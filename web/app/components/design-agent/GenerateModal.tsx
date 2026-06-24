@@ -113,6 +113,31 @@ function isTransientLocateError(err: unknown): boolean {
   return true
 }
 
+/**
+ * A candidate is "real" (pickable) when it names an actual host surface: it has
+ * a usable resolution key — a non-empty route OR a non-empty id — AND at least
+ * one component, AND is NOT a decline rationale. The id-OR-route check is
+ * load-bearing: a non-route host (the app shell, an in-page section) legitimately
+ * carries an EMPTY route and is keyed only by its id (chosen_screen_id is the
+ * resolution key `runGenerateForRoute` forwards). A route-only test would wrongly
+ * filter that real host out. The backend can also return a degenerate placeholder
+ * (empty route AND empty id / zero components / "no screen can be identified"
+ * rationale) inside a ranked_confirm; surfacing THAT as a "Suggested / Use this
+ * screen" card is a wrong-screen trap. This predicate keeps the placeholders out
+ * of the picker while preserving a real empty-route host.
+ */
+export function isRealCandidate(c: LocateCandidate): boolean {
+  const route = (c.route ?? "").trim()
+  const id = (c.id ?? "").trim()
+  const componentCount = c.component_count ?? 0
+  const rationale = c.rationale ?? ""
+  return (
+    (route.length > 0 || id.length > 0) &&
+    componentCount > 0 &&
+    !/no screen can be identified/i.test(rationale)
+  )
+}
+
 /** Maps LocateCandidate[] to the shape LocateConfirmView expects. */
 export function mapLocateCandidates(ranked: LocateCandidate[]): LocateConfirmCandidate[] {
   return ranked.map((c, i) => ({
@@ -228,6 +253,14 @@ export function GenerateModal({
   // every phase; `config` is the resting state. Codebase generate drives it
   // through locating → (picker | unmapped-resolve) → generating.
   const [flowPhase, setFlowPhase] = useState<FlowPhase>(_testFlowPhase ?? "config")
+  // The "search again" steer the PM typed on the no-match panel. Drives the
+  // hint sent on a re-run locate; cleared when a flow leaves the panel.
+  const [searchHint, setSearchHint] = useState("")
+  // True only after a STEERED re-search (a hint was carried) still lands on the
+  // recovery body with no real candidate — so we can tell the PM the steer
+  // missed rather than silently re-rendering the same panel. Cleared on a hit,
+  // on a generate, and whenever a new direction is typed.
+  const [steerMissed, setSteerMissed] = useState(false)
   const [locateResult, setLocateResult] = useState<LocateResponse | null>(_testLocateResult ?? null)
   const [locateError, setLocateError] = useState<string | null>(_testLocateError ?? null)
   // The screen the resolve call matched, shown on the transient "matched" line
@@ -731,6 +764,18 @@ export function GenerateModal({
             ...(chosenId ? { chosen_screen_id: chosenId } : {}),
             ...(retainedSha ? { map_commit_sha: retainedSha } : {}),
           }
+        : codebaseGenerate && retainedSha
+        ? {
+            // No screen chosen, but a successful locate gives us a snapshot SHA:
+            // send it (with no chosen_screen_*) so the backend builds the repo
+            // map (cache hit on the pinned snapshot) and the shell-grounded
+            // fallback (Tier-2) seats the PRD inside the real app shell. When
+            // locate was unmapped (build_map failed → no SHA), retainedSha is
+            // empty and we send neither — the backend degrades to design-system
+            // -only (Tier-3), since there is no shell to ground on anyway.
+            ...baseParams,
+            map_commit_sha: retainedSha,
+          }
         : baseParams
     void runGenerateFlow({
       params,
@@ -794,10 +839,18 @@ export function GenerateModal({
   // (unmapped / auto_proceed / proceed_with_note / ranked_confirm). Pulled out
   // so the POST→poll resolver and any future caller share one success path —
   // behaviour here is preserved byte-for-byte from the pre-poll version.
-  function handleLocateResult(result: LocateResponse, opts: { repo: string }) {
+  function handleLocateResult(result: LocateResponse, opts: { repo: string; hint?: string }) {
     setLocateResult(result)
 
+    // Route a no-match (unmapped) OR a ranked_confirm whose only candidates are
+    // degenerate placeholders to the SAME recovery body. A degenerate
+    // ranked_confirm must NEVER reach the picker — surfacing a placeholder as a
+    // "Suggested / Use this screen" card is the wrong-screen trap.
+    const realRanked = result.ranked.filter(isRealCandidate)
     if (result.unmapped) {
+      // A steered re-search that still missed → tell the PM (true only when THIS
+      // resolve carried a hint). The initial unmapped landing has no hint.
+      setSteerMissed(!!opts.hint)
       setFlowPhase("unmapped-resolve")
       return
     }
@@ -812,6 +865,9 @@ export function GenerateModal({
         const note = result.chosen[0]?.rationale ?? null
         setProceedNote(note)
       }
+      // A generate is being kicked off — the recovery body is left behind, so
+      // any prior miss message must not linger.
+      setSteerMissed(false)
       // Persist the source preference now that a confident match exists.
       void onSavePreference?.({
         design_source: "github",
@@ -832,8 +888,16 @@ export function GenerateModal({
       )
       return
     }
-    // FIRST ranked_confirm → straight to the picker. Never re-sample.
-    setFlowPhase("picker")
+    // ranked_confirm. With at least one REAL candidate → the picker (never
+    // re-sample). With only degenerate placeholders → the recovery body, same
+    // as a no-match, with the steered-miss feedback when this was a re-search.
+    if (realRanked.length > 0) {
+      setSteerMissed(false)
+      setFlowPhase("picker")
+    } else {
+      setSteerMissed(!!opts.hint)
+      setFlowPhase("unmapped-resolve")
+    }
   }
 
   // Drive the async locate contract: POST → job id → poll until done/error,
@@ -843,7 +907,10 @@ export function GenerateModal({
   // job, exhausted transient budget, or timeout) the flow goes to the EXPLICIT
   // "error" phase — NOT back to "config". A failed locate no longer silently
   // collapses to the PRD form (the prod hang→collapse bug).
-  async function runLocateResolve(opts: { repo: string }, token: number): Promise<void> {
+  async function runLocateResolve(
+    opts: { repo: string; hint?: string },
+    token: number,
+  ): Promise<void> {
     const intervalMs = _testPollIntervalMs ?? LOCATE_POLL_INTERVAL_MS
     const timeoutMs = _testPollTimeoutMs ?? LOCATE_POLL_TIMEOUT_MS
     const maxRetries = _testPollMaxRetries ?? LOCATE_POLL_MAX_RETRIES
@@ -877,6 +944,9 @@ export function GenerateModal({
           handle = await designAgentApi.locate({
             prd_id: localPrdId,
             github_repo: opts.repo,
+            // Steer carried only when the PM typed a "search again" direction;
+            // a plain locate sends no hint (unsteered, unchanged behaviour).
+            ...(opts.hint ? { hint: opts.hint } : {}),
           })
         } catch (err) {
           if (isStale()) return
@@ -956,14 +1026,22 @@ export function GenerateModal({
     }
   }
 
-  function enterLoadingFlow(opts: { repo: string }) {
+  function enterLoadingFlow(opts: { repo: string; hint?: string }) {
     if (prdId == null) return
     // Re-entry guard: one resolve flow at a time. Covers the auto-skip effect
     // re-running on connections/repos churn and an accidental double-click.
     if (locateInFlightRef.current) return
-    // Allowed entry phases: the resting config form, or a retry from the error
-    // phase. Never re-enter from a live/decided phase.
-    if (flowPhase !== "config" && flowPhase !== "error") return
+    // Allowed entry phases: the resting config form, a retry from the error
+    // phase, or a "search again" steer from EITHER recovery surface (the picker
+    // and the no-match unmapped-resolve panel now share the steer). Never
+    // re-enter from a live phase (locating/generating).
+    if (
+      flowPhase !== "config" &&
+      flowPhase !== "error" &&
+      flowPhase !== "unmapped-resolve" &&
+      flowPhase !== "picker"
+    )
+      return
 
     const token = ++flowTokenRef.current
     locateInFlightRef.current = true
@@ -1007,6 +1085,129 @@ export function GenerateModal({
     })
     runGenerateForRoute(null)
   }
+
+  // The ONE shared recovery body, rendered identically in BOTH the picker and
+  // unmapped-resolve phases (the phase names persist; the UI is consolidated).
+  // It always carries: the steer + Search again, the real candidates (pickable,
+  // only when present), the Generate-from-the-PRD-anyway floor, and Switch
+  // source — one consolidated action row. A degenerate placeholder never
+  // reaches the pickable LocateConfirmView because we filter on isRealCandidate.
+  const realRanked = locateResult
+    ? locateResult.ranked.filter(isRealCandidate)
+    : []
+  const recoveryPanel = locateResult ? (
+    <div data-testid="unmapped-resolve">
+      <p className="locate-hint" data-testid="locate-unmapped">
+        {realRanked.length > 0 ? (
+          <>
+            We found some candidate screens — pick one, or point us at a
+            different screen and search again.
+          </>
+        ) : (
+          <>
+            We couldn&apos;t find a screen to anchor on in this repo. Tell us
+            where to look and search again, or generate straight from the PRD —
+            we&apos;ll match your app&apos;s look.
+          </>
+        )}
+      </p>
+      {/* Candidates lead on the PICKER variant. The pickable confirm view
+          (Suggested + Other options) renders ABOVE the steer whenever a real
+          candidate survives the isRealCandidate filter — "the picker and the
+          options always appear at the top." A degenerate placeholder is filtered
+          out so it never shows a "Suggested / Use this screen" card, and the
+          UNMAPPED variant has no candidates at all — so there the steer leads
+          instead. The SHA travels so a picked screen is Tier-1 on the right
+          snapshot. */}
+      {realRanked.length > 0 && (
+        <LocateConfirmView
+          question="Pick the closest screen:"
+          candidates={mapLocateCandidates(realRanked)}
+          onChoose={(route, id) =>
+            runGenerateForRoute(
+              route,
+              locateResult.commit_sha || null,
+              id,
+              repoSel,
+              true,
+            )
+          }
+        />
+      )}
+      {/* Steer + re-search. On the UNMAPPED variant (no candidates) this is the
+          sole, primary action → "Search again" is accent and leads the panel. On
+          the PICKER variant the candidate list above is the primary path, so the
+          steer is demoted below it and "Search again" is plain/secondary — it
+          must not compete with the accent "Use this screen" cards. Blank input
+          disables the button. */}
+      <div className="locate-steer" data-testid="locate-steer">
+        <input
+          type="text"
+          className="input"
+          data-testid="locate-steer-input"
+          placeholder="Tell us where to anchor — e.g. 'the settings page', 'the dashboard'"
+          value={searchHint}
+          onChange={(e) => {
+            setSearchHint(e.target.value)
+            // Typing a fresh direction clears the prior miss message.
+            setSteerMissed(false)
+          }}
+          maxLength={300}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && searchHint.trim()) {
+              e.preventDefault()
+              enterLoadingFlow({ repo: repoSel, hint: searchHint.trim() })
+            }
+          }}
+        />
+        <button
+          type="button"
+          className={realRanked.length === 0 ? "btn btn-accent" : "btn"}
+          data-testid="locate-search-again"
+          disabled={!searchHint.trim()}
+          onClick={() =>
+            enterLoadingFlow({ repo: repoSel, hint: searchHint.trim() })
+          }
+        >
+          Search again
+        </button>
+      </div>
+      {/* A steered re-search that still missed — say so explicitly rather than
+          re-rendering the same panel silently. */}
+      {steerMissed && (
+        <p className="locate-hint" data-testid="locate-steer-missed">
+          Still couldn&apos;t pin a screen for that — try another direction, or
+          generate anyway.
+        </p>
+      )}
+      {/* "Generate from the PRD anyway" — the PRD-only floor — renders ONLY on
+          the UNMAPPED variant (no real candidates). On the picker the user has
+          real screens to pick or steer toward, so the floor isn't offered there.
+          A de-emphasized text link, not a button. Switch source was removed from
+          this panel (close the modal to swap source); the X/close path back to
+          config is unaffected. */}
+      {realRanked.length === 0 && (
+        <div className="locate-generate-row">
+          <button
+            type="button"
+            className="locate-generate-link"
+            data-testid="generate-anyway"
+            onClick={() =>
+              runGenerateForRoute(
+                null,
+                locateResult.commit_sha || null,
+                undefined,
+                repoSel,
+                true,
+              )
+            }
+          >
+            Generate from the PRD anyway
+          </button>
+        </div>
+      )}
+    </div>
+  ) : null
 
   return (
     <div
@@ -1226,6 +1427,20 @@ export function GenerateModal({
                   "Couldn't analyse the codebase — try again or switch source"}
               </p>
               <div className={`locate-error-actions ${locateErrorStyles.actions}`}>
+                {/* Codebase-only escape hatch: when locate fails for a github
+                    source the user can still generate straight from the PRD (no
+                    screen anchor). Gated on codebaseMode so figma/website error
+                    UX is unchanged. */}
+                {codebaseMode && (
+                  <button
+                    type="button"
+                    className="btn btn-accent"
+                    data-testid="generate-anyway"
+                    onClick={() => runGenerateForRoute(null, undefined, undefined, undefined, true)}
+                  >
+                    Generate from the PRD anyway
+                  </button>
+                )}
                 <button
                   type="button"
                   className="btn btn-accent"
@@ -1265,59 +1480,16 @@ export function GenerateModal({
             </div>
           )}
 
-          {/* picker phase — an ambiguous match; the user picks the screen. Reuses
-              the existing inline confirm view. */}
-          {flowPhase === "picker" && locateResult && (
-            <LocateConfirmView
-              candidates={mapLocateCandidates(locateResult.ranked)}
-              onChoose={(route, id) => {
-                // Pick → generating. forCodebase=true so the github wiring is on.
-                runGenerateForRoute(route, undefined, id, repoSel, true)
-              }}
-              onSearchOther={() => {
-                // Switch source = a phase change BACK to config (not a remount).
-                // Clearing the in-flight guard lets a fresh flow start later.
-                locateInFlightRef.current = false
-                flowTokenRef.current++
-                setLocateResult(null)
-                setFlowPhase("config")
-              }}
-            />
-          )}
-
-          {/* unmapped-resolve phase — no match. Pick a screen (from the ranked
-              fallbacks, if any) or switch source back to config. */}
-          {flowPhase === "unmapped-resolve" && (
-            <div data-testid="unmapped-resolve">
-              <p className="locate-hint" data-testid="locate-unmapped">
-                We couldn&apos;t match your codebase to a screen — pick a screen
-                or switch source.
-              </p>
-              {locateResult && locateResult.ranked.length > 0 && (
-                <LocateConfirmView
-                  question="Pick the closest screen:"
-                  candidates={mapLocateCandidates(locateResult.ranked)}
-                  onChoose={(route, id) => {
-                    // unmapped has no snapshot to pin against → omit the SHA.
-                    runGenerateForRoute(route, null, id, repoSel, true)
-                  }}
-                />
-              )}
-              <button
-                type="button"
-                className="btn"
-                data-testid="unmapped-switch-source"
-                onClick={() => {
-                  locateInFlightRef.current = false
-                  flowTokenRef.current++
-                  setLocateResult(null)
-                  setFlowPhase("config")
-                }}
-              >
-                Switch source
-              </button>
-            </div>
-          )}
+          {/* picker + unmapped-resolve — one consolidated recovery body. Both
+              phase names persist (the routing in handleLocateResult decides
+              which); the rendered UI is identical. The picker phase is reached
+              only with at least one REAL candidate; unmapped-resolve covers the
+              no-match and degenerate-only cases. The shared body always offers
+              the steer + Search again, the Generate-from-the-PRD-anyway floor,
+              and Switch source; the pickable confirm view appears only when real
+              candidates survive the isRealCandidate filter. */}
+          {(flowPhase === "picker" || flowPhase === "unmapped-resolve") &&
+            recoveryPanel}
         </div>
 
         {/* The action footer belongs to the config phase only — once a flow is

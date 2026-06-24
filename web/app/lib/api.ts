@@ -1545,8 +1545,15 @@ export const designAgentApi = {
    *  `locateJob(job_id)`. Inline failures still surface on the POST itself —
    *  notably 404 (feature off / PRD not owned / cross-workspace) — so callers
    *  must catch the POST as well as the poll. Use `locateJob` to drive the loop. */
-  locate: (body: { prd_id: number; github_repo: string; ref?: string | null }) =>
-    api.post<LocateJobHandle>("/v1/design-agent/locate", body),
+  locate: (body: {
+    prd_id: number
+    github_repo: string
+    ref?: string | null
+    /** Optional "search again" steer — a free-text direction (e.g. "the
+     *  settings page") that re-ranks locate toward the surface the PM means.
+     *  Omitted/blank = today's unsteered locate. */
+    hint?: string | null
+  }) => api.post<LocateJobHandle>("/v1/design-agent/locate", body),
   /** Poll a locate job by id. Returns the job status; when `status` is
    *  "done" the existing `LocateResponse` rides in `result`, and when "error"
    *  the failure reason rides in `error`. A 404 from this endpoint means the

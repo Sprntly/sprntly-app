@@ -15,6 +15,8 @@ from app.design_agent.codebase_map.repo_reader import RepoSnapshot
 from app.design_agent.codebase_map.shell import (
     APP_SHELL_NODE_ID,
     APP_SHELL_ROUTE,
+    _extract_nav_items,
+    _locate_shell_file,
     build_app_shell_node,
     extract_shell,
 )
@@ -114,6 +116,156 @@ export function Sidebar() {
     assert shell.nav_items[1].label == "Team"
     assert shell.nav_items[1].icon == "Users"
     assert shell.nav_items[1].route == "/team"
+
+
+# ── Strategy C: repeated custom nav component ─────────────────────────────────
+
+def test_nav_parser_railitem_custom_component():
+    """A repeated custom component with string-literal labels yields nav items.
+
+    The shell uses NEITHER a nav-config array NOR inline <Link>/<a> elements — it
+    repeats a custom <RailItem … label="…" /> per item. Strategy C recovers the
+    labels in source order and skips commented-out occurrences.
+    """
+    body = """
+export function Rail() {
+  return (
+    <nav>
+      <RailItem screen="brief" icon={<IconMessageCircle/>} label="Weekly brief" />
+      <RailItem screen="chats" icon={<IconChats/>} label="All chats" />
+      <RailItem screen="backlog" icon={<IconList/>} label="Backlog Projects" />
+      <RailItem screen="templates" icon={<IconStar/>} label="Templates · what good looks like" />
+      <RailItem screen="sources" icon={<IconDb/>} label="Sources" />
+      <RailItem screen="settings" icon={<IconGear/>} label="Settings" />
+      {/* <RailItem screen="proto" icon={<IconBolt/>} label="Prototype" /> */}
+      // <RailItem screen="hidden" label="Hidden Item" />
+    </nav>
+  );
+}
+"""
+    items = _extract_nav_items(body)
+    labels = [it.label for it in items]
+    assert labels[:4] == [
+        "Weekly brief",
+        "All chats",
+        "Backlog Projects",
+        "Templates · what good looks like",
+    ]
+    assert "Sources" in labels
+    assert "Settings" in labels
+    # Commented-out occurrences must not leak.
+    assert "Prototype" not in labels
+    assert "Hidden Item" not in labels
+    # Orders are 0-based in source order.
+    assert [it.order for it in items] == list(range(len(items)))
+
+
+def test_locate_shell_selects_custom_nav_over_navless_layout():
+    """SELECTION layer (the live-pipeline gap a body-only test misses): when the
+    repo has BOTH a navless `layout.tsx` and a `Sidebar.tsx` whose nav is custom
+    <RailItem label="…"> components (zero standard links), shell-file selection
+    must pick the Sidebar, not the layout — otherwise `_extract_nav_items` runs on
+    the navless file and yields n_nav=0. Ranking folds custom-nav count into the
+    score so the RailItem sidebar wins.
+    """
+    navless_layout = """
+import { ReactNode } from "react"
+export default function AppLayout({ children }: { children: ReactNode }) {
+  return <div className="app"><main>{children}</main></div>
+}
+"""
+    railitem_sidebar = """
+export function Sidebar() {
+  return (
+    <nav>
+      <RailItem screen="brief" icon={<IconMessageCircle/>} label="Weekly brief" />
+      <RailItem screen="chats" icon={<IconChats/>} label="All chats" />
+      <RailItem screen="backlog" icon={<IconList/>} label="Backlog Projects" />
+      <RailItem screen="templates" icon={<IconStar/>} label="Templates" />
+      <RailItem screen="settings" icon={<IconGear/>} label="Settings" />
+    </nav>
+  );
+}
+"""
+    snap = _snapshot(
+        {
+            "web/app/(app)/layout.tsx": navless_layout,
+            "web/app/components/shared/Sidebar.tsx": railitem_sidebar,
+        }
+    )
+    path, _body = _locate_shell_file(snap)
+    assert path == "web/app/components/shared/Sidebar.tsx"
+    # …and the full pipeline therefore recovers the real labels (not n_nav=0).
+    shell = extract_shell(snap)
+    labels = [it.label for it in shell.nav_items]
+    assert "Weekly brief" in labels
+    assert "All chats" in labels
+    assert "Backlog Projects" in labels
+    assert "Templates" in labels
+
+
+def test_nav_parser_strategy_c_does_not_fire_when_config_present():
+    """When a Strategy-A config array exists, the repeated custom component is
+    ignored — the config wins, proving Strategy C is purely additive."""
+    body = """
+const NAV = [
+  {label:"Home", icon:"House", href:"/"},
+  {label:"Team", icon:"Users", href:"/team"},
+];
+
+export function Rail() {
+  return (
+    <nav>
+      <RailItem label="Weekly brief" />
+      <RailItem label="All chats" />
+    </nav>
+  );
+}
+"""
+    items = _extract_nav_items(body)
+    labels = [it.label for it in items]
+    assert labels == ["Home", "Team"]
+    assert "Weekly brief" not in labels
+
+
+def test_nav_parser_strategy_c_does_not_fire_when_links_present():
+    """When inline <Link> elements exist (Strategy B), the repeated custom
+    component is ignored — links win, proving Strategy C is purely additive."""
+    body = """
+export function Rail() {
+  return (
+    <nav>
+      <Link href="/home">Home</Link>
+      <Link href="/team">Team</Link>
+      <RailItem label="Weekly brief" />
+      <RailItem label="All chats" />
+    </nav>
+  );
+}
+"""
+    items = _extract_nav_items(body)
+    labels = [it.label for it in items]
+    assert labels == ["Home", "Team"]
+    assert "Weekly brief" not in labels
+
+
+def test_nav_parser_ignores_aria_label_and_expressions():
+    """Strategy C ignores aria-label and expression props — only string-literal
+    label=/title= props on a repeated component qualify."""
+    body = """
+export function Rail() {
+  return (
+    <nav>
+      <RailItem aria-label="Weekly brief" />
+      <RailItem aria-label="All chats" />
+      <RailItem label={dynamicLabel} />
+      <RailItem label={t('nav.sources')} />
+    </nav>
+  );
+}
+"""
+    items = _extract_nav_items(body)
+    assert items == []
 
 
 # ── Logo render kinds ─────────────────────────────────────────────────────────

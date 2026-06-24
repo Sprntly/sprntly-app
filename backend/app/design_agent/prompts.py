@@ -34,7 +34,12 @@ from __future__ import annotations
 # is appended to DESIGN_AGENT_RECREATE_DISCIPLINE. This changes which handlers the
 # agent emits, so it is template-invalidating: old prototypes must regenerate
 # under the new discipline.
-DESIGN_AGENT_TEMPLATE_VERSION = 6
+# v7 (shell-grounded fallback): codebase runs with no located screen now seat the
+# PRD inside the real app shell + theme via a shell-only task block, instead of
+# falling straight to the design-system-only pre-seed. This changes the user
+# prompt + injected reference files for that class of run, so it is template-
+# invalidating: those prototypes must regenerate under the new fallback.
+DESIGN_AGENT_TEMPLATE_VERSION = 7
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the

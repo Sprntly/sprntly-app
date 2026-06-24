@@ -84,6 +84,31 @@ _ICON_COMP_RE = re.compile(r"""<([A-Z][A-Za-z0-9]+)\s*/>""")
 # strip HTML/JSX tags (for visible text extraction)
 _STRIP_TAGS_RE = re.compile(r"<[^>]+>")
 
+# Strategy C — repeated custom JSX nav component carrying a string-literal label.
+# A custom component is a PascalCase tag (<RailItem …>, <SidebarLink …>); the app
+# shell that uses NEITHER a nav-config array NOR inline <Link>/<a> elements often
+# repeats one such component with a `label="…"` / `title="…"` prop per item.
+# The opening tag is located by name; the tag span is then scanned brace-aware so
+# an expression attribute that itself contains `>` (e.g. icon={<Icon/>}) does not
+# truncate the tag before its label prop is seen.
+_CUSTOM_COMP_OPEN_RE = re.compile(r"""<([A-Z][A-Za-z0-9]*)\b""")
+# A string-literal label/title prop INSIDE a single tag. aria-label is excluded by
+# the leading boundary (the alternation matches `label`/`title` only as whole
+# attribute names, never the `-label` tail of `aria-label`); expression props
+# (`label={…}`) never match because the value side requires a quote.
+_CUSTOM_COMP_LABEL_RE = re.compile(
+    r"""(?<![\w-])(?:label|title)\s*=\s*['"]([^'"]+)['"]""",
+)
+# JS/JSX comment spans to strip before Strategy-C scanning so a commented-out
+# `{/* <RailItem label="Prototype" /> */}` or `// <RailItem label="x" />` line
+# does not leak a phantom nav item. Order: block JSX `{/* … */}`, block `/* … */`,
+# then line `// …`.
+_JSX_BLOCK_COMMENT_RE = re.compile(r"\{\s*/\*.*?\*/\s*\}", re.DOTALL)
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+
+_MAX_STRATEGY_C_ITEMS = 12
+
 # nav-link count heuristic (≥3 → likely a nav component)
 _LINK_HEURISTIC_RE = re.compile(r"""<(?:Link|NavLink|a)\b""", re.IGNORECASE)
 
@@ -123,25 +148,28 @@ def _locate_shell_file(snapshot: RepoSnapshot) -> tuple[str | None, str | None]:
         if _stem_of(path) in _SHELL_STEMS
     ]
     if name_matches:
-        # Pick highest nav-link density in case of ties.
+        # Pick highest nav density in case of ties — counting BOTH standard links
+        # and the repeated-custom-component nav pattern, so a sidebar that renders
+        # <RailItem label="…"> (zero standard links) outranks a navless layout
+        # instead of losing to it.
         name_matches.sort(
-            key=lambda pb: len(_LINK_HEURISTIC_RE.findall(pb[1])),
+            key=lambda pb: _nav_signal_count(pb[1]),
             reverse=True,
         )
         return name_matches[0]
 
-    # Fallback: scan component files for high nav-link count + a brand/logo region.
+    # Fallback: scan component files for high nav density + a brand/logo region.
     candidates: list[tuple[int, str, str]] = []
     for path, body in snapshot.files.items():
         if not path.endswith((".tsx", ".jsx", ".ts", ".js")):
             continue
-        link_count = len(_LINK_HEURISTIC_RE.findall(body))
-        if link_count >= 3 and (
+        nav_count = _nav_signal_count(body)
+        if nav_count >= 3 and (
             _IMG_TAG_RE.search(body)
             or _SVG_TAG_RE.search(body)
             or _BRAND_SPAN_RE.search(body)
         ):
-            candidates.append((link_count, path, body))
+            candidates.append((nav_count, path, body))
 
     if candidates:
         candidates.sort(reverse=True)
@@ -263,11 +291,125 @@ def _parse_nav_config_array(body: str) -> list[NavItem]:
     return items
 
 
+def _strip_comments(body: str) -> str:
+    """Remove JSX/JS comment spans so commented-out markup never leaks a match.
+
+    Strips block JSX comments (``{/* … */}``), block comments (``/* … */``), and
+    line comments (``// …``) in that order. Used by the Strategy-C scanner only —
+    the existing Strategy A/B paths are unaffected.
+    """
+    body = _JSX_BLOCK_COMMENT_RE.sub(" ", body)
+    body = _BLOCK_COMMENT_RE.sub(" ", body)
+    body = _LINE_COMMENT_RE.sub(" ", body)
+    return body
+
+
+def _read_tag_span(text: str, start: int) -> str:
+    """Return the opening-tag text from ``start`` (just past the component name)
+    up to and including its closing ``>``.
+
+    Brace- and quote-aware so a JSX expression attribute that itself contains
+    ``>`` (``icon={<Icon/>}``) or a quoted ``>`` does not terminate the tag early.
+    A small scan cap bounds pathological inputs.
+    """
+    depth = 0
+    quote = ""
+    i = start
+    end = min(len(text), start + 2000)
+    while i < end:
+        ch = text[i]
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            if depth > 0:
+                depth -= 1
+        elif ch == ">" and depth == 0:
+            return text[start:i + 1]
+        i += 1
+    return text[start:end]
+
+
+def _parse_repeated_custom_component_nav(body: str) -> list[NavItem]:
+    """Strategy C: a repeated custom JSX component carrying a string-literal label.
+
+    Some shells render their primary nav as one custom component repeated per item
+    with a label prop — ``<RailItem icon={…} label="Weekly brief" />`` ×N — using
+    NEITHER a nav-config array (Strategy A) NOR inline ``<Link>``/``<a>`` elements
+    (Strategy B). This recovers those labels.
+
+    Rules: only a PascalCase tag that appears ≥2 times AND carries a
+    string-literal ``label="…"`` / ``title="…"`` prop qualifies. ``aria-label`` and
+    expression props (``label={…}``) are ignored, single-occurrence tags are
+    ignored, comments are stripped first, identical labels are de-duped, and the
+    result is capped. Returns ``[]`` when nothing qualifies — the caller only
+    consults this when Strategies A and B both came back empty, so it never
+    overrides a structured extraction.
+    """
+    clean = _strip_comments(body)
+
+    # First pass: collect, per tag occurrence, the (component_name, label) for any
+    # tag that carries a string-literal label/title prop. Preserve source order.
+    # The tag span is read brace-/quote-aware so a `>` inside an expression
+    # attribute (icon={<Icon/>}) does not close the tag prematurely.
+    occurrences: list[tuple[str, str]] = []
+    name_counts: dict[str, int] = {}
+    for m in _CUSTOM_COMP_OPEN_RE.finditer(clean):
+        name = m.group(1)
+        tag = _read_tag_span(clean, m.end())
+        label_m = _CUSTOM_COMP_LABEL_RE.search(tag)
+        if not label_m:
+            continue
+        label = label_m.group(1).strip()
+        if not label:
+            continue
+        occurrences.append((name, label))
+        name_counts[name] = name_counts.get(name, 0) + 1
+
+    # Only a tag NAME that repeats (≥2 labelled occurrences) is a nav component.
+    repeated = {name for name, count in name_counts.items() if count >= 2}
+    if not repeated:
+        return []
+
+    items: list[NavItem] = []
+    seen_labels: set[str] = set()
+    for name, label in occurrences:
+        if name not in repeated or label in seen_labels:
+            continue
+        seen_labels.add(label)
+        items.append(NavItem(label=label, order=len(items)))
+        if len(items) >= _MAX_STRATEGY_C_ITEMS:
+            break
+    return items
+
+
+def _nav_signal_count(body: str) -> int:
+    """A file's nav-strength score for shell-file SELECTION.
+
+    Counts BOTH standard nav links (``<Link>``/``<NavLink>``/``<a>``) AND the
+    repeated-custom-component nav pattern Strategy C recognizes, and returns the
+    larger. A shell that renders its nav as ``<RailItem label="…">`` ×N has zero
+    standard links, so ranking by ``_LINK_HEURISTIC_RE`` alone picks a navless
+    layout over the real sidebar; folding the custom-component count in fixes the
+    selection. ``max`` (not sum) keeps the score conservative — it never lowers a
+    standard-link file's rank, it only lifts a custom-nav file above zero, so a
+    repo whose shell uses ordinary links selects exactly as before.
+    """
+    link_count = len(_LINK_HEURISTIC_RE.findall(body))
+    custom_count = len(_parse_repeated_custom_component_nav(body))
+    return max(link_count, custom_count)
+
+
 def _extract_nav_items(body: str) -> list[NavItem]:
     """Extract nav items from shell body.
 
     Prefers a nav-config array declaration (more structured, fewer false
-    positives) over inline JSX link scanning when both are present.
+    positives) over inline JSX link scanning when both are present, then falls
+    back to a repeated custom nav component when neither is present.
     """
     # Strategy A: nav-config array wins when present.
     config_items = _parse_nav_config_array(body)
@@ -289,8 +431,13 @@ def _extract_nav_items(body: str) -> list[NavItem]:
         if not label:
             continue
         items.append(NavItem(label=label, order=len(items), icon=icon, route=href))
+    if items:
+        return items
 
-    return items
+    # Strategy C: a repeated custom nav component carrying string-literal labels.
+    # Fires ONLY when A and B both yielded nothing — purely additive, never
+    # overrides a structured (config-array or inline-link) extraction.
+    return _parse_repeated_custom_component_nav(body)
 
 
 def _extract_brand(body: str, logo: LogoAsset) -> str:
