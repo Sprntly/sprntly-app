@@ -154,7 +154,10 @@ def find_github_installation_for_repo(
     resp = (
         c.table("github_installations")
         .select("*")
-        .eq("account_login", owner)
+        # GitHub logins contain no %/_ so ilike is an exact case-insensitive
+        # match; hardens against owner-login casing drift only. The durable fix
+        # is the company binding, not this lookup.
+        .ilike("account_login", owner)
         .eq("company_id", company_id)
         .eq("suspended", False)
         .limit(1)

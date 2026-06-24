@@ -260,6 +260,35 @@ def get_installation_token(installation_id: int) -> str:
     return token
 
 
+def fetch_app_installation(installation_id: int) -> dict | None:
+    """Fetch an installation's detail via the App JWT: GET /app/installations/{id}.
+    Returns the raw GitHub object (account/permissions/events/repository_selection)
+    or None if the App isn't configured or GitHub rejects the lookup. Used to
+    backfill install details when the OAuth callback binds a company before the
+    webhook has populated the row."""
+    if not github_app_configured():
+        return None
+    try:
+        resp = requests.get(
+            f"{GITHUB_API_BASE}/app/installations/{installation_id}",
+            headers={
+                "Authorization": f"Bearer {make_app_jwt()}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+            timeout=15,
+        )
+    except Exception:
+        return None
+    if not resp.ok:
+        logger.warning(
+            "GitHub /app/installations/%s failed: %s %s",
+            installation_id, resp.status_code, resp.text[:200],
+        )
+        return None
+    return resp.json() or None
+
+
 def headers_for_installation(installation_id: int) -> dict[str, str]:
     """Convenience: ready-to-use Authorization/Accept headers for the GitHub REST API."""
     return {
@@ -374,6 +403,7 @@ def fetch_installation_repos(
     raw = (resp.json() or {}).get("repositories") or []
     return [
         {
+            "id": r.get("id"),
             "full_name": r.get("full_name"),
             "name": r.get("name"),
             "private": bool(r.get("private")),

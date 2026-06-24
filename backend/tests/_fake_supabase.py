@@ -172,6 +172,14 @@ class _Query:
         self._ins.append((col, list(vals)))
         return self
 
+    def ilike(self, col: str, val: Any) -> "_Query":
+        """Case-insensitive match. SQLite's LIKE is ASCII case-insensitive,
+        which mirrors PostgREST `.ilike` for the GitHub-login lookup that uses
+        it (logins carry no %/_ wildcards)."""
+        self._raw_where.append(f"{col} LIKE ?")
+        self._raw_args.append(val)
+        return self
+
     def lt(self, col: str, val: Any) -> "_Query":
         """`col < ?` — used by the map-cache expiry sweep."""
         self._raw_where.append(f"{col} < ?")
