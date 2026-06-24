@@ -20,7 +20,7 @@ const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const updateWorkspaceMock = vi.fn()
 const advanceStepMock = vi.fn()
-const kpiPutMock = vi.fn()
+const kpiSelectionMock = vi.fn()
 
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
@@ -34,7 +34,10 @@ vi.mock("../../../../lib/onboarding/kpiTreeApi", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../../../lib/onboarding/kpiTreeApi")>()
   return {
     ...actual,
-    kpiTreeApi: { put: (...a: unknown[]) => kpiPutMock(...a) },
+    kpiTreeApi: {
+      put: vi.fn(),
+      putFromSelection: (...a: unknown[]) => kpiSelectionMock(...a),
+    },
   }
 })
 
@@ -178,7 +181,7 @@ describe("Metrics (container) — pick 3 to 5", () => {
 
     // nothing persisted, no advance, no navigation
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
-    expect(kpiPutMock).not.toHaveBeenCalled()
+    expect(kpiSelectionMock).not.toHaveBeenCalled()
     expect(advanceStepMock).not.toHaveBeenCalled()
     expect(routerMock.push).not.toHaveBeenCalled()
     // a pick-at-least-3 error shows (the old "Set a North Star" blocker is gone)
@@ -191,10 +194,10 @@ describe("Metrics (container) — pick 3 to 5", () => {
     ).toBeNull()
   })
 
-  it("advances on exactly 3 picks, persisting the 3 to the KPI tree (north_star inferred server-side → placeholder = first pick)", async () => {
+  it("advances on 3 picks, sending the picks to the from-selection endpoint (server infers the North Star)", async () => {
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
     advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
-    kpiPutMock.mockResolvedValue({ ok: true, version: 2 })
+    kpiSelectionMock.mockResolvedValue({ ok: true, version: 2, north_star: "x" })
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({
         workspace: makeWorkspace({ onboarding_step: 2, industry: null, business_type: null }),
@@ -214,22 +217,17 @@ describe("Metrics (container) — pick 3 to 5", () => {
       industry: "Fintech",
       business_type: "Marketplace",
     })
-    // the 3 picks → KPI tree
-    expect(kpiPutMock).toHaveBeenCalledTimes(1)
-    const payload = kpiPutMock.mock.calls[0][0] as {
-      north_star: { metric: string }
-      primary_metrics: { metric: string }[]
-      secondary_signals: { metric: string }[]
+    // the picks → /kpi-tree/from-selection as a flat metric list; the server
+    // infers the North Star (no north_star/placeholder sent from the client)
+    expect(kpiSelectionMock).toHaveBeenCalledTimes(1)
+    const payload = kpiSelectionMock.mock.calls[0][0] as {
+      metrics: { metric: string; description: string }[]
     }
-    const persisted = [
-      ...payload.primary_metrics,
-      ...payload.secondary_signals,
-    ].map((m) => m.metric)
-    // all three picks are persisted (none dropped)
+    const persisted = payload.metrics.map((m) => m.metric)
+    // all three picks are sent (none dropped), and no north_star field is present
     expect(persisted.sort()).toEqual([...picks].sort())
     expect(persisted.length).toBe(3)
-    // north_star is a placeholder = the first pick (server infers the real one)
-    expect(payload.north_star.metric).toBe(picks[0])
+    expect("north_star" in payload).toBe(false)
 
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 2)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")

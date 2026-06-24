@@ -45,7 +45,11 @@ vi.mock("../../../../lib/onboarding/kpiTreeApi", async () => {
   >("../../../../lib/onboarding/kpiTreeApi")
   return {
     ...actual,
-    kpiTreeApi: { get: vi.fn(), put: (...a: unknown[]) => kpiTreePutMock(...a) },
+    kpiTreeApi: {
+      get: vi.fn(),
+      put: vi.fn(),
+      putFromSelection: (...a: unknown[]) => kpiTreePutMock(...a),
+    },
   }
 })
 
