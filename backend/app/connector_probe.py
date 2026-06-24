@@ -104,8 +104,25 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
         access_token = token_json.get("access_token") or ""
         user_obj = figma_oauth.fetch_me(access_token) or {}
     elif provider == github_app.GITHUB_PROVIDER:
-        access_token = token_json.get("access_token") or ""
-        user_obj = github_app.fetch_authenticated_user(access_token) or {}
+        # Company-shared connector: health reflects the App INSTALLATION token
+        # (self-minting, no 8h clock), not a member's personal OAuth token.
+        # Fall back to the personal token only when no install exists yet.
+        from app import db
+
+        for inst in db.list_github_installations(row.get("company_id") or ""):
+            if inst.get("suspended"):
+                continue
+            try:
+                github_app.get_installation_token(int(inst["installation_id"]))
+            except Exception:
+                continue
+            user_obj = {
+                "login": inst.get("account_login") or row.get("account_label") or "",
+            }
+            break
+        if not user_obj:
+            access_token = token_json.get("access_token") or ""
+            user_obj = github_app.fetch_authenticated_user(access_token) or {}
     elif provider == clickup_oauth.CLICKUP_PROVIDER:
         access_token = token_json.get("access_token") or ""
         user_obj = clickup_oauth.fetch_authenticated_user(access_token) or {}

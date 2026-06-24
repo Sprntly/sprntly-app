@@ -81,31 +81,33 @@ def test_list_install_repos_returns_repo_summaries(github_env, monkeypatch):
     ctx = company_client(monkeypatch)
     _seed_github_oauth(company_id=ctx.company_id)
 
-    mock_resp = MagicMock(ok=True, status_code=200)
-    mock_resp.json.return_value = {
-        "total_count": 2,
-        "repositories": [
-            {
-                "id": 101,
-                "name": "widgets",
-                "full_name": "octocat/widgets",
-                "private": False,
-                "html_url": "https://github.com/octocat/widgets",
-                "default_branch": "main",
-                "description": "things",
-            },
-            {
-                "id": 102,
-                "name": "internal",
-                "full_name": "octocat/internal",
-                "private": True,
-                "html_url": "https://github.com/octocat/internal",
-                "default_branch": "main",
-                "description": None,
-            },
-        ],
-    }
-    with patch("app.routes.connectors.requests.get", return_value=mock_resp):
+    # Repo-list now goes via the App INSTALLATION token (github_app.
+    # fetch_installation_repos), not the connecting member's personal OAuth
+    # token — so the picker keeps working past the ~8h OAuth-token lifetime.
+    repos = [
+        {
+            "id": 101,
+            "name": "widgets",
+            "full_name": "octocat/widgets",
+            "private": False,
+            "html_url": "https://github.com/octocat/widgets",
+            "default_branch": "main",
+            "description": "things",
+        },
+        {
+            "id": 102,
+            "name": "internal",
+            "full_name": "octocat/internal",
+            "private": True,
+            "html_url": "https://github.com/octocat/internal",
+            "default_branch": "main",
+            "description": None,
+        },
+    ]
+    with patch(
+        "app.routes.connectors.github_app.fetch_installation_repos",
+        return_value=repos,
+    ):
         r = ctx.client.get(
             "/v1/connectors/github/installations/12345/repositories"
         )
@@ -114,31 +116,34 @@ def test_list_install_repos_returns_repo_summaries(github_env, monkeypatch):
     assert body["total"] == 2
     assert len(body["repositories"]) == 2
     assert body["repositories"][0]["full_name"] == "octocat/widgets"
+    assert body["repositories"][0]["id"] == 101
     assert body["repositories"][1]["private"] is True
 
 
-def test_list_install_repos_passes_user_oauth_token(github_env, monkeypatch):
-    """Per GitHub docs, /user/installations/{id}/repositories needs the
-    user's OAuth token (not the App JWT). Confirm we send the right one."""
+def test_list_install_repos_uses_installation_token_not_personal(
+    github_env, monkeypatch
+):
+    """Repo-list resolves via the App installation token, never the personal
+    OAuth path — so it survives the personal token aging out. Prove the
+    personal-token path is not touched."""
     ctx = company_client(monkeypatch)
     _seed_github_oauth(company_id=ctx.company_id)
 
-    captured = {}
+    def _boom(*_a, **_k):
+        raise AssertionError("personal OAuth token path must not be used")
 
-    def _fake(url, headers=None, timeout=None):
-        captured["url"] = url
-        captured["auth"] = headers.get("Authorization")
-        m = MagicMock(ok=True, status_code=200)
-        m.json.return_value = {"total_count": 0, "repositories": []}
-        return m
+    with patch(
+        "app.routes.connectors.github_app.fetch_installation_repos",
+        return_value=[],
+    ) as mfetch, patch(
+        "app.routes.connectors._github_access_token", side_effect=_boom
+    ), patch("app.routes.connectors.requests.get", side_effect=_boom):
+        r = ctx.client.get(
+            "/v1/connectors/github/installations/99/repositories"
+        )
 
-    with patch("app.routes.connectors.requests.get", side_effect=_fake):
-        ctx.client.get("/v1/connectors/github/installations/99/repositories")
-
-    assert captured["url"] == (
-        "https://api.github.com/user/installations/99/repositories"
-    )
-    assert captured["auth"] == "Bearer gho_USER_TOKEN"
+    assert r.status_code == 200, r.text
+    mfetch.assert_called_once_with(99)
 
 
 def test_list_install_repos_requires_github_connection(github_env, monkeypatch):

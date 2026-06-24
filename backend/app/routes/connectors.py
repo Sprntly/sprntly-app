@@ -1022,14 +1022,15 @@ def github_callback(
 
 
 def _bind_installation_company(installation_id: int, company_id: str) -> None:
-    """Attach `company_id` to an existing installation row (idempotent).
+    """Attach `company_id` to an installation row (idempotent), keyed on
+    installation_id. The webhook may have created the row first with no company;
+    this binds it. If the row is missing or thin (callback fired before the
+    webhook), backfill the real account details from GitHub's App API so we
+    never persist an empty skeleton.
 
     Called from the post-install callback — the only flow that knows both the
     installation_id (from GitHub's Setup-URL redirect) and the company (from the
-    signed state). The webhook may have created the row first with no company;
-    this binds it. If the row doesn't exist yet (webhook hasn't fired), the
-    upsert seeds a minimal row carrying the company so it's never orphaned
-    cross-tenant; the next webhook refresh fills in account details."""
+    signed state)."""
     try:
         existing = db.get_github_installation(installation_id)
         # Never re-key an installation already bound to a DIFFERENT company.
@@ -1046,28 +1047,30 @@ def _bind_installation_company(installation_id: int, company_id: str) -> None:
                 installation_id,
             )
             return
-        if existing:
-            db.upsert_github_installation(
-                installation_id=installation_id,
-                account_id=int(existing.get("account_id") or 0),
-                account_login=str(existing.get("account_login") or ""),
-                account_type=str(existing.get("account_type") or "User"),
-                repository_selection=str(
-                    existing.get("repository_selection") or "selected"
-                ),
-                suspended=bool(existing.get("suspended")),
-                permissions=json.loads(existing.get("permissions_json") or "{}"),
-                events=json.loads(existing.get("events_json") or "[]"),
-                company_id=company_id,
-            )
-        else:
-            db.upsert_github_installation(
-                installation_id=installation_id,
-                account_id=0,
-                account_login="",
-                account_type="User",
-                company_id=company_id,
-            )
+        thin = (
+            not existing
+            or not existing.get("account_login")
+            or int(existing.get("account_id") or 0) == 0
+        )
+        detail = github_app.fetch_app_installation(installation_id) if thin else None
+        acct = (detail or {}).get("account") or {}
+        ex = existing or {}
+        db.upsert_github_installation(
+            installation_id=installation_id,
+            account_id=int(acct.get("id") or ex.get("account_id") or 0),
+            account_login=str(acct.get("login") or ex.get("account_login") or ""),
+            account_type=str(acct.get("type") or ex.get("account_type") or "User"),
+            repository_selection=str(
+                (detail or {}).get("repository_selection")
+                or ex.get("repository_selection") or "selected"
+            ),
+            suspended=bool(ex.get("suspended") or False),
+            permissions=(detail or {}).get("permissions")
+                or json.loads(ex.get("permissions_json") or "{}"),
+            events=(detail or {}).get("events")
+                or json.loads(ex.get("events_json") or "[]"),
+            company_id=company_id,
+        )
     except Exception:
         logger.warning(
             "Failed to bind GitHub installation %s to company", installation_id,
@@ -1164,33 +1167,27 @@ def github_list_install_repos(
     installation_id: int,
     company: CompanyContext = Depends(require_company),
 ):
-    """List repositories accessible to this installation, using the
-    connected user's OAuth token (per GitHub's auth rules)."""
+    """List repositories accessible to this installation, using the App
+    INSTALLATION token (self-minting, no 8h OAuth clock) so the picker works
+    for any company member long after the connecting member's personal token
+    has aged out."""
     _require_company_owns_installation(installation_id, company.company_id)
-    r = requests.get(
-        _github_user_install_url(installation_id),
-        headers=_github_user_token_headers(company.company_id),
-        timeout=10,
-    )
-    if not r.ok:
-        raise HTTPException(r.status_code, f"GitHub: {r.text[:200]}")
-    body = r.json() or {}
-    repos = [
-        {
-            "id": x.get("id"),
-            "name": x.get("name"),
-            "full_name": x.get("full_name"),
-            "private": x.get("private"),
-            "html_url": x.get("html_url"),
-            "default_branch": x.get("default_branch"),
-            "description": x.get("description"),
-        }
-        for x in (body.get("repositories") or [])
-    ]
+    repos = github_app.fetch_installation_repos(installation_id)
     return {
         "installation_id": installation_id,
-        "total": body.get("total_count", len(repos)),
-        "repositories": repos,
+        "total": len(repos),
+        "repositories": [
+            {
+                "id": r.get("id"),
+                "name": r.get("name"),
+                "full_name": r.get("full_name"),
+                "private": r.get("private"),
+                "html_url": r.get("html_url"),
+                "default_branch": r.get("default_branch"),
+                "description": r.get("description"),
+            }
+            for r in repos
+        ],
     }
 
 
