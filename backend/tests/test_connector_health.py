@@ -41,11 +41,12 @@ def captured_health(monkeypatch):
     return state
 
 
-def _row(cid: str, provider: str, *, health=None, last_check=None) -> dict:
+def _row(cid: str, provider: str, *, health=None, last_check=None, user_id=None) -> dict:
     return {
         "id": cid,
         "provider": provider,
         "company_id": "co-1",
+        "user_id": user_id or f"u-{cid}",
         "account_label": f"{provider}@x.test",
         "health": health,
         "last_health_check_at": last_check,
@@ -174,34 +175,69 @@ async def test_fail_open_on_unreadable_token(captured_health, monkeypatch):
     assert alerts == []
 
 
-def test_send_alert_noop_without_config(monkeypatch):
+def test_send_alert_noop_without_resend_key(monkeypatch):
     monkeypatch.setattr(settings, "resend_api_key", "")
-    monkeypatch.setattr(settings, "connector_health_alert_email", "")
-    monkeypatch.setattr(settings, "signin_monitor_alert_email", "")
-    # Should log-only and not attempt a send (no exception, no import error).
+    # No RESEND_API_KEY → log-only, no send attempt (no exception, no import).
     connector_health._send_alert([_row("c1", "figma")])
 
 
-def test_send_alert_sends_one_email_when_configured(monkeypatch):
-    monkeypatch.setattr(settings, "resend_api_key", "re_key")
-    monkeypatch.setattr(settings, "connector_health_alert_email", "ops@sprntly.ai")
+def _patch_send(monkeypatch) -> list[dict]:
+    """Capture _send_via_resend calls + stub the company-name lookup."""
     sent: list[dict] = []
-
     import app.synthesis.email_delivery as email_delivery
 
     def fake_send(api_key, *, to, subject, html_body, text_body):
         sent.append({"to": to, "subject": subject, "text": text_body})
 
     monkeypatch.setattr(email_delivery, "_send_via_resend", fake_send)
-
     import app.db.companies as companies_db
-
     monkeypatch.setattr(companies_db, "slug_for_company_id", lambda cid: "acme")
+    return sent
+
+
+def test_send_alert_emails_each_connector_owner(monkeypatch):
+    """Each disconnected connector is emailed to its OWNER (user_id → email),
+    grouped so one owner with two dead connectors gets a single email."""
+    monkeypatch.setattr(settings, "resend_api_key", "re_key")
+    sent = _patch_send(monkeypatch)
+
+    import app.db.profiles as profiles_db
+    monkeypatch.setattr(
+        profiles_db, "emails_for_user_ids",
+        lambda ids: {"u-c1": "alice@x.test", "u-c2": "bob@x.test"},
+    )
+
+    rows = [
+        {**_row("c1", "figma", user_id="u-c1"), "_health_error": "token rejected"},
+        {**_row("c2", "slack", user_id="u-c1"), "_health_error": "token rejected"},
+        {**_row("c3", "github", user_id="u-c2"), "_health_error": "token rejected"},
+    ]
+    connector_health._send_alert(rows)
+
+    by_to = {s["to"]: s for s in sent}
+    assert set(by_to) == {"alice@x.test", "bob@x.test"}
+    # Alice owns c1+c2 → one email naming both providers; "2 connectors".
+    assert "figma" in by_to["alice@x.test"]["text"]
+    assert "slack" in by_to["alice@x.test"]["text"]
+    assert "2 connectors" in by_to["alice@x.test"]["subject"]
+    # Bob owns just github.
+    assert "github" in by_to["bob@x.test"]["text"]
+    assert "connector" in by_to["bob@x.test"]["subject"]
+
+
+def test_send_alert_falls_back_to_admin_when_owner_unresolved(monkeypatch):
+    """A connector whose owner email can't be resolved goes to the admin
+    fallback address rather than being silently dropped."""
+    monkeypatch.setattr(settings, "resend_api_key", "re_key")
+    monkeypatch.setattr(settings, "connector_health_alert_email", "ops@sprntly.ai")
+    sent = _patch_send(monkeypatch)
+
+    import app.db.profiles as profiles_db
+    monkeypatch.setattr(profiles_db, "emails_for_user_ids", lambda ids: {})  # none resolve
 
     rows = [{**_row("c1", "figma"), "_health_error": "token rejected"}]
     connector_health._send_alert(rows)
 
     assert len(sent) == 1
     assert sent[0]["to"] == "ops@sprntly.ai"
-    assert "1 connector" in sent[0]["subject"]
     assert "figma" in sent[0]["text"]

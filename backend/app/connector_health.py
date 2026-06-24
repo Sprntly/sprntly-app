@@ -183,33 +183,13 @@ async def run_connector_health_check() -> dict:
     return summary
 
 
-def _send_alert(connection_rows: list[dict]) -> None:
-    """Email ONE alert listing every connector that just transitioned to
-    disconnected this sweep. Option #1 only: a single configured admin address
-    (connector_health_alert_email, falling back to signin_monitor_alert_email).
-
-    Kept as a single swappable function so we can later switch to per-owner
-    emails or Slack without touching the sweep logic. If no Resend key or no
-    address is configured, logs a warning and no-ops (like signin_monitor)."""
-    api_key = settings.resend_api_key
-    to = settings.connector_health_alert_email or settings.signin_monitor_alert_email
-    if not api_key or not to:
-        logger.warning(
-            "connector_health: alert email not configured "
-            "(needs RESEND_API_KEY + CONNECTOR_HEALTH_ALERT_EMAIL "
-            "or SIGNIN_MONITOR_ALERT_EMAIL); %d disconnected connector(s) logged only",
-            len(connection_rows),
-        )
-        return
-
+def _format_alert(rows: list[dict]) -> tuple[str, str, str]:
+    """Build ``(subject, text_body, html_body)`` for one owner's disconnected
+    connector(s). Owner-addressed copy — it's *their* connector to reconnect."""
     from app.db.companies import slug_for_company_id
-    from app.synthesis.email_delivery import _send_via_resend
-
-    n = len(connection_rows)
-    subject = f"🔴 Sprntly: {n} connector(s) disconnected"
 
     lines: list[str] = []
-    for row in connection_rows:
+    for row in rows:
         company = _company_of(row)
         try:
             company = slug_for_company_id(company) or company
@@ -220,27 +200,81 @@ def _send_alert(connection_rows: list[dict]) -> None:
         error = row.get("_health_error") or "credential rejected"
         lines.append(f"{provider} — {company} — {label} — {error}")
 
-    text_body = (
-        "The scheduled connector health monitor found the following "
-        f"connector(s) newly disconnected (stored token rejected). Each owner "
-        "must reconnect the connector in Settings → Connectors.\n\n"
-        + "\n".join(f"  • {ln}" for ln in lines)
+    n = len(rows)
+    subject = f"🔴 Sprntly: reconnect your {'connector' if n == 1 else f'{n} connectors'}"
+    intro = (
+        f"{'A connector you' if n == 1 else 'Connectors you'} connected to Sprntly "
+        f"{'has' if n == 1 else 'have'} stopped working — the stored credential was "
+        "rejected. Reconnect in Settings → Connectors:"
     )
+    text_body = intro + "\n\n" + "\n".join(f"  • {ln}" for ln in lines)
     html_body = (
-        "<p>The scheduled connector health monitor found the following "
-        "connector(s) newly disconnected (stored token rejected). Each owner "
-        "must reconnect the connector in Settings → Connectors.</p><ul>"
-        + "".join(f"<li>{ln}</li>" for ln in lines)
-        + "</ul>"
+        f"<p>{intro}</p><ul>" + "".join(f"<li>{ln}</li>" for ln in lines) + "</ul>"
     )
+    return subject, text_body, html_body
+
+
+def _send_alert(connection_rows: list[dict]) -> None:
+    """Email each disconnected connector's OWNER — the user who connected it.
+
+    Resolves ``connection.user_id`` → email via the ``profiles`` table and groups
+    connectors by owner, so each owner gets ONE email about their own
+    connector(s). Any connector whose owner email can't be resolved falls back to
+    the configured admin address (``connector_health_alert_email``, then
+    ``signin_monitor_alert_email``) so it's never silently dropped. With no
+    RESEND_API_KEY — or nothing left to route — logs a warning and no-ops."""
+    api_key = settings.resend_api_key
+    if not api_key:
+        logger.warning(
+            "connector_health: RESEND_API_KEY not set; "
+            "%d disconnected connector(s) logged only",
+            len(connection_rows),
+        )
+        return
+
+    from app.db.profiles import emails_for_user_ids
+    from app.synthesis.email_delivery import _send_via_resend
 
     try:
-        _send_via_resend(
-            api_key, to=to, subject=subject,
-            html_body=html_body, text_body=text_body,
+        owner_emails = emails_for_user_ids([r.get("user_id") for r in connection_rows])
+    except Exception:  # noqa: BLE001 — a profiles lookup failure falls back to admin
+        logger.exception("connector_health: owner-email lookup failed; using fallback")
+        owner_emails = {}
+
+    fallback = (
+        settings.connector_health_alert_email or settings.signin_monitor_alert_email
+    )
+
+    # Route each connector to its owner's email; unresolvable owners → the admin
+    # fallback. Group by recipient so each person gets a single email.
+    by_recipient: dict[str, list[dict]] = {}
+    unrouted = 0
+    for row in connection_rows:
+        to = owner_emails.get(str(row.get("user_id") or "")) or fallback
+        if not to:
+            unrouted += 1
+            continue
+        by_recipient.setdefault(to, []).append(row)
+
+    if unrouted:
+        logger.warning(
+            "connector_health: %d disconnected connector(s) had no resolvable "
+            "owner email and no fallback configured — logged only",
+            unrouted,
         )
-        logger.info("connector_health: alert email sent to %s (%d connector(s))", to, n)
-    except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "connector_health: failed to send alert email: %s", type(exc).__name__
-        )
+
+    for to, rows in by_recipient.items():
+        subject, text_body, html_body = _format_alert(rows)
+        try:
+            _send_via_resend(
+                api_key, to=to, subject=subject,
+                html_body=html_body, text_body=text_body,
+            )
+            logger.info(
+                "connector_health: alert sent to %s (%d connector(s))", to, len(rows)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "connector_health: failed to send alert to %s: %s",
+                to, type(exc).__name__,
+            )
