@@ -23,6 +23,23 @@ describe("loadPrdById", () => {
     if (result.ok) expect(result.prd.prd_id).toBe(42)
   })
 
+  it("carries brief_id/insight_index so the panel can fetch QA scenarios (the View-PRD path)", async () => {
+    // Regression: 'View PRD' loads via loadPrdById; if the brief ref isn't on
+    // PrdState, PrdPanelContent can't fetch the matching qa-scenarios doc and
+    // the Test Scenarios section never renders.
+    vi.spyOn(prdApi, "get").mockResolvedValue({
+      id: 592, status: "ready", payload_md: "# T\n\nBody.",
+      brief_id: 274, insight_index: 2, llm_part: "",
+    } as never)
+
+    const result = await loadPrdById(592)
+    expect(result.ok).toBe(true)
+    if (result.ok) {
+      expect(result.prd.briefId).toBe(274)
+      expect(result.prd.insightIndex).toBe(2)
+    }
+  })
+
   it("surfaces a backend failure as an error message", async () => {
     vi.spyOn(prdApi, "get").mockResolvedValue({
       id: 7,

@@ -525,6 +525,12 @@ export interface PrdState extends PrdContent {
    *  faithfully in the LLM-readable view. Undefined/empty when Part B wasn't
    *  generated or failed. */
   llmPart?: string
+  /** The brief insight this PRD was generated from (`PrdRecord.brief_id` /
+   *  `insight_index`). Carried on PrdState so EVERY load path (latest,
+   *  open-generation, and the brief card's "View PRD" via loadPrdById) lets the
+   *  panel fetch the matching QA test-scenarios doc. */
+  briefId?: number
+  insightIndex?: number
 }
 
 export interface AppContentState {
