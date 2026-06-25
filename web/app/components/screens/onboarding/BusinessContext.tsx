@@ -1,169 +1,98 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
+import { advanceOnboardingStep } from "../../../lib/onboarding/store"
 import { businessContextApi, type BusinessContextDoc } from "../../../lib/api"
-import {
-  INDUSTRIES,
-  BUSINESS_TYPES,
-  TECH_STACK_OPTIONS,
-} from "../../../lib/onboarding/types"
 import { Sparkles } from "../../auth/icons"
-import {
-  buildLayers,
-  type BcLayer,
-} from "../app/settings/BusinessContextSettings"
 
 /**
  * Onboarding step 04 — "Your business context" (design scene onbctx).
  *
- * REUSES the #450 Business Context surface end-to-end:
- *   - the structured 8-layer doc + `businessContextApi` (GET/PUT
- *     /v1/company/business-context), and
- *   - the `buildLayers` field model the Settings pane edits.
+ * PRODUCT DECISION: onboarding's business-context step is the design's TWO
+ * friendly narrative textareas — NOT the full structured 8-layer editor. The
+ * heavy structured doc and the company-shape fields (industry / business type /
+ * tech stack) now live in Settings → Business Context. Onboarding shows only the
+ * two AI-drafted narratives, mapped onto the existing #450 Business Context
+ * model (GET/PUT /v1/company/business-context):
+ *
+ *   (a) "What the company does"  → product_value.what_it_does (+ identity.one_liner)
+ *   (b) "What the company cares about" → goals_strategy.stated_goal
+ *                                        (+ goals_strategy.current_priorities)
  *
  * The doc is auto-drafted server-side from the website + connectors during the
- * earlier steps; here the PM reviews and edits it inline. A 404 from GET means
- * "not generated yet" — we surface a Generate affordance and a friendly empty
- * state, and the step stays skippable (the design's onbctx never blocks).
- *
- * On Continue we PUT any edits (when a doc exists) and advance to the strategy
- * step (index 5). The pane mirrors the Settings editor: edit only each leaf's
- * `.value`; the backend stamps edited leaves src="user".
+ * earlier steps; here the PM reviews and edits the two narratives inline. A 404
+ * from GET means "not generated yet" — we surface a friendly empty state and
+ * keep the step skippable (the design's onbctx never blocks). On Next we PUT the
+ * two edited narratives back onto their leaves and advance to the strategy step.
  */
 
-/** Seed the editable string values from a freshly loaded doc. */
-function valuesFromDoc(doc: BusinessContextDoc): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const layer of buildLayers(doc)) {
-    for (const field of layer.fields) {
-      const v = field.leaf?.value
-      out[field.path] =
-        v == null
-          ? ""
-          : Array.isArray(v)
-            ? v.join(", ")
-            : typeof v === "boolean"
-              ? v
-                ? "true"
-                : "false"
-              : String(v)
-    }
+// ── narrative ↔ doc mapping ───────────────────────────────────────────────────
+// We surface two leaves per narrative: a primary leaf (what we read from on
+// load) and a mirror leaf (also written on save so the structured doc stays
+// consistent — e.g. the one-liner and the stated goal track the narrative).
+const WHAT_PRIMARY = ["product_value", "what_it_does"] as const
+const WHAT_MIRROR = ["identity", "one_liner"] as const
+const CARES_PRIMARY = ["goals_strategy", "stated_goal"] as const
+const CARES_MIRROR = ["goals_strategy", "current_priorities"] as const
+
+function leafString(doc: BusinessContextDoc, path: readonly string[]): string {
+  let cursor: unknown = doc
+  for (const key of path) {
+    if (cursor == null || typeof cursor !== "object") return ""
+    cursor = (cursor as Record<string, unknown>)[key]
   }
-  return out
+  const v = (cursor as { value?: unknown } | null)?.value
+  if (v == null) return ""
+  if (Array.isArray(v)) return v.join(", ")
+  return String(v)
 }
 
-/** Apply edited string values back onto a clone of the doc (mirrors the
- *  Settings pane's applyEdits — list-shaped leaves split on comma). */
-function applyEdits(
+/** Read both narratives from a freshly loaded doc (primary leaf, fall back to
+ *  the mirror leaf when the primary is empty). */
+function narrativesFromDoc(doc: BusinessContextDoc): {
+  whatItDoes: string
+  whatItCares: string
+} {
+  return {
+    whatItDoes:
+      leafString(doc, WHAT_PRIMARY) || leafString(doc, WHAT_MIRROR),
+    whatItCares:
+      leafString(doc, CARES_PRIMARY) || leafString(doc, CARES_MIRROR),
+  }
+}
+
+/** Write a trimmed string onto a leaf in a doc clone (null when blank). */
+function setLeaf(doc: BusinessContextDoc, path: readonly string[], raw: string) {
+  let cursor: unknown = doc
+  for (let i = 0; i < path.length - 1; i++) {
+    if (cursor == null || typeof cursor !== "object") return
+    cursor = (cursor as Record<string, unknown>)[path[i]]
+  }
+  if (cursor == null || typeof cursor !== "object") return
+  const leaf = (cursor as Record<string, { value: unknown } | undefined>)[
+    path[path.length - 1]
+  ]
+  if (!leaf || typeof leaf !== "object") return
+  const trimmed = raw.trim()
+  leaf.value = trimmed === "" ? null : trimmed
+}
+
+/** Apply the two edited narratives back onto a clone of the doc. The backend
+ *  stamps edited leaves src="user". */
+function applyNarratives(
   doc: BusinessContextDoc,
-  values: Record<string, string>,
+  whatItDoes: string,
+  whatItCares: string,
 ): BusinessContextDoc {
   const next = JSON.parse(JSON.stringify(doc)) as BusinessContextDoc
-  for (const [path, raw] of Object.entries(values)) {
-    const parts = path.split(".")
-    let cursor: unknown = next
-    for (let i = 0; i < parts.length - 1; i++) {
-      cursor = (cursor as Record<string, unknown>)[parts[i]]
-      if (cursor == null) break
-    }
-    if (cursor == null) continue
-    const leafKey = parts[parts.length - 1]
-    const leaf = (cursor as Record<string, { value: unknown }>)[leafKey]
-    if (!leaf || typeof leaf !== "object") continue
-    const trimmed = raw.trim()
-    if (Array.isArray(leaf.value)) {
-      leaf.value = trimmed ? trimmed.split(",").map((s) => s.trim()).filter(Boolean) : []
-    } else {
-      leaf.value = trimmed === "" ? null : trimmed
-    }
-  }
+  setLeaf(next, WHAT_PRIMARY, whatItDoes)
+  setLeaf(next, WHAT_MIRROR, whatItDoes)
+  setLeaf(next, CARES_PRIMARY, whatItCares)
+  setLeaf(next, CARES_MIRROR, whatItCares)
   return next
-}
-
-// ── Company-shape sub-view (relocated from onb1) ──────────────────────────────
-// The tech-stack chips + predicted industry / business-type dropdowns used to
-// live on onb1. The onb1 design ends at the metric note, so they moved here to
-// the business-context step. These edit WORKSPACE-level company fields
-// (companies.tech_stack / industry / business_type), persisted via
-// updateWorkspace — separate from the structured business-context doc.
-export type CompanyShapeViewProps = {
-  industry: string
-  businessType: string
-  techStack: string[]
-  onChangeIndustry: (value: string) => void
-  onChangeBusinessType: (value: string) => void
-  onToggleTechStack: (tech: string) => void
-}
-
-export function CompanyShapeView({
-  industry,
-  businessType,
-  techStack,
-  onChangeIndustry,
-  onChangeBusinessType,
-  onToggleTechStack,
-}: CompanyShapeViewProps) {
-  return (
-    <div data-bc-company-shape>
-      <div className="onb-section">
-        <div className="onb-section-h">
-          Your business{" "}
-          <span className="opt">— predicted from your website, edit if it&apos;s off</span>
-        </div>
-        <div className="form-grid">
-          <div className="field" data-field="industry">
-            <div className="field-l">Industry</div>
-            <select
-              className="inp"
-              value={industry}
-              onChange={(e) => onChangeIndustry(e.target.value)}
-              aria-label="Industry"
-            >
-              {INDUSTRIES.map((i) => (
-                <option key={i}>{i}</option>
-              ))}
-            </select>
-          </div>
-          <div className="field" data-field="businessType">
-            <div className="field-l">Business type</div>
-            <select
-              className="inp"
-              value={businessType}
-              onChange={(e) => onChangeBusinessType(e.target.value)}
-              aria-label="Business type"
-            >
-              {BUSINESS_TYPES.map((b) => (
-                <option key={b}>{b}</option>
-              ))}
-            </select>
-          </div>
-        </div>
-      </div>
-
-      <div className="onb-section">
-        <div className="onb-section-h">
-          Tech stack <span className="opt">optional</span>
-        </div>
-        <div className="onb-chip-row">
-          {TECH_STACK_OPTIONS.map((t) => (
-            <button
-              key={t}
-              type="button"
-              className={`onb-chip ${techStack.includes(t) ? "sel" : ""}`}
-              aria-pressed={techStack.includes(t)}
-              onClick={() => onToggleTechStack(t)}
-            >
-              {t}
-            </button>
-          ))}
-        </div>
-      </div>
-    </div>
-  )
 }
 
 // ── pure view (props in, JSX out — unit-testable via renderToStaticMarkup) ────
@@ -172,41 +101,43 @@ export type BusinessContextStepViewProps = {
   loadError: string | null
   /** null = GET returned 404 (not generated yet). */
   doc: BusinessContextDoc | null
-  values: Record<string, string>
+  whatItDoes: string
+  whatItCares: string
+  /** Website host shown in the "Generated from <website>" ai-flag. */
+  websiteLabel: string
   generating: boolean
   generateError: string | null
-  onChangeField: (path: string, value: string) => void
+  onChangeWhatItDoes: (value: string) => void
+  onChangeWhatItCares: (value: string) => void
   onGenerate: () => void
-  /** Relocated company-shape fields (industry / business type / tech stack). */
-  companyShape: CompanyShapeViewProps
 }
 
 export function BusinessContextStepView({
   loading,
   loadError,
   doc,
-  values,
+  whatItDoes,
+  whatItCares,
+  websiteLabel,
   generating,
   generateError,
-  onChangeField,
+  onChangeWhatItDoes,
+  onChangeWhatItCares,
   onGenerate,
-  companyShape,
 }: BusinessContextStepViewProps) {
   if (loading) {
     return <p className="onb-field-hint">Loading your business context…</p>
   }
   if (loadError) {
-    return <div className="onb-form-error">Could not load business context: {loadError}</div>
+    return (
+      <div className="onb-form-error">Could not load business context: {loadError}</div>
+    )
   }
 
-  // Empty / not-generated state — never blocks the step. The relocated
-  // company-shape fields still render so industry / business type / tech stack
-  // can be confirmed even when the structured doc hasn't been drafted yet.
+  // Empty / not-generated state — never blocks the step.
   if (!doc) {
     return (
-      <>
-        <CompanyShapeView {...companyShape} />
-        <div className="onb-section" data-bc-state="empty">
+      <div className="onb-section" data-bc-state="empty">
         <div className="ctx-ai-flag">
           <Sparkles style={{ width: 13, height: 13 }} aria-hidden /> Your business
           context hasn&apos;t been drafted yet — it&apos;s normally built from your
@@ -226,101 +157,79 @@ export function BusinessContextStepView({
           You can skip this for now and fill it in later in Settings → Business
           Context.
         </p>
-        </div>
-      </>
+      </div>
     )
   }
 
-  const layers: BcLayer[] = buildLayers(doc)
-
   return (
     <div data-bc-state="ready">
-      <CompanyShapeView {...companyShape} />
-
-      <div className="ctx-ai-flag">
-        <Sparkles style={{ width: 13, height: 13 }} aria-hidden /> AI-drafted from
-        your website and connectors. Edit anything — it&apos;s the lens every
-        agent reasons through.
+      <div className="onb-section">
+        <div className="onb-section-h">
+          What the company does <span className="opt">— AI-drafted, editable</span>
+        </div>
+        <div className="ctx-ai-flag">
+          <Sparkles style={{ width: 13, height: 13 }} aria-hidden /> Generated from{" "}
+          {websiteLabel} + your analytics. Refine for accuracy.
+        </div>
+        <textarea
+          className="inp"
+          rows={8}
+          style={{ resize: "vertical", lineHeight: 1.6 }}
+          value={whatItDoes}
+          onChange={(e) => onChangeWhatItDoes(e.target.value)}
+          aria-label="What the company does"
+          data-field="what-it-does"
+        />
       </div>
 
-      {layers.map((layer) => (
-        <div key={layer.key} className="onb-section bc-layer" data-layer={layer.key}>
-          <div className="onb-section-h">
-            {layer.title} <span className="opt">— {layer.sub}</span>
-          </div>
-          {layer.fields.length === 0 && <p className="onb-field-hint">No entries.</p>}
-          {layer.fields.map((field) => (
-            <div className="field full bc-field" key={field.path} data-field={field.path}>
-              <div className="field-l">{field.label}</div>
-              {field.multiline ? (
-                <textarea
-                  className="inp"
-                  rows={3}
-                  value={values[field.path] ?? ""}
-                  onChange={(e) => onChangeField(field.path, e.target.value)}
-                  aria-label={field.label}
-                />
-              ) : (
-                <input
-                  className="inp"
-                  value={values[field.path] ?? ""}
-                  onChange={(e) => onChangeField(field.path, e.target.value)}
-                  aria-label={field.label}
-                />
-              )}
-            </div>
-          ))}
+      <div className="onb-section" style={{ marginBottom: 0 }}>
+        <div className="onb-section-h">
+          What does the company care about?{" "}
+          <span className="opt">— AI-drafted, editable</span>
         </div>
-      ))}
+        <textarea
+          className="inp"
+          rows={5}
+          style={{ resize: "vertical", lineHeight: 1.6 }}
+          value={whatItCares}
+          onChange={(e) => onChangeWhatItCares(e.target.value)}
+          aria-label="What does the company care about?"
+          data-field="what-it-cares"
+        />
+        <div className="onb-field-hint" style={{ marginTop: 6 }}>
+          Your mission and priorities — this anchors how every agent weighs what
+          matters.
+        </div>
+      </div>
     </div>
   )
 }
 
 // ── container ─────────────────────────────────────────────────────────────────
 export function BusinessContext() {
-  const { workspace, setWorkspace, websiteAnalysis, loading } = useOnboarding()
+  const { workspace, websiteAnalysis, loading } = useOnboarding()
   const router = useRouter()
 
   const [doc, setDoc] = useState<BusinessContextDoc | null>(null)
   const [bcLoading, setBcLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [values, setValues] = useState<Record<string, string>>({})
+  const [whatItDoes, setWhatItDoes] = useState("")
+  const [whatItCares, setWhatItCares] = useState("")
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
-  // ── relocated company-shape fields (moved off onb1) ─────────────────────────
-  // industry / business_type / tech_stack are WORKSPACE-level company fields.
-  // Seeded from the saved workspace first, then any website analysis. A user
-  // edit stops later analysis results from clobbering the choice.
-  const [industry, setIndustry] = useState<string>(INDUSTRIES[0])
-  const [businessType, setBusinessType] = useState<string>(BUSINESS_TYPES[0])
-  const [techStack, setTechStack] = useState<string[]>([])
-  const [industryTouched, setIndustryTouched] = useState(false)
-  const [businessTypeTouched, setBusinessTypeTouched] = useState(false)
-
-  useEffect(() => {
-    if (industryTouched) return
-    const next = workspace?.industry || websiteAnalysis?.industry
-    if (next && INDUSTRIES.includes(next as (typeof INDUSTRIES)[number])) setIndustry(next)
-    else if (next) setIndustry("Other")
-  }, [workspace?.industry, websiteAnalysis?.industry, industryTouched])
-
-  useEffect(() => {
-    if (businessTypeTouched) return
-    const next = workspace?.business_type || websiteAnalysis?.business_type
-    if (next && BUSINESS_TYPES.includes(next as (typeof BUSINESS_TYPES)[number]))
-      setBusinessType(next)
-  }, [workspace?.business_type, websiteAnalysis?.business_type, businessTypeTouched])
-
-  const techStackSeeded = useRef(false)
-  useEffect(() => {
-    if (techStackSeeded.current) return
-    if (!workspace) return
-    techStackSeeded.current = true
-    setTechStack(workspace.tech_stack ?? [])
-  }, [workspace])
+  // Friendly host for the "Generated from <website>" ai-flag.
+  const websiteLabel = (() => {
+    const raw = websiteAnalysis?.url || workspace?.slug || ""
+    try {
+      if (raw && /^https?:\/\//.test(raw)) return new URL(raw).host
+    } catch {
+      /* fall through */
+    }
+    return raw || "your website"
+  })()
 
   const load = useCallback(async () => {
     setBcLoading(true)
@@ -328,7 +237,14 @@ export function BusinessContext() {
     try {
       const d = await businessContextApi.get()
       setDoc(d)
-      setValues(d ? valuesFromDoc(d) : {})
+      if (d) {
+        const n = narrativesFromDoc(d)
+        setWhatItDoes(n.whatItDoes)
+        setWhatItCares(n.whatItCares)
+      } else {
+        setWhatItDoes("")
+        setWhatItCares("")
+      }
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -345,11 +261,6 @@ export function BusinessContext() {
   useEffect(() => {
     if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
-
-  function onChangeField(path: string, value: string) {
-    setSaveError(null)
-    setValues((prev) => ({ ...prev, [path]: value }))
-  }
 
   function onGenerate() {
     void (async () => {
@@ -373,18 +284,12 @@ export function BusinessContext() {
     setSaving(true)
     setSaveError(null)
     try {
-      // Persist the relocated company-shape fields (industry / business type /
-      // tech stack) onto the workspace — these moved here off onb1 and still
-      // seed the workspace + metric candidates downstream.
-      const updated = await updateWorkspace(workspace.id, {
-        industry,
-        business_type: businessType,
-        tech_stack: techStack,
-      })
-      setWorkspace({ ...updated, product: updated.product ?? workspace.product })
-      // Persist any inline edits when a doc exists (skippable when it doesn't).
+      // Persist the two narrative edits onto their business-context leaves when
+      // a doc exists (skippable when it doesn't — the design never blocks).
       if (doc) {
-        await businessContextApi.update(applyEdits(doc, values))
+        await businessContextApi.update(
+          applyNarratives(doc, whatItDoes, whatItCares),
+        )
       }
       await advanceOnboardingStep(workspace.id, 5)
       router.push("/onboarding/strategy")
@@ -400,14 +305,6 @@ export function BusinessContext() {
     if (!workspace) return
     setSaving(true)
     try {
-      // Skip only skips the structured business-context doc edits; the relocated
-      // company-shape fields are still persisted so they're never lost.
-      const updated = await updateWorkspace(workspace.id, {
-        industry,
-        business_type: businessType,
-        tech_stack: techStack,
-      })
-      setWorkspace({ ...updated, product: updated.product ?? workspace.product })
       await advanceOnboardingStep(workspace.id, 5)
       router.push("/onboarding/strategy")
     } finally {
@@ -420,13 +317,14 @@ export function BusinessContext() {
   return (
     <OnboardingChrome
       step={4}
+      wideCard
       saveLabel="Saved · auto-saves"
       title={
         <>
           Your <em>business context.</em>
         </>
       }
-      subtitle="We drafted this from your website and connectors. Edit anything — it's the lens every Sprntly agent reasons through. You can refine it any time in Settings."
+      subtitle="I drafted this from your website and connectors. Edit anything — it's the lens every agent reasons through."
       footerMeta={
         <>
           Step 4 of 5 · business context —{" "}
@@ -442,6 +340,7 @@ export function BusinessContext() {
       }
       onBack={() => router.push("/onboarding/connectors")}
       onContinue={() => void next()}
+      continueLabel="Next"
       continueDisabled={saving}
       loading={saving}
     >
@@ -450,32 +349,20 @@ export function BusinessContext() {
         loading={bcLoading}
         loadError={loadError}
         doc={doc}
-        values={values}
+        whatItDoes={whatItDoes}
+        whatItCares={whatItCares}
+        websiteLabel={websiteLabel}
         generating={generating}
         generateError={generateError}
-        onChangeField={onChangeField}
-        onGenerate={onGenerate}
-        companyShape={{
-          industry,
-          businessType,
-          techStack,
-          onChangeIndustry: (v) => {
-            setIndustryTouched(true)
-            setSaveError(null)
-            setIndustry(v)
-          },
-          onChangeBusinessType: (v) => {
-            setBusinessTypeTouched(true)
-            setSaveError(null)
-            setBusinessType(v)
-          },
-          onToggleTechStack: (t) => {
-            setSaveError(null)
-            setTechStack((prev) =>
-              prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t],
-            )
-          },
+        onChangeWhatItDoes={(v) => {
+          setSaveError(null)
+          setWhatItDoes(v)
         }}
+        onChangeWhatItCares={(v) => {
+          setSaveError(null)
+          setWhatItCares(v)
+        }}
+        onGenerate={onGenerate}
       />
     </OnboardingChrome>
   )

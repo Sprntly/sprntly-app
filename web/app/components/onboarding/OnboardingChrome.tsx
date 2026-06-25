@@ -28,6 +28,7 @@ export function OnboardingChrome({
   continueDisabled,
   loading,
   saveLabel = "Saved",
+  wideCard = false,
 }: {
   /** 1-based numbered step; controls the active dot. */
   step: number
@@ -41,6 +42,8 @@ export function OnboardingChrome({
   continueDisabled?: boolean
   loading?: boolean
   saveLabel?: string
+  /** Widen the card (design's `.onb-card-wide`) for the narrative steps. */
+  wideCard?: boolean
 }) {
   const dots = Array.from({ length: ONBOARDING_STEP_COUNT }, (_, i) => i + 1)
   return (
@@ -63,7 +66,7 @@ export function OnboardingChrome({
         </span>
       </div>
 
-      <div className="onb-card">
+      <div className={`onb-card${wideCard ? " onb-card-wide" : ""}`}>
         <div className="onb-h">{title}</div>
         {subtitle && <div className="onb-sub">{subtitle}</div>}
         {children}
