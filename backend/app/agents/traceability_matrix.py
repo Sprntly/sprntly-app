@@ -136,6 +136,9 @@ def generate_traceability_matrix_sync(
             prd, stories_md, qa_test_cases_md,
             risk_analysis_md, technical_design_md, evidence_md,
         ),
+        # Large markdown doc — stream on the long read timeout (was tripping
+        # httpx.ReadTimeout on the default 120s non-streamed path).
+        long_output=True,
     )
     md = result.output if isinstance(result.output, str) else str(result.output)
 
