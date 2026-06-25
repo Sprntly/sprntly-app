@@ -21,6 +21,12 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from app.auth import CompanyContext, require_company
+from app.company_document import (
+    DOC_TYPES,
+    is_valid_doc_type,
+    list_company_documents,
+    save_company_document,
+)
 from app.company_template import (
     delete_company_template,
     list_company_templates,
@@ -230,3 +236,73 @@ def delete_template(
     if not delete_company_template(company.company_id, template_id):
         raise HTTPException(404, "Template not found")
     return {"ok": True, "id": template_id}
+
+
+# ── Company documents — strategy/context files from the onboarding strategy step
+# The GENERALIZED sibling of the roadmap doc + templates above: a single store
+# with a `doc_type` discriminator (ceo_memo | team_priorities | research |
+# company_strategy), backing the onbstrat grid of typed upload cards. MANY per
+# company, like templates. Same converter + 20 MB cap. STORED only for now —
+# feeding the extracted text into agent context is a deliberate follow-up.
+DOCUMENT_MAX_UPLOAD_BYTES = ROADMAP_MAX_UPLOAD_BYTES
+
+
+def _document_item(d) -> dict:
+    """Public list-item shape — metadata + extracted-char count, never raw bytes."""
+    return {
+        "id": d.id,
+        "doc_type": d.doc_type,
+        "filename": d.filename,
+        "content_type": d.content_type,
+        "extracted_chars": len(d.extracted_text or ""),
+        "uploaded_at": d.uploaded_at,
+    }
+
+
+@router.post("/documents")
+async def post_company_document(
+    file: Annotated[UploadFile, File(description="Strategy/context doc (PDF/DOCX/MD/…)")],
+    doc_type: Annotated[str, Form()],
+    company: CompanyContext = Depends(require_company),
+):
+    """Upload a strategy/context document for the company (multiple allowed).
+
+    `doc_type` must be one of the onboarding strategy cards: ceo_memo,
+    team_priorities, research, company_strategy. Reuses the shared ingest
+    converter to extract text; the doc is STORED only for now (a follow-up wires
+    it into agent context). Any member may add a document during onboarding.
+    """
+    if not is_valid_doc_type(doc_type):
+        raise HTTPException(
+            422,
+            f"Invalid doc_type '{doc_type}'. Expected one of: {', '.join(DOC_TYPES)}",
+        )
+    filename = file.filename or "document"
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Empty file")
+    if len(data) > DOCUMENT_MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            413,
+            f"File exceeds {DOCUMENT_MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit",
+        )
+    saved = save_company_document(
+        company.company_id,
+        doc_type=doc_type,
+        filename=filename,
+        data=data,
+        content_type=file.content_type,
+    )
+    return {"ok": True, **_document_item(saved)}
+
+
+@router.get("/documents")
+def get_company_documents(
+    doc_type: str | None = None,
+    company: CompanyContext = Depends(require_company),
+):
+    """List the company's strategy/context documents (newest first). Optionally
+    filtered by `doc_type`. Returns metadata + extracted-char counts, not the raw
+    bytes."""
+    items = list_company_documents(company.company_id, doc_type=doc_type)
+    return {"documents": [_document_item(d) for d in items]}
