@@ -72,20 +72,100 @@ describe("BusinessInfo (container) — Product + metrics page", () => {
     expect(screen.getByText(/tell us about your/i)).not.toBeNull()
   })
 
-  it("renders the pick-3 metric picker inline (combined onto this screen)", () => {
+  it("renders the exact onb1 design copy (subtitle, field labels, note)", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
     const { container } = render(React.createElement(BusinessInfo))
-    // The pick-3 metric cards + "write your own" row now live here (onb1).
-    expect(container.querySelector(".metric-pick")).not.toBeNull()
-    expect(container.querySelector(".metric-other")).not.toBeNull()
-    expect(container.querySelector(".metric-card")).not.toBeNull()
+    const text = container.textContent ?? ""
+    // Design subtitle, verbatim.
+    expect(text).toContain(
+      "A name and your success metrics anchor the whole workspace. You'll add the full description in Settings.",
+    )
+    // Design field labels.
+    expect(text).toContain("Company name")
+    expect(text).toContain("Product name")
+    expect(text).toContain("Product website")
+    expect(text).toContain("Your metrics")
+    // Design metric note, verbatim (split across <strong>).
+    expect(text).toContain("These are how Sprntly")
+    expect(text).toContain("prioritizes which issues and ideas to surface")
+    expect(text).toContain(
+      "every brief is ranked by impact on the metrics you pick.",
+    )
+  })
+
+  it("renders the flat onb1 metric-chips picker inline (combined onto this screen)", () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
+
+    const { container } = render(React.createElement(BusinessInfo))
+    // The onb1 design renders a flat chip row + custom-add row + a note callout.
+    expect(container.querySelector(".metric-chips")).not.toBeNull()
+    expect(container.querySelector(".metric")).not.toBeNull()
+    expect(container.querySelector(".metric-other-row")).not.toBeNull()
+    expect(container.querySelector(".metric-note")).not.toBeNull()
+    expect(container.querySelector("#customMetricInput")).not.toBeNull()
     // Inference-seed website input is still present.
     expect(container.querySelector('input[type="url"]')).not.toBeNull()
   })
 
-  it("no longer renders the Stage or Team size steps", () => {
+  it("enforces EXACTLY 3 picks: pre-selects 3 and BLOCKS a 4th (deselect to swap)", () => {
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    // Seed a saved KPI tree so the chip pool is deterministic in the test.
+    const ws = makeWorkspace({
+      kpi_tree: {
+        north_star: "",
+        north_star_description: "",
+        metrics: [
+          { name: "Weekly active users", description: "" },
+          { name: "Net revenue retention", description: "" },
+          { name: "Paid conversion rate", description: "" },
+          { name: "Activation rate", description: "" },
+        ],
+      } as never,
+    })
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: ws }))
+
+    const { container } = render(React.createElement(BusinessInfo))
+    const chips = Array.from(
+      container.querySelectorAll<HTMLButtonElement>(".metric-chips .metric"),
+    )
+    expect(chips.length).toBeGreaterThanOrEqual(4)
+    // First 3 are pre-selected (exactly 3).
+    const selectedBefore = chips.filter(
+      (c) => c.getAttribute("aria-pressed") === "true",
+    )
+    expect(selectedBefore.length).toBe(3)
+    // A 4th pick is REFUSED — the chip stays unselected (you deselect to swap),
+    // and the "up to 3" warning surfaces.
+    const fourth = chips.find((c) => c.getAttribute("aria-pressed") === "false")!
+    act(() => {
+      fourth.click()
+    })
+    expect(fourth.getAttribute("aria-pressed")).toBe("false")
+    expect(
+      chips.filter((c) => c.getAttribute("aria-pressed") === "true").length,
+    ).toBe(3)
+    expect(container.textContent).toMatch(/up to 3 metrics/i)
+
+    // Deselecting one frees a slot so the previously-refused chip can be picked.
+    const firstSelected = chips.find(
+      (c) => c.getAttribute("aria-pressed") === "true",
+    )!
+    act(() => {
+      firstSelected.click()
+    })
+    act(() => {
+      fourth.click()
+    })
+    expect(fourth.getAttribute("aria-pressed")).toBe("true")
+    expect(
+      chips.filter((c) => c.getAttribute("aria-pressed") === "true").length,
+    ).toBe(3)
+  })
+
+  it("no longer renders Stage, Team size, tech-stack, or the industry/business-type controls (moved to business-context)", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
@@ -93,8 +173,12 @@ describe("BusinessInfo (container) — Product + metrics page", () => {
     expect(container.textContent).not.toContain("Team size")
     // no headcount number input remains
     expect(container.querySelector('input[type="number"]')).toBeNull()
-    // tech-stack chips still render (untouched)
-    expect(container.querySelector(".onb-chip")).not.toBeNull()
+    // tech-stack chips + industry/business-type controls relocated to onbctx
+    expect(container.querySelector(".onb-chip")).toBeNull()
+    expect(container.querySelector('[data-field="industry"]')).toBeNull()
+    expect(container.querySelector('[data-field="businessType"]')).toBeNull()
+    expect(container.querySelector("select")).toBeNull()
+    expect(container.textContent).not.toContain("Tech stack")
   })
 
   it("does NOT send stage/team_size in the create payload (dropped cleanly)", async () => {

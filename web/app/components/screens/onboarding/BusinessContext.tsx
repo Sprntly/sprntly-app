@@ -1,11 +1,16 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep } from "../../../lib/onboarding/store"
+import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
 import { businessContextApi, type BusinessContextDoc } from "../../../lib/api"
+import {
+  INDUSTRIES,
+  BUSINESS_TYPES,
+  TECH_STACK_OPTIONS,
+} from "../../../lib/onboarding/types"
 import { Sparkles } from "../../auth/icons"
 import {
   buildLayers,
@@ -79,6 +84,88 @@ function applyEdits(
   return next
 }
 
+// ── Company-shape sub-view (relocated from onb1) ──────────────────────────────
+// The tech-stack chips + predicted industry / business-type dropdowns used to
+// live on onb1. The onb1 design ends at the metric note, so they moved here to
+// the business-context step. These edit WORKSPACE-level company fields
+// (companies.tech_stack / industry / business_type), persisted via
+// updateWorkspace — separate from the structured business-context doc.
+export type CompanyShapeViewProps = {
+  industry: string
+  businessType: string
+  techStack: string[]
+  onChangeIndustry: (value: string) => void
+  onChangeBusinessType: (value: string) => void
+  onToggleTechStack: (tech: string) => void
+}
+
+export function CompanyShapeView({
+  industry,
+  businessType,
+  techStack,
+  onChangeIndustry,
+  onChangeBusinessType,
+  onToggleTechStack,
+}: CompanyShapeViewProps) {
+  return (
+    <div data-bc-company-shape>
+      <div className="onb-section">
+        <div className="onb-section-h">
+          Your business{" "}
+          <span className="opt">— predicted from your website, edit if it&apos;s off</span>
+        </div>
+        <div className="form-grid">
+          <div className="field" data-field="industry">
+            <div className="field-l">Industry</div>
+            <select
+              className="inp"
+              value={industry}
+              onChange={(e) => onChangeIndustry(e.target.value)}
+              aria-label="Industry"
+            >
+              {INDUSTRIES.map((i) => (
+                <option key={i}>{i}</option>
+              ))}
+            </select>
+          </div>
+          <div className="field" data-field="businessType">
+            <div className="field-l">Business type</div>
+            <select
+              className="inp"
+              value={businessType}
+              onChange={(e) => onChangeBusinessType(e.target.value)}
+              aria-label="Business type"
+            >
+              {BUSINESS_TYPES.map((b) => (
+                <option key={b}>{b}</option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      <div className="onb-section">
+        <div className="onb-section-h">
+          Tech stack <span className="opt">optional</span>
+        </div>
+        <div className="onb-chip-row">
+          {TECH_STACK_OPTIONS.map((t) => (
+            <button
+              key={t}
+              type="button"
+              className={`onb-chip ${techStack.includes(t) ? "sel" : ""}`}
+              aria-pressed={techStack.includes(t)}
+              onClick={() => onToggleTechStack(t)}
+            >
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── pure view (props in, JSX out — unit-testable via renderToStaticMarkup) ────
 export type BusinessContextStepViewProps = {
   loading: boolean
@@ -90,6 +177,8 @@ export type BusinessContextStepViewProps = {
   generateError: string | null
   onChangeField: (path: string, value: string) => void
   onGenerate: () => void
+  /** Relocated company-shape fields (industry / business type / tech stack). */
+  companyShape: CompanyShapeViewProps
 }
 
 export function BusinessContextStepView({
@@ -101,6 +190,7 @@ export function BusinessContextStepView({
   generateError,
   onChangeField,
   onGenerate,
+  companyShape,
 }: BusinessContextStepViewProps) {
   if (loading) {
     return <p className="onb-field-hint">Loading your business context…</p>
@@ -109,10 +199,14 @@ export function BusinessContextStepView({
     return <div className="onb-form-error">Could not load business context: {loadError}</div>
   }
 
-  // Empty / not-generated state — never blocks the step.
+  // Empty / not-generated state — never blocks the step. The relocated
+  // company-shape fields still render so industry / business type / tech stack
+  // can be confirmed even when the structured doc hasn't been drafted yet.
   if (!doc) {
     return (
-      <div className="onb-section" data-bc-state="empty">
+      <>
+        <CompanyShapeView {...companyShape} />
+        <div className="onb-section" data-bc-state="empty">
         <div className="ctx-ai-flag">
           <Sparkles style={{ width: 13, height: 13 }} aria-hidden /> Your business
           context hasn&apos;t been drafted yet — it&apos;s normally built from your
@@ -132,7 +226,8 @@ export function BusinessContextStepView({
           You can skip this for now and fill it in later in Settings → Business
           Context.
         </p>
-      </div>
+        </div>
+      </>
     )
   }
 
@@ -140,6 +235,8 @@ export function BusinessContextStepView({
 
   return (
     <div data-bc-state="ready">
+      <CompanyShapeView {...companyShape} />
+
       <div className="ctx-ai-flag">
         <Sparkles style={{ width: 13, height: 13 }} aria-hidden /> AI-drafted from
         your website and connectors. Edit anything — it&apos;s the lens every
@@ -181,7 +278,7 @@ export function BusinessContextStepView({
 
 // ── container ─────────────────────────────────────────────────────────────────
 export function BusinessContext() {
-  const { workspace, loading } = useOnboarding()
+  const { workspace, setWorkspace, websiteAnalysis, loading } = useOnboarding()
   const router = useRouter()
 
   const [doc, setDoc] = useState<BusinessContextDoc | null>(null)
@@ -192,6 +289,38 @@ export function BusinessContext() {
   const [generateError, setGenerateError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
+
+  // ── relocated company-shape fields (moved off onb1) ─────────────────────────
+  // industry / business_type / tech_stack are WORKSPACE-level company fields.
+  // Seeded from the saved workspace first, then any website analysis. A user
+  // edit stops later analysis results from clobbering the choice.
+  const [industry, setIndustry] = useState<string>(INDUSTRIES[0])
+  const [businessType, setBusinessType] = useState<string>(BUSINESS_TYPES[0])
+  const [techStack, setTechStack] = useState<string[]>([])
+  const [industryTouched, setIndustryTouched] = useState(false)
+  const [businessTypeTouched, setBusinessTypeTouched] = useState(false)
+
+  useEffect(() => {
+    if (industryTouched) return
+    const next = workspace?.industry || websiteAnalysis?.industry
+    if (next && INDUSTRIES.includes(next as (typeof INDUSTRIES)[number])) setIndustry(next)
+    else if (next) setIndustry("Other")
+  }, [workspace?.industry, websiteAnalysis?.industry, industryTouched])
+
+  useEffect(() => {
+    if (businessTypeTouched) return
+    const next = workspace?.business_type || websiteAnalysis?.business_type
+    if (next && BUSINESS_TYPES.includes(next as (typeof BUSINESS_TYPES)[number]))
+      setBusinessType(next)
+  }, [workspace?.business_type, websiteAnalysis?.business_type, businessTypeTouched])
+
+  const techStackSeeded = useRef(false)
+  useEffect(() => {
+    if (techStackSeeded.current) return
+    if (!workspace) return
+    techStackSeeded.current = true
+    setTechStack(workspace.tech_stack ?? [])
+  }, [workspace])
 
   const load = useCallback(async () => {
     setBcLoading(true)
@@ -244,6 +373,15 @@ export function BusinessContext() {
     setSaving(true)
     setSaveError(null)
     try {
+      // Persist the relocated company-shape fields (industry / business type /
+      // tech stack) onto the workspace — these moved here off onb1 and still
+      // seed the workspace + metric candidates downstream.
+      const updated = await updateWorkspace(workspace.id, {
+        industry,
+        business_type: businessType,
+        tech_stack: techStack,
+      })
+      setWorkspace({ ...updated, product: updated.product ?? workspace.product })
       // Persist any inline edits when a doc exists (skippable when it doesn't).
       if (doc) {
         await businessContextApi.update(applyEdits(doc, values))
@@ -262,6 +400,14 @@ export function BusinessContext() {
     if (!workspace) return
     setSaving(true)
     try {
+      // Skip only skips the structured business-context doc edits; the relocated
+      // company-shape fields are still persisted so they're never lost.
+      const updated = await updateWorkspace(workspace.id, {
+        industry,
+        business_type: businessType,
+        tech_stack: techStack,
+      })
+      setWorkspace({ ...updated, product: updated.product ?? workspace.product })
       await advanceOnboardingStep(workspace.id, 4)
       router.push("/onboarding/strategy")
     } finally {
@@ -309,6 +455,27 @@ export function BusinessContext() {
         generateError={generateError}
         onChangeField={onChangeField}
         onGenerate={onGenerate}
+        companyShape={{
+          industry,
+          businessType,
+          techStack,
+          onChangeIndustry: (v) => {
+            setIndustryTouched(true)
+            setSaveError(null)
+            setIndustry(v)
+          },
+          onChangeBusinessType: (v) => {
+            setBusinessTypeTouched(true)
+            setSaveError(null)
+            setBusinessType(v)
+          },
+          onToggleTechStack: (t) => {
+            setSaveError(null)
+            setTechStack((prev) =>
+              prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t],
+            )
+          },
+        }}
       />
     </OnboardingChrome>
   )

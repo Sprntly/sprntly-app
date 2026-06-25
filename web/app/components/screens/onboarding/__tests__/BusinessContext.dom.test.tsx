@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const advanceStepMock = vi.fn()
+const updateWorkspaceMock = vi.fn()
 const bcGetMock = vi.fn()
 const bcUpdateMock = vi.fn()
 const bcRefreshMock = vi.fn()
@@ -28,6 +29,7 @@ vi.mock("../../../../context/OnboardingContext", () => ({
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   advanceOnboardingStep: (...a: unknown[]) => advanceStepMock(...a),
+  updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
 }))
 vi.mock("../../../../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../../../../lib/api")>(
@@ -46,7 +48,7 @@ vi.mock("../../../../lib/api", async () => {
 // real lib/api, which is mocked above (so businessContextApi is our spy).
 
 import { BusinessContext } from "../BusinessContext"
-import { makeOnboardingCtx } from "./fixtures"
+import { makeOnboardingCtx, makeWorkspace } from "./fixtures"
 import type { BcLeaf, BusinessContextDoc } from "../../../../lib/api"
 
 function leaf<T>(value: T): BcLeaf<T> {
@@ -137,6 +139,7 @@ describe("BusinessContext (onboarding step 03)", () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     bcGetMock.mockResolvedValue(makeDoc())
     bcUpdateMock.mockResolvedValue({ ok: true, version: 4 })
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace())
     advanceStepMock.mockResolvedValue(undefined)
 
     await act(async () => {
@@ -162,9 +165,69 @@ describe("BusinessContext (onboarding step 03)", () => {
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
   })
 
-  it("shows the empty 'not generated yet' state on a 404 (null doc) and stays skippable", async () => {
+  // ── relocated company-shape fields (moved off onb1) ─────────────────────────
+  it("renders the relocated industry / business-type / tech-stack controls", async () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx())
+    bcGetMock.mockResolvedValue(makeDoc())
+
+    await act(async () => {
+      render(React.createElement(BusinessContext))
+    })
+
+    expect(document.querySelector("[data-bc-company-shape]")).not.toBeNull()
+    expect(document.querySelector('[data-field="industry"] select')).not.toBeNull()
+    expect(document.querySelector('[data-field="businessType"] select')).not.toBeNull()
+    expect(document.querySelector(".onb-chip")).not.toBeNull()
+    expect(document.body.textContent).toContain("Tech stack")
+  })
+
+  it("persists the relocated company-shape fields on Continue (industry / business type / tech stack)", async () => {
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({
+          industry: "Fintech",
+          business_type: "Marketplace",
+          tech_stack: [],
+        }),
+      }),
+    )
+    bcGetMock.mockResolvedValue(makeDoc())
+    bcUpdateMock.mockResolvedValue({ ok: true, version: 4 })
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace())
+    advanceStepMock.mockResolvedValue(undefined)
+
+    await act(async () => {
+      render(React.createElement(BusinessContext))
+    })
+
+    // Toggle a tech-stack chip on.
+    const chip = document.querySelector(".onb-chip") as HTMLButtonElement
+    const chipLabel = chip.textContent ?? ""
+    fireEvent.click(chip)
+
+    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /continue/i.test(b.textContent ?? ""),
+    ) as HTMLButtonElement
+    await act(async () => {
+      continueBtn.click()
+    })
+
+    expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
+    const [id, patch] = updateWorkspaceMock.mock.calls[0] as [
+      string,
+      Record<string, unknown>,
+    ]
+    expect(id).toBe("ws-1")
+    expect(patch.industry).toBe("Fintech")
+    expect(patch.business_type).toBe("Marketplace")
+    expect(patch.tech_stack).toEqual([chipLabel])
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+  })
+
+  it("shows the empty 'not generated yet' state on a 404 (null doc), still renders company-shape, and stays skippable", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     bcGetMock.mockResolvedValue(null) // GET returned 404
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace())
     advanceStepMock.mockResolvedValue(undefined)
 
     await act(async () => {
@@ -172,7 +235,10 @@ describe("BusinessContext (onboarding step 03)", () => {
     })
 
     expect(document.querySelector('[data-bc-state="empty"]')).not.toBeNull()
-    // No doc → Continue must NOT call update, but must still advance.
+    // Company-shape fields still render even when the doc isn't drafted yet.
+    expect(document.querySelector("[data-bc-company-shape]")).not.toBeNull()
+    // No doc → Continue must NOT PUT the doc, but must still advance + persist
+    // the company-shape fields.
     const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
       /continue/i.test(b.textContent ?? ""),
     ) as HTMLButtonElement
@@ -180,12 +246,14 @@ describe("BusinessContext (onboarding step 03)", () => {
       continueBtn.click()
     })
     expect(bcUpdateMock).not.toHaveBeenCalled()
+    expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
   })
 
-  it("Skip for now advances without PUTting edits", async () => {
+  it("Skip for now advances without PUTting doc edits (still persists company-shape)", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     bcGetMock.mockResolvedValue(makeDoc())
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace())
     advanceStepMock.mockResolvedValue(undefined)
 
     await act(async () => {
@@ -199,6 +267,7 @@ describe("BusinessContext (onboarding step 03)", () => {
       skip.click()
     })
     expect(bcUpdateMock).not.toHaveBeenCalled()
+    expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
   })

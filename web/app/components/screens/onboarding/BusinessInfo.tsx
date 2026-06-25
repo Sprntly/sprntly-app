@@ -10,11 +10,7 @@ import {
   validateProductWebsite,
   normalizeProductWebsite,
 } from "../../../lib/onboarding/product-helpers"
-import {
-  TECH_STACK_OPTIONS,
-  INDUSTRIES,
-  BUSINESS_TYPES,
-} from "../../../lib/onboarding/types"
+import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
 import {
   createWorkspace,
   updateWorkspace,
@@ -23,22 +19,33 @@ import {
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import {
   buildSelectionPayload,
-  canSavePickedMetrics,
   kpiTreeApi,
-  MAX_METRIC_PICKS,
-  MIN_METRIC_PICKS,
   type SupportingMetric,
 } from "../../../lib/onboarding/kpiTreeApi"
 import {
-  MetricsSetupView,
   mergeCandidates,
   selectedAsMetrics,
   DEFAULT_METRICS_BY_BUSINESS_TYPE,
   FALLBACK_CANDIDATES_BY_INDUSTRY,
   type MetricCandidate,
 } from "./Metrics"
+import { Check, InfoCircle, Plus } from "../../auth/icons"
 
 const DRAFT_KEY = "business-info"
+
+/**
+ * onb1 picks EXACTLY this many success metrics. The design's onb1 card reads
+ * "pick up to 3" / "3 of 3", so the picker pre-selects 3, blocks a 4th (you
+ * deselect to swap), and Continue requires exactly 3. This is intentionally
+ * stricter than the shared 3–5 `MIN/MAX_METRIC_PICKS` used by the (now dormant,
+ * unrouted) standalone metrics page — onb1 owns its own exact-3 rule.
+ */
+const ONB1_METRIC_PICKS = 3
+
+/** onb1 is satisfiable iff EXACTLY ONB1_METRIC_PICKS metrics are named/picked. */
+function canSaveOnb1Metrics(picked: SupportingMetric[]): boolean {
+  return picked.filter((m) => m.name.trim().length > 0).length === ONB1_METRIC_PICKS
+}
 
 /**
  * Onboarding step 01 — "Tell us about your product" (design scene onb1).
@@ -72,20 +79,22 @@ export function BusinessInfo() {
   const [companyName, setCompanyName] = useState((draft?.companyName as string) ?? "")
   const [productName, setProductName] = useState((draft?.productName as string) ?? "")
   const [productWebsite, setProductWebsite] = useState((draft?.productWebsite as string) ?? "")
-  const [techStack, setTechStack] = useState<string[]>((draft?.techStack as string[]) ?? [])
 
   // ── metrics picker state (combined onto this screen) ───────────────────────
-  const [industry, setIndustry] = useState<string>((draft?.industry as string) ?? INDUSTRIES[0])
-  const [businessType, setBusinessType] = useState<string>(
-    (draft?.businessType as string) ?? BUSINESS_TYPES[0],
-  )
+  // industry / business_type are RESOLVED here (from the saved workspace, then
+  // any website analysis) purely to SEED the metric candidate pool. They are no
+  // longer editable on onb1 — the predicted-industry / business-type dropdowns
+  // (and the tech-stack chips) moved to the business-context step. We still seed
+  // from them so the metric candidates match the company's shape.
+  const resolvedIndustry =
+    workspace?.industry || websiteAnalysis?.industry || INDUSTRIES[0]
+  const resolvedBusinessType =
+    workspace?.business_type || websiteAnalysis?.business_type || BUSINESS_TYPES[0]
   const [candidates, setCandidates] = useState<MetricCandidate[]>(
     (draft?.candidates as MetricCandidate[]) ?? [],
   )
   const [selected, setSelected] = useState<string[]>((draft?.selected as string[]) ?? [])
   const [customMetric, setCustomMetric] = useState("")
-  const [industryTouched, setIndustryTouched] = useState(false)
-  const [businessTypeTouched, setBusinessTypeTouched] = useState(false)
   const candidatesSeeded = useRef(false)
   const [limitWarning, setLimitWarning] = useState<string | null>(null)
   const [limitNonce, setLimitNonce] = useState(0)
@@ -94,7 +103,7 @@ export function BusinessInfo() {
   const [error, setError] = useState<string | null>(null)
 
   function flashLimitWarning() {
-    setLimitWarning(`You can pick up to ${MAX_METRIC_PICKS} metrics — deselect one to swap.`)
+    setLimitWarning(`You can pick up to ${ONB1_METRIC_PICKS} metrics — deselect one to swap.`)
     setLimitNonce((n) => n + 1)
   }
   useEffect(() => {
@@ -110,7 +119,6 @@ export function BusinessInfo() {
     setCompanyName(workspace.display_name)
     setProductName(workspace.product?.name ?? workspace.display_name)
     setProductWebsite(workspace.product?.website ?? "")
-    setTechStack(workspace.tech_stack ?? [])
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Save draft on visibility change (tab switch / minimize) — not on every keystroke
@@ -121,32 +129,13 @@ export function BusinessInfo() {
           companyName,
           productName,
           productWebsite,
-          techStack,
-          industry,
-          businessType,
           candidates,
           selected,
         })
     }
     document.addEventListener("visibilitychange", onHide)
     return () => document.removeEventListener("visibilitychange", onHide)
-  }, [companyName, productName, productWebsite, techStack, industry, businessType, candidates, selected])
-
-  // Seed industry / business type from the saved company first, then from any
-  // available website analysis — never clobbering a hand-changed value.
-  useEffect(() => {
-    if (industryTouched) return
-    const next = workspace?.industry || websiteAnalysis?.industry
-    if (next && INDUSTRIES.includes(next as (typeof INDUSTRIES)[number])) setIndustry(next)
-    else if (next) setIndustry("Other")
-  }, [workspace?.industry, websiteAnalysis?.industry, industryTouched])
-
-  useEffect(() => {
-    if (businessTypeTouched) return
-    const next = workspace?.business_type || websiteAnalysis?.business_type
-    if (next && BUSINESS_TYPES.includes(next as (typeof BUSINESS_TYPES)[number]))
-      setBusinessType(next)
-  }, [workspace?.business_type, websiteAnalysis?.business_type, businessTypeTouched])
+  }, [companyName, productName, productWebsite, candidates, selected])
 
   // Hydrate the picker from a KPI tree already saved on the workspace.
   useEffect(() => {
@@ -159,19 +148,17 @@ export function BusinessInfo() {
         named.map((m) => ({ name: m.name, description: m.description ?? "" })),
       )
       setCandidates(pool)
-      setSelected(pool.slice(0, MIN_METRIC_PICKS).map((c) => c.name))
+      setSelected(pool.slice(0, ONB1_METRIC_PICKS).map((c) => c.name))
     }
   }, [workspace])
 
   const suggestedMetrics = websiteAnalysis?.suggested_metrics ?? []
 
   // Seed the candidate pool from analysis suggestions, else business-type /
-  // industry defaults. Runs at most once (candidatesSeeded guard).
+  // industry defaults (resolved from the workspace / analysis above). Runs at
+  // most once (candidatesSeeded guard).
   useEffect(() => {
     if (candidatesSeeded.current) return
-    const resolvedBusinessType =
-      workspace?.business_type || websiteAnalysis?.business_type || businessType
-    const resolvedIndustry = workspace?.industry || websiteAnalysis?.industry || industry
 
     const fromAnalysis: MetricCandidate[] = suggestedMetrics
       .filter((m) => m.metric)
@@ -188,16 +175,8 @@ export function BusinessInfo() {
     if (pool.length === 0) return
     candidatesSeeded.current = true
     setCandidates(pool)
-    setSelected(pool.slice(0, MIN_METRIC_PICKS).map((c) => c.name))
-  }, [
-    suggestedMetrics,
-    businessType,
-    industry,
-    workspace?.business_type,
-    workspace?.industry,
-    websiteAnalysis?.business_type,
-    websiteAnalysis?.industry,
-  ])
+    setSelected(pool.slice(0, ONB1_METRIC_PICKS).map((c) => c.name))
+  }, [suggestedMetrics, resolvedBusinessType, resolvedIndustry])
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(() => [
     {
@@ -212,15 +191,15 @@ export function BusinessInfo() {
     },
     {
       key: "metrics",
-      valid: canSavePickedMetrics(selectedAsMetrics(candidates, selected)),
-      message: `Pick at least ${MIN_METRIC_PICKS} metrics to continue.`,
+      valid: canSaveOnb1Metrics(selectedAsMetrics(candidates, selected)),
+      message: `Pick exactly ${ONB1_METRIC_PICKS} metrics to continue.`,
     },
   ])
 
   function toggle(name: string) {
     const key = name.toLowerCase()
     const isSelected = selected.some((s) => s.toLowerCase() === key)
-    if (!isSelected && selected.length >= MAX_METRIC_PICKS) {
+    if (!isSelected && selected.length >= ONB1_METRIC_PICKS) {
       flashLimitWarning()
       return
     }
@@ -228,7 +207,7 @@ export function BusinessInfo() {
       if (prev.some((s) => s.toLowerCase() === key)) {
         return prev.filter((s) => s.toLowerCase() !== key)
       }
-      if (prev.length >= MAX_METRIC_PICKS) return prev
+      if (prev.length >= ONB1_METRIC_PICKS) return prev
       clearError("metrics")
       return [...prev, name]
     })
@@ -242,13 +221,13 @@ export function BusinessInfo() {
       prev.some((c) => c.name.toLowerCase() === key) ? prev : [...prev, { name: m, description: "" }],
     )
     const alreadySelected = selected.some((s) => s.toLowerCase() === key)
-    if (!alreadySelected && selected.length >= MAX_METRIC_PICKS) {
+    if (!alreadySelected && selected.length >= ONB1_METRIC_PICKS) {
       flashLimitWarning()
       setCustomMetric("")
       return
     }
     setSelected((prev) =>
-      prev.some((s) => s.toLowerCase() === key) || prev.length >= MAX_METRIC_PICKS
+      prev.some((s) => s.toLowerCase() === key) || prev.length >= ONB1_METRIC_PICKS
         ? prev
         : [...prev, m],
     )
@@ -268,14 +247,16 @@ export function BusinessInfo() {
     const website = normalizeProductWebsite(productWebsite)
     setSaving(true)
     try {
-      const companyPayload = { companyName, productName, productWebsite: website, techStack }
+      // onb1 captures company + product + website + the metric picks only. The
+      // tech stack and predicted industry / business type are confirmed later in
+      // the business-context step, so we no longer write them here. (industry /
+      // business_type are still auto-drafted server-side from the website during
+      // the /analyzing interstitial that follows.)
+      const companyPayload = { companyName, productName, productWebsite: website }
       let ws = workspace
       if (workspace) {
         const updated = await updateWorkspace(workspace.id, {
           display_name: companyPayload.companyName.trim(),
-          tech_stack: companyPayload.techStack,
-          industry,
-          business_type: businessType,
           // The next numbered step is connectors (route 2). The interstitial is
           // unnumbered, so we never persist its route as a resume target.
           onboarding_step: andContinue ? 2 : workspace.onboarding_step,
@@ -289,17 +270,15 @@ export function BusinessInfo() {
       } else {
         const created = await createWorkspace({
           ...companyPayload,
-          industry,
-          businessType,
           userId: auth.user.id,
         })
         ws = created
         setWorkspace(created)
       }
-      // Persist the 3–5 picks to the KPI tree; the server infers which pick is
+      // Persist the metric picks to the KPI tree; the server infers which pick is
       // the North Star (PUT /v1/company/kpi-tree/from-selection).
       const picks: SupportingMetric[] = selectedAsMetrics(candidates, selected)
-      if (canSavePickedMetrics(picks)) {
+      if (canSaveOnb1Metrics(picks)) {
         await kpiTreeApi.putFromSelection(buildSelectionPayload(picks))
       }
       clearDraft(DRAFT_KEY)
@@ -319,7 +298,7 @@ export function BusinessInfo() {
 
   if (loading) return <div className="onb-shell">Loading…</div>
 
-  const ready = selected.length >= MIN_METRIC_PICKS
+  const ready = selected.length === ONB1_METRIC_PICKS
 
   return (
     <OnboardingChrome
@@ -330,12 +309,12 @@ export function BusinessInfo() {
           Tell us about your <em>product.</em>
         </>
       }
-      subtitle="A name and your success metrics anchor the whole workspace — pick the 3 to 5 that matter most. We'll read your website to draft your industry and context for the next steps. You can change everything later in Settings."
+      subtitle="A name and your success metrics anchor the whole workspace. You'll add the full description in Settings."
       footerMeta={
         ready
-          ? `${selected.length} metrics selected — ready to continue`
-          : `Pick ${Math.max(MIN_METRIC_PICKS - selected.length, 0)} more metric${
-              MIN_METRIC_PICKS - selected.length === 1 ? "" : "s"
+          ? `${selected.length} of ${ONB1_METRIC_PICKS} metrics selected — ready to continue`
+          : `Pick ${Math.max(ONB1_METRIC_PICKS - selected.length, 0)} more metric${
+              ONB1_METRIC_PICKS - selected.length === 1 ? "" : "s"
             } to continue`
       }
       onContinue={() => save(true)}
@@ -399,52 +378,100 @@ export function BusinessInfo() {
           </div>
         </div>
 
-        <div className="onb-section" style={{ marginTop: 22 }}>
+        {/* ── Your metrics (design scene onb1) ────────────────────────────────
+            The design renders a flat wrapping row of pill chips; selected chips
+            flip to the dark fill with a leading check. We keep the picker
+            FUNCTION (server infers the North Star) behind that chip visual.
+            Per the design's onb1, the PM picks EXACTLY 3 — the helper reads
+            "pick up to 3" and the footer counts "3 of 3". */}
+        <div className="onb-section" style={{ marginTop: 22 }} data-field="metrics">
           <div className="onb-section-h">
-            Tech stack <span className="opt">optional</span>
+            Your metrics{" "}
+            <span className="opt">— pick up to {ONB1_METRIC_PICKS} that matter most</span>
           </div>
-          <div className="onb-chip-row">
-            {TECH_STACK_OPTIONS.map((t) => (
-              <button
-                key={t}
-                type="button"
-                className={`onb-chip ${techStack.includes(t) ? "sel" : ""}`}
-                aria-pressed={techStack.includes(t)}
-                onClick={() =>
-                  setTechStack((prev) =>
-                    prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t],
-                  )
-                }
-              >
-                {t}
-              </button>
-            ))}
-          </div>
-        </div>
 
-        <div style={{ marginTop: 22 }}>
-          <MetricsSetupView
-            industry={industry}
-            businessType={businessType}
-            candidates={candidates}
-            selected={selected}
-            customMetric={customMetric}
-            errors={errors}
-            error={null}
-            limitWarning={limitWarning}
-            onChangeIndustry={(value) => {
-              setIndustryTouched(true)
-              setIndustry(value)
-            }}
-            onChangeBusinessType={(value) => {
-              setBusinessTypeTouched(true)
-              setBusinessType(value)
-            }}
-            onToggle={toggle}
-            onChangeCustomMetric={setCustomMetric}
-            onAddCustom={addCustom}
-          />
+          {errors.metrics && <p className="onb-field-error">{errors.metrics}</p>}
+
+          <div className="metric-chips" id="suggestedMetrics" data-max={ONB1_METRIC_PICKS}>
+            {candidates.length > 0 ? (
+              candidates.map((c) => {
+                const isSel = selected.some(
+                  (s) => s.toLowerCase() === c.name.toLowerCase(),
+                )
+                const atMaxUnselected = !isSel && selected.length >= ONB1_METRIC_PICKS
+                return (
+                  <button
+                    type="button"
+                    key={c.name}
+                    className={`metric ${isSel ? "sel" : ""}`}
+                    data-metric={c.name}
+                    aria-pressed={isSel}
+                    aria-selected={isSel}
+                    aria-disabled={atMaxUnselected}
+                    onClick={() => toggle(c.name)}
+                  >
+                    {isSel && (
+                      <span className="mt-ic" aria-hidden>
+                        <Check style={{ width: 11, height: 11 }} />
+                      </span>
+                    )}
+                    {c.name}
+                  </button>
+                )
+              })
+            ) : (
+              <p className="mt-targets-empty">
+                No candidate metrics yet — add your own below.
+              </p>
+            )}
+          </div>
+
+          <div className="metric-other-row" style={{ marginTop: 12 }}>
+            <input
+              className="inp"
+              id="customMetricInput"
+              value={customMetric}
+              onChange={(e) => setCustomMetric(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault()
+                  addCustom()
+                }
+              }}
+              placeholder="Add your own metric…"
+              maxLength={80}
+              aria-label="Custom metric name"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={addCustom}
+              disabled={!customMetric.trim()}
+            >
+              <Plus style={{ width: 13, height: 13 }} aria-hidden /> Add
+            </button>
+          </div>
+
+          {limitWarning && (
+            <p className="onb-field-error" role="alert" aria-live="polite">
+              {limitWarning}
+            </p>
+          )}
+
+          <div className="metric-note">
+            <span className="mt-ic" aria-hidden>
+              <InfoCircle style={{ width: 14, height: 14 }} />
+            </span>
+            <span>
+              These are how Sprntly{" "}
+              <strong>prioritizes which issues and ideas to surface</strong> —
+              every brief is ranked by impact on the metrics you pick.
+            </span>
+          </div>
         </div>
+        {/* The onb1 design card ENDS at the metric note. The tech-stack chips and
+            the predicted industry / business-type dropdowns that used to live
+            here moved to the business-context step (BusinessContext.tsx). */}
       </div>
     </OnboardingChrome>
   )
