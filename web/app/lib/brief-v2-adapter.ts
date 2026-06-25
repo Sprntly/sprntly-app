@@ -78,6 +78,10 @@ interface BriefV2CardBase {
   title: string
   body: string
   metricHighlight: string
+  // The weekly-brief skill's honest "From" source chips (`_card.sources`) — the
+  // provenance row the skill specifies (e.g. From · Sentry · Analytics). Empty
+  // for legacy briefs with no `_card`.
+  fromSources: string[]
   statTiles: BriefV2StatTile[]
   // Every insight ships 2–4 chart_hints (required by the synthesis schema), so
   // every card — hero and supporting alike — carries an inline chart.
@@ -357,6 +361,9 @@ function buildCardBase(
     title: insight.title,
     body: bodyFor(insight),
     metricHighlight: metricHighlightFor(insight, m.actionAccent),
+    fromSources: Array.isArray(insight._card?.sources)
+      ? insight._card!.sources.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+      : [],
     statTiles: statTilesFor(insight, m.actionAccent),
     chart: pickInsightChart(insight),
     convergence: convergenceRows(insight),

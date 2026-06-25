@@ -179,6 +179,7 @@ function baseFinding(detailKey: string, title: string, chart: BriefV2InlineChart
     title,
     body: `Body copy for ${title} that should disappear when the card is dismissed.`,
     metricHighlight: "41% completion",
+    fromSources: ["Amplitude", "Zendesk"],
     statTiles: [{ value: "41%", label: "completion", tone: "negative" as const }],
     chart,
     convergence: [],
@@ -197,6 +198,7 @@ const HERO: BriefV2HeroFinding = {
 const SUPPORTING: BriefV2CompactFinding = {
   kind: "compact",
   ...baseFinding("something_wrong-1", "Onboarding email open-rate slipping", null),
+  fromSources: [], // honest-provenance case: no sources → no "From" row
   extraConvergenceCount: 0,
 }
 
@@ -305,8 +307,8 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
 
     const card = cardFor(HERO.title)
     expect(card.className).not.toContain("fc--dismissed")
-    // Full card shows the mini chart, the body copy, and the action buttons.
-    expect(card.querySelector(".fc-mc")).not.toBeNull()
+    // Full card shows the source row, the body copy, and the action buttons.
+    expect(card.querySelector(".fc-from")).not.toBeNull()
     expect(within(card).queryByText(/Body copy for First-handoff/)).not.toBeNull()
     expect(within(card).queryByText("View prototype")).not.toBeNull()
 
@@ -317,7 +319,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     expect(dismissed.className).toContain("fc--dismissed")
     // The finding is still present (title visible) — but the detail/viz is gone.
     expect(within(dismissed).getByText(HERO.title)).not.toBeNull()
-    expect(dismissed.querySelector(".fc-mc")).toBeNull()
+    expect(dismissed.querySelector(".fc-from")).toBeNull()
     expect(within(dismissed).queryByText(/Body copy for First-handoff/)).toBeNull()
     expect(within(dismissed).queryByText("View prototype")).toBeNull()
     // The restore affordance is shown.
@@ -338,7 +340,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
 
     const restored = cardFor(HERO.title)
     expect(restored.className).not.toContain("fc--dismissed")
-    expect(restored.querySelector(".fc-mc")).not.toBeNull()
+    expect(restored.querySelector(".fc-from")).not.toBeNull()
     expect(within(restored).queryByText("View prototype")).not.toBeNull()
   })
 
@@ -379,48 +381,35 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
   })
 })
 
-describe("BriefChat finding card — real chart from the insight (Task B)", () => {
-  it("test_chart_renders_insight_values_not_placeholder: bars encode the fixture's label:value pairs", async () => {
+describe("BriefChat finding card — 'From' source chips (weekly-brief skill format)", () => {
+  it("renders the skill's source chips and NOT the legacy mini-chart / KPI stat columns", async () => {
     await act(async () => {
       renderBrief()
     })
 
     const card = cardFor(HERO.title)
-    const chart = card.querySelector(".fc-mc") as HTMLElement | null
-    expect(chart).not.toBeNull()
+    // The 'From' provenance row renders each source chip from `_card.sources`.
+    const fromRow = card.querySelector(".fc-from") as HTMLElement | null
+    expect(fromRow).not.toBeNull()
+    expect(within(fromRow!).getByText("From")).not.toBeNull()
+    const chips = Array.from(fromRow!.querySelectorAll(".fc-from-src")).map((c) => c.textContent)
+    expect(chips).toEqual(["Amplitude", "Zendesk"])
 
-    // One bar per data point, each titled with the REAL "label: value" pair.
-    const bars = Array.from(chart!.querySelectorAll(".fc-mc-bar"))
-    expect(bars.length).toBe(HERO_CHART.data.length)
-    const barTitles = bars.map((b) => b.getAttribute("title"))
-    expect(barTitles).toContain("Riverside General: 41")
-    expect(barTitles).toContain("Mercy Health: 58")
-    expect(barTitles).toContain("Coastal Care: 88")
-
-    // Axis ticks are derived from the real labels (first-letters of each word).
-    const ticks = Array.from(chart!.querySelectorAll(".fc-mc-tick")).map((t) => t.textContent)
-    expect(ticks).toContain("RG") // Riverside General
-    expect(ticks).toContain("MH") // Mercy Health
-    expect(ticks).toContain("CC") // Coastal Care
-
-    // The reference line carries the insight's own threshold label, not a stub.
-    expect(within(card).getByText("70% threshold")).not.toBeNull()
+    // The legacy mini bar chart + numeric KPI stat columns are gone — the skill
+    // puts numbers in the title/body, with a quiet source row beneath.
+    expect(card.querySelector(".fc-mc")).toBeNull()
+    expect(card.querySelector(".fc-stat")).toBeNull()
+    expect(card.querySelector(".fc-stats-row")).toBeNull()
   })
 
-  it("test_chart_fallback_from_stat_tiles_when_no_chart_hints: a finding with no chart still renders a data-driven bar", async () => {
+  it("renders no 'From' row when the finding has no sources (honest provenance)", async () => {
     await act(async () => {
       renderBrief()
     })
 
-    // SUPPORTING ships chart: null but carries a numeric stat tile (41%).
+    // SUPPORTING is built with fromSources: [] → no row, no empty 'From' label.
     const card = cardFor(SUPPORTING.title)
-    const chart = card.querySelector(".fc-mc") as HTMLElement | null
-    expect(chart).not.toBeNull()
-    const barTitles = Array.from(chart!.querySelectorAll(".fc-mc-bar")).map((b) =>
-      b.getAttribute("title"),
-    )
-    // The fallback bar is built from the stat tile's "completion: 41".
-    expect(barTitles.some((t) => t?.includes("41"))).toBe(true)
+    expect(card.querySelector(".fc-from")).toBeNull()
   })
 })
 

@@ -334,4 +334,21 @@ describe("briefToBriefV2State — weekly-brief skill taxonomy", () => {
     expect(hero.skillAccent).toBe("#1a8a52")
     expect(hero.ctas).toEqual([]) // no skill card → caller falls back to default CTAs
   })
+
+  it("carries the skill card's source chips onto fromSources (the 'From' row)", () => {
+    const state = briefToBriefV2State(
+      makeBrief([
+        makeInsight({
+          tag: "something_broken",
+          title: "A churn signal",
+          _card: { type: "retention", sources: ["Amplitude", "Zendesk", "  "] },
+        }),
+        makeInsight({ tag: "something_new", title: "Second finding" }),
+      ]),
+    )
+    // Honest provenance: real chips carried through, blanks dropped.
+    expect(state.hero!.fromSources).toEqual(["Amplitude", "Zendesk"])
+    // Legacy insight with no _card → no source chips (no fabricated convergence).
+    expect(state.supporting[0].fromSources).toEqual([])
+  })
 })
