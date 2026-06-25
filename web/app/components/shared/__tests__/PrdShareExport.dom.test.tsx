@@ -229,4 +229,13 @@ describe("PrdPanelContent bottom bar", () => {
     expect(footButtons.some((b) => /share/i.test(b.textContent ?? ""))).toBe(false)
     expect(container.querySelector(".share-menu")).toBeNull()
   })
+
+  it("does not render the prototype preview section (hidden for now)", () => {
+    content = { ...EMPTY_CONTENT, prd: FAKE_PRD }
+    const { container } = render(<PrdPanelContent />)
+    // SHOW_PROTOTYPE_SECTION is off — the prototype preview card (which showed a
+    // broken thumbnail) must not render in the PRD view.
+    expect(within(container).queryByText(/click to open the design/i)).toBeNull()
+    expect(container.querySelector(".prototype-preview-card")).toBeNull()
+  })
 })

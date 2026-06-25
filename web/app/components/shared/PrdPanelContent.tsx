@@ -88,6 +88,13 @@ function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; saveStatus:
   )
 }
 
+// Hidden for now: the prototype preview thumbnail is wrong — the design-agent
+// screenshot captures the staged bundle's raw index.html SOURCE (served as
+// text/plain) instead of the rendered page, so the card shows HTML markup. Flip
+// this back to true once the screenshot capture (design-agent screenshot.py) is
+// fixed. The component is kept intact so re-enabling is a one-line change.
+const SHOW_PROTOTYPE_SECTION = false
+
 function PrototypeSection({ prdId, figmaFileKey, externalGeneratingId }: { prdId: number; figmaFileKey?: string | null; externalGeneratingId?: number | null }) {
   const [existing, setExisting] = useState<PrototypeRecord | null>(null)
   const [loading, setLoading] = useState(true)
@@ -440,7 +447,7 @@ export function PrdPanelContent() {
 
       </div>
 
-      {prd && <PrototypeSection prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} externalGeneratingId={notifyGenId} />}
+      {prd && SHOW_PROTOTYPE_SECTION && <PrototypeSection prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} externalGeneratingId={notifyGenId} />}
 
       {prd && <ArtifactFooterActions current="prd" />}
 
