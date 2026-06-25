@@ -257,8 +257,9 @@ export function BusinessInfo() {
       if (workspace) {
         const updated = await updateWorkspace(workspace.id, {
           display_name: companyPayload.companyName.trim(),
-          // The next numbered step is connectors (route 2). The interstitial is
-          // unnumbered, so we never persist its route as a resume target.
+          // The next numbered step is workspace (route 2). The analyzing
+          // interstitial is unnumbered, so we never persist its route as a
+          // resume target.
           onboarding_step: andContinue ? 2 : workspace.onboarding_step,
         })
         const product = await upsertPrimaryProduct(workspace.id, {
@@ -284,7 +285,7 @@ export function BusinessInfo() {
       clearDraft(DRAFT_KEY)
       if (andContinue) {
         // Route to the blocking analyzing interstitial; it runs the website
-        // analysis and forwards to the connectors step.
+        // analysis and forwards to the workspace step.
         router.push("/onboarding/analyzing")
       } else {
         await refresh()

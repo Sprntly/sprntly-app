@@ -1,59 +1,45 @@
 // @vitest-environment jsdom
 //
-// Container mount test for the onboarding step 05 — "Create your workspace"
-// (design scene onbws). The final step: workspace name + invites, then it
-// COMPLETES onboarding, kicks the first brief, and enters the app at /brief.
+// Container mount test for the onboarding step 02 — "Create your workspace"
+// (design scene onbws). In the redesign this is a SLIM, EARLY, name-only step:
+// it captures the (optional) workspace name and continues to connectors. It NO
+// LONGER owns invites, the first-brief kickoff, or onboarding completion — those
+// moved to Settings → Team and the final Strategy step respectively.
 //
-// Covers: name persist + invites sent + completeOnboarding + redirect, invite
-// rows add/remove, and that a failed invite send does NOT block completion.
+// Covers: name seeded from the company, the auth-card minimal layout, Continue
+// persists a changed name + advances to connectors, Continue with an unchanged
+// name only advances the step, and that there is NO invite UI / no completion.
 //
 // Matchers: native DOM only.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
-const completeOnboardingMock = vi.fn()
-const sendInvitesMock = vi.fn()
+const advanceStepMock = vi.fn()
 const updateWorkspaceMock = vi.fn()
 
-vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
 }))
-vi.mock("../../../../context/ContentContext", () => ({
-  useContent: () => ({ setContent: vi.fn() }),
-}))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
-  completeOnboarding: (...a: unknown[]) => completeOnboardingMock(...a),
-  sendWorkspaceInvites: (...a: unknown[]) => sendInvitesMock(...a),
+  advanceOnboardingStep: (...a: unknown[]) => advanceStepMock(...a),
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
 }))
-vi.mock("../../../../lib/workspace-brief", () => ({
-  ensureDatasetForWorkspace: vi.fn().mockResolvedValue(undefined),
-  seedWorkspaceContextFiles: vi.fn().mockResolvedValue(undefined),
-  fetchBriefWhenReady: vi.fn().mockResolvedValue(null),
-  startBriefGeneration: vi.fn().mockResolvedValue(undefined),
-}))
-vi.mock("../../../../lib/brief-adapter", () => ({ briefToContentPatch: () => ({}) }))
 
 import { Workspace } from "../Workspace"
 import { makeOnboardingCtx, makeWorkspace } from "./fixtures"
 
-beforeEach(() => {
-  authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
-})
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
 })
 
-describe("Workspace (onboarding step 05)", () => {
+describe("Workspace (onboarding step 02 — name-only)", () => {
   it("renders the create-workspace heading + name seeded from the company", () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     render(React.createElement(Workspace))
@@ -64,84 +50,75 @@ describe("Workspace (onboarding step 05)", () => {
     expect(nameInput.value).toBe("Acme")
   })
 
-  it("Continue persists a changed name, sends invites, completes onboarding, enters /brief", async () => {
+  it("uses the design's minimal auth-card layout (no numbered onb-shell chrome)", () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx())
+    const { container } = render(React.createElement(Workspace))
+    expect(container.querySelector(".auth-card")).not.toBeNull()
+    // No progress dots on this early auth-card step.
+    expect(container.querySelector(".onb-dots")).toBeNull()
+  })
+
+  it("has NO invite UI and does NOT complete onboarding (those moved away)", () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx())
+    const { container } = render(React.createElement(Workspace))
+    expect(container.querySelector(".invite-row")).toBeNull()
+    const labels = Array.from(container.querySelectorAll("button")).map((b) =>
+      (b.textContent ?? "").trim(),
+    )
+    expect(labels.some((l) => /add another/i.test(l))).toBe(false)
+    expect(labels.some((l) => /create workspace & enter|finish/i.test(l))).toBe(false)
+  })
+
+  it("Continue persists a changed name + advances to connectors", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ display_name: "Acme HQ" }))
-    sendInvitesMock.mockResolvedValue(undefined)
-    completeOnboardingMock.mockResolvedValue(undefined)
 
     render(React.createElement(Workspace))
-
     const nameInput = document.querySelector(
       '[data-field="workspaceName"] input',
     ) as HTMLInputElement
     fireEvent.change(nameInput, { target: { value: "Acme HQ" } })
 
-    const emailInput = document.querySelector(
-      '[data-field="invite-0"] input',
-    ) as HTMLInputElement
-    fireEvent.change(emailInput, { target: { value: "pm@acme.com" } })
-
-    const finishBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /create workspace & enter/i.test(b.textContent ?? ""),
+    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /continue/i.test(b.textContent ?? ""),
     ) as HTMLButtonElement
     await act(async () => {
-      finishBtn.click()
+      continueBtn.click()
     })
 
-    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", { display_name: "Acme HQ" })
-    expect(sendInvitesMock).toHaveBeenCalledTimes(1)
-    const invites = sendInvitesMock.mock.calls[0][1] as { email: string }[]
-    expect(invites[0].email).toBe("pm@acme.com")
-    expect(completeOnboardingMock).toHaveBeenCalledWith("ws-1", "u-1")
-    expect(routerMock.replace).toHaveBeenCalledWith("/brief")
+    // Name + resume marker persisted in the same write; advance never doubled.
+    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
+      display_name: "Acme HQ",
+      onboarding_step: 3,
+    })
+    expect(advanceStepMock).not.toHaveBeenCalled()
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
-  it("completes even when invite sending fails (best-effort, never blocks)", async () => {
+  it("Continue with an unchanged name only advances the step (no name write)", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
-    sendInvitesMock.mockRejectedValue(new Error("invite service down"))
-    completeOnboardingMock.mockResolvedValue(undefined)
+    advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
 
     render(React.createElement(Workspace))
-    const emailInput = document.querySelector(
-      '[data-field="invite-0"] input',
-    ) as HTMLInputElement
-    fireEvent.change(emailInput, { target: { value: "pm@acme.com" } })
-
-    const finishBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /create workspace & enter/i.test(b.textContent ?? ""),
+    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /continue/i.test(b.textContent ?? ""),
     ) as HTMLButtonElement
     await act(async () => {
-      finishBtn.click()
+      continueBtn.click()
     })
 
-    expect(completeOnboardingMock).toHaveBeenCalledWith("ws-1", "u-1")
-    expect(routerMock.replace).toHaveBeenCalledWith("/brief")
+    expect(updateWorkspaceMock).not.toHaveBeenCalled()
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
-  it("does NOT send invites when no valid email is entered", async () => {
-    onboardingMock.mockReturnValue(makeOnboardingCtx())
-    completeOnboardingMock.mockResolvedValue(undefined)
-
-    render(React.createElement(Workspace))
-    const finishBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /create workspace & enter/i.test(b.textContent ?? ""),
-    ) as HTMLButtonElement
-    await act(async () => {
-      finishBtn.click()
-    })
-    expect(sendInvitesMock).not.toHaveBeenCalled()
-    expect(completeOnboardingMock).toHaveBeenCalledTimes(1)
-  })
-
-  it("can add another invite row", () => {
+  it("Back routes to the business-info page", () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     render(React.createElement(Workspace))
-    expect(document.querySelectorAll(".invite-row").length).toBe(1)
-    const addBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /add another/i.test(b.textContent ?? ""),
-    ) as HTMLButtonElement
-    fireEvent.click(addBtn)
-    expect(document.querySelectorAll(".invite-row").length).toBe(2)
+    const back = Array.from(document.querySelectorAll("a")).find((a) =>
+      /^back$/i.test((a.textContent ?? "").trim()),
+    ) as HTMLAnchorElement
+    fireEvent.click(back)
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/business-info")
   })
 })

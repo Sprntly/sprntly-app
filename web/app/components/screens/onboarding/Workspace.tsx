@@ -2,56 +2,33 @@
 
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { useAuth } from "../../../lib/auth"
-import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
+import { AuthShell } from "../../auth/AuthShell"
+import { ArrowRight } from "../../auth/icons"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import {
-  completeOnboarding,
-  sendWorkspaceInvites,
-  updateWorkspace,
-} from "../../../lib/onboarding/store"
-import { useContent } from "../../../context/ContentContext"
-import { briefToContentPatch } from "../../../lib/brief-adapter"
-import {
-  ensureDatasetForWorkspace,
-  fetchBriefWhenReady,
-  seedWorkspaceContextFiles,
-  startBriefGeneration,
-} from "../../../lib/workspace-brief"
-import { Plus } from "../../auth/icons"
-
-const ROLE_OPTIONS = ["Member", "Admin"] as const
-
-type InviteRow = { email: string; role: (typeof ROLE_OPTIONS)[number] }
-
-function isValidEmail(v: string): boolean {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.trim())
-}
+import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
 
 /**
- * Onboarding step 05 — "Create your workspace" (design scene onbws).
+ * Onboarding step 02 — "Create your workspace" (design scene onbws).
  *
- * The final numbered step: confirm the workspace name and (optionally) invite
- * colleagues, then COMPLETE onboarding and enter the app. On finish we:
- *   1. persist the workspace name (display_name),
- *   2. send any valid invites (sendWorkspaceInvites — best-effort),
- *   3. kick the first weekly brief generation (fire-and-forget; it lands on the
- *      Brief page when ready), and
- *   4. completeOnboarding → set the active company → router.replace("/brief").
+ * A SLIM, EARLY, name-only step. It uses the design's minimal auth-card layout
+ * (not the numbered onb-shell chrome): a header, a sub, a single optional
+ * "Workspace name" field + hint, and a single "Continue →".
  *
- * Invites and brief-generation are best-effort: a failure there must NOT trap
- * the user on this last step, so they're caught and the user still enters the
- * app. completeOnboarding is the only hard requirement.
+ * It does exactly two things:
+ *   1. persist the (optional) workspace name (display_name) when it changed, and
+ *   2. advance to the connectors step (index 3) and route there.
+ *
+ * The team-invite UI, the first-brief kickoff, and onboarding completion that
+ * used to live here have MOVED:
+ *   - invites → Settings → Team (TeamSettings), and
+ *   - completion + first brief → the final Strategy step (onbstrat).
  */
 export function Workspace() {
-  const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
-  const { setContent } = useContent()
   const router = useRouter()
 
   const [name, setName] = useState("")
-  const [invites, setInvites] = useState<InviteRow[]>([{ email: "", role: "Member" }])
-  const [finishing, setFinishing] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -64,151 +41,89 @@ export function Workspace() {
     if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
 
-  function setInvite(i: number, patch: Partial<InviteRow>) {
-    setInvites((prev) => prev.map((row, idx) => (idx === i ? { ...row, ...patch } : row)))
-  }
-  function addInviteRow() {
-    setInvites((prev) => [...prev, { email: "", role: "Member" }])
-  }
-  function removeInviteRow(i: number) {
-    setInvites((prev) => (prev.length === 1 ? prev : prev.filter((_, idx) => idx !== i)))
-  }
-
-  async function finish() {
-    if (!workspace || auth.kind !== "authed") return
+  async function continueToConnectors() {
+    if (!workspace) return
     setError(null)
-    setFinishing(true)
+    setSaving(true)
     try {
-      // 1) Persist the (optional) workspace name when it changed.
+      // Persist the (optional) workspace name when it changed, advancing the
+      // resume marker to connectors (index 3 in ONBOARDING_STEP_SLUGS) in the
+      // same write. When it's unchanged we only advance the step.
       const trimmed = name.trim()
-      let ws = workspace
       if (trimmed && trimmed !== workspace.display_name) {
-        ws = await updateWorkspace(workspace.id, { display_name: trimmed })
+        const ws = await updateWorkspace(workspace.id, {
+          display_name: trimmed,
+          onboarding_step: 3,
+        })
+        setWorkspace(ws)
+      } else {
+        const ws = await advanceOnboardingStep(workspace.id, 3)
         setWorkspace(ws)
       }
-
-      // 2) Send valid invites (best-effort — never blocks finishing).
-      const valid = invites
-        .map((r) => ({ email: r.email.trim(), role: r.role }))
-        .filter((r) => isValidEmail(r.email))
-      if (valid.length) {
-        try {
-          await sendWorkspaceInvites(workspace.id, valid, auth.user.id)
-        } catch {
-          /* best-effort — invites can be re-sent from Team settings */
-        }
-      }
-
-      // 3) Kick the first brief (fire-and-forget). It lands on the Brief page.
-      void (async () => {
-        try {
-          await ensureDatasetForWorkspace(ws)
-          await seedWorkspaceContextFiles(ws)
-          const existing = await fetchBriefWhenReady(ws.slug)
-          if (existing) setContent(briefToContentPatch(existing))
-          else await startBriefGeneration(ws.slug)
-        } catch {
-          /* generation runs server-side; the Brief page reflects status */
-        }
-      })()
-
-      // 4) Complete onboarding and enter the app.
-      await completeOnboarding(workspace.id, auth.user.id)
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("sprntly_active_company", workspace.slug)
-      }
-      router.replace("/brief")
+      router.push("/onboarding/connectors")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't create your workspace.")
-      setFinishing(false)
+      setError(e instanceof Error ? e.message : "Couldn't save your workspace.")
+      setSaving(false)
     }
   }
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
-    <OnboardingChrome
-      step={5}
-      saveLabel="Saved · auto-saves"
-      title={
-        <>
-          Create your <em>workspace.</em>
-        </>
-      }
-      subtitle="Your workspace is the shared home where you invite colleagues, run briefs, and collaborate. Invite your team now or later from Settings."
-      footerMeta="Step 5 of 5 · workspace — your first Brief starts generating when you finish"
-      onBack={() => router.push("/onboarding/strategy")}
-      onContinue={() => void finish()}
-      continueLabel="Create workspace & enter"
-      continueDisabled={finishing}
-      loading={finishing}
-    >
+    <AuthShell tag="Create workspace" cardClassName="auth-card-wide" showMeta={false}>
+      <div className="auth-h">
+        Create your <em>workspace.</em>
+      </div>
+      <div className="auth-sub">
+        Your workspace is the shared home where you invite colleagues, run
+        briefs, and collaborate.
+      </div>
+
       {error && <div className="onb-form-error">{error}</div>}
 
-      <div className="form-grid">
-        <div className="field full" data-field="workspaceName">
-          <div className="field-l">
-            Workspace name <span className="opt">optional</span>
-          </div>
-          <input
-            className="inp"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            maxLength={100}
-            placeholder="Usually your company or team name"
-            aria-label="Workspace name"
-          />
-          <p className="onb-field-hint">You can change this later in Settings.</p>
+      <div className="field" data-field="workspaceName">
+        <div className="field-l">
+          Workspace name <span className="opt">optional</span>
+        </div>
+        <input
+          className="inp"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          maxLength={100}
+          placeholder="Usually your company or team name"
+          aria-label="Workspace name"
+        />
+        <div className="field-hint">
+          Usually your company or team name. You can change this later.
         </div>
       </div>
 
-      <div className="onb-section" style={{ marginTop: 22 }}>
-        <div className="onb-section-h">
-          Invite your team <span className="opt">— optional</span>
-        </div>
-        {invites.map((row, i) => (
-          <div className="invite-row" key={i} data-field={`invite-${i}`}>
-            <input
-              className="inp"
-              type="email"
-              value={row.email}
-              onChange={(e) => setInvite(i, { email: e.target.value })}
-              placeholder="colleague@company.com"
-              aria-label={`Invite email ${i + 1}`}
-            />
-            <select
-              className="inp"
-              value={row.role}
-              onChange={(e) =>
-                setInvite(i, { role: e.target.value as InviteRow["role"] })
-              }
-              aria-label={`Invite role ${i + 1}`}
-            >
-              {ROLE_OPTIONS.map((r) => (
-                <option key={r}>{r}</option>
-              ))}
-            </select>
-            {invites.length > 1 && (
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => removeInviteRow(i)}
-                aria-label={`Remove invite ${i + 1}`}
-              >
-                Remove
-              </button>
-            )}
-          </div>
-        ))}
-        <button
-          type="button"
-          className="btn btn-secondary"
-          onClick={addInviteRow}
-          style={{ marginTop: 10 }}
+      <button
+        type="button"
+        className="btn btn-brand btn-block"
+        style={{ marginTop: 10 }}
+        onClick={() => void continueToConnectors()}
+        disabled={saving}
+      >
+        {saving ? "Saving…" : "Continue"}
+        {!saving && <ArrowRight style={{ width: 14, height: 14 }} aria-hidden />}
+      </button>
+
+      <div className="auth-foot">
+        <a
+          role="button"
+          tabIndex={0}
+          onClick={() => router.push("/onboarding/business-info")}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault()
+              router.push("/onboarding/business-info")
+            }
+          }}
         >
-          <Plus style={{ width: 13, height: 13 }} aria-hidden /> Add another
-        </button>
+          Back
+        </a>
       </div>
-    </OnboardingChrome>
+    </AuthShell>
   )
 }

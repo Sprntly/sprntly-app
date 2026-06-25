@@ -20,10 +20,11 @@ import {
  *
  *   1. business-info     → BusinessInfo    (onb1: product + pick-3 metrics)
  *      [analyzing]       → Analyzing       (its own /onboarding/analyzing route, NOT here)
- *   2. connectors        → Connectors      (onb4: connect your tools)
- *   3. business-context  → BusinessContext (onbctx: auto-drafted, editable)
- *   4. strategy          → Strategy        (onbstrat: priorities + roadmap doc)
- *   5. workspace         → Workspace       (onbws: name + invite; completes onboarding)
+ *   2. workspace         → Workspace       (onbws: slim, name-only — continues)
+ *   3. connectors        → Connectors      (onb4: connect your tools)
+ *   4. business-context  → BusinessContext (onbctx: auto-drafted, editable)
+ *   5. strategy          → Strategy        (onbstrat: priorities + roadmap doc;
+ *                                           the FINAL step — completes onboarding)
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
  * `onboarding_step` is the 1-based index into both). The analyzing interstitial
@@ -34,10 +35,10 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   Component: React.ComponentType
 }> = [
   { slug: "business-info", Component: BusinessInfo },
+  { slug: "workspace", Component: Workspace },
   { slug: "connectors", Component: Connectors },
   { slug: "business-context", Component: BusinessContext },
   { slug: "strategy", Component: Strategy },
-  { slug: "workspace", Component: Workspace },
 ]
 
 // Dev-time guard: the route map and the slug source of truth must agree in

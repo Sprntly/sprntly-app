@@ -10,7 +10,7 @@
 //   - live connections render a non-togglable "Live" card (and keep an
 //     otherwise-unsupported provider/category visible)
 //   - connectable cards open the connect modal with the right provider
-//   - Continue advances to step 3 and routes to /onboarding/business-context
+//   - Continue advances to step 4 and routes to /onboarding/business-context
 //   - "Connect later" marks skipped fields first, then advances
 //   - NO required-Analytics gate: Continue is enabled with zero selections
 //   - the no-workspace redirect happens in an EFFECT, never during render
@@ -69,7 +69,7 @@ function mountLoaded(connections: unknown[] = []) {
     makeOnboardingCtx({ workspace: makeWorkspace({ onboarding_step: 3 }) }),
   )
   listMock.mockResolvedValue({ connections })
-  advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
+  advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 4 }))
   markSkippedMock.mockResolvedValue(undefined)
   return render(React.createElement(Connectors))
 }
@@ -212,11 +212,11 @@ describe("Connectors (container) — design-v4 accordion", () => {
     expect(screen.queryByText("Heap")).toBeNull()
   })
 
-  it("Continue advances to step 3 and routes to business-context (no skip marking)", async () => {
+  it("Continue advances to step 4 and routes to business-context (no skip marking)", async () => {
     mountLoaded()
     fireEvent.click(screen.getByText("Continue").closest("button") as HTMLElement)
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/business-context")
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
@@ -227,7 +227,7 @@ describe("Connectors (container) — design-v4 accordion", () => {
     fireEvent.click(screen.getByText("Connect later"))
     await waitFor(() => {
       expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/business-context")
     })
   })
@@ -238,10 +238,10 @@ describe("Connectors (container) — design-v4 accordion", () => {
     expect(btn.disabled).toBe(false)
   })
 
-  it("Back routes to the business-info page", () => {
+  it("Back routes to the workspace page", () => {
     mountLoaded()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/business-info")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

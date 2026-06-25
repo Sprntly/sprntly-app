@@ -52,16 +52,17 @@ describe("clampStep — out-of-range persisted indices", () => {
 describe("slugForStep — resume index → slug (clamped)", () => {
   it("maps each in-range index to its ordered slug", () => {
     expect(slugForStep(1)).toBe("business-info")
-    expect(slugForStep(2)).toBe("connectors")
-    expect(slugForStep(3)).toBe("business-context")
-    expect(slugForStep(4)).toBe("strategy")
-    expect(slugForStep(5)).toBe("workspace")
+    expect(slugForStep(2)).toBe("workspace")
+    expect(slugForStep(3)).toBe("connectors")
+    expect(slugForStep(4)).toBe("business-context")
+    expect(slugForStep(5)).toBe("strategy")
   })
 
   it("maps a stale out-of-range index to the LAST step (no crash)", () => {
-    // Indices past the end (older/longer flows) clamp to the last step.
-    expect(slugForStep(6)).toBe("workspace")
-    expect(slugForStep(7)).toBe("workspace")
+    // Indices past the end (older/longer flows) clamp to the last step
+    // (strategy is now the closing step).
+    expect(slugForStep(6)).toBe("strategy")
+    expect(slugForStep(7)).toBe("strategy")
     expect(slugForStep(0)).toBe("business-info")
   })
 })
