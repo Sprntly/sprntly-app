@@ -336,6 +336,37 @@ function pickHeroQuote(insight: Insight): BriefV2Quote | null {
   return null
 }
 
+// Friendly labels for the "From" source chips — the raw signal `source_type`
+// tokens (e.g. pm_manual, customer_voice) read internal; the skill shows clean
+// names. Unknown types fall back to a de-underscored, sentence-cased label.
+const SOURCE_LABELS: Record<string, string> = {
+  revenue: "Revenue",
+  analytics: "Analytics",
+  customer_voice: "Customer voice",
+  pm_manual: "PM notes",
+  project_mgmt: "Project mgmt",
+  communication: "Communication",
+  corpus_doc: "Documents",
+  competitive: "Competitive",
+  market: "Market",
+  support: "Support",
+  sales: "Sales",
+  design: "Design",
+}
+
+export function humanizeSource(src: string): string {
+  const trimmed = src.trim()
+  if (SOURCE_LABELS[trimmed.toLowerCase()]) return SOURCE_LABELS[trimmed.toLowerCase()]
+  // Only de-underscore + sentence-case RAW lowercase snake_case tokens
+  // ("foo_bar" → "Foo bar"); leave already-friendly names (e.g. "HubSpot")
+  // untouched — test the original casing so mixed-case names pass through.
+  if (/^[a-z][a-z0-9_]*$/.test(trimmed)) {
+    const words = trimmed.replace(/_/g, " ")
+    return words.charAt(0).toUpperCase() + words.slice(1)
+  }
+  return trimmed
+}
+
 function buildCardBase(
   insight: Insight,
   rank: number,
@@ -362,7 +393,9 @@ function buildCardBase(
     body: bodyFor(insight),
     metricHighlight: metricHighlightFor(insight, m.actionAccent),
     fromSources: Array.isArray(insight._card?.sources)
-      ? insight._card!.sources.filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+      ? insight._card!.sources
+          .filter((s): s is string => typeof s === "string" && s.trim().length > 0)
+          .map(humanizeSource)
       : [],
     statTiles: statTilesFor(insight, m.actionAccent),
     chart: pickInsightChart(insight),
