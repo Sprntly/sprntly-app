@@ -30,13 +30,13 @@ import {
   type SupportingMetric,
 } from "../../../lib/onboarding/kpiTreeApi"
 import {
-  MetricsSetupView,
   mergeCandidates,
   selectedAsMetrics,
   DEFAULT_METRICS_BY_BUSINESS_TYPE,
   FALLBACK_CANDIDATES_BY_INDUSTRY,
   type MetricCandidate,
 } from "./Metrics"
+import { Check, InfoCircle, Plus } from "../../auth/icons"
 
 const DRAFT_KEY = "business-info"
 
@@ -330,7 +330,7 @@ export function BusinessInfo() {
           Tell us about your <em>product.</em>
         </>
       }
-      subtitle="A name and your success metrics anchor the whole workspace — pick the 3 to 5 that matter most. We'll read your website to draft your industry and context for the next steps. You can change everything later in Settings."
+      subtitle="A name and your success metrics anchor the whole workspace. You'll add the full description in Settings."
       footerMeta={
         ready
           ? `${selected.length} metrics selected — ready to continue`
@@ -399,6 +399,107 @@ export function BusinessInfo() {
           </div>
         </div>
 
+        {/* ── Your metrics (design scene onb1) ────────────────────────────────
+            The design renders a flat wrapping row of pill chips; selected chips
+            flip to the dark fill with a leading check. We keep our 3–5 picker
+            FUNCTION (server infers the North Star) behind that chip visual.
+            DIVERGENCE: the design's helper reads "pick up to 3"; our product
+            decision is 3–5, so the helper + count copy reflect 3–5. */}
+        <div className="onb-section" style={{ marginTop: 22 }} data-field="metrics">
+          <div className="onb-section-h">
+            Your metrics{" "}
+            <span className="opt">
+              — pick {MIN_METRIC_PICKS} to {MAX_METRIC_PICKS} that matter most
+            </span>
+          </div>
+
+          {errors.metrics && <p className="onb-field-error">{errors.metrics}</p>}
+
+          <div className="metric-chips" id="suggestedMetrics" data-max={MAX_METRIC_PICKS}>
+            {candidates.length > 0 ? (
+              candidates.map((c) => {
+                const isSel = selected.some(
+                  (s) => s.toLowerCase() === c.name.toLowerCase(),
+                )
+                const atMaxUnselected = !isSel && selected.length >= MAX_METRIC_PICKS
+                return (
+                  <button
+                    type="button"
+                    key={c.name}
+                    className={`metric ${isSel ? "sel" : ""}`}
+                    data-metric={c.name}
+                    aria-pressed={isSel}
+                    aria-selected={isSel}
+                    aria-disabled={atMaxUnselected}
+                    onClick={() => toggle(c.name)}
+                  >
+                    {isSel && (
+                      <span className="mt-ic" aria-hidden>
+                        <Check style={{ width: 11, height: 11 }} />
+                      </span>
+                    )}
+                    {c.name}
+                  </button>
+                )
+              })
+            ) : (
+              <p className="mt-targets-empty">
+                No candidate metrics yet — add your own below.
+              </p>
+            )}
+          </div>
+
+          <div className="metric-other-row" style={{ marginTop: 12 }}>
+            <input
+              className="inp"
+              id="customMetricInput"
+              value={customMetric}
+              onChange={(e) => setCustomMetric(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault()
+                  addCustom()
+                }
+              }}
+              placeholder="Add your own metric…"
+              maxLength={80}
+              aria-label="Custom metric name"
+            />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={addCustom}
+              disabled={!customMetric.trim()}
+            >
+              <Plus style={{ width: 13, height: 13 }} aria-hidden /> Add
+            </button>
+          </div>
+
+          {limitWarning && (
+            <p className="onb-field-error" role="alert" aria-live="polite">
+              {limitWarning}
+            </p>
+          )}
+
+          <div className="metric-note">
+            <span className="mt-ic" aria-hidden>
+              <InfoCircle style={{ width: 14, height: 14 }} />
+            </span>
+            <span>
+              These are how Sprntly{" "}
+              <strong>prioritizes which issues and ideas to surface</strong> —
+              every brief is ranked by impact on the metrics you pick.
+            </span>
+          </div>
+        </div>
+
+        {/* ── Kept-from-current-function context (NOT in the onb1 design) ──────
+            DIVERGENCE: the onb1 card ends at the metric note. We retain the
+            tech-stack chips and the predicted industry / business-type
+            dropdowns because they are persisted to the workspace and seed the
+            metric candidates — dropping them would change behaviour. They are
+            rendered below the design card body and flagged for product to
+            decide. */}
         <div className="onb-section" style={{ marginTop: 22 }}>
           <div className="onb-section-h">
             Tech stack <span className="opt">optional</span>
@@ -422,28 +523,45 @@ export function BusinessInfo() {
           </div>
         </div>
 
-        <div style={{ marginTop: 22 }}>
-          <MetricsSetupView
-            industry={industry}
-            businessType={businessType}
-            candidates={candidates}
-            selected={selected}
-            customMetric={customMetric}
-            errors={errors}
-            error={null}
-            limitWarning={limitWarning}
-            onChangeIndustry={(value) => {
-              setIndustryTouched(true)
-              setIndustry(value)
-            }}
-            onChangeBusinessType={(value) => {
-              setBusinessTypeTouched(true)
-              setBusinessType(value)
-            }}
-            onToggle={toggle}
-            onChangeCustomMetric={setCustomMetric}
-            onAddCustom={addCustom}
-          />
+        <div className="onb-section">
+          <div className="onb-section-h">
+            Your business{" "}
+            <span className="opt">— predicted from your website, edit if it&apos;s off</span>
+          </div>
+          <div className="form-grid">
+            <div className="field" data-field="industry">
+              <div className="field-l">Industry</div>
+              <select
+                className="inp"
+                value={industry}
+                onChange={(e) => {
+                  setIndustryTouched(true)
+                  setIndustry(e.target.value)
+                }}
+                aria-label="Industry"
+              >
+                {INDUSTRIES.map((i) => (
+                  <option key={i}>{i}</option>
+                ))}
+              </select>
+            </div>
+            <div className="field" data-field="businessType">
+              <div className="field-l">Business type</div>
+              <select
+                className="inp"
+                value={businessType}
+                onChange={(e) => {
+                  setBusinessTypeTouched(true)
+                  setBusinessType(e.target.value)
+                }}
+                aria-label="Business type"
+              >
+                {BUSINESS_TYPES.map((b) => (
+                  <option key={b}>{b}</option>
+                ))}
+              </select>
+            </div>
+          </div>
         </div>
       </div>
     </OnboardingChrome>
