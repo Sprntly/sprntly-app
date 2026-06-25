@@ -2,20 +2,32 @@
 
 import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep, updateWorkspace } from "../../../lib/onboarding/store"
+import { useContent } from "../../../context/ContentContext"
+import { completeOnboarding, updateWorkspace } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
+import { briefToContentPatch } from "../../../lib/brief-adapter"
+import {
+  ensureDatasetForWorkspace,
+  fetchBriefWhenReady,
+  seedWorkspaceContextFiles,
+  startBriefGeneration,
+} from "../../../lib/workspace-brief"
 import { roadmapDocApi } from "../../../lib/api"
 import { FileText, Check } from "../../auth/icons"
 
 const DRAFT_KEY = "strategy"
 
 /**
- * Onboarding step 04 — "Strategy, leadership & your roadmap" (scene onbstrat).
+ * Onboarding step 05 — "Strategy, leadership & your roadmap" (scene onbstrat).
  *
- * Captures what shapes the company's priorities so the agents weigh work
- * correctly:
+ * The FINAL step: it COMPLETES onboarding and enters the app. (The workspace
+ * step moved EARLY in the redesign; completion + first-brief kickoff relocated
+ * here from it.)
+ *
+ * Content (unchanged for now — the 4 upload cards are a separate follow-up PR):
  *   - a free-text "current priorities" field (persisted to companies.okrs, the
  *     existing strategic-context slot), and
  *   - a ROADMAP-DOC upload that posts to `POST /v1/company/roadmap-doc`, which
@@ -23,12 +35,22 @@ const DRAFT_KEY = "strategy"
  *     roadmap feeds the weekly brief as a high-weight priorities signal and
  *     renders read-only as the `roadmapdoc` artifact view.
  *
- * On a successful upload the step shows the design's "uploaded" confirmation
- * state. A failure (e.g. a transient network error) is caught and shown as a
- * non-blocking notice — the upload is optional and the whole step is skippable.
+ * On "Finish setup" we:
+ *   1. persist the (optional) priorities,
+ *   2. kick the first weekly brief generation (fire-and-forget; it lands on the
+ *      Brief page when ready),
+ *   3. completeOnboarding → set the active company → router.replace("/brief").
+ * Brief-generation is best-effort: a failure there must NOT trap the user on the
+ * last step. completeOnboarding is the only hard requirement.
+ *
+ * The roadmap-doc upload shows the design's "uploaded" confirmation state on
+ * success; a failure is caught as a non-blocking notice — the upload is optional
+ * and the whole step is skippable.
  */
 export function Strategy() {
+  const auth = useAuth()
   const { workspace, loading } = useOnboarding()
+  const { setContent } = useContent()
   const router = useRouter()
   const draft = loadDraft(DRAFT_KEY)
   const [priorities, setPriorities] = useState<string>((draft?.priorities as string) ?? "")
@@ -36,7 +58,7 @@ export function Strategy() {
   const [uploading, setUploading] = useState(false)
   const [uploaded, setUploaded] = useState(false)
   const [uploadNotice, setUploadNotice] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
+  const [finishing, setFinishing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
 
@@ -81,24 +103,42 @@ export function Strategy() {
     }
   }
 
-  async function go(skipped: boolean) {
-    if (!workspace) return
+  // The closing step: persist priorities, kick the first brief, COMPLETE
+  // onboarding, and enter the app. `skipped` only skips persisting priorities —
+  // completion always runs.
+  async function finish(skipped: boolean) {
+    if (!workspace || auth.kind !== "authed") return
     setError(null)
-    setSaving(true)
+    setFinishing(true)
     try {
+      // 1) Persist the (optional) priorities when not skipped.
       if (!skipped && priorities.trim()) {
-        await updateWorkspace(workspace.id, {
-          okrs: priorities.trim(),
-          onboarding_step: 5,
-        })
-      } else {
-        await advanceOnboardingStep(workspace.id, 5)
+        await updateWorkspace(workspace.id, { okrs: priorities.trim() })
       }
       clearDraft(DRAFT_KEY)
-      router.push("/onboarding/workspace")
+
+      // 2) Kick the first brief (fire-and-forget). It lands on the Brief page.
+      void (async () => {
+        try {
+          await ensureDatasetForWorkspace(workspace)
+          await seedWorkspaceContextFiles(workspace)
+          const existing = await fetchBriefWhenReady(workspace.slug)
+          if (existing) setContent(briefToContentPatch(existing))
+          else await startBriefGeneration(workspace.slug)
+        } catch {
+          /* generation runs server-side; the Brief page reflects status */
+        }
+      })()
+
+      // 3) Complete onboarding and enter the app.
+      await completeOnboarding(workspace.id, auth.user.id)
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem("sprntly_active_company", workspace.slug)
+      }
+      router.replace("/brief")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't save your strategy.")
-      setSaving(false)
+      setError(e instanceof Error ? e.message : "Couldn't finish setting up your workspace.")
+      setFinishing(false)
     }
   }
 
@@ -106,7 +146,7 @@ export function Strategy() {
 
   return (
     <OnboardingChrome
-      step={4}
+      step={5}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -116,21 +156,23 @@ export function Strategy() {
       subtitle="Give the agents what shapes your priorities. The more you add, the sharper every brief and roadmap gets — you can always add more in Settings."
       footerMeta={
         <>
-          Step 4 of 5 · strategy —{" "}
+          Step 5 of 5 · strategy —{" "}
           <button
             type="button"
             className="onb-skip-link"
-            onClick={() => void go(true)}
-            disabled={saving}
+            onClick={() => void finish(true)}
+            disabled={finishing}
           >
-            Skip for now
-          </button>
+            Skip
+          </button>{" "}
+          · your first Brief starts generating when you finish
         </>
       }
       onBack={() => router.push("/onboarding/business-context")}
-      onContinue={() => void go(false)}
-      continueDisabled={saving}
-      loading={saving}
+      onContinue={() => void finish(false)}
+      continueLabel="Finish setup"
+      continueDisabled={finishing}
+      loading={finishing}
     >
       {error && <div className="onb-form-error">{error}</div>}
 
@@ -175,11 +217,9 @@ export function Strategy() {
             <span className="onb-up-t">
               {uploading
                 ? "Uploading…"
-                : uploaded && roadmapFileName
+                : roadmapFileName
                   ? roadmapFileName
-                  : roadmapFileName
-                    ? roadmapFileName
-                    : "Upload your current roadmap"}
+                  : "Upload your current roadmap"}
             </span>
             <span className="onb-up-s">
               {uploaded

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Container mount test for the onboarding step 03 — "Your business context"
+// Container mount test for the onboarding step 04 — "Your business context"
 // (design scene onbctx). It REUSES the #450 Business Context surface: it loads
 // the doc via businessContextApi.get (GET /v1/company/business-context), lets
 // the PM edit leaves inline, and on Continue PUTs edits + advances to strategy.
@@ -117,7 +117,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("BusinessContext (onboarding step 03)", () => {
+describe("BusinessContext (onboarding step 04)", () => {
   it("loads the auto-drafted doc and renders its editable fields", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     bcGetMock.mockResolvedValue(makeDoc())
@@ -161,7 +161,7 @@ describe("BusinessContext (onboarding step 03)", () => {
     expect(bcUpdateMock).toHaveBeenCalledTimes(1)
     const sent = bcUpdateMock.mock.calls[0][0] as BusinessContextDoc
     expect(sent.product_value.what_it_does.value).toBe("Edited description.")
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
   })
 
@@ -221,7 +221,7 @@ describe("BusinessContext (onboarding step 03)", () => {
     expect(patch.industry).toBe("Fintech")
     expect(patch.business_type).toBe("Marketplace")
     expect(patch.tech_stack).toEqual([chipLabel])
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
   })
 
   it("shows the empty 'not generated yet' state on a 404 (null doc), still renders company-shape, and stays skippable", async () => {
@@ -247,7 +247,7 @@ describe("BusinessContext (onboarding step 03)", () => {
     })
     expect(bcUpdateMock).not.toHaveBeenCalled()
     expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
   })
 
   it("Skip for now advances without PUTting doc edits (still persists company-shape)", async () => {
@@ -268,7 +268,7 @@ describe("BusinessContext (onboarding step 03)", () => {
     })
     expect(bcUpdateMock).not.toHaveBeenCalled()
     expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
   })
 })

@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 //
 // Integrity tests for the semantic-slug onboarding flow (5-step redesign):
-//   business-info → [analyzing] → connectors → business-context → strategy → workspace
-// (the agent-naming `coworkers` step stays removed; the old metrics + first-brief
-//  routes were folded into business-info + workspace)
+//   business-info → [analyzing] → workspace → connectors → business-context → strategy
+// (workspace moved EARLY; strategy is the closing step. The agent-naming
+//  `coworkers` step stays removed; the old metrics + first-brief routes were
+//  folded into business-info + strategy.)
 //
 // Asserts the slug→screen map renders the right component per numbered step (in
 // the right order, no gaps), that an unknown slug falls back to the first step,
@@ -47,10 +48,10 @@ afterEach(() => {
 // renders the screen with the same data-screen marker).
 const EXPECTED_ORDER = [
   "business-info",
+  "workspace",
   "connectors",
   "business-context",
   "strategy",
-  "workspace",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
@@ -59,11 +60,11 @@ describe("onboarding flow order — slug → screen", () => {
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
-  it("renders the connectors page at the 'connectors' slug (right after the loader)", () => {
+  it("renders the workspace page at the 'workspace' slug (right after the loader)", () => {
     const { container } = render(
-      React.createElement(OnboardingStep, { slug: "connectors" }),
+      React.createElement(OnboardingStep, { slug: "workspace" }),
     )
-    expect(container.querySelector('[data-screen="connectors"]')).not.toBeNull()
+    expect(container.querySelector('[data-screen="workspace"]')).not.toBeNull()
   })
 
   it("maps every numbered slug to the expected screen, in order, with no gaps", () => {

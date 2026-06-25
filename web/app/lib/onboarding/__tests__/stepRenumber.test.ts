@@ -1,9 +1,9 @@
 // Slug-routing integrity for the semantic-routes onboarding flow. The flow is
-// the product-approved 5-step redesign (business-info → connectors →
-// business-context → strategy → workspace) plus an unnumbered `analyzing`
-// loader. The earlier `metrics` and `first-brief` routes were folded in
-// (metrics → business-info; brief generation → workspace); the agent-naming
-// `coworkers` step stays removed. These guard the total step count, the
+// the product-approved 5-step redesign (business-info → workspace → connectors →
+// business-context → strategy) plus an unnumbered `analyzing` loader. The
+// earlier `metrics` and `first-brief` routes were folded in (metrics →
+// business-info; brief generation → strategy); the agent-naming `coworkers`
+// step stays removed. These guard the total step count, the
 // slug↔screen mapping (no gaps, dropped pages gone), and that the loader is
 // excluded from the numbered screen list / progress dots.
 import { describe, expect, it } from "vitest"
@@ -22,10 +22,10 @@ describe("onboarding slug routing", () => {
     expect(ONBOARDING_SCREENS).toHaveLength(5)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
       "business-info",
+      "workspace",
       "connectors",
       "business-context",
       "strategy",
-      "workspace",
     ])
     // The agent-naming step is gone, and the trimmed standalone routes are
     // folded into the redesign steps.

@@ -399,6 +399,12 @@ export async function completeOnboarding(companyId: string, userId: string) {
   }
 }
 
+/**
+ * Direct `workspace_invites` upsert. No longer wired into onboarding — team
+ * invites now live in Settings → Team (`teamApi.invite` → POST /v1/team/invites,
+ * which both stores the invite AND sends the email). Kept for any remaining
+ * callers; prefer `teamApi.invite` for new invite flows.
+ */
 export async function sendWorkspaceInvites(
   companyId: string,
   invites: { email: string; role: string }[],

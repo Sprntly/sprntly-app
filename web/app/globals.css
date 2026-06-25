@@ -12980,6 +12980,26 @@
     color: var(--accent);
   }
 
+  /* Optional-field marker inside an auth-card label (design scene onbws:
+     "Workspace name (optional)"). Mirrors the .onb-card .field-l .opt rule so
+     the de-emphasised, non-uppercase "optional" reads the same across chromes. */
+  .auth-card .field-l .opt {
+    color: var(--ink-4);
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 400;
+    font-size: 10.5px;
+  }
+
+  /* Sub-field hint under an auth-card input (design's inline
+     font-size:11.5px; color:var(--text3) → app token --ink-3). */
+  .auth-card .field-hint {
+    font-size: 11.5px;
+    color: var(--ink-3);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
   .auth-card .field-l .right {
     margin-left: auto;
   }
