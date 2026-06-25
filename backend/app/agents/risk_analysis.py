@@ -131,6 +131,9 @@ def generate_risk_analysis_sync(
         prompt_version=PROMPT_VERSION,
         system=_SYSTEM,
         input=_build_input(prd, evidence_md, stories_md, clickup_context),
+        # Large markdown doc — stream on the long read timeout (was tripping
+        # httpx.ReadTimeout on the default 120s non-streamed path).
+        long_output=True,
     )
     md = result.output if isinstance(result.output, str) else str(result.output)
 

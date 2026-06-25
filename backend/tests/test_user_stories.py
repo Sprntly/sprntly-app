@@ -88,9 +88,17 @@ def test_generation_binds_user_stories_skill_to_gateway(isolated_settings, monke
         captured.update(kw)
         return _tool_msg(_TWO_STORIES)
 
+    # user-stories generation runs long_output=True → the gateway streams, so the
+    # fake client must also satisfy the `messages.stream(...)` protocol.
+    from tests._fake_anthropic import _FakeStream
+
+    def _stream(**kw):
+        captured.update(kw)
+        return _FakeStream(_tool_msg(_TWO_STORIES))
+
     monkeypatch.setattr(
         llm, "get_client",
-        lambda: SimpleNamespace(messages=SimpleNamespace(create=_create)),
+        lambda: SimpleNamespace(messages=SimpleNamespace(create=_create, stream=_stream)),
     )
 
     spec = get_skill("user-stories")

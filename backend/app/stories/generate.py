@@ -207,6 +207,9 @@ def generate_user_stories(
         json_schema=_SCHEMA,
         skill="user-stories",
         model=model,
+        # Large structured output — stream on the long read timeout (was tripping
+        # httpx.ReadTimeout on the default 120s non-streamed path).
+        long_output=True,
     )
     raw = (result.output or {}).get("stories", []) if result.output else []
     stories = [Story.from_dict(s) for s in raw if s.get("title")]

@@ -123,6 +123,9 @@ def generate_qa_test_cases_sync(
         # (happy → edge → failure → trace → risk-rank). The Sprntly
         # `:::qa-scenarios` output contract lives in _SYSTEM.
         skill="test-scenario-builder",
+        # Large markdown doc — stream on the long read timeout (consistent with
+        # the other multi-agent doc generators; avoids httpx.ReadTimeout).
+        long_output=True,
     )
     md = result.output if isinstance(result.output, str) else str(result.output)
 

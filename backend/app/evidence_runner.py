@@ -13,7 +13,7 @@ import logging
 
 from app.corpus import load_corpus, load_evidence_template
 from app.db import complete_evidence, fail_evidence, get_brief_by_id
-from app.llm import call_md
+from app.llm import LONG_REQUEST_TIMEOUT_S, call_md
 from app.prompts import EVIDENCE_SYSTEM, EVIDENCE_USER_TEMPLATE
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,13 @@ def _run_sync(evidence_id: int, brief_id: int, insight_index: int) -> None:
         corpus=corpus.joined(),
         template=template,
     )
-    md = call_md(system=EVIDENCE_SYSTEM, user=user)
+    # Evidence is a large markdown doc — stream on the long read timeout so the
+    # generation never trips the default 120s non-streamed read timeout
+    # (httpx.ReadTimeout seen in prod).
+    md = call_md(
+        system=EVIDENCE_SYSTEM, user=user,
+        stream=True, timeout=LONG_REQUEST_TIMEOUT_S,
+    )
     title = insight.get("title") or f"Insight #{insight_index + 1}"
     complete_evidence(evidence_id=evidence_id, title=title, md=md)
 

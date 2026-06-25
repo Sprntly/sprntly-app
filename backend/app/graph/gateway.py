@@ -128,6 +128,7 @@ def llm_call(
     user_cacheable_prefix: Optional[str] = None,
     skill: Optional[str] = None,
     skill_module: Optional[str] = None,
+    long_output: bool = False,
     log: bool = True,
     background: bool = False,
 ) -> LLMResult:
@@ -148,12 +149,16 @@ def llm_call(
     if skill is not None:
         method_block, version_suffix = _build_method_prefix(skill, skill_module)
         prompt_version = f"{prompt_version}{version_suffix}"
-    # Long-output skills (e.g. prd-author) stream on the long read timeout so a
-    # large/slow generation never trips the default per-request timeout. Gated
-    # on the skill, so non-long callers keep the existing non-streamed path.
-    long_output = _is_long_output(skill)
-    stream = long_output
-    timeout = LONG_REQUEST_TIMEOUT_S if long_output else None
+    # Long-output calls stream on the long read timeout so a large/slow
+    # generation never trips the default per-request timeout. Triggered either by
+    # a registered long-output skill (e.g. prd-author) OR an explicit
+    # `long_output=True` from the caller — the latter for non-skill agents that
+    # still produce big docs (technical design, risk analysis, traceability
+    # matrix, QA test cases), which were tripping httpx.ReadTimeout on the
+    # default 120s non-streamed path. Other callers keep the non-streamed path.
+    use_long_output = long_output or _is_long_output(skill)
+    stream = use_long_output
+    timeout = LONG_REQUEST_TIMEOUT_S if use_long_output else None
     meta: dict = {}
     t0 = time.monotonic()
     if json_schema is not None:
