@@ -578,40 +578,36 @@ describe("BriefChat header — fixed agent name 'Spiky'", () => {
   })
 })
 
-// ── Persistent PM-agent intro ────────────────────────────────────────────────
-// The brief opens with a persistent, educational PM-agent message that restates
-// what the agent continuously does. It is deliberately NOT personalized — the
-// per-brief greeting carries the "Good day, {name}" salutation, so the intro
-// stays a plain capability statement (avoids a double "Good day {name}").
-describe("BriefChat — persistent PM-agent intro", () => {
-  it("renders the persistent intro as a non-personalized capability statement", async () => {
+// ── Greeting (single combined paragraph) ─────────────────────────────────────
+// The brief opens with ONE greeting paragraph: the personalized salutation, the
+// agent's ongoing-value capability line, and a "top N this week" tail — no
+// separate persistent-intro paragraph (which used to double-lead "Good day").
+describe("BriefChat — greeting paragraph", () => {
+  it("renders one combined greeting: salutation + capability + top-N tail", async () => {
     await act(async () => {
       renderBrief()
     })
-    const intro = document.querySelector(".bc-intro") as HTMLElement | null
-    expect(intro).not.toBeNull()
-    // The intro does NOT carry the salutation — that belongs to the greeting.
-    expect(intro!.textContent).not.toContain("Good day")
-    expect(intro!.textContent).toContain(
-      "continuously monitor how your product is being used",
-    )
-    expect(intro!.textContent).toContain(
+    const greeting = document.querySelector(".bc-greeting") as HTMLElement | null
+    expect(greeting).not.toBeNull()
+    const text = greeting!.textContent ?? ""
+    // Personalized salutation (first name only).
+    expect(text).toContain("Good day, Apurva -")
+    // The capability line flows in the same paragraph…
+    expect(text).toContain("continuously monitor how your product is being used")
+    expect(text).toContain(
       "give you a weekly digest of the most important things worth working on",
     )
+    // …and the "top N this week" tail closes it (fixture has 3 findings).
+    expect(text).toMatch(/Here's the top \d+ things? worth your attention this week\./)
   })
 
-  it("shows exactly one 'Good day {name}' across intro + greeting (no duplicate)", async () => {
+  it("has no separate persistent-intro paragraph and exactly one 'Good day'", async () => {
     await act(async () => {
       renderBrief()
     })
-    const intro = document.querySelector(".bc-intro")?.textContent ?? ""
+    expect(document.querySelector(".bc-intro")).toBeNull()
     const greeting = document.querySelector(".bc-greeting")?.textContent ?? ""
-    const combined = `${intro}\n${greeting}`
-    const count = (combined.match(/Good day/g) ?? []).length
-    expect(count).toBe(1)
-    // The single salutation lives on the greeting, personalized with the first name.
-    expect(greeting).toContain("Good day")
-    expect(greeting).toContain("Apurva")
+    expect((greeting.match(/Good day/g) ?? []).length).toBe(1)
   })
 
   it("no longer renders the redundant 'Monday brief · …' secondary status line", async () => {

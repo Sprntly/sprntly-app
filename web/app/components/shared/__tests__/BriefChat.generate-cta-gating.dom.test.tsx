@@ -176,7 +176,7 @@ function mountHarness() {
 
 const GENERATE_PRD = /Generate PRD/
 const VIEW_PROTOTYPE = /View prototype/
-const EMPTY_GREETING = "Please add more sources"
+const EMPTY_GREETING = "add and connect more sources"
 
 afterEach(() => {
   cleanup()
