@@ -210,16 +210,22 @@ describe("ContentPanel header Share dropdown", () => {
   })
 })
 
-describe("PrdPanelContent footer no longer has a Share control", () => {
-  it("renders Version history + Approve & next step but NOT a Share button", () => {
+describe("PrdPanelContent bottom bar", () => {
+  it("renders Version history + the autosave/Save control, and NOT Approve or Share", () => {
     content = { ...EMPTY_CONTENT, prd: FAKE_PRD }
     const { container } = render(<PrdPanelContent />)
-    const foot = container.querySelector(".prd-foot")
+    // The mid-page footer is gone; actions live in the bottom bar.
+    expect(container.querySelector(".prd-foot")).toBeNull()
+    const foot = container.querySelector(".prd-bottom-bar")
     expect(foot).toBeTruthy()
+    // Version history (relocated to the bottom) + the autosave/save button.
     expect(within(foot as HTMLElement).getByText(/Version history/i)).toBeTruthy()
-    expect(within(foot as HTMLElement).getByText(/Approve & next step/i)).toBeTruthy()
-    // No "Share" control in the footer, and no share dropdown anywhere.
+    expect(
+      within(foot as HTMLElement).getByText(/Autosaved|Save now|Saving/i),
+    ).toBeTruthy()
+    // The old "Approve & next step" button and any Share control are gone.
     const footButtons = within(foot as HTMLElement).queryAllByRole("button")
+    expect(footButtons.some((b) => /approve & next step/i.test(b.textContent ?? ""))).toBe(false)
     expect(footButtons.some((b) => /share/i.test(b.textContent ?? ""))).toBe(false)
     expect(container.querySelector(".share-menu")).toBeNull()
   })
