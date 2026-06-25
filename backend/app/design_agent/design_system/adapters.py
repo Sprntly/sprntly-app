@@ -550,6 +550,7 @@ class WebExtractor:
             DesignSignals,
             FieldFlags,
             NeutralCandidate,
+            SemanticCandidate,
             TypographySignals,
         )
 
@@ -586,6 +587,22 @@ class WebExtractor:
                     )
                 )
 
+        # Semantic (status) candidates: convert each raw colour; drop non-convertible.
+        # The kernel's pick_semantics hue-buckets them into warning/error/success.
+        # If the cache predates semantic sampling the key is absent -> empty list.
+        semantic_list: list[SemanticCandidate] = []
+        for sc in s.get("semantic_candidates") or []:
+            hx = _css_color_to_hex(sc.get("color"))
+            if hx:
+                kind = sc.get("kind")
+                semantic_list.append(
+                    SemanticCandidate(
+                        role=str(sc.get("role") or ""),
+                        hex=hx,
+                        kind=kind if kind in ("fill", "text") else "fill",
+                    )
+                )
+
         # Container observations for elevation derivation.
         container_list = [
             ContainerObservation(
@@ -615,6 +632,7 @@ class WebExtractor:
         signals = DesignSignals(
             color_candidates=chromatic_list,
             neutral_candidates=neutral_list,
+            semantic_candidates=semantic_list,
             container_observations=container_list,
             observed_component_types=observed_types,
             typography=typography,
@@ -968,6 +986,7 @@ class GithubExtractor:
             DesignSignals,
             FieldFlags,
             NeutralCandidate,
+            SemanticCandidate,
             TypographySignals,
         )
 
@@ -1162,9 +1181,28 @@ class GithubExtractor:
         if explicit.typography:
             gathered.typography = True
 
+        # Semantic (status) candidates from the gathered colour roles. github_gather's
+        # _CSS_VAR_ROLE_MAP surfaces a `destructive` role for shadcn-style themes; some
+        # token sets also name `warning`/`success` directly. We feed exactly these three
+        # status roles (NOT `secondary` — it is not a status colour) into the seam; the
+        # kernel's pick_semantics buckets each by hue (destructive's red lands in error).
+        # Explicit config hits out-rank inferred className hits via weight, mirroring the
+        # accent/neutral weighting above.
+        semantic_candidates: list[SemanticCandidate] = []
+        for role in ("destructive", "warning", "success"):
+            if role in color_map:
+                semantic_candidates.append(
+                    SemanticCandidate(hex=color_map[role], role=role, kind="fill", weight=2.0)
+                )
+            elif role in inferred_color_map:
+                semantic_candidates.append(
+                    SemanticCandidate(hex=inferred_color_map[role], role=role, kind="fill", weight=1.0)
+                )
+
         signals = DesignSignals(
             color_candidates=color_candidates,
             neutral_candidates=neutral_candidates,
+            semantic_candidates=semantic_candidates,
             container_observations=container_observations,
             observed_component_types=observed_types,
             typography=typography,

@@ -148,13 +148,16 @@ def test_discipline_length_within_bounds():
 # ─── AC6: version bumped ─────────────────────────────────────────────────────
 
 def test_template_version_bumped_to_5():
-    """DESIGN_AGENT_TEMPLATE_VERSION must be 5 after the recreate-discipline bump."""
+    """DESIGN_AGENT_TEMPLATE_VERSION is an int, now 7 (bumped when the pre-seed
+    began emitting token-driven semantic palette vars)."""
     assert DESIGN_AGENT_TEMPLATE_VERSION == 7
     assert isinstance(DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
 def test_scaffold_sync_green_at_new_version():
-    """The version-coupled scaffold-sync contract: version is an int equal to 5."""
+    """The version-coupled scaffold-sync contract: version is an int equal to 7
+    (bumped to 7 when the pre-seed began emitting token-driven semantic palette
+    vars --destructive/--error/--warning/--success)."""
     assert p.DESIGN_AGENT_TEMPLATE_VERSION == 7
 
 

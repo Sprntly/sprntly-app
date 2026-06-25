@@ -45,6 +45,22 @@ class NeutralCandidate(BaseModel):
     weight: float = 0.0
 
 
+class SemanticCandidate(BaseModel):
+    """One observed status-color candidate (warning / error / success).
+
+    Sources collect these from alert/badge/toast/error/warning/success surfaces;
+    the kernel's pick_semantics buckets them by hue into the SemanticColors slots.
+    `role` is the source-side hint (e.g. "error", "warning", "alert"); the final
+    bucket is decided by hue, so `role` is provenance only, never a binding. `kind`
+    records whether the hex came from a fill (background) or text observation.
+    """
+
+    role: str                     # source hint: "error" | "warning" | "success" | "alert" | "badge" | ...
+    hex: str                      # lower-case #rrggbb (gather/normalize layer converts)
+    kind: Literal["fill", "text"] = "fill"
+    weight: float = 0.0           # source-comparable prominence; 0.0 when unmeasured
+
+
 class ContainerObservation(BaseModel):
     """One sampled container's separation treatment (for elevation derivation)."""
 
@@ -86,6 +102,11 @@ class DesignSignals(BaseModel):
     # decided downstream in pick_accent, not by what's allowed into this list.
     color_candidates: list[ColorCandidate] = Field(default_factory=list)
     neutral_candidates: list[NeutralCandidate] = Field(default_factory=list)
+    # Status-color candidates (warning / error / success), bucketed by hue in the
+    # kernel's pick_semantics. Like color_candidates, this is a raw observation
+    # list — membership is NOT a hue filter; the kernel decides each bucket. Empty
+    # list (the default) leaves colors.semantic at the SemanticColors defaults.
+    semantic_candidates: list[SemanticCandidate] = Field(default_factory=list)
     container_observations: list[ContainerObservation] = Field(default_factory=list)
     observed_component_types: list[str] = Field(default_factory=list)
     typography: TypographySignals = Field(default_factory=TypographySignals)

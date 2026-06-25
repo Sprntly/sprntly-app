@@ -15,12 +15,13 @@ from __future__ import annotations
 
 from typing import Literal
 
-from .models import Colors, DesignSystem, Fonts, Tokens
+from .models import Colors, DesignSystem, Fonts, SemanticColors, Tokens
 from .signals import (
     ColorCandidate,
     ContainerObservation,
     DesignSignals,
     NeutralCandidate,
+    SemanticCandidate,
 )
 
 # Import (do NOT re-implement) the canonical color helpers + component vocabulary.
@@ -129,6 +130,88 @@ def _chroma_of(color: str) -> float:
         return 0.0
     r, g, b = channels
     return (max(r, g, b) - min(r, g, b)) / 255.0
+
+
+def _hue_and_saturation(color: str) -> tuple[float, float] | None:
+    """HSL hue (degrees, 0-360) and saturation ([0,1]) for a color string.
+
+    Returns None on anything unparseable. Hue is undefined for a pure gray
+    (saturation 0); callers that gate on saturation should treat that as "no
+    confident hue". Parsing is shared with the chroma helpers via ``_rgb_channels``.
+    """
+    channels = _rgb_channels(color)
+    if channels is None:
+        return None
+    r, g, b = (c / 255.0 for c in channels)
+    mx = max(r, g, b)
+    mn = min(r, g, b)
+    delta = mx - mn
+    lum = (mx + mn) / 2.0
+    sat = 0.0 if delta == 0 else delta / (1 - abs(2 * lum - 1))
+    if delta == 0:
+        hue = 0.0
+    elif mx == r:
+        hue = 60.0 * (((g - b) / delta) % 6)
+    elif mx == g:
+        hue = 60.0 * ((b - r) / delta + 2)
+    else:
+        hue = 60.0 * ((r - g) / delta + 4)
+    return (hue % 360.0, sat)
+
+
+# Saturation floor below which a candidate is treated as a gray with no confident
+# status hue (skipped by pick_semantics).
+SEMANTIC_SATURATION_FLOOR = 0.25
+
+
+def pick_semantics(
+    candidates: list[SemanticCandidate],
+) -> dict[str, str | None]:
+    """Resolve success / error / warning status colours by hue-bucketing candidates.
+
+    Each candidate's hex is converted to HSL. Candidates below
+    ``SEMANTIC_SATURATION_FLOOR`` are dropped as grays (no confident hue). The rest
+    are bucketed by hue:
+
+    - error:   hue ∈ [340,360] ∪ [0,20]   (reds)
+    - warning: hue ∈ [30,65]              (oranges/ambers/golds)
+    - success: hue ∈ [90,160]             (greens)
+
+    The warning lower bound is 30 (not 35) so the canonical amber status colours
+    sit inside the band — the SemanticColors default ``#d97706`` is at hue ≈32 and
+    a typical Tailwind amber-500 ``#f59e0b`` at ≈38; a 35 floor would reject the
+    very colour these slots are meant to carry. The bands stay non-overlapping
+    (error tops out at 20, success starts at 90), so widening warning's floor
+    cannot poach a red or a green.
+
+    Within a bucket the highest-weight candidate wins (stable first-seen on a tie,
+    since ``max`` returns the first maximum). Returns
+    ``{"success": hex|None, "error": hex|None, "warning": hex|None}`` — None for a
+    bucket with no confident candidate, so the caller keeps the model default.
+    """
+    result: dict[str, str | None] = {"success": None, "error": None, "warning": None}
+    buckets: dict[str, list[SemanticCandidate]] = {
+        "success": [],
+        "error": [],
+        "warning": [],
+    }
+    for cand in candidates:
+        hs = _hue_and_saturation(cand.hex)
+        if hs is None:
+            continue
+        hue, sat = hs
+        if sat < SEMANTIC_SATURATION_FLOOR:
+            continue
+        if (340 <= hue <= 360) or (0 <= hue <= 20):
+            buckets["error"].append(cand)
+        elif 30 <= hue <= 65:
+            buckets["warning"].append(cand)
+        elif 90 <= hue <= 160:
+            buckets["success"].append(cand)
+    for role, pool in buckets.items():
+        if pool:
+            result[role] = max(pool, key=lambda c: c.weight).hex
+    return result
 
 
 def pick_accent(candidates: list[ColorCandidate]) -> str | None:
@@ -277,6 +360,16 @@ def harden(signals: DesignSignals) -> DesignSystem:
         colors.background = signals.background_hex
     if signals.foreground_hex:
         colors.foreground = signals.foreground_hex
+
+    # Semantic (status) colours: hue-bucket the gathered candidates. Unmatched
+    # buckets fall back to the SemanticColors model defaults — never blank a value.
+    sem = pick_semantics(signals.semantic_candidates or [])
+    defaults = SemanticColors()
+    colors.semantic = SemanticColors(
+        success=sem["success"] or defaults.success,
+        error=sem["error"] or defaults.error,
+        warning=sem["warning"] or defaults.warning,
+    )
 
     fonts = Fonts()
     if signals.typography.heading_family:

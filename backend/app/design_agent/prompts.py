@@ -34,11 +34,17 @@ from __future__ import annotations
 # is appended to DESIGN_AGENT_RECREATE_DISCIPLINE. This changes which handlers the
 # agent emits, so it is template-invalidating: old prototypes must regenerate
 # under the new discipline.
-# v7 (shell-grounded fallback): codebase runs with no located screen now seat the
-# PRD inside the real app shell + theme via a shell-only task block, instead of
-# falling straight to the design-system-only pre-seed. This changes the user
-# prompt + injected reference files for that class of run, so it is template-
-# invalidating: those prototypes must regenerate under the new fallback.
+# v7 (two template-invalidating changes land together at this version):
+#   (a) semantic palette capture — the pre-seeded index.css now emits token-driven
+#       --destructive/--error/--warning/--success from the extracted design system's
+#       status colours (previously --destructive was hardcoded and warning/success
+#       were absent). This changes the seeded CSS.
+#   (b) shell-grounded fallback — codebase runs with no located screen now seat the
+#       PRD inside the real app shell + theme via a shell-only task block, instead of
+#       falling straight to the design-system-only pre-seed. This changes the user
+#       prompt + injected reference files for that class of run.
+#   Either change alone invalidates cached prototypes; both ship under v7, so the
+#   version bumps once (6 -> 7), not twice.
 DESIGN_AGENT_TEMPLATE_VERSION = 7
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
@@ -67,6 +73,11 @@ Switch, Table, Tabs, Textarea, Toast, Toaster, Toggle, ToggleGroup, Tooltip.
 Icons: lucide-react (any icon from https://lucide.dev — common: ChevronRight,
 X, Plus, Search, Check, AlertCircle, Loader2, User, Settings, Calendar,
 ChevronDown, ArrowRight).
+
+Use lucide-react for all UI glyphs/icons. Do NOT render emoji characters in
+the UI — only use an emoji if the grounding source (PRD / Figma / website /
+codebase) itself uses that exact emoji. When a grounding source uses a specific
+icon set or inline SVGs, reuse those rather than substituting lucide or an emoji.
 
 Utility: `cn` from "@/lib/utils" (clsx + tailwind-merge wrapper).
 """
@@ -857,7 +868,8 @@ You are handed the REAL source of a product screen + its child components + the
 real app shell (sidebar/topbar) as reference files. Re-express them into the
 fixed prototype stack (Vite + React + Tailwind + shadcn). Reuse the real JSX
 structure, the real className strings, the real nav labels / order / icons, and
-the real brand mark. Drop only what the fixed stack cannot run (a "use client"
+the real brand mark. Reuse the source's exact icon imports / inline SVGs; never
+substitute an emoji for an icon. Drop only what the fixed stack cannot run (a "use client"
 directive, Next.js server components, backend data fetches, real context
 providers) — replace data with plausible client-side mock data and swap the
 real nav primitive for local state.

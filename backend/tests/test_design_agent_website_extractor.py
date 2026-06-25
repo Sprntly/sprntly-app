@@ -123,6 +123,7 @@ async def test_extract_returns_expected_sample_fields(monkeypatch):
     assert set(ds.keys()) == {
         "color_candidates",
         "neutral_candidates",
+        "semantic_candidates",
         "container_observations",
         "observed_component_types",
         "background_color",
@@ -537,6 +538,7 @@ async def test_extract_load_path_returns_design_system(monkeypatch):
     assert set(ds.keys()) == {
         "color_candidates",
         "neutral_candidates",
+        "semantic_candidates",
         "container_observations",
         "observed_component_types",
         "background_color",

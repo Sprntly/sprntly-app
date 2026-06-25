@@ -54,6 +54,7 @@ class WebsiteDesignSystem(TypedDict):
     # RAW (rgb()/rgba()/hex); hex conversion happens on the Python side.
     color_candidates: list[dict]   # [{color, area, saturation}, ...] — visible filled CTAs
     neutral_candidates: list[dict]     # [{role, color, area}, ...] — role ∈ surface/border/muted
+    semantic_candidates: list[dict]    # [{role, color, kind}, ...] — status colours (warning/error/success)
     container_observations: list[dict]  # [{has_border, has_shadow}, ...] — bounded card/section scan
     observed_component_types: list[str]  # lower-case type names with count>0 (names only, no counts)
     background_color: str         # body computed background-color
@@ -260,9 +261,81 @@ _SAMPLER_JS = r"""
     if (n > 0) observedComponentTypes.push(type);
   }
 
+  // Semantic (status) colour candidates: warning / error / success surfaces. We
+  // sample fills AND text colours off alert/badge/toast nodes plus any node whose
+  // class names name a status role. The Python kernel buckets each by hue; the
+  // `role` here is only a source-side hint, never the binding. A fill that reads
+  // as transparent, near-white, or near-black is skipped — those are surfaces, not
+  // status colours. Wrapped defensively: a DOM quirk yields an empty list, never a
+  // sampler failure.
+  const semanticCandidates = [];
+  try {
+    // Channels of a colour string in 0..255, or null if unparseable/transparent.
+    const channelsOf = (c) => {
+      if (isTransparent(c)) return null;
+      let r, g, b;
+      const m = (c || '').match(/rgba?\(([^)]+)\)/i);
+      if (m) {
+        [r, g, b] = m[1].split(',').map((x) => parseFloat(x));
+      } else if (c && c[0] === '#' && c.length >= 7) {
+        r = parseInt(c.slice(1, 3), 16);
+        g = parseInt(c.slice(3, 5), 16);
+        b = parseInt(c.slice(5, 7), 16);
+      } else {
+        return null;
+      }
+      if ([r, g, b].some((v) => Number.isNaN(v))) return null;
+      return [r, g, b];
+    };
+    // A near-white or near-black fill is a surface, not a status colour.
+    const isStructuralFill = (c) => {
+      const ch = channelsOf(c);
+      if (!ch) return true;                         // unparseable/transparent → skip as fill
+      const [r, g, b] = ch;
+      const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+      if (mx >= 245 && mn >= 245) return true;      // near-white
+      if (mx <= 24) return true;                    // near-black
+      return false;
+    };
+    // role → selector. alert/badge/toast reuse the inventory selectors; the
+    // status-named selectors catch error/warning/success/danger/destructive.
+    const semanticSelectors = {
+      error: '[class*="error" i],[class*="danger" i],[class*="destructive" i]',
+      warning: '[class*="warning" i]',
+      success: '[class*="success" i]',
+      alert: '[role="alert"],[class*="alert" i]',
+      badge: '[class*="badge" i],[class*="chip" i]',
+      toast: '[class*="toast" i]',
+    };
+    const SEMANTIC_SCAN_CAP = 60;
+    let semScanned = 0;
+    for (const role in semanticSelectors) {
+      if (semScanned >= SEMANTIC_SCAN_CAP) break;
+      let nodes = [];
+      try { nodes = document.querySelectorAll(semanticSelectors[role]); } catch (e) { nodes = []; }
+      for (const el of nodes) {
+        if (semScanned >= SEMANTIC_SCAN_CAP) break;
+        const elCs = cs(el);
+        if (!elCs) continue;
+        semScanned++;
+        const fill = elCs.backgroundColor;
+        if (!isStructuralFill(fill)) {
+          semanticCandidates.push({ role: role, color: fill, kind: 'fill' });
+        }
+        const txt = elCs.color;
+        if (channelsOf(txt)) {
+          semanticCandidates.push({ role: role, color: txt, kind: 'text' });
+        }
+      }
+    }
+  } catch (e) {
+    // Fail-soft: a DOM quirk must never break extraction.
+  }
+
   return {
     color_candidates: colorCandidates,
     neutral_candidates: neutralCandidates,
+    semantic_candidates: semanticCandidates,
     container_observations: containerObservations,
     observed_component_types: observedComponentTypes,
     background_color: bodyCs ? bodyCs.backgroundColor : '',
@@ -318,6 +391,7 @@ def _map_sample(raw: dict | None) -> WebsiteDesignSystem:
     return WebsiteDesignSystem(
         color_candidates=list(raw.get("color_candidates") or []),
         neutral_candidates=list(raw.get("neutral_candidates") or []),
+        semantic_candidates=list(raw.get("semantic_candidates") or []),
         container_observations=list(raw.get("container_observations") or []),
         observed_component_types=list(raw.get("observed_component_types") or []),
         background_color=(raw.get("background_color") or "").strip(),
