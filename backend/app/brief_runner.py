@@ -13,6 +13,7 @@ acquire `_WARM_SEMA`), so a click runs immediately.
 """
 import asyncio
 import logging
+from weakref import WeakKeyDictionary
 
 from app.db import (
     find_existing_evidence,
@@ -37,7 +38,30 @@ _errors: dict[str, str] = {}
 # queue. 3 lets all 3 evidence calls for a brief run concurrently so no
 # insight queues behind another. PRDs are NOT warmed (they run on-demand,
 # unthrottled), so this only caps evidence + Ask warming.
-_WARM_SEMA = asyncio.Semaphore(3)
+_WARM_CONCURRENCY = 3
+
+# Per-event-loop warm semaphore. A module-level Semaphore is bound to the loop
+# active when it is first awaited; warm_synthesis_drilldowns runs the fan-out via
+# a FRESH `asyncio.run(...)` loop on every scheduler/startup pass (the no-running-
+# loop path), so a single shared Semaphore raised "bound to a different event
+# loop" and every cached-Ask warm failed. Keyed weakly by loop so closed loops
+# are GC'd (no leak across the many short-lived asyncio.run loops).
+_warm_semas: "WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    WeakKeyDictionary()
+)
+
+
+def _warm_sema() -> asyncio.Semaphore:
+    """The warm-concurrency semaphore bound to the CURRENT running loop.
+
+    Must be called from within a running loop (every warming entry point runs on
+    one — either the request loop or the per-pass `asyncio.run` loop)."""
+    loop = asyncio.get_running_loop()
+    sema = _warm_semas.get(loop)
+    if sema is None:
+        sema = asyncio.Semaphore(_WARM_CONCURRENCY)
+        _warm_semas[loop] = sema
+    return sema
 
 # Strong refs to in-flight warm tasks. asyncio holds only a weak reference to a
 # bare create_task result, so without this a fanned-out evidence warm task
@@ -102,7 +126,7 @@ async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
         brief_id,
         insight_index,
     )
-    async with _WARM_SEMA:
+    async with _warm_sema():
         await generate_evidence(ev_id, brief_id, insight_index)
 
 
@@ -134,11 +158,11 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
     # send a fixed set of questions; pre-generating responses means the
     # demo's first click renders instantly.
     if dataset:
-        warm_predefined_asks(dataset, _WARM_SEMA)
+        warm_predefined_asks(dataset, _warm_sema())
         # Pass 4: per-insight Ask prompts. Clicking "Ask Sprntly" on a
         # finding card in the BriefScreen fires "Tell me more about: <title>"
         # — those titles are known at brief-gen time, so we warm them too.
-        warm_brief_dynamic_asks(dataset, brief, _WARM_SEMA)
+        warm_brief_dynamic_asks(dataset, brief, _warm_sema())
     # PRDs for the top insights — background-lane only (see docstring), so
     # this never competes with evidence/Ask warming or a user click.
     _track(asyncio.create_task(warm_prds_for_brief(brief)))
