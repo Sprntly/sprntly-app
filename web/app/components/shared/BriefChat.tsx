@@ -86,11 +86,12 @@ const isTicketsCommand = (q: string) =>
 
 // Persistent PM-agent intro shown every time the brief opens. It educates the
 // user on what the agent continuously does for them (so the value is re-stated,
-// not assumed). Personalized with the user's first name when known; the rest of
-// the copy is fixed. This replaces the redundant secondary header line.
-function buildPersistentIntro(firstName: string | null): string {
-  const who = firstName ? ` ${firstName}` : ""
-  return `Good day${who}, we continuously monitor how your product is being used, what customers are asking for, and competitor launches — and give you a weekly digest of the most important things worth working on.`
+// not assumed). Deliberately NOT personalized: the per-brief greeting below
+// (buildGreeting) carries the "Good day, {name}" salutation, so opening this
+// explainer with one too produced a double "Good day {name}". This is the fixed
+// capability statement; the greeting is the personalized opener.
+function buildPersistentIntro(): string {
+  return `We continuously monitor how your product is being used, what customers are asking for, and competitor launches — and give you a weekly digest of the most important things worth working on.`
 }
 
 function buildGreeting(v2: BriefV2State | null, firstName: string | null): string {
@@ -1349,7 +1350,7 @@ export function BriefChat() {
   // ── Derived render data ────────────────────────────────────────────────────
   const v2 = content.briefV2
   const firstName = content.userName ? content.userName.split(/\s+/)[0] : null
-  const persistentIntro = useMemo(() => buildPersistentIntro(firstName), [firstName])
+  const persistentIntro = useMemo(() => buildPersistentIntro(), [])
   const greeting = useMemo(() => buildGreeting(v2, firstName), [v2, firstName])
   const findings: Finding[] = useMemo(() => {
     if (!v2) return []
