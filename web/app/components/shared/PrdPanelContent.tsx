@@ -19,7 +19,6 @@ import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
 import { runDesignAgentGeneration } from "../../lib/runDesignAgentGeneration"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
 import {
-  IconCheck,
   IconGrid,
   IconLinkInsert,
   IconListBullet,
@@ -215,7 +214,7 @@ export function LlmReadableView({ prd, generating, loading }: { prd: PrdState | 
 type PrdSubTab = "human" | "llm"
 
 export function PrdPanelContent() {
-  const { openModal, showToast } = useNavigation()
+  const { showToast } = useNavigation()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const prd = content.prd
@@ -336,6 +335,23 @@ export function PrdPanelContent() {
     document.execCommand(cmd, false, value)
   }
 
+  // Manual save — the bottom "Autosaved" button. The PRD already autosaves on
+  // edit (handleInput, debounced); this lets the user force a save now and is
+  // also where the autosave status is surfaced.
+  const saveNow = useCallback(async () => {
+    if (!prd || !bodyRef.current) return
+    setSaveStatus("saving")
+    saveDraft(prd.prd_id, bodyRef.current.innerHTML)
+    try {
+      await prdApi.update(prd.prd_id, { title: prd.title, payload_md: bodyRef.current.innerText || "" })
+      setSaveStatus("saved")
+      showToast("Saved", "Your PRD has been saved.")
+    } catch {
+      showToast("Save failed", "Could not save to server. Local draft preserved.")
+      setSaveStatus("saved")
+    }
+  }, [prd])
+
   return (
     <div className="cpanel-prd-wrap">
       {/* Sub-tabs: Human-readable / LLM-readable */}
@@ -422,21 +438,30 @@ export function PrdPanelContent() {
           </div>
         )}
 
-        <div className="prd-foot">
-          <div className="prd-foot-left">
-            <button type="button" className="btn btn-ghost btn-sm" disabled={!prd} onClick={async () => {
-              if (!prd || !bodyRef.current) return
-              setSaveStatus("saving")
-              try {
-                await prdApi.update(prd.prd_id, { title: prd.title, payload_md: bodyRef.current.innerText || "" })
-                setSaveStatus("saved")
-                showToast("Draft saved", "Your PRD has been saved.")
-              } catch { showToast("Save failed", "Could not save to server. Local draft preserved."); setSaveStatus("saved") }
-            }}>
-              Save as draft
-            </button>
-            <button type="button" className="btn btn-ghost btn-sm" disabled={!prd} onClick={async () => {
-              if (!prd) return
+      </div>
+
+      {prd && <PrototypeSection prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} externalGeneratingId={notifyGenId} />}
+
+      {prd && <ArtifactFooterActions current="prd" />}
+
+      {/* Bottom action row: autosave status (click = save now) + Version history
+          toggle. Replaces the old mid-page footer; version history lives here at
+          the very bottom and expands the panel below. */}
+      {prd && (
+        <div className="prd-bottom-bar" style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 16 }}>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={saveStatus === "saving"}
+            onClick={saveNow}
+            title="This PRD autosaves as you edit — click to save now"
+          >
+            {saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Save now" : "✓ Autosaved"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={async () => {
               setShowVersions(!showVersions)
               if (!showVersions) {
                 setVersionsLoading(true)
@@ -446,22 +471,16 @@ export function PrdPanelContent() {
                 } catch { setHistory([]) }
                 setVersionsLoading(false)
               }
-            }} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-              Version history
-              <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ transform: showVersions ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
-                <path d="M5 7L1 3h8z" />
-              </svg>
-            </button>
-          </div>
-          <div className="prd-foot-right">
-            <button type="button" className="btn btn-accent" disabled={!prd} onClick={() => prd && openModal("approve")}>
-              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
-                <IconCheck size={16} /> Approve & next step
-              </span>
-            </button>
-          </div>
+            }}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+          >
+            Version history
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ transform: showVersions ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+              <path d="M5 7L1 3h8z" />
+            </svg>
+          </button>
         </div>
-      </div>
+      )}
 
       {showVersions && prd && (
         <div style={{ marginTop: 12, borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface)", overflow: "hidden" }}>
@@ -512,10 +531,6 @@ export function PrdPanelContent() {
           )}
         </div>
       )}
-
-      {prd && <PrototypeSection prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} externalGeneratingId={notifyGenId} />}
-
-      {prd && <ArtifactFooterActions current="prd" />}
       </>
       )}
     </div>
