@@ -105,6 +105,50 @@ describe("Connectors (container) — design-v4 accordion", () => {
     }
   })
 
+  it("renders the onb4 header + sub copy verbatim and the design accordion shell", () => {
+    const { container } = mountLoaded()
+    // Header: "Connect your tools." with the period inside the italic <em>.
+    const h = container.querySelector(".onb-card .onb-h") as HTMLElement
+    expect(h.textContent).toBe("Connect your tools.")
+    expect((h.querySelector("em") as HTMLElement).textContent).toBe("tools.")
+    // Sub copy, verbatim from the design kit.
+    const sub = container.querySelector(".onb-card .onb-sub") as HTMLElement
+    expect(sub.textContent).toBe(
+      "The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later.",
+    )
+    // Design accordion shell: onb-card → conn-steps → conn-step rows.
+    expect(container.querySelector(".onb-card .conn-steps")).not.toBeNull()
+    expect(container.querySelectorAll(".conn-steps .conn-step").length).toBeGreaterThan(0)
+  })
+
+  it("uses the design footer labels: 'Skip' and 'Done · next ↓' (plain 'Done' on the last)", () => {
+    const { container } = mountLoaded()
+    const foot = container.querySelector(
+      ".conn-step.open .conn-step-foot",
+    ) as HTMLElement
+    const [skip, done] = Array.from(foot.querySelectorAll("button"))
+    expect(skip.textContent?.trim()).toBe("Skip")
+    // Non-last category opens the one below → "Done · next" + a down arrow.
+    expect(done.textContent).toMatch(/Done · next/)
+    expect(done.querySelector("svg")).not.toBeNull()
+
+    // Walk to the LAST category and assert it reads plain "Done" (nothing opens
+    // below it) with no arrow.
+    const stepCount = container.querySelectorAll(".conn-step").length
+    for (let n = 0; n < stepCount - 1; n++) {
+      fireEvent.click(
+        container.querySelector(
+          ".conn-step.open .conn-step-foot .btn-brand",
+        ) as HTMLElement,
+      )
+    }
+    const lastDone = container.querySelector(
+      ".conn-step.open .conn-step-foot .btn-brand",
+    ) as HTMLElement
+    expect(lastDone.textContent?.trim()).toBe("Done")
+    expect(lastDone.querySelector("svg")).toBeNull()
+  })
+
   it("hides unsupported connectors and empty categories", () => {
     const { container } = mountLoaded()
     // Analytics has no supported connector today → the whole category and all

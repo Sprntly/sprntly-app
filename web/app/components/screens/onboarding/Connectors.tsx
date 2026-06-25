@@ -155,6 +155,16 @@ function LockIcon(props: SVGProps<SVGSVGElement>) {
   )
 }
 
+/** Down-arrow on the "Done · next ↓" button — the next category opens below. */
+function ArrowDownIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg {...iconProps({ width: 13, height: 13, ...props })}>
+      <path d="M12 5v14" />
+      <path d="M19 12l-7 7-7-7" />
+    </svg>
+  )
+}
+
 export function Connectors() {
   const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
@@ -386,7 +396,13 @@ export function Connectors() {
                       className="btn btn-brand"
                       onClick={() => completeCategory(i)}
                     >
-                      Done
+                      {i < categories.length - 1 ? (
+                        <>
+                          Done · next <ArrowDownIcon aria-hidden />
+                        </>
+                      ) : (
+                        "Done"
+                      )}
                     </button>
                   </div>
                 </div>
