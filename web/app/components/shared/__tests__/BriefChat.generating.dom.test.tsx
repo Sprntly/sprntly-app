@@ -201,7 +201,7 @@ function mountHarness() {
 }
 
 const WIP_TITLE = "Generating your Weekly brief…"
-const EMPTY_GREETING = "Please add more sources"
+const EMPTY_GREETING = "add and connect more sources"
 
 afterEach(() => {
   cleanup()
@@ -223,11 +223,9 @@ describe("BriefChat — generating / WIP indicator", () => {
     // …it carries the live-region role and the spinner element…
     const status = screen.getByRole("status")
     expect(status.querySelector(".bc-generating-spinner")).not.toBeNull()
-    // …the persistent PM-agent intro is shown even while generating (the old
-    // redundant "Monday brief · generating…" status line was removed)…
-    expect(
-      screen.getByText(/continuously monitor how your product is being used/),
-    ).not.toBeNull()
+    // …the WIP block replaces the greeting while generating: the single greeting
+    // paragraph (salutation + capability + top-N tail) is not rendered yet…
+    expect(document.querySelector(".bc-greeting")).toBeNull()
     // …and the empty "no brief yet" greeting is NOT shown.
     expect(screen.queryByText(new RegExp(EMPTY_GREETING))).toBeNull()
   })
@@ -287,7 +285,7 @@ describe("BriefChat — generating / WIP indicator", () => {
     // The encouraging "we received your data" message is shown…
     expect(screen.getByText(/We've got your data/)).not.toBeNull()
     expect(
-      screen.getByText(/there isn't enough connected evidence yet to build your brief/),
+      screen.getByText(/there isn't enough connected evidence yet to build/),
     ).not.toBeNull()
     // …and the brand-new-empty "add more sources" copy is NOT used.
     expect(screen.queryByText(new RegExp(EMPTY_GREETING))).toBeNull()

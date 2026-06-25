@@ -84,37 +84,31 @@ const isPrototypeCommand = (q: string) =>
 const isTicketsCommand = (q: string) =>
   /\b(create|generate|make|draft|break)\b.*\btickets?\b/i.test(q)
 
-// Persistent PM-agent intro shown every time the brief opens. It educates the
-// user on what the agent continuously does for them (so the value is re-stated,
-// not assumed). Deliberately NOT personalized: the per-brief greeting below
-// (buildGreeting) carries the "Good day, {name}" salutation, so opening this
-// explainer with one too produced a double "Good day {name}". This is the fixed
-// capability statement; the greeting is the personalized opener.
-function buildPersistentIntro(): string {
-  return `We continuously monitor how your product is being used, what customers are asking for, and competitor launches — and give you a weekly digest of the most important things worth working on.`
-}
+// The fixed capability sentence — what the agent continuously does for the user.
+// Lower-cased so it flows after the "Good day, {name} - " salutation in a single
+// greeting paragraph.
+const CAPABILITY_LINE =
+  "we continuously monitor how your product is being used, what customers are asking for, and competitor launches — and give you a weekly digest of the most important things worth working on."
 
+// Single greeting paragraph: salutation + capability + a state-dependent tail.
+// One paragraph (no separate persistent intro) so there's exactly one
+// "Good day, {name}" and the message reads as one flowing line.
 function buildGreeting(v2: BriefV2State | null, firstName: string | null): string {
   const who = firstName ? `, ${firstName}` : ""
+  const lead = `Good day${who} - ${CAPABILITY_LINE}`
   if (!v2 || (!v2.hero && v2.supporting.length === 0)) {
     // Distinguish "we received your data but it isn't connected-evidence-rich
     // enough yet" from a brand-new, no-data account. The backend sets
     // `insufficientEvidence` on the empty brief in the former case so we can
     // reassure the user their upload landed instead of telling them to "add a
-    // first source". `_empty_reason` can carry internal jargon, so we only use
-    // it when it's clearly a user-facing sentence; otherwise static copy.
+    // first source".
     if (v2?.insufficientEvidence) {
-      return `We've got your data${who} — but there isn't enough connected evidence yet to build your brief. Connect another source or add richer data, and your brief will fill in.`
+      return `${lead} We've got your data, but there isn't enough connected evidence yet to build this week's brief — connect another source or add richer data and it'll fill in.`
     }
-    return `Good day${who} — there isn't enough connected yet to generate a weekly brief. Please add more sources and connect them to us, and your brief will appear here.`
+    return `${lead} There isn't enough connected yet to generate this week's brief — add and connect more sources and it'll appear here.`
   }
-  // Lead with a clean one-line intro and let the finding cards below carry the
-  // titles — inlining the (Title-Cased) finding titles into this sentence read
-  // as an awkward run-on.
   const n = [v2.hero, ...v2.supporting].filter(Boolean).length
-  return `Good day${who} — here's this week's brief. I spotted ${n} thing${
-    n !== 1 ? "s" : ""
-  } worth your attention this week.`
+  return `${lead} Here's the top ${n} thing${n !== 1 ? "s" : ""} worth your attention this week.`
 }
 
 function weekLabel(weekOf: string | null): string {
@@ -1350,7 +1344,6 @@ export function BriefChat() {
   // ── Derived render data ────────────────────────────────────────────────────
   const v2 = content.briefV2
   const firstName = content.userName ? content.userName.split(/\s+/)[0] : null
-  const persistentIntro = useMemo(() => buildPersistentIntro(), [])
   const greeting = useMemo(() => buildGreeting(v2, firstName), [v2, firstName])
   const findings: Finding[] = useMemo(() => {
     if (!v2) return []
@@ -1423,14 +1416,14 @@ export function BriefChat() {
                 </span>
               </div>
               <div className="bc-agent-body">
-                {/* Persistent educational intro — shown every time, even while the
-                    brief is generating or empty — so the agent's ongoing value is
-                    always restated. Replaces the redundant "Monday brief" line. */}
-                <p className="bc-intro">{persistentIntro}</p>
                 {generatingBrief ? (
                   <BriefGeneratingState />
                 ) : (
                 <>
+                {/* Single greeting paragraph: salutation + the agent's ongoing
+                    value + the "top N this week" tail (buildGreeting). Replaces
+                    the old separate persistent-intro + greeting that double-led
+                    with "Good day {name}". */}
                 <p className="bc-greeting">{greeting}</p>
                 {findings.length > 0 ? (
                   <div className="fc-stack">
