@@ -228,13 +228,11 @@ export function PrdPanelContent() {
 
   const [prdLoading, setPrdLoading] = useState(false)
 
-  // The brief insight the loaded PRD was generated from (PrdState only carries
-  // prd_id, but the PrdRecord wire shape also has brief_id/insight_index). Kept
-  // here so we can fetch the matching QA test-scenarios doc for the same source.
-  const [briefRef, setBriefRef] = useState<{ briefId: number; insightIndex: number } | null>(null)
   // Parsed QA test-scenario sections to render under the PRD. Empty until a
   // ready qa-scenarios doc is fetched and parsed; a failed/absent/not-ready
-  // fetch leaves this empty so nothing extra renders.
+  // fetch leaves this empty so nothing extra renders. Keyed off the loaded PRD's
+  // briefId/insightIndex (carried on PrdState), so EVERY load path triggers it —
+  // including the brief card's "View PRD" (loadPrdById), not just latest/openGen.
   const [qaSections, setQaSections] = useState<PrdSection[]>([])
 
   useEffect(() => {
@@ -246,8 +244,7 @@ export function PrdPanelContent() {
     setPrdLoading(true)
     prdApi.latest(activeCompany).then((record) => {
       if (cancelled || !record.payload_md) return
-      setBriefRef({ briefId: record.brief_id, insightIndex: record.insight_index })
-      setContent({ prd: { ...markdownToPrdState(record.payload_md), prd_id: record.id, figma_file_key: undefined, llmPart: record.llm_part } })
+      setContent({ prd: { ...markdownToPrdState(record.payload_md), prd_id: record.id, figma_file_key: undefined, llmPart: record.llm_part, briefId: record.brief_id, insightIndex: record.insight_index } })
     }).catch((e) => {
       if (e instanceof ApiError && e.status === 404) return
     }).finally(() => { if (!cancelled) setPrdLoading(false) })
@@ -258,11 +255,13 @@ export function PrdPanelContent() {
   // doc for the same brief_id + insight_index. Render its parsed sections only
   // when the doc is present AND ready; otherwise render nothing extra. Resilient:
   // a failed/absent fetch never breaks the PRD view (errors swallowed → empty).
+  const qaBriefId = prd?.briefId
+  const qaInsightIndex = prd?.insightIndex
   useEffect(() => {
-    if (!briefRef) { setQaSections([]); return }
+    if (qaBriefId == null || qaInsightIndex == null) { setQaSections([]); return }
     let cancelled = false
     multiAgentApi
-      .getQaScenarios(briefRef.briefId, briefRef.insightIndex)
+      .getQaScenarios(qaBriefId, qaInsightIndex)
       .then((res) => {
         if (cancelled) return
         const doc = res.doc
@@ -276,7 +275,7 @@ export function PrdPanelContent() {
       })
       .catch(() => { if (!cancelled) setQaSections([]) })
     return () => { cancelled = true }
-  }, [briefRef])
+  }, [qaBriefId, qaInsightIndex])
 
   const bodyRef = useRef<HTMLDivElement>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -289,8 +288,7 @@ export function PrdPanelContent() {
   const openGeneration = useCallback(async (genId: number) => {
     try {
       const rec = await prdApi.get(genId)
-      setBriefRef({ briefId: rec.brief_id, insightIndex: rec.insight_index })
-      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, llmPart: rec.llm_part } })
+      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, llmPart: rec.llm_part, briefId: rec.brief_id, insightIndex: rec.insight_index } })
       setShowVersions(false)
     } catch {
       showToast("Couldn't open version", "Failed to load that generation.")
