@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { Brief, Insight } from "../api"
-import { briefToBriefV2State, companyLabel } from "../brief-v2-adapter"
+import { briefToBriefV2State, companyLabel, humanizeSource } from "../brief-v2-adapter"
 
 function makeInsight(overrides: Partial<Insight> & { tag: Insight["tag"] }): Insight {
   return {
@@ -56,6 +56,24 @@ function makeBrief(insights: Insight[]): Brief {
     insights,
   }
 }
+
+describe("humanizeSource", () => {
+  it("maps known signal source_types to friendly labels", () => {
+    expect(humanizeSource("pm_manual")).toBe("PM notes")
+    expect(humanizeSource("customer_voice")).toBe("Customer voice")
+    expect(humanizeSource("project_mgmt")).toBe("Project mgmt")
+    expect(humanizeSource("revenue")).toBe("Revenue")
+    expect(humanizeSource("corpus_doc")).toBe("Documents")
+  })
+  it("de-underscores + sentence-cases unknown tokens", () => {
+    expect(humanizeSource("foo_bar")).toBe("Foo bar")
+    expect(humanizeSource("ANALYTICS")).toBe("Analytics") // case-insensitive
+  })
+  it("leaves already-friendly names readable", () => {
+    expect(humanizeSource("HubSpot")).toBe("HubSpot")
+    expect(humanizeSource("  Zendesk  ")).toBe("Zendesk")
+  })
+})
 
 describe("companyLabel", () => {
   it("prefers the backend display name over the dataset slug", () => {
@@ -335,19 +353,20 @@ describe("briefToBriefV2State — weekly-brief skill taxonomy", () => {
     expect(hero.ctas).toEqual([]) // no skill card → caller falls back to default CTAs
   })
 
-  it("carries the skill card's source chips onto fromSources (the 'From' row)", () => {
+  it("carries source chips onto fromSources, humanized, blanks dropped", () => {
     const state = briefToBriefV2State(
       makeBrief([
         makeInsight({
           tag: "something_broken",
           title: "A churn signal",
-          _card: { type: "retention", sources: ["Amplitude", "Zendesk", "  "] },
+          // raw signal source_type tokens + a blank
+          _card: { type: "retention", sources: ["customer_voice", "pm_manual", "revenue", "  "] },
         }),
         makeInsight({ tag: "something_new", title: "Second finding" }),
       ]),
     )
-    // Honest provenance: real chips carried through, blanks dropped.
-    expect(state.hero!.fromSources).toEqual(["Amplitude", "Zendesk"])
+    // Honest provenance: raw source_types are humanized; blanks dropped.
+    expect(state.hero!.fromSources).toEqual(["Customer voice", "PM notes", "Revenue"])
     // Legacy insight with no _card → no source chips (no fabricated convergence).
     expect(state.supporting[0].fromSources).toEqual([])
   })
