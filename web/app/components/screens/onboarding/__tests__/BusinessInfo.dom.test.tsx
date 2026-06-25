@@ -110,7 +110,7 @@ describe("BusinessInfo (container) — Product + metrics page", () => {
     expect(container.querySelector('input[type="url"]')).not.toBeNull()
   })
 
-  it("keeps the 3–5 pick function: toggling chips updates the selection", () => {
+  it("enforces EXACTLY 3 picks: pre-selects 3 and BLOCKS a 4th (deselect to swap)", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     // Seed a saved KPI tree so the chip pool is deterministic in the test.
     const ws = makeWorkspace({
@@ -132,20 +132,40 @@ describe("BusinessInfo (container) — Product + metrics page", () => {
       container.querySelectorAll<HTMLButtonElement>(".metric-chips .metric"),
     )
     expect(chips.length).toBeGreaterThanOrEqual(4)
-    // First 3 are pre-selected (MIN_METRIC_PICKS).
+    // First 3 are pre-selected (exactly 3).
     const selectedBefore = chips.filter(
       (c) => c.getAttribute("aria-pressed") === "true",
     )
     expect(selectedBefore.length).toBe(3)
-    // Toggling a 4th selects it (3–5 range allows this).
+    // A 4th pick is REFUSED — the chip stays unselected (you deselect to swap),
+    // and the "up to 3" warning surfaces.
     const fourth = chips.find((c) => c.getAttribute("aria-pressed") === "false")!
     act(() => {
       fourth.click()
     })
+    expect(fourth.getAttribute("aria-pressed")).toBe("false")
+    expect(
+      chips.filter((c) => c.getAttribute("aria-pressed") === "true").length,
+    ).toBe(3)
+    expect(container.textContent).toMatch(/up to 3 metrics/i)
+
+    // Deselecting one frees a slot so the previously-refused chip can be picked.
+    const firstSelected = chips.find(
+      (c) => c.getAttribute("aria-pressed") === "true",
+    )!
+    act(() => {
+      firstSelected.click()
+    })
+    act(() => {
+      fourth.click()
+    })
     expect(fourth.getAttribute("aria-pressed")).toBe("true")
+    expect(
+      chips.filter((c) => c.getAttribute("aria-pressed") === "true").length,
+    ).toBe(3)
   })
 
-  it("no longer renders the Stage or Team size steps", () => {
+  it("no longer renders Stage, Team size, tech-stack, or the industry/business-type controls (moved to business-context)", () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
 
@@ -153,8 +173,12 @@ describe("BusinessInfo (container) — Product + metrics page", () => {
     expect(container.textContent).not.toContain("Team size")
     // no headcount number input remains
     expect(container.querySelector('input[type="number"]')).toBeNull()
-    // tech-stack chips still render (untouched)
-    expect(container.querySelector(".onb-chip")).not.toBeNull()
+    // tech-stack chips + industry/business-type controls relocated to onbctx
+    expect(container.querySelector(".onb-chip")).toBeNull()
+    expect(container.querySelector('[data-field="industry"]')).toBeNull()
+    expect(container.querySelector('[data-field="businessType"]')).toBeNull()
+    expect(container.querySelector("select")).toBeNull()
+    expect(container.textContent).not.toContain("Tech stack")
   })
 
   it("does NOT send stage/team_size in the create payload (dropped cleanly)", async () => {
