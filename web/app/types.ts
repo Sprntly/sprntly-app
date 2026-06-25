@@ -1,10 +1,12 @@
 export type ScreenId =
-  // Numbered onboarding steps, keyed by their semantic slug (5-step redesign).
+  // Numbered onboarding steps, keyed by their semantic slug (5-step redesign),
+  // in flow order: business-info → workspace → connectors → business-context →
+  // strategy (strategy is the closing step).
   | "ob-business-info"
+  | "ob-workspace"
   | "ob-connectors"
   | "ob-business-context"
   | "ob-strategy"
-  | "ob-workspace"
   // Unnumbered loader interstitial — its own route, excluded from the numbered
   // ONBOARDING_SCREENS list and the progress dots.
   | "ob-analyzing"
@@ -32,10 +34,10 @@ export type ScreenId =
 // absent — it is the unnumbered loader, not a counted step.
 export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-business-info",
+  "ob-workspace",
   "ob-connectors",
   "ob-business-context",
   "ob-strategy",
-  "ob-workspace",
 ]
 
 export const APP_SCREENS: ScreenId[] = [
@@ -61,10 +63,10 @@ export const APP_SCREENS: ScreenId[] = [
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   "ob-business-info": "Setup · Step 1 of 5",
-  "ob-connectors": "Setup · Step 2 of 5",
-  "ob-business-context": "Setup · Step 3 of 5",
-  "ob-strategy": "Setup · Step 4 of 5",
-  "ob-workspace": "Setup · Step 5 of 5",
+  "ob-workspace": "Setup · Step 2 of 5",
+  "ob-connectors": "Setup · Step 3 of 5",
+  "ob-business-context": "Setup · Step 4 of 5",
+  "ob-strategy": "Setup · Step 5 of 5",
   // Unnumbered loader — no step counter.
   "ob-analyzing": "Setup",
   chat: "Home",

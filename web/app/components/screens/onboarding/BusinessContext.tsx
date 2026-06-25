@@ -18,7 +18,7 @@ import {
 } from "../app/settings/BusinessContextSettings"
 
 /**
- * Onboarding step 03 — "Your business context" (design scene onbctx).
+ * Onboarding step 04 — "Your business context" (design scene onbctx).
  *
  * REUSES the #450 Business Context surface end-to-end:
  *   - the structured 8-layer doc + `businessContextApi` (GET/PUT
@@ -31,7 +31,7 @@ import {
  * state, and the step stays skippable (the design's onbctx never blocks).
  *
  * On Continue we PUT any edits (when a doc exists) and advance to the strategy
- * step (index 4). The pane mirrors the Settings editor: edit only each leaf's
+ * step (index 5). The pane mirrors the Settings editor: edit only each leaf's
  * `.value`; the backend stamps edited leaves src="user".
  */
 
@@ -386,7 +386,7 @@ export function BusinessContext() {
       if (doc) {
         await businessContextApi.update(applyEdits(doc, values))
       }
-      await advanceOnboardingStep(workspace.id, 4)
+      await advanceOnboardingStep(workspace.id, 5)
       router.push("/onboarding/strategy")
     } catch (e) {
       setSaveError(
@@ -408,7 +408,7 @@ export function BusinessContext() {
         tech_stack: techStack,
       })
       setWorkspace({ ...updated, product: updated.product ?? workspace.product })
-      await advanceOnboardingStep(workspace.id, 4)
+      await advanceOnboardingStep(workspace.id, 5)
       router.push("/onboarding/strategy")
     } finally {
       setSaving(false)
@@ -419,7 +419,7 @@ export function BusinessContext() {
 
   return (
     <OnboardingChrome
-      step={3}
+      step={4}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -429,7 +429,7 @@ export function BusinessContext() {
       subtitle="We drafted this from your website and connectors. Edit anything — it's the lens every Sprntly agent reasons through. You can refine it any time in Settings."
       footerMeta={
         <>
-          Step 3 of 5 · business context —{" "}
+          Step 4 of 5 · business context —{" "}
           <button
             type="button"
             className="onb-skip-link"

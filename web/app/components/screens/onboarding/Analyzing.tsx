@@ -15,8 +15,10 @@ import {
  * This is a TRANSIENT, UNNUMBERED route (`/onboarding/analyzing`): it is not in
  * ONBOARDING_SCREENS, it is not back-navigable, and it is excluded from the
  * progress-dot count (it renders no dots). It sits between the combined
- * product+metrics page (step 1, business-info) and the connectors page
- * (`/onboarding/connectors`, step 2).
+ * product+metrics page (step 1, business-info) and the workspace page
+ * (`/onboarding/workspace`, step 2). The website analysis it runs is consumed
+ * later by the business-context step (auto-drafted industry / business type),
+ * which now sits at step 4 — giving the server-side job ample time to finish.
  *
  * BLUR/REMOUNT-SAFE (mirrors the chat Ask flow):
  *   - POST /v1/onboarding/analyze-website is fire-and-forget — it returns a
@@ -29,9 +31,10 @@ import {
  *     RE-ATTACHES to the running job instead of re-POSTing a duplicate run.
  *
  * RESILIENCE — onboarding must always complete:
- *   - On `ready` → stash the analysis, forward to metrics.
+ *   - On `ready` → stash the analysis, forward to the workspace step.
  *   - On `error` / transport failure / wall-clock budget exhaustion → still
- *     forward (manual fallback on the metrics page). The poll's Date.now budget
+ *     forward (the analysis is consumed later, on business-context). The poll's
+ *     Date.now budget
  *     (90s) is the "don't trap forever" backstop — it does NOT abandon a still-
  *     running analysis just because the tab was briefly backgrounded.
  *   - A manual "Skip" lets the user bail out immediately.
@@ -52,7 +55,7 @@ export function Analyzing() {
   function forward() {
     if (forwardedRef.current) return
     forwardedRef.current = true
-    router.replace("/onboarding/connectors")
+    router.replace("/onboarding/workspace")
   }
 
   // No workspace to anchor the flow → bounce back to the first step (in an
