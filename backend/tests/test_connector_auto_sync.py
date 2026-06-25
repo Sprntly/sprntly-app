@@ -73,6 +73,38 @@ def test_run_sync_stamps_error_on_failure(monkeypatch):
     assert "API down" in stamps["last_sync_error"]
 
 
+def test_run_sync_handles_expired_token_gracefully(monkeypatch, caplog):
+    """A 401/403 (expired or revoked OAuth token) is expected/recoverable: it is
+    logged at WARNING (no ERROR traceback) and stamped as a reconnect prompt —
+    not flooded as an ERROR every sync cycle (the prod GitHub auto-sync noise)."""
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"token_json_encrypted": "enc"})
+    monkeypatch.setattr(auto_sync, "decrypt_token_json", lambda enc: '{"access_token": "t"}')
+    monkeypatch.setattr(auto_sync, "token_for", lambda prov, tj: "t")
+    monkeypatch.setattr(auto_sync, "GraphFacade", lambda *a, **k: object())
+
+    def expired(*a, **k):
+        raise HTTPException(status_code=401, detail="GitHub repos fetch failed")
+
+    monkeypatch.setattr(auto_sync, "sync_provider", expired)
+    stamps = {}
+    monkeypatch.setattr(auto_sync.db, "update_connection_sync",
+                        lambda cid, prov, **kw: stamps.update(kw))
+
+    import logging
+    with caplog.at_level(logging.WARNING, logger="app.kg_ingest.auto_sync"):
+        auto_sync._run_sync("co-1", "github")        # must not raise
+
+    # Graceful: reconnect prompt stamped, WARNING (not ERROR) logged.
+    assert stamps["last_sync_error"] == "github authorization expired — reconnect required"
+    recs = [r for r in caplog.records if r.name == "app.kg_ingest.auto_sync"]
+    assert any(r.levelno == logging.WARNING and "reconnect required" in r.getMessage()
+               for r in recs)
+    assert not any(r.levelno >= logging.ERROR for r in recs)  # no ERROR traceback
+
+
 # ---------- kickoff fires from the connect callback ----------
 
 def test_fireflies_connect_kicks_off_sync(isolated_settings, monkeypatch):

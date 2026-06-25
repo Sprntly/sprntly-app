@@ -47,11 +47,25 @@ def _run_sync(company_id: str, provider: str) -> None:
         logger.info("auto-sync done: %s/%s records=%s signals=%s",
                     company_id, provider, result.get("records"), result.get("signals"))
     except (TokenEncryptionError, Exception) as e:  # noqa: BLE001 — fully isolated
-        logger.exception("auto-sync failed for %s/%s", company_id, provider)
+        # An auth failure (401/403) means the stored OAuth token expired or was
+        # revoked — an EXPECTED, recoverable condition. Don't flood ERROR logs
+        # with a full traceback every sync cycle: log a WARNING and stamp the
+        # connection so the UI can prompt a reconnect. Genuine errors still get
+        # the full ERROR traceback.
+        status = getattr(e, "status_code", None)
+        if status in (401, 403):
+            logger.warning(
+                "auto-sync: %s token for %s is invalid (%s) — reconnect required",
+                provider, company_id, status,
+            )
+            error_msg = f"{provider} authorization expired — reconnect required"
+        else:
+            logger.exception("auto-sync failed for %s/%s", company_id, provider)
+            error_msg = str(e)
         try:
             db.update_connection_sync(
                 company_id, provider, last_sync_at=utc_now(),
-                last_sync_error=str(e)[:500],
+                last_sync_error=error_msg[:500],
             )
         except Exception:  # noqa: BLE001
             logger.warning("auto-sync: could not stamp error for %s/%s",
