@@ -96,11 +96,12 @@ function HeroFindingCard({
     card.secondaryCtaBehavior === "generate_prd"
   return (
     <article
-      className={`briefv2-hero briefv2-card briefv2-card--${card.actionAccent}`}
+      className="briefv2-hero briefv2-card briefv2-card--skill"
+      style={{ ["--card-accent"]: card.skillAccent } as React.CSSProperties}
     >
       <div className="briefv2-card-inner">
         <div className="briefv2-card-top">
-          <span className="briefv2-card-action">{card.actionLabel}</span>
+          <span className="briefv2-card-action briefv2-card-action--skill">{card.skillLabel}</span>
           <span className="briefv2-card-eyebrow">HEADLINE FINDING</span>
           <span className="briefv2-card-metric">{card.metricHighlight}</span>        </div>
         <h2 className="briefv2-card-headline">{card.title}</h2>
@@ -142,11 +143,12 @@ function CompactFindingCard({
     card.secondaryCtaBehavior === "generate_prd"
   return (
     <article
-      className={`briefv2-compact briefv2-card briefv2-card--${card.actionAccent}`}
+      className="briefv2-compact briefv2-card briefv2-card--skill"
+      style={{ ["--card-accent"]: card.skillAccent } as React.CSSProperties}
     >
       <div className="briefv2-card-inner">
         <div className="briefv2-card-top">
-          <span className="briefv2-card-action">{card.actionLabel}</span>
+          <span className="briefv2-card-action briefv2-card-action--skill">{card.skillLabel}</span>
           <span className="briefv2-card-metric">{card.metricHighlight}</span>        </div>
         <h3 className="briefv2-card-headline">{card.title}</h3>
         <p className="briefv2-card-body">{card.body}</p>

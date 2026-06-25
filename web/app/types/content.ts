@@ -33,6 +33,17 @@ export interface BriefFindingRow {
   /** Template: BUILD / FIX / OPTIMIZE — left rail color + secondary CTA. */
   actionAccent: BriefActionAccent
   actionLabel: string
+  /** Weekly-brief skill taxonomy: the finding type (one of the 7), its accent
+   *  hex (derived from the type — not the model's mismatchable accent), and the
+   *  type-name pill label (no P0/P1). Drives the card accent bar + category pill
+   *  in the skill design. */
+  skillType: string
+  skillAccent: string
+  skillLabel: string
+  /** Skill card CTAs (View/Draft PRD, View/Generate prototype); empty for
+   *  legacy briefs that predate the skill card — callers fall back. */
+  ctas: Array<{ label: string; style: string }>
+
   /** Template: headline metric (e.g. +$12M LTV / yr), accent-colored. */
   metricHighlight: string
   /** Template: italic footer line of signal sources. */

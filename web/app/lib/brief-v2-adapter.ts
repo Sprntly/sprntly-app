@@ -19,7 +19,8 @@ import type {
   PrdChartDatum,
   PrdChartKind,
 } from "../types/content"
-import type { Brief, ChartHint, Insight } from "./api"
+import type { Brief, BriefSkillCta, BriefSkillType, ChartHint, Insight } from "./api"
+import { accentForInsight, labelForInsight, resolveSkillType } from "./brief-skill-taxonomy"
 
 // ---- Types ----------------------------------------------------------------
 
@@ -57,6 +58,16 @@ interface BriefV2CardBase {
   actionLabel: string
   tagType: BriefTagType
   tagLabel: string
+  // Weekly-brief skill taxonomy (the canonical design): the finding's type,
+  // its accent hex (derived from the type, not the model's mismatchable accent),
+  // and the type-name pill label (no P0/P1, per the skill). Render layers prefer
+  // these over category/priority for the card accent + pill.
+  skillType: BriefSkillType
+  skillAccent: string
+  skillLabel: string
+  // The skill card's CTAs (View/Draft PRD, View/Generate prototype) when the
+  // backend attached `_card`; empty for legacy briefs (callers fall back).
+  ctas: BriefSkillCta[]
   category: string
   priority: string
   confidence: number
@@ -333,6 +344,10 @@ function buildCardBase(
     actionLabel: m.actionLabel,
     tagType: m.tagType,
     tagLabel: m.tagLabel,
+    skillType: resolveSkillType(insight),
+    skillAccent: accentForInsight(insight),
+    skillLabel: labelForInsight(insight),
+    ctas: Array.isArray(insight._card?.ctas) ? insight._card!.ctas : [],
     category: categoryFor(insight, m.actionAccent),
     priority,
     confidence: insight.confidence ?? 0,
