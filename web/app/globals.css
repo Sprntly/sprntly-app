@@ -13414,6 +13414,27 @@
     box-shadow: var(--shadow-md);
   }
 
+  /* Wider card for the narrative steps (design's `.onb-card-wide`). */
+  .onb-card-wide {
+    max-width: 860px;
+  }
+
+  /* AI-drafted note above an editable field (design's `.ctx-ai-flag`; tokens
+     mapped to globals: --brand-d → --accent-ink, --brand-ll → --accent-muted,
+     --brand-b → --accent-2, --r-sm → --radius-sm). */
+  .ctx-ai-flag {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 11.5px;
+    color: var(--accent-ink);
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-2);
+    border-radius: var(--radius-sm);
+    padding: 7px 11px;
+    margin-bottom: 10px;
+  }
+
   .onb-h {
     font-family: var(--font-serif);
     font-size: 30px;

@@ -2,6 +2,13 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react"
 import { useAuth } from "../../../../lib/auth"
+import { useWorkspace } from "../../../../context/WorkspaceContext"
+import { updateWorkspace } from "../../../../lib/onboarding/store"
+import {
+  BUSINESS_TYPES,
+  INDUSTRIES,
+  TECH_STACK_OPTIONS,
+} from "../../../../lib/onboarding/types"
 import {
   businessContextApi,
   teamApi,
@@ -354,6 +361,193 @@ export function BusinessContextSettingsView(props: BusinessContextSettingsViewPr
   )
 }
 
+// ── company-shape pane (Industry / Business type / Tech stack) ───────────────
+// These company-shape signals (companies.industry / business_type / tech_stack)
+// used to be edited inside the onboarding business-context step. Onboarding now
+// shows only the two narrative textareas, so the structured signal moved here so
+// it stays editable. They persist via updateWorkspace and are still consumed
+// downstream (metric-candidate seeding, workspace brief, research grounding).
+
+export type CompanyShapeSettingsViewProps = {
+  loading: boolean
+  industry: string
+  businessType: string
+  techStack: string[]
+  canEdit: boolean
+  saving: boolean
+  saved: boolean
+  error: string | null
+  onChangeIndustry: (value: string) => void
+  onChangeBusinessType: (value: string) => void
+  onToggleTechStack: (tech: string) => void
+  onSave: (e: React.FormEvent) => void
+}
+
+export function CompanyShapeSettingsView(props: CompanyShapeSettingsViewProps) {
+  const {
+    loading,
+    industry,
+    businessType,
+    techStack,
+    canEdit,
+    saving,
+    saved,
+    error,
+    onChangeIndustry,
+    onChangeBusinessType,
+    onToggleTechStack,
+    onSave,
+  } = props
+
+  if (loading) return null
+
+  return (
+    <SettingsSection
+      title="Company shape"
+      sub="Industry, business type, and tech stack — the structured signal that grounds metric suggestions, the weekly brief, and research."
+    >
+      <form onSubmit={onSave} data-bc-company-shape>
+        <div className="field" data-field="industry">
+          <label className="field-label" htmlFor="bc-shape-industry">
+            Industry
+          </label>
+          <select
+            id="bc-shape-industry"
+            className="input"
+            value={industry}
+            onChange={(e) => onChangeIndustry(e.target.value)}
+            disabled={!canEdit}
+          >
+            {INDUSTRIES.map((i) => (
+              <option key={i}>{i}</option>
+            ))}
+          </select>
+        </div>
+        <div className="field" data-field="businessType">
+          <label className="field-label" htmlFor="bc-shape-business-type">
+            Business type
+          </label>
+          <select
+            id="bc-shape-business-type"
+            className="input"
+            value={businessType}
+            onChange={(e) => onChangeBusinessType(e.target.value)}
+            disabled={!canEdit}
+          >
+            {BUSINESS_TYPES.map((b) => (
+              <option key={b}>{b}</option>
+            ))}
+          </select>
+        </div>
+        <div className="field" data-field="techStack">
+          <label className="field-label">Tech stack</label>
+          <div className="ob-chip-row">
+            {TECH_STACK_OPTIONS.map((t) => (
+              <button
+                key={t}
+                type="button"
+                className={`metric-chip ${techStack.includes(t) ? "selected" : ""}`}
+                aria-pressed={techStack.includes(t)}
+                onClick={() => onToggleTechStack(t)}
+                disabled={!canEdit}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+        {error && <SettingsMessage kind="error">{error}</SettingsMessage>}
+        {saved && <SettingsMessage kind="success">Company shape saved.</SettingsMessage>}
+        {canEdit && (
+          <button type="submit" className="btn btn-primary" disabled={saving}>
+            {saving ? "Saving…" : "Save company shape"}
+          </button>
+        )}
+      </form>
+    </SettingsSection>
+  )
+}
+
+/** Container for the company-shape section. Reads the workspace company-shape
+ *  fields and persists edits via updateWorkspace. */
+export function CompanyShapeSettings({ canEdit }: { canEdit: boolean }) {
+  const { workspace, loading, refresh } = useWorkspace()
+  const [industry, setIndustry] = useState<string>(INDUSTRIES[0])
+  const [businessType, setBusinessType] = useState<string>(BUSINESS_TYPES[0])
+  const [techStack, setTechStack] = useState<string[]>([])
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!workspace) return
+    const ind = workspace.industry
+    setIndustry(
+      ind && INDUSTRIES.includes(ind as (typeof INDUSTRIES)[number])
+        ? ind
+        : ind
+          ? "Other"
+          : INDUSTRIES[0],
+    )
+    const bt = workspace.business_type
+    setBusinessType(
+      bt && BUSINESS_TYPES.includes(bt as (typeof BUSINESS_TYPES)[number])
+        ? bt
+        : BUSINESS_TYPES[0],
+    )
+    setTechStack(workspace.tech_stack ?? [])
+  }, [workspace])
+
+  async function onSave(e: React.FormEvent) {
+    e.preventDefault()
+    if (!workspace || !canEdit) return
+    setSaving(true)
+    setError(null)
+    setSaved(false)
+    try {
+      await updateWorkspace(workspace.id, {
+        industry,
+        business_type: businessType,
+        tech_stack: techStack,
+      })
+      await refresh()
+      setSaved(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save company shape")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <CompanyShapeSettingsView
+      loading={loading}
+      industry={industry}
+      businessType={businessType}
+      techStack={techStack}
+      canEdit={canEdit}
+      saving={saving}
+      saved={saved}
+      error={error}
+      onChangeIndustry={(v) => {
+        setSaved(false)
+        setIndustry(v)
+      }}
+      onChangeBusinessType={(v) => {
+        setSaved(false)
+        setBusinessType(v)
+      }}
+      onToggleTechStack={(t) => {
+        setSaved(false)
+        setTechStack((prev) =>
+          prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t],
+        )
+      }}
+      onSave={onSave}
+    />
+  )
+}
+
 // ── container ────────────────────────────────────────────────────────────────
 
 /** Apply the edited string values back onto a clone of the doc. Multi-token
@@ -500,20 +694,25 @@ export function BusinessContextSettings() {
   )
 
   return (
-    <BusinessContextSettingsView
-      loading={loading}
-      loadError={loadError}
-      doc={view.doc}
-      values={view.values}
-      canEdit={view.canEdit}
-      saving={saving}
-      saved={saved}
-      saveError={saveError}
-      refreshing={refreshing}
-      refreshError={refreshError}
-      onChangeField={onChangeField}
-      onSave={onSave}
-      onRefresh={onRefresh}
-    />
+    <>
+      <BusinessContextSettingsView
+        loading={loading}
+        loadError={loadError}
+        doc={view.doc}
+        values={view.values}
+        canEdit={view.canEdit}
+        saving={saving}
+        saved={saved}
+        saveError={saveError}
+        refreshing={refreshing}
+        refreshError={refreshError}
+        onChangeField={onChangeField}
+        onSave={onSave}
+        onRefresh={onRefresh}
+      />
+      {/* Company-shape fields (Industry / Business type / Tech stack) — moved
+          here from the onboarding business-context step (now narrative-only). */}
+      <CompanyShapeSettings canEdit={view.canEdit} />
+    </>
   )
 }

@@ -1,14 +1,19 @@
 // @vitest-environment jsdom
 //
 // Container mount test for the onboarding step 04 — "Your business context"
-// (design scene onbctx). It REUSES the #450 Business Context surface: it loads
-// the doc via businessContextApi.get (GET /v1/company/business-context), lets
-// the PM edit leaves inline, and on Continue PUTs edits + advances to strategy.
+// (design scene onbctx). PRODUCT DECISION: this step is the design's TWO
+// narrative textareas only — NOT the full structured 8-layer editor, and NOT
+// the company-shape fields (industry / business type / tech stack), which moved
+// to Settings → Business Context.
 //
-// Covers: loads + renders the auto-drafted doc, edits a field and persists it on
-// Continue (PUT), the 404 "not generated yet" empty state, and skip.
+// The two narratives map onto the #450 Business Context model
+// (businessContextApi.get/update, GET/PUT /v1/company/business-context):
+//   - "What the company does"  → product_value.what_it_does (+ identity.one_liner)
+//   - "What it cares about"     → goals_strategy.stated_goal (+ current_priorities)
 //
-// Matchers: native DOM only.
+// Covers: renders ONLY the 2 textareas (no structured doc, no company-shape),
+// loads the AI-drafted narratives, edits + PUTs them on Next, the 404 empty
+// state, and skip.
 import * as React from "react"
 import { act, cleanup, fireEvent, render } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -44,8 +49,6 @@ vi.mock("../../../../lib/api", async () => {
     },
   }
 })
-// The step pulls buildLayers from the Settings pane; that module imports the
-// real lib/api, which is mocked above (so businessContextApi is our spy).
 
 import { BusinessContext } from "../BusinessContext"
 import { makeOnboardingCtx, makeWorkspace } from "./fixtures"
@@ -55,7 +58,7 @@ function leaf<T>(value: T): BcLeaf<T> {
   return { value, src: "inferred", conf: "med", as_of: null, evidence: null }
 }
 
-/** Minimal but complete BusinessContextDoc with a couple of editable values. */
+/** Minimal but complete BusinessContextDoc with the narrative leaves set. */
 function makeDoc(over: Partial<BusinessContextDoc> = {}): BusinessContextDoc {
   return {
     identity: {
@@ -117,8 +120,8 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("BusinessContext (onboarding step 04)", () => {
-  it("loads the auto-drafted doc and renders its editable fields", async () => {
+describe("BusinessContext (onboarding step 04 — onbctx)", () => {
+  it("renders ONLY the two narrative textareas — no structured doc, no company-shape", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     bcGetMock.mockResolvedValue(makeDoc())
 
@@ -126,108 +129,87 @@ describe("BusinessContext (onboarding step 04)", () => {
       render(React.createElement(BusinessContext))
     })
 
-    // The step heading + the doc's drafted value are on screen.
     expect(document.querySelector(".onb-h")?.textContent).toMatch(/business context/i)
-    const whatItDoes = document.querySelector(
-      '[data-field="product_value.what_it_does"] textarea',
-    ) as HTMLTextAreaElement
-    expect(whatItDoes).not.toBeNull()
-    expect(whatItDoes.value).toContain("Reconciles payments")
+
+    // Exactly the two narrative textareas are present.
+    expect(document.querySelector('[data-field="what-it-does"]')).not.toBeNull()
+    expect(document.querySelector('[data-field="what-it-cares"]')).not.toBeNull()
+    expect(document.body.textContent).toContain("What the company does")
+    expect(document.body.textContent).toContain("What does the company care about?")
+
+    // NO structured 8-layer editor leaves and NO company-shape fields.
+    expect(
+      document.querySelector('[data-field="product_value.what_it_does"]'),
+    ).toBeNull()
+    expect(document.querySelector(".bc-layer")).toBeNull()
+    expect(document.querySelector("[data-bc-company-shape]")).toBeNull()
+    expect(document.querySelector('[data-field="industry"]')).toBeNull()
+    expect(document.querySelector(".onb-chip")).toBeNull()
   })
 
-  it("edits a field and PUTs the edit on Continue, then advances to strategy", async () => {
+  it("loads the AI-drafted narratives from the #450 doc", async () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx())
+    bcGetMock.mockResolvedValue(makeDoc())
+
+    await act(async () => {
+      render(React.createElement(BusinessContext))
+    })
+
+    expect(bcGetMock).toHaveBeenCalledTimes(1)
+    const whatDoes = document.querySelector(
+      '[data-field="what-it-does"]',
+    ) as HTMLTextAreaElement
+    const whatCares = document.querySelector(
+      '[data-field="what-it-cares"]',
+    ) as HTMLTextAreaElement
+    expect(whatDoes.value).toContain("Reconciles payments across providers.")
+    expect(whatCares.value).toContain("Grow reconciled volume")
+  })
+
+  it("edits both narratives and PUTs them onto their leaves on Next, then advances", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     bcGetMock.mockResolvedValue(makeDoc())
     bcUpdateMock.mockResolvedValue({ ok: true, version: 4 })
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace())
     advanceStepMock.mockResolvedValue(undefined)
 
     await act(async () => {
       render(React.createElement(BusinessContext))
     })
 
-    const whatItDoes = document.querySelector(
-      '[data-field="product_value.what_it_does"] textarea',
+    const whatDoes = document.querySelector(
+      '[data-field="what-it-does"]',
     ) as HTMLTextAreaElement
-    fireEvent.change(whatItDoes, { target: { value: "Edited description." } })
+    const whatCares = document.querySelector(
+      '[data-field="what-it-cares"]',
+    ) as HTMLTextAreaElement
+    fireEvent.change(whatDoes, { target: { value: "We do new things." } })
+    fireEvent.change(whatCares, { target: { value: "We care about growth." } })
 
-    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /continue/i.test(b.textContent ?? ""),
+    const nextBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /next/i.test(b.textContent ?? ""),
     ) as HTMLButtonElement
     await act(async () => {
-      continueBtn.click()
+      nextBtn.click()
     })
 
     expect(bcUpdateMock).toHaveBeenCalledTimes(1)
     const sent = bcUpdateMock.mock.calls[0][0] as BusinessContextDoc
-    expect(sent.product_value.what_it_does.value).toBe("Edited description.")
+    // "What the company does" → product_value.what_it_does (+ identity.one_liner)
+    expect(sent.product_value.what_it_does.value).toBe("We do new things.")
+    expect(sent.identity.one_liner.value).toBe("We do new things.")
+    // "What it cares about" → goals_strategy.stated_goal (+ current_priorities)
+    expect(sent.goals_strategy.stated_goal.value).toBe("We care about growth.")
+    expect(sent.goals_strategy.current_priorities.value).toBe("We care about growth.")
+
+    // Company-shape is NOT persisted from this step anymore.
+    expect(updateWorkspaceMock).not.toHaveBeenCalled()
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
   })
 
-  // ── relocated company-shape fields (moved off onb1) ─────────────────────────
-  it("renders the relocated industry / business-type / tech-stack controls", async () => {
-    onboardingMock.mockReturnValue(makeOnboardingCtx())
-    bcGetMock.mockResolvedValue(makeDoc())
-
-    await act(async () => {
-      render(React.createElement(BusinessContext))
-    })
-
-    expect(document.querySelector("[data-bc-company-shape]")).not.toBeNull()
-    expect(document.querySelector('[data-field="industry"] select')).not.toBeNull()
-    expect(document.querySelector('[data-field="businessType"] select')).not.toBeNull()
-    expect(document.querySelector(".onb-chip")).not.toBeNull()
-    expect(document.body.textContent).toContain("Tech stack")
-  })
-
-  it("persists the relocated company-shape fields on Continue (industry / business type / tech stack)", async () => {
-    onboardingMock.mockReturnValue(
-      makeOnboardingCtx({
-        workspace: makeWorkspace({
-          industry: "Fintech",
-          business_type: "Marketplace",
-          tech_stack: [],
-        }),
-      }),
-    )
-    bcGetMock.mockResolvedValue(makeDoc())
-    bcUpdateMock.mockResolvedValue({ ok: true, version: 4 })
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace())
-    advanceStepMock.mockResolvedValue(undefined)
-
-    await act(async () => {
-      render(React.createElement(BusinessContext))
-    })
-
-    // Toggle a tech-stack chip on.
-    const chip = document.querySelector(".onb-chip") as HTMLButtonElement
-    const chipLabel = chip.textContent ?? ""
-    fireEvent.click(chip)
-
-    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /continue/i.test(b.textContent ?? ""),
-    ) as HTMLButtonElement
-    await act(async () => {
-      continueBtn.click()
-    })
-
-    expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
-    const [id, patch] = updateWorkspaceMock.mock.calls[0] as [
-      string,
-      Record<string, unknown>,
-    ]
-    expect(id).toBe("ws-1")
-    expect(patch.industry).toBe("Fintech")
-    expect(patch.business_type).toBe("Marketplace")
-    expect(patch.tech_stack).toEqual([chipLabel])
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
-  })
-
-  it("shows the empty 'not generated yet' state on a 404 (null doc), still renders company-shape, and stays skippable", async () => {
+  it("shows the empty 'not generated yet' state on a 404 (null doc) and stays skippable", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     bcGetMock.mockResolvedValue(null) // GET returned 404
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace())
     advanceStepMock.mockResolvedValue(undefined)
 
     await act(async () => {
@@ -235,25 +217,20 @@ describe("BusinessContext (onboarding step 04)", () => {
     })
 
     expect(document.querySelector('[data-bc-state="empty"]')).not.toBeNull()
-    // Company-shape fields still render even when the doc isn't drafted yet.
-    expect(document.querySelector("[data-bc-company-shape]")).not.toBeNull()
-    // No doc → Continue must NOT PUT the doc, but must still advance + persist
-    // the company-shape fields.
-    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /continue/i.test(b.textContent ?? ""),
+    // No doc → Next must NOT PUT, but must still advance.
+    const nextBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /next/i.test(b.textContent ?? ""),
     ) as HTMLButtonElement
     await act(async () => {
-      continueBtn.click()
+      nextBtn.click()
     })
     expect(bcUpdateMock).not.toHaveBeenCalled()
-    expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
   })
 
-  it("Skip for now advances without PUTting doc edits (still persists company-shape)", async () => {
+  it("Skip for now advances without PUTting any edits", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     bcGetMock.mockResolvedValue(makeDoc())
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace())
     advanceStepMock.mockResolvedValue(undefined)
 
     await act(async () => {
@@ -267,8 +244,11 @@ describe("BusinessContext (onboarding step 04)", () => {
       skip.click()
     })
     expect(bcUpdateMock).not.toHaveBeenCalled()
-    expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
   })
 })
+
+// Reference makeWorkspace so the import stays used even though company-shape
+// persistence moved out of this step.
+void makeWorkspace

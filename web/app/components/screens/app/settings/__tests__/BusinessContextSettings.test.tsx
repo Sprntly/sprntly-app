@@ -9,8 +9,10 @@ import { describe, expect, it, vi } from "vitest"
 
 import {
   BusinessContextSettingsView,
+  CompanyShapeSettingsView,
   buildLayers,
   type BusinessContextSettingsViewProps,
+  type CompanyShapeSettingsViewProps,
 } from "../BusinessContextSettings"
 import type { BcLeaf, BusinessContextDoc } from "../../../../../lib/api"
 
@@ -182,6 +184,93 @@ describe("BusinessContextSettingsView — chrome states", () => {
 
   it("disables Save while saving", () => {
     expect(render({ saving: true })).toContain("Saving…")
+  })
+})
+
+// ── company-shape section (relocated from the onboarding business-context step) ──
+function renderShape(
+  override: Partial<CompanyShapeSettingsViewProps> = {},
+): string {
+  const defaults: CompanyShapeSettingsViewProps = {
+    loading: false,
+    industry: "B2B SaaS",
+    businessType: "SaaS",
+    techStack: ["React"],
+    canEdit: true,
+    saving: false,
+    saved: false,
+    error: null,
+    onChangeIndustry: () => {},
+    onChangeBusinessType: () => {},
+    onToggleTechStack: () => {},
+    onSave: () => {},
+  }
+  return renderToStaticMarkup(
+    React.createElement(CompanyShapeSettingsView, { ...defaults, ...override }),
+  )
+}
+
+describe("CompanyShapeSettingsView — relocated company-shape fields", () => {
+  it("renders the Industry / Business type / Tech stack controls", () => {
+    const html = renderShape()
+    expect(html).toContain("Company shape")
+    expect(html).toContain('data-field="industry"')
+    expect(html).toContain('data-field="businessType"')
+    expect(html).toContain('data-field="techStack"')
+    expect(html).toContain("Tech stack")
+    expect(html).toContain("data-bc-company-shape")
+  })
+
+  it("shows the current values selected", () => {
+    const html = renderShape({ industry: "Fintech", businessType: "Marketplace" })
+    // The selected option is rendered as selected in the static markup.
+    expect(html).toContain("Fintech")
+    expect(html).toContain("Marketplace")
+  })
+
+  it("admin sees Save; non-admin gets disabled controls and no Save", () => {
+    expect(renderShape({ canEdit: true })).toContain("Save company shape")
+    const ro = renderShape({ canEdit: false })
+    expect(ro).not.toContain("Save company shape")
+    expect(ro).toContain("disabled")
+  })
+
+  it("wires onSave to the form's onSubmit", () => {
+    const onSave = vi.fn()
+    const props: CompanyShapeSettingsViewProps = {
+      loading: false,
+      industry: "B2B SaaS",
+      businessType: "SaaS",
+      techStack: [],
+      canEdit: true,
+      saving: false,
+      saved: false,
+      error: null,
+      onChangeIndustry: () => {},
+      onChangeBusinessType: () => {},
+      onToggleTechStack: () => {},
+      onSave,
+    }
+    type Node = { props?: { onSubmit?: (e: unknown) => void; children?: unknown }; type?: unknown }
+    function findForm(node: unknown): ((e: unknown) => void) | null {
+      if (!node || typeof node !== "object") return null
+      const n = node as Node
+      if (n.type === "form" && n.props?.onSubmit) return n.props.onSubmit
+      const kids = n.props?.children
+      const arr = Array.isArray(kids) ? kids : kids != null ? [kids] : []
+      for (const k of arr) {
+        const found = findForm(k)
+        if (found) return found
+      }
+      return null
+    }
+    const rendered = (
+      CompanyShapeSettingsView as (p: CompanyShapeSettingsViewProps) => unknown
+    )(props)
+    const submit = findForm(rendered)
+    expect(submit).toBeTypeOf("function")
+    submit?.({ preventDefault() {} })
+    expect(onSave).toHaveBeenCalledTimes(1)
   })
 })
 
