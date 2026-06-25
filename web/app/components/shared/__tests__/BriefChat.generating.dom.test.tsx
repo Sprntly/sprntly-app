@@ -226,7 +226,7 @@ describe("BriefChat — generating / WIP indicator", () => {
     // …the persistent PM-agent intro is shown even while generating (the old
     // redundant "Monday brief · generating…" status line was removed)…
     expect(
-      screen.getByText(/we continuously monitor how your product is being used/),
+      screen.getByText(/continuously monitor how your product is being used/),
     ).not.toBeNull()
     // …and the empty "no brief yet" greeting is NOT shown.
     expect(screen.queryByText(new RegExp(EMPTY_GREETING))).toBeNull()

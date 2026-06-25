@@ -580,24 +580,38 @@ describe("BriefChat header — fixed agent name 'Spiky'", () => {
 
 // ── Persistent PM-agent intro ────────────────────────────────────────────────
 // The brief opens with a persistent, educational PM-agent message that restates
-// what the agent continuously does. It is personalized with the user's FIRST
-// name (the fixture's userName is "Apurva Jain" → "Apurva") and replaces the old
-// redundant "Monday brief · …" secondary header line, which must no longer render.
+// what the agent continuously does. It is deliberately NOT personalized — the
+// per-brief greeting carries the "Good day, {name}" salutation, so the intro
+// stays a plain capability statement (avoids a double "Good day {name}").
 describe("BriefChat — persistent PM-agent intro", () => {
-  it("renders the persistent intro personalized with the user's first name", async () => {
+  it("renders the persistent intro as a non-personalized capability statement", async () => {
     await act(async () => {
       renderBrief()
     })
     const intro = document.querySelector(".bc-intro") as HTMLElement | null
     expect(intro).not.toBeNull()
-    // Personalized with the FIRST name only (not the full "Apurva Jain").
-    expect(intro!.textContent).toContain("Good day Apurva,")
+    // The intro does NOT carry the salutation — that belongs to the greeting.
+    expect(intro!.textContent).not.toContain("Good day")
     expect(intro!.textContent).toContain(
-      "we continuously monitor how your product is being used",
+      "continuously monitor how your product is being used",
     )
     expect(intro!.textContent).toContain(
       "give you a weekly digest of the most important things worth working on",
     )
+  })
+
+  it("shows exactly one 'Good day {name}' across intro + greeting (no duplicate)", async () => {
+    await act(async () => {
+      renderBrief()
+    })
+    const intro = document.querySelector(".bc-intro")?.textContent ?? ""
+    const greeting = document.querySelector(".bc-greeting")?.textContent ?? ""
+    const combined = `${intro}\n${greeting}`
+    const count = (combined.match(/Good day/g) ?? []).length
+    expect(count).toBe(1)
+    // The single salutation lives on the greeting, personalized with the first name.
+    expect(greeting).toContain("Good day")
+    expect(greeting).toContain("Apurva")
   })
 
   it("no longer renders the redundant 'Monday brief · …' secondary status line", async () => {
