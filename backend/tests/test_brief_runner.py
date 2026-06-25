@@ -156,9 +156,13 @@ def test_warm_drilldowns_warms_predefined_and_dynamic_asks(isolated_settings, mo
 
     asyncio.run(_drive())
 
-    assert predefined == [("acme", br._WARM_SEMA)], "predefined Ask warming must still fire"
+    assert len(predefined) == 1 and predefined[0][0] == "acme", "predefined Ask warming must still fire"
     assert len(dynamic) == 1 and dynamic[0][0] == "acme", "dynamic Ask warming must still fire"
-    assert dynamic[0][2] is br._WARM_SEMA
+    # Both warmers share ONE per-loop semaphore instance (per-loop accessor —
+    # replaces the old module-level _WARM_SEMA that broke across asyncio.run loops).
+    sema_pre = predefined[0][1]
+    assert isinstance(sema_pre, asyncio.Semaphore)
+    assert dynamic[0][2] is sema_pre
 
 
 def test_warm_drilldowns_skips_asks_without_dataset(isolated_settings, monkeypatch):
