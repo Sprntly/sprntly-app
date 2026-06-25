@@ -94,6 +94,7 @@ const READY_BRIEF: BriefV2State = {
     title: "Day-30 retention is slipping",
     body: "Retention dropped 6 points week over week.",
     metricHighlight: "",
+    fromSources: [],
     statTiles: [],
     chart: null,
     convergence: [],

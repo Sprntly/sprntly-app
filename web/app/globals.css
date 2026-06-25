@@ -6329,6 +6329,38 @@
     font-weight: 600;
   }
 
+  /* Per-card "From · source · source" provenance row — the weekly-brief skill's
+     honest source chips (replaces the legacy mini-chart + KPI stat columns). */
+  .fc-from {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin: 10px 0 2px;
+  }
+
+  .fc-from-lead {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-4);
+    margin-right: 2px;
+  }
+
+  .fc-from-src {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: var(--surface-3);
+    border: 1px solid var(--line);
+    color: var(--ink-3);
+    font-size: 11.5px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
   .bc-error {
     color: var(--danger);
     font-size: 13px;

@@ -17,7 +17,6 @@ import { AGENT_NAME } from "../../lib/agent"
 import type {
   BriefV2CompactFinding,
   BriefV2HeroFinding,
-  BriefV2InlineChart,
   BriefV2State,
 } from "../../lib/brief-v2-adapter"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
@@ -213,147 +212,6 @@ function IconTicket({ size = 14 }: { size?: number }) {
     </svg>
   )
 }
-// ── Mini inline chart + prototype preview (reference card chrome) ─────────────
-// First signed number found in a string ("70% handoff threshold" → 70). Used
-// to place the dashed reference line on the same domain as the bars.
-function firstNumber(text?: string): number | null {
-  if (!text) return null
-  const m = String(text).replace(/,/g, "").match(/-?\d+(\.\d+)?/)
-  return m ? Number(m[0]) : null
-}
-
-// Compact 2–3 char axis tick from a bar label ("Riverside General" → "RG").
-function shortBarLabel(label: string): string {
-  const t = (label || "").trim()
-  if (!t) return "—"
-  const words = t.split(/[\s_-]+/).filter(Boolean)
-  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
-  return t.slice(0, 3).toUpperCase()
-}
-
-// Reduce a metric value to its numeric core for the large KPI tile — drops
-// appended comparisons / trailing words ("76% (vs 93.5% Enterprise)" → "76%",
-// "12 (most recent customer)" → "12") so the stat row stays clean. Values with
-// no number fall through unchanged (rendered small by the caller).
-function compactMetricValue(raw: string): string {
-  const s = (raw || "").trim().split(/[(（[]/)[0].trim()
-  const m = s.match(/[-+]?[$€£]?\s?\d[\d,.]*\s?(?:%|[kKmMbB]\b|x|×)?/)
-  return m ? m[0].replace(/\s+/g, "").trim() : s
-}
-
-const num = (v: number | string) => (typeof v === "number" ? v : Number(v) || 0)
-
-// Compact ring / donut — share-of-whole or progress (card 2's "3/4 answered").
-// Shows the first slice's share of the total; the centre reads as a "3/4"
-// ratio when the values are small whole numbers, else a percentage.
-function FindingMiniRing({ chart }: { chart: BriefV2InlineChart }) {
-  const data = chart.data.slice(0, 6)
-  if (data.length === 0) return null
-  const nums = data.map((d) => num(d.value))
-  const total = nums.reduce((a, b) => a + b, 0) || 1
-  const first = nums[0] ?? 0
-  const pct = Math.max(0, Math.min(1, first / total))
-  const allWhole = nums.every((n) => Number.isInteger(n)) && total <= 20
-  const center = data.length >= 2 && allWhole ? `${first}/${Math.round(total)}` : `${Math.round(pct * 100)}%`
-  const label = (data[0]?.label || chart.title || "").trim()
-  const r = 21
-  const circ = 2 * Math.PI * r
-  return (
-    <figure className="fc-mc fc-mc--ring" aria-label={chart.title || "Finding ratio chart"}>
-      <div className="fc-ring" title={chart.title || `${center} ${label}`}>
-        <svg viewBox="0 0 54 54" width="54" height="54" aria-hidden>
-          <circle cx="27" cy="27" r={r} fill="none" stroke="var(--surface-3)" strokeWidth="6" />
-          <circle
-            cx="27"
-            cy="27"
-            r={r}
-            fill="none"
-            stroke="var(--fc-ring-accent, #C68A1E)"
-            strokeWidth="6"
-            strokeLinecap="round"
-            strokeDasharray={`${(pct * circ).toFixed(1)} ${circ.toFixed(1)}`}
-            transform="rotate(-90 27 27)"
-          />
-          <text x="27" y="30" textAnchor="middle" className="fc-ring-val">{center}</text>
-        </svg>
-        {label ? <span className="fc-ring-label">{label.slice(0, 12).toUpperCase()}</span> : null}
-      </div>
-    </figure>
-  )
-}
-
-// Vertical mini bar chart with a dashed reference line — echoes the
-// "70% threshold" mini-graph in the reference finding card. Bars below the
-// line read red, above read green.
-function FindingMiniBars({ chart }: { chart: BriefV2InlineChart }) {
-  const data = chart.data.slice(0, 6)
-  if (data.length === 0) return null
-  const nums = data.map((d) => num(d.value))
-  const dataMax = Math.max(...nums, 1)
-  // Prefer an explicit threshold from the subtitle/title; otherwise fall back to
-  // the mean so the reference line always represents a real statistic.
-  const thr = firstNumber(chart.subtitle) ?? firstNumber(chart.title)
-  const useThreshold = thr != null && thr > 0
-  const mean = nums.reduce((a, b) => a + b, 0) / nums.length
-  const lineVal = useThreshold ? (thr as number) : mean
-  // Headroom above the tallest bar / reference line so the dashed line sits
-  // clearly inside the plot — bars read as "below threshold", not pinned to top.
-  const domainMax = Math.max(dataMax, lineVal, 1) * 1.18
-  const lineLabel = useThreshold
-    ? chart.subtitle || chart.title || `${thr}% threshold`
-    : chart.subtitle || "avg"
-  const cols = { gridTemplateColumns: `repeat(${data.length}, 1fr)` }
-  return (
-    <figure className="fc-mc" aria-label={chart.title || "Finding metric chart"}>
-      <div className="fc-mc-plot">
-        <div className="fc-mc-line" style={{ bottom: `${(lineVal / domainMax) * 100}%` }}>
-          <span className="fc-mc-line-label">{lineLabel}</span>
-        </div>
-        <div className="fc-mc-bars" style={cols}>
-          {data.map((d, i) => {
-            const h = Math.max(10, (nums[i] / domainMax) * 100)
-            const under = nums[i] < lineVal
-            return (
-              <div
-                key={i}
-                className={`fc-mc-bar ${under ? "fc-mc-bar--under" : "fc-mc-bar--over"}`}
-                style={{ height: `${h}%` }}
-                title={`${d.label}: ${d.value}`}
-              />
-            )
-          })}
-        </div>
-      </div>
-      <div className="fc-mc-ticks" style={cols}>
-        {data.map((d, i) => (
-          <span key={i} className="fc-mc-tick">{shortBarLabel(d.label)}</span>
-        ))}
-      </div>
-    </figure>
-  )
-}
-
-// Inline mini chart — routes share-of-whole / progress kinds to a ring and
-// everything else to the threshold bar chart, so every card gets a graph.
-function FindingMiniChart({ chart }: { chart: BriefV2InlineChart }) {
-  const ringKind = chart.kind === "pie" || chart.kind === "donut" || chart.kind === "gauge"
-  return ringKind ? <FindingMiniRing chart={chart} /> : <FindingMiniBars chart={chart} />
-}
-
-// Data-driven fallback chart for insights whose payload carries no chart_hints.
-// Rather than draw a hardcoded/placeholder shape, derive a real bar chart from
-// the finding's own quantitative fields — the numeric KPI stat tiles (which come
-// straight from `insight.metrics`). Only when there is genuinely no numeric
-// signal do we return null so the card simply renders without a chart.
-function chartFromStatTiles(finding: Finding): BriefV2InlineChart | null {
-  const tiles = finding.statTiles || []
-  const data = tiles
-    .map((t) => ({ label: (t.label || "").trim(), value: firstNumber(t.value) }))
-    .filter((d): d is { label: string; value: number } => d.value != null)
-    .map((d) => ({ label: d.label || "—", value: d.value }))
-  if (data.length === 0) return null
-  return { kind: "bar", title: finding.metricHighlight || finding.title || "", data }
-}
 
 /** Pure: the primary finding-card CTA. When a PRD already exists for this
  *  insight the button becomes "View PRD" (opens the existing PRD); otherwise
@@ -411,11 +269,6 @@ function BriefFindingCard({
   // hex (derived from type, set as a CSS var the pill / left bar / PRD button
   // read), and the category pill shows the type name only (no P0/P1).
   const accentStyle = { ["--card-accent"]: finding.skillAccent } as React.CSSProperties
-  const statTiles = finding.statTiles || []
-  // Real chart from the insight payload (chart_hints → BriefV2InlineChart). When
-  // the insight ships no chart_hints, derive a data-driven bar chart from the
-  // finding's numeric KPI tiles instead of a hardcoded placeholder.
-  const chart = finding.chart ?? chartFromStatTiles(finding)
 
   // ── Dismissed (greyed) state ──────────────────────────────────────────────
   // Greys the card out in place — keeps the finding present (not deleted) and
@@ -482,34 +335,24 @@ function BriefFindingCard({
           {/* Title — sans-serif bold */}
           <h3 className="fc-title">{finding.title}</h3>
 
-          {/* Stats row: mini chart (hero only) followed by KPI tiles */}
-          {chart || statTiles.length > 0 ? (
-            <div className="fc-stats-row">
-              {chart ? <FindingMiniChart chart={chart} /> : null}
-              <div className="fc-stats-kpi">
-                {statTiles.map((tile, i) => {
-                  const compact = compactMetricValue(tile.value)
-                  const numeric = /\d/.test(compact)
-                  return (
-                    <div key={i} className={`fc-stat fc-stat--${tile.tone}`}>
-                      <span
-                        className={`fc-stat-value${numeric ? "" : " fc-stat-value--text"}`}
-                        title={tile.value}
-                      >
-                        {compact}
-                      </span>
-                      {tile.label ? <span className="fc-stat-label">{tile.label}</span> : null}
-                    </div>
-                  )
-                })}
-              </div>
-            </div>
-          ) : null}
-
           {/* Body — rendered as markdown so LLM-supplied **bold** shows correctly */}
           {finding.body ? (
             <div className="fc-body fc-body--md">
               <ReactMarkdown remarkPlugins={[remarkGfm]}>{finding.body}</ReactMarkdown>
+            </div>
+          ) : null}
+
+          {/* "From" source-chip row — the weekly-brief skill's honest provenance
+              row (assets/brief-template.html). Replaces the legacy mini-chart +
+              KPI stat columns: the skill puts numbers in the title/body, and a
+              quiet source row under it (never implies convergence that didn't
+              happen). Hidden when no sources are attached. */}
+          {finding.fromSources.length > 0 ? (
+            <div className="fc-from" role="list" aria-label="Sources">
+              <span className="fc-from-lead">From</span>
+              {finding.fromSources.map((s, i) => (
+                <span key={i} className="fc-from-src" role="listitem">{s}</span>
+              ))}
             </div>
           ) : null}
 
