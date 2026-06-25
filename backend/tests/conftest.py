@@ -683,6 +683,29 @@ CREATE TABLE company_template (
 );
 CREATE INDEX company_template_company_idx ON company_template (company_id);
 
+-- Company documents storage (mirrors 20260626120000_company_document.sql,
+-- SQLite-ized). The GENERALIZED sibling of roadmap_doc / company_template: a
+-- SINGLE table with a `doc_type` discriminator instead of one table per kind.
+-- MANY rows per company. Holds the original file (base64) + extracted text for a
+-- future agent-context follow-up (STORED only for now). uuid / timestamptz are
+-- TEXT here, matching the other seeded tables.
+CREATE TABLE company_document (
+    id             TEXT PRIMARY KEY,
+    company_id     TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    doc_type       TEXT NOT NULL
+                     CHECK (doc_type IN (
+                       'ceo_memo', 'team_priorities', 'research', 'company_strategy'
+                     )),
+    filename       TEXT NOT NULL,
+    content_type   TEXT,
+    extracted_text TEXT NOT NULL DEFAULT '',
+    raw_b64        TEXT,
+    uploaded_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX company_document_company_idx ON company_document (company_id);
+CREATE INDEX company_document_company_type_idx
+    ON company_document (company_id, doc_type);
+
 -- Onboarding drip / nudge email tracking (mirrors
 -- 20260614100000_drip_email_sends.sql). One row per delivered (company ×
 -- member × step); UNIQUE is the de-dup guard so steps never double-send.
