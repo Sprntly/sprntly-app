@@ -285,7 +285,10 @@ def test_push_not_connected_raises(isolated_settings, monkeypatch):
 
 # ───────────────────────── routes (dep-override + tenant) ─────────────────────
 
-def test_route_generate_returns_stories_no_write(isolated_settings, monkeypatch):
+def test_route_generate_returns_a_job_not_a_hung_request(isolated_settings, monkeypatch):
+    # Generation is now fire-and-forget: the POST returns a job id immediately
+    # instead of blocking on the multi-minute LLM call. The full
+    # generate→poll→stories flow is covered in test_routes_stories_async.py.
     ctx = company_client(monkeypatch)
     import app.routes.stories as routes
     monkeypatch.setattr(
@@ -298,8 +301,10 @@ def test_route_generate_returns_stories_no_write(isolated_settings, monkeypatch)
     r = ctx.client.post("/v1/stories/generate", json={"insight": "hello"})
     assert r.status_code == 200, r.text
     data = r.json()
-    assert len(data["stories"]) == 1
-    assert data["stories"][0]["title"] == "S1"
+    assert data["status"] == "generating"
+    assert isinstance(data["job_id"], int)
+    # No stories inline — they arrive via GET /v1/stories/jobs/{job_id}.
+    assert "stories" not in data
 
 
 def test_route_generate_rejects_both_sources(isolated_settings, monkeypatch):

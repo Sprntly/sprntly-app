@@ -1857,11 +1857,21 @@ export type StoryPushResult = {
   errors: { story: string; error: string }[]
 }
 
+export type StoryJob = {
+  job_id: number
+  status: "generating" | "ready" | "failed"
+  stories?: GeneratedStory[]
+  error?: string
+}
+
 export const storiesApi = {
-  /** Break a PRD into user-story tickets via the LLM. No write. 404 if the PRD
-   *  no longer exists. */
+  /** Kick off breaking a PRD into user-story tickets (fire-and-forget). Returns
+   *  a job id immediately; poll `getJob` until ready/failed. No write. */
   generate: (prdId: number) =>
-    api.post<{ stories: GeneratedStory[] }>("/v1/stories/generate", { prd_id: prdId }),
+    api.post<{ job_id: number; status: string }>("/v1/stories/generate", { prd_id: prdId }),
+  /** Poll a story-generation job. 404 once it's unknown / not the caller's. */
+  getJob: (jobId: number) =>
+    api.get<StoryJob>(`/v1/stories/jobs/${jobId}`),
   /** ClickUp lists the company can push into (target picker). 404 if ClickUp
    *  isn't connected. */
   listClickUpLists: () =>
