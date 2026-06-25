@@ -10,6 +10,8 @@ the explicit, outward-facing write. All routes require_company (tenant scoped).
 """
 from __future__ import annotations
 
+import asyncio
+import itertools
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -27,6 +29,33 @@ from app.stories.push import ClickUpNotConnectedError, push_stories_to_clickup
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/stories", tags=["stories"])
+
+# ── Async story generation jobs ──────────────────────────────────────────────
+# Breaking a PRD into tickets is a multi-minute LLM call. Running it inside the
+# request (the old synchronous POST) made the Tickets tab hang/spin for minutes
+# and risked proxy/browser timeouts. So generation is now fire-and-forget: POST
+# schedules a background task and returns a job id immediately; the client polls
+# GET /jobs/{id} until status is "ready" or "failed".
+#
+# Stories are TRANSIENT — they were never persisted (the user reviews them, then
+# pushes to ClickUp). So the job store is in-memory, matching the established
+# single-uvicorn-worker pattern elsewhere (e.g. app/brief_runner.py). A backend
+# restart drops in-flight jobs; the user simply re-opens the tab to regenerate.
+# All dict mutations happen on the event loop (the to_thread result is applied
+# back in the coroutine), so no lock is needed under the single-worker topology.
+_jobs: dict[int, dict] = {}
+_job_ids = itertools.count(1)
+_JOBS_CAP = 200  # keep the store bounded over a long-running process
+_inflight_tasks: set[asyncio.Task] = set()
+
+
+def _prune_jobs() -> None:
+    """Bound the in-memory store: drop the oldest finished jobs past the cap."""
+    if len(_jobs) <= _JOBS_CAP:
+        return
+    finished = [jid for jid, j in _jobs.items() if j["status"] in ("ready", "failed")]
+    for jid in sorted(finished)[: len(_jobs) - _JOBS_CAP]:
+        _jobs.pop(jid, None)
 
 
 class GenerateIn(BaseModel):
@@ -48,24 +77,74 @@ class PushIn(BaseModel):
 
 
 @router.post("/generate")
-def generate(
+async def generate(
     body: GenerateIn,
     company: CompanyContext = Depends(require_company),
 ):
-    """Generate user stories from a PRD (or a free-form insight).
+    """Kick off user-story generation from a PRD (or a free-form insight).
 
-    Returns the stories for the user to review. Does NOT write anything to
-    ClickUp — call /v1/stories/push separately once reviewed.
+    Fire-and-forget: schedules the multi-minute generation in the background and
+    returns a `job_id` immediately so the Tickets tab never blocks on a hung
+    request. Poll GET /v1/stories/jobs/{job_id} until status is "ready" (carries
+    `stories`) or "failed" (carries `error`). Generation never writes to ClickUp
+    — call /v1/stories/push separately once the user has reviewed.
     """
     if (body.prd_id is None) == (body.insight is None):
         raise HTTPException(400, "provide exactly one of prd_id or insight")
-    try:
-        stories = generate_user_stories(
-            company.company_id, prd_id=body.prd_id, insight=body.insight,
-        )
-    except PRDNotFoundError as e:
-        raise HTTPException(404, str(e)) from e
-    return {"stories": [s.to_dict() for s in stories]}
+
+    job_id = next(_job_ids)
+    _jobs[job_id] = {
+        "id": job_id,
+        "company_id": company.company_id,
+        "status": "generating",
+        "stories": None,
+        "error": None,
+    }
+    _prune_jobs()
+
+    async def _run() -> None:
+        try:
+            stories = await asyncio.to_thread(
+                generate_user_stories,
+                company.company_id, prd_id=body.prd_id, insight=body.insight,
+            )
+            job = _jobs.get(job_id)
+            if job is not None:
+                job["status"] = "ready"
+                job["stories"] = [s.to_dict() for s in stories]
+        except PRDNotFoundError as exc:
+            job = _jobs.get(job_id)
+            if job is not None:
+                job["status"], job["error"] = "failed", str(exc)
+        except Exception as exc:  # noqa: BLE001 — surface, never hang the poll
+            logger.exception("story generation failed job_id=%s", job_id)
+            job = _jobs.get(job_id)
+            if job is not None:
+                job["status"], job["error"] = "failed", f"{type(exc).__name__}: {exc}"
+
+    task = asyncio.create_task(_run())
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+
+    return {"job_id": job_id, "status": "generating"}
+
+
+@router.get("/jobs/{job_id}")
+def get_job(
+    job_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Poll a story-generation job. 404 for an unknown job or a foreign tenant
+    (job ids are sequential integers, so bind to the caller's company)."""
+    job = _jobs.get(job_id)
+    if job is None or job["company_id"] != company.company_id:
+        raise HTTPException(404, "Job not found")
+    out: dict = {"job_id": job_id, "status": job["status"]}
+    if job["status"] == "ready":
+        out["stories"] = job["stories"] or []
+    elif job["status"] == "failed":
+        out["error"] = job["error"]
+    return out
 
 
 @router.post("/lists")

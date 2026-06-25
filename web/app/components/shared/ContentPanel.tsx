@@ -484,27 +484,54 @@ export function TicketsTab() {
   const [selectedListId, setSelectedListId] = useState<string>("")
 
   // Break the current PRD into tickets on open / whenever the PRD changes.
+  // Generation is fire-and-forget on the backend (a multi-minute LLM call), so
+  // we kick it off, get a job id, then POLL until it's ready/failed instead of
+  // blocking on one long request. The "generating…" spinner is driven by the
+  // poll, so the tab never hangs on a stalled request.
   useEffect(() => {
     if (prdId == null) {
       setGenState({ kind: "idle" })
       return
     }
     let cancelled = false
+    let timer: ReturnType<typeof setTimeout> | null = null
     setGenState({ kind: "generating" })
     setPushState({ kind: "idle" })
+
+    const fail = (e: unknown) => {
+      if (cancelled) return
+      setGenState({
+        kind: "error",
+        message: e instanceof Error ? e.message : "Couldn't generate tickets",
+      })
+    }
+
+    const poll = (jobId: number) => {
+      storiesApi
+        .getJob(jobId)
+        .then((j) => {
+          if (cancelled) return
+          if (j.status === "ready") {
+            setGenState({ kind: "ready", stories: j.stories ?? [] })
+          } else if (j.status === "failed") {
+            setGenState({ kind: "error", message: j.error || "Couldn't generate tickets" })
+          } else {
+            timer = setTimeout(() => poll(jobId), 2000)
+          }
+        })
+        .catch(fail)
+    }
+
     storiesApi
       .generate(prdId)
       .then((r) => {
-        if (!cancelled) setGenState({ kind: "ready", stories: r.stories })
+        if (!cancelled) poll(r.job_id)
       })
-      .catch((e) => {
-        if (!cancelled) {
-          const msg = e instanceof Error ? e.message : "Couldn't generate tickets"
-          setGenState({ kind: "error", message: msg })
-        }
-      })
+      .catch(fail)
+
     return () => {
       cancelled = true
+      if (timer) clearTimeout(timer)
     }
   }, [prdId])
 

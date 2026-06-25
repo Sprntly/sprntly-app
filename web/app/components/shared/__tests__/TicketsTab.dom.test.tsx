@@ -22,14 +22,15 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }))
 
-const { generate, listClickUpLists, pushToClickUp } = vi.hoisted(() => ({
+const { generate, getJob, listClickUpLists, pushToClickUp } = vi.hoisted(() => ({
   generate: vi.fn(),
+  getJob: vi.fn(),
   listClickUpLists: vi.fn(),
   pushToClickUp: vi.fn(),
 }))
 vi.mock("../../../lib/api", async (orig) => {
   const actual = await orig<typeof import("../../../lib/api")>()
-  return { ...actual, storiesApi: { generate, listClickUpLists, pushToClickUp } }
+  return { ...actual, storiesApi: { generate, getJob, listClickUpLists, pushToClickUp } }
 })
 
 const showToast = vi.fn()
@@ -54,7 +55,11 @@ afterEach(() => {
 describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
   it("breaks the current PRD into tickets and renders them", async () => {
     content = { prd: { prd_id: 42, title: "Onboarding PRD" }, connectedConnectorIds: [] }
-    generate.mockResolvedValue({
+    // Fire-and-forget: generate returns a job id, then we poll getJob → ready.
+    generate.mockResolvedValue({ job_id: 11, status: "generating" })
+    getJob.mockResolvedValue({
+      job_id: 11,
+      status: "ready",
       stories: [
         { title: "Instrument wizard steps", body: "Track each onboarding step", acceptance_criteria: ["G", "W"], priority: "P1", route: null },
         { title: "Resume on re-login", body: "", acceptance_criteria: [], priority: null, route: null },
@@ -65,8 +70,9 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
       render(React.createElement(TicketsTab))
     })
 
-    // Generated from the PRD's id — not mock fixtures.
+    // Generated from the PRD's id, then polled by the returned job id.
     expect(generate).toHaveBeenCalledWith(42)
+    await waitFor(() => expect(getJob).toHaveBeenCalledWith(11))
     await waitFor(() => expect(screen.getByText("Instrument wizard steps")).toBeTruthy())
     expect(screen.getByText("Resume on re-login")).toBeTruthy()
     // Acceptance-criteria count surfaces on the row.
@@ -85,7 +91,8 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
   it("pushing fetches ClickUp lists then creates the generated tickets", async () => {
     content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
     const stories = [{ title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
-    generate.mockResolvedValue({ stories })
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
     listClickUpLists.mockResolvedValue({ lists: [{ id: "list-1", name: "Sprint", folder: null }] })
     pushToClickUp.mockResolvedValue({ created: [{ story: "T1", task_id: "cu-1", url: "http://x" }], errors: [] })
 
