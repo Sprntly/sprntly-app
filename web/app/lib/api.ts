@@ -808,6 +808,54 @@ export const templatesApi = {
     ),
 }
 
+// ---- company documents (onboarding strategy step — scene onbstrat) ----------
+//
+// The strategy/context files a PM uploads on the FINAL onboarding step: a typed
+// grid of upload cards. Generalized sibling of the roadmap doc + templates: a
+// single store with a `doc_type` discriminator. MANY per company. Mirrors
+// backend/app/company_document.py + the /v1/company/documents routes. STORED
+// only for now (feeding the text into agent context is a follow-up).
+
+/** The strategy-step upload cards. Mirrors company_document.DOC_TYPES. */
+export type CompanyDocType =
+  | "ceo_memo"
+  | "team_priorities"
+  | "research"
+  | "company_strategy"
+
+/** One stored company document, as the list view reads it. Never carries the
+ *  raw file bytes — only metadata + the extracted-char count. */
+export type CompanyDocument = {
+  id: string
+  doc_type: CompanyDocType
+  filename: string
+  content_type: string | null
+  /** Characters extracted from the upload. */
+  extracted_chars: number
+  uploaded_at: string | null
+}
+
+export type CompanyDocUploadResponse = { ok: true } & CompanyDocument
+
+export const companyDocsApi = {
+  /** All strategy/context documents for the company, newest first. Optionally
+   *  filtered by `doc_type`. */
+  list: (docType?: CompanyDocType) => {
+    const qs = docType ? `?doc_type=${encodeURIComponent(docType)}` : ""
+    return api
+      .get<{ documents: CompanyDocument[] }>(`/v1/company/documents${qs}`)
+      .then((r) => r.documents)
+  },
+  /** Upload a strategy/context document under one of the onbstrat cards
+   *  (multipart). */
+  upload: (file: File, docType: CompanyDocType) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    form.append("doc_type", docType)
+    return api.post<CompanyDocUploadResponse>("/v1/company/documents", form)
+  },
+}
+
 // ---- sources ----------------------------------------------------------------
 
 export type SourceFile = {

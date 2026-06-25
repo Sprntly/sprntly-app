@@ -6,8 +6,8 @@ import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { useContent } from "../../../context/ContentContext"
-import { completeOnboarding, updateWorkspace } from "../../../lib/onboarding/store"
-import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
+import { completeOnboarding } from "../../../lib/onboarding/store"
+import { clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { briefToContentPatch } from "../../../lib/brief-adapter"
 import {
   ensureDatasetForWorkspace,
@@ -15,10 +15,48 @@ import {
   seedWorkspaceContextFiles,
   startBriefGeneration,
 } from "../../../lib/workspace-brief"
-import { roadmapDocApi } from "../../../lib/api"
+import { companyDocsApi, roadmapDocApi, type CompanyDocType } from "../../../lib/api"
 import { FileText, Check } from "../../auth/icons"
 
 const DRAFT_KEY = "strategy"
+
+/**
+ * The strategy step's typed document-upload cards (design scene onbstrat,
+ * `onb-up-grid`). Each posts to `POST /v1/company/documents` with its doc_type.
+ * Copy is verbatim from the design; the colored icon tint maps the design's
+ * per-card hue to a globals.css semantic var.
+ */
+const DOC_CARDS: {
+  docType: CompanyDocType
+  title: string
+  sub: string
+  tint: string
+}[] = [
+  {
+    docType: "ceo_memo",
+    title: "CEO memo / priorities for the half",
+    sub: "The leadership direction for this period",
+    tint: "var(--warn)",
+  },
+  {
+    docType: "team_priorities",
+    title: "Team priorities",
+    sub: "What the team has committed to or is weighing",
+    tint: "var(--accent-ink)",
+  },
+  {
+    docType: "research",
+    title: "Research & insights",
+    sub: "User studies, market or competitive research",
+    tint: "var(--purple)",
+  },
+  {
+    docType: "company_strategy",
+    title: "Company strategy",
+    sub: "OKRs, annual plan, strategy decks",
+    tint: "var(--info)",
+  },
+]
 
 /**
  * Onboarding step 05 — "Strategy, leadership & your roadmap" (scene onbstrat).
@@ -27,97 +65,129 @@ const DRAFT_KEY = "strategy"
  * step moved EARLY in the redesign; completion + first-brief kickoff relocated
  * here from it.)
  *
- * Content (unchanged for now — the 4 upload cards are a separate follow-up PR):
- *   - a free-text "current priorities" field (persisted to companies.okrs, the
- *     existing strategic-context slot), and
- *   - a ROADMAP-DOC upload that posts to `POST /v1/company/roadmap-doc`, which
- *     stores the doc + its extracted text against the company. The stored
- *     roadmap feeds the weekly brief as a high-weight priorities signal and
- *     renders read-only as the `roadmapdoc` artifact view.
+ * Content (this PR rebuilds it to match the design):
+ *   - a 2×2 grid of typed document-upload cards (CEO memo, team priorities,
+ *     research, company strategy) — each posts to `POST /v1/company/documents`
+ *     with its doc_type. STORED only for now (a follow-up wires them into agent
+ *     context), and
+ *   - a ROADMAP-DOC upload (its own section below the grid) that posts to
+ *     `POST /v1/company/roadmap-doc`, storing the doc + its extracted text. The
+ *     stored roadmap feeds the weekly brief as a high-weight priorities signal
+ *     and renders read-only as the `roadmapdoc` artifact view.
  *
  * On "Finish setup" we:
- *   1. persist the (optional) priorities,
- *   2. kick the first weekly brief generation (fire-and-forget; it lands on the
+ *   1. kick the first weekly brief generation (fire-and-forget; it lands on the
  *      Brief page when ready),
- *   3. completeOnboarding → set the active company → router.replace("/brief").
+ *   2. completeOnboarding → set the active company → router.replace("/brief").
  * Brief-generation is best-effort: a failure there must NOT trap the user on the
- * last step. completeOnboarding is the only hard requirement.
+ * last step. completeOnboarding is the only hard requirement. (The free-text
+ * priorities field was removed with the redesign — leadership direction is now
+ * captured as the CEO-memo / company-strategy document uploads.)
  *
- * The roadmap-doc upload shows the design's "uploaded" confirmation state on
- * success; a failure is caught as a non-blocking notice — the upload is optional
- * and the whole step is skippable.
+ * Every upload card shows the design's "uploaded" confirmation state on success;
+ * a failure is caught as a non-blocking notice — uploads are optional and the
+ * whole step is skippable.
  */
 export function Strategy() {
   const auth = useAuth()
   const { workspace, loading } = useOnboarding()
   const { setContent } = useContent()
   const router = useRouter()
-  const draft = loadDraft(DRAFT_KEY)
-  const [priorities, setPriorities] = useState<string>((draft?.priorities as string) ?? "")
+  // ── Roadmap-doc card state (its own dedicated upload, like before) ──────────
   const [roadmapFileName, setRoadmapFileName] = useState<string | null>(null)
-  const [uploading, setUploading] = useState(false)
-  const [uploaded, setUploaded] = useState(false)
-  const [uploadNotice, setUploadNotice] = useState<string | null>(null)
+  const [roadmapUploading, setRoadmapUploading] = useState(false)
+  const [roadmapUploaded, setRoadmapUploaded] = useState(false)
+  const [roadmapNotice, setRoadmapNotice] = useState<string | null>(null)
+  const roadmapFileRef = useRef<HTMLInputElement | null>(null)
+
+  // ── 4 typed document cards — per-card upload state keyed by doc_type ─────────
+  type CardState = {
+    fileName: string | null
+    uploading: boolean
+    uploaded: boolean
+    notice: string | null
+  }
+  const [docStates, setDocStates] = useState<Record<CompanyDocType, CardState>>(() =>
+    DOC_CARDS.reduce(
+      (acc, c) => {
+        acc[c.docType] = { fileName: null, uploading: false, uploaded: false, notice: null }
+        return acc
+      },
+      {} as Record<CompanyDocType, CardState>,
+    ),
+  )
+  const docFileRefs = useRef<Record<CompanyDocType, HTMLInputElement | null>>(
+    {} as Record<CompanyDocType, HTMLInputElement | null>,
+  )
+
   const [finishing, setFinishing] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const fileRef = useRef<HTMLInputElement | null>(null)
-
-  // Seed priorities from the saved company (only if no draft).
-  useEffect(() => {
-    if (!workspace || draft) return
-    setPriorities(workspace.okrs ?? "")
-  }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    const onHide = () => {
-      if (document.hidden) saveDraft(DRAFT_KEY, { priorities })
-    }
-    document.addEventListener("visibilitychange", onHide)
-    return () => document.removeEventListener("visibilitychange", onHide)
-  }, [priorities])
 
   // Redirect when there's no workspace to anchor the step.
   useEffect(() => {
     if (!loading && !workspace) router.replace("/onboarding/business-info")
   }, [loading, workspace, router])
 
-  async function onPickRoadmap(file: File | null) {
+  function patchDocState(docType: CompanyDocType, patch: Partial<CardState>) {
+    setDocStates((prev) => ({ ...prev, [docType]: { ...prev[docType], ...patch } }))
+  }
+
+  // Upload one of the 4 typed strategy documents (CEO memo, team priorities,
+  // research, company strategy). Optional + skippable: a transient failure
+  // surfaces a non-blocking per-card notice rather than halting onboarding.
+  async function onPickDoc(docType: CompanyDocType, file: File | null) {
     if (!file) return
-    setUploadNotice(null)
-    setUploaded(false)
-    setRoadmapFileName(file.name)
-    setUploading(true)
+    patchDocState(docType, { fileName: file.name, uploading: true, uploaded: false, notice: null })
     try {
-      await roadmapDocApi.upload(file)
-      setUploaded(true)
-      setUploadNotice(`Your roadmap · uploaded just now — we'll pressure-test it against your data.`)
+      await companyDocsApi.upload(file, docType)
+      patchDocState(docType, {
+        uploading: false,
+        uploaded: true,
+        notice: `${file.name} · uploaded just now.`,
+      })
     } catch {
-      // The upload is optional and the step is skippable; a transient failure
-      // surfaces a non-blocking notice rather than halting onboarding.
-      setUploaded(false)
-      setUploadNotice(
-        `Couldn't upload "${file.name}" just now — you can re-try here or add it later in Settings. This won't block setup.`,
-      )
-    } finally {
-      setUploading(false)
+      patchDocState(docType, {
+        uploading: false,
+        uploaded: false,
+        notice: `Couldn't upload "${file.name}" just now — re-try here or add it later in Settings. This won't block setup.`,
+      })
     }
   }
 
-  // The closing step: persist priorities, kick the first brief, COMPLETE
-  // onboarding, and enter the app. `skipped` only skips persisting priorities —
-  // completion always runs.
-  async function finish(skipped: boolean) {
+  async function onPickRoadmap(file: File | null) {
+    if (!file) return
+    setRoadmapNotice(null)
+    setRoadmapUploaded(false)
+    setRoadmapFileName(file.name)
+    setRoadmapUploading(true)
+    try {
+      await roadmapDocApi.upload(file)
+      setRoadmapUploaded(true)
+      setRoadmapNotice(`Your roadmap · uploaded just now — we'll pressure-test it against your data.`)
+    } catch {
+      // The upload is optional and the step is skippable; a transient failure
+      // surfaces a non-blocking notice rather than halting onboarding.
+      setRoadmapUploaded(false)
+      setRoadmapNotice(
+        `Couldn't upload "${file.name}" just now — you can re-try here or add it later in Settings. This won't block setup.`,
+      )
+    } finally {
+      setRoadmapUploading(false)
+    }
+  }
+
+  // The closing step: kick the first brief, COMPLETE onboarding, and enter the
+  // app. The strategy documents + roadmap are uploaded inline as the PM picks
+  // them, so finishing has nothing extra to persist — `skipped` and "Finish
+  // setup" differ only by intent; completion always runs.
+  async function finish() {
     if (!workspace || auth.kind !== "authed") return
     setError(null)
     setFinishing(true)
     try {
-      // 1) Persist the (optional) priorities when not skipped.
-      if (!skipped && priorities.trim()) {
-        await updateWorkspace(workspace.id, { okrs: priorities.trim() })
-      }
       clearDraft(DRAFT_KEY)
 
-      // 2) Kick the first brief (fire-and-forget). It lands on the Brief page.
+      // 1) Kick the first brief (fire-and-forget). It lands on the Brief page.
       void (async () => {
         try {
           await ensureDatasetForWorkspace(workspace)
@@ -130,7 +200,7 @@ export function Strategy() {
         }
       })()
 
-      // 3) Complete onboarding and enter the app.
+      // 2) Complete onboarding and enter the app.
       await completeOnboarding(workspace.id, auth.user.id)
       if (typeof window !== "undefined") {
         window.localStorage.setItem("sprntly_active_company", workspace.slug)
@@ -160,7 +230,7 @@ export function Strategy() {
           <button
             type="button"
             className="onb-skip-link"
-            onClick={() => void finish(true)}
+            onClick={() => void finish()}
             disabled={finishing}
           >
             Skip
@@ -169,45 +239,85 @@ export function Strategy() {
         </>
       }
       onBack={() => router.push("/onboarding/business-context")}
-      onContinue={() => void finish(false)}
+      onContinue={() => void finish()}
       continueLabel="Finish setup"
       continueDisabled={finishing}
       loading={finishing}
     >
       {error && <div className="onb-form-error">{error}</div>}
 
-      <div className="onb-section">
-        <div className="onb-section-h">
-          Current priorities <span className="opt">— optional</span>
-        </div>
-        <textarea
-          className="inp"
-          rows={4}
-          style={{ resize: "vertical", lineHeight: 1.6 }}
-          value={priorities}
-          onChange={(e) => setPriorities(e.target.value)}
-          placeholder="What's the leadership direction this half? OKRs, big bets, constraints the team is weighing…"
-          aria-label="Current priorities"
-        />
-        <p className="onb-field-hint">
-          This anchors how every agent weighs what matters.
-        </p>
+      {/* 2×2 grid of typed document-upload cards (design `onb-up-grid`). */}
+      <div className="onb-up-grid">
+        {DOC_CARDS.map((card) => {
+          const st = docStates[card.docType]
+          return (
+            <div key={card.docType} className="onb-up-card">
+              <button
+                type="button"
+                className={`onb-up ${st.uploaded ? "has-file" : ""}`}
+                onClick={() => docFileRefs.current[card.docType]?.click()}
+                disabled={st.uploading}
+                data-field={`doc-${card.docType}`}
+                data-doc-type={card.docType}
+                data-uploaded={st.uploaded ? "true" : undefined}
+              >
+                <span
+                  className="onb-up-ic"
+                  style={{ color: card.tint }}
+                  aria-hidden
+                >
+                  {st.uploaded ? (
+                    <Check style={{ width: 16, height: 16 }} />
+                  ) : (
+                    <FileText style={{ width: 16, height: 16 }} />
+                  )}
+                </span>
+                <span className="onb-up-b">
+                  <span className="onb-up-t">
+                    {st.uploading ? "Uploading…" : st.fileName ?? card.title}
+                  </span>
+                  <span className="onb-up-s">
+                    {st.uploaded ? "Added — we'll fold it into your context." : card.sub}
+                  </span>
+                </span>
+              </button>
+              <input
+                ref={(el) => {
+                  docFileRefs.current[card.docType] = el
+                }}
+                type="file"
+                style={{ display: "none" }}
+                onChange={(e) =>
+                  void onPickDoc(card.docType, e.target.files?.[0] ?? null)
+                }
+                aria-label={card.title}
+              />
+              {st.notice && (
+                <p className="onb-field-hint" role="status">
+                  {st.notice}
+                </p>
+              )}
+            </div>
+          )
+        })}
       </div>
 
+      {/* Roadmap doc — its own section below the grid (POST /v1/company/roadmap-doc). */}
       <div className="onb-section" style={{ marginTop: 18 }}>
         <div className="onb-section-h">
-          Your current roadmap <span className="opt">— we&apos;ll stress-test it</span>
+          Your team-level current roadmap{" "}
+          <span className="opt">— we&apos;ll stress-test it</span>
         </div>
         <button
           type="button"
-          className={`onb-up onb-up-wide ${uploaded ? "has-file" : ""}`}
-          onClick={() => fileRef.current?.click()}
-          disabled={uploading}
+          className={`onb-up onb-up-wide ${roadmapUploaded ? "has-file" : ""}`}
+          onClick={() => roadmapFileRef.current?.click()}
+          disabled={roadmapUploading}
           data-field="roadmap-doc"
-          data-uploaded={uploaded ? "true" : undefined}
+          data-uploaded={roadmapUploaded ? "true" : undefined}
         >
-          <span className="onb-up-ic" aria-hidden>
-            {uploaded ? (
+          <span className="onb-up-ic" style={{ color: "var(--accent-ink)" }} aria-hidden>
+            {roadmapUploaded ? (
               <Check style={{ width: 16, height: 16 }} />
             ) : (
               <FileText style={{ width: 16, height: 16 }} />
@@ -215,29 +325,27 @@ export function Strategy() {
           </span>
           <span className="onb-up-b">
             <span className="onb-up-t">
-              {uploading
+              {roadmapUploading
                 ? "Uploading…"
-                : roadmapFileName
-                  ? roadmapFileName
-                  : "Upload your current roadmap"}
+                : roadmapFileName ?? "Upload your current roadmap"}
             </span>
             <span className="onb-up-s">
-              {uploaded
+              {roadmapUploaded
                 ? "Loaded in — we'll pressure-test it against your data."
                 : "Spreadsheet, deck, or doc — Sprntly loads it in and pressure-tests it against your data."}
             </span>
           </span>
         </button>
         <input
-          ref={fileRef}
+          ref={roadmapFileRef}
           type="file"
           style={{ display: "none" }}
           onChange={(e) => void onPickRoadmap(e.target.files?.[0] ?? null)}
           aria-label="Roadmap document"
         />
-        {uploadNotice && (
+        {roadmapNotice && (
           <p className="onb-field-hint" role="status">
-            {uploadNotice}
+            {roadmapNotice}
           </p>
         )}
       </div>

@@ -2,14 +2,17 @@
 //
 // Container mount test for the onboarding step 05 — "Strategy, leadership &
 // your roadmap" (design scene onbstrat). In the redesign this is the FINAL
-// step: it captures free-text priorities (→ companies.okrs) + a roadmap-doc
-// upload (POST /v1/company/roadmap-doc), then COMPLETES onboarding — kicks the
-// first brief, calls completeOnboarding, and enters the app at /brief.
+// step. This PR rebuilds its CONTENT: a 2×2 grid of typed document-upload cards
+// (CEO memo / team priorities / research / company strategy → POST
+// /v1/company/documents) + the existing roadmap-doc upload (POST
+// /v1/company/roadmap-doc) as its own section. Then it COMPLETES onboarding —
+// kicks the first brief, calls completeOnboarding, and enters the app at /brief.
 //
-// Covers: "Finish setup" persists priorities + completes onboarding + redirect,
-// "Skip" completes without persisting priorities, the roadmap-doc upload calls
-// the real API + shows the "uploaded" confirmation, and a failed upload surfaces
-// a non-blocking notice without halting the step.
+// Covers: the 4 doc cards + roadmap card render; a doc-card upload calls the
+// documents API with its doc_type + shows the "uploaded" confirmation; the
+// roadmap upload calls its API + shows confirmation; a failed upload surfaces a
+// non-blocking notice without halting the step; "Finish setup" and "Skip" both
+// complete onboarding + redirect to /brief.
 //
 // Matchers: native DOM only.
 import * as React from "react"
@@ -22,8 +25,8 @@ const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const completeOnboardingMock = vi.fn()
-const updateWorkspaceMock = vi.fn()
 const roadmapUploadMock = vi.fn()
+const docUploadMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
@@ -35,7 +38,6 @@ vi.mock("../../../../context/ContentContext", () => ({
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   completeOnboarding: (...a: unknown[]) => completeOnboardingMock(...a),
-  updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
 }))
 vi.mock("../../../../lib/workspace-brief", () => ({
   ensureDatasetForWorkspace: vi.fn().mockResolvedValue(undefined),
@@ -56,11 +58,14 @@ vi.mock("../../../../lib/api", async () => {
   return {
     ...actual,
     roadmapDocApi: { upload: (...a: unknown[]) => roadmapUploadMock(...a) },
+    companyDocsApi: { upload: (...a: unknown[]) => docUploadMock(...a) },
   }
 })
 
 import { Strategy } from "../Strategy"
 import { makeOnboardingCtx } from "./fixtures"
+
+const DOC_TYPES = ["ceo_memo", "team_priorities", "research", "company_strategy"]
 
 beforeEach(() => {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
@@ -70,23 +75,113 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("Strategy (onboarding step 05 — completes onboarding)", () => {
-  it("renders the strategy heading + roadmap-doc upload affordance", () => {
+describe("Strategy (onboarding step 05 — onbstrat upload cards, completes onboarding)", () => {
+  it("renders the heading, the 4 typed doc cards, and the roadmap-doc card", () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     render(React.createElement(Strategy))
+
     expect(screen.getByText(/your roadmap/i)).not.toBeNull()
+    // The 2×2 grid of typed cards.
+    expect(document.querySelector(".onb-up-grid")).not.toBeNull()
+    for (const dt of DOC_TYPES) {
+      expect(document.querySelector(`[data-field="doc-${dt}"]`)).not.toBeNull()
+    }
+    // The roadmap card remains, as its own section.
     expect(document.querySelector('[data-field="roadmap-doc"]')).not.toBeNull()
+    // The verbatim card copy is present.
+    expect(screen.getByText(/CEO memo \/ priorities for the half/i)).not.toBeNull()
+    expect(screen.getByText(/Research & insights/i)).not.toBeNull()
+    expect(screen.getByText(/Company strategy/i)).not.toBeNull()
   })
 
-  it("'Finish setup' persists priorities, completes onboarding, enters /brief", async () => {
+  it("a doc card upload calls the documents API with its doc_type + shows confirmation", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
-    updateWorkspaceMock.mockResolvedValue(undefined)
+    docUploadMock.mockResolvedValue({
+      ok: true,
+      id: "d-1",
+      doc_type: "ceo_memo",
+      filename: "memo.pdf",
+      content_type: "application/pdf",
+      extracted_chars: 120,
+      uploaded_at: null,
+    })
+
+    render(React.createElement(Strategy))
+    // The CEO-memo card's hidden file input.
+    const card = document.querySelector('[data-field="doc-ceo_memo"]') as HTMLElement
+    const input = card.parentElement!.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement
+    const file = new File(["memo"], "memo.pdf", { type: "application/pdf" })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+    })
+
+    expect(docUploadMock).toHaveBeenCalledTimes(1)
+    expect((docUploadMock.mock.calls[0][0] as File).name).toBe("memo.pdf")
+    expect(docUploadMock.mock.calls[0][1]).toBe("ceo_memo")
+    expect(
+      document.querySelector('[data-field="doc-ceo_memo"][data-uploaded="true"]'),
+    ).not.toBeNull()
+    expect(screen.getByText(/uploaded just now/i)).not.toBeNull()
+  })
+
+  it("a failed doc upload surfaces a non-blocking notice, step not blocked", async () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx())
+    docUploadMock.mockRejectedValue(new Error("network error"))
+
+    render(React.createElement(Strategy))
+    const card = document.querySelector('[data-field="doc-research"]') as HTMLElement
+    const input = card.parentElement!.querySelector(
+      'input[type="file"]',
+    ) as HTMLInputElement
+    const file = new File(["x"], "study.pdf", { type: "application/pdf" })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+    })
+
+    expect(docUploadMock).toHaveBeenCalledTimes(1)
+    expect(screen.getByText(/won't block setup/i)).not.toBeNull()
+    expect(
+      document.querySelector('[data-field="doc-research"][data-uploaded="true"]'),
+    ).toBeNull()
+    const finishBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /finish setup/i.test(b.textContent ?? ""),
+    ) as HTMLButtonElement
+    expect(finishBtn.disabled).toBe(false)
+  })
+
+  it("the roadmap-doc upload calls the REAL API and shows the uploaded confirmation", async () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx())
+    roadmapUploadMock.mockResolvedValue({
+      ok: true,
+      filename: "roadmap.pdf",
+      extracted_chars: 420,
+      version: 1,
+    })
+
+    render(React.createElement(Strategy))
+    const card = document.querySelector('[data-field="roadmap-doc"]') as HTMLElement
+    const input = card.parentElement!.querySelector(
+      'input[aria-label="Roadmap document"]',
+    ) as HTMLInputElement
+    const file = new File(["roadmap"], "roadmap.pdf", { type: "application/pdf" })
+    await act(async () => {
+      fireEvent.change(input, { target: { files: [file] } })
+    })
+
+    expect(roadmapUploadMock).toHaveBeenCalledTimes(1)
+    expect((roadmapUploadMock.mock.calls[0][0] as File).name).toBe("roadmap.pdf")
+    expect(
+      document.querySelector('[data-field="roadmap-doc"][data-uploaded="true"]'),
+    ).not.toBeNull()
+  })
+
+  it("'Finish setup' completes onboarding and enters /brief", async () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx())
     completeOnboardingMock.mockResolvedValue(undefined)
 
     render(React.createElement(Strategy))
-    const ta = document.querySelector("textarea") as HTMLTextAreaElement
-    fireEvent.change(ta, { target: { value: "Ship reconciliation v2 this half." } })
-
     const finishBtn = Array.from(document.querySelectorAll("button")).find((b) =>
       /finish setup/i.test(b.textContent ?? ""),
     ) as HTMLButtonElement
@@ -94,14 +189,11 @@ describe("Strategy (onboarding step 05 — completes onboarding)", () => {
       finishBtn.click()
     })
 
-    expect(updateWorkspaceMock).toHaveBeenCalledTimes(1)
-    const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Record<string, unknown>]
-    expect(patch.okrs).toBe("Ship reconciliation v2 this half.")
     expect(completeOnboardingMock).toHaveBeenCalledWith("ws-1", "u-1")
     expect(routerMock.replace).toHaveBeenCalledWith("/brief")
   })
 
-  it("'Skip' completes onboarding without persisting priorities", async () => {
+  it("'Skip' completes onboarding and enters /brief", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     completeOnboardingMock.mockResolvedValue(undefined)
 
@@ -112,62 +204,8 @@ describe("Strategy (onboarding step 05 — completes onboarding)", () => {
     await act(async () => {
       skip.click()
     })
-    expect(updateWorkspaceMock).not.toHaveBeenCalled()
+
     expect(completeOnboardingMock).toHaveBeenCalledWith("ws-1", "u-1")
     expect(routerMock.replace).toHaveBeenCalledWith("/brief")
-  })
-
-  it("roadmap-doc upload calls the REAL API and shows the uploaded confirmation", async () => {
-    onboardingMock.mockReturnValue(makeOnboardingCtx())
-    roadmapUploadMock.mockResolvedValue({
-      ok: true,
-      filename: "roadmap.pdf",
-      extracted_chars: 420,
-      version: 1,
-    })
-
-    render(React.createElement(Strategy))
-    const fileInput = document.querySelector(
-      'input[type="file"]',
-    ) as HTMLInputElement
-    const file = new File(["roadmap"], "roadmap.pdf", { type: "application/pdf" })
-    await act(async () => {
-      fireEvent.change(fileInput, { target: { files: [file] } })
-    })
-
-    // The real endpoint is called with the picked file.
-    expect(roadmapUploadMock).toHaveBeenCalledTimes(1)
-    expect((roadmapUploadMock.mock.calls[0][0] as File).name).toBe("roadmap.pdf")
-    // The design's "uploaded" confirmation state renders.
-    expect(screen.getByText(/uploaded just now/i)).not.toBeNull()
-    expect(
-      document.querySelector('[data-field="roadmap-doc"][data-uploaded="true"]'),
-    ).not.toBeNull()
-  })
-
-  it("roadmap-doc upload failure surfaces a non-blocking notice", async () => {
-    onboardingMock.mockReturnValue(makeOnboardingCtx())
-    roadmapUploadMock.mockRejectedValue(new Error("network error"))
-
-    render(React.createElement(Strategy))
-    const fileInput = document.querySelector(
-      'input[type="file"]',
-    ) as HTMLInputElement
-    const file = new File(["roadmap"], "roadmap.pdf", { type: "application/pdf" })
-    await act(async () => {
-      fireEvent.change(fileInput, { target: { files: [file] } })
-    })
-
-    expect(roadmapUploadMock).toHaveBeenCalledTimes(1)
-    // A friendly notice renders and the step is NOT blocked.
-    expect(screen.getByText(/won't block setup/i)).not.toBeNull()
-    expect(
-      document.querySelector('[data-field="roadmap-doc"][data-uploaded="true"]'),
-    ).toBeNull()
-    // Finish setup still works after a failed upload.
-    const finishBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /finish setup/i.test(b.textContent ?? ""),
-    ) as HTMLButtonElement
-    expect((finishBtn as HTMLButtonElement).disabled).toBe(false)
   })
 })
