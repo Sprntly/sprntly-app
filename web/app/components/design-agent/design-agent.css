@@ -1217,6 +1217,18 @@
   flex-shrink: 0;
 }
 
+/* Framing heading above the mapped steer grouping — sentence-case label that
+ * names both redirect paths (type a direction / show a screenshot). Reuses the
+ * cluster's small-label tokens (13px / 600 / --ink) and the 12px vertical
+ * rhythm shared with the chip + steer row. */
+.design-agent-surface.modal .locate-steer-heading {
+  margin: 16px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
 /* Image-as-steer. A SECOND, optional steer on the SAME recovery
  * modal — reuses the steer row, the global `.btn`, and the accent/danger/warn
  * tokens; introduces no parallel control. MAPPED variant only (gated in JSX).

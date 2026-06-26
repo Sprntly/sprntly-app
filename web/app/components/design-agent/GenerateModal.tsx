@@ -1312,6 +1312,18 @@ export function GenerateModal({
           so NONE of this renders — that path keeps the text steer
           + PRD-anyway floor only. The chip + image feedback sit above the steer
           row (mockup intent); the attach button sits inside the row. */}
+      {/* Framing heading for the mapped steer grouping — names both ways to
+          redirect the anchor (type a direction, or show a screenshot). MAPPED
+          variant only, matching the image-control gating; the unmapped variant
+          keeps its own steer copy. */}
+      {realRanked.length > 0 && (
+        <p
+          className="locate-steer-heading"
+          data-testid="locate-steer-heading"
+        >
+          Not the right screen? Tell us where to anchor — or show us.
+        </p>
+      )}
       {realRanked.length > 0 && steerImage && (
         <div className="locate-image-chip" data-testid="locate-image-chip">
           <IconImage size={16} className="locate-image-chip-icon" />

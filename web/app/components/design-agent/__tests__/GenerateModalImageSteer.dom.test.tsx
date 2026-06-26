@@ -223,10 +223,30 @@ describe("the image affordance is absent on the unmapped variant", () => {
     expect(q(container, "locate-image-attach")).toBeNull()
     expect(q(container, "locate-image-input")).toBeNull()
     expect(q(container, "locate-image-chip")).toBeNull()
+    // The steer framing heading rides the same mapped-only gate → absent here.
+    expect(q(container, "locate-steer-heading")).toBeNull()
 
     // …while the text steer + the PRD-anyway floor are still present.
     expect(q(container, "locate-steer-input")).toBeTruthy()
     expect(q(container, "generate-anyway")).toBeTruthy()
+  })
+})
+
+// ── steer framing heading (mapped variant only) ───────────────────────────────
+
+describe("the steer framing heading frames the mapped steer grouping", () => {
+  it("mapped variant renders the framing heading above the steer input", () => {
+    const { container } = render(
+      React.createElement(GenerateModal, steerProps()),
+    )
+
+    const heading = q(container, "locate-steer-heading")
+    expect(heading).toBeTruthy()
+    expect(heading!.textContent).toBe(
+      "Not the right screen? Tell us where to anchor — or show us.",
+    )
+    // It frames the shared steer input, which is present on the mapped variant.
+    expect(q(container, "locate-steer-input")).toBeTruthy()
   })
 })
 
