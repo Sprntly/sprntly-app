@@ -1660,6 +1660,11 @@ export const designAgentApi = {
      *  settings page") that re-ranks locate toward the surface the PM means.
      *  Omitted/blank = today's unsteered locate. */
     hint?: string | null
+    /** Optional image-as-steer — a client-downscaled base64 image
+     *  data URL ("data:image/<png|jpeg|webp>;base64,…") of the screen the PM
+     *  wants. The server reads its on-screen text/route cues and re-ranks; falls
+     *  open to text-only on an oversized/undecodable image. Omitted = no image. */
+    image?: string | null
   }) => api.post<LocateJobHandle>("/v1/design-agent/locate", body),
   /** Poll a locate job by id. Returns the job status; when `status` is
    *  "done" the existing `LocateResponse` rides in `result`, and when "error"
@@ -1721,6 +1726,15 @@ export type LocateResponse = {
    *  unmapped path. The generate body sends this back as `map_commit_sha` so
    *  the recreate reads the same snapshot. */
   commit_sha: string
+  /** Image-as-steer. Cues the model read off an attached screenshot
+   *  (URL/route, nav labels, headings), for the recovery chip. Always `[]`
+   *  unless `image_status === "applied"` (backend-enforced). Optional/additive. */
+  read_cues?: string[]
+  /** Image-as-steer. Tells the UI whether an attached screenshot was
+   *  used: "absent" (no image sent), "applied" (re-ranked toward it),
+   *  "ignored_oversize" / "ignored_decode" (fell open to text-only — the UI must
+   *  NOT claim the image was used). Optional/additive; defaults to "absent". */
+  image_status?: "absent" | "applied" | "ignored_oversize" | "ignored_decode"
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate. */

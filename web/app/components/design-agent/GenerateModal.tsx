@@ -138,6 +138,87 @@ export function isRealCandidate(c: LocateCandidate): boolean {
   )
 }
 
+/** Local image-frame glyph — the mockup's attach/screenshot icon.
+ *  Kept local rather than added to shared app-icons (single-use, one component). */
+function IconImage({ size = 16, className }: { size?: number; className?: string }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className={className}
+    >
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="9" cy="9" r="1.6" />
+      <path d="m21 15-4.5-4.5L7 20" />
+    </svg>
+  )
+}
+
+/** Image-as-steer honesty states, mirroring the backend's
+ *  `image_status`. Only "applied" may surface cues / an "applied" affirmation. */
+type LocateImageStatus = "absent" | "applied" | "ignored_oversize" | "ignored_decode"
+
+/** Client-side bounds for the steer screenshot. Accept PNG/JPEG/WebP
+ *  only and reject > ~5 MB BEFORE upload; downscale to ≤1568px longest edge
+ *  (Anthropic's vision sweet spot) so request size + vision token cost stay sane.
+ *  The server enforces its own cap and falls open to text-only regardless. */
+const STEER_IMAGE_ACCEPTED_TYPES = ["image/png", "image/jpeg", "image/webp"] as const
+const STEER_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+const STEER_IMAGE_MAX_EDGE = 1568
+
+/**
+ * Downscale + re-encode a user-selected screenshot to a base64 data URL bounded
+ * at STEER_IMAGE_MAX_EDGE on its longest edge, using the native canvas API (no
+ * dependency). Defensive for SSR / no-canvas: if there's no document or no 2D
+ * context, or the image is already within bounds, the original data URL is
+ * returned unchanged. Pure — never touches storage; the caller holds the result
+ * in memory only. Injectable in tests via the `_testDownscale` prop (jsdom has
+ * no real canvas / image decode).
+ */
+async function downscaleImageToDataUrl(file: File): Promise<string> {
+  const readAsDataUrl = (f: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = () => reject(new Error("read-failed"))
+      reader.readAsDataURL(f)
+    })
+
+  const dataUrl = await readAsDataUrl(file)
+  if (typeof document === "undefined" || typeof Image === "undefined") {
+    return dataUrl
+  }
+
+  const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const el = new Image()
+    el.onload = () => resolve(el)
+    el.onerror = () => reject(new Error("decode-failed"))
+    el.src = dataUrl
+  })
+
+  const longest = Math.max(img.width, img.height)
+  if (!longest || longest <= STEER_IMAGE_MAX_EDGE) return dataUrl
+
+  const scale = STEER_IMAGE_MAX_EDGE / longest
+  const canvas = document.createElement("canvas")
+  canvas.width = Math.round(img.width * scale)
+  canvas.height = Math.round(img.height * scale)
+  const ctx = canvas.getContext("2d")
+  if (!ctx) return dataUrl
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+  // PNG/WebP keep their type (transparency); anything else re-encodes to JPEG.
+  const outType =
+    file.type === "image/png" || file.type === "image/webp" ? file.type : "image/jpeg"
+  return canvas.toDataURL(outType, 0.9)
+}
+
 /** Maps LocateCandidate[] to the shape LocateConfirmView expects. */
 export function mapLocateCandidates(ranked: LocateCandidate[]): LocateConfirmCandidate[] {
   return ranked.map((c, i) => ({
@@ -195,6 +276,7 @@ export function GenerateModal({
   _testPollIntervalMs,
   _testPollTimeoutMs,
   _testPollMaxRetries,
+  _testDownscale,
 }: {
   open: boolean
   onClose: () => void
@@ -239,6 +321,10 @@ export function GenerateModal({
   _testPollIntervalMs?: number
   _testPollTimeoutMs?: number
   _testPollMaxRetries?: number
+  // Image downscale override (tests only). jsdom has no real canvas/image
+  // decode, so tests stub this to return a deterministic data URL. Production
+  // uses the native-canvas downscaleImageToDataUrl.
+  _testDownscale?: (file: File) => Promise<string>
 }) {
   const { showToast } = useNavigation()
 
@@ -261,6 +347,31 @@ export function GenerateModal({
   // missed rather than silently re-rendering the same panel. Cleared on a hit,
   // on a generate, and whenever a new direction is typed.
   const [steerMissed, setSteerMissed] = useState(false)
+  // Image-as-steer. A SECOND, optional steer on the SAME recovery
+  // modal: the PM attaches a screenshot of the screen they want and locate reads
+  // its on-screen text/route cues to re-rank. Co-located with searchHint because
+  // it feeds the very same `enterLoadingFlow` re-search — not a parallel control.
+  //   - steerImage: the client-downscaled base64 data URL (in-memory only; never
+  //     persisted, never logged). null = nothing attached.
+  //   - steerImageName: the filename, for the chip.
+  //   - steerImageError: client-side reject message (non-image MIME / >5MB /
+  //     unreadable) shown inline before any upload happens.
+  //   - imageStatus / steerCues mirror the backend's honesty contract: cues only
+  //     ride an `applied` status; a fall-open (ignored_*) must NEVER render cues
+  //     or an "applied to the screenshot" claim. Initialised from an
+  //     injected test result; otherwise set by handleLocateResult after a search
+  //     and reset whenever the attachment changes (so a stale notice can't linger).
+  const [steerImage, setSteerImage] = useState<string | null>(null)
+  const [steerImageName, setSteerImageName] = useState<string | null>(null)
+  const [steerImageError, setSteerImageError] = useState<string | null>(null)
+  const [imageStatus, setImageStatus] = useState<LocateImageStatus>(
+    _testLocateResult?.image_status ?? "absent",
+  )
+  const [steerCues, setSteerCues] = useState<string[]>(
+    _testLocateResult?.image_status === "applied"
+      ? _testLocateResult.read_cues ?? []
+      : [],
+  )
   const [locateResult, setLocateResult] = useState<LocateResponse | null>(_testLocateResult ?? null)
   const [locateError, setLocateError] = useState<string | null>(_testLocateError ?? null)
   // The screen the resolve call matched, shown on the transient "matched" line
@@ -281,6 +392,8 @@ export function GenerateModal({
   //     superseded flow can never write phase/result state for a newer one).
   const locateInFlightRef = useRef(false)
   const flowTokenRef = useRef(0)
+  // Hidden file input for the image-as-steer attach control.
+  const steerImageInputRef = useRef<HTMLInputElement | null>(null)
 
   // One-shot gate for the saved-preference AUTO-SKIP effect. The effect
   // re-runs on every dep churn (connections / repos / savedPreference identity
@@ -839,8 +952,56 @@ export function GenerateModal({
   // (unmapped / auto_proceed / proceed_with_note / ranked_confirm). Pulled out
   // so the POST→poll resolver and any future caller share one success path —
   // behaviour here is preserved byte-for-byte from the pre-poll version.
-  function handleLocateResult(result: LocateResponse, opts: { repo: string; hint?: string }) {
+  // Image-as-steer: validate + downscale a selected screenshot, then
+  // hold it in memory for the next "Search again". Client-side bounds (MIME +
+  // size) are enforced BEFORE any work; the downscale shrinks the bytes. The
+  // file never touches storage or a log — it rides only the outgoing locate body.
+  async function handleSteerImageSelected(file: File) {
+    setSteerImageError(null)
+    if (!STEER_IMAGE_ACCEPTED_TYPES.includes(file.type as (typeof STEER_IMAGE_ACCEPTED_TYPES)[number])) {
+      setSteerImageError("That's not an image — attach a PNG, JPEG, or WebP screenshot.")
+      return
+    }
+    if (file.size > STEER_IMAGE_MAX_BYTES) {
+      setSteerImageError("That screenshot is over 5 MB — attach a smaller one.")
+      return
+    }
+    try {
+      const dataUrl = await (_testDownscale ?? downscaleImageToDataUrl)(file)
+      setSteerImage(dataUrl)
+      setSteerImageName(file.name)
+      // A freshly attached image invalidates any prior search's image feedback
+      // (cues / fall-open notice) until the next "Search again" resolves.
+      setImageStatus("absent")
+      setSteerCues([])
+      setSteerMissed(false)
+    } catch {
+      setSteerImageError("Couldn't read that screenshot — try another file.")
+    }
+  }
+
+  // Clear the attached screenshot and any feedback derived from it. Pure local
+  // reset — the in-flight/last locate result is untouched.
+  function clearSteerImage() {
+    setSteerImage(null)
+    setSteerImageName(null)
+    setSteerImageError(null)
+    setImageStatus("absent")
+    setSteerCues([])
+  }
+
+  function handleLocateResult(
+    result: LocateResponse,
+    opts: { repo: string; hint?: string; image?: string },
+  ) {
     setLocateResult(result)
+    // Image-as-steer honesty: mirror the backend gate exactly.
+    // Cues ride ONLY an "applied" status; a fall-open (ignored_*) or "absent"
+    // surfaces no cues and no "applied to the screenshot" claim. Trust the
+    // backend (read_cues is [] unless applied) AND gate the UI on the status.
+    const status = (result.image_status ?? "absent") as LocateImageStatus
+    setImageStatus(status)
+    setSteerCues(status === "applied" ? result.read_cues ?? [] : [])
 
     // Route a no-match (unmapped) OR a ranked_confirm whose only candidates are
     // degenerate placeholders to the SAME recovery body. A degenerate
@@ -908,7 +1069,7 @@ export function GenerateModal({
   // "error" phase — NOT back to "config". A failed locate no longer silently
   // collapses to the PRD form (the prod hang→collapse bug).
   async function runLocateResolve(
-    opts: { repo: string; hint?: string },
+    opts: { repo: string; hint?: string; image?: string },
     token: number,
   ): Promise<void> {
     const intervalMs = _testPollIntervalMs ?? LOCATE_POLL_INTERVAL_MS
@@ -947,6 +1108,11 @@ export function GenerateModal({
             // Steer carried only when the PM typed a "search again" direction;
             // a plain locate sends no hint (unsteered, unchanged behaviour).
             ...(opts.hint ? { hint: opts.hint } : {}),
+            // Image-as-steer: the bounded base64 data URL rides the
+            // body ONLY when a screenshot is attached. With no image the key is
+            // omitted entirely, so the no-image request stays byte-identical to
+            // the text-only path.
+            ...(opts.image ? { image: opts.image } : {}),
           })
         } catch (err) {
           if (isStale()) return
@@ -1026,7 +1192,7 @@ export function GenerateModal({
     }
   }
 
-  function enterLoadingFlow(opts: { repo: string; hint?: string }) {
+  function enterLoadingFlow(opts: { repo: string; hint?: string; image?: string }) {
     if (prdId == null) return
     // Re-entry guard: one resolve flow at a time. Covers the auto-skip effect
     // re-running on connections/repos churn and an accidental double-click.
@@ -1140,6 +1306,60 @@ export function GenerateModal({
           steer is demoted below it and "Search again" is plain/secondary — it
           must not compete with the accent "Use this screen" cards. Blank input
           disables the button. */}
+      {/* Image-as-steer. The screenshot affordance lives ONLY on the
+          MAPPED variant (realRanked > 0): there ARE candidates to re-rank, so a
+          screenshot can help. On the UNMAPPED variant there is no map to re-rank,
+          so NONE of this renders — that path keeps the text steer
+          + PRD-anyway floor only. The chip + image feedback sit above the steer
+          row (mockup intent); the attach button sits inside the row. */}
+      {realRanked.length > 0 && steerImage && (
+        <div className="locate-image-chip" data-testid="locate-image-chip">
+          <IconImage size={16} className="locate-image-chip-icon" />
+          <div className="locate-image-chip-meta">
+            <span className="locate-image-name">
+              {steerImageName ?? "screenshot"}
+            </span>
+            {/* Cues render ONLY on an "applied" status — the honest signal
+                that the screenshot's text actually steered the re-rank. */}
+            {imageStatus === "applied" && steerCues.length > 0 && (
+              <span
+                className="locate-image-cues"
+                data-testid="locate-image-cues"
+              >
+                Read from screenshot:{" "}
+                {steerCues.map((cue, i) => (
+                  <code key={`${cue}-${i}`} className="locate-image-cue">
+                    {cue}
+                  </code>
+                ))}
+              </span>
+            )}
+          </div>
+          <button
+            type="button"
+            className="locate-image-remove"
+            data-testid="locate-image-remove"
+            aria-label="Remove screenshot"
+            onClick={clearSteerImage}
+          >
+            <IconClose size={15} />
+          </button>
+        </div>
+      )}
+      {/* No silent image drop. A fall-open (oversize / undecodable on the
+          server) must NEVER claim the image was used: show an inline notice that
+          we searched on text instead, and render NO cues / no "re-ranked toward
+          the screenshot" copy. Gated on the mapped variant + a non-applied,
+          non-absent status returned by the last search. */}
+      {realRanked.length > 0 &&
+        (imageStatus === "ignored_oversize" ||
+          imageStatus === "ignored_decode") && (
+          <p className="locate-image-notice" data-testid="locate-image-notice">
+            {imageStatus === "ignored_oversize"
+              ? "Screenshot too large — searched on your text instead."
+              : "Couldn't read that screenshot — searched on your text instead."}
+          </p>
+        )}
       <div className="locate-steer" data-testid="locate-steer">
         <input
           type="text"
@@ -1154,24 +1374,70 @@ export function GenerateModal({
           }}
           maxLength={300}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && searchHint.trim()) {
+            // Search fires on EITHER signal — a typed direction OR an attached
+            // screenshot.
+            if (e.key === "Enter" && (searchHint.trim() || steerImage)) {
               e.preventDefault()
-              enterLoadingFlow({ repo: repoSel, hint: searchHint.trim() })
+              enterLoadingFlow({
+                repo: repoSel,
+                hint: searchHint.trim(),
+                image: steerImage || undefined,
+              })
             }
           }}
         />
+        {/* Attach / replace screenshot — MAPPED variant only. Hidden file input
+            driven by a visible button so the control matches the steer row's
+            vocabulary. */}
+        {realRanked.length > 0 && (
+          <>
+            <input
+              ref={steerImageInputRef}
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              data-testid="locate-image-input"
+              className="locate-image-input"
+              onChange={(e) => {
+                const file = e.target.files?.[0]
+                if (file) void handleSteerImageSelected(file)
+                // Reset so re-selecting the same file fires onChange again.
+                e.target.value = ""
+              }}
+            />
+            <button
+              type="button"
+              className="btn locate-image-attach"
+              data-testid="locate-image-attach"
+              onClick={() => steerImageInputRef.current?.click()}
+            >
+              <IconImage size={16} />
+              {steerImage ? "Replace" : "Add screenshot"}
+            </button>
+          </>
+        )}
         <button
           type="button"
           className={realRanked.length === 0 ? "btn btn-accent" : "btn"}
           data-testid="locate-search-again"
-          disabled={!searchHint.trim()}
+          disabled={!(searchHint.trim() || steerImage)}
           onClick={() =>
-            enterLoadingFlow({ repo: repoSel, hint: searchHint.trim() })
+            enterLoadingFlow({
+              repo: repoSel,
+              hint: searchHint.trim(),
+              image: steerImage || undefined,
+            })
           }
         >
           Search again
         </button>
       </div>
+      {/* Client-side reject: a non-image MIME / >5 MB / unreadable file is
+          refused BEFORE any upload, with an inline message. Mapped variant only. */}
+      {realRanked.length > 0 && steerImageError && (
+        <p className="locate-image-error" data-testid="locate-image-error">
+          {steerImageError}
+        </p>
+      )}
       {/* A steered re-search that still missed — say so explicitly rather than
           re-rendering the same panel silently. */}
       {steerMissed && (
