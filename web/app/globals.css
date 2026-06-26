@@ -4639,6 +4639,99 @@
     color: var(--ink-4);
   }
 
+  /* Sticky top action bar — ticket title + the Push-to-ClickUp button. */
+  .tkt-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 4px 0 12px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .tkt-topbar-titles {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .tkt-topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .tkt-list-select {
+    font-size: 12px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    max-width: 200px;
+  }
+
+  .tkt-push-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: 7px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+  }
+
+  .tkt-push-btn:disabled {
+    background: var(--surface-3);
+    color: var(--ink-4);
+    cursor: not-allowed;
+  }
+
+  .tkt-regen-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-2);
+    border: 1px solid var(--border);
+    cursor: pointer;
+  }
+
+  .tkt-regen-btn:hover {
+    background: var(--surface-2);
+    color: var(--ink-1);
+  }
+
+  .tkt-push-status {
+    font-size: 12px;
+    color: var(--ink-3);
+    margin: 0 0 12px;
+  }
+
+  .tkt-push-status--err {
+    color: var(--danger);
+  }
+
+  .tkt-push-status--ok {
+    color: var(--accent-ink);
+  }
+
   .tkt-list {
     display: flex;
     flex-direction: column;

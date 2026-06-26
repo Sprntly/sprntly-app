@@ -37,10 +37,12 @@ router = APIRouter(prefix="/v1/stories", tags=["stories"])
 # schedules a background task and returns a job id immediately; the client polls
 # GET /jobs/{id} until status is "ready" or "failed".
 #
-# Stories are TRANSIENT — they were never persisted (the user reviews them, then
-# pushes to ClickUp). So the job store is in-memory, matching the established
-# single-uvicorn-worker pattern elsewhere (e.g. app/brief_runner.py). A backend
-# restart drops in-flight jobs; the user simply re-opens the tab to regenerate.
+# The job store tracks only the in-flight generation; the produced stories are
+# persisted to the `prd_tickets` table on completion (app.db.prd_tickets), so the
+# tab serves them via GET /for-prd without re-running generation until the PRD
+# changes. The in-memory store matches the single-uvicorn-worker pattern
+# elsewhere (e.g. app/brief_runner.py); a restart only drops an in-flight job's
+# poll (the tab re-kicks generation), never a completed set (that's in the DB).
 # All dict mutations happen on the event loop (the to_thread result is applied
 # back in the coroutine), so no lock is needed under the single-worker topology.
 _jobs: dict[int, dict] = {}
@@ -145,6 +147,37 @@ def get_job(
     elif job["status"] == "failed":
         out["error"] = job["error"]
     return out
+
+
+@router.get("/for-prd/{prd_id}")
+def tickets_for_prd(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Return the persisted tickets for a PRD and whether they're still fresh.
+
+    The Tickets tab reads this first: if `fresh` is true (the stored stories were
+    generated from the PRD's current rendered content), it renders them with no
+    LLM call. If the row is missing/stale/failed it kicks off /generate, which
+    re-persists. `fresh` compares the stored content_hash to the live PRD hash.
+    """
+    from app.db.prd_tickets import get_tickets, prd_content_hash
+
+    row = get_tickets(company.company_id, prd_id)
+    if row is None:
+        return {"status": "none", "fresh": False, "stories": []}
+    current = prd_content_hash(prd_id)
+    fresh = (
+        row.get("status") == "ready"
+        and current is not None
+        and current == row.get("content_hash")
+    )
+    return {
+        "status": row.get("status") or "ready",
+        "fresh": fresh,
+        "stories": row.get("stories") or [],
+        "generated_at": row.get("generated_at"),
+    }
 
 
 @router.post("/lists")
