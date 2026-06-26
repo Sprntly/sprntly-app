@@ -72,7 +72,13 @@ EVIDENCE_TEMPLATE_VERSION = 3
 #      the Design section on next view.
 #  4 — VOICE_GUARD appended + "corpus" de-jargoned in the grounding
 #      preamble. Bump re-renders cached PRDs under the de-jargoned prompt.
-PRD_TEMPLATE_VERSION = 4
+#  5 — Part A (the human PRD) regenerates against the typed-`:::`-block
+#      contract (data/sprntly_prd_template.md) instead of the prd-author
+#      skill's prose/EARS template, which emitted no blocks and degraded to
+#      a raw markdown doc in the renderer. Bump invalidates the plain-md
+#      cached PRDs so they re-render as first-class components. (Part B is
+#      generated separately by the implementation-spec skill.)
+PRD_TEMPLATE_VERSION = 5
 
 
 # Bumped whenever the predefined Ask prompts list changes or the underlying
