@@ -802,7 +802,8 @@ Return STRICT JSON matching this schema — raw JSON only, no markdown, no expla
       "classification_confidence": 80
     }
   ],
-  "is_multi_node": false
+  "is_multi_node": false,
+  "read_cues": []
 }
 
 Rules:
@@ -833,6 +834,13 @@ representable way to decline: an empty array is silent, a decline candidate is n
 screen is and what a user does on it (not WHY it matches the request), in plain \
 language a non-technical product manager can choose between candidates with. Keep \
 it under 300 characters.
+- "read_cues" is an OPTIONAL top-level list of short strings, used ONLY when a \
+screenshot of the target screen is attached to the conversation. When an image is \
+attached, read its on-screen TEXT and route cues — the URL/route, nav labels, \
+headings, button text — list those cues here, and re-rank the screen candidates \
+toward the surface the screenshot depicts. This is a text/route-cue read, NOT a \
+visual pixel-match against the screenshot. When no screenshot is attached, omit \
+"read_cues" or return an empty list.
 
 Classification — for each candidate, also label the KIND of placement the PRD implies:
 - "classification" is one of three values: "modify-existing" (the PRD changes or \

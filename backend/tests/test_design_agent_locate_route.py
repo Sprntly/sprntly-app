@@ -377,6 +377,152 @@ def test_bg_task_forwards_hint_to_locate_screen(client, env, monkeypatch):
     assert captured.get("hint") == "the settings page"
 
 
+# ── image-as-steer: optional `image` threading ───────────────────────────────
+
+
+def _data_url(raw: bytes = b"screenshot-bytes", mime: str = "image/png") -> str:
+    import base64
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
+def test_endpoint_forwards_image_to_bg_task(client, env, monkeypatch):
+    """An `image` in the POST body is forwarded to _run_locate_bg verbatim."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    patcher, captured = _capture_run_locate_bg(env.routes)
+    data_url = _data_url()
+
+    with patcher:
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo", "image": data_url},
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert captured.get("image") == data_url
+
+
+def test_endpoint_forwards_none_image_when_absent(client, env, monkeypatch):
+    """No image in the body → _run_locate_bg receives image=None."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    patcher, captured = _capture_run_locate_bg(env.routes)
+
+    with patcher:
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo"},
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert captured.get("image") is None
+
+
+def test_oversized_image_body_rejected_413_and_not_queued(client, env, monkeypatch):
+    """A body whose image exceeds the accept-step char cap is rejected with 413
+    BEFORE any background job is scheduled — the abusive upload never reaches the
+    vision model. A within-cap-but-undecodable image is a different path (it falls
+    open to text-only inside the job); this guard is purely about transport size."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    patcher, captured = _capture_run_locate_bg(env.routes)
+
+    # Cheap oversized body: a valid-looking data-URL prefix + a padded base64 body
+    # one char past the cap. No real image bytes needed — only the length matters.
+    cap = env.routes._MAX_LOCATE_IMAGE_CHARS
+    oversized = "data:image/png;base64," + ("A" * (cap + 1))
+
+    with patcher:
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo", "image": oversized},
+        )
+
+    assert resp.status_code == 413, resp.text
+    # The background task was never scheduled: the spy captured nothing and no job
+    # record was minted in the process-local store.
+    assert captured == {}
+    assert env.routes._locate_jobs == {}
+
+
+def test_within_cap_image_body_still_accepted_and_queued(client, env, monkeypatch):
+    """A normal small image is under the accept-step cap, so it still queues as
+    before (202) and reaches the background task — the guard only trips on abuse."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    patcher, captured = _capture_run_locate_bg(env.routes)
+    data_url = _data_url()
+
+    with patcher:
+        resp = client.post(
+            "/v1/design-agent/locate",
+            json={"prd_id": 1, "github_repo": "org/repo", "image": data_url},
+        )
+
+    assert resp.status_code == 202, resp.text
+    assert captured.get("image") == data_url
+
+
+def test_bg_task_forwards_image_to_locate_screen(client, env, monkeypatch):
+    """_run_locate_bg forwards its image kwarg into the locate_screen call."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    fake_map, fake_locate = _make_map_result(confidence=90)
+    captured: dict = {}
+    data_url = _data_url()
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        if func.__name__ == "build_map":
+            return fake_map
+        if func.__name__ == "locate_screen":
+            captured["image"] = kwargs.get("image", "__absent__")
+        return fake_locate
+
+    with patch("asyncio.to_thread", new=_fake_to_thread):
+        env.routes._locate_jobs["jobImg"] = {
+            "status": "running",
+            "workspace_id": _TEST_COMPANY_ID,
+            "created_at": 0.0,
+        }
+        asyncio.run(
+            env.routes._run_locate_bg(
+                job_id="jobImg",
+                workspace_id=_TEST_COMPANY_ID,
+                github_repo="org/repo",
+                ref=None,
+                prd_text="login PRD",
+                installation_id=42,
+                image=data_url,
+            )
+        )
+
+    assert captured.get("image") == data_url
+
+
+def test_response_includes_read_cues_and_image_status(client, env, monkeypatch):
+    """The LocateResponse exposes the new read_cues + image_status fields."""
+    _seed_prd()
+    _mock_installation(monkeypatch)
+    fake_map, fake_locate = _make_map_result(confidence=90)
+
+    async def _fake_to_thread(func, *args, **kwargs):
+        if func.__name__ == "build_map":
+            return fake_map
+        return fake_locate
+
+    with patch("asyncio.to_thread", new=_fake_to_thread):
+        resp = _post_and_poll(
+            client, env.routes,
+            {"prd_id": 1, "github_repo": "org/repo"},
+        )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()["result"]
+    # No image was sent → defaults surface, never absent from the payload.
+    assert body["read_cues"] == []
+    assert body["image_status"] == "absent"
+
+
 # ── degradation / errors ─────────────────────────────────────────────────────
 
 

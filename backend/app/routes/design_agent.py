@@ -933,6 +933,14 @@ class LocateRequest(BaseModel):
     # Capped here (the prompt layer caps again defensively); blank/None = today's
     # unsteered locate, byte-for-byte.
     hint: str | None = Field(default=None, max_length=300)
+    # Optional screenshot of the target screen for the same "search again" re-run.
+    # A base64 image data URL ("data:image/<png|jpeg|webp>;base64,…"),
+    # client-downscaled. It rides the volatile locate user turn as an image block
+    # so the model reads its on-screen text/route cues and re-ranks. Stateless:
+    # never persisted, never logged as bytes. Omitted/None = no image. Server
+    # decode + size validation lives in locate_screen, which falls open to a
+    # text-only locate (never 500) on an oversized/undecodable image.
+    image: str | None = Field(default=None)
 
 
 class LocateCandidateOut(BaseModel):
@@ -961,6 +969,12 @@ class LocateResponse(BaseModel):
     #                                         pins build_map to this SHA so the
     #                                         recreate reads the same bytes.
     #                                         "" on the unmapped path.
+    # Image-as-steer. Cues the model read off an attached screenshot,
+    # for the recovery chip; empty unless an image was applied. image_status tells
+    # the UI whether the screenshot was used so it never claims a steer that did
+    # not happen ("absent" | "applied" | "ignored_oversize" | "ignored_decode").
+    read_cues: list[str] = Field(default_factory=list)
+    image_status: str = "absent"
 
 
 def _unmapped_locate_response(repo: str) -> LocateResponse:
@@ -1034,6 +1048,7 @@ def _candidate_to_out(candidate, map_result) -> LocateCandidateOut:
 # job_id -> {status, workspace_id, created_at, result?, error?}
 _locate_jobs: dict[str, dict[str, Any]] = {}
 _LOCATE_JOB_TTL_SECONDS = 600  # drop entries older than ~10 min (opportunistic sweep)
+_MAX_LOCATE_IMAGE_CHARS = 10 * 1024 * 1024  # ~10 MB of base64 chars; a legit <=5 MB image is ~6.7 MB base64, so this never rejects a valid request
 
 
 def _sweep_locate_jobs(now: float | None = None) -> None:
@@ -1068,6 +1083,7 @@ async def _run_locate_bg(
     prd_text: str,
     installation_id: int | None,
     hint: str | None = None,
+    image: str | None = None,
 ) -> None:
     """Run the locate pipeline off the request path and record the terminal
     state in the process-local job store.
@@ -1113,7 +1129,7 @@ async def _run_locate_bg(
             return
 
         locate_result = await asyncio.to_thread(
-            locate_screen, prd_text, map_result, hint=hint
+            locate_screen, prd_text, map_result, hint=hint, image=image
         )
 
         threshold = threshold_for_repo(github_repo)
@@ -1149,6 +1165,8 @@ async def _run_locate_bg(
             posture=map_result.posture,
             unmapped=False,
             commit_sha=map_result.commit_sha,
+            read_cues=locate_result.read_cues,
+            image_status=locate_result.image_status,
         ))
     except Exception as exc:  # noqa: BLE001 — terminal record, never let the task die unhandled
         # error_class only in logs (no PII rule); the full message is locate
@@ -1206,6 +1224,17 @@ async def locate(
     # and the locate prompt take the unsteered path; the model length cap on
     # LocateRequest.hint already bounds it.
     hint = (body.hint or "").strip() or None
+    # The image is forwarded as-is (or None). locate_screen owns decode + size
+    # validation and falls open to text-only on a bad/oversized image; we do not
+    # log or persist the bytes here.
+    image = body.image or None
+
+    if image is not None and len(image) > _MAX_LOCATE_IMAGE_CHARS:
+        # Accept-step guard: a client that bypasses the client-side downscale must not
+        # get a giant upload queued and billed to the vision model. This is a 4xx, not a
+        # 500 — within-cap-but-undecodable images still fall open to a text-only locate
+        # inside the job. Reject synchronously before the job is minted.
+        raise HTTPException(status_code=413, detail="Screenshot too large.")
 
     _sweep_locate_jobs()
     job_id = uuid.uuid4().hex
@@ -1224,6 +1253,7 @@ async def locate(
             prd_text=prd_text,
             installation_id=installation_id,
             hint=hint,
+            image=image,
         )
     )
     _inflight_tasks.add(task)

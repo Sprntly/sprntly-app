@@ -7,6 +7,8 @@ RunUsage never-raise pattern from design_system/brief.py.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import logging
 import re
@@ -36,6 +38,66 @@ _MAX_HINT_CHARS = 300
 
 # Guard against pathologically large repos blowing the stable prefix.
 _COMPACT_MAP_CHAR_CAP = 8000
+
+# ── Image-as-steer ────────────────────────────────────────────────────────────
+# An optional screenshot of the target screen can ride the volatile user turn as
+# an Anthropic image content block. It is a richer steer signal (read for its
+# on-screen text/route cues), NOT a visual pixel-match. The cached system+map
+# prefix is untouched so a steered re-search stays a prefix cache hit.
+#
+# Server-side decode cap on the image bytes (≈5 MB), mirroring the client bound.
+# Oversized or undecodable images fall OPEN to the text-only path — never raise.
+_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+# Allowed image MIME types (Anthropic vision set, minus gif).
+_ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg", "image/webp"}
+# Defensive bounds on the model-emitted `read_cues` list.
+_MAX_READ_CUES = 12
+_MAX_READ_CUE_CHARS = 120
+# data:image/<type>;base64,<payload> — the only shape the client sends.
+_DATA_URL_RE = re.compile(r"^data:(image/[a-zA-Z0-9.+-]+);base64,(.+)$", re.DOTALL)
+
+# Appended to the volatile user turn when (and only when) a valid image rides
+# along. Instructs the model to read the screenshot's TEXT/route cues and steer
+# the ranking — explicitly not a pixel-match — and to report the cues it read.
+_IMAGE_INSTRUCTION = (
+    "A screenshot of the target screen is attached. Read its on-screen TEXT and "
+    "route cues — URL/route, nav labels, headings, button text — and re-rank the "
+    "screen candidates toward what it depicts. This is a text/route-cue read, NOT "
+    "a visual pixel-match. List the cues you read in `read_cues`."
+)
+
+
+def _decode_image_data_url(image: object) -> tuple[Optional[str], Optional[str], str]:
+    """Validate a base64 image data URL. Returns (media_type, raw_b64, status).
+
+    status is one of:
+      - "applied"          — well-formed, allowed MIME, decodes within the cap.
+      - "ignored_oversize" — decodes but exceeds _MAX_IMAGE_BYTES.
+      - "ignored_decode"   — not a str, malformed data URL, disallowed MIME, or
+                             a base64 decode error.
+
+    NEVER raises. On any ignored_* status the caller falls open to the text-only
+    locate path (no image block, plain-string user turn).
+    """
+    try:
+        if not isinstance(image, str):
+            return (None, None, "ignored_decode")
+        match = _DATA_URL_RE.match(image.strip())
+        if not match:
+            return (None, None, "ignored_decode")
+        media_type = match.group(1).lower()
+        raw_b64 = match.group(2)
+        if media_type not in _ALLOWED_IMAGE_MIME:
+            return (None, None, "ignored_decode")
+        try:
+            decoded = base64.b64decode(raw_b64, validate=True)
+        except (binascii.Error, ValueError):
+            return (None, None, "ignored_decode")
+        if len(decoded) > _MAX_IMAGE_BYTES:
+            return (media_type, raw_b64, "ignored_oversize")
+        return (media_type, raw_b64, "applied")
+    except Exception:  # noqa: BLE001 — fall open, never let a steer image 500
+        return (None, None, "ignored_decode")
 
 
 class LocateCandidate(BaseModel):
@@ -73,6 +135,14 @@ class LocateResult(BaseModel):
     candidates: list[LocateCandidate] = Field(default_factory=list)  # ranked, ≤3
     is_multi_node: bool = False  # True when the PRD legitimately spans a screen set
     # honest default: empty candidates ⇒ "no codebase locate" ⇒ caller degrades
+    # Cues the model read off an attached screenshot. Optional,
+    # defensively coerced; forced empty on any image fall-open so the UI never
+    # claims an image steer that did not happen.
+    read_cues: list[str] = Field(default_factory=list)
+    # How an attached image was handled: "absent" (none passed), "applied"
+    # (rode the call), "ignored_oversize" / "ignored_decode" (fell open to
+    # text-only). Surfaced so the route + UI can avoid an image-steer claim.
+    image_status: str = "absent"
 
 
 def compact_map(m: "MapResult") -> str:
@@ -108,6 +178,7 @@ def locate_screen(
     map_result: "MapResult",
     *,
     hint: Optional[str] = None,
+    image: Optional[str] = None,
     client=None,
 ) -> LocateResult:
     """Map a PRD to ranked screen candidates via a single LLM call.
@@ -128,6 +199,17 @@ def locate_screen(
         toward the steer. The cached system+map prefix is untouched, so a steered
         re-search is a cache hit on the prefix. Empty/blank/None ⇒ the user turn
         is byte-for-byte today's `PRD:\\n{prd_text}` and behaviour is unchanged.
+    image:
+        An optional base64 image data URL ("data:image/<png|jpeg|webp>;base64,…")
+        — a screenshot of the target screen, client-downscaled. When present and
+        decodable within the server cap, it rides the volatile user turn as an
+        Anthropic image content block (alongside PRD + hint) and the user turn is
+        switched from a plain string to a content-block list; the model reads its
+        on-screen text/route cues and re-ranks. When absent/blank the user turn is
+        byte-for-byte today's plain string (no regression). When oversized or
+        undecodable it FALLS OPEN to the text-only path — never raises — and the
+        result's `image_status` records why. The cached system+map prefix is
+        untouched in both paths, so a steered re-search is a prefix cache hit.
     client:
         An Anthropic client (or any compatible object). When None, the cached
         design-agent client is used. Injecting a fake here enables unit-testing
@@ -181,7 +263,41 @@ def locate_screen(
                 f"User direction: {steer}\n"
                 "Re-rank the screen candidates toward this direction."
             )
-        messages = [{"role": "user", "content": user_turn}]
+
+        # Image steer: when a valid screenshot is attached, append the
+        # image instruction to the text (order: PRD → hint → image instruction) and
+        # carry the image as a content block so the user turn becomes a list. An
+        # oversized/undecodable image FALLS OPEN — the text-only plain string is
+        # kept and image_status records why. Absent/blank ⇒ byte-for-byte today.
+        image_status = "absent"
+        image_block = None
+        if image is not None and str(image).strip():
+            media_type, raw_b64, image_status = _decode_image_data_url(image)
+            if image_status == "applied":
+                user_turn = f"{user_turn}\n\n{_IMAGE_INSTRUCTION}"
+                image_block = {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": raw_b64,
+                    },
+                }
+            # ignored_* → fall open: no image block, plain-string user turn below.
+        result.image_status = image_status
+
+        if image_block is not None:
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_turn},
+                        image_block,
+                    ],
+                }
+            ]
+        else:
+            messages = [{"role": "user", "content": user_turn}]
 
         resp = client.messages.create(
             model=_MODEL,
@@ -255,6 +371,24 @@ def locate_screen(
                     else:
                         cand["spans_multi_surface"] = bool(raw_spans)
 
+            # Defensively coerce the optional top-level `read_cues` BEFORE
+            # validation. The model may emit a string, a non-list, or a list with
+            # non-str items; a raw bad value would fail the whole model_validate
+            # (dropping every candidate). Coerce to a clean, bounded list of
+            # non-empty strings so a malformed read_cues never breaks the parse.
+            if "read_cues" in parsed:
+                raw_cues = parsed.get("read_cues")
+                coerced_cues: list[str] = []
+                if isinstance(raw_cues, list):
+                    for item in raw_cues:
+                        if len(coerced_cues) >= _MAX_READ_CUES:
+                            break
+                        if isinstance(item, str):
+                            cleaned = item.strip()[:_MAX_READ_CUE_CHARS]
+                            if cleaned:
+                                coerced_cues.append(cleaned)
+                parsed["read_cues"] = coerced_cues
+
         raw_result = LocateResult.model_validate(parsed)
 
         # Post-parse normalization.
@@ -289,10 +423,17 @@ def locate_screen(
                 c.rationale = c.rationale[:_MAX_RATIONALE_CHARS]
             candidates.append(c)
 
+        # read_cues are only a meaningful claim when an image was actually
+        # applied. On any fall-open (ignored_*) or no image (absent), force the
+        # list empty so the UI never claims an image steer that did not happen.
+        read_cues = list(raw_result.read_cues) if image_status == "applied" else []
+
         # Enforce the ≤3 cap even when the model returns more.
         result = LocateResult(
             candidates=candidates[:3],
             is_multi_node=raw_result.is_multi_node,
+            read_cues=read_cues,
+            image_status=image_status,
         )
         _status = "complete" if result.candidates else "empty"
         return result

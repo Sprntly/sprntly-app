@@ -16,6 +16,9 @@ from unittest.mock import patch
 
 import pytest
 
+import base64
+
+import app.design_agent.codebase_map.locate as locate_mod
 from app.design_agent.codebase_map.locate import (
     LocateCandidate,
     LocateResult,
@@ -565,6 +568,305 @@ def test_hint_does_not_touch_cached_system_prefix():
     assert fake_plain.calls[0]["system"] == fake_steered.calls[0]["system"]
     # And the user turns genuinely differ (the steer landed somewhere).
     assert _user_turn_text(fake_plain) != _user_turn_text(fake_steered)
+
+
+# ---------------------------------------------------------------------------
+# Image-as-steer — optional screenshot in the volatile user turn
+# ---------------------------------------------------------------------------
+
+
+def _data_url(raw: bytes = b"screenshot-text-bytes", mime: str = "image/png") -> str:
+    """A base64 image data URL shaped exactly like the client sends. The bytes
+    need not be a real image — locate only base64-decodes + size-checks them."""
+    return f"data:{mime};base64," + base64.b64encode(raw).decode("ascii")
+
+
+def _user_content(fake: FakeClient):
+    """The raw `content` of the single user turn (str or content-block list)."""
+    messages = fake.calls[0]["messages"]
+    assert len(messages) == 1
+    return messages[0]["content"]
+
+
+def test_absent_image_user_turn_byte_identical():
+    """With NO image the user turn is the exact plain string as today — the
+    no-image path is byte-for-byte unchanged (no content-block list)."""
+    m = _map_with_nodes("/team")
+    fake = FakeClient([_make_response(_happy_payload())])
+
+    result = locate_screen("team management PRD", m, client=fake)
+
+    content = _user_content(fake)
+    assert isinstance(content, str)
+    assert content == "PRD:\nteam management PRD"
+    assert result.image_status == "absent"
+    assert result.read_cues == []
+
+
+def test_image_present_builds_content_block_list():
+    """An attached image turns the user turn into a [text, image] block list; the
+    image block carries the raw base64 (after `base64,`) and the derived MIME."""
+    m = _map_with_nodes("/team")
+    raw = b"the-real-screenshot-bytes"
+    fake = FakeClient([_make_response(_happy_payload())])
+
+    result = locate_screen(
+        "team PRD", m, client=fake, image=_data_url(raw, "image/webp")
+    )
+
+    content = _user_content(fake)
+    assert isinstance(content, list)
+    assert len(content) == 2
+    text_block, image_block = content
+    assert text_block["type"] == "text"
+    assert text_block["text"].startswith("PRD:\nteam PRD")
+    # The image instruction rides the text block.
+    assert "screenshot" in text_block["text"].lower()
+    assert "read_cues" in text_block["text"]
+    assert image_block["type"] == "image"
+    assert image_block["source"]["type"] == "base64"
+    assert image_block["source"]["media_type"] == "image/webp"
+    assert image_block["source"]["data"] == base64.b64encode(raw).decode("ascii")
+    assert result.image_status == "applied"
+
+
+def test_image_does_not_touch_cached_system_prefix():
+    """The image rides ONLY the volatile user turn — the cached system+map
+    prefix (with the cache breakpoint) is byte-for-byte identical with and
+    without the image, so a steered re-search is a prefix cache hit."""
+    m = _map_with_nodes("/team", "/settings/members")
+    fake_plain = FakeClient([_make_response(_happy_payload())])
+    fake_image = FakeClient([_make_response(_happy_payload())])
+
+    locate_screen("team PRD", m, client=fake_plain)
+    locate_screen("team PRD", m, client=fake_image, image=_data_url())
+
+    assert fake_plain.calls[0]["system"] == fake_image.calls[0]["system"]
+    # The user turns genuinely differ (plain string vs content-block list).
+    assert _user_content(fake_plain) != _user_content(fake_image)
+
+
+def test_hint_and_image_compose_order_stable():
+    """Hint + image together: both inject, order is PRD → hint direction → image
+    instruction, and the image block is present."""
+    m = _map_with_nodes("/team", "/settings/members")
+    fake = FakeClient([_make_response(_happy_payload("/settings/members"))])
+
+    locate_screen(
+        "team PRD",
+        m,
+        client=fake,
+        hint="the settings page",
+        image=_data_url(),
+    )
+
+    content = _user_content(fake)
+    assert isinstance(content, list)
+    text = content[0]["text"]
+    # Order: PRD anchor, then the hint direction, then the image instruction.
+    prd_at = text.index("PRD:\nteam PRD")
+    hint_at = text.index("User direction: the settings page")
+    image_at = text.lower().index("a screenshot of the target screen")
+    assert prd_at < hint_at < image_at
+    assert content[1]["type"] == "image"
+
+
+def test_image_reranks_top_candidate():
+    """A fixture image whose cues point at screen B flips the top candidate
+    from A→B vs the no-image call on the same PRD+map. Driven by a content-aware
+    fake that returns a B-first payload when the user content is a block list."""
+    m = _map_with_nodes("/a", "/b")
+
+    payload_a = {
+        "candidates": [
+            {"route": "/a", "entry_component": "AScreen", "confidence": 88,
+             "rationale": "Screen A.", "ambiguous": False},
+        ],
+        "is_multi_node": False,
+    }
+    payload_b = {
+        "candidates": [
+            {"route": "/b", "entry_component": "BScreen", "confidence": 91,
+             "rationale": "Screen B.", "ambiguous": False},
+        ],
+        "is_multi_node": False,
+        "read_cues": ["/b", "Backlog"],
+    }
+
+    class _ContentAwareClient:
+        def __init__(self):
+            self.calls = []
+            outer = self
+
+            class _Messages:
+                def create(self, **kwargs):
+                    outer.calls.append(kwargs)
+                    content = kwargs["messages"][0]["content"]
+                    payload = payload_b if isinstance(content, list) else payload_a
+                    return _make_response(payload)
+
+            self.messages = _Messages()
+
+    fake_no_image = _ContentAwareClient()
+    fake_image = _ContentAwareClient()
+
+    no_image = locate_screen("ambiguous PRD", m, client=fake_no_image)
+    with_image = locate_screen(
+        "ambiguous PRD", m, client=fake_image, image=_data_url()
+    )
+
+    assert no_image.candidates[0].route == "/a"
+    assert with_image.candidates[0].route == "/b"
+    # The cues read off the image are surfaced (applied path only).
+    assert with_image.image_status == "applied"
+    assert with_image.read_cues == ["/b", "Backlog"]
+
+
+def test_malformed_read_cues_coerced_to_empty():
+    """A non-list / non-str `read_cues` from the model is coerced, the parse
+    still succeeds, and nothing about the rest of the result breaks."""
+    m = _map_with_nodes("/team")
+
+    # read_cues as a bare string would fail naive validation — must coerce to [].
+    payload_str = dict(_happy_payload(), read_cues="not a list at all")
+    fake1 = FakeClient([_make_response(payload_str)])
+    r1 = locate_screen("prd", m, client=fake1, image=_data_url())
+    assert r1.candidates[0].route == "/team"
+    assert r1.read_cues == []
+
+    # read_cues with mixed junk → only the clean string survives.
+    payload_mixed = dict(
+        _happy_payload(), read_cues=["  Backlog  ", 42, None, {"x": 1}, ""]
+    )
+    fake2 = FakeClient([_make_response(payload_mixed)])
+    r2 = locate_screen("prd", m, client=fake2, image=_data_url())
+    assert r2.read_cues == ["Backlog"]
+
+
+def test_read_cues_length_and_char_capped():
+    """read_cues is bounded: at most _MAX_READ_CUES items, each clipped."""
+    m = _map_with_nodes("/team")
+    many = [f"cue-{i}-" + "x" * 300 for i in range(50)]
+    payload = dict(_happy_payload(), read_cues=many)
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen("prd", m, client=fake, image=_data_url())
+
+    assert len(result.read_cues) <= locate_mod._MAX_READ_CUES
+    assert all(len(c) <= locate_mod._MAX_READ_CUE_CHARS for c in result.read_cues)
+
+
+def test_oversize_image_falls_open_to_text_only(monkeypatch):
+    """An image whose decoded bytes exceed the cap falls open to the
+    text-only path (plain-string user turn), image_status='ignored_oversize',
+    read_cues forced empty, and NO exception is raised."""
+    m = _map_with_nodes("/team")
+    monkeypatch.setattr(locate_mod, "_MAX_IMAGE_BYTES", 4)
+    # The model still returns read_cues, but a fall-open must NOT surface them.
+    payload = dict(_happy_payload(), read_cues=["should", "be", "dropped"])
+    fake = FakeClient([_make_response(payload)])
+
+    result = locate_screen(
+        "team PRD", m, client=fake, image=_data_url(b"way-too-many-bytes")
+    )
+
+    content = _user_content(fake)
+    assert isinstance(content, str)  # text-only fall-open
+    assert content == "PRD:\nteam PRD"
+    assert result.image_status == "ignored_oversize"
+    assert result.read_cues == []
+    # And the call still succeeded with a real candidate (no 500/empty drop).
+    assert result.candidates[0].route == "/team"
+
+
+def test_bad_mime_falls_open_to_text_only():
+    """A disallowed MIME (gif) is treated as undecodable → ignored_decode,
+    text-only locate, no exception."""
+    m = _map_with_nodes("/team")
+    fake = FakeClient([_make_response(_happy_payload())])
+
+    result = locate_screen(
+        "team PRD", m, client=fake, image=_data_url(mime="image/gif")
+    )
+
+    assert isinstance(_user_content(fake), str)
+    assert result.image_status == "ignored_decode"
+    assert result.read_cues == []
+
+
+def test_malformed_data_url_falls_open_to_text_only():
+    """A non-data-URL string is undecodable → ignored_decode, text-only."""
+    m = _map_with_nodes("/team")
+    fake = FakeClient([_make_response(_happy_payload())])
+
+    result = locate_screen(
+        "team PRD", m, client=fake, image="this-is-not-a-data-url"
+    )
+
+    assert isinstance(_user_content(fake), str)
+    assert result.image_status == "ignored_decode"
+
+
+def test_blank_image_treated_as_absent():
+    """An empty/whitespace image string is unsteered — identical to no image."""
+    m = _map_with_nodes("/team")
+    fake = FakeClient([_make_response(_happy_payload())])
+
+    result = locate_screen("team PRD", m, client=fake, image="   ")
+
+    assert _user_content(fake) == "PRD:\nteam PRD"
+    assert result.image_status == "absent"
+
+
+def test_image_cache_verification_second_call_reads_cache(caplog):
+    """A second locate within the window still shows non-zero cached input
+    tokens with the image in the volatile turn (the prefix stays cacheable)."""
+    m = _map_with_nodes("/team")
+    usage1 = _make_usage(input_tokens=100, cache_read_input_tokens=0)
+    usage2 = _make_usage(input_tokens=20, cache_read_input_tokens=80)
+    fake = FakeClient([
+        _make_response(_happy_payload(), usage1),
+        _make_response(_happy_payload(), usage2),
+    ])
+
+    with caplog.at_level(logging.INFO):
+        locate_screen("prd", m, client=fake, image=_data_url())
+        locate_screen("prd", m, client=fake, image=_data_url())
+
+    log_lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "design_agent.locate.complete" in r.getMessage()
+    ]
+    assert len(log_lines) == 2
+    assert "cached_input_tokens=80" in log_lines[1]
+
+
+def test_image_bytes_not_in_cost_summary_log(caplog):
+    """The per-run cost-summary line still emits with its standard fields and
+    contains NO image bytes / data URL — identifiers only."""
+    m = _map_with_nodes("/team")
+    raw = b"SECRET-SCREENSHOT-BYTES-DO-NOT-LOG"
+    data_url = _data_url(raw)
+    fake = FakeClient([_make_response(_happy_payload())])
+
+    with caplog.at_level(logging.INFO):
+        locate_screen("prd", m, client=fake, image=data_url)
+
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if "design_agent.locate.complete" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    line = lines[0]
+    # Standard fields still present.
+    assert "repo=org/repo" in line
+    assert "est_cost_usd=" in line
+    # No image content leaked.
+    assert base64.b64encode(raw).decode("ascii") not in line
+    assert "data:image" not in line
+    assert "SECRET-SCREENSHOT" not in line
 
 
 # ---------------------------------------------------------------------------
