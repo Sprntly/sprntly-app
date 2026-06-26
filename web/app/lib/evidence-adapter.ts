@@ -22,6 +22,7 @@ import type {
   PrdSection,
   PrdContent,
 } from "../types/content"
+import { isHtmlEvidence } from "./evidenceHouseCss"
 
 const HEADING_RULE = /^─+$/
 const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "donut", "stat", "gauge"]
@@ -298,6 +299,13 @@ function parseSemanticBlock(
 /* ---------- main entry ---------- */
 
 export function markdownToEvidenceState(markdown: string): PrdContent {
+  // Visual HTML brief (evidence-brief skill v4+): the payload is one
+  // self-contained HTML body. Render it whole in a sandboxed iframe rather than
+  // parsing `:::` blocks. Title/metaLine are blank — the HTML carries its own
+  // eyebrow/title/meta — so the surrounding chrome stays out of the way.
+  if (isHtmlEvidence(markdown)) {
+    return { metaLine: "", title: "", sections: [{ type: "evidence-html", html: markdown.trim() }] }
+  }
   const lines = markdown.replace(/\r\n/g, "\n").split("\n")
   let title = ""
   const sections: PrdSection[] = []

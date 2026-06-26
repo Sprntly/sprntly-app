@@ -10,6 +10,7 @@
  */
 "use client"
 
+import { useRef, useState } from "react"
 import type {
   EvidenceV2CutsIndexRow,
   EvidenceV2HeroCard,
@@ -18,6 +19,7 @@ import type {
   PrdState,
 } from "../../types/content"
 import { renderInline } from "../../lib/inline-md"
+import { EVIDENCE_HOUSE_CSS } from "../../lib/evidenceHouseCss"
 import { InlineChart } from "./InlineChart"
 
 export function EvidenceSections({
@@ -31,6 +33,51 @@ export function EvidenceSections({
         <RenderBlock key={i} block={block} />
       ))}
     </>
+  )
+}
+
+/**
+ * The visual HTML evidence brief, rendered in a sandboxed iframe. The model
+ * emits only the body HTML (house classes + inline SVG); we wrap it with the
+ * canonical house stylesheet here.
+ *
+ * Security: `sandbox="allow-same-origin"` WITHOUT `allow-scripts` — no script
+ * in the model HTML can execute, so there is no XSS/JS surface; same-origin is
+ * granted only so the parent can read `scrollHeight` to size the frame to its
+ * content (no inner scrollbar).
+ */
+function EvidenceHtmlFrame({ html }: { html: string }) {
+  const ref = useRef<HTMLIFrameElement>(null)
+  const [height, setHeight] = useState(720)
+  const srcDoc =
+    `<!doctype html><html><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width, initial-scale=1">` +
+    `<style>${EVIDENCE_HOUSE_CSS}</style></head>` +
+    `<body><div class="wrap">${html}</div></body></html>`
+
+  const onLoad = () => {
+    const doc = ref.current?.contentDocument
+    if (!doc?.body) return
+    const update = () => setHeight(doc.body.scrollHeight + 8)
+    update()
+    // Re-measure once fonts/SVG settle (and on any later content reflow).
+    try {
+      new ResizeObserver(update).observe(doc.body)
+    } catch {
+      /* ResizeObserver unsupported — the onLoad measure is enough */
+    }
+  }
+
+  return (
+    <iframe
+      ref={ref}
+      className="evidence-html-frame"
+      sandbox="allow-same-origin"
+      srcDoc={srcDoc}
+      title="Evidence brief"
+      onLoad={onLoad}
+      style={{ width: "100%", height, border: "none", display: "block" }}
+    />
   )
 }
 
@@ -78,6 +125,8 @@ function RenderBlock({ block }: { block: PrdSection }) {
           data={block.data}
         />
       )
+    case "evidence-html":
+      return <EvidenceHtmlFrame html={block.html} />
     case "v2-hero":
       return <HeroStrip cards={block.cards} />
     case "v2-context-chip":

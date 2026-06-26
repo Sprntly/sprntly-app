@@ -36,16 +36,15 @@ import json
 import logging
 from typing import Optional
 
-from app.corpus import load_evidence_template
 from app.db import complete_evidence, fail_evidence, get_brief_by_id
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.types import Entity, Signal
 from app.prompts import (
-    EVIDENCE_KG_PROMPT_VERSION,
-    EVIDENCE_KG_SYSTEM,
-    EVIDENCE_KG_USER_TEMPLATE,
+    EVIDENCE_HTML_PROMPT_VERSION,
+    EVIDENCE_HTML_SYSTEM,
+    EVIDENCE_HTML_USER_TEMPLATE,
 )
 from app.synthesis_brief import resolve_company
 
@@ -189,23 +188,22 @@ def build_evidence_kg(
             f"title={title!r} (enterprise={enterprise_id})"
         )
 
-    template = load_evidence_template()
-    user = EVIDENCE_KG_USER_TEMPLATE.format(
+    user = EVIDENCE_HTML_USER_TEMPLATE.format(
         insight_json=json.dumps(insight, indent=2),
         evidence_trail=_render_trail(trail),
-        template=template,
     )
     result = llm_call(
         enterprise_id=enterprise_id,
         agent=AGENT,
         purpose="generate_evidence",
-        prompt_version=EVIDENCE_KG_PROMPT_VERSION,
-        system=EVIDENCE_KG_SYSTEM,
+        prompt_version=EVIDENCE_HTML_PROMPT_VERSION,
+        system=EVIDENCE_HTML_SYSTEM,
         input=user,
         # Bind the evidence-brief skill: its SKILL.md becomes the METHOD layer
         # (converge ≥2 signals → wedge → best-chart-per-finding → honesty pass).
-        # The Sprntly `:::block` template + system prompt still govern the OUTPUT
-        # format (see EVIDENCE_KG_SYSTEM overrides 1 & 2).
+        # The skill's NATIVE output is a visual HTML brief — the model emits the
+        # body HTML (house classes + inline SVG); the frontend wraps it with the
+        # house stylesheet in a sandboxed iframe.
         skill="evidence-brief",
     )
     md = result.output if isinstance(result.output, str) else str(result.output)
@@ -227,7 +225,7 @@ def build_evidence_kg(
             "hypothesis_id": hypothesis.id if hypothesis else None,
             "signal_count": len(signal_ids),
             "source_types": sorted({t["source_type"] for t in trail}),
-            "prompt_version": EVIDENCE_KG_PROMPT_VERSION,
+            "prompt_version": EVIDENCE_HTML_PROMPT_VERSION,
         },
         reasoning=(
             f"Evidence grounded in {len(signal_ids)} converging signals across "

@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 # the long read timeout — the SDK's required pattern for big generations —
 # accumulating the streamed text into the same return value. Behavior for all
 # other skills/callers is unchanged.
-_LONG_OUTPUT_SKILLS = frozenset({"prd-author", "implementation-spec"})
+_LONG_OUTPUT_SKILLS = frozenset({"prd-author", "implementation-spec", "evidence-brief"})
 
 
 def _is_long_output(skill: Optional[str]) -> bool:

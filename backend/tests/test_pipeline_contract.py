@@ -135,15 +135,18 @@ def test_prd_skill_template_keeps_two_part_structure(repo_root):
     assert any(line.strip() == "---" for line in md.split("\n")), "missing `---` separator"
 
 
-# ── end-to-end: evidence runner persists the rich-block markdown intact ───────
+# ── end-to-end: evidence runner persists the HTML brief intact ────────────────
 
-def test_evidence_runner_persists_rich_blocks_intact(
-    isolated_settings, fake_llm, monkeypatch, repo_root
+def test_evidence_runner_persists_html_brief_intact(
+    isolated_settings, fake_llm, monkeypatch
 ):
-    """Drive the real evidence runner with the canonical sample as the model
-    output; the stored row must be ready and carry every `:::block` marker
-    unchanged — proving a generated evidence page reaches the adapter in the
-    shape the adapter (and UI) expect."""
+    """Evidence is now the evidence-brief skill's native visual HTML brief. Drive
+    the real runner with an HTML body as the model output; the stored row must be
+    ready and carry the HTML verbatim — so the frontend's HTML-evidence path (a
+    sandboxed iframe, see web/.../EvidenceSections) receives it intact. The
+    model seam is `llm_call` → LLMResult."""
+    from types import SimpleNamespace
+
     from app import evidence_runner
 
     db_mod = isolated_settings["db"]
@@ -159,13 +162,22 @@ def test_evidence_runner_persists_rich_blocks_intact(
         brief_id=brief_id, insight_index=0, title="t", template_version=1, variant="v2",
     )
 
-    sample_md = _data_file(repo_root, "sprntly_evidence_sample.md")
-    monkeypatch.setattr(evidence_runner, "call_md", lambda **kw: sample_md)
+    html = (
+        '<p class="eyebrow">Evidence Brief · Data Science → team</p>'
+        '<h1>Users churn at the deductible step</h1>'
+        '<div class="tldr"><h4>TL;DR</h4><p>…</p></div>'
+        '<section><p class="kicker o">THE CONVERGENCE</p><h2>Signals agree</h2></section>'
+        '<div class="hyp"><h4>Value-driven hypothesis</h4><p class="stmt">We believe …</p></div>'
+    )
+    monkeypatch.setattr(
+        evidence_runner, "llm_call", lambda **kw: SimpleNamespace(output=html)
+    )
 
     evidence_runner._run_sync(evidence_id, brief_id, 0)
 
     row = db_mod.get_evidence(evidence_id)
     assert row["status"] == "ready"
-    assert row["payload_md"] == sample_md
-    for block in EVIDENCE_FILE_BLOCKS:
-        assert f":::{block}" in row["payload_md"], f"lost :::{block} through generation"
+    assert row["payload_md"] == html
+    # The HTML body (not `:::` blocks) is what the frontend renders for evidence.
+    assert row["payload_md"].lstrip().startswith("<")
+    assert ":::" not in row["payload_md"]

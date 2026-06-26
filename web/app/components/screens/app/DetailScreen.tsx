@@ -141,7 +141,8 @@ export function DetailScreen() {
             {evidence.metaLine ? (
               <div className="prd-meta">{evidence.metaLine}</div>
             ) : null}
-            <h1 className="prd-title">{evidence.title}</h1>
+            {/* HTML briefs carry their own title inside the iframe — skip when blank. */}
+            {evidence.title ? <h1 className="prd-title">{evidence.title}</h1> : null}
             <EvidenceSections sections={evidence.sections} />
           </div>
         </div>

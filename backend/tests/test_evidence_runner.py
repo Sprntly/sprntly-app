@@ -11,6 +11,16 @@ import asyncio
 import pytest
 
 from app import evidence_runner
+from app.graph.gateway import LLMResult
+
+
+def _llm_result(output, model="claude-sonnet-4-6", prompt_version="evidence-html-v1"):
+    return LLMResult(
+        output=output, model=model, prompt_version=prompt_version,
+        input_tokens=10, output_tokens=5, cache_read_input_tokens=0,
+        cache_creation_input_tokens=0, cost_usd=0.001, latency_ms=5,
+        stop_reason="end_turn",
+    )
 
 
 def _seed_corpus(data_dir, dataset="asurion", body="some corpus body"):
@@ -48,24 +58,25 @@ def test_run_sync_happy_path_completes_evidence(
         variant="v2",
     )
     monkeypatch.setattr(
-        evidence_runner, "call_md", lambda **kw: "# Final markdown"
+        evidence_runner, "llm_call",
+        lambda **kw: _llm_result('<p class="eyebrow">Evidence Brief</p><h1>X</h1>'),
     )
 
     evidence_runner._run_sync(evidence_id, brief_id, 0)
 
     row = db_mod.get_evidence(evidence_id)
     assert row["status"] == "ready"
-    assert row["payload_md"] == "# Final markdown"
+    assert row["payload_md"] == '<p class="eyebrow">Evidence Brief</p><h1>X</h1>'
     assert row["title"] == "Insight A"
     assert row["variant"] == "v2"
 
 
-def test_run_sync_passes_template_and_system_prompt(
+def test_run_sync_binds_evidence_brief_skill_and_emits_html(
     isolated_settings, fake_llm, monkeypatch
 ):
-    """Sanity-check that the runner wires the system prompt and template
-    we expect (typed semantic blocks; `:::hero` from the template)."""
-    _seed_corpus(isolated_settings["data_dir"])
+    """The fallback runner generates through the gateway with the evidence-brief
+    skill bound, on the HTML system prompt (its native visual output)."""
+    _seed_corpus(isolated_settings["data_dir"], body="UNIQUE_CORPUS_MARK")
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
     evidence_id = db_mod.start_evidence(
@@ -80,17 +91,18 @@ def test_run_sync_passes_template_and_system_prompt(
 
     def _capture(**kwargs):
         captured.update(kwargs)
-        return "# md"
+        return _llm_result("<h1>brief</h1>")
 
-    monkeypatch.setattr(evidence_runner, "call_md", _capture)
+    monkeypatch.setattr(evidence_runner, "llm_call", _capture)
     evidence_runner._run_sync(evidence_id, brief_id, 0)
 
-    # The system prompt centers on typed semantic blocks — phrase is
-    # stable across iterations of the prompt body.
-    assert "typed semantic blocks" in captured["system"]
-    # The template carries this exact block; appearing in the user prompt
-    # confirms the template was loaded and inlined.
-    assert ":::hero" in captured["user"]
+    assert captured["skill"] == "evidence-brief"
+    assert captured["agent"] == "evidence"
+    # HTML system prompt: emit body HTML, not `:::` blocks.
+    assert "visual HTML brief" in captured["system"]
+    assert ":::hero" not in captured["system"]
+    # The corpus grounding is inlined into the input.
+    assert "UNIQUE_CORPUS_MARK" in captured["input"]
 
 
 def test_run_sync_missing_brief_raises(isolated_settings):
@@ -122,7 +134,7 @@ def test_generate_evidence_records_failure_in_db(
     def _boom(**_kw):
         raise ValueError("LLM exploded")
 
-    monkeypatch.setattr(evidence_runner, "call_md", _boom)
+    monkeypatch.setattr(evidence_runner, "llm_call", _boom)
     asyncio.run(evidence_runner.generate_evidence(evidence_id, brief_id, 0))
 
     row = db_mod.get_evidence(evidence_id)

@@ -469,6 +469,9 @@ export type PrdSection =
       data: PrdChartDatum[]
     }
   // ---- Evidence variants ----
+  // The visual HTML brief (evidence-brief skill v4+): the whole document is one
+  // self-contained HTML body rendered in a sandboxed iframe with the house CSS.
+  | { type: "evidence-html"; html: string }
   | { type: "v2-hero"; cards: EvidenceV2HeroCard[] }
   | { type: "v2-context-chip"; text: string }
   | { type: "v2-cuts-index"; rows: EvidenceV2CutsIndexRow[] }

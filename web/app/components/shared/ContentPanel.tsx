@@ -370,7 +370,9 @@ function EvidenceTab() {
 
         {evidence ? (
           <>
-            <h1 className="ev-doc-title">{evidence.title}</h1>
+            {/* HTML briefs carry their own title/meta inside the iframe, so the
+                adapter leaves these blank — skip the chrome when empty. */}
+            {evidence.title && <h1 className="ev-doc-title">{evidence.title}</h1>}
             {evidence.metaLine && <div className="ev-doc-meta">{evidence.metaLine}</div>}
             <div className="ev-doc-sections">
               <EvidenceSections sections={evidence.sections} />

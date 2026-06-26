@@ -304,9 +304,10 @@ def test_build_feeds_signals_to_llm_and_logs_refs(facade, isolated_settings,
     assert "revenue" in prompt and "customer_voice" in prompt
     # Agent + prompt_version are attributed.
     assert captured["agent"] == "evidence"
-    assert captured["prompt_version"] == evidence_kg.EVIDENCE_KG_PROMPT_VERSION
-    # System prompt enforces the never-invent rule.
-    assert "Never invent" in captured["system"]
+    assert captured["prompt_version"] == evidence_kg.EVIDENCE_HTML_PROMPT_VERSION
+    # HTML system prompt: native visual brief + the never-invent grounding rule.
+    assert "visual HTML brief" in captured["system"]
+    assert "never invent" in captured["system"]
 
     assert md.startswith("# Evidence")
     # kg_refs = signal ids + hypothesis id + theme id.
@@ -421,14 +422,16 @@ def test_run_sync_kg_falls_back_to_legacy_when_no_backing(
     kg_calls, legacy_calls = [], []
     monkeypatch.setattr(evidence_kg, "llm_call",
                         lambda **kw: kg_calls.append(kw))
-    monkeypatch.setattr(evidence_runner, "call_md",
-                        lambda **kw: legacy_calls.append(kw) or "# legacy md")
+    # The corpus fallback also generates through the gateway now (evidence-brief
+    # skill bound), so its seam is `llm_call` → LLMResult.
+    monkeypatch.setattr(evidence_runner, "llm_call",
+                        lambda **kw: legacy_calls.append(kw) or _llm_result("<h1>legacy</h1>"))
 
     evidence_kg._run_sync_kg(evidence_id, brief_id, 0)
 
     row = db_mod.get_evidence(evidence_id)
     assert row["status"] == "ready"
-    assert row["payload_md"] == "# legacy md"   # legacy path produced the doc
+    assert row["payload_md"] == "<h1>legacy</h1>"   # legacy path produced the doc
     assert kg_calls == []                        # KG llm_call never fired
     assert len(legacy_calls) == 1                # legacy corpus call did
 

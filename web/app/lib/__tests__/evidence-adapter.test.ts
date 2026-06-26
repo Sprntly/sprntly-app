@@ -1,5 +1,42 @@
 import { describe, expect, it } from "vitest"
 import { markdownToEvidenceState } from "../evidence-adapter"
+import { isHtmlEvidence } from "../evidenceHouseCss"
+
+describe("HTML evidence brief", () => {
+  const html =
+    '<p class="eyebrow">Evidence Brief · Data Science → team</p>\n' +
+    '<h1>Users churn at the deductible step</h1>\n' +
+    '<div class="tldr"><h4>TL;DR</h4><p>…</p></div>\n' +
+    '<div class="hyp"><p class="stmt">We believe …</p></div>'
+
+  it("detects an HTML payload (leading <) vs :::-block / plain markdown", () => {
+    expect(isHtmlEvidence(html)).toBe(true)
+    expect(isHtmlEvidence("   \n<h1>x</h1>")).toBe(true)
+    expect(isHtmlEvidence(":::hero\n[]\n:::")).toBe(false)
+    expect(isHtmlEvidence("# A title\n\nbody")).toBe(false)
+    expect(isHtmlEvidence("")).toBe(false)
+    expect(isHtmlEvidence(null)).toBe(false)
+  })
+
+  it("renders an HTML brief as a single evidence-html section, no chrome title", () => {
+    const out = markdownToEvidenceState(html)
+    expect(out.sections).toHaveLength(1)
+    const block = out.sections[0]
+    expect(block.type).toBe("evidence-html")
+    expect(block.type === "evidence-html" && block.html).toContain('<div class="hyp">')
+    // Title/meta blank — the HTML carries its own; surfaces skip the chrome.
+    expect(out.title).toBe("")
+    expect(out.metaLine).toBe("")
+  })
+
+  it("still parses :::-block evidence the legacy way (backward compat)", () => {
+    const md = ":::context-chip\nArea · Segment\n:::\n\n## Heading\n\nbody"
+    const out = markdownToEvidenceState(md)
+    const types = out.sections.map((s) => s.type)
+    expect(types).not.toContain("evidence-html")
+    expect(types).toContain("v2-context-chip")
+  })
+})
 
 describe("markdownToEvidenceState", () => {
   it("extracts the title from the first H1", () => {
