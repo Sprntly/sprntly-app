@@ -235,7 +235,8 @@ def reset_prd_to_draft(prd_id: int) -> None:
 
 @retry_on_disconnect
 def list_prds_by_brief(brief_id: int, variant: str = "v1") -> list[dict]:
-    """Return all ready PRDs for a (brief, variant), ordered by insight_index ascending.
+    """Return the NEWEST ready PRD per insight for a (brief, variant), ordered
+    by insight_index ascending.
 
     One query — not per-insight — returning at minimum `id` + `insight_index`.
     Used by GET /v1/design-agent/brief-prototype-map to build context-aware cards
@@ -243,6 +244,14 @@ def list_prds_by_brief(brief_id: int, variant: str = "v1") -> list[dict]:
 
     Only `status='ready'` rows are returned; generating/failed/invalidated rows are
     excluded so callers only see PRDs that can back a prototype.
+
+    A regenerated PRD (force / a second generation) creates a NEW `prds` row while
+    the prior one stays ready, so an insight can have several ready rows. This
+    function collapses each insight to its newest (highest-id) row — the one the
+    user just generated — so the consumer (brief-prototype-map) binds exactly one
+    deterministic, freshest prd_id per insight. Without the collapse the route
+    emitted duplicate per-insight entries and the frontend's last-wins map could
+    land on a stale prd_id (the regenerated PRD silently never surfaced).
     """
     c = require_client()
     resp = (
@@ -251,10 +260,18 @@ def list_prds_by_brief(brief_id: int, variant: str = "v1") -> list[dict]:
         .eq("brief_id", brief_id)
         .eq("variant", variant)
         .eq("status", "ready")
-        .order("insight_index", desc=False)
         .execute()
     )
-    return resp.data or []
+    # Collapse to the newest (highest-id) ready PRD per insight, then return them
+    # in insight_index order. Done in Python rather than via SQL ordering so the
+    # result is deterministic regardless of the driver's tie-break behaviour.
+    newest_by_insight: dict[int, dict] = {}
+    for row in resp.data or []:
+        idx = row["insight_index"]
+        kept = newest_by_insight.get(idx)
+        if kept is None or row["id"] > kept["id"]:
+            newest_by_insight[idx] = row
+    return [newest_by_insight[idx] for idx in sorted(newest_by_insight)]
 
 
 # ── PRD version control ──────────────────────────────────────────────────
