@@ -1005,11 +1005,16 @@ def test_generate_does_not_persist_installation_for_another_company(
     assert persisted["github_installation_id"] is None
 
 
-def test_generate_leaves_github_installation_null_when_repo_owner_not_installed(
+def test_generate_resolves_single_bound_install_by_binding(
     env, client, monkeypatch
 ):
-    # The company's only installation covers a different account login than the
-    # repo owner, so no installation covers "org/repo" and the id stays null.
+    # Resolve-by-binding: the company has exactly ONE non-suspended install, so
+    # grounding resolves to it for any repo it can pick — even when the install's
+    # account_login differs from the repo owner. (The picker mints repos against
+    # this same single install, so picker/resolver stay in lockstep; a future
+    # extractor rejection is an honest extraction-time failure, not a
+    # generate-time decision.) Previously this stayed null because resolution
+    # keyed on account_login ILIKE owner.
     _stub_generate(monkeypatch, env.routes)
     _seed_prd(env.db)
     env.db.upsert_github_installation(
@@ -1018,6 +1023,34 @@ def test_generate_leaves_github_installation_null_when_repo_owner_not_installed(
         account_login="other-org",
         account_type="Organization",
         company_id=_TEST_COMPANY_ID,
+    )
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": 1, "github_repo": "org/repo"},
+    )
+    assert resp.status_code == 200, resp.text
+    persisted = env.proto.get_prototype(
+        prototype_id=resp.json()["prototype_id"],
+        workspace_id=_TEST_COMPANY_ID,
+    )
+    assert persisted["github_installation_id"] == 12345
+
+
+def test_generate_leaves_github_installation_null_when_ambiguous_multi_install(
+    env, client, monkeypatch
+):
+    # Genuine null: the company has MULTIPLE non-suspended installs and none
+    # matches the repo owner by login → ambiguous by the DB alone → grounding
+    # resolves to None and generation proceeds ungrounded (id stays null).
+    _stub_generate(monkeypatch, env.routes)
+    _seed_prd(env.db)
+    env.db.upsert_github_installation(
+        installation_id=12345, account_id=99, account_login="other-org",
+        account_type="Organization", company_id=_TEST_COMPANY_ID,
+    )
+    env.db.upsert_github_installation(
+        installation_id=67890, account_id=88, account_login="second-org",
+        account_type="Organization", company_id=_TEST_COMPANY_ID,
     )
     resp = client.post(
         "/v1/design-agent/generate",

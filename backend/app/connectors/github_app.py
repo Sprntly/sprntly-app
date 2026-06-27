@@ -257,7 +257,75 @@ def get_installation_token(installation_id: int) -> str:
         except ValueError:
             pass
     _install_token_cache[installation_id] = (token, expires_epoch)
+    # Self-heal: on a REAL mint (cache-miss path only), backfill a thin install
+    # row's account metadata. The picker, grounding, and the health probe all
+    # mint through here, so a skeleton row heals on its first token use whichever
+    # path runs first. Fully fail-open — it can never affect the returned token.
+    maybe_hydrate_installation(installation_id)
     return token
+
+
+def maybe_hydrate_installation(installation_id: int) -> bool:
+    """Best-effort self-heal of a thin ``github_installations`` row.
+
+    A thin row (``account_login=''`` or ``account_id=0``) is a usable install
+    whose intrinsic GitHub account metadata was never populated (pre-hydration
+    install, or an install-time ``fetch_app_installation`` race). When a token is
+    minted for it, backfill that metadata from GitHub's App API so the
+    ``account_login`` resolution path works and the row stops looking like a
+    skeleton.
+
+    Tenant safety (load-bearing): hydration only writes install-INTRINSIC account
+    fields (login/id/type from GitHub) and passes the row's EXISTING ``company_id``
+    straight through to the upsert — it NEVER changes or re-keys the tenant
+    binding. ``account_login`` is a property of the installation, not of the
+    tenant, so backfilling it cannot leak an install across companies.
+
+    Fail-open: any error logs a warning and returns False. A hydration failure
+    must never break token mint or generation. Returns True iff a thin row was
+    hydrated.
+    """
+    try:
+        # Lazy import avoids any import cycle at module load (app.db.github does
+        # not import this module, but keep the boundary explicit).
+        from app import db
+
+        row = db.get_github_installation(installation_id)
+        if not row:
+            return False
+        thin = (not row.get("account_login")) or int(row.get("account_id") or 0) == 0
+        if not thin:
+            return False  # cheap no-op for healthy rows
+        detail = fetch_app_installation(installation_id)
+        if not detail:
+            return False
+        acct = (detail or {}).get("account") or {}
+        db.upsert_github_installation(
+            installation_id=installation_id,
+            account_id=int(acct.get("id") or 0),
+            account_login=str(acct.get("login") or ""),
+            account_type=str(acct.get("type") or "User"),
+            repository_selection=str(
+                detail.get("repository_selection")
+                or row.get("repository_selection")
+                or "selected"
+            ),
+            suspended=bool(row.get("suspended") or False),
+            permissions=detail.get("permissions")
+            or json.loads(row.get("permissions_json") or "{}"),
+            events=detail.get("events")
+            or json.loads(row.get("events_json") or "[]"),
+            # Preserve the existing tenant binding; never re-key across companies.
+            company_id=row.get("company_id"),
+        )
+        return True
+    except Exception:
+        logger.warning(
+            "GitHub installation lazy-hydration failed for %s",
+            installation_id,
+            exc_info=True,
+        )
+        return False
 
 
 def fetch_app_installation(installation_id: int) -> dict | None:
