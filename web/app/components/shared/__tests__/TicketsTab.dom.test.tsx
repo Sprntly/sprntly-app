@@ -22,22 +22,34 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }))
 
-const { getForPrd, generate, getJob, listClickUpLists, pushToClickUp } = vi.hoisted(() => ({
+const { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, getData, teamList } = vi.hoisted(() => ({
   getForPrd: vi.fn(),
   generate: vi.fn(),
   getJob: vi.fn(),
   listClickUpLists: vi.fn(),
   pushToClickUp: vi.fn(),
+  getData: vi.fn(),
+  teamList: vi.fn(),
 }))
 vi.mock("../../../lib/api", async (orig) => {
   const actual = await orig<typeof import("../../../lib/api")>()
-  return { ...actual, storiesApi: { getForPrd, generate, getJob, listClickUpLists, pushToClickUp } }
+  return {
+    ...actual,
+    storiesApi: { getForPrd, generate, getJob, listClickUpLists, pushToClickUp },
+    ticketDataApi: { ...actual.ticketDataApi, getData },
+    teamApi: { list: teamList },
+  }
 })
 
 // Default: no persisted tickets → the tab regenerates (matches first-open).
 // Individual tests override getForPrd to exercise the cache-hit path.
 beforeEach(() => {
   getForPrd.mockResolvedValue({ status: "none", fresh: false, stories: [] })
+  getData.mockResolvedValue({
+    description: null, acceptance_criteria: null, title: null, priority: null,
+    status: null, sprint: null, assignee: null, attachments: [], comments: [],
+  })
+  teamList.mockResolvedValue({ members: [] })
 })
 
 const showToast = vi.fn()
@@ -192,6 +204,32 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     // …but it points to Settings instead of pushing.
     expect(listClickUpLists).not.toHaveBeenCalled()
     expect(showToast).toHaveBeenCalledWith("ClickUp not connected", expect.stringMatching(/Settings/i))
+  })
+
+  it("clicking a ticket opens the editable detail; Back returns to the list", async () => {
+    content = { prd: { prd_id: 42, title: "Onboarding PRD" }, connectedConnectorIds: [] }
+    generate.mockResolvedValue({ job_id: 11, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 11, status: "ready", stories: [
+      { title: "Instrument wizard steps", body: "Track each step", acceptance_criteria: ["G"], priority: "P1", route: null },
+    ] })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByText("Instrument wizard steps")).toBeTruthy())
+
+    // Click the row → detail opens (reads saved overrides) with a Back button.
+    await act(async () => {
+      fireEvent.click(screen.getByText("Instrument wizard steps"))
+    })
+    await waitFor(() => expect(getData).toHaveBeenCalledWith("prd-42-instrument-wizard-steps"))
+    expect(screen.getByRole("button", { name: /all chunks/i })).toBeTruthy()
+
+    // Back → list returns, regen button is visible again.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /all chunks/i }))
+    })
+    await waitFor(() => expect(screen.getByRole("button", { name: /regenerate/i })).toBeTruthy())
   })
 
   it("does not generate when there is no PRD yet", async () => {

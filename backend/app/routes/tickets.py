@@ -2,6 +2,7 @@
 
   GET    /v1/tickets/{key}/data           -> all overrides for a ticket
   PUT    /v1/tickets/{key}/description    -> save description + acceptance criteria
+  PUT    /v1/tickets/{key}/fields         -> save title/priority/status/sprint/assignee
   POST   /v1/tickets/{key}/attachments    -> add an attachment
   DELETE /v1/tickets/{key}/attachments/{id} -> remove an attachment
   POST   /v1/tickets/{key}/comments       -> add a comment
@@ -36,6 +37,17 @@ router = APIRouter(prefix="/v1/tickets", tags=["tickets"])
 class DescriptionIn(BaseModel):
     description: str = ""
     acceptance_criteria: list[str] = Field(default_factory=list)
+
+
+class FieldsIn(BaseModel):
+    """Editable ticket metadata. Every field is optional so a partial save (e.g.
+    just the priority picker) only updates what was sent and never clobbers the
+    description / acceptance criteria or the other fields."""
+    title: str | None = None
+    priority: str | None = None
+    status: str | None = None
+    sprint: str | None = None
+    assignee: dict[str, Any] | None = None
 
 
 class AttachmentIn(BaseModel):
@@ -82,6 +94,11 @@ def get_ticket_data(
     return {
         "description": edit.get("description", "") if edit else None,
         "acceptance_criteria": edit.get("acceptance_criteria", []) if edit else None,
+        "title": edit.get("title") if edit else None,
+        "priority": edit.get("priority") if edit else None,
+        "status": edit.get("status") if edit else None,
+        "sprint": edit.get("sprint") if edit else None,
+        "assignee": edit.get("assignee") if edit else None,
         "attachments": [
             {"id": a["id"], "label": a["label"], "sub": a["sub"]}
             for a in (attach_resp.data or [])
@@ -109,6 +126,29 @@ def save_description(
         "description": body.description,
         "acceptance_criteria": body.acceptance_criteria,
         "updated_at": utc_now(),
+    }
+    c.table("ticket_edits").upsert(
+        payload, on_conflict="company_id,ticket_key"
+    ).execute()
+    return {"ok": True}
+
+
+@router.put("/{ticket_key}/fields")
+def save_fields(
+    ticket_key: str,
+    body: FieldsIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save title/priority/status/sprint/assignee. Only the fields actually sent
+    are written (exclude_unset), so a partial save preserves the description and
+    the other fields on the same ticket_edits row."""
+    fields = body.model_dump(exclude_unset=True)
+    c = require_client()
+    payload = {
+        "company_id": company.company_id,
+        "ticket_key": ticket_key,
+        "updated_at": utc_now(),
+        **fields,
     }
     c.table("ticket_edits").upsert(
         payload, on_conflict="company_id,ticket_key"

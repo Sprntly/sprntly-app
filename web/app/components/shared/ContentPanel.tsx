@@ -11,6 +11,7 @@ import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvide
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { TicketDetail } from "./TicketDetail"
 import { ArtifactFooterActions } from "./ArtifactFooterActions"
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
 import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx } from "../../lib/prdExport"
@@ -430,13 +431,19 @@ function storyPriorityColor(p: string | null): string {
   return STORY_PRIORITY_COLOR[(p ?? "").toUpperCase()] ?? "#6B7280"
 }
 
-// One generated ticket row (read-only — the source of truth is the PRD; edits
-// happen in ClickUp after the push).
-function StoryRow({ story, index }: { story: GeneratedStory; index: number }) {
+// One generated ticket row. Click to open the editable in-panel detail
+// (TicketDetail) — the generated story is the base, edits persist as overrides.
+function StoryRow({ story, index, onOpen }: { story: GeneratedStory; index: number; onOpen: () => void }) {
   const priority = (story.priority ?? "").toUpperCase()
   const color = storyPriorityColor(story.priority)
   return (
-    <div className="tkt-row tkt-row--static">
+    <div
+      className="tkt-row"
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen() } }}
+    >
       <div className="tkt-row-left">
         <div className="tkt-row-id-wrap">
           <span className="tkt-row-id">{`T-${index + 1}`}</span>
@@ -480,6 +487,9 @@ export function TicketsTab() {
   const [genState, setGenState] = useState<GenState>({ kind: "idle" })
   const stories = genState.kind === "ready" ? genState.stories : []
 
+  // Which ticket (if any) is open in the in-panel editable detail view.
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
+
   // ── ClickUp push ───────────────────────────────────────────────────────
   type PushState =
     | { kind: "idle" }
@@ -510,6 +520,8 @@ export function TicketsTab() {
   // call), so we kick it off, get a job id, then POLL until ready/failed. The
   // backend re-persists on completion, so the next open is a cache hit.
   useEffect(() => {
+    // A new PRD (or a regenerate) invalidates the open detail.
+    setSelectedIndex(null)
     if (prdId == null) {
       setGenState({ kind: "idle" })
       return
@@ -683,6 +695,21 @@ export function TicketsTab() {
       : pushState.kind === "done" ? "Push again"
       : "Push to ClickUp"
 
+  // A ticket is open → show the editable detail in place of the list.
+  const selectedStory = selectedIndex != null ? stories[selectedIndex] : null
+  if (selectedStory && prdId != null) {
+    return (
+      <div className="tkt-list-wrap">
+        <TicketDetail
+          story={selectedStory}
+          index={selectedIndex as number}
+          prdId={prdId}
+          onBack={() => setSelectedIndex(null)}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="tkt-list-wrap">
       {/* Top action bar: the ticket title + the Push-to-ClickUp button. Push is
@@ -759,7 +786,7 @@ export function TicketsTab() {
 
       <div className="tkt-list">
         {stories.map((s, i) => (
-          <StoryRow key={i} story={s} index={i} />
+          <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
         ))}
       </div>
 

@@ -1806,15 +1806,38 @@ export type TicketPushTask = {
   priority?: string
 }
 
+/** The team member picked as a ticket's assignee (subset of TeamMemberRecord). */
+export type TicketAssignee = {
+  user_id: string
+  display_name: string | null
+  email: string | null
+  role: string | null
+  avatar_url: string | null
+}
+
+/** Editable ticket metadata. All optional — a partial save only writes what's set. */
+export type TicketFields = {
+  title?: string | null
+  priority?: string | null
+  status?: string | null
+  sprint?: string | null
+  assignee?: TicketAssignee | null
+}
+
 export type TicketDataResponse = {
   description: string | null
   acceptance_criteria: string[] | null
+  title: string | null
+  priority: string | null
+  status: string | null
+  sprint: string | null
+  assignee: TicketAssignee | null
   attachments: { id: number; label: string; sub: string }[]
   comments: { id: number; author: string; body: string; time: string }[]
 }
 
 export const ticketDataApi = {
-  /** Get all saved overrides for a ticket (description, attachments, comments). */
+  /** Get all saved overrides for a ticket (fields, description, attachments, comments). */
   getData: (ticketKey: string) =>
     api.get<TicketDataResponse>(`/v1/tickets/${encodeURIComponent(ticketKey)}/data`),
   /** Save description + acceptance criteria. */
@@ -1822,6 +1845,10 @@ export const ticketDataApi = {
     api.put(`/v1/tickets/${encodeURIComponent(ticketKey)}/description`, {
       description, acceptance_criteria: acceptanceCriteria,
     }),
+  /** Save title/priority/status/sprint/assignee. Only the keys present are
+   *  written, so a partial save never clobbers the description or other fields. */
+  saveFields: (ticketKey: string, fields: TicketFields) =>
+    api.put(`/v1/tickets/${encodeURIComponent(ticketKey)}/fields`, fields),
   /** Add an attachment. */
   addAttachment: (ticketKey: string, label: string, sub: string) =>
     api.post<{ id: number; label: string; sub: string }>(
