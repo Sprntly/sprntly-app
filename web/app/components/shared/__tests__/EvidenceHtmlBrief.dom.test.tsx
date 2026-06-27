@@ -38,6 +38,13 @@ describe("EvidenceHtmlBrief", () => {
     expect(sandbox).toBe("allow-same-origin")
     expect(sandbox).not.toContain("allow-scripts")
   })
+
+  it("strips a wrapping ```html code fence before rendering (no literal backticks)", () => {
+    const { container } = render(<EvidenceHtmlBrief html={"```html\n" + BRIEF + "\n```"} />)
+    const srcdoc = container.querySelector("iframe")!.getAttribute("srcdoc")!
+    expect(srcdoc).toBe(BRIEF)
+    expect(srcdoc).not.toContain("```")
+  })
 })
 
 describe("looksLikeHtmlBrief", () => {

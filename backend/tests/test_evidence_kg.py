@@ -550,7 +550,11 @@ def test_payload_md_shape_matches_ui_contract(isolated_settings, monkeypatch):
         '<div class="wrap"><h1>Beginners Plateau</h1>'
         '<svg viewBox="0 0 720 250"></svg></div>'
     )
-    monkeypatch.setattr(evidence_kg, "llm_call", lambda **kw: _llm_result(html))
+    # The model sometimes wraps its HTML in a ```html code fence; the runner must
+    # strip it so the stored payload is raw HTML (else the UI iframe shows
+    # literal backticks / fails the `^<` sniff and renders blank).
+    fenced = f"```html\n{html}\n```"
+    monkeypatch.setattr(evidence_kg, "llm_call", lambda **kw: _llm_result(fenced))
     evidence_kg._run_sync_kg(evidence_id, brief_id, 0)
 
     row = db_mod.get_evidence(evidence_id)
@@ -558,6 +562,9 @@ def test_payload_md_shape_matches_ui_contract(isolated_settings, monkeypatch):
     assert set(row) >= {"id", "title", "payload_md", "status", "variant"}
     assert row["status"] == "ready"
     assert row["variant"] == "v3"               # HTML-brief storage variant
+    # Stored as raw HTML — the wrapping code fence is stripped.
+    assert "```" not in row["payload_md"]
+    assert row["payload_md"].startswith("<meta")
     # Self-contained HTML, not the retired :::block markdown.
     assert '<div class="wrap"' in row["payload_md"]
     assert "<svg" in row["payload_md"]

@@ -170,3 +170,28 @@ def test_get_client_raises_without_api_key(monkeypatch, isolated_settings):
     with pytest.raises(HTTPException) as excinfo:
         llm.get_client()
     assert excinfo.value.status_code == 500
+
+
+# ── strip_code_fence: unwrap a Markdown code fence from model output ──────────
+
+class TestStripCodeFence:
+    def test_strips_html_fence(self):
+        out = llm.strip_code_fence("```html\n<!DOCTYPE html>\n<div>x</div>\n```")
+        assert out == "<!DOCTYPE html>\n<div>x</div>"
+        assert "```" not in out
+
+    def test_strips_fence_without_language(self):
+        assert llm.strip_code_fence("```\nhello\n```") == "hello"
+
+    def test_leaves_unfenced_text_unchanged(self):
+        html = '<div class="wrap"><h1>x</h1></div>'
+        assert llm.strip_code_fence(html) == html
+
+    def test_does_not_strip_inner_fences(self):
+        # A fence that only opens mid-document (not wrapping the whole thing) is
+        # left alone — we only unwrap a single fence around the entire payload.
+        s = "<div>before</div>\n```\ncode\n```\n<div>after</div>"
+        assert llm.strip_code_fence(s) == s
+
+    def test_tolerates_surrounding_whitespace(self):
+        assert llm.strip_code_fence("\n  ```html\n<p>hi</p>\n```  \n") == "<p>hi</p>"

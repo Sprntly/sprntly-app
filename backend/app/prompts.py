@@ -604,7 +604,7 @@ PRD TEMPLATE TO FOLLOW:
 # ── KG-grounded Evidence ──────────────────────────────────────────────────
 # Bumped when the KG-evidence prompt changes meaningfully. Used as the
 # decision-log prompt_version for agent="evidence".
-EVIDENCE_KG_PROMPT_VERSION = "evidence-kg-v4"
+EVIDENCE_KG_PROMPT_VERSION = "evidence-kg-v5"
 
 
 EVIDENCE_KG_SYSTEM = """\
@@ -625,7 +625,9 @@ EXACTLY. Emit ONE self-contained HTML document: a `<meta charset>`, one inline \
 `examples/`), then one `<div class="wrap">`. Charts are hand-authored inline \
 `<svg>` drawn from the trail's numbers. No external CSS/JS, no chart libraries, \
 no markdown, no `:::` blocks, no commentary outside the document. The output \
-must render correctly on its own.
+must render correctly on its own. Output the raw HTML document ONLY — do NOT \
+wrap it in a Markdown code fence; the first characters of your response must be \
+the HTML itself (e.g. `<!DOCTYPE html>` or `<meta>`), never ``` ``` ```.
 
 This brief is the PROVENANCE TRAIL behind a single weekly-brief finding: it \
 shows a product manager HOW the insight was surfaced — the converging signals \
