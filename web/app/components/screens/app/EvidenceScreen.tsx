@@ -6,6 +6,7 @@ import { useContent } from "../../../context/ContentContext"
 import { evidenceApi, type EvidenceRecord } from "../../../lib/api"
 import { sleepUntilNextPoll } from "../../../lib/poll"
 import { AppLayout } from "./AppLayout"
+import { EvidenceHtmlBrief, looksLikeHtmlBrief } from "../../shared/EvidenceHtmlBrief"
 import { IconSparkles } from "@tabler/icons-react"
 
 // ── Style constants (warm/green Sprntly theme) ──
@@ -120,46 +121,6 @@ function LoadingSkeleton() {
   )
 }
 
-// ── HTML evidence brief (variant v3) ──
-// The v3 evidence artifact is a single self-contained HTML visual brief
-// produced by the `evidence-brief` skill (inline <style> + hand-authored
-// inline SVG charts). We render it in a SANDBOXED iframe:
-//   - sandbox="allow-same-origin" (and NOT allow-scripts) → the brief's inline
-//     CSS/SVG render, but any <script> in the model-generated HTML cannot
-//     execute and inline event handlers never fire — XSS-safe by construction.
-//   - allow-same-origin lets us read the document height to size the iframe to
-//     its content (no inner scrollbar); the brief carries no scripts of its own.
-function EvidenceHtmlBrief({ html }: { html: string }) {
-  const ref = useRef<HTMLIFrameElement>(null)
-  const [height, setHeight] = useState(640)
-
-  const resize = () => {
-    const doc = ref.current?.contentDocument
-    if (!doc?.body) return
-    const h = Math.max(doc.body.scrollHeight, doc.documentElement?.scrollHeight ?? 0)
-    if (h > 0) setHeight(h)
-  }
-
-  return (
-    <iframe
-      ref={ref}
-      title="Evidence brief"
-      srcDoc={html}
-      onLoad={resize}
-      sandbox="allow-same-origin"
-      style={{
-        width: "100%",
-        height,
-        border: "1px solid var(--line, #E8E6E0)",
-        borderRadius: 10,
-        display: "block",
-        colorScheme: "light",
-        background: "#fbfaf6",
-      }}
-    />
-  )
-}
-
 // ── EvidenceScreen ──
 
 export function EvidenceScreen() {
@@ -244,8 +205,7 @@ export function EvidenceScreen() {
   // `:::block` markdown. Branch on the variant, with a content sniff as a
   // fallback for any row whose variant didn't round-trip.
   const isHtmlBrief =
-    evidence?.variant === "v3" ||
-    /^\s*<(?:!doctype|meta|html|div|style)\b/i.test(evidence?.payload_md ?? "")
+    evidence?.variant === "v3" || looksLikeHtmlBrief(evidence?.payload_md)
 
   return (
     <AppLayout mainClassName="main--reading" inlineChat>

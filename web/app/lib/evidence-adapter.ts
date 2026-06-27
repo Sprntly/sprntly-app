@@ -23,6 +23,11 @@ import type {
   PrdContent,
 } from "../types/content"
 
+// v3 evidence is a self-contained HTML visual brief, not `:::block` markdown.
+// (Mirrors looksLikeHtmlBrief in components/shared/EvidenceHtmlBrief; kept inline
+// here so this lib module doesn't import a "use client" component.)
+const HTML_BRIEF_OPEN = /^\s*<(?:!doctype|meta|html|div|style)\b/i
+
 const HEADING_RULE = /^─+$/
 const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "donut", "stat", "gauge"]
 const TONES: EvidenceV2Tone[] = ["negative", "neutral", "positive"]
@@ -298,6 +303,13 @@ function parseSemanticBlock(
 /* ---------- main entry ---------- */
 
 export function markdownToEvidenceState(markdown: string): PrdContent {
+  // v3 evidence is a self-contained HTML visual brief. Detect it up front and
+  // pass the raw HTML straight through (the consumer renders it in a sandboxed
+  // iframe) — parsing it as markdown yields no sections and a blank panel.
+  if (HTML_BRIEF_OPEN.test(markdown)) {
+    return { metaLine: "", title: "", sections: [], html: markdown }
+  }
+
   const lines = markdown.replace(/\r\n/g, "\n").split("\n")
   let title = ""
   const sections: PrdSection[] = []

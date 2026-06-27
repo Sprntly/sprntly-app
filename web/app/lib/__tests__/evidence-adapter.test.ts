@@ -12,6 +12,33 @@ describe("markdownToEvidenceState", () => {
     expect(out.title).toBe("Evidence")
   })
 
+  describe("v3 HTML brief", () => {
+    it("passes a self-contained HTML brief through as `html`, not :::block sections", () => {
+      const html =
+        '<meta charset="utf-8"><style>.wrap{max-width:820px}</style>' +
+        '<div class="wrap"><h1>Beginners Plateau</h1><svg viewBox="0 0 720 250"></svg></div>'
+      const out = markdownToEvidenceState(html)
+      expect(out.html).toBe(html)
+      expect(out.sections).toEqual([])
+      // Self-contained brief carries its own title; the panel renders the iframe.
+      expect(out.title).toBe("")
+    })
+
+    it.each([
+      ["<!doctype html><html></html>"],
+      ['  <div class="wrap"></div>'],
+      ['<style>.x{}</style><div class="wrap"></div>'],
+    ])("detects HTML opener %s", (html) => {
+      expect(markdownToEvidenceState(html).html).toBe(html)
+    })
+
+    it("does NOT treat :::block markdown as HTML", () => {
+      const md = ["# T", "", ":::hero", "[]", ":::"].join("\n")
+      const out = markdownToEvidenceState(md)
+      expect(out.html).toBeUndefined()
+    })
+  })
+
   it("parses an H2 + paragraph + bullet list as PRD primitives", () => {
     const out = markdownToEvidenceState(
       ["# T", "", "## Section", "", "Paragraph one.", "", "- item 1", "- item 2"].join("\n"),
