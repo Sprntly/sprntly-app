@@ -519,6 +519,13 @@ export interface PrdContent {
   title: string
   /** Plain sections; render as paragraphs / lists / tables / charts client-side */
   sections: PrdSection[]
+  /**
+   * Self-contained HTML escape hatch. When set, the document is NOT `:::block`
+   * markdown but a complete HTML document (the v3 evidence-brief visual brief);
+   * the renderer shows it in a sandboxed iframe and ignores `sections`. Empty
+   * for `:::block` PRDs/evidence.
+   */
+  html?: string
 }
 
 /**

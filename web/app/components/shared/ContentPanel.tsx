@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { EvidenceSections } from "./EvidenceSections"
+import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
@@ -369,13 +370,20 @@ function EvidenceTab() {
         )}
 
         {evidence ? (
-          <>
-            <h1 className="ev-doc-title">{evidence.title}</h1>
-            {evidence.metaLine && <div className="ev-doc-meta">{evidence.metaLine}</div>}
-            <div className="ev-doc-sections">
-              <EvidenceSections sections={evidence.sections} />
-            </div>
-          </>
+          evidence.html ? (
+            // v3 evidence — the self-contained HTML visual brief. It carries its
+            // own title/eyebrow/meta, so we render JUST the brief (sandboxed
+            // iframe) and skip the panel's title/meta/section chrome.
+            <EvidenceHtmlBrief html={evidence.html} />
+          ) : (
+            <>
+              <h1 className="ev-doc-title">{evidence.title}</h1>
+              {evidence.metaLine && <div className="ev-doc-meta">{evidence.metaLine}</div>}
+              <div className="ev-doc-sections">
+                <EvidenceSections sections={evidence.sections} />
+              </div>
+            </>
+          )
         ) : isLoading ? (
           <EmptyPane
             title="Generating evidence…"
