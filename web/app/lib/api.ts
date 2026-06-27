@@ -1878,9 +1878,23 @@ export type StoryJob = {
   error?: string
 }
 
+// Persisted tickets for a PRD. `fresh` is true when the stored stories were
+// generated from the PRD's CURRENT rendered content (content-hash match) — the
+// tab renders them with no LLM call. Otherwise the tab regenerates.
+export type StoryCache = {
+  status: "none" | "ready" | "generating" | "failed"
+  fresh: boolean
+  stories: GeneratedStory[]
+  generated_at?: string
+}
+
 export const storiesApi = {
+  /** Persisted tickets for a PRD + whether they're still fresh. Read this first;
+   *  only regenerate when missing/stale (`fresh` false). No LLM call. */
+  getForPrd: (prdId: number) =>
+    api.get<StoryCache>(`/v1/stories/for-prd/${prdId}`),
   /** Kick off breaking a PRD into user-story tickets (fire-and-forget). Returns
-   *  a job id immediately; poll `getJob` until ready/failed. No write. */
+   *  a job id immediately; poll `getJob` until ready/failed. Persists on ready. */
   generate: (prdId: number) =>
     api.post<{ job_id: number; status: string }>("/v1/stories/generate", { prd_id: prdId }),
   /** Poll a story-generation job. 404 once it's unknown / not the caller's. */

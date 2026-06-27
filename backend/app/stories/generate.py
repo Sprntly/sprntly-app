@@ -214,6 +214,23 @@ def generate_user_stories(
     raw = (result.output or {}).get("stories", []) if result.output else []
     stories = [Story.from_dict(s) for s in raw if s.get("title")]
 
+    # Persist the generated set for a PRD so the Tickets tab can serve it without
+    # re-running this multi-minute call until the PRD content actually changes.
+    # Keyed by a content hash of the rendered PRD (see app.db.prd_tickets). Never
+    # let a persistence write break generation — the stories are still returned.
+    if prd_id is not None and prd is not None:
+        try:
+            from app.db.prd_tickets import hash_prd_row, save_tickets
+
+            save_tickets(
+                enterprise_id,
+                prd_id,
+                hash_prd_row(prd),  # hash the row we already rendered above
+                [s.to_dict() for s in stories],
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("persisting prd_tickets failed (continuing)")
+
     # Record the semantic decision (what was produced) alongside the gateway's
     # own llm_call telemetry row. Never let an audit-write break generation.
     try:
