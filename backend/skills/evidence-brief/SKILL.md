@@ -53,6 +53,32 @@ A single **visual brief (HTML), 1–3 pages**, audience = **product team**, body
 - **Hypothesis** — value-driven, testable, with primary metric + guardrails, and a **→ feeds the PRD** handoff.
 - **No footer, no methods boilerplate, no machinery** (never mention agents, the platform, or how it was produced).
 
+## Output format — HTML rendering contract (mandatory)
+The brief **is** rendered HTML, not a description of one. Every brief uses the **same shared design system** so a team reads each one the same way; only the content and the charts flex. **Render, don't drift.**
+
+**Hard rules**
+- Output is **one self-contained `.html` file**: a `<meta charset="utf-8">`, one inline `<style>` block, then one `<div class="wrap">` holding the brief. **No external CSS/JS, no web fonts, no chart libraries, no build step, no `<img>` for charts.** It must open correctly by double-clicking the file.
+- **Use the canonical design system verbatim.** Copy the `<style>` block from `examples/01-lyra-language-app.html` (the most complete one) as your base and do not change the `:root` tokens, fonts, spacing, or any core component rule. You may *append* a small bespoke class (e.g. `.note` as in `02`/`05`) when a brief genuinely needs one — never edit or remove the shared rules. Two briefs placed side by side must look like the same template.
+- **Charts are hand-authored inline `<svg viewBox="…">`**, drawn directly from the provided numbers — never a JS chart, never a screenshot, never a placeholder. Use the chart-text classes (`.ax` axis labels, `.vlabel` value labels, `.blabel` bar/category labels) and the color tokens (`--problem` for the leak/problem, `--opp` for the opportunity/wedge, `--bar-neutral` for the comparison baseline, `--grid` for gridlines). Wrap each chart in `<figure>…<figcaption>` and keep `svg{width:100%}` so it scales.
+
+**Section → required HTML component** (use these classes; this is what makes every brief render identically)
+
+| Brief section | HTML component |
+|---|---|
+| Eyebrow / kicker line above the title | `<p class="eyebrow">Evidence Brief · <source> → <team></p>` |
+| Title (strategic thesis) | `<h1>` + italic `<p class="deck">` subtitle |
+| Author / date / status / "Pairs with → … PRD" line | `<p class="meta">` (and `<p class="demo">` only for illustrative/example data) |
+| TL;DR | `<div class="tldr"><h4>TL;DR</h4><p>…</p></div>` |
+| Opportunity (one line) | `<div class="opp-top"><span class="tag">OPPORTUNITY</span><p>…</p></div>` |
+| Context | `<p class="context"><b>Context.</b> …</p>` |
+| Each evidence finding | `<section>` → `<p class="kicker">` (use `.o` for opportunity-tone, `.n` for neutral) → `<h2>` → `<p>` → `<figure>` chart |
+| VoC quotes | `<div class="voc">` of `<div class="q"><p class="ch rev|sup|sale">channel</p><p>quote</p></div>` |
+| Competitive extraction | `<table>` with `.yes`/`.no`/`.us` cells, then `<div class="extract"><b>What I extract:</b> …</div>` |
+| Convergence | `<section>` with an inline-SVG **convergence diagram** (signal nodes → one opportunity box), as in `01`/`05` |
+| Hypothesis | `<div class="hyp">` — `<h4>`, `<p class="stmt">` with `.b` (behavior) / `.v` (value) / `.x` (change) spans, `<p class="test">` (metric + guardrails), `<div class="handoff">→ FEEDS THE PRD …</div>` |
+
+If a section's signal is absent (e.g. no VoC, single signal), **omit that component** — never render an empty shell or invented filler. The five `examples/` are the authoritative rendering reference: match their markup, not just their wording.
+
 ## Repeatability
 This skill is meant to be run the same way every time: the ordered method + fixed output sequence + chart guide make the brief reproducible across products and analysts. Given comparable scattered inputs, two runs should produce structurally identical briefs that differ only in their content — that consistency is the point, so a team learns to read every brief the same way.
 
@@ -73,6 +99,9 @@ This skill is meant to be run the same way every time: the ordered method + fixe
 - [ ] Correlation vs causation labeled; the wedge's strength stated plainly.
 - [ ] Hypothesis is value-driven (behavior change → business value) and testable, with metric + guardrails, and feeds the PRD.
 - [ ] ≤ 3 pages; data-scientist body voice; product-team audience; **no footer/methods/machinery.**
+- [ ] **Renders as one self-contained HTML file** (inline `<style>`, single `.wrap`, no external CSS/JS, no chart libs); opens by double-click.
+- [ ] **Canonical design system used verbatim** (tokens/fonts/core classes from `examples/01` unchanged); each section uses its required component class.
+- [ ] **Every chart is hand-authored inline `<svg>`** from the provided numbers, in a `figure`/`figcaption`, using the `.ax/.vlabel/.blabel` + color tokens — no JS charts, screenshots, or placeholders.
 
 ## Known gaps / limitations
 - Synthesis layer, not an analysis engine — it structures and visualizes provided analysis but cannot validate the underlying numbers (garbage in, garbage out).

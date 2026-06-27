@@ -27,11 +27,14 @@ from app.db import (
 )
 from app.deps.ownership import require_owned_brief, require_owned_evidence
 from app.evidence_kg import generate_evidence_kg
-from app.prompts import EVIDENCE_TEMPLATE_VERSION
+from app.prompts import EVIDENCE_TEMPLATE_VERSION, EVIDENCE_VARIANT
 
 router = APIRouter(prefix="/v1/evidence", tags=["evidence"])
 
-_VARIANT = "v2"
+# v3: the evidence artifact is the evidence-brief skill's self-contained HTML
+# visual brief (rendered in a sandboxed iframe). v1/v2 rows are the legacy
+# `:::block` markdown format; the frontend branches rendering on this variant.
+_VARIANT = EVIDENCE_VARIANT
 
 # Strong refs to in-flight background generation tasks (see routes/design_agent.py):
 # without this, the bare create_task result can be garbage-collected mid-run.

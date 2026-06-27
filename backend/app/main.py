@@ -31,6 +31,7 @@ from app.prompts import (
     ASK_CACHE_VERSION,
     BRIEF_SCHEMA_VERSION,
     EVIDENCE_TEMPLATE_VERSION,
+    EVIDENCE_VARIANT,
     PRD_TEMPLATE_VERSION,
 )
 from app.routes import (
@@ -100,10 +101,10 @@ async def lifespan(app: FastAPI):
                     invalidated, BRIEF_SCHEMA_VERSION)
     # Same for cached evidence docs — mismatched template_version → status
     # 'invalidated' so the next view regenerates under the current prompt.
-    # Variant-scoped to v2 (the only variant we generate now); historical
-    # v1 rows are read-only and left untouched.
+    # Variant-scoped to the current EVIDENCE_VARIANT (v3, the HTML brief);
+    # historical v1/v2 `:::block` rows are read-only and left untouched.
     ev_invalidated = db.invalidate_stale_evidences(
-        EVIDENCE_TEMPLATE_VERSION, variant="v2"
+        EVIDENCE_TEMPLATE_VERSION, variant=EVIDENCE_VARIANT
     )
     if ev_invalidated:
         logger.info(

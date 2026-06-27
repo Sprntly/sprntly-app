@@ -316,8 +316,9 @@ def test_build_feeds_signals_to_llm_and_logs_refs(facade, isolated_settings,
 def test_build_binds_evidence_brief_skill(facade, isolated_settings, monkeypatch):
     """Evidence generation runs through the vendored `evidence-brief` skill:
     the gateway llm_call is invoked with skill="evidence-brief" so its SKILL.md
-    METHOD (converge ≥2 signals → wedge → best-chart-per-finding → honesty
-    pass) is prepended. The Sprntly `:::block` output contract is unchanged."""
+    is prepended as BOTH the METHOD (converge ≥2 signals → wedge →
+    best-chart-per-finding → honesty pass) AND the HTML rendering contract that
+    governs the output (a self-contained visual brief)."""
     from app import evidence_kg
 
     _seed_template(isolated_settings["data_dir"])
@@ -340,6 +341,38 @@ def test_build_binds_evidence_brief_skill(facade, isolated_settings, monkeypatch
 
     assert "evidence-brief" in NON_ROUTABLE
     assert get_skill("evidence-brief").method.strip()  # SKILL.md present
+
+
+def test_evidence_emits_html_contract_not_blocks(facade, isolated_settings,
+                                                 monkeypatch):
+    """The runner asks for the self-contained HTML brief, NOT the retired
+    `:::block` markdown: the system prompt steers HTML, the user prompt carries
+    no `:::`/template scaffolding, and evidence-brief is a long-output skill so
+    the (large) HTML payload streams instead of truncating."""
+    from app import evidence_kg
+    from app.graph.gateway import _LONG_OUTPUT_SKILLS
+
+    theme, _hyp, _sigs = _seed_theme_hypothesis(facade)
+    captured = {}
+    monkeypatch.setattr(
+        evidence_kg, "llm_call",
+        lambda **kw: captured.update(kw) or _llm_result(
+            '<div class="wrap"></div>'),
+    )
+    insight = {"title": "SSO gap blocks $1.4M in deals", "theme_id": theme.id}
+    evidence_kg.build_evidence_kg(facade, "ent-A", insight)
+
+    # System prompt steers the self-contained HTML brief; the retired :::block
+    # template scaffolding is gone (the prompt may still *forbid* :::blocks).
+    system = captured["system"]
+    assert "HTML" in system and "self-contained" in system
+    assert ":::hero" not in system and ":::cuts-index" not in system
+    # User prompt carries the trail but no leftover :::block template scaffolding.
+    user = captured["input"]
+    assert ":::hero" not in user
+    assert "{template}" not in user and "EVIDENCE PAGE TEMPLATE" not in user
+    # Long-output so the big HTML doc streams on the long read timeout.
+    assert "evidence-brief" in _LONG_OUTPUT_SKILLS
 
 
 def test_build_decision_log_carries_kg_refs(facade, isolated_settings,
@@ -401,8 +434,10 @@ def test_run_sync_kg_completes_with_doc(isolated_settings, monkeypatch):
 def test_run_sync_kg_falls_back_to_legacy_when_no_backing(
     isolated_settings, monkeypatch
 ):
-    """Empty KG (no hypothesis/theme signals) → legacy corpus path runs and
-    completes the row, so evidence never hard-fails."""
+    """Empty KG (no hypothesis/theme signals) → legacy CORPUS path runs and
+    completes the row, so evidence never hard-fails. The corpus fallback now
+    emits the SAME self-contained HTML brief (binding `evidence-brief`), just
+    grounded on the corpus instead of the KG trail."""
     from app import evidence_kg, evidence_runner
     _seed_template(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
@@ -415,22 +450,27 @@ def test_run_sync_kg_falls_back_to_legacy_when_no_backing(
     brief_id = _seed_brief(db_mod, dataset="acme", insights=[
         {"title": "no KG backing", "theme_id": "missing"}])
     evidence_id = db_mod.start_evidence(brief_id=brief_id, insight_index=0,
-                                        title="t", template_version=2,
-                                        variant="v2")
+                                        title="t", template_version=4,
+                                        variant="v3")
 
     kg_calls, legacy_calls = [], []
     monkeypatch.setattr(evidence_kg, "llm_call",
                         lambda **kw: kg_calls.append(kw))
-    monkeypatch.setattr(evidence_runner, "call_md",
-                        lambda **kw: legacy_calls.append(kw) or "# legacy md")
+    monkeypatch.setattr(
+        evidence_runner, "llm_call",
+        lambda **kw: legacy_calls.append(kw) or _llm_result(
+            '<div class="wrap"><h1>Legacy corpus brief</h1></div>'),
+    )
 
     evidence_kg._run_sync_kg(evidence_id, brief_id, 0)
 
     row = db_mod.get_evidence(evidence_id)
     assert row["status"] == "ready"
-    assert row["payload_md"] == "# legacy md"   # legacy path produced the doc
+    # legacy path produced the HTML brief from the corpus
+    assert row["payload_md"] == '<div class="wrap"><h1>Legacy corpus brief</h1></div>'
     assert kg_calls == []                        # KG llm_call never fired
     assert len(legacy_calls) == 1                # legacy corpus call did
+    assert legacy_calls[0]["skill"] == "evidence-brief"  # same skill binding
 
 
 def test_generate_evidence_kg_records_failure(isolated_settings, monkeypatch):
@@ -490,8 +530,9 @@ def test_route_dispatches_to_kg(tenant_client, isolated_settings, monkeypatch):
 
 
 def test_payload_md_shape_matches_ui_contract(isolated_settings, monkeypatch):
-    """The KG path writes the same evidence row shape the UI reads: a ready
-    row whose payload_md is the rendered markdown doc (variant unchanged)."""
+    """The KG path writes the row shape the UI reads: a ready row whose
+    payload_md is the self-contained HTML brief (variant v3), which the
+    EvidenceScreen renders in a sandboxed iframe."""
     from app import evidence_kg
     _seed_template(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
@@ -502,15 +543,22 @@ def test_payload_md_shape_matches_ui_contract(isolated_settings, monkeypatch):
     brief_id = _seed_brief(db_mod, dataset="acme", insights=[
         {"title": "SSO gap blocks $1.4M in deals", "theme_id": theme.id}])
     evidence_id = db_mod.start_evidence(brief_id=brief_id, insight_index=0,
-                                        title="t", template_version=2,
-                                        variant="v2")
-    monkeypatch.setattr(evidence_kg, "llm_call",
-                        lambda **kw: _llm_result(":::hero\n{}\n:::\n"))
+                                        title="t", template_version=4,
+                                        variant="v3")
+    html = (
+        '<meta charset="utf-8"><style>.wrap{max-width:820px}</style>'
+        '<div class="wrap"><h1>Beginners Plateau</h1>'
+        '<svg viewBox="0 0 720 250"></svg></div>'
+    )
+    monkeypatch.setattr(evidence_kg, "llm_call", lambda **kw: _llm_result(html))
     evidence_kg._run_sync_kg(evidence_id, brief_id, 0)
 
     row = db_mod.get_evidence(evidence_id)
     # Same contract fields the EvidenceScreen renders.
     assert set(row) >= {"id", "title", "payload_md", "status", "variant"}
     assert row["status"] == "ready"
-    assert row["variant"] == "v2"          # storage variant unchanged
-    assert ":::hero" in row["payload_md"]  # semantic blocks preserved
+    assert row["variant"] == "v3"               # HTML-brief storage variant
+    # Self-contained HTML, not the retired :::block markdown.
+    assert '<div class="wrap"' in row["payload_md"]
+    assert "<svg" in row["payload_md"]
+    assert ":::" not in row["payload_md"]
