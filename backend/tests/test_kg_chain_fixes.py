@@ -221,8 +221,7 @@ def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
     monkeypatch.setattr(pr, "get_brief_by_id", lambda bid: brief)
     monkeypatch.setattr(pr, "_resolve_grounding",
                         lambda ds, b, i: ("EVIDENCE", None))
-    monkeypatch.setattr(pr, "get_skill",
-                        lambda name: SimpleNamespace(templates={"prd-template.md": "TEMPLATE"}))
+    monkeypatch.setattr(pr, "load_prd_template", lambda: "TEMPLATE")
     monkeypatch.setattr(pr, "log_agent_decision", lambda **kw: None)
 
     skills_seen = []
