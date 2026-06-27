@@ -37,6 +37,16 @@ describe("markdownToEvidenceState", () => {
       const out = markdownToEvidenceState(md)
       expect(out.html).toBeUndefined()
     })
+
+    it("unwraps a ```html code fence (the model sometimes adds one)", () => {
+      const inner =
+        '<meta charset="utf-8"><div class="wrap"><h1>x</h1></div>'
+      const out = markdownToEvidenceState("```html\n" + inner + "\n```")
+      // html is the UNWRAPPED document — no stray backticks reach the iframe.
+      expect(out.html).toBe(inner)
+      expect(out.html).not.toContain("```")
+      expect(out.sections).toEqual([])
+    })
   })
 
   it("parses an H2 + paragraph + bullet list as PRD primitives", () => {

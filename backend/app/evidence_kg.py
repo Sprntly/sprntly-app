@@ -43,6 +43,7 @@ from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.types import Entity, Signal
+from app.llm import strip_code_fence
 from app.prompts import (
     EVIDENCE_KG_PROMPT_VERSION,
     EVIDENCE_KG_SYSTEM,
@@ -209,7 +210,10 @@ def build_evidence_kg(
         # `evidence-brief` skill is a long-output skill (large HTML payload).
         skill="evidence-brief",
     )
-    html = result.output if isinstance(result.output, str) else str(result.output)
+    raw = result.output if isinstance(result.output, str) else str(result.output)
+    # The model occasionally wraps the document in a ```html code fence despite
+    # the prompt; strip it so the stored payload is raw HTML the UI can iframe.
+    html = strip_code_fence(raw)
 
     signal_ids = [t["signal_id"] for t in trail]
     kg_refs = list(signal_ids)

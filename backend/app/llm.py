@@ -9,6 +9,7 @@ timeouts / connection drops) and a per-request timeout. Existing callers
 import json
 import logging
 import random
+import re
 import threading
 import time as _time
 
@@ -128,6 +129,22 @@ _REQUEST_TIMEOUT_S = 120.0
 # long-output skills run with this floor AND stream the response, which is the
 # SDK's required pattern for slow/large requests and sidesteps the read timeout.
 LONG_REQUEST_TIMEOUT_S = 600.0
+
+# A single wrapping markdown code fence (```lang … ```). Models sometimes wrap an
+# HTML/markdown document in one despite being told not to; we strip it so the
+# stored payload is the raw document.
+_CODE_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)\r?\n?```\s*$")
+
+
+def strip_code_fence(text: str) -> str:
+    """Strip a single wrapping markdown code fence (```html … ```) from a model
+    response, returning the inner document. Returns `text` unchanged when it
+    isn't fenced. Use on outputs that must be stored/rendered as a raw document
+    (e.g. the evidence-brief HTML), where a stray fence would otherwise leak into
+    the artifact."""
+    m = _CODE_FENCE_RE.match(text)
+    return m.group(1).strip() if m else text
+
 
 _client: Anthropic | None = None
 
