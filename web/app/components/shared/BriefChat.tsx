@@ -204,14 +204,6 @@ function IconTerminalPrompt({ size = 14 }: { size?: number }) {
     </svg>
   )
 }
-function IconTicket({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1a2 2 0 0 0 0 4v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 0 0-4z" />
-      <path d="M13 7v10" />
-    </svg>
-  )
-}
 
 /** Pure: the primary finding-card CTA. When a PRD already exists for this
  *  insight the button becomes "View PRD" (opens the existing PRD); otherwise
@@ -408,43 +400,6 @@ function BriefFindingCard({
   )
 }
 
-// ── Suggested-actions state machine ──────────────────────────────────────────
-// The chip stack above the composer offers the most useful next step. Generating
-// a PRD already lives on each finding card, so the composer's suggestion starts
-// at the downstream flow: create tickets from the PRD, then view the PRD.
-type SuggestStage = "prd" | "tickets"
-type SuggestKind = "create-ticket" | "view-prd"
-
-interface SuggestSpec {
-  kind: SuggestKind
-  label: string
-  icon: "file" | "ticket"
-  primary?: boolean
-}
-
-const SUGGEST_STAGES: Record<SuggestStage, SuggestSpec[]> = {
-  // Default — break the PRD into tickets.
-  prd: [
-    { kind: "create-ticket", label: "Create ticket", icon: "ticket", primary: true },
-  ],
-  // After Create ticket.
-  tickets: [
-    { kind: "view-prd", label: "View PRD", icon: "file", primary: true },
-  ],
-}
-
-// Stage to advance to after a kind is clicked (null → keep the current stage).
-const SUGGEST_NEXT: Record<SuggestKind, SuggestStage | null> = {
-  "create-ticket": "tickets",
-  "view-prd": null,
-}
-
-// The AgentAction a kind dispatches.
-const SUGGEST_ACTION: Record<SuggestKind, AgentAction> = {
-  "create-ticket": "tickets",
-  "view-prd": "prd",
-}
-
 // ── Brief generating / WIP indicator ─────────────────────────────────────────
 // Shown on the brief surface while the backend is generating this week's brief
 // (hydration kind === "generating"). Visually distinct from the empty greeting
@@ -464,13 +419,8 @@ function BriefGeneratingState() {
   )
 }
 
-function SuggestIcon({ name }: { name: SuggestSpec["icon"] }) {
-  if (name === "file") return <IconFileText size={14} />
-  return <IconTicket size={14} />
-}
-
 export function BriefChat() {
-  const { aiBarValue, setAIBarValue, openContentPanel, showToast, goTo, contentPanelTab } = useNavigation()
+  const { aiBarValue, setAIBarValue, openContentPanel, showToast, goTo } = useNavigation()
   const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
@@ -484,7 +434,6 @@ export function BriefChat() {
   const [busy, setBusy] = useState(false)
   const [cardBusyKey, setCardBusyKey] = useState<string | null>(null)
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
-  const [suggestStage, setSuggestStage] = useState<SuggestStage>("prd")
   const busyRef = useRef(false)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
@@ -904,21 +853,6 @@ export function BriefChat() {
     [content.prd, evidenceFlow, multiAgentFlow, openContentPanel, prdFlow, prototypeFlow, runGate, ticketsFlow],
   )
 
-  // ── Suggested-actions: hand the implementation brief to a coding agent ─────
-  // Active suggestion chips, each advancing the stage as the user acts.
-  const suggestions = useMemo(
-    () =>
-      SUGGEST_STAGES[suggestStage].map((spec) => ({
-        ...spec,
-        onClick: () => {
-          const next = SUGGEST_NEXT[spec.kind]
-          if (next) setSuggestStage(next)
-          onAction(SUGGEST_ACTION[spec.kind])
-        },
-      })),
-    [suggestStage, onAction],
-  )
-
   // ── Per-card actions (evidence/PRD wiring) ────────
   const cardAsk = useCallback(
     (finding: Finding) => {
@@ -1327,28 +1261,6 @@ export function BriefChat() {
         </div>
 
         <div className="bc-dock">
-          {/* "Create ticket" only makes sense against an open PRD — gate the chip
-              stack on the PRD rail being open so it isn't a hanging button. Also
-              suppressed when the brief has no real data (insufficient-evidence /
-              empty case): no findings to drive a PRD/prototype flow. */}
-          {hasRealData && contentPanelTab === "prd" ? (
-            <div className="bc-suggest">
-              <div className="bc-suggest-list">
-                {suggestions.map((s) => (
-                  <button
-                    key={s.kind}
-                    type="button"
-                    className={`bc-suggest-btn${s.primary ? " bc-suggest-btn--primary" : ""}`}
-                    onClick={s.onClick}
-                    disabled={busy}
-                  >
-                    <SuggestIcon name={s.icon} />
-                    {s.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : null}
           <div className="bc-composer">
             <textarea
               ref={composerRef}
