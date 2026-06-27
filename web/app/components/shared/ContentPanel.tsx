@@ -761,8 +761,6 @@ export function TicketsTab() {
         </svg>
         <span>Tickets are generated from the PRD.{!isClickUpConnected && " Connect ClickUp in Settings to push them."}</span>
       </div>
-
-      <ArtifactFooterActions current="tickets" />
     </div>
   )
 }
