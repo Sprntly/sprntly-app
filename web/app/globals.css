@@ -15128,6 +15128,29 @@
     opacity: 0.85;
   }
 
+  .tkt-comment-summary {
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-alpha-14);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+    font-size: 12.5px;
+    color: var(--ink);
+    line-height: 1.55;
+  }
+
+  .tkt-comment-summary-h {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    margin-bottom: 6px;
+  }
+
   /* ═══════════════════════════════════════════════════════════════════════════
      Backlog Projects screen  (BacklogScreen.tsx)
   ═══════════════════════════════════════════════════════════════════════════ */

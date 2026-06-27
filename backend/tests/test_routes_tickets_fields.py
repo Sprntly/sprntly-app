@@ -70,3 +70,41 @@ def test_data_defaults_when_no_edits(client: TestClient):
     assert data["assignee"] is None
     assert data["attachments"] == []
     assert data["comments"] == []
+
+
+def test_comment_summary_needs_two_comments(client: TestClient):
+    # 0 comments → null, no LLM call.
+    assert client.get(f"/v1/tickets/{KEY}/comments/summary").json()["summary"] is None
+    client.post(f"/v1/tickets/{KEY}/comments", json={"author": "Sam", "body": "Ship behind a flag?"})
+    # Still < 2 → null.
+    assert client.get(f"/v1/tickets/{KEY}/comments/summary").json()["summary"] is None
+
+
+def test_comment_summary_calls_llm(client: TestClient, monkeypatch):
+    import app.routes.tickets as tickets_mod
+    seen = {}
+
+    def fake_call_md(*, system, user, **kwargs):
+        seen["system"] = system
+        seen["user"] = user
+        return "Team aligned to ship behind a flag; open question on step 3."
+
+    monkeypatch.setattr(tickets_mod, "call_md", fake_call_md)
+
+    client.post(f"/v1/tickets/{KEY}/comments", json={"author": "Sam", "body": "Ship behind a flag?"})
+    client.post(f"/v1/tickets/{KEY}/comments", json={"author": "Lee", "body": "Yes, flag it; step 3 still open."})
+
+    out = client.get(f"/v1/tickets/{KEY}/comments/summary").json()
+    assert out["summary"] == "Team aligned to ship behind a flag; open question on step 3."
+    # The thread (author: body lines) was handed to the model.
+    assert "Sam: Ship behind a flag?" in seen["user"]
+    assert "Lee:" in seen["user"]
+
+
+def test_generated_story_has_stable_content_id():
+    from app.stories.generate import Story
+    a = Story(title="Guest alert", body="one click").to_dict()
+    b = Story(title="Guest alert", body="one click").to_dict()
+    c = Story(title="Guest alert", body="different body").to_dict()
+    assert a["id"] and a["id"] == b["id"]   # same content → same id (survives reorder/regen)
+    assert a["id"] != c["id"]               # different content → different id (no misattach)

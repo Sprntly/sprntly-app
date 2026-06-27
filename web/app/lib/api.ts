@@ -1865,6 +1865,10 @@ export const ticketDataApi = {
   /** Remove a comment. */
   removeComment: (ticketKey: string, commentId: number) =>
     api.delete(`/v1/tickets/${encodeURIComponent(ticketKey)}/comments/${commentId}`),
+  /** AI summary of the comment thread. `summary` is null when there's too little
+   *  to summarize (< 2 comments) or the LLM call failed (best-effort). */
+  summarizeComments: (ticketKey: string) =>
+    api.get<{ summary: string | null }>(`/v1/tickets/${encodeURIComponent(ticketKey)}/comments/summary`),
 }
 
 export const ticketPushApi = {
@@ -1886,6 +1890,9 @@ export const ticketPushApi = {
 // user-stories skill) and writes nothing; push is the explicit ClickUp write.
 // This is the REAL path behind "Create ticket" (vs the mock ticket fixtures).
 export type GeneratedStory = {
+  /** Content-derived stable id (hash of title+body) stamped at generation.
+   *  Keys per-ticket edit overrides. Optional for sets cached before it existed. */
+  id?: string
   title: string
   body: string
   acceptance_criteria: string[]

@@ -22,6 +22,7 @@ const api = vi.hoisted(() => ({
   removeAttachment: vi.fn(),
   addComment: vi.fn(),
   removeComment: vi.fn(),
+  summarizeComments: vi.fn(),
   teamList: vi.fn(),
 }))
 
@@ -37,6 +38,7 @@ vi.mock("../../../lib/api", async (orig) => {
       removeAttachment: api.removeAttachment,
       addComment: api.addComment,
       removeComment: api.removeComment,
+      summarizeComments: api.summarizeComments,
     },
     teamApi: { list: api.teamList },
   }
@@ -71,6 +73,7 @@ beforeEach(() => {
   api.saveDescription.mockResolvedValue({ ok: true })
   api.saveFields.mockResolvedValue({ ok: true })
   api.teamList.mockResolvedValue({ members: [] })
+  api.summarizeComments.mockResolvedValue({ summary: null })
 })
 afterEach(() => { cleanup(); vi.clearAllMocks() })
 
@@ -83,9 +86,11 @@ async function renderDetail(onBack = vi.fn()) {
 }
 
 describe("ticketKeyFor", () => {
-  it("derives a stable slug key from the prd id + generated title", () => {
+  it("prefers the content-derived id when present", () => {
+    expect(ticketKeyFor(7, { ...STORY, id: "3e7b3c1fa35a" })).toBe("prd-7-3e7b3c1fa35a")
+  })
+  it("falls back to a title slug for sets cached before id existed", () => {
     expect(ticketKeyFor(7, STORY)).toBe(KEY)
-    expect(ticketKeyFor(7, { ...STORY, title: "Guest alert data model" })).toBe(KEY)
   })
 })
 
@@ -141,6 +146,29 @@ describe("TicketDetail", () => {
       fireEvent.click(screen.getByRole("button", { name: /post comment/i }))
     })
     expect(api.addComment).toHaveBeenCalledWith(KEY, "You", "Looks good")
+  })
+
+  it("shows the AI summary block once there are 2+ comments", async () => {
+    api.getData.mockResolvedValue({
+      ...noEdits(),
+      comments: [
+        { id: 1, author: "Sam", body: "Ship behind a flag?", time: "t1" },
+        { id: 2, author: "Lee", body: "Yes, step 3 still open.", time: "t2" },
+      ],
+    })
+    api.summarizeComments.mockResolvedValue({ summary: "Team aligned to ship behind a flag." })
+    await renderDetail()
+    await waitFor(() => expect(api.summarizeComments).toHaveBeenCalledWith(KEY))
+    await waitFor(() => expect(screen.getByText("Team aligned to ship behind a flag.")).toBeTruthy())
+  })
+
+  it("does not summarize with fewer than 2 comments", async () => {
+    api.getData.mockResolvedValue({
+      ...noEdits(),
+      comments: [{ id: 1, author: "Sam", body: "Only one.", time: "t1" }],
+    })
+    await renderDetail()
+    expect(api.summarizeComments).not.toHaveBeenCalled()
   })
 
   it("Back invokes onBack", async () => {

@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import {
   IconArrowLeft, IconLink, IconDots, IconUser, IconBook, IconPaperclip,
   IconExternalLink, IconMessageCircle, IconArrowsExchange, IconPlus,
-  IconChevronDown, IconCheck, IconX, IconSend,
+  IconChevronDown, IconCheck, IconX, IconSend, IconSparkles,
 } from "@tabler/icons-react"
 import { useNavigation } from "../../context/NavigationContext"
 import {
@@ -37,11 +37,13 @@ function avatarColor(seed: string) {
   return AVATAR_PALETTE[Math.abs(h) % AVATAR_PALETTE.length]
 }
 
-/** Stable per-ticket key for the overrides store. Derived from the PRD id + a
- *  slug of the GENERATED title (survives list reordering on regenerate). Known
- *  limitation: if a regenerate changes a ticket's title, its saved overrides
- *  won't re-attach. */
+/** Stable per-ticket key for the overrides store. Prefers the content-derived
+ *  `id` stamped at generation (hash of title+body) so edits survive list
+ *  reordering and re-attach on an identical regeneration without misattaching
+ *  across genuinely-different ones. Falls back to a title slug for any set
+ *  cached before `id` existed. */
 export function ticketKeyFor(prdId: number, story: GeneratedStory): string {
+  if (story.id) return `prd-${prdId}-${story.id}`
   const slug = (story.title || "ticket")
     .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60)
   return `prd-${prdId}-${slug || "ticket"}`
@@ -69,6 +71,7 @@ export function TicketDetail({ story, index, prdId, onBack }: {
   const [criteria, setCriteria] = useState<string[]>(story.acceptance_criteria)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [comments, setComments] = useState<Comment[]>([])
+  const [summary, setSummary] = useState<string | null>(null)
 
   const [members, setMembers] = useState<TeamMemberRecord[] | null>(null)
   const [openMenu, setOpenMenu] = useState<null | "priority" | "status" | "sprint" | "reassign">(null)
@@ -93,6 +96,17 @@ export function TicketDetail({ story, index, prdId, onBack }: {
     }).catch(() => { /* first-open / offline → keep generated defaults */ })
     return () => { cancelled = true }
   }, [key])
+
+  // AI summary of the comment thread — only once there's a real discussion
+  // (>= 2 comments). Refetched when the comment count changes.
+  useEffect(() => {
+    if (comments.length < 2) { setSummary(null); return }
+    let cancelled = false
+    ticketDataApi.summarizeComments(key)
+      .then((r) => { if (!cancelled) setSummary(r.summary) })
+      .catch(() => { /* best-effort — hide the block on failure */ })
+    return () => { cancelled = true }
+  }, [key, comments.length])
 
   const saveFields = (patch: Parameters<typeof ticketDataApi.saveFields>[1]) => {
     ticketDataApi.saveFields(key, patch).catch(() => showToast("Couldn't save", "Your change may not persist."))
@@ -310,6 +324,12 @@ export function TicketDetail({ story, index, prdId, onBack }: {
       {/* Comments */}
       <div className="tkt-detail-section">
         <div className="tkt-detail-section-label"><IconMessageCircle size={11} style={{ verticalAlign: "-1px", marginRight: 4 }} />Comments · {comments.length}</div>
+        {summary ? (
+          <div className="tkt-comment-summary">
+            <div className="tkt-comment-summary-h"><IconSparkles size={12} /> Summary</div>
+            {summary}
+          </div>
+        ) : null}
         {comments.length === 0 ? (
           <div className="tkt-comments-empty">No comments yet.</div>
         ) : (
