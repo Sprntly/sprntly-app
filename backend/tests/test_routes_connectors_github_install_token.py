@@ -223,3 +223,168 @@ def test_bind_heals_existing_orphan(github_env):
     assert row["account_login"] == "globex"
     assert int(row["account_id"]) == 909
     assert row["company_id"] == company_id
+
+
+# ─────────────────────── lazy-hydration at the mint choke point ───────────────────────
+
+
+def _mint_token_response():
+    from unittest.mock import MagicMock
+
+    resp = MagicMock(ok=True, status_code=200)
+    resp.json.return_value = {
+        "token": "ghs_minted",
+        "expires_at": "2099-01-01T00:00:00Z",
+    }
+    return resp
+
+
+def test_get_installation_token_self_heals_thin_row(github_env):
+    """A REAL token mint self-heals a thin install row: account_login/id are
+    backfilled from the App API and the company_id is preserved unchanged. A
+    subsequent resolver call then sees the hydrated row."""
+    from app import db
+    from app.connectors import github_app
+
+    company = uuid.uuid4().hex
+    install_id = 990000040
+    db.upsert_github_installation(
+        installation_id=install_id, account_id=0, account_login="",
+        account_type="User", suspended=False, company_id=company,
+    )
+
+    detail = {
+        "account": {"id": 123, "login": "Acme", "type": "Organization"},
+        "repository_selection": "all",
+        "permissions": {"contents": "read"},
+        "events": ["push"],
+    }
+    with patch(
+        "app.connectors.github_app.github_app_configured", return_value=True
+    ), patch(
+        "app.connectors.github_app.make_app_jwt", return_value="jwt"
+    ), patch(
+        "app.connectors.github_app.requests.post", return_value=_mint_token_response()
+    ), patch(
+        "app.connectors.github_app.fetch_app_installation", return_value=detail
+    ):
+        github_app.clear_installation_token_cache(install_id)
+        tok = github_app.get_installation_token(install_id)
+
+    assert tok == "ghs_minted"
+    row = db.get_github_installation(install_id)
+    assert row["account_login"] == "Acme"
+    assert int(row["account_id"]) == 123
+    assert row["account_type"] == "Organization"
+    assert row["company_id"] == company  # tenant binding unchanged by hydration
+
+    # The hydrated login now resolves via the resolver's tier-1 path.
+    found = db.find_github_installation_for_repo("Acme/widget", company)
+    assert int(found["installation_id"]) == install_id
+
+
+def test_get_installation_token_hydration_is_fail_open(github_env):
+    """fetch_app_installation returning None must NOT break the mint: the token
+    is still returned and the row stays thin (no exception propagates)."""
+    from app import db
+    from app.connectors import github_app
+
+    company = uuid.uuid4().hex
+    install_id = 990000041
+    db.upsert_github_installation(
+        installation_id=install_id, account_id=0, account_login="",
+        account_type="User", suspended=False, company_id=company,
+    )
+
+    with patch(
+        "app.connectors.github_app.github_app_configured", return_value=True
+    ), patch(
+        "app.connectors.github_app.make_app_jwt", return_value="jwt"
+    ), patch(
+        "app.connectors.github_app.requests.post", return_value=_mint_token_response()
+    ), patch(
+        "app.connectors.github_app.fetch_app_installation", return_value=None
+    ):
+        github_app.clear_installation_token_cache(install_id)
+        tok = github_app.get_installation_token(install_id)
+
+    assert tok == "ghs_minted"  # mint unaffected
+    row = db.get_github_installation(install_id)
+    assert row["account_login"] == ""  # row stays thin
+    assert int(row["account_id"]) == 0
+
+
+def test_maybe_hydrate_fail_open_when_fetch_raises(github_env):
+    """A raising fetch_app_installation → maybe_hydrate returns False, no raise,
+    row stays thin."""
+    from app import db
+    from app.connectors import github_app
+
+    company = uuid.uuid4().hex
+    install_id = 990000042
+    db.upsert_github_installation(
+        installation_id=install_id, account_id=0, account_login="",
+        account_type="User", suspended=False, company_id=company,
+    )
+
+    with patch(
+        "app.connectors.github_app.fetch_app_installation",
+        side_effect=RuntimeError("boom"),
+    ):
+        assert github_app.maybe_hydrate_installation(install_id) is False
+
+    row = db.get_github_installation(install_id)
+    assert row["account_login"] == ""
+    assert row["company_id"] == company  # unchanged
+
+
+def test_maybe_hydrate_noop_on_healthy_row(github_env):
+    """A populated (non-thin) row is a cheap no-op: no App-API call, returns
+    False, row unchanged."""
+    from app import db
+    from app.connectors import github_app
+
+    company = uuid.uuid4().hex
+    install_id = 990000043
+    db.upsert_github_installation(
+        installation_id=install_id, account_id=77, account_login="globex",
+        account_type="Organization", suspended=False, company_id=company,
+    )
+
+    with patch("app.connectors.github_app.fetch_app_installation") as mfetch:
+        assert github_app.maybe_hydrate_installation(install_id) is False
+    mfetch.assert_not_called()
+
+    row = db.get_github_installation(install_id)
+    assert row["account_login"] == "globex"
+    assert row["company_id"] == company
+
+
+def test_maybe_hydrate_preserves_company_binding(github_env):
+    """Tenant safety: hydrating a thin row owned by company A leaves it owned by
+    company A (hydration writes only install-intrinsic account metadata)."""
+    from app import db
+    from app.connectors import github_app
+
+    company_a = uuid.uuid4().hex
+    install_id = 990000044
+    db.upsert_github_installation(
+        installation_id=install_id, account_id=0, account_login="",
+        account_type="User", suspended=False, company_id=company_a,
+    )
+
+    detail = {
+        "account": {"id": 555, "login": "Acme", "type": "Organization"},
+        "repository_selection": "selected",
+        "permissions": {"contents": "read"},
+        "events": [],
+    }
+    with patch(
+        "app.connectors.github_app.fetch_app_installation", return_value=detail
+    ):
+        assert github_app.maybe_hydrate_installation(install_id) is True
+
+    row = db.get_github_installation(install_id)
+    assert row["account_login"] == "Acme"
+    assert int(row["account_id"]) == 555
+    assert row["company_id"] == company_a  # never re-keyed

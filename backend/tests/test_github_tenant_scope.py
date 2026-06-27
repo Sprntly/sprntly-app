@@ -656,15 +656,102 @@ def test_resolve_picks_installation_covering_repo(github_env):
 
 
 def test_no_installation_returns_none_graceful(github_env):
-    """No installation covering the repo owner → None, no exception. A None
-    repo_full_name also resolves to None."""
+    """A company with NO installation at all → None, no exception (genuine
+    no-coverage). A None repo_full_name also resolves to None."""
     from app.routes.design_agent import _resolve_github_installation_id_for_repo
 
-    company_a = uuid.uuid4().hex
-    _seed_install(installation_id=5, company_id=company_a, login="acme")
+    company_a = uuid.uuid4().hex  # no install seeded
 
     assert _resolve_github_installation_id_for_repo(company_a, "ghost/repo") is None
     assert _resolve_github_installation_id_for_repo(company_a, None) is None
+
+
+def test_resolve_single_install_binds_regardless_of_owner(github_env):
+    """Resolve-by-binding: a company with exactly ONE non-suspended install
+    resolves that install for any repo — even an owner that doesn't match the
+    install's account_login. The picker mints repos against this same single
+    install, so grounding must use it (picker/resolver parity)."""
+    from app.routes.design_agent import _resolve_github_installation_id_for_repo
+
+    company_a = uuid.uuid4().hex
+    _seed_install(installation_id=42, company_id=company_a, login="acme")
+
+    assert _resolve_github_installation_id_for_repo(company_a, "acme/thing") == 42
+    # Owner does not match the login, but it is the company's only install → bind.
+    assert _resolve_github_installation_id_for_repo(company_a, "other/thing") == 42
+
+
+def test_find_installation_resolves_thin_single_install_row(github_env):
+    """Regression — reproduces the skeleton-row failure shape: a single bound
+    install with an EMPTY account_login (account_id=0). The pre-fix resolver
+    keyed on `account_login ILIKE owner`, so '' never matched 'Acme' → None →
+    grounding unmapped. Resolve-by-binding (tier 2) returns the install."""
+    from app import db
+
+    company = uuid.uuid4().hex
+    db.upsert_github_installation(
+        installation_id=990000001,
+        account_id=0,
+        account_login="",  # thin/skeleton row
+        account_type="User",
+        suspended=False,
+        company_id=company,
+    )
+
+    found = db.find_github_installation_for_repo("Acme/widget", company)
+    assert found is not None
+    assert int(found["installation_id"]) == 990000001
+
+
+def test_find_installation_multi_install_login_match_then_ambiguous(github_env):
+    """Multi-install: a populated login-match resolves via tier 1; two thin
+    installs with no login match are ambiguous by the DB alone → None (tier 3)."""
+    from app import db
+
+    # (a) Two populated installs — owner matches one → tier-1 hit.
+    company = uuid.uuid4().hex
+    db.upsert_github_installation(
+        installation_id=990000010, account_id=10, account_login="Acme",
+        account_type="Organization", suspended=False, company_id=company,
+    )
+    db.upsert_github_installation(
+        installation_id=990000020, account_id=20, account_login="Globex",
+        account_type="Organization", suspended=False, company_id=company,
+    )
+    hit = db.find_github_installation_for_repo("acme/widget", company)
+    assert int(hit["installation_id"]) == 990000010
+
+    # (b) Two thin installs, neither matches by login → ambiguous → None.
+    company2 = uuid.uuid4().hex
+    db.upsert_github_installation(
+        installation_id=990000011, account_id=0, account_login="",
+        account_type="User", suspended=False, company_id=company2,
+    )
+    db.upsert_github_installation(
+        installation_id=990000021, account_id=0, account_login="",
+        account_type="User", suspended=False, company_id=company2,
+    )
+    assert db.find_github_installation_for_repo("Acme/widget", company2) is None
+
+
+def test_find_installation_thin_row_tenant_isolated(github_env):
+    """Tenant isolation: company A's thin single install is NEVER returned for
+    company B (resolve-by-binding stays strictly company-scoped). A still
+    resolves its own thin install."""
+    from app import db
+
+    company_a = uuid.uuid4().hex
+    company_b = uuid.uuid4().hex
+    db.upsert_github_installation(
+        installation_id=990000030, account_id=0, account_login="",
+        account_type="User", suspended=False, company_id=company_a,
+    )
+
+    # B has no install of its own → must not borrow A's bound install.
+    assert db.find_github_installation_for_repo("Acme/widget", company_b) is None
+    # A still resolves it via tier 2.
+    found_a = db.find_github_installation_for_repo("Acme/widget", company_a)
+    assert int(found_a["installation_id"]) == 990000030
 
 
 def test_bind_installation_company_does_not_steal(github_env):
