@@ -120,6 +120,46 @@ function LoadingSkeleton() {
   )
 }
 
+// ── HTML evidence brief (variant v3) ──
+// The v3 evidence artifact is a single self-contained HTML visual brief
+// produced by the `evidence-brief` skill (inline <style> + hand-authored
+// inline SVG charts). We render it in a SANDBOXED iframe:
+//   - sandbox="allow-same-origin" (and NOT allow-scripts) → the brief's inline
+//     CSS/SVG render, but any <script> in the model-generated HTML cannot
+//     execute and inline event handlers never fire — XSS-safe by construction.
+//   - allow-same-origin lets us read the document height to size the iframe to
+//     its content (no inner scrollbar); the brief carries no scripts of its own.
+function EvidenceHtmlBrief({ html }: { html: string }) {
+  const ref = useRef<HTMLIFrameElement>(null)
+  const [height, setHeight] = useState(640)
+
+  const resize = () => {
+    const doc = ref.current?.contentDocument
+    if (!doc?.body) return
+    const h = Math.max(doc.body.scrollHeight, doc.documentElement?.scrollHeight ?? 0)
+    if (h > 0) setHeight(h)
+  }
+
+  return (
+    <iframe
+      ref={ref}
+      title="Evidence brief"
+      srcDoc={html}
+      onLoad={resize}
+      sandbox="allow-same-origin"
+      style={{
+        width: "100%",
+        height,
+        border: "1px solid var(--line, #E8E6E0)",
+        borderRadius: 10,
+        display: "block",
+        colorScheme: "light",
+        background: "#fbfaf6",
+      }}
+    />
+  )
+}
+
 // ── EvidenceScreen ──
 
 export function EvidenceScreen() {
@@ -200,6 +240,13 @@ export function EvidenceScreen() {
   )
   const confidenceValue = confidenceMetric?.value ?? (evidence ? "0.82" : null)
 
+  // v3 rows are the self-contained HTML visual brief; v1/v2 are legacy
+  // `:::block` markdown. Branch on the variant, with a content sniff as a
+  // fallback for any row whose variant didn't round-trip.
+  const isHtmlBrief =
+    evidence?.variant === "v3" ||
+    /^\s*<(?:!doctype|meta|html|div|style)\b/i.test(evidence?.payload_md ?? "")
+
   return (
     <AppLayout mainClassName="main--reading" inlineChat>
       {/* Back link */}
@@ -233,50 +280,60 @@ export function EvidenceScreen() {
       {/* Ready state */}
       {evidence && evidence.status === "ready" && (
         <div style={{ marginTop: 16 }}>
-          {/* Badge row */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-            {detail?.tags?.map((t, i) => (
-              <span key={i} style={t.className.includes("accent") ? badgeAccentStyle : badgeStyle}>
-                {t.label}
-              </span>
-            )) ?? (
-              <>
-                <span style={badgeStyle}>WHAT&apos;S BROKEN</span>
-                {confidenceValue && (
-                  <span style={badgeAccentStyle}>CONFIDENCE {confidenceValue}</span>
+          {/* v3 evidence is a self-contained HTML visual brief (own title,
+              eyebrow, TL;DR, charts…), so we render JUST the brief and skip the
+              app's outer title/badges/AI-summary chrome to avoid a double title.
+              Legacy v1/v2 `:::block` rows keep the original preformatted render. */}
+          {isHtmlBrief ? (
+            <EvidenceHtmlBrief html={evidence.payload_md} />
+          ) : (
+            <>
+              {/* Badge row */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                {detail?.tags?.map((t, i) => (
+                  <span key={i} style={t.className.includes("accent") ? badgeAccentStyle : badgeStyle}>
+                    {t.label}
+                  </span>
+                )) ?? (
+                  <>
+                    <span style={badgeStyle}>WHAT&apos;S BROKEN</span>
+                    {confidenceValue && (
+                      <span style={badgeAccentStyle}>CONFIDENCE {confidenceValue}</span>
+                    )}
+                    <span style={badgeStyle}>BRIEF INSIGHT</span>
+                  </>
                 )}
-                <span style={badgeStyle}>BRIEF INSIGHT</span>
-              </>
-            )}
-          </div>
-
-          {/* Title — design `.art-h` serif headline */}
-          <h1 className="art-h">
-            {evidence.title}
-          </h1>
-
-          {/* AI summary box — design `.art-ai-sum` */}
-          {detail?.summary && (
-            <div className="art-ai-sum">
-              <div className="art-ai-sum-h">
-                <IconSparkles size={14} /> AI Summary
               </div>
-              <div>{detail.summary}</div>
-            </div>
-          )}
 
-          {/* Evidence content (markdown rendered as preformatted text) */}
-          <div style={{
-            fontSize: 13.5,
-            color: "var(--ink, #1A1A17)",
-            lineHeight: 1.7,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            fontFamily: "inherit",
-            padding: "0 2px",
-          }}>
-            {evidence.payload_md}
-          </div>
+              {/* Title — design `.art-h` serif headline */}
+              <h1 className="art-h">
+                {evidence.title}
+              </h1>
+
+              {/* AI summary box — design `.art-ai-sum` */}
+              {detail?.summary && (
+                <div className="art-ai-sum">
+                  <div className="art-ai-sum-h">
+                    <IconSparkles size={14} /> AI Summary
+                  </div>
+                  <div>{detail.summary}</div>
+                </div>
+              )}
+
+              {/* Evidence content (markdown rendered as preformatted text) */}
+              <div style={{
+                fontSize: 13.5,
+                color: "var(--ink, #1A1A17)",
+                lineHeight: 1.7,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                fontFamily: "inherit",
+                padding: "0 2px",
+              }}>
+                {evidence.payload_md}
+              </div>
+            </>
+          )}
 
           {/* Metadata strip */}
           <div style={{

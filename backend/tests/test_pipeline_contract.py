@@ -18,11 +18,15 @@ This file guards the backend half of the contract:
     adapter case (guarded on the web side by `pipeline-contract.test.ts`).
   - The LIVE `prd-author` skill template keeps the two-part (Part A / `---` /
     Part B) structure the runner's `_split_2part` + per-part directives rely on.
-  - End to end: the evidence runner persists the rich-block markdown intact
-    (status=ready, payload_md carries every `:::block`), so a generated evidence
-    page actually reaches the adapter in the shape it expects.
 
-The matching frontend guard reads these SAME files through the real adapters;
+NOTE: the EVIDENCE artifact has moved OFF this `:::block` contract — it is now
+the `evidence-brief` skill's self-contained HTML visual brief (rendered in a
+sandboxed iframe; see app.evidence_kg + test_evidence_kg). The evidence template
+files are retained as legacy assets (v1/v2 rows), so the asset-integrity +
+vocabulary checks below still guard them, but the evidence runner no longer
+emits `:::block` markdown. The PRD half of the contract is unchanged.
+
+The matching frontend guard reads the PRD files through the real adapter;
 `test-web.yml` triggers on changes to these template paths so a backend-only
 edit still runs the adapter side.
 """
@@ -135,37 +139,7 @@ def test_prd_skill_template_keeps_two_part_structure(repo_root):
     assert any(line.strip() == "---" for line in md.split("\n")), "missing `---` separator"
 
 
-# ── end-to-end: evidence runner persists the rich-block markdown intact ───────
-
-def test_evidence_runner_persists_rich_blocks_intact(
-    isolated_settings, fake_llm, monkeypatch, repo_root
-):
-    """Drive the real evidence runner with the canonical sample as the model
-    output; the stored row must be ready and carry every `:::block` marker
-    unchanged — proving a generated evidence page reaches the adapter in the
-    shape the adapter (and UI) expect."""
-    from app import evidence_runner
-
-    db_mod = isolated_settings["db"]
-    ds = isolated_settings["data_dir"] / "asurion"
-    ds.mkdir(exist_ok=True)
-    (ds / "a.md").write_text("corpus body")
-    payload = {"summary_headline": "stub", "insights": [{"title": "Insight A"}],
-               "_schema_version": 1}
-    brief_id = db_mod.save_brief(
-        dataset="asurion", week_label="Week of stub", payload=payload, schema_version=1
-    )
-    evidence_id = db_mod.start_evidence(
-        brief_id=brief_id, insight_index=0, title="t", template_version=1, variant="v2",
-    )
-
-    sample_md = _data_file(repo_root, "sprntly_evidence_sample.md")
-    monkeypatch.setattr(evidence_runner, "call_md", lambda **kw: sample_md)
-
-    evidence_runner._run_sync(evidence_id, brief_id, 0)
-
-    row = db_mod.get_evidence(evidence_id)
-    assert row["status"] == "ready"
-    assert row["payload_md"] == sample_md
-    for block in EVIDENCE_FILE_BLOCKS:
-        assert f":::{block}" in row["payload_md"], f"lost :::{block} through generation"
+# NOTE: the evidence-runner end-to-end `:::block` persistence test was removed
+# when evidence moved to the HTML visual brief. The HTML evidence path's
+# end-to-end behavior (skill binding + HTML payload + variant v3) is now covered
+# by tests/test_evidence_kg.py and tests/test_evidence_runner.py.

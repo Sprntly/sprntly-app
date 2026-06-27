@@ -44,7 +44,7 @@ def test_get_evidence_returns_row(tenant_client, isolated_settings):
     brief_id = _save_brief_with_insights(db_mod, dataset="acme")
     evidence_id = db_mod.start_evidence(
         brief_id=brief_id, insight_index=0, title="t",
-        template_version=1, variant="v2",
+        template_version=1, variant="v3",
     )
     db_mod.complete_evidence(evidence_id, title="t", md="# body")
 
@@ -63,7 +63,7 @@ def test_get_evidence_cross_tenant_returns_404(tenant_client, isolated_settings)
     brief_id = _save_brief_with_insights(db_mod, dataset="company-a")
     evidence_id = db_mod.start_evidence(
         brief_id=brief_id, insight_index=0, title="t",
-        template_version=1, variant="v2",
+        template_version=1, variant="v3",
     )
     db_mod.complete_evidence(evidence_id, title="t", md="# A's evidence")
 
@@ -83,7 +83,7 @@ def test_by_insight_returns_evidence(tenant_client, isolated_settings):
     brief_id = _save_brief_with_insights(db_mod, dataset="acme")
     evidence_id = db_mod.start_evidence(
         brief_id=brief_id, insight_index=1, title="t",
-        template_version=1, variant="v2",
+        template_version=1, variant="v3",
     )
     db_mod.complete_evidence(evidence_id, title="t", md="# insight-1 evidence")
 
@@ -110,7 +110,7 @@ def test_by_insight_cross_tenant_returns_404(tenant_client, isolated_settings):
     brief_id = _save_brief_with_insights(db_mod, dataset="company-a")
     evidence_id = db_mod.start_evidence(
         brief_id=brief_id, insight_index=0, title="t",
-        template_version=1, variant="v2",
+        template_version=1, variant="v3",
     )
     db_mod.complete_evidence(evidence_id, title="t", md="# A's evidence")
 
@@ -131,7 +131,7 @@ def test_by_insight_three_segment_not_shadowed(tenant_client, isolated_settings)
     brief_id = _save_brief_with_insights(db_mod, dataset="acme")
     evidence_id = db_mod.start_evidence(
         brief_id=brief_id, insight_index=0, title="t",
-        template_version=1, variant="v2",
+        template_version=1, variant="v3",
     )
     db_mod.complete_evidence(evidence_id, title="t", md="# body")
     resp = t.client.get(f"/v1/evidence/by-insight/{brief_id}/0")
@@ -194,7 +194,7 @@ def test_generate_happy_path_returns_generating_status(
     assert "evidence_id" in body
     assert body["status"] in ("generating", "ready")
     assert body["title"] == "Insight A — number leads with $1M"
-    assert body["variant"] == "v2"
+    assert body["variant"] == "v3"
 
 
 def test_generate_returns_existing_doc_when_not_forced(
@@ -205,7 +205,7 @@ def test_generate_returns_existing_doc_when_not_forced(
     brief_id = _save_brief_with_insights(db_mod, dataset="acme")
     existing_id = db_mod.start_evidence(
         brief_id=brief_id, insight_index=0, title="t",
-        template_version=1, variant="v2",
+        template_version=1, variant="v3",
     )
     db_mod.complete_evidence(existing_id, title="t", md="# Already here")
 
