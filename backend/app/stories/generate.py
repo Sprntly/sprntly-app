@@ -17,6 +17,7 @@ written to their tracker.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -103,6 +104,14 @@ class Story:
     priority: Optional[str] = None
     route: Optional[str] = None
 
+    def stable_id(self) -> str:
+        """A content-derived id (hash of title + body). Stable across list
+        reordering and identical regenerations; a genuinely different story
+        (changed title/body) hashes differently, so per-ticket edit overrides
+        keyed off this id never misattach to the wrong ticket."""
+        seed = f"{self.title}\x1f{self.body}".encode("utf-8")
+        return hashlib.sha256(seed).hexdigest()[:12]
+
     def clickup_priority(self) -> Optional[int]:
         """ClickUp's 1-4 priority for this story, or None if unset/unknown."""
         if not self.priority:
@@ -125,6 +134,7 @@ class Story:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "id": self.stable_id(),
             "title": self.title,
             "body": self.body,
             "acceptance_criteria": list(self.acceptance_criteria),

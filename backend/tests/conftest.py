@@ -625,6 +625,12 @@ CREATE TABLE ticket_edits (
     ticket_key          TEXT NOT NULL,
     description         TEXT NOT NULL DEFAULT '',
     acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+    -- Mirrors supabase/migrations/20260628120000_ticket_edits_fields.sql
+    title               TEXT,
+    priority            TEXT,
+    status              TEXT,
+    sprint              TEXT,
+    assignee            TEXT,
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, ticket_key)
 );

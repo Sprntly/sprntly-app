@@ -2,10 +2,12 @@
 
   GET    /v1/tickets/{key}/data           -> all overrides for a ticket
   PUT    /v1/tickets/{key}/description    -> save description + acceptance criteria
+  PUT    /v1/tickets/{key}/fields         -> save title/priority/status/sprint/assignee
   POST   /v1/tickets/{key}/attachments    -> add an attachment
   DELETE /v1/tickets/{key}/attachments/{id} -> remove an attachment
   POST   /v1/tickets/{key}/comments       -> add a comment
   DELETE /v1/tickets/{key}/comments/{id}  -> remove a comment
+  GET    /v1/tickets/{key}/comments/summary -> AI summary of the comment thread
   POST   /v1/tickets/lists                -> ClickUp lists to pick a target
   POST   /v1/tickets/push-clickup         -> create the tickets in ClickUp
 
@@ -23,6 +25,7 @@ from pydantic import BaseModel, Field
 from app.auth import CompanyContext, require_company
 from app.connectors import clickup_oauth
 from app.db.client import require_client, utc_now
+from app.llm import call_md
 from app.stories.push import ClickUpNotConnectedError, _clickup_access_token
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,17 @@ router = APIRouter(prefix="/v1/tickets", tags=["tickets"])
 class DescriptionIn(BaseModel):
     description: str = ""
     acceptance_criteria: list[str] = Field(default_factory=list)
+
+
+class FieldsIn(BaseModel):
+    """Editable ticket metadata. Every field is optional so a partial save (e.g.
+    just the priority picker) only updates what was sent and never clobbers the
+    description / acceptance criteria or the other fields."""
+    title: str | None = None
+    priority: str | None = None
+    status: str | None = None
+    sprint: str | None = None
+    assignee: dict[str, Any] | None = None
 
 
 class AttachmentIn(BaseModel):
@@ -82,6 +96,11 @@ def get_ticket_data(
     return {
         "description": edit.get("description", "") if edit else None,
         "acceptance_criteria": edit.get("acceptance_criteria", []) if edit else None,
+        "title": edit.get("title") if edit else None,
+        "priority": edit.get("priority") if edit else None,
+        "status": edit.get("status") if edit else None,
+        "sprint": edit.get("sprint") if edit else None,
+        "assignee": edit.get("assignee") if edit else None,
         "attachments": [
             {"id": a["id"], "label": a["label"], "sub": a["sub"]}
             for a in (attach_resp.data or [])
@@ -109,6 +128,29 @@ def save_description(
         "description": body.description,
         "acceptance_criteria": body.acceptance_criteria,
         "updated_at": utc_now(),
+    }
+    c.table("ticket_edits").upsert(
+        payload, on_conflict="company_id,ticket_key"
+    ).execute()
+    return {"ok": True}
+
+
+@router.put("/{ticket_key}/fields")
+def save_fields(
+    ticket_key: str,
+    body: FieldsIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save title/priority/status/sprint/assignee. Only the fields actually sent
+    are written (exclude_unset), so a partial save preserves the description and
+    the other fields on the same ticket_edits row."""
+    fields = body.model_dump(exclude_unset=True)
+    c = require_client()
+    payload = {
+        "company_id": company.company_id,
+        "ticket_key": ticket_key,
+        "updated_at": utc_now(),
+        **fields,
     }
     c.table("ticket_edits").upsert(
         payload, on_conflict="company_id,ticket_key"
@@ -179,6 +221,44 @@ def remove_comment(
         "id", comment_id
     ).eq("company_id", company.company_id).execute()
     return {"ok": True}
+
+
+_SUMMARY_SYSTEM = (
+    "You summarize a software ticket's comment thread for a product manager. "
+    "In 1-2 plain sentences, capture where the discussion landed: the decision "
+    "or consensus and any open question still being debated. No preamble, no "
+    "bullet points, no restating who said what verbatim."
+)
+
+
+@router.get("/{ticket_key}/comments/summary")
+def summarize_comments(
+    ticket_key: str,
+    company: CompanyContext = Depends(require_company),
+):
+    """An AI summary of the ticket's comment thread. Returns {"summary": null}
+    when there's too little to summarize (< 2 comments) so the UI can hide the
+    block without an LLM call being meaningful."""
+    c = require_client()
+    resp = (
+        c.table("ticket_comments").select("*")
+        .eq("company_id", company.company_id).eq("ticket_key", ticket_key)
+        .order("created_at").execute()
+    )
+    comments = resp.data or []
+    if len(comments) < 2:
+        return {"summary": None}
+    thread = "\n".join(
+        f"{r.get('author', 'user')}: {r.get('body', '')}".strip()
+        for r in comments if str(r.get("body", "")).strip()
+    )
+    try:
+        summary = call_md(system=_SUMMARY_SYSTEM, user=thread, max_tokens=300).strip()
+    except Exception:  # noqa: BLE001 — a summary is best-effort, never blocks the tab
+        logger.exception("comment summary failed for %s", ticket_key)
+        return {"summary": None}
+    return {"summary": summary or None}
+
 
 # ── Priority mapping ────────────────────────────────────────────────────
 # Internal ticket priorities (P0–P3) → ClickUp's 1–4 scale.
