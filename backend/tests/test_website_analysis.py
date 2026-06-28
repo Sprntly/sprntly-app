@@ -120,6 +120,18 @@ def test_returns_structured_analysis(seeded_company, monkeypatch):
     assert m.call_count == 1
 
 
+def test_business_context_uses_deep_model(seeded_company, monkeypatch):
+    """Onboarding business-context inference is a DEEP, once-per-company,
+    background pass that seeds everything downstream → DEEP_MODEL (opus)."""
+    from app.llm import DEEP_MODEL
+
+    _patch_fetch(monkeypatch, {"acme.com": "Acme field service software."})
+    with patch.object(wa, "llm_call", return_value=_llm_result(_FULL_OUTPUT)) as m:
+        wa.analyze_website(_COMPANY_ID, "https://acme.com")
+
+    assert m.call_args.kwargs["model"] == DEEP_MODEL
+
+
 def test_suggested_metrics_shape(seeded_company, monkeypatch):
     _patch_fetch(monkeypatch, {"acme.com": "Acme field service software."})
     with patch.object(wa, "llm_call", return_value=_llm_result(_FULL_OUTPUT)):
