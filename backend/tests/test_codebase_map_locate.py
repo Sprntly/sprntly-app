@@ -490,6 +490,16 @@ def test_model_is_sonnet_4_6():
     assert fake.calls[0]["model"] == "claude-sonnet-4-6"
 
 
+def test_locate_call_uses_temperature_zero():
+    """The screen-matching call is pinned to temperature=0 for determinism."""
+    m = _map_with_nodes("/team")
+    fake = FakeClient([_make_response(_happy_payload())])
+    locate_screen("prd", m, client=fake)
+
+    assert fake.calls, "No call was recorded"
+    assert fake.calls[0]["temperature"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Steerable re-search — optional user `hint`
 # ---------------------------------------------------------------------------

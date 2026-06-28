@@ -60,6 +60,14 @@ export type UsePinMarkingParams = {
   /** Signed-in only — pre-fill the composer via a synthetic CommentRecord (the
    *  applyTarget seam) when no iterate runner is wired. Public passes neither. */
   onPinApply?: (comment: CommentRecord) => void
+  /** Public only — when true a pin comment must NOT post yet because the viewer
+   *  has not supplied a name (it would otherwise be attributed "Anonymous"). The
+   *  submit aborts and `onRequireName` surfaces the existing name-capture form.
+   *  The signed-in surface passes neither, so its submit is unchanged. */
+  requireName?: boolean
+  /** Public only — called when a submit is blocked for a missing name, to force
+   *  the comments/name surface open so the viewer can enter it. */
+  onRequireName?: () => void
 }
 
 export type UsePinMarkingReturn = {
@@ -88,6 +96,8 @@ export function usePinMarking({
   onPinDropped,
   onPinIterate,
   onPinApply,
+  requireName = false,
+  onRequireName,
 }: UsePinMarkingParams): UsePinMarkingReturn {
   // mark-and-comment pin flow state.
   // `markMode` toggles the crosshair overlay; `pins` holds the dropped pins +
@@ -194,6 +204,14 @@ export function usePinMarking({
   async function handlePinSubmit(n: number) {
     const pin = pins.find((p) => p.n === n)
     if (!pin || !pin.draft.trim()) return
+    // Public surface: never post an unnamed pin comment (it would be attributed
+    // "Anonymous"). Abort and surface the name-capture form; the draft is kept so
+    // the viewer can submit again once a name is set. No-op on the signed-in
+    // surface (requireName defaults false there).
+    if (requireName) {
+      onRequireName?.()
+      return
+    }
     setPins((prev) =>
       prev.map((p) => (p.n === n ? { ...p, busy: true, error: null } : p)),
     )

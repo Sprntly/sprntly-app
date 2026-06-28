@@ -389,8 +389,10 @@ describe("C2b public marking — shared hook + token create-fn", () => {
 // form fragment to prove it composes with first/last inputs + the PII notice.
 describe("Phase 3 name capture + viewer_name threading", () => {
   it("test_name_capture_form_gated_on_first_comment_no_stored_name: the form renders when commentsOpen && no stored name", () => {
-    // needsName = commentsOpen && !viewerName drives the form.
-    expect(publicViewerSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*!viewerName/)
+    // A single derived `viewerNeedsName = !viewerName` is the source of truth,
+    // and needsName = commentsOpen && viewerNeedsName drives the form.
+    expect(publicViewerSrc).toMatch(/viewerNeedsName\s*=\s*!viewerName/)
+    expect(publicViewerSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*viewerNeedsName/)
     expect(publicViewerSrc).toMatch(/commentsOpen\s*&&\s*needsName\s*&&/)
     expect(publicViewerSrc).toContain('data-testid="viewer-name-form"')
     // first + last name inputs.

@@ -36,7 +36,7 @@ import { useEffect, useRef, useState } from "react"
 import { designAgentApi, type CommentRecord } from "../../lib/api"
 import { CommentClarifyDialog } from "./CommentClarifyDialog"
 import { findByAnchor, parseStoredAnchor, getElementDescription } from "./pinAnchorBridge"
-import { IconMessage, IconClose, IconPin, IconCheck, IconSendUp } from "../shared/app-icons"
+import { IconMessage, IconClose, IconCheck, IconSendUp } from "../shared/app-icons"
 
 // ---- Author identity helpers -------------------------------------------------
 // Comment rows show author label + avatar chip + relative timestamp. The backend
@@ -258,7 +258,6 @@ export type CommentsPanelViewProps = {
 function CommentThread({
   comment,
   withPin,
-  stepNumber,
   canResolve,
   pinExtra,
   busy = false,
@@ -269,9 +268,6 @@ function CommentThread({
 }: {
   comment: CommentRecord
   withPin: boolean
-  /** 1-based position in the open-comment list; renders a "Step N" chip when
-   *  supplied and withPin is true. Omitted for resolved/orphaned sections. */
-  stepNumber?: number
   canResolve?: boolean
   pinExtra?: string | null
   /** Disables Apply/Ignore while an iterate is in flight to prevent overlapping runs. */
@@ -343,13 +339,6 @@ function CommentThread({
         )}
       </div>
       <div className="comment-body">
-        {/* "Step N" pin pill, inline at the start of the body (David's `pc-anchor`). */}
-        {withPin && stepNumber != null && (
-          <span className="comment-step-chip">
-            <IconPin size={11} />
-            Step {stepNumber}
-          </span>
-        )}
         {comment.body}
       </div>
       {/* Apply / Ignore actions. Apply calls the parent handler (pre-fill or
@@ -491,7 +480,7 @@ export function CommentsPanelView({
 
       {comments.length === 0 ? (
         <p className="comments-empty" data-testid="comments-empty">
-          Right-click any element in the prototype to leave a comment.
+          Select an element on the prototype to leave a comment.
         </p>
       ) : (
         <>
@@ -501,7 +490,6 @@ export function CommentsPanelView({
                 key={c.id}
                 comment={c}
                 withPin
-                stepNumber={idx + 1}
                 canResolve={canResolve}
                 pinExtra={pinExtra?.[c.anchor_id] ?? null}
                 busy={busy}

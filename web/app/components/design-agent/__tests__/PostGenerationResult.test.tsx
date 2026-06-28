@@ -991,7 +991,7 @@ describe("DaControlBar + PostGenerationResultView — isInTab title-bar restruct
     expect(html).toContain('data-testid="proto-fullscreen-trigger"')
   })
 
-  it("isInTab: the da-ctl-label spans are NOT present", () => {
+  it("isInTab: only Share keeps its label; Mark/Comments stay icon-only", () => {
     const html = renderToStaticMarkup(
       React.createElement(DaControlBar, {
         prototypeId: 42,
@@ -1005,7 +1005,11 @@ describe("DaControlBar + PostGenerationResultView — isInTab title-bar restruct
         isInTab: true,
       }),
     )
-    expect(html).not.toContain('class="da-ctl-label"')
+    // Share renders icon + "Share" label even in-tab (no bare glyph).
+    expect(html).toContain('<span class="da-ctl-label">Share</span>')
+    // The other tool labels remain hidden in-tab.
+    expect(html).not.toContain('<span class="da-ctl-label">Mark</span>')
+    expect(html).not.toContain('<span class="da-ctl-label">Comments</span>')
   })
 
   it("NOT isInTab: the back button is ABSENT and the classic labeled bar is present", () => {
