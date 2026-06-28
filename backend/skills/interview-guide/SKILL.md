@@ -30,7 +30,7 @@ The Mom Test (Rob Fitzpatrick) + Teresa Torres story-based interviewing + JTBD t
 A guide with: learning goal · warm-up · 3–6 story-based core questions with follow-up probes · explicit "avoid saying" list · wrap-up · a map of question → hypothesis.
 
 ## Sprntly integration (optional)
-- **Inputs from Sprntly:** the opportunity/assumption under test from the OST or Monday Brief; segment from the knowledge graph.
+- **Inputs from Sprntly:** the opportunity/assumption under test from the OST or Weekly Brief; segment from the knowledge graph.
 - **Outputs to Sprntly:** the guide as an artifact linked to the opportunity; placeholders for results to flow into `interview-synthesis`.
 - **Degrades to:** with no context, ask for the learning goal and produce a standalone guide.
 
