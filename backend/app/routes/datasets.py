@@ -26,6 +26,7 @@ from app.auth import CompanyContext, require_company
 from app.db.companies import slug_for_company_id
 from app.deps.ownership import require_owned_dataset
 from app.ingest import UnsupportedFileType, md_filename
+from app.kg_ingest.auto_sync import kickoff_corpus_seed
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/datasets", tags=["datasets"])
@@ -178,6 +179,14 @@ async def upload_files(
             "md_path": ingested.md_path,
             "md_chars": ingested.md_chars,
         })
+
+    # Eagerly extract the freshly-uploaded docs into the KG in the background so
+    # they're available the moment a brief runs (incremental + content-hash
+    # deduped, so this is a cheap no-op for docs already ingested). Fire-and-
+    # forget: never blocks the upload response, never raises.
+    if results:
+        kickoff_corpus_seed(company.company_id, slug)
+
     return {"slug": slug, "ingested": results, "errors": errors}
 
 
