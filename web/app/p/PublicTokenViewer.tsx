@@ -94,6 +94,11 @@ export function PublicTokenViewer() {
   const [viewerName, setViewerName] = useState("")
   const [firstName, setFirstName] = useState("")
   const [lastName, setLastName] = useState("")
+  // dedup: canonical server comment ids from the mounted CommentsPanel,
+  // forwarded to PrototypeMarkLayer so a saved pin whose comment is in the server
+  // list has its local card suppressed (the canvas dot stays). Public pins stay
+  // non-resolvable (no onResolve passed) — this is dedup only.
+  const [serverCommentIds, setServerCommentIds] = useState<number[]>([])
   useEffect(() => {
     setViewerName(readStoredViewerName())
   }, [])
@@ -263,6 +268,7 @@ export function PublicTokenViewer() {
               onPinDraftChange={pin.handlePinDraftChange}
               onSubmitComment={pin.handlePinSubmit}
               onPinRemove={pin.handlePinRemove}
+              serverCommentIds={serverCommentIds}
             />
             {commentsOpen && needsName && (
               /* Phase 3: first-comment name capture. Shown when the writable comments
@@ -323,6 +329,7 @@ export function PublicTokenViewer() {
                 token={token as string}
                 canComment
                 viewerName={viewerName}
+                onCommentsLoaded={setServerCommentIds}
               />
             )}
           </div>

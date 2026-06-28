@@ -408,20 +408,25 @@ export function CommentsPanelView({
   const open = comments.filter((c) => c.status === "open").sort(byNewestFirst)
   const resolved = comments.filter((c) => c.status === "resolved").sort(byNewestFirst)
   const orphaned = comments.filter((c) => c.status === "orphaned").sort(byNewestFirst)
+  // Header badge counts OPEN (unresolved) comments only — anything not yet
+  // resolved (open + orphaned). A resolved comment must not keep the badge lit.
+  const openCount = comments.filter((c) => c.status !== "resolved").length
 
   return (
     <aside className="comments-panel" data-testid="comments-panel">
       {/* Header: message icon + "Comments" + count pill + close (X) — David's
-          `.proto-comments-panel-top`. The count pill reflects the total comments. */}
+          `.proto-comments-panel-top`. The count pill reflects the OPEN
+          (unresolved) comments only — a resolved comment must not keep inflating
+          the badge — and hides entirely when nothing is open. */}
       <header className="comments-panel-header">
         <h2 className="comments-panel-title">
           <span className="comments-panel-icon" aria-hidden="true">
             <IconMessage size={16} />
           </span>
           Comments
-          {comments.length > 0 && (
-            <span className="comments-count-badge" aria-label={`${comments.length} comments`}>
-              {comments.length}
+          {openCount > 0 && (
+            <span className="comments-count-badge" aria-label={`${openCount} open comments`}>
+              {openCount}
             </span>
           )}
         </h2>
@@ -587,6 +592,11 @@ export type CommentsPanelProps = {
    *  a name (server falls back to "Anonymous"). Omitted on the signed-in mount →
    *  no change there. Additive. */
   viewerName?: string
+  /** dedup seam: called with the ids of every comment after each
+   *  successful list load (mount + refreshKey). The host lifts these so the
+   *  local saved-pin CARD can be suppressed once its comment is in the canonical
+   *  server list (the canvas dot stays). No-op when not provided. */
+  onCommentsLoaded?: (ids: number[]) => void
 }
 
 function toMessage(err: unknown, fallback: string): string {
@@ -605,6 +615,7 @@ export function CommentsPanel({
   readOnly = false,
   canComment,
   viewerName,
+  onCommentsLoaded,
 }: CommentsPanelProps) {
   // Writable-anon resolution: create is enabled when not read-only AND either a
   // prototypeId is present (signed-in mount) OR the host opted into anon create
@@ -631,7 +642,12 @@ export function CommentsPanel({
     let active = true
     runLoadComments({ token, prototypeId, api: designAgentApi })
       .then((list) => {
-        if (active) setComments(list)
+        if (active) {
+          setComments(list)
+          // publish the canonical server ids so the host can dedup local saved
+          // pins against the server-backed list (fires on mount + each refresh).
+          onCommentsLoaded?.(list.map((c) => c.id))
+        }
       })
       .catch((e) => {
         if (active) setError(toMessage(e, "Failed to load comments"))

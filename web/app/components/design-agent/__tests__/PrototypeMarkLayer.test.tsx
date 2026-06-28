@@ -201,3 +201,81 @@ describe("PrototypeMarkLayer — pin-comment rows", () => {
     expect(html).toContain("Could not save comment")
   })
 })
+
+describe("PrototypeMarkLayer — dedup against the server list", () => {
+  const savedPin = pinComment({
+    n: 1,
+    saved: true,
+    commentId: 7,
+    body: "dedup me",
+    author: "demo",
+    createdAt: "2026-06-06T08:00:00Z",
+  })
+
+  it("suppresses the CARD for a saved pin whose commentId is in serverCommentIds", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeMarkLayer, {
+        pins: [savedPin],
+        serverCommentIds: new Set([7]),
+      }),
+    )
+    // its only pin is deduped → the card list collapses to nothing.
+    expect(html).toBe("")
+  })
+
+  it("accepts an array form for serverCommentIds and suppresses the same way", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeMarkLayer, {
+        pins: [savedPin],
+        serverCommentIds: [7],
+      }),
+    )
+    expect(html).toBe("")
+  })
+
+  it("renders the card when the pin's commentId is NOT in the set", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeMarkLayer, {
+        pins: [savedPin],
+        serverCommentIds: new Set([999]),
+      }),
+    )
+    expect(html).toContain('data-testid="da-pin-comment-1"')
+    expect(html).toContain("dedup me")
+  })
+
+  it("empty / undefined set suppresses nothing (no-panel-mounted case)", () => {
+    const empty = renderToStaticMarkup(
+      React.createElement(PrototypeMarkLayer, {
+        pins: [savedPin],
+        serverCommentIds: new Set<number>(),
+      }),
+    )
+    expect(empty).toContain('data-testid="da-pin-comment-1"')
+    const undef = renderToStaticMarkup(
+      React.createElement(PrototypeMarkLayer, { pins: [savedPin] }),
+    )
+    expect(undef).toContain('data-testid="da-pin-comment-1"')
+  })
+
+  it("only the matching saved pin is suppressed; others (incl. unsaved) keep their card", () => {
+    const unsaved = pinComment({ n: 2, draft: "typing" }) // unsaved → never deduped
+    const otherSaved = pinComment({
+      n: 3,
+      saved: true,
+      commentId: 8,
+      body: "keep me",
+      author: "demo",
+      createdAt: "2026-06-06T08:00:00Z",
+    })
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeMarkLayer, {
+        pins: [savedPin, unsaved, otherSaved],
+        serverCommentIds: new Set([7]),
+      }),
+    )
+    expect(html).not.toContain('data-testid="da-pin-comment-1"') // deduped
+    expect(html).toContain('data-testid="da-pin-comment-2"') // unsaved kept
+    expect(html).toContain('data-testid="da-pin-comment-3"') // not-in-set kept
+  })
+})
