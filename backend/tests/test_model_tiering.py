@@ -60,7 +60,8 @@ def _seed_company(db, cid):
 # ─────────────────────── DEEP_MODEL call sites ───────────────────────
 
 def test_deep_model_is_opus_and_distinct_from_default():
-    assert DEEP_MODEL == "claude-opus-4-8"
+    # Opus tier standardised on 4.7 (single opus version across the codebase).
+    assert DEEP_MODEL == "claude-opus-4-7"
     assert DEFAULT_MODEL == "claude-sonnet-4-6"
     assert DEEP_MODEL != DEFAULT_MODEL
 
