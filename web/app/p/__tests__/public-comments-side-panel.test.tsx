@@ -98,8 +98,9 @@ describe("Locked scope #2 — CommentsPanel no longer in PrototypeViewer chrome 
 
 // 5. Name capture form is inside the panel (not a standalone floating overlay)
 describe("Locked scope #5 — name capture form inside the da-right panel", () => {
-  it("needsName pattern is still commentsOpen && !viewerName (source invariant)", () => {
-    expect(publicViewerSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*!viewerName/)
+  it("needsName derives from commentsOpen && viewerNeedsName, with viewerNeedsName = !viewerName as the single source of truth (source invariant)", () => {
+    expect(publicViewerSrc).toMatch(/viewerNeedsName\s*=\s*!viewerName/)
+    expect(publicViewerSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*viewerNeedsName/)
   })
 
   it("name form is conditionally rendered with commentsOpen && needsName && pattern (source invariant)", () => {

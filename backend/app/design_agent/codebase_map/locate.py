@@ -302,6 +302,9 @@ def locate_screen(
         resp = client.messages.create(
             model=_MODEL,
             max_tokens=_LOCATE_MAX_TOKENS,
+            # Pin to temperature=0 for deterministic screen matching: the same PRD +
+            # codebase map should resolve to the same candidate screens on every run.
+            temperature=0,
             system=system_blocks,
             messages=messages,
         )

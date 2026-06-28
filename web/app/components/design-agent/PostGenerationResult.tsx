@@ -762,13 +762,13 @@ export function DaControlBar({
           trigger={(open) => (
             <button
               type="button"
-              className={`da-ctl-icon${open ? " on" : ""}`}
+              className={`da-ctl-icon da-ctl-share${open ? " on" : ""}`}
               title="Share"
               data-testid="da-share-toggle"
             >
               <IconShare size={15} />
-              {!isInTab && <span className="da-ctl-label">Share</span>}
-              {!isInTab && <IconChevronDown size={13} />}
+              <span className="da-ctl-label">Share</span>
+              <IconChevronDown size={13} />
             </button>
           )}
         >
@@ -898,7 +898,10 @@ function FullscreenOverlay({
         ×
       </button>
       <div className="proto-fullscreen-body">
-        <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} onAssetError={onAssetError} />
+        {/* Edge-to-edge: suppress the cosmetic browser-frame decoration (traffic
+            lights + URL bar) so the prototype fills the full-screen surface. The
+            platform toggle is unaffected (not gated by hideChrome). */}
+        <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} hideChrome onAssetError={onAssetError} />
       </div>
     </div>
   )
@@ -1136,6 +1139,9 @@ export function PostGenerationResultView({
           data-testid="da-left"
         >
           <div className="da-left-top">
+            {/* In-tab the panel carries a persistent Design Agent identity (the
+                badge below + the subtitle under this row); the launcher path keeps
+                showing the PRD title. */}
             <span className="da-left-title">
               {isInTab ? "Prototype" : (prdTitle || "PRD")}
             </span>
@@ -1159,6 +1165,11 @@ export function PostGenerationResultView({
               <IconChevronLeft size={15} />
             </button>
           </div>
+          {isInTab && (
+            <p className="da-left-subtitle" data-testid="da-left-subtitle">
+              Describe a change and it updates the prototype.
+            </p>
+          )}
           {/* LIVE-ONLY agent-conversation thread — named turns (author + relative
               timestamp) for the user's requests, the "agent working" steps, the
               completion summary, clarifying questions, and errors. No PRD panel,
@@ -1167,13 +1178,23 @@ export function PostGenerationResultView({
               When a run pauses on a clarifying question the INLINE answer surface
               renders right here in the stream and continues the iterate. */}
           <div className="da-left-scroll" data-testid="da-left-thread">
-            {(iterateActivity.length > 0 || iteratePendingQuestion) && (
+            {(iterateActivity.length > 0 || iteratePendingQuestion) ? (
               <ActivityPanel
                 iterateActivity={iterateActivity}
                 iterateRunning={iterateRunning}
                 iteratePendingQuestion={iteratePendingQuestion}
                 onAnswerQuestion={onAnswerQuestion}
                 onSkipQuestion={onSkipQuestion}
+                userName={userName}
+              />
+            ) : (
+              /* Empty thread: the same IterateActivityStream renders its own
+                 empty-state (no separate primitive). It only appears here, where
+                 there is no activity AND no pending question, so the empty-state
+                 never sits above a clarifying card. */
+              <IterateActivityStream
+                activity={iterateActivity}
+                running={iterateRunning}
                 userName={userName}
               />
             )}

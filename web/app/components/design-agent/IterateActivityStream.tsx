@@ -30,6 +30,7 @@
 
 import { useEffect, useState } from "react"
 import { shortRelativeTime } from "./CommentsPanel"
+import { IconSparkle } from "../shared/app-icons"
 import type { ActivityEvent } from "./useIterateRun"
 
 function stripAgentContext(text: string): string {
@@ -73,7 +74,18 @@ export function IterateActivityStream({
     return () => clearInterval(id)
   }, [])
 
-  if (activity.length === 0) return null
+  // Empty thread → a quiet empty-state instead of a blank region, so the panel
+  // always reads as the Design Agent conversation even before the first change.
+  if (activity.length === 0) {
+    return (
+      <div className="da-activity-empty" data-testid="da-activity-empty">
+        <IconSparkle size={18} />
+        <p className="da-activity-empty-text">
+          No changes yet — describe one below to iterate.
+        </p>
+      </div>
+    )
+  }
 
   // ─── Derive the "Focus" view from the array in a single backward scan ───
   // The thread is no longer a row-per-event wall. We compute, from the same

@@ -100,7 +100,8 @@ export function PublicTokenViewer() {
 
   // Capture form is shown when the writable comments surface is open but no name
   // is known yet. On submit we persist then proceed; the panel renders next.
-  const needsName = commentsOpen && !viewerName
+  const viewerNeedsName = !viewerName
+  const needsName = commentsOpen && viewerNeedsName
   function handleNameSubmit(e: FormEvent) {
     e.preventDefault()
     const name = `${firstName.trim()} ${lastName.trim()}`.trim()
@@ -118,6 +119,12 @@ export function PublicTokenViewer() {
     onCreate: (payload) => designAgentApi.createCommentByToken(token as string, { ...payload, viewer_name: viewerName }),
     onEnterMarkMode: () => setCommentsOpen(true),
     onPinDropped: () => setCommentsOpen(true),
+    // A pin comment must carry a real viewer name — never post "Anonymous". Until
+    // the viewer supplies one, the submit aborts and the name-capture form is
+    // surfaced (the comments sidebar holds the First/Last name form). Once the
+    // name is set, requireName flips false and the pin posts attributed.
+    requireName: viewerNeedsName,
+    onRequireName: () => setCommentsOpen(true),
   })
 
   useEffect(() => {
@@ -165,6 +172,10 @@ export function PublicTokenViewer() {
           <PrototypeViewer
             bundleUrl={state.bundleUrl}
             isComplete={state.isComplete}
+            // Edge-to-edge: suppress the cosmetic browser-frame decoration (traffic
+            // lights + URL bar) so the shared prototype renders flush. The Mark +
+            // Comment headControls below are NOT gated by hideChrome and remain.
+            hideChrome
             // C2a: Mark + Comment controls in the browser-frame head. Styled like the
             // platform toggle (.platform-toggle group look). aria-pressed reflects the
             // toggle state. Comment opens the collapsible da-right sidebar.
