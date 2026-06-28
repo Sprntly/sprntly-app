@@ -101,6 +101,18 @@ describe("TicketDetail", () => {
     expect(screen.getByText("T-3")).toBeTruthy() // id chip = index+1
   })
 
+  it("a fields-only edit (null description) keeps the generated body, not a blank", async () => {
+    // Regression: status set but description/criteria null → fall back to the
+    // generated story rather than blanking the textarea.
+    api.getData.mockResolvedValue({
+      ...noEdits(), status: "In progress", description: null, acceptance_criteria: null,
+    })
+    await renderDetail()
+    expect((screen.getByPlaceholderText("Add a description…") as HTMLTextAreaElement).value)
+      .toBe("One-click guest-alert for Deal Alerts.")
+    expect((screen.getByDisplayValue("Admin can enable in one click")) as HTMLInputElement).toBeTruthy()
+  })
+
   it("saved overrides win over the generated story", async () => {
     api.getData.mockResolvedValue({ ...noEdits(), title: "Edited title", priority: "P0 — Critical" })
     await renderDetail()

@@ -94,8 +94,12 @@ def get_ticket_data(
     )
 
     return {
-        "description": edit.get("description", "") if edit else None,
-        "acceptance_criteria": edit.get("acceptance_criteria", []) if edit else None,
+        # `.get(...)` with no default: a NULL column stays None, so a fields-only
+        # edit (which never set these) reads back as "no override" and the UI
+        # keeps the generated ticket body — rather than an empty string/array
+        # that would blank it out.
+        "description": edit.get("description") if edit else None,
+        "acceptance_criteria": edit.get("acceptance_criteria") if edit else None,
         "title": edit.get("title") if edit else None,
         "priority": edit.get("priority") if edit else None,
         "status": edit.get("status") if edit else None,
