@@ -29,7 +29,9 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 # extraction, ranking, PRD templating, the per-message/loop paths — stays on
 # DEFAULT_MODEL where opus would compound cost for marginal quality. Keep in
 # sync with the pricing row in app/llm_telemetry.py (est_cost_usd fails closed).
-DEEP_MODEL = "claude-opus-4-8"
+# Opus tier is standardised on 4.7 (same value as the design-agent escalation
+# model) so there is a single opus version across the codebase.
+DEEP_MODEL = "claude-opus-4-7"
 
 # --- Process-wide concurrency cap on in-flight Anthropic calls ---------------
 # The prod box is small (~916 MB RAM, limited CPU). 4+ concurrent streaming

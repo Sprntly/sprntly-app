@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 ROUTER_MODEL = "claude-haiku-4-5"
 ANSWER_MODEL = "claude-sonnet-4-6"
-HEAVY_MODEL = "claude-opus-4-8"
+HEAVY_MODEL = "claude-opus-4-7"
 
 # Skills heavy enough (deep analysis / long output) to answer on opus rather
 # than sonnet. Tunable — keep small; most skills do fine on sonnet.

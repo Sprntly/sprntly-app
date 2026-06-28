@@ -35,13 +35,7 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
         "cache_read":     0.3 / 1_000_000,
         "output":         15.0 / 1_000_000,
     },
-    "claude-opus-4-7": {  # AD2 escape hatch only
-        "input":          5.0 / 1_000_000,
-        "cache_write_1h": 10.0 / 1_000_000,
-        "cache_read":     0.5 / 1_000_000,
-        "output":         25.0 / 1_000_000,
-    },
-    "claude-opus-4-8": {  # DEEP_MODEL — KG extraction + weekly-brief synthesis
+    "claude-opus-4-7": {  # opus tier — DEEP_MODEL, HEAVY_MODEL, design escalation
         "input":          5.0 / 1_000_000,
         "cache_write_1h": 10.0 / 1_000_000,
         "cache_read":     0.5 / 1_000_000,
