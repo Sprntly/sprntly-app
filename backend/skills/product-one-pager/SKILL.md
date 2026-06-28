@@ -30,7 +30,7 @@ Based on BLUF (bottom line up front), Amazon's narrative density, and the rule t
 One page: Title + the ask (BLUF) · Problem & why now · The bet · Expected impact · Cost/size · Risks · Decision requested + by when. See `templates/one-pager-template.md`.
 
 ## Sprntly integration (optional)
-- **Inputs from Sprntly:** the ranked opportunity + confidence from the Monday Brief, supporting signals across sources (for "why now"), and outcome-graph estimates (for expected impact).
+- **Inputs from Sprntly:** the ranked opportunity + confidence from the Weekly Brief, supporting signals across sources (for "why now"), and outcome-graph estimates (for expected impact).
 - **Outputs to Sprntly:** the brief artifact + a decision record (approved/declined/deferred) written back so the outcome graph can later check whether the bet paid off.
 - **Degrades to:** with no Sprntly context, ask for the idea, the decision wanted, and any known metric; assume + label the rest.
 
