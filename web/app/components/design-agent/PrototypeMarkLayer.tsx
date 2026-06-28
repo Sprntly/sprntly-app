@@ -155,6 +155,14 @@ export type PrototypeMarkLayerProps = {
   /** Resolve a saved pin comment from the consolidated header control. Wired to
    *  the same resolve-only semantic as Ignore on the editable mount. */
   onPinResolve?: (n: number) => void
+  /** dedup: the set of comment ids already present in the canonical
+   *  server-backed CommentsPanel list. A SAVED pin whose `commentId` is in this
+   *  set has its comment CARD suppressed here (the server list is the one source
+   *  of truth for saved comments — local pins do NOT hydrate on reload); the
+   *  canvas dot (rendered by the sibling <PinLayer>) is untouched. Empty /
+   *  undefined → suppress nothing (covers the no-CommentsPanel-mounted case, so
+   *  saved cards still render). Accepts a Set or an array (normalized below). */
+  serverCommentIds?: Set<number> | number[]
 }
 
 /** the `.da-right` pin-comment rows. Each dropped pin renders here with its
@@ -171,11 +179,23 @@ export function PrototypeMarkLayer({
   onPinApply,
   onPinIgnore,
   onPinResolve,
+  serverCommentIds,
 }: PrototypeMarkLayerProps) {
-  if (pins.length === 0) return null
+  // Normalize the dedup set. Empty/undefined → suppress nothing (no-panel case).
+  const serverIds =
+    serverCommentIds instanceof Set
+      ? serverCommentIds
+      : new Set(serverCommentIds ?? [])
+  // Suppress the CARD for a saved pin whose comment is already in the canonical
+  // server list (renders once via the CommentsPanel). The canvas dot is rendered
+  // separately by <PinLayer> off the full pins list, so it stays.
+  const visiblePins = pins.filter(
+    (pin) => !(pin.saved && pin.commentId != null && serverIds.has(pin.commentId)),
+  )
+  if (visiblePins.length === 0) return null
   return (
     <ul className="proto-comment-list" data-testid="da-pin-comments">
-      {pins.map((pin) => (
+      {visiblePins.map((pin) => (
         <li
           key={pin.n}
           className={`proto-comment${pin.saved ? " saved" : ""}${pin.resolved ? " resolved" : ""}`}

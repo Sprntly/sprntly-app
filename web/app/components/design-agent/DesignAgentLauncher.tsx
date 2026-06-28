@@ -248,6 +248,14 @@ type LauncherViewProps = DesignAgentLauncherProps & {
   /** P3-14 (F10): setter for `applyTarget` (CommentsPanel onApply → set;
    *  IterateComposer onClearApply → clear). */
   setApplyTarget?: (comment: CommentRecord | null) => void
+  /** dedup: server comment ids lifted in the container, threaded to
+   *  PostGenerationResult (→ PrototypeMarkLayer) so saved-pin cards already in
+   *  the server list are suppressed. Optional so direct-view test calls keep
+   *  typechecking. */
+  serverCommentIds?: number[]
+  /** dedup: setter passed to the mounted CommentsPanel as
+   *  `onCommentsLoaded` so each successful list load republishes the ids. */
+  setServerCommentIds?: (ids: number[]) => void
   /** P6-05 (#5): forwarded to IterateComposer — fired after a successful iterate
    *  so the container re-polls + refreshes `result`. Optional/defaulted. */
   onIterated?: () => void
@@ -285,6 +293,8 @@ export function DesignAgentLauncherView({
   onRetry = () => {},
   applyTarget = null,
   setApplyTarget,
+  serverCommentIds = [],
+  setServerCommentIds,
   onIterated,
   onAnswered,
   onShared,
@@ -361,6 +371,7 @@ export function DesignAgentLauncherView({
           key={result.id}
           prototype={result}
           prdTitle={prdTitle}
+          serverCommentIds={serverCommentIds}
           comments={
             result.share_token ? (
               <CommentsPanel
@@ -368,6 +379,7 @@ export function DesignAgentLauncherView({
                 token={result.share_token}
                 prototypeId={result.id}
                 onApply={(comment) => setApplyTarget?.(comment)}
+                onCommentsLoaded={setServerCommentIds}
               />
             ) : null
           }
@@ -460,6 +472,14 @@ export function DesignAgentLauncher({
   // P3-14 (F10): lifted so CommentsPanel's Apply sets it and IterateComposer
   // reads it as its pre-fill.
   const [applyTarget, setApplyTarget] = useState<CommentRecord | null>(null)
+
+  // dedup: the canonical server comment ids from the mounted CommentsPanel.
+  // Lifted here because the launcher owns BOTH the CommentsPanel (source) and the
+  // PostGenerationResult (consumer, which threads them to the pin layer). A saved
+  // pin whose comment is in this set has its local card suppressed (canvas dot
+  // stays) so a saved comment renders exactly once. `setServerCommentIds` is a
+  // stable setter → safe to pass straight as CommentsPanel's onCommentsLoaded.
+  const [serverCommentIds, setServerCommentIds] = useState<number[]>([])
 
   // On a successful generation, mount the result view AND clear any prior failure
   // banner. On failure, STOP discarding it (the pre-P6-08 bug): set the single
@@ -575,6 +595,8 @@ export function DesignAgentLauncher({
         onRetry={handleRetry}
         applyTarget={applyTarget}
         setApplyTarget={setApplyTarget}
+        serverCommentIds={serverCommentIds}
+        setServerCommentIds={setServerCommentIds}
         onIterated={refreshResult}
         onAnswered={refreshResult}
         onShared={refreshShareToken}

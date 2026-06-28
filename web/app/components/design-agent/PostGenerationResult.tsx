@@ -133,6 +133,12 @@ export type PinComment = {
   // author/created_at onto the pin so the optimistic row shows real identity.
   author?: string | null
   createdAt?: string | null
+  // the server comment id returned by the create endpoint (matches
+  // CommentRecord.id). Captured at create time so the local pin can RECONCILE
+  // with the server-backed CommentsPanel: it drives the persisted pin-resolve
+  // (PATCH .../comments/{id}/resolve) and the saved-pin↔server-comment dedup.
+  // Null when the create returned no record (optimistic-only pin).
+  commentId?: number | null
   // a saved pin comment can be
   // Applied (pre-fill composer + resolve) or Ignored (resolve only). `resolved`
   // moves the row to the muted/collapsed state (David's `.resolved`).
@@ -158,6 +164,11 @@ export type PostGenerationResultProps = {
    *  use this component (it composes its own chrome) → it passes nothing and the
    *  comments column is omitted. Null-by-default keeps the public shape intact. */
   comments?: ReactNode
+  /** dedup: server comment ids from the mounted CommentsPanel, lifted by
+   *  the launcher. Threaded down to the <PrototypeMarkLayer> so a saved pin whose
+   *  comment is already in the server list has its local card suppressed (the
+   *  canvas dot stays). Empty/undefined → nothing suppressed. */
+  serverCommentIds?: number[]
   /** the iterate/change-request column node
    *  (the launcher's `<IterateComposer>`). Placed in the LEFT region of the
    *  3-region canvas. Optional → when absent (e.g. the public viewer) the left
@@ -269,6 +280,9 @@ export type PostGenerationResultViewProps = {
   /** P6-13 (UX-3): comments node for the right cell of the `design-pane` grid.
    *  When absent, the viewer renders full-width (no comments cell, no grid). */
   comments?: ReactNode
+  /** dedup: server comment ids forwarded to <PrototypeMarkLayer> to
+   *  suppress saved-pin cards already present in the server list. */
+  serverCommentIds?: number[]
   /** iterate/change-request column node for the
    *  LEFT region of the 3-region canvas. When absent, the left region is omitted. */
   iterate?: ReactNode
@@ -1006,6 +1020,7 @@ export function PostGenerationResultView({
   hideBreadcrumb,
   isInTab,
   onBack,
+  serverCommentIds,
 }: PostGenerationResultViewProps) {
   // cache-bust the iframe src so a
   // rebuilt bundle reloads even when the backend overwrites it at the SAME url.
@@ -1328,6 +1343,7 @@ export function PostGenerationResultView({
               onPinApply={onPinApply}
               onPinIgnore={onPinIgnore}
               onPinResolve={onPinResolve ?? onPinIgnore}
+              serverCommentIds={serverCommentIds}
             />
             {comments ? (
               comments
@@ -1395,6 +1411,7 @@ export function PostGenerationResult({
   hideBreadcrumb,
   isInTab,
   onBack,
+  serverCommentIds,
 }: PostGenerationResultProps) {
   const [isComplete, setIsComplete] = useState<boolean>(
     prototype.is_complete ?? false,
@@ -1433,6 +1450,10 @@ export function PostGenerationResult({
     onPinDropped: () => setCommentsOpen(true),
     onPinIterate,
     onPinApply,
+    // PERSIST a pin-resolve through the SAME authed PATCH the CommentsPanel card
+    // uses (withAuthRetry → resolveComment) so resolving a pin survives reload.
+    onResolve: (commentId) =>
+      withAuthRetry(() => designAgentApi.resolveComment(prototype.id, commentId)),
   })
   const leftPanelRef = useRef<HTMLDivElement>(null)
 
@@ -1504,6 +1525,7 @@ export function PostGenerationResult({
         onStateChange?.(state)
       }}
       comments={comments}
+      serverCommentIds={serverCommentIds}
       iterate={iterate}
       onShared={onShared}
       fullscreenOpen={fullscreenOpen}

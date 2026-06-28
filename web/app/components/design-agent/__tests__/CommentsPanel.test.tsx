@@ -114,13 +114,45 @@ describe("CommentsPanelView — rendering", () => {
     expect(html).toMatch(/comment-resolve-btn[^"]*\bresolved\b/)
   })
 
-  it("renders the mockup header: a message icon, the title, and a total-count pill", () => {
+  it("renders the mockup header: a message icon, the title, and an open-count pill", () => {
     const html = render({ comments: [comment({ id: 1 }), comment({ id: 2 })] })
     expect(html).toContain("comments-panel-icon")
     expect(html).toContain("comments-panel-title")
-    // Count pill reflects total comments (2), not just open.
+    // Count pill reflects OPEN (unresolved) comments — both are open → 2.
     expect(html).toContain("comments-count-badge")
     expect(html).toMatch(/comments-count-badge[^>]*>2</)
+  })
+
+  it("the header badge counts OPEN (unresolved) comments, not resolved ones", () => {
+    const html = render({
+      comments: [
+        comment({ id: 1, status: "open" }),
+        comment({ id: 2, status: "resolved", resolved_at: "2026-05-30T13:00:00Z" }),
+        comment({ id: 3, status: "open" }),
+      ],
+    })
+    // 2 open + 1 resolved → badge shows 2 (the resolved one is excluded).
+    expect(html).toMatch(/comments-count-badge[^>]*>2</)
+  })
+
+  it("resolving the last open comment hides the badge entirely (all resolved → none)", () => {
+    const html = render({
+      comments: [
+        comment({ id: 1, status: "resolved", resolved_at: "2026-05-30T13:00:00Z" }),
+        comment({ id: 2, status: "resolved", resolved_at: "2026-05-30T13:30:00Z" }),
+      ],
+    })
+    expect(html).not.toContain("comments-count-badge")
+  })
+
+  it("reopening (an open comment present again) restores the badge", () => {
+    const html = render({
+      comments: [
+        comment({ id: 1, status: "resolved", resolved_at: "2026-05-30T13:00:00Z" }),
+        comment({ id: 2, status: "open" }),
+      ],
+    })
+    expect(html).toMatch(/comments-count-badge[^>]*>1</)
   })
 
   it("does not render a Step N pin chip on open comment bodies", () => {

@@ -68,6 +68,12 @@ export type UsePinMarkingParams = {
   /** Public only — called when a submit is blocked for a missing name, to force
    *  the comments/name surface open so the viewer can enter it. */
   onRequireName?: () => void
+  /** Surface-specific PERSISTED resolve (mirrors the `onCreate` injection seam).
+   *  Signed-in injects withAuthRetry(() => resolveComment(prototype.id, id)) so a
+   *  pin-resolve writes through the SAME authed PATCH the CommentsPanel card uses;
+   *  the public surface passes nothing (anon viewers cannot resolve), keeping
+   *  pin-resolve local-only there. Called with the pin's captured `commentId`. */
+  onResolve?: (commentId: number) => Promise<unknown>
 }
 
 export type UsePinMarkingReturn = {
@@ -98,6 +104,7 @@ export function usePinMarking({
   onPinApply,
   requireName = false,
   onRequireName,
+  onResolve,
 }: UsePinMarkingParams): UsePinMarkingReturn {
   // mark-and-comment pin flow state.
   // `markMode` toggles the crosshair overlay; `pins` holds the dropped pins +
@@ -239,6 +246,11 @@ export function usePinMarking({
                 error: null,
                 author: created?.author ?? "demo",
                 createdAt: created?.created_at ?? new Date().toISOString(),
+                // capture the server comment id (null when the create returned
+                // no record) so pin-resolve can persist + the saved-pin↔server
+                // dedup can reconcile. A null id never throws — it just means
+                // this pin stays local-only for the server write.
+                commentId: created?.id ?? null,
               }
             : p,
         ),
@@ -290,7 +302,8 @@ export function usePinMarking({
     // instruction) when `onPinIterate` is supplied — same fixed path as the
     // composer + comment Apply. Falls back to the old applyTarget pre-fill
     // (`onPinApply`) only when no runner is wired. The agent decides
-    // applicability; the client fabricates no change. Then mark the pin resolved.
+    // applicability; the client fabricates no change. Then mark the pin resolved
+    // (optimistically) and PERSIST the resolve through `onResolve`.
     if (onPinIterate) {
       onPinIterate(instruction, null)
     } else {
@@ -305,13 +318,56 @@ export function usePinMarking({
       }
       onPinApply?.(synthetic)
     }
-    setPins((prev) => prev.map((p) => (p.n === n ? { ...p, resolved: true } : p)))
+    return resolvePinOptimistically(pin)
   }
 
   // Ignore — mark the pin resolved
-  // WITHOUT pre-filling the composer.
+  // WITHOUT pre-filling the composer, then PERSIST the resolve through `onResolve`.
   function handlePinIgnore(n: number) {
-    setPins((prev) => prev.map((p) => (p.n === n ? { ...p, resolved: true } : p)))
+    const pin = pins.find((p) => p.n === n)
+    if (!pin) return
+    return resolvePinOptimistically(pin)
+  }
+
+  // Optimistically flip the pin to resolved, then — when the pin carries a
+  // captured server comment id AND a surface-specific `onResolve` is wired —
+  // write the resolve through the SAME authed PATCH the CommentsPanel card uses
+  // so a pin-resolve actually PERSISTS (survives reload). On a server failure we
+  // ROLL BACK the optimistic flip and surface the error on that pin. A pin with
+  // no commentId (optimistic-only) or a surface with no `onResolve` (public anon
+  // viewer) keeps the local-only resolve as a safe no-op for the server write.
+  const warnedLocalOnlyResolveRef = useRef<boolean>(false)
+  async function resolvePinOptimistically(pin: PinComment): Promise<void> {
+    setPins((prev) =>
+      prev.map((p) => (p.n === pin.n ? { ...p, resolved: true, error: null } : p)),
+    )
+    if (pin.commentId == null || !onResolve) {
+      if (!warnedLocalOnlyResolveRef.current) {
+        warnedLocalOnlyResolveRef.current = true
+        // local-only resolve: no server write attempted (no captured id, or this
+        // surface does not allow resolve). Warned once to avoid console noise.
+        console.warn(
+          "usePinMarking: pin resolved locally only (no server comment id or no onResolve).",
+        )
+      }
+      return
+    }
+    try {
+      await onResolve(pin.commentId)
+    } catch (e) {
+      // roll back the optimistic resolve + surface the failure on the pin.
+      setPins((prev) =>
+        prev.map((p) =>
+          p.n === pin.n
+            ? {
+                ...p,
+                resolved: false,
+                error: e instanceof Error ? e.message : "Could not resolve comment",
+              }
+            : p,
+        ),
+      )
+    }
   }
 
   return {
