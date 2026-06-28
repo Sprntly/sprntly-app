@@ -21,6 +21,7 @@ from app.db.client import require_client
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade, TenantViolationError
 from app.synthesis.agent import run_synthesis
+from app.synthesis_brief import seed_incremental
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +66,16 @@ def seed_from_corpus(company: CompanyContext = Depends(require_company)):
 
 @router.post("/brief")
 def generate_brief(company: CompanyContext = Depends(require_company)):
-    """Generate the KG-driven weekly brief (replaces the legacy corpus brief)."""
+    """Generate the KG-driven weekly brief (replaces the legacy corpus brief).
+
+    Incrementally seeds the KG first (only new/changed corpus docs — unchanged
+    ones are skipped cheaply by content hash) so a last-minute upload still makes
+    the brief. With event-driven ingestion warming the KG as data arrives, this
+    seed is normally a cheap no-op rather than a full from-scratch ingestion."""
     slug = _company_slug(company.company_id)
     facade = GraphFacade()
     try:
+        seed_incremental(facade, company.company_id, slug)
         brief = run_synthesis(facade, company.company_id, dataset_slug=slug)
     except TenantViolationError as e:
         raise HTTPException(403, str(e)) from e

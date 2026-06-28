@@ -66,7 +66,8 @@ def kickoff_sync(company_id: str, provider: str) -> bool:
     caller's connect flow."""
     if provider not in PULLERS:
         # Providers like figma / slack / google-drive have their own corpus
-        # sync paths, not a kg_ingest puller — nothing to kick off here.
+        # sync paths, not a kg_ingest puller — kick a corpus seed instead (see
+        # kickoff_corpus_seed, wired into those providers' sync-to-corpus routes).
         return False
     try:
         t = threading.Thread(
@@ -78,4 +79,73 @@ def kickoff_sync(company_id: str, provider: str) -> bool:
     except Exception:  # noqa: BLE001 — never let a thread-spawn failure break connect
         logger.exception("auto-sync: failed to start thread for %s/%s",
                          company_id, provider)
+        return False
+
+
+# ─────────────────────── corpus-seed-on-arrival ───────────────────────
+#
+# Connector pullers (kickoff_sync above) cover GitHub/ClickUp/HubSpot/Fireflies.
+# But docs arrive on the *corpus* path too — manual file uploads and the
+# Drive/Slack/Figma sync-to-corpus routes — and those weren't reaching the KG
+# until the next brief ran a seed. kickoff_corpus_seed closes that gap: it runs
+# the same incremental, content-hash-deduped corpus extraction the brief uses,
+# but eagerly in the background the moment a doc lands. By brief time the KG is
+# already warm, so the brief's own seed is a cheap no-op.
+
+# Per-company locks so overlapping kickoffs (e.g. several files uploaded at once)
+# serialize instead of redundantly re-extracting the same corpus in parallel.
+_corpus_seed_locks: dict[str, threading.Lock] = {}
+_corpus_seed_locks_guard = threading.Lock()
+
+
+def _corpus_seed_lock(company_id: str) -> threading.Lock:
+    with _corpus_seed_locks_guard:
+        lock = _corpus_seed_locks.get(company_id)
+        if lock is None:
+            lock = threading.Lock()
+            _corpus_seed_locks[company_id] = lock
+        return lock
+
+
+def _run_corpus_seed(company_id: str, slug: str) -> None:
+    """Blocking incremental corpus extraction — runs inside the daemon thread.
+
+    Fully isolated: any failure is logged, never raised. Serialized per company
+    via a lock so a burst of uploads doesn't spin up redundant parallel seeds;
+    a queued run picks up everything on disk (incl. whatever triggered it), and
+    extraction is content-keyed idempotent so a re-extract self-dedups."""
+    # Lazy import avoids a module-load cycle (synthesis_brief → kg_ingest.runner).
+    from app.synthesis_brief import _seed_from_corpus
+
+    lock = _corpus_seed_lock(company_id)
+    with lock:
+        try:
+            facade = GraphFacade()
+            result = _seed_from_corpus(facade, company_id, slug)
+            logger.info(
+                "corpus-seed done: %s (slug=%s) docs=%s signals=%s unchanged=%s",
+                company_id, slug, result.get("docs"), result.get("signals"),
+                result.get("unchanged"),
+            )
+        except Exception:  # noqa: BLE001 — fully isolated
+            logger.exception("corpus-seed failed for %s (slug=%s)", company_id, slug)
+
+
+def kickoff_corpus_seed(company_id: str, slug: str) -> bool:
+    """Fire-and-forget: extract newly-arrived corpus docs into the KG.
+
+    Called right after a file upload or a connector→corpus sync (Drive/Slack/
+    Figma) so manually- or connector-supplied docs reach the KG without waiting
+    for the next brief. Incremental + content-hash deduped, so repeated kickoffs
+    are cheap. Never blocks; never raises into the caller's request flow."""
+    try:
+        t = threading.Thread(
+            target=_run_corpus_seed, args=(company_id, slug),
+            name="corpus-seed", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a thread-spawn failure break the request
+        logger.exception("corpus-seed: failed to start thread for %s (slug=%s)",
+                         company_id, slug)
         return False

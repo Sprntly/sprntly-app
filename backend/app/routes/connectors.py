@@ -70,7 +70,7 @@ from app.connectors.tokens import (
     decrypt_token_json,
     encrypt_token_json,
 )
-from app.kg_ingest.auto_sync import kickoff_sync
+from app.kg_ingest.auto_sync import kickoff_corpus_seed, kickoff_sync
 
 logger = logging.getLogger(__name__)
 
@@ -559,6 +559,24 @@ def _auto_enable_drive_input_source(company_id: str, dataset: str | None) -> Non
             )
 
 
+def _seed_corpus_after_sync(company_id: str, dataset: str | None) -> None:
+    """Kick a background KG corpus seed after a connector→corpus sync.
+
+    Drive/Slack/Figma write docs to the corpus but have no kg_ingest puller, so
+    without this their content never reaches the KG until the next brief's seed.
+    This eagerly extracts it (incremental + content-hash deduped). Resolves the
+    corpus slug from the sync's dataset, falling back to the company's slug.
+    Best-effort: a missing slug is logged and skipped, never raised."""
+    from app.db.companies import slug_for_company_id
+
+    slug = dataset or slug_for_company_id(company_id)
+    if not slug:
+        logger.warning("corpus-seed: no dataset slug for company=%s — skipping",
+                       company_id)
+        return
+    kickoff_corpus_seed(company_id, slug)
+
+
 class GoogleDrivePickedFile(BaseModel):
     id: str
     name: str | None = None
@@ -606,6 +624,7 @@ def google_drive_save_files(
         raise HTTPException(400, str(e)) from e
 
     _auto_enable_drive_input_source(company.company_id, body.dataset)
+    _seed_corpus_after_sync(company.company_id, body.dataset)
     return result.to_dict()
 
 
@@ -625,6 +644,7 @@ def google_drive_sync(
         raise HTTPException(400, str(e)) from e
 
     _auto_enable_drive_input_source(company.company_id, payload.dataset)
+    _seed_corpus_after_sync(company.company_id, payload.dataset)
     return result.to_dict()
 
 
@@ -863,6 +883,7 @@ def figma_sync_to_corpus(
     except Exception:
         logger.warning("Failed to auto-enable figma input source", exc_info=True)
 
+    _seed_corpus_after_sync(company.company_id, body.dataset)
     return {"ok": True, "chars": len(md_text), "path": str(target)}
 
 
@@ -2071,6 +2092,7 @@ def slack_sync_to_corpus(
         )
     except SlackSyncError as e:
         raise HTTPException(400, str(e)) from e
+    _seed_corpus_after_sync(company.company_id, body.dataset)
     return result.to_dict()
 
 
