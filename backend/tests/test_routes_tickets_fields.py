@@ -72,6 +72,16 @@ def test_data_defaults_when_no_edits(client: TestClient):
     assert data["comments"] == []
 
 
+def test_fields_only_edit_leaves_description_null(client: TestClient):
+    # Regression: editing only a field (status/assignee) must NOT fabricate an
+    # empty description/criteria that would blank out the generated ticket body.
+    client.put(f"/v1/tickets/{KEY}/fields", json={"status": "In progress"})
+    data = client.get(f"/v1/tickets/{KEY}/data").json()
+    assert data["status"] == "In progress"
+    assert data["description"] is None          # not "" → UI keeps the generated body
+    assert data["acceptance_criteria"] is None  # not [] → UI keeps the generated AC
+
+
 def test_comment_summary_needs_two_comments(client: TestClient):
     # 0 comments → null, no LLM call.
     assert client.get(f"/v1/tickets/{KEY}/comments/summary").json()["summary"] is None
