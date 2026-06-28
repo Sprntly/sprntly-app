@@ -56,7 +56,7 @@ import logging
 
 from app.company_template import render_templates_for_prompt
 from app.config import settings
-from app.corpus import load_corpus
+from app.corpus import load_corpus, load_prd_template
 from app.db import complete_prd_2part, get_brief_by_id
 from app.db.companies import company_id_for_slug
 from app.db.prds import fail_prd, find_existing_prd, start_prd
@@ -65,7 +65,6 @@ from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.retrieval import insight_evidence_trail, render_evidence_trail_section
 from app.prompts import VOICE_GUARD
-from app.skills.loader import get_skill
 
 logger = logging.getLogger(__name__)
 
@@ -114,10 +113,20 @@ the `---` horizontal rule that would separate them.""" + VOICE_GUARD
 # Part A and Part B derive from the same brief, so they stay coherent.
 _PART_A_DIRECTIVE = """\
 PART DIRECTIVE: Produce ONLY Part A — the human-readable Product Requirements \
-Document (the METHOD's Part A: problem & evidence, goals & success metrics, \
-non-goals, users & scenarios, requirements/flows, risks, open questions, \
-rollout, "done when"). Do NOT include Part B (the Implementation Spec) and do \
-NOT emit the `---` separator. Start at the document title / Part A heading."""
+Document. Render it as the typed semantic `:::` blocks defined in the TEMPLATE \
+below (`:::context-chip`, `:::tldr`, `:::problem`, `:::hypothesis`, \
+`:::requirements`, `:::acceptance-criteria`, `:::metrics`, `:::risks`, \
+`:::milestones`, `:::dod`), in the template's order, with the prose Context \
+section as written. The METHOD above governs your REASONING and quality bar \
+(problem-first, no fabrication, EARS-grade requirements, Given/When/Then \
+acceptance criteria, guardrail metrics, a testable done-gate); the TEMPLATE \
+governs the OUTPUT FORMAT. Emit every named block EXACTLY — never a paragraph, \
+bullet list, or markdown table where the template specifies a `:::` block, or \
+the frontend cannot render it as a first-class component. Fill each placeholder \
+with concrete, grounded content; never keep a `[bracketed]` example. Do NOT \
+include Part B (the Implementation Spec), do NOT emit the `---` separator, and \
+do NOT emit the template's trailing "How to use this template" section. Start \
+at the document title."""
 
 _USER_TEMPLATE = """\
 {part_directive}
@@ -274,10 +283,15 @@ def _build_context(brief_id: int, insight_index: int) -> dict:
     # carries the kg_refs for the decision log. Resolved ONCE and shared by both
     # part-calls so Part A and Part B cite the same evidence.
     evidence, trail = _resolve_grounding(dataset, brief, insight_index)
-    # The PRD structure ships with the skill (templates/prd-template.md) so the
-    # human PRD + Implementation Spec stay version-locked to the method. Both
-    # calls receive the full template and emit only their assigned half.
-    template = get_skill(_SKILL).templates["prd-template.md"]
+    # Part A (the human PRD the user reads) is generated against the typed-
+    # `:::`-block contract (data/sprntly_prd_template.md) that the frontend
+    # `prd-adapter` parses into first-class components (hero/metrics/
+    # requirements/acceptance-criteria/…). The prd-author skill stays bound on
+    # the Part-A call for its METHOD + version pin; only the OUTPUT SHAPE comes
+    # from this template. Without these blocks the adapter degrades to plain
+    # markdown — the "PRD looks like a raw .md" failure. (Part B is generated
+    # separately by the implementation-spec skill and does NOT use this template.)
+    template = load_prd_template()
     title = insight.get("title") or f"Insight #{insight_index + 1}"
     # FORMAT/STYLE EXEMPLARS — the company's uploaded gold-standard PRD examples
     # ("what good looks like"). Additive context ONLY: when the company has

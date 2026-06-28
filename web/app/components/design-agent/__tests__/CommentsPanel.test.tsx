@@ -123,10 +123,10 @@ describe("CommentsPanelView — rendering", () => {
     expect(html).toMatch(/comments-count-badge[^>]*>2</)
   })
 
-  it("renders the Step N pin pill inline at the start of an open comment body", () => {
+  it("does not render a Step N pin chip on open comment bodies", () => {
     const html = render({ comments: [comment()] })
-    expect(html).toContain("comment-step-chip")
-    expect(html).toContain("Step 1")
+    expect(html).not.toContain("comment-step-chip")
+    expect(html).not.toContain("Step 1")
   })
 
   it("renders a header close (X) only when onClose is supplied", () => {

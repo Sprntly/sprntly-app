@@ -1,12 +1,16 @@
-"""Tests for app.evidence_runner._run_sync — the inner generation worker.
+"""Tests for app.evidence_runner._run_sync — the CORPUS-FALLBACK generation
+worker (the path app.evidence_kg defers to when an insight has no KG backing).
 
-We test the sync function directly to avoid asyncio plumbing. The async
-wrapper `generate_evidence` is a thin `asyncio.to_thread(_run_sync, …)`
-shim plus an exception → fail_evidence path.
+It now emits the `evidence-brief` skill's self-contained HTML visual brief
+(variant v3), grounded on the corpus instead of the KG evidence trail. We test
+the sync function directly to avoid asyncio plumbing; the async wrapper
+`generate_evidence` is a thin `asyncio.to_thread(_run_sync, …)` shim plus an
+exception → fail_evidence path.
 """
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -32,65 +36,66 @@ def _seed_brief(db_mod, dataset="asurion", insights=None):
     )
 
 
+def _patch_gateway(monkeypatch, html='<div class="wrap"><h1>Corpus brief</h1></div>'):
+    """Patch the gateway + company resolution so _run_sync emits `html`.
+    Returns the dict of captured llm_call kwargs."""
+    monkeypatch.setattr(evidence_runner, "resolve_company",
+                        lambda ds: ("ent-1", ds))
+    captured: dict = {}
+
+    def _llm(**kw):
+        captured.update(kw)
+        return SimpleNamespace(output=html)
+
+    monkeypatch.setattr(evidence_runner, "llm_call", _llm)
+    return captured
+
+
 # ---- happy path -------------------------------------------------------------
 
-def test_run_sync_happy_path_completes_evidence(
-    isolated_settings, fake_llm, monkeypatch
+def test_run_sync_happy_path_completes_with_html_brief(
+    isolated_settings, monkeypatch
 ):
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
     evidence_id = db_mod.start_evidence(
-        brief_id=brief_id,
-        insight_index=0,
-        title="t",
-        template_version=1,
-        variant="v2",
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=4, variant="v3",
     )
-    monkeypatch.setattr(
-        evidence_runner, "call_md", lambda **kw: "# Final markdown"
-    )
+    _patch_gateway(monkeypatch, '<div class="wrap"><h1>Corpus brief</h1></div>')
 
     evidence_runner._run_sync(evidence_id, brief_id, 0)
 
     row = db_mod.get_evidence(evidence_id)
     assert row["status"] == "ready"
-    assert row["payload_md"] == "# Final markdown"
+    assert row["payload_md"] == '<div class="wrap"><h1>Corpus brief</h1></div>'
     assert row["title"] == "Insight A"
-    assert row["variant"] == "v2"
+    assert ":::" not in row["payload_md"]   # HTML, not the retired :::block doc
 
 
-def test_run_sync_passes_template_and_system_prompt(
-    isolated_settings, fake_llm, monkeypatch
+def test_run_sync_binds_skill_and_grounds_on_corpus(
+    isolated_settings, monkeypatch
 ):
-    """Sanity-check that the runner wires the system prompt and template
-    we expect (typed semantic blocks; `:::hero` from the template)."""
-    _seed_corpus(isolated_settings["data_dir"])
+    """The fallback binds the `evidence-brief` skill (METHOD + HTML contract)
+    and feeds the corpus as the grounding data — no :::block template."""
+    _seed_corpus(isolated_settings["data_dir"], body="distinct corpus marker")
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
     evidence_id = db_mod.start_evidence(
-        brief_id=brief_id,
-        insight_index=0,
-        title="t",
-        template_version=1,
-        variant="v2",
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=4, variant="v3",
     )
+    captured = _patch_gateway(monkeypatch)
 
-    captured: dict = {}
-
-    def _capture(**kwargs):
-        captured.update(kwargs)
-        return "# md"
-
-    monkeypatch.setattr(evidence_runner, "call_md", _capture)
     evidence_runner._run_sync(evidence_id, brief_id, 0)
 
-    # The system prompt centers on typed semantic blocks — phrase is
-    # stable across iterations of the prompt body.
-    assert "typed semantic blocks" in captured["system"]
-    # The template carries this exact block; appearing in the user prompt
-    # confirms the template was loaded and inlined.
-    assert ":::hero" in captured["user"]
+    assert captured["skill"] == "evidence-brief"
+    assert captured["agent"] == "evidence"
+    # Corpus is the grounding; the HTML system prompt steers self-contained HTML.
+    assert "distinct corpus marker" in captured["input"]
+    assert ":::hero" not in captured["input"]
+    assert "HTML" in captured["system"] and "self-contained" in captured["system"]
 
 
 def test_run_sync_missing_brief_raises(isolated_settings):
@@ -112,17 +117,16 @@ def test_generate_evidence_records_failure_in_db(
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
     evidence_id = db_mod.start_evidence(
-        brief_id=brief_id,
-        insight_index=0,
-        title="t",
-        template_version=1,
-        variant="v2",
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=4, variant="v3",
     )
+    monkeypatch.setattr(evidence_runner, "resolve_company",
+                        lambda ds: ("ent-1", ds))
 
     def _boom(**_kw):
         raise ValueError("LLM exploded")
 
-    monkeypatch.setattr(evidence_runner, "call_md", _boom)
+    monkeypatch.setattr(evidence_runner, "llm_call", _boom)
     asyncio.run(evidence_runner.generate_evidence(evidence_id, brief_id, 0))
 
     row = db_mod.get_evidence(evidence_id)

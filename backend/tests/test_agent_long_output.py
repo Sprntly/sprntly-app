@@ -108,12 +108,16 @@ def test_doc_agent_sets_long_output(monkeypatch, module_path, fn_name):
     )
 
 
-# ── evidence_runner uses call_md directly — assert it streams on long timeout ──
+# ── evidence_runner (corpus fallback) binds evidence-brief, a long-output skill ─
 
 
-def test_evidence_runner_streams_on_long_timeout(monkeypatch):
+def test_evidence_runner_binds_long_output_skill(monkeypatch):
+    """The corpus-fallback evidence runner emits the HTML brief via the gateway
+    with skill="evidence-brief". That skill is registered long-output, so the
+    gateway streams the (large) HTML doc on the long read timeout — the runner
+    no longer hand-rolls call_md(stream=...)."""
     from app import evidence_runner
-    from app.llm import LONG_REQUEST_TIMEOUT_S
+    from app.graph.gateway import _LONG_OUTPUT_SKILLS
 
     monkeypatch.setattr(
         evidence_runner, "get_brief_by_id",
@@ -123,22 +127,25 @@ def test_evidence_runner_streams_on_long_timeout(monkeypatch):
         evidence_runner, "load_corpus",
         lambda d: SimpleNamespace(joined=lambda: "corpus text"),
     )
-    monkeypatch.setattr(evidence_runner, "load_evidence_template", lambda: "tmpl")
+    monkeypatch.setattr(evidence_runner, "resolve_company",
+                        lambda ds: ("ent-1", ds))
     monkeypatch.setattr(evidence_runner, "complete_evidence", lambda **kw: None)
 
     captured: dict = {}
 
-    def fake_call_md(*, system, user, stream=False, timeout=None, **kw):
-        captured["stream"] = stream
-        captured["timeout"] = timeout
-        return "# evidence"
+    def fake_llm_call(**kw):
+        captured.update(kw)
+        return SimpleNamespace(output='<div class="wrap"></div>')
 
-    monkeypatch.setattr(evidence_runner, "call_md", fake_call_md)
+    monkeypatch.setattr(evidence_runner, "llm_call", fake_llm_call)
 
     evidence_runner._run_sync(evidence_id=1, brief_id=2, insight_index=0)
 
-    assert captured["stream"] is True
-    assert captured["timeout"] == LONG_REQUEST_TIMEOUT_S
+    assert captured["skill"] == "evidence-brief"
+    assert "evidence-brief" in _LONG_OUTPUT_SKILLS  # → gateway streams it
+    # The corpus is fed as the grounding data, not a :::block template.
+    assert "corpus text" in captured["input"]
+    assert ":::hero" not in captured["input"]
 
 
 def test_user_stories_sets_long_output(monkeypatch):

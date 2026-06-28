@@ -94,11 +94,24 @@ def test_answer_skill_path_uses_sonnet(monkeypatch):
 
 
 def test_answer_heavy_skill_escalates_to_opus(monkeypatch):
+    # competitive-intelligence-review is the remaining HEAVY skill. It's also
+    # cost-gated, so pin it to skip the confirm-gate and reach the answer path.
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+    out = qa.answer(enterprise_id="ent", question="size up our competitors",
+                    dataset="acme", pinned_skill="competitive-intelligence-review")
+    assert out["_skill"] == "competitive-intelligence-review"
+    assert captured["model"] == qa.HEAVY_MODEL
+
+
+def test_answer_prd_author_stays_on_sonnet(monkeypatch):
+    # The deep reasoning happens upstream in the KG + weekly brief; the PRD
+    # composes off that material and answers on the default (sonnet) model.
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     out = qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme")
     assert out["_skill"] == "prd-author"
-    assert captured["model"] == qa.HEAVY_MODEL
+    assert captured["model"] == qa.ANSWER_MODEL
 
 
 def test_answer_direct_path(monkeypatch):

@@ -52,8 +52,13 @@ function count(haystack: string, needle: string): number {
 // ---------------------------------------------------------------------------
 
 describe("IterateActivityStream — empty list", () => {
-  it("test_empty_activity_renders_null: returns null when activity is empty", () => {
-    expect(render([])).toBe("")
+  it("test_empty_activity_renders_empty_state: shows the quiet empty-state cue when activity is empty", () => {
+    const html = render([])
+    expect(html).toContain('data-testid="da-activity-empty"')
+    expect(html).toContain("No changes yet — describe one below to iterate.")
+    // It is the empty-state, NOT the live/terminal status region.
+    expect(html).not.toContain('data-testid="da-activity-live"')
+    expect(html).not.toContain('data-testid="da-activity"')
   })
 })
 

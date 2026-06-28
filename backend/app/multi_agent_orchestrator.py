@@ -139,13 +139,13 @@ async def run_multi_agent_generation(
     )
 
     # Evidence generation
-    from app.prompts import EVIDENCE_TEMPLATE_VERSION
+    from app.prompts import EVIDENCE_TEMPLATE_VERSION, EVIDENCE_VARIANT
     evidence_id = start_evidence(
         brief_id=brief_id,
         insight_index=insight_index,
         title=title,
         template_version=EVIDENCE_TEMPLATE_VERSION,
-        variant="v2",
+        variant=EVIDENCE_VARIANT,
     )
 
     # Run Phase 1 concurrently

@@ -21,10 +21,12 @@ So given (brief_id, insight_index) we:
   3. gather the EVIDENCE TRAIL = SUPPORTS signals (hypothesis-backing) UNION
      the theme's convergence signals, deduped, each with content +
      source_type + provenance + confidence + weight,
-  4. run ONE gateway llm_call that assembles the evidence doc strictly from
-     those signals (never inventing),
+  4. run ONE gateway llm_call (binding the `evidence-brief` skill) that
+     assembles the evidence brief — a single self-contained HTML visual brief —
+     strictly from those signals (never inventing),
   5. decision-log it (kg_refs = signal/hypothesis/theme ids used),
-  6. write the same `payload_md` the UI renders.
+  6. write that HTML into `payload_md`, which the UI renders in a sandboxed
+     iframe (variant v3).
 
 Falls back to the legacy corpus path when the KG has no backing for the
 insight (no theme_id, no hypothesis, no signals), so it never hard-fails.
@@ -36,12 +38,12 @@ import json
 import logging
 from typing import Optional
 
-from app.corpus import load_evidence_template
 from app.db import complete_evidence, fail_evidence, get_brief_by_id
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.types import Entity, Signal
+from app.llm import strip_code_fence
 from app.prompts import (
     EVIDENCE_KG_PROMPT_VERSION,
     EVIDENCE_KG_SYSTEM,
@@ -167,9 +169,10 @@ def build_evidence_kg(
     enterprise_id: str,
     insight: dict,
 ) -> tuple[str, dict]:
-    """Build the KG-grounded evidence markdown for one brief insight.
+    """Build the KG-grounded evidence brief (self-contained HTML) for one
+    brief insight.
 
-    Returns (payload_md, meta) where meta carries the kg_refs + the trail used.
+    Returns (html, meta) where meta carries the kg_refs + the trail used.
     Raises NoKGBackingError when the KG has no signals for this insight so the
     caller can fall back to the legacy corpus path."""
     theme_id = insight.get("theme_id")
@@ -189,11 +192,9 @@ def build_evidence_kg(
             f"title={title!r} (enterprise={enterprise_id})"
         )
 
-    template = load_evidence_template()
     user = EVIDENCE_KG_USER_TEMPLATE.format(
         insight_json=json.dumps(insight, indent=2),
         evidence_trail=_render_trail(trail),
-        template=template,
     )
     result = llm_call(
         enterprise_id=enterprise_id,
@@ -202,13 +203,17 @@ def build_evidence_kg(
         prompt_version=EVIDENCE_KG_PROMPT_VERSION,
         system=EVIDENCE_KG_SYSTEM,
         input=user,
-        # Bind the evidence-brief skill: its SKILL.md becomes the METHOD layer
-        # (converge ≥2 signals → wedge → best-chart-per-finding → honesty pass).
-        # The Sprntly `:::block` template + system prompt still govern the OUTPUT
-        # format (see EVIDENCE_KG_SYSTEM overrides 1 & 2).
+        # Bind the evidence-brief skill: its SKILL.md is the METHOD *and* the
+        # OUTPUT contract — the runner emits the skill's self-contained HTML
+        # visual brief (converge ≥2 signals → wedge → best-chart-per-finding →
+        # honesty pass → value-driven hypothesis), grounded in the trail. The
+        # `evidence-brief` skill is a long-output skill (large HTML payload).
         skill="evidence-brief",
     )
-    md = result.output if isinstance(result.output, str) else str(result.output)
+    raw = result.output if isinstance(result.output, str) else str(result.output)
+    # The model occasionally wraps the document in a ```html code fence despite
+    # the prompt; strip it so the stored payload is raw HTML the UI can iframe.
+    html = strip_code_fence(raw)
 
     signal_ids = [t["signal_id"] for t in trail]
     kg_refs = list(signal_ids)
@@ -247,7 +252,7 @@ def build_evidence_kg(
         "hypothesis_id": hypothesis.id if hypothesis else None,
         "trail": trail,
     }
-    return md, meta
+    return html, meta
 
 
 def _run_sync_kg(
@@ -272,7 +277,7 @@ def _run_sync_kg(
     enterprise_id, _slug = resolve_company(brief.get("dataset", "asurion"))
     facade = GraphFacade()
     try:
-        md, _meta = build_evidence_kg(facade, enterprise_id, insight)
+        html, _meta = build_evidence_kg(facade, enterprise_id, insight)
     except NoKGBackingError as exc:
         logger.info(
             "evidence_kg: %s — falling back to legacy corpus path "
@@ -284,7 +289,7 @@ def _run_sync_kg(
         return
 
     title = insight.get("title") or f"Insight #{insight_index + 1}"
-    complete_evidence(evidence_id=evidence_id, title=title, md=md)
+    complete_evidence(evidence_id=evidence_id, title=title, md=html)
 
 
 async def generate_evidence_kg(

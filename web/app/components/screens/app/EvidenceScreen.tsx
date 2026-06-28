@@ -6,6 +6,7 @@ import { useContent } from "../../../context/ContentContext"
 import { evidenceApi, type EvidenceRecord } from "../../../lib/api"
 import { sleepUntilNextPoll } from "../../../lib/poll"
 import { AppLayout } from "./AppLayout"
+import { EvidenceHtmlBrief, looksLikeHtmlBrief } from "../../shared/EvidenceHtmlBrief"
 import { IconSparkles } from "@tabler/icons-react"
 
 // ── Style constants (warm/green Sprntly theme) ──
@@ -200,6 +201,12 @@ export function EvidenceScreen() {
   )
   const confidenceValue = confidenceMetric?.value ?? (evidence ? "0.82" : null)
 
+  // v3 rows are the self-contained HTML visual brief; v1/v2 are legacy
+  // `:::block` markdown. Branch on the variant, with a content sniff as a
+  // fallback for any row whose variant didn't round-trip.
+  const isHtmlBrief =
+    evidence?.variant === "v3" || looksLikeHtmlBrief(evidence?.payload_md)
+
   return (
     <AppLayout mainClassName="main--reading" inlineChat>
       {/* Back link */}
@@ -233,50 +240,60 @@ export function EvidenceScreen() {
       {/* Ready state */}
       {evidence && evidence.status === "ready" && (
         <div style={{ marginTop: 16 }}>
-          {/* Badge row */}
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
-            {detail?.tags?.map((t, i) => (
-              <span key={i} style={t.className.includes("accent") ? badgeAccentStyle : badgeStyle}>
-                {t.label}
-              </span>
-            )) ?? (
-              <>
-                <span style={badgeStyle}>WHAT&apos;S BROKEN</span>
-                {confidenceValue && (
-                  <span style={badgeAccentStyle}>CONFIDENCE {confidenceValue}</span>
+          {/* v3 evidence is a self-contained HTML visual brief (own title,
+              eyebrow, TL;DR, charts…), so we render JUST the brief and skip the
+              app's outer title/badges/AI-summary chrome to avoid a double title.
+              Legacy v1/v2 `:::block` rows keep the original preformatted render. */}
+          {isHtmlBrief ? (
+            <EvidenceHtmlBrief html={evidence.payload_md} />
+          ) : (
+            <>
+              {/* Badge row */}
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 16 }}>
+                {detail?.tags?.map((t, i) => (
+                  <span key={i} style={t.className.includes("accent") ? badgeAccentStyle : badgeStyle}>
+                    {t.label}
+                  </span>
+                )) ?? (
+                  <>
+                    <span style={badgeStyle}>WHAT&apos;S BROKEN</span>
+                    {confidenceValue && (
+                      <span style={badgeAccentStyle}>CONFIDENCE {confidenceValue}</span>
+                    )}
+                    <span style={badgeStyle}>BRIEF INSIGHT</span>
+                  </>
                 )}
-                <span style={badgeStyle}>BRIEF INSIGHT</span>
-              </>
-            )}
-          </div>
-
-          {/* Title — design `.art-h` serif headline */}
-          <h1 className="art-h">
-            {evidence.title}
-          </h1>
-
-          {/* AI summary box — design `.art-ai-sum` */}
-          {detail?.summary && (
-            <div className="art-ai-sum">
-              <div className="art-ai-sum-h">
-                <IconSparkles size={14} /> AI Summary
               </div>
-              <div>{detail.summary}</div>
-            </div>
-          )}
 
-          {/* Evidence content (markdown rendered as preformatted text) */}
-          <div style={{
-            fontSize: 13.5,
-            color: "var(--ink, #1A1A17)",
-            lineHeight: 1.7,
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-word",
-            fontFamily: "inherit",
-            padding: "0 2px",
-          }}>
-            {evidence.payload_md}
-          </div>
+              {/* Title — design `.art-h` serif headline */}
+              <h1 className="art-h">
+                {evidence.title}
+              </h1>
+
+              {/* AI summary box — design `.art-ai-sum` */}
+              {detail?.summary && (
+                <div className="art-ai-sum">
+                  <div className="art-ai-sum-h">
+                    <IconSparkles size={14} /> AI Summary
+                  </div>
+                  <div>{detail.summary}</div>
+                </div>
+              )}
+
+              {/* Evidence content (markdown rendered as preformatted text) */}
+              <div style={{
+                fontSize: 13.5,
+                color: "var(--ink, #1A1A17)",
+                lineHeight: 1.7,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                fontFamily: "inherit",
+                padding: "0 2px",
+              }}>
+                {evidence.payload_md}
+              </div>
+            </>
+          )}
 
           {/* Metadata strip */}
           <div style={{

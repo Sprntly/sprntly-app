@@ -48,7 +48,7 @@ import {
   setElementHighlight,
   clearElementHighlight,
 } from "./pinAnchorBridge"
-import { IconCheck, IconPin } from "../shared/app-icons"
+import { IconCheck } from "../shared/app-icons"
 
 /**
  * the transparent mark overlay over the canvas stage. Click-inert normally
@@ -189,10 +189,6 @@ export function PrototypeMarkLayer({
                     the consolidated resolve control (David's `pc-resolve`),
                     reusing CommentsPanel's shared `.comment-resolve-btn` markup. */}
                 <div className="proto-comment-au-row">
-                  <div className="comment-step-chip">
-                    <IconPin size={11} />
-                    Step {pin.n}
-                  </div>
                   <CommentAvatar author={pin.author ?? "demo"} />
                   <span className="proto-comment-au">{pin.author ?? "demo"}</span>
                   <time

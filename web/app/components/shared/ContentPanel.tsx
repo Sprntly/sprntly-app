@@ -4,12 +4,14 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { EvidenceSections } from "./EvidenceSections"
+import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
-import { storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
+import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { TicketDetail } from "./TicketDetail"
 import { ArtifactFooterActions } from "./ArtifactFooterActions"
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
 import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx } from "../../lib/prdExport"
@@ -369,13 +371,20 @@ function EvidenceTab() {
         )}
 
         {evidence ? (
-          <>
-            <h1 className="ev-doc-title">{evidence.title}</h1>
-            {evidence.metaLine && <div className="ev-doc-meta">{evidence.metaLine}</div>}
-            <div className="ev-doc-sections">
-              <EvidenceSections sections={evidence.sections} />
-            </div>
-          </>
+          evidence.html ? (
+            // v3 evidence — the self-contained HTML visual brief. It carries its
+            // own title/eyebrow/meta, so we render JUST the brief (sandboxed
+            // iframe) and skip the panel's title/meta/section chrome.
+            <EvidenceHtmlBrief html={evidence.html} />
+          ) : (
+            <>
+              <h1 className="ev-doc-title">{evidence.title}</h1>
+              {evidence.metaLine && <div className="ev-doc-meta">{evidence.metaLine}</div>}
+              <div className="ev-doc-sections">
+                <EvidenceSections sections={evidence.sections} />
+              </div>
+            </>
+          )
         ) : isLoading ? (
           <EmptyPane
             title="Generating evidence…"
@@ -422,13 +431,19 @@ function storyPriorityColor(p: string | null): string {
   return STORY_PRIORITY_COLOR[(p ?? "").toUpperCase()] ?? "#6B7280"
 }
 
-// One generated ticket row (read-only — the source of truth is the PRD; edits
-// happen in ClickUp after the push).
-function StoryRow({ story, index }: { story: GeneratedStory; index: number }) {
+// One generated ticket row. Click to open the editable in-panel detail
+// (TicketDetail) — the generated story is the base, edits persist as overrides.
+function StoryRow({ story, index, onOpen }: { story: GeneratedStory; index: number; onOpen: () => void }) {
   const priority = (story.priority ?? "").toUpperCase()
   const color = storyPriorityColor(story.priority)
   return (
-    <div className="tkt-row tkt-row--static">
+    <div
+      className="tkt-row"
+      role="button"
+      tabIndex={0}
+      onClick={onOpen}
+      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen() } }}
+    >
       <div className="tkt-row-left">
         <div className="tkt-row-id-wrap">
           <span className="tkt-row-id">{`T-${index + 1}`}</span>
@@ -472,6 +487,9 @@ export function TicketsTab() {
   const [genState, setGenState] = useState<GenState>({ kind: "idle" })
   const stories = genState.kind === "ready" ? genState.stories : []
 
+  // Which ticket (if any) is open in the in-panel editable detail view.
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
+
   // ── ClickUp push ───────────────────────────────────────────────────────
   type PushState =
     | { kind: "idle" }
@@ -483,20 +501,37 @@ export function TicketsTab() {
   const [pushState, setPushState] = useState<PushState>({ kind: "idle" })
   const [selectedListId, setSelectedListId] = useState<string>("")
 
-  // Break the current PRD into tickets on open / whenever the PRD changes.
-  // Generation is fire-and-forget on the backend (a multi-minute LLM call), so
-  // we kick it off, get a job id, then POLL until it's ready/failed instead of
-  // blocking on one long request. The "generating…" spinner is driven by the
-  // poll, so the tab never hangs on a stalled request.
+  // Manual regenerate: tickets are cached per PRD and only auto-regenerate when
+  // the PRD changes, so give the user an explicit way to force a fresh set. A
+  // nonce re-runs the generation effect; the ref tells it to SKIP the cache read
+  // and regenerate (vs the normal cache-first path on PRD change).
+  const [regenNonce, setRegenNonce] = useState(0)
+  const forceRegenRef = useRef(false)
+  const regenerate = () => {
+    forceRegenRef.current = true
+    setRegenNonce((n) => n + 1)
+  }
+
+  // Tickets are persisted per PRD (keyed by a content hash of the rendered PRD).
+  // On open / PRD change we READ the stored set first: if it's fresh (generated
+  // from the PRD's current content) we render it instantly with no LLM call. Only
+  // when there's no row, or the PRD has changed since (stale), or a prior run
+  // failed, do we (re)generate — fire-and-forget on the backend (a multi-minute
+  // call), so we kick it off, get a job id, then POLL until ready/failed. The
+  // backend re-persists on completion, so the next open is a cache hit.
   useEffect(() => {
+    // A new PRD (or a regenerate) invalidates the open detail.
+    setSelectedIndex(null)
     if (prdId == null) {
       setGenState({ kind: "idle" })
       return
     }
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
-    setGenState({ kind: "generating" })
-    setPushState({ kind: "idle" })
+    // A deploy/restart can drop an in-flight (not-yet-persisted) job → the poll
+    // 404s. Treat that as "work was lost" and re-kick generation (bounded)
+    // rather than surfacing an error.
+    let restarts = 0
 
     const fail = (e: unknown) => {
       if (cancelled) return
@@ -519,25 +554,78 @@ export function TicketsTab() {
             timer = setTimeout(() => poll(jobId), 2000)
           }
         })
+        .catch((e) => {
+          if (!cancelled && e instanceof ApiError && e.status === 404 && restarts < 2) {
+            restarts++
+            start()
+            return
+          }
+          fail(e)
+        })
+    }
+
+    const start = () => {
+      if (cancelled) return
+      setGenState({ kind: "generating" })
+      storiesApi
+        .generate(prdId)
+        .then((r) => {
+          if (!cancelled) poll(r.job_id)
+        })
         .catch(fail)
     }
 
+    setPushState({ kind: "idle" })
+    setGenState({ kind: "generating" })
+
+    // Manual "Regenerate" forces a fresh set; skip the cache read entirely.
+    const force = forceRegenRef.current
+    forceRegenRef.current = false
+    if (force) {
+      start()
+      return () => {
+        cancelled = true
+        if (timer) clearTimeout(timer)
+      }
+    }
+
+    // Cache-first: serve the persisted set if it's still fresh, else regenerate.
     storiesApi
-      .generate(prdId)
-      .then((r) => {
-        if (!cancelled) poll(r.job_id)
+      .getForPrd(prdId)
+      .then((cache) => {
+        if (cancelled) return
+        if (cache.status === "ready" && cache.fresh) {
+          setGenState({ kind: "ready", stories: cache.stories })
+        } else {
+          start()
+        }
       })
-      .catch(fail)
+      .catch((e) => {
+        // The cache read failing shouldn't dead-end the tab — fall back to
+        // generating (404/none is the common "first time" case anyway).
+        if (cancelled) return
+        if (e instanceof ApiError && e.status === 404) {
+          start()
+          return
+        }
+        fail(e)
+      })
 
     return () => {
       cancelled = true
       if (timer) clearTimeout(timer)
     }
-  }, [prdId])
+  }, [prdId, regenNonce])
 
   const handleClickUpPush = async () => {
     if (stories.length === 0) return
     if (pushState.kind === "fetching-lists" || pushState.kind === "pushing") return
+    // The push button is always shown at the top; if ClickUp isn't connected,
+    // point the user to Settings rather than failing with a raw API error.
+    if (!isClickUpConnected) {
+      showToast("ClickUp not connected", "Connect ClickUp in Settings to push these tickets.")
+      return
+    }
     // List already chosen → push the generated tickets directly.
     if (pushState.kind === "picking" && selectedListId) {
       const list = pushState.lists.find((l) => l.id === selectedListId)
@@ -600,8 +688,93 @@ export function TicketsTab() {
     )
   }
 
+  const pushLabel =
+    pushState.kind === "fetching-lists" ? "Loading…"
+      : pushState.kind === "pushing" ? "Pushing…"
+      : pushState.kind === "error" ? "Retry"
+      : pushState.kind === "done" ? "Push again"
+      : "Push to ClickUp"
+
+  // A ticket is open → show the editable detail in place of the list.
+  const selectedStory = selectedIndex != null ? stories[selectedIndex] : null
+  if (selectedStory && prdId != null) {
+    return (
+      <div className="tkt-list-wrap">
+        <TicketDetail
+          story={selectedStory}
+          index={selectedIndex as number}
+          prdId={prdId}
+          onBack={() => setSelectedIndex(null)}
+        />
+      </div>
+    )
+  }
+
   return (
     <div className="tkt-list-wrap">
+      {/* Top action bar: the ticket title + the Push-to-ClickUp button. Push is
+          explicit (only on click); when ClickUp isn't connected the handler
+          points the user to Settings rather than auto-pushing or erroring. */}
+      <div className="tkt-topbar">
+        <div className="tkt-topbar-titles">
+          <span className="tkt-list-title">Tickets from <em>{prdTitle}</em></span>
+          <span className="tkt-list-meta">{stories.length} ticket{stories.length !== 1 ? "s" : ""} · generated from the PRD</span>
+        </div>
+        {stories.length > 0 && (
+          <div className="tkt-topbar-actions">
+            <button
+              type="button"
+              className="tkt-regen-btn"
+              onClick={regenerate}
+              title="Regenerate tickets from the current PRD"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+              Regenerate
+            </button>
+            {pushState.kind === "picking" && (
+              <select
+                value={selectedListId}
+                onChange={(e) => setSelectedListId(e.target.value)}
+                className="tkt-list-select"
+                aria-label="ClickUp list"
+              >
+                {(pushState as { kind: "picking"; lists: ClickUpList[] }).lists.map((l) => (
+                  <option key={l.id} value={l.id}>{l.folder ? `${l.folder} / ` : ""}{l.name}</option>
+                ))}
+              </select>
+            )}
+            <button
+              type="button"
+              className="tkt-push-btn"
+              onClick={handleClickUpPush}
+              disabled={pushState.kind === "fetching-lists" || pushState.kind === "pushing"}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <polyline points="20 6 9 17 4 12" />
+              </svg>
+              {pushState.kind === "picking" ? "Push to selected list" : pushLabel}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Push status line (under the top bar). */}
+      {pushState.kind === "pushing" && (
+        <div className="tkt-push-status">Pushing to “{pushState.listName}”…</div>
+      )}
+      {pushState.kind === "error" && (
+        <div className="tkt-push-status tkt-push-status--err">{pushState.message}</div>
+      )}
+      {pushState.kind === "done" && (
+        <div className="tkt-push-status tkt-push-status--ok">
+          {pushState.created} ticket{pushState.created !== 1 ? "s" : ""} created in ClickUp
+          {pushState.errors > 0 ? ` · ${pushState.errors} failed` : ""}
+        </div>
+      )}
+
       <div className="tkt-intro-box">
         <IconSparkle size={14} />
         <p>
@@ -611,77 +784,9 @@ export function TicketsTab() {
         </p>
       </div>
 
-      {/* ── ClickUp sync banner ── */}
-      {isClickUpConnected && pushState.kind !== "done" && stories.length > 0 && (
-        <div style={{
-          margin: "0 0 12px", padding: "10px 14px", borderRadius: 8,
-          background: "#f0faf5", border: "1px solid #b2e0ca",
-          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
-        }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#179463" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden style={{ flexShrink: 0 }}>
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-          <span style={{ fontSize: 12.5, color: "#0E6E49", flex: 1 }}>
-            {pushState.kind === "idle" && "ClickUp connected — push these tickets to your workspace."}
-            {pushState.kind === "fetching-lists" && "Fetching ClickUp lists…"}
-            {pushState.kind === "pushing" && `Pushing to "${pushState.listName}"…`}
-            {pushState.kind === "error" && <span style={{ color: "#C13838" }}>{pushState.message}</span>}
-            {pushState.kind === "picking" && (
-              <select
-                value={selectedListId}
-                onChange={(e) => setSelectedListId(e.target.value)}
-                style={{ fontSize: 12, padding: "3px 6px", borderRadius: 5, border: "1px solid #b2e0ca", background: "#fff", marginRight: 6 }}
-              >
-                {(pushState as { kind: "picking"; lists: ClickUpList[] }).lists.map((l) => (
-                  <option key={l.id} value={l.id}>{l.folder ? `${l.folder} / ` : ""}{l.name}</option>
-                ))}
-              </select>
-            )}
-          </span>
-          <button
-            type="button"
-            onClick={handleClickUpPush}
-            disabled={pushState.kind === "fetching-lists" || pushState.kind === "pushing"}
-            style={{
-              fontSize: 12, fontWeight: 600, padding: "5px 14px", borderRadius: 6,
-              background: pushState.kind === "fetching-lists" || pushState.kind === "pushing" ? "#ccc" : "#179463",
-              color: "#fff", border: "none",
-              cursor: pushState.kind === "fetching-lists" || pushState.kind === "pushing" ? "not-allowed" : "pointer",
-              flexShrink: 0,
-            }}
-          >
-            {pushState.kind === "fetching-lists" ? "Loading…"
-              : pushState.kind === "pushing" ? "Pushing…"
-              : pushState.kind === "picking" ? "Push to ClickUp"
-              : pushState.kind === "error" ? "Retry"
-              : "Sync to ClickUp"}
-          </button>
-        </div>
-      )}
-
-      {/* ClickUp done banner */}
-      {pushState.kind === "done" && (
-        <div style={{
-          margin: "0 0 12px", padding: "10px 14px", borderRadius: 8,
-          background: "#f0faf5", border: "1px solid #b2e0ca",
-          display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#0E6E49",
-        }}>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#179463" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <polyline points="20 6 9 17 4 12" />
-          </svg>
-          {pushState.created} ticket{pushState.created !== 1 ? "s" : ""} created in ClickUp
-          {pushState.errors > 0 && <span style={{ color: "#C13838", marginLeft: 4 }}>· {pushState.errors} failed</span>}
-        </div>
-      )}
-
-      <div className="tkt-list-header">
-        <span className="tkt-list-title">Tickets from <em>{prdTitle}</em></span>
-        <span className="tkt-list-meta">{stories.length} ticket{stories.length !== 1 ? "s" : ""} · generated from the PRD</span>
-      </div>
-
       <div className="tkt-list">
         {stories.map((s, i) => (
-          <StoryRow key={i} story={s} index={i} />
+          <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
         ))}
       </div>
 
@@ -691,8 +796,6 @@ export function TicketsTab() {
         </svg>
         <span>Tickets are generated from the PRD.{!isClickUpConnected && " Connect ClickUp in Settings to push them."}</span>
       </div>
-
-      <ArtifactFooterActions current="tickets" />
     </div>
   )
 }

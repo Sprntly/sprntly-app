@@ -100,7 +100,7 @@ Prioritization math launders inputs into false confidence, so each input is chec
 State the framework + mode used. Math via `scripts/score.py` (`--method rice|wsjf|voc|northstar`, `--mode plain|goal`, `--north-star`, `--ns-weight`, `--goal-weight`).
 
 ## Sprntly integration (optional)
-- **Inputs from Sprntly:** the **goal from `business-context`** (so prioritization is scored against the company's actual stated goal); backlog items + confidence scores from the Monday Brief / outcome graph (Reach and Confidence can be data-derived, not guessed).
+- **Inputs from Sprntly:** the **goal from `business-context`** (so prioritization is scored against the company's actual stated goal); backlog items + confidence scores from the Weekly Brief / outcome graph (Reach and Confidence can be data-derived, not guessed).
 - **Outputs to Sprntly:** ranked backlog written back; the score components stored so re-ranking is reproducible as data updates.
 - **Degrades to:** standalone; ask for estimates or assume-and-label.
 

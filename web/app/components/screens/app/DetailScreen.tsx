@@ -9,6 +9,7 @@ import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { EvidenceSections } from "../../shared/EvidenceSections"
+import { EvidenceHtmlBrief } from "../../shared/EvidenceHtmlBrief"
 
 export function DetailScreen() {
   const { goTo, setAIBarValue, expandAiPanel, showToast, openContentPanel } = useNavigation()
@@ -136,15 +137,25 @@ export function DetailScreen() {
       </div>
 
       {evidence ? (
-        <div className="prd-frame">
-          <div className="prd-body">
-            {evidence.metaLine ? (
-              <div className="prd-meta">{evidence.metaLine}</div>
-            ) : null}
-            <h1 className="prd-title">{evidence.title}</h1>
-            <EvidenceSections sections={evidence.sections} />
+        evidence.html ? (
+          // v3 evidence — self-contained HTML brief (own title/meta); render the
+          // sandboxed iframe alone, skipping the panel title/meta/section chrome.
+          <div className="prd-frame">
+            <div className="prd-body">
+              <EvidenceHtmlBrief html={evidence.html} />
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="prd-frame">
+            <div className="prd-body">
+              {evidence.metaLine ? (
+                <div className="prd-meta">{evidence.metaLine}</div>
+              ) : null}
+              <h1 className="prd-title">{evidence.title}</h1>
+              <EvidenceSections sections={evidence.sections} />
+            </div>
+          </div>
+        )
       ) : evidenceState.kind === "loading" ? (
         <EmptyPane
           title="Generating evidence…"

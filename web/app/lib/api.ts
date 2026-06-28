@@ -1660,6 +1660,11 @@ export const designAgentApi = {
      *  settings page") that re-ranks locate toward the surface the PM means.
      *  Omitted/blank = today's unsteered locate. */
     hint?: string | null
+    /** Optional image-as-steer — a client-downscaled base64 image
+     *  data URL ("data:image/<png|jpeg|webp>;base64,…") of the screen the PM
+     *  wants. The server reads its on-screen text/route cues and re-ranks; falls
+     *  open to text-only on an oversized/undecodable image. Omitted = no image. */
+    image?: string | null
   }) => api.post<LocateJobHandle>("/v1/design-agent/locate", body),
   /** Poll a locate job by id. Returns the job status; when `status` is
    *  "done" the existing `LocateResponse` rides in `result`, and when "error"
@@ -1721,6 +1726,15 @@ export type LocateResponse = {
    *  unmapped path. The generate body sends this back as `map_commit_sha` so
    *  the recreate reads the same snapshot. */
   commit_sha: string
+  /** Image-as-steer. Cues the model read off an attached screenshot
+   *  (URL/route, nav labels, headings), for the recovery chip. Always `[]`
+   *  unless `image_status === "applied"` (backend-enforced). Optional/additive. */
+  read_cues?: string[]
+  /** Image-as-steer. Tells the UI whether an attached screenshot was
+   *  used: "absent" (no image sent), "applied" (re-ranked toward it),
+   *  "ignored_oversize" / "ignored_decode" (fell open to text-only — the UI must
+   *  NOT claim the image was used). Optional/additive; defaults to "absent". */
+  image_status?: "absent" | "applied" | "ignored_oversize" | "ignored_decode"
 }
 
 /** Shape returned by POST /v1/design-agent/{id}/iterate/estimate. */
@@ -1792,15 +1806,38 @@ export type TicketPushTask = {
   priority?: string
 }
 
+/** The team member picked as a ticket's assignee (subset of TeamMemberRecord). */
+export type TicketAssignee = {
+  user_id: string
+  display_name: string | null
+  email: string | null
+  role: string | null
+  avatar_url: string | null
+}
+
+/** Editable ticket metadata. All optional — a partial save only writes what's set. */
+export type TicketFields = {
+  title?: string | null
+  priority?: string | null
+  status?: string | null
+  sprint?: string | null
+  assignee?: TicketAssignee | null
+}
+
 export type TicketDataResponse = {
   description: string | null
   acceptance_criteria: string[] | null
+  title: string | null
+  priority: string | null
+  status: string | null
+  sprint: string | null
+  assignee: TicketAssignee | null
   attachments: { id: number; label: string; sub: string }[]
   comments: { id: number; author: string; body: string; time: string }[]
 }
 
 export const ticketDataApi = {
-  /** Get all saved overrides for a ticket (description, attachments, comments). */
+  /** Get all saved overrides for a ticket (fields, description, attachments, comments). */
   getData: (ticketKey: string) =>
     api.get<TicketDataResponse>(`/v1/tickets/${encodeURIComponent(ticketKey)}/data`),
   /** Save description + acceptance criteria. */
@@ -1808,6 +1845,10 @@ export const ticketDataApi = {
     api.put(`/v1/tickets/${encodeURIComponent(ticketKey)}/description`, {
       description, acceptance_criteria: acceptanceCriteria,
     }),
+  /** Save title/priority/status/sprint/assignee. Only the keys present are
+   *  written, so a partial save never clobbers the description or other fields. */
+  saveFields: (ticketKey: string, fields: TicketFields) =>
+    api.put(`/v1/tickets/${encodeURIComponent(ticketKey)}/fields`, fields),
   /** Add an attachment. */
   addAttachment: (ticketKey: string, label: string, sub: string) =>
     api.post<{ id: number; label: string; sub: string }>(
@@ -1824,6 +1865,10 @@ export const ticketDataApi = {
   /** Remove a comment. */
   removeComment: (ticketKey: string, commentId: number) =>
     api.delete(`/v1/tickets/${encodeURIComponent(ticketKey)}/comments/${commentId}`),
+  /** AI summary of the comment thread. `summary` is null when there's too little
+   *  to summarize (< 2 comments) or the LLM call failed (best-effort). */
+  summarizeComments: (ticketKey: string) =>
+    api.get<{ summary: string | null }>(`/v1/tickets/${encodeURIComponent(ticketKey)}/comments/summary`),
 }
 
 export const ticketPushApi = {
@@ -1845,6 +1890,9 @@ export const ticketPushApi = {
 // user-stories skill) and writes nothing; push is the explicit ClickUp write.
 // This is the REAL path behind "Create ticket" (vs the mock ticket fixtures).
 export type GeneratedStory = {
+  /** Content-derived stable id (hash of title+body) stamped at generation.
+   *  Keys per-ticket edit overrides. Optional for sets cached before it existed. */
+  id?: string
   title: string
   body: string
   acceptance_criteria: string[]
@@ -1864,9 +1912,23 @@ export type StoryJob = {
   error?: string
 }
 
+// Persisted tickets for a PRD. `fresh` is true when the stored stories were
+// generated from the PRD's CURRENT rendered content (content-hash match) — the
+// tab renders them with no LLM call. Otherwise the tab regenerates.
+export type StoryCache = {
+  status: "none" | "ready" | "generating" | "failed"
+  fresh: boolean
+  stories: GeneratedStory[]
+  generated_at?: string
+}
+
 export const storiesApi = {
+  /** Persisted tickets for a PRD + whether they're still fresh. Read this first;
+   *  only regenerate when missing/stale (`fresh` false). No LLM call. */
+  getForPrd: (prdId: number) =>
+    api.get<StoryCache>(`/v1/stories/for-prd/${prdId}`),
   /** Kick off breaking a PRD into user-story tickets (fire-and-forget). Returns
-   *  a job id immediately; poll `getJob` until ready/failed. No write. */
+   *  a job id immediately; poll `getJob` until ready/failed. Persists on ready. */
   generate: (prdId: number) =>
     api.post<{ job_id: number; status: string }>("/v1/stories/generate", { prd_id: prdId }),
   /** Poll a story-generation job. 404 once it's unknown / not the caller's. */

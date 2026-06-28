@@ -44,6 +44,7 @@ from app.business_context import (
 )
 from app.graph.decision_log import log_agent_decision
 from app.graph.gateway import llm_call
+from app.llm import DEEP_MODEL
 from app.net_guard import UnsafeURLError, assert_public_url
 
 logger = logging.getLogger(__name__)
@@ -380,6 +381,7 @@ def analyze_website(company_id: str, url: str) -> dict:
             enterprise_id=company_id,
             agent=AGENT,
             purpose="onboarding_website_analysis",
+            model=DEEP_MODEL,
             prompt_version=PROMPT_VERSION,
             system=_SYSTEM,
             input=_build_user_prompt(url, facts, corpus),

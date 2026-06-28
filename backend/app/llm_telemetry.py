@@ -41,6 +41,12 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
         "cache_read":     0.5 / 1_000_000,
         "output":         25.0 / 1_000_000,
     },
+    "claude-opus-4-8": {  # DEEP_MODEL — KG extraction + weekly-brief synthesis
+        "input":          5.0 / 1_000_000,
+        "cache_write_1h": 10.0 / 1_000_000,
+        "cache_read":     0.5 / 1_000_000,
+        "output":         25.0 / 1_000_000,
+    },
 }
 
 

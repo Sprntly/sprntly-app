@@ -159,6 +159,30 @@ def test_part_a_directed_part_b_fed_finished_part_a(isolated_settings, monkeypat
     assert "ONLY Part B" not in b_input
 
 
+def test_part_a_carries_the_rich_block_contract(isolated_settings, monkeypatch):
+    """Part A (the human PRD the user reads) is generated against the typed
+    `:::`-block contract (data/sprntly_prd_template.md), so its output renders
+    as first-class components instead of degrading to a raw markdown doc. Lock
+    the full block vocabulary + the no-degrade directive into the Part-A prompt."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    a_input = {c["purpose"]: c for c in captured}["generate_prd_part_a"]["input"]
+    for block in (
+        ":::context-chip", ":::tldr", ":::problem", ":::hypothesis",
+        ":::requirements", ":::acceptance-criteria", ":::metrics", ":::risks",
+        ":::milestones", ":::dod",
+    ):
+        assert block in a_input, f"Part A prompt missing {block} contract"
+    assert "Emit every named block EXACTLY" in a_input
+
+
 def test_part_b_derives_from_part_a_and_shared_evidence(isolated_settings, monkeypatch):
     """Coherence: Part A receives the insight + grounding; Part B derives from
     the finished Part A and the SAME evidence, so the two halves stay aligned."""

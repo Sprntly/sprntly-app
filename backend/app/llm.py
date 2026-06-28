@@ -9,6 +9,7 @@ timeouts / connection drops) and a per-request timeout. Existing callers
 import json
 import logging
 import random
+import re
 import threading
 import time as _time
 
@@ -21,6 +22,14 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
+# Deep-reasoning tier. Reserved for the handful of calls that are genuinely
+# open-ended AND infrequent AND high-stakes — the weekly-brief composition and
+# the onboarding business-context inference (each runs ~once per brief / per
+# company and seeds everything downstream). Everything else — structured
+# extraction, ranking, PRD templating, the per-message/loop paths — stays on
+# DEFAULT_MODEL where opus would compound cost for marginal quality. Keep in
+# sync with the pricing row in app/llm_telemetry.py (est_cost_usd fails closed).
+DEEP_MODEL = "claude-opus-4-8"
 
 # --- Process-wide concurrency cap on in-flight Anthropic calls ---------------
 # The prod box is small (~916 MB RAM, limited CPU). 4+ concurrent streaming
@@ -128,6 +137,22 @@ _REQUEST_TIMEOUT_S = 120.0
 # long-output skills run with this floor AND stream the response, which is the
 # SDK's required pattern for slow/large requests and sidesteps the read timeout.
 LONG_REQUEST_TIMEOUT_S = 600.0
+
+# A single wrapping markdown code fence (```lang … ```). Models sometimes wrap an
+# HTML/markdown document in one despite being told not to; we strip it so the
+# stored payload is the raw document.
+_CODE_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)\r?\n?```\s*$")
+
+
+def strip_code_fence(text: str) -> str:
+    """Strip a single wrapping markdown code fence (```html … ```) from a model
+    response, returning the inner document. Returns `text` unchanged when it
+    isn't fenced. Use on outputs that must be stored/rendered as a raw document
+    (e.g. the evidence-brief HTML), where a stray fence would otherwise leak into
+    the artifact."""
+    m = _CODE_FENCE_RE.match(text)
+    return m.group(1).strip() if m else text
+
 
 _client: Anthropic | None = None
 

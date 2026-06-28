@@ -30,7 +30,7 @@ Teresa Torres' continuous discovery + Opportunity Solution Tree.
 An OST (outcome → opportunities → sub-opportunities → solutions → experiments) rendered as an indented tree or mermaid graph, plus a weekly cadence plan (touchpoints, owners, artifacts) and the next target opportunity with rationale.
 
 ## Sprntly integration (optional)
-- **Inputs from Sprntly:** the outcome + ranked findings from the Monday Brief; customer signals across the 15 sources to seed opportunities; knowledge-graph segments.
+- **Inputs from Sprntly:** the outcome + ranked findings from the Weekly Brief; customer signals across the 15 sources to seed opportunities; knowledge-graph segments.
 - **Outputs to Sprntly:** the OST as a living artifact; target opportunities written to the backlog; experiments registered to the outcome graph for later learning.
 - **Degrades to:** with no Sprntly context, ask for the outcome and any research, then build the tree manually.
 

@@ -1092,15 +1092,11 @@
     display: block;
   }
 
+  /* The Sidebar always renders as the 60px icon rail (sidebar--collapsed is
+     hardcoded), so the content column's left reservation must equal that rail
+     width. A larger value leaves a phantom gutter between the rail and the
+     tab/content area. Matches the .app--sidebar-collapsed path below. */
   .app:not(.app--sidebar-collapsed) .main-column {
-    padding-left: 202px;
-  }
-
-  /* Prototype editor route: the rail is permanently 60px (Sidebar renders
-     sidebar--collapsed unconditionally), so the default-state 202px reservation
-     above leaves a phantom gutter. Scope the gutter to the real rail width on
-     this route only — the global rule above is intentionally left as-is. */
-  .app:not(.app--sidebar-collapsed) .main-column.main-column--flush {
     padding-left: 60px;
   }
 
@@ -4639,6 +4635,99 @@
     color: var(--ink-4);
   }
 
+  /* Sticky top action bar — ticket title + the Push-to-ClickUp button. */
+  .tkt-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 4px 0 12px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .tkt-topbar-titles {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .tkt-topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+  }
+
+  .tkt-list-select {
+    font-size: 12px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--ink);
+    max-width: 200px;
+  }
+
+  .tkt-push-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 6px 14px;
+    border-radius: 7px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    cursor: pointer;
+  }
+
+  .tkt-push-btn:disabled {
+    background: var(--surface-3);
+    color: var(--ink-4);
+    cursor: not-allowed;
+  }
+
+  .tkt-regen-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12.5px;
+    font-weight: 600;
+    padding: 6px 12px;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-2);
+    border: 1px solid var(--border);
+    cursor: pointer;
+  }
+
+  .tkt-regen-btn:hover {
+    background: var(--surface-2);
+    color: var(--ink-1);
+  }
+
+  .tkt-push-status {
+    font-size: 12px;
+    color: var(--ink-3);
+    margin: 0 0 12px;
+  }
+
+  .tkt-push-status--err {
+    color: var(--danger);
+  }
+
+  .tkt-push-status--ok {
+    color: var(--accent-ink);
+  }
+
   .tkt-list {
     display: flex;
     flex-direction: column;
@@ -7612,6 +7701,11 @@
   .od-layout {
     display: grid;
     /* grid-template-columns: 52px 1fr; */
+    /* Tab bar takes its content height; the chat/brief surface fills the rest.
+       Without this, the default single-column grid creates two equal auto rows
+       (align-content: stretch), pushing the brief content halfway down the
+       viewport and leaving a large blank gap under the tab bar. */
+    grid-template-rows: auto 1fr;
     flex: 1 1 auto;
     min-height: 0;
     align-items: stretch;
@@ -15033,6 +15127,29 @@
 
   .tkt-comment-send:hover {
     opacity: 0.85;
+  }
+
+  .tkt-comment-summary {
+    background: var(--accent-muted);
+    border: 1px solid var(--accent-alpha-14);
+    border-radius: 10px;
+    padding: 12px 14px;
+    margin-bottom: 14px;
+    font-size: 12.5px;
+    color: var(--ink);
+    line-height: 1.55;
+  }
+
+  .tkt-comment-summary-h {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    margin-bottom: 6px;
   }
 
   /* ═══════════════════════════════════════════════════════════════════════════

@@ -10,8 +10,11 @@ Back-compat note: the prior SQLite shape exposed `permissions` /
 keys in returned dicts so existing callers don't have to change.
 """
 import json
+import logging
 
 from app.db.client import require_client, utc_now
+
+logger = logging.getLogger(__name__)
 
 
 def _legacy_install(row: dict) -> dict:
@@ -137,35 +140,78 @@ def find_github_installation_for_repo(
 ) -> dict | None:
     """Return the caller-company's non-suspended installation for ``owner/repo``.
 
-    GitHub App installations are account-scoped. Until we persist a per-repo
-    installation inventory, the durable production-shaped lookup is by the repo
-    owner/account login. A selected-repos installation may still reject a future
-    extractor if the app was not granted this specific repo; that is an honest
-    extraction-time failure, not a generate-time product decision.
+    Resolution is by **company binding**, not by ``account_login`` string-match.
+    The picker lists a company's repos via an installation token minted from the
+    installation_id alone, so a row whose ``account_login`` was never hydrated
+    (an empty skeleton/thin row from a pre-hydration install or an install-time
+    ``fetch_app_installation`` race) is still a perfectly usable install. Keying
+    resolution on ``account_login`` made such a row unresolvable — the repo was
+    selectable in the picker yet grounding came back unmapped. The fix: bind by
+    company, use ``account_login`` only as a discriminator when a company has
+    several populated installs.
 
-    Tenant-scoped: only matches an installation owned by ``company_id`` (legacy
-    NULL-company rows never match), so one company can never resolve another
-    company's installation for the same account login.
+    Tiered (DB-only, no GitHub API calls here):
+      1. ``account_login`` ILIKE owner (+ company + non-suspended) — the healthy
+         path; populated rows resolve exactly as before.
+      2. No login match → if the company has **exactly one** non-suspended bound
+         install, use it. This heals the thin/skeleton single-install row and
+         matches what the picker mints against, so "selectable in the picker"
+         and "groundable" stay in lockstep.
+      3. Multiple non-suspended installs and none matched by login → ambiguous by
+         the DB alone → return None (lazy-hydration populates the logins over
+         time so tier-1 then resolves these).
+
+    ``account_login`` is no longer load-bearing: an empty login must not cause
+    resolution to fail when the company has a usable bound install.
+
+    Tenant-scoped at every tier: only matches an installation owned by
+    ``company_id`` (legacy NULL-company rows never match), so one company can
+    never resolve another company's installation.
     """
     owner = (repo_full_name or "").split("/", 1)[0].strip()
     if not owner or not company_id:
         return None
     c = require_client()
+
+    # Tier 1 — account_login match (healthy/populated rows, unchanged behavior).
+    # GitHub logins contain no %/_ so ilike is an exact case-insensitive match;
+    # hardens against owner-login casing drift only.
     resp = (
         c.table("github_installations")
         .select("*")
-        # GitHub logins contain no %/_ so ilike is an exact case-insensitive
-        # match; hardens against owner-login casing drift only. The durable fix
-        # is the company binding, not this lookup.
         .ilike("account_login", owner)
         .eq("company_id", company_id)
         .eq("suspended", False)
         .limit(1)
         .execute()
     )
-    if not resp.data:
-        return None
-    return _legacy_install(resp.data[0])
+    if resp.data:
+        return _legacy_install(resp.data[0])
+
+    # Tier 2 — company-binding fallback. With exactly one non-suspended install
+    # bound to the company, that IS the install the picker uses, so resolve to it
+    # regardless of the (possibly empty) account_login.
+    resp2 = (
+        c.table("github_installations")
+        .select("*")
+        .eq("company_id", company_id)
+        .eq("suspended", False)
+        .execute()
+    )
+    rows = resp2.data or []
+    if len(rows) == 1:
+        return _legacy_install(rows[0])
+
+    # Tier 3 — zero installs (genuine no-coverage) or multiple with no login
+    # match (ambiguous by DB alone). Lazy-hydration backfills logins so a future
+    # call resolves via tier 1.
+    if len(rows) > 1:
+        logger.info(
+            "github_installation_resolve_ambiguous company has %d non-suspended "
+            "installs, none matched repo owner by login",
+            len(rows),
+        )
+    return None
 
 
 def delete_github_installation(installation_id: int) -> bool:

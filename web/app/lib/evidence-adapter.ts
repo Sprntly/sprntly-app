@@ -22,6 +22,7 @@ import type {
   PrdSection,
   PrdContent,
 } from "../types/content"
+import { looksLikeHtmlBrief, stripHtmlCodeFence } from "./htmlBrief"
 
 const HEADING_RULE = /^─+$/
 const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "donut", "stat", "gauge"]
@@ -298,6 +299,14 @@ function parseSemanticBlock(
 /* ---------- main entry ---------- */
 
 export function markdownToEvidenceState(markdown: string): PrdContent {
+  // v3 evidence is a self-contained HTML visual brief. Detect it up front
+  // (unwrapping any ```html code fence the model may have added) and pass the
+  // raw HTML straight through — parsing it as markdown yields no sections and a
+  // blank panel.
+  if (looksLikeHtmlBrief(markdown)) {
+    return { metaLine: "", title: "", sections: [], html: stripHtmlCodeFence(markdown) }
+  }
+
   const lines = markdown.replace(/\r\n/g, "\n").split("\n")
   let title = ""
   const sections: PrdSection[] = []

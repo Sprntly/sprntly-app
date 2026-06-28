@@ -1217,6 +1217,128 @@
   flex-shrink: 0;
 }
 
+/* Framing heading above the mapped steer grouping — sentence-case label that
+ * names both redirect paths (type a direction / show a screenshot). Reuses the
+ * cluster's small-label tokens (13px / 600 / --ink) and the 12px vertical
+ * rhythm shared with the chip + steer row. */
+.design-agent-surface.modal .locate-steer-heading {
+  margin: 16px 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+/* Image-as-steer. A SECOND, optional steer on the SAME recovery
+ * modal — reuses the steer row, the global `.btn`, and the accent/danger/warn
+ * tokens; introduces no parallel control. MAPPED variant only (gated in JSX).
+ *
+ * Attach / replace button — a dashed sibling of the steer button so it reads as
+ * a secondary affordance, not a primary action. */
+.design-agent-surface.modal .locate-image-input {
+  display: none;
+}
+.design-agent-surface.modal .locate-image-attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  border-style: dashed;
+  color: var(--ink-2);
+}
+.design-agent-surface.modal .locate-image-attach:hover {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  background: var(--accent-muted);
+}
+.design-agent-surface.modal .locate-image-attach svg {
+  color: var(--ink-3);
+}
+.design-agent-surface.modal .locate-image-attach:hover svg {
+  color: var(--accent);
+}
+
+/* Attached-screenshot chip — filename + the cues read off it + a remove (×).
+ * Sits above the steer row. Accent-tinted to echo the "Suggested" lead card. */
+.design-agent-surface.modal .locate-image-chip {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 12px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--accent-alpha-14);
+  background: var(--accent-muted);
+  border-radius: var(--radius);
+}
+.design-agent-surface.modal .locate-image-chip-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+.design-agent-surface.modal .locate-image-chip-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.design-agent-surface.modal .locate-image-name {
+  display: block;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.design-agent-surface.modal .locate-image-cues {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.design-agent-surface.modal .locate-image-cue {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--accent-alpha-14);
+  color: var(--accent-ink);
+  padding: 1px 5px;
+  border-radius: 5px;
+  margin: 0 3px 2px 0;
+  display: inline-block;
+}
+.design-agent-surface.modal .locate-image-remove {
+  appearance: none;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  line-height: 0;
+  border-radius: var(--radius-sm);
+  color: var(--ink-3);
+  flex-shrink: 0;
+}
+.design-agent-surface.modal .locate-image-remove:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* Fall-open notice — the screenshot wasn't applied; we searched on text.
+ * Soft warn tone, NEVER an "applied"/"re-ranked toward the screenshot" claim. */
+.design-agent-surface.modal .locate-image-notice {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--warn);
+}
+
+/* Client-side reject — non-image MIME / >5 MB / unreadable, before upload. */
+.design-agent-surface.modal .locate-image-error {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--danger);
+}
+
 /* "Generate from the PRD anyway" — de-emphasized fallback rendered as a text
  * link, not a button (the recovery ladder leads with the accent "Search again").
  * Kept as a <button> element for the action semantics; styled flat. */
@@ -1551,6 +1673,32 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+/* Persistent in-tab identity subtitle, directly under the panel header row. */
+.design-agent-surface .da-left-subtitle {
+  margin: 0;
+  padding: 8px 16px 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+/* Empty-thread state: a quiet centred cue when no change has been described yet. */
+.design-agent-surface .da-activity-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--muted);
+}
+.design-agent-surface .da-activity-empty-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
 }
 .design-agent-surface .da-left-handle {
   margin-left: auto;
@@ -3127,23 +3275,6 @@
   border-color: var(--line);
 }
 
-/* "Step N" pin pill — inline at the start of the comment body (David's
-   `.pc-anchor`): brand-tinted, sits on the first text line. */
-.design-agent-surface .comment-step-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  border: 1px solid var(--accent-alpha-18);
-  border-radius: 5px;
-  padding: 1px 6px;
-  margin-right: 6px;
-  font-size: 10.5px;
-  font-weight: 600;
-  color: var(--accent);
-  background: var(--accent-soft);
-  vertical-align: middle;
-}
-
 /* (C1 Slice B / PART 2) The `.comment-resolve-indicator` rules were removed here:
    the PostGenerationResult `.da-right` pin-rows now reuse the shared
    `.comment-resolve-btn` (defined above), so the inline indicator class is dead. */
@@ -3302,6 +3433,13 @@
 .design-agent-surface .da-controlbar--titlebar .da-ctl-icon--square {
   width: 30px;
   height: 30px;
+}
+/* Share keeps its label in-tab (icon + "Share" + chevron), so it opts out of the
+   icon-only 30px squeeze above — auto width + the standard label padding/gap. */
+.design-agent-surface .da-controlbar--titlebar .da-ctl-icon.da-ctl-share {
+  width: auto;
+  padding: 0 10px;
+  gap: 6px;
 }
 
 /* Platform toggle: left-of-center (small margin from the back button) */

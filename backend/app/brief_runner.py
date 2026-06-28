@@ -23,7 +23,7 @@ from app.db import (
 from app.ask_runner import warm_brief_dynamic_asks, warm_predefined_asks
 from app.evidence_runner import generate_evidence
 from app.prd_runner import warm_prds_for_brief
-from app.prompts import EVIDENCE_TEMPLATE_VERSION
+from app.prompts import EVIDENCE_TEMPLATE_VERSION, EVIDENCE_VARIANT
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
     already cached. Errors are swallowed — drill-down warming is a perf
     optimization, not a correctness requirement.
     """
-    if find_existing_evidence(brief_id, insight_index, variant="v2"):
+    if find_existing_evidence(brief_id, insight_index, variant=EVIDENCE_VARIANT):
         logger.info(
             "Evidence already cached brief_id=%s insight_index=%s, skipping warm",
             brief_id,
@@ -118,7 +118,7 @@ async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
         insight_index=insight_index,
         title=title,
         template_version=EVIDENCE_TEMPLATE_VERSION,
-        variant="v2",
+        variant=EVIDENCE_VARIANT,
     )
     logger.info(
         "Warming evidence ev_id=%s brief_id=%s insight_index=%s (waiting on sema)",

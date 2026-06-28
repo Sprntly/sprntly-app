@@ -623,8 +623,16 @@ CREATE TABLE ticket_edits (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id          TEXT NOT NULL,
     ticket_key          TEXT NOT NULL,
-    description         TEXT NOT NULL DEFAULT '',
-    acceptance_criteria TEXT NOT NULL DEFAULT '[]',
+    -- Nullable (per 20260628130000): a fields-only edit leaves these NULL so the
+    -- UI keeps the generated body, distinct from an intentionally-saved empty.
+    description         TEXT,
+    acceptance_criteria TEXT,
+    -- Mirrors supabase/migrations/20260628120000_ticket_edits_fields.sql
+    title               TEXT,
+    priority            TEXT,
+    status              TEXT,
+    sprint              TEXT,
+    assignee            TEXT,
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, ticket_key)
 );
