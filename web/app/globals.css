@@ -1092,15 +1092,11 @@
     display: block;
   }
 
+  /* The Sidebar always renders as the 60px icon rail (sidebar--collapsed is
+     hardcoded), so the content column's left reservation must equal that rail
+     width. A larger value leaves a phantom gutter between the rail and the
+     tab/content area. Matches the .app--sidebar-collapsed path below. */
   .app:not(.app--sidebar-collapsed) .main-column {
-    padding-left: 202px;
-  }
-
-  /* Prototype editor route: the rail is permanently 60px (Sidebar renders
-     sidebar--collapsed unconditionally), so the default-state 202px reservation
-     above leaves a phantom gutter. Scope the gutter to the real rail width on
-     this route only — the global rule above is intentionally left as-is. */
-  .app:not(.app--sidebar-collapsed) .main-column.main-column--flush {
     padding-left: 60px;
   }
 
