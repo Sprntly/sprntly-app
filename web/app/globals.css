@@ -7705,6 +7705,11 @@
   .od-layout {
     display: grid;
     /* grid-template-columns: 52px 1fr; */
+    /* Tab bar takes its content height; the chat/brief surface fills the rest.
+       Without this, the default single-column grid creates two equal auto rows
+       (align-content: stretch), pushing the brief content halfway down the
+       viewport and leaving a large blank gap under the tab bar. */
+    grid-template-rows: auto 1fr;
     flex: 1 1 auto;
     min-height: 0;
     align-items: stretch;
