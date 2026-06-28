@@ -34,7 +34,10 @@ from .state import SessionState
 logger = logging.getLogger(__name__)
 
 
-_MODEL = os.environ.get("AGENT_MODEL", "claude-opus-4-7")
+# Sonnet by default: the ask agent is an interactive streaming tool-dispatch
+# loop (MEDIUM routing work), so the cheaper/faster tier. Override per-deploy
+# with AGENT_MODEL if a heavier model is ever warranted.
+_MODEL = os.environ.get("AGENT_MODEL", "claude-sonnet-4-6")
 _MAX_TOKENS = int(os.environ.get("AGENT_MAX_TOKENS", "32000"))
 _EFFORT = os.environ.get("AGENT_EFFORT", "high")  # low | medium | high | xhigh | max
 _MAX_PAUSE_RESUMES = 5

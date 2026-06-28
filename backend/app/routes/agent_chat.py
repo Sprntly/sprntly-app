@@ -30,6 +30,7 @@ from app.agent_tools import registry
 import app.agent_tools.github  # noqa: F401 — side-effect: registers GitHub tools
 from app.auth import CompanyContext, require_company
 from app.config import settings
+from app.llm import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -41,8 +42,10 @@ router = APIRouter(prefix="/v1/agent", tags=["agent"])
 # read another file) but tight enough to keep per-turn cost bounded.
 MAX_ITERATIONS = 8
 
-# Same model + budget the rest of Sprntly uses for chat.
-_MODEL = "claude-opus-4-7"
+# Sonnet: this is an interactive tool-dispatch loop (5-10 turns), so MEDIUM
+# routing reasoning on the cheaper/faster tier — opus is reserved for the rare
+# deep single-shot calls (see app.llm.DEEP_MODEL), not per-turn loop work.
+_MODEL = DEFAULT_MODEL
 _MAX_TOKENS_PER_TURN = 4096
 
 _SYSTEM_PROMPT = (

@@ -26,6 +26,7 @@ from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.types import Entity, Relationship
+from app.llm import DEEP_MODEL
 from app.prompts import BRIEF_SCHEMA_VERSION, VOICE_GUARD
 from app.synthesis.convergence import (
     ThemeConvergence,
@@ -512,6 +513,7 @@ def run_synthesis(
         cands, recipient=recipient, company_scale=company_scale)
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="compose_weekly_brief",
+        model=DEEP_MODEL,
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
         input=(strategic + roadmap_block + bizctx_block + skill_request
                + "\n\nCANDIDATE EVIDENCE (for the structured render fields):\n"

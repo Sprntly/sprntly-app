@@ -22,6 +22,14 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
+# Deep-reasoning tier. Reserved for the handful of calls that are genuinely
+# open-ended AND infrequent AND high-stakes — the weekly-brief composition and
+# the onboarding business-context inference (each runs ~once per brief / per
+# company and seeds everything downstream). Everything else — structured
+# extraction, ranking, PRD templating, the per-message/loop paths — stays on
+# DEFAULT_MODEL where opus would compound cost for marginal quality. Keep in
+# sync with the pricing row in app/llm_telemetry.py (est_cost_usd fails closed).
+DEEP_MODEL = "claude-opus-4-8"
 
 # --- Process-wide concurrency cap on in-flight Anthropic calls ---------------
 # The prod box is small (~916 MB RAM, limited CPU). 4+ concurrent streaming
