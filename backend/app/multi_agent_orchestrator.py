@@ -94,6 +94,7 @@ async def run_multi_agent_generation(
     dataset: str,
     run_id: str | None = None,
     mode: str = "aggressive",
+    prd_id: int | None = None,
 ) -> dict[str, Any]:
     """Orchestrate multi-agent generation for a brief insight.
 
@@ -130,13 +131,17 @@ async def run_multi_agent_generation(
     from app.prd_runner import generate_prd, PRD_VARIANT
     from app.prompts import PRD_TEMPLATE_VERSION
 
-    prd_id = start_prd(
-        brief_id=brief_id,
-        insight_index=insight_index,
-        title=title,
-        template_version=PRD_TEMPLATE_VERSION,
-        variant=PRD_VARIANT,
-    )
+    # The endpoint may pre-create the PRD row (stamped with run_id) so repeat
+    # clicks dedupe against it; only create one here when called directly.
+    if prd_id is None:
+        prd_id = start_prd(
+            brief_id=brief_id,
+            insight_index=insight_index,
+            title=title,
+            template_version=PRD_TEMPLATE_VERSION,
+            variant=PRD_VARIANT,
+            run_id=run_id,
+        )
 
     # Evidence generation
     from app.prompts import EVIDENCE_TEMPLATE_VERSION, EVIDENCE_VARIANT

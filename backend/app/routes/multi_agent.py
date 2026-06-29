@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from app.auth import CompanyContext, require_company
 from app.config import settings
 from app.db.multi_agent_docs import get_docs_by_run, get_run_status
+from app.db.prds import find_existing_prd, start_prd
 from app.deps.ownership import require_owned_brief
 
 logger = logging.getLogger(__name__)
@@ -76,8 +77,45 @@ async def generate(
             f"(0..{len(insights) - 1})",
         )
 
+    from app.prd_runner import PRD_VARIANT
+    from app.prompts import PRD_TEMPLATE_VERSION
+
+    # Idempotency: a repeat click for the same (brief, insight) must NOT restart
+    # the orchestration. If a multi-agent PRD is already generating or ready,
+    # return its run instead of minting a new one. We dedupe on the PRD row
+    # (the run's first DB write); run_id is NULL for single-PRD generations, so
+    # those never short-circuit a full run. force=true bypasses the guard.
+    if not body.force:
+        existing = find_existing_prd(
+            body.brief_id, body.insight_index, variant=PRD_VARIANT
+        )
+        if existing and existing.get("run_id"):
+            return {
+                "run_id": existing["run_id"],
+                "status": existing["status"],
+                "mode": body.mode,
+                "brief_id": body.brief_id,
+                "insight_index": body.insight_index,
+                "reused": True,
+            }
+
     run_id = str(uuid.uuid4())
     dataset = brief.get("dataset", "")
+
+    # Create the PRD row synchronously and stamp it with run_id so a concurrent
+    # second click resolves this run via find_existing_prd (no race window
+    # before the background task writes its first row). Pass it to the
+    # orchestrator so it reuses this row rather than creating a duplicate.
+    insight = insights[body.insight_index]
+    title = insight.get("title") or f"Insight #{body.insight_index + 1}"
+    prd_id = start_prd(
+        brief_id=body.brief_id,
+        insight_index=body.insight_index,
+        title=title,
+        template_version=PRD_TEMPLATE_VERSION,
+        variant=PRD_VARIANT,
+        run_id=run_id,
+    )
 
     from app.multi_agent_orchestrator import run_multi_agent_generation
 
@@ -90,6 +128,7 @@ async def generate(
                 dataset=dataset,
                 run_id=run_id,
                 mode=body.mode,
+                prd_id=prd_id,
             )
         except Exception:
             logger.exception("Multi-agent run failed run_id=%s", run_id)

@@ -29,8 +29,12 @@ def start_prd(
     title: str,
     template_version: int | None = None,
     variant: str = "v1",
+    run_id: str | None = None,
 ) -> int:
-    """Insert an empty PRD row in 'generating' state. Returns the new id."""
+    """Insert an empty PRD row in 'generating' state. Returns the new id.
+
+    `run_id` ties the row to a multi-agent run (NULL for single-PRD runs).
+    """
     c = require_client()
     resp = c.table("prds").insert({
         "brief_id": brief_id,
@@ -40,6 +44,7 @@ def start_prd(
         "status": "generating",
         "template_version": template_version,
         "variant": variant,
+        "run_id": run_id,
     }).execute()
     return resp.data[0]["id"]
 
