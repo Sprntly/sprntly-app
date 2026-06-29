@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import time
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
@@ -103,6 +104,155 @@ def test_run_sync_handles_expired_token_gracefully(monkeypatch, caplog):
     assert any(r.levelno == logging.WARNING and "reconnect required" in r.getMessage()
                for r in recs)
     assert not any(r.levelno >= logging.ERROR for r in recs)  # no ERROR traceback
+
+
+# ---------- github token refresh-on-sync ----------
+
+def _expired_github_tj() -> str:
+    # obtained_at far in the past → _token_is_fresh() is False
+    return ('{"access_token": "OLD", "refresh_token": "r1", '
+            '"obtained_at": 1, "expires_in": 28800}')
+
+
+def _fresh_github_tj() -> str:
+    return ('{"access_token": "OLD", "refresh_token": "r1", '
+            f'"obtained_at": {int(time.time())}, "expires_in": 28800}}')
+
+
+def _patch_github_refresh(monkeypatch, *, new_access="NEW"):
+    """Stub the github_app refresh + token tokens-encrypt + persist used by
+    auto_sync._maybe_refresh_token. Returns a dict recording the persist call."""
+    import app.connectors.github_app as gh
+    import app.connectors.tokens as toks
+
+    persisted: dict = {}
+    monkeypatch.setattr(gh, "refresh_user_token",
+                        lambda rt: {"access_token": new_access, "refresh_token": "r2",
+                                    "expires_in": 28800})
+    monkeypatch.setattr(
+        gh, "token_payload_to_store",
+        lambda tj: ('{"access_token": "%s", "refresh_token": "r2", '
+                    '"expires_in": 28800, "obtained_at": 999}') % tj["access_token"],
+    )
+    monkeypatch.setattr(toks, "encrypt_token_json", lambda s: "enc-new")
+    monkeypatch.setattr(auto_sync.db, "update_connection_tokens",
+                        lambda cid, prov, enc: persisted.update(cid=cid, prov=prov, enc=enc))
+    return persisted
+
+
+def test_run_sync_proactively_refreshes_expired_github_token(monkeypatch):
+    """An expired GitHub access token is refreshed BEFORE the pull (using the
+    stored refresh_token), persisted, and the sync runs with the new token —
+    no 401, no reconnect prompt."""
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"token_json_encrypted": "enc"})
+    monkeypatch.setattr(auto_sync, "decrypt_token_json", lambda enc: _expired_github_tj())
+    persisted = _patch_github_refresh(monkeypatch)
+    monkeypatch.setattr(auto_sync, "GraphFacade", lambda *a, **k: object())
+
+    used = {}
+
+    def fake_sync(facade, cid, prov, *, token, **k):
+        used["token"] = token
+        return {"records": 3, "signals": 2, "errors": []}
+
+    monkeypatch.setattr(auto_sync, "sync_provider", fake_sync)
+    stamps = {}
+    monkeypatch.setattr(auto_sync.db, "update_connection_sync",
+                        lambda cid, prov, **kw: stamps.update(kw))
+
+    auto_sync._run_sync("co-1", "github")
+
+    assert used["token"] == "NEW"            # synced with the refreshed token
+    assert persisted["enc"] == "enc-new"     # new token persisted
+    assert stamps["last_sync_error"] is None
+
+
+def test_run_sync_does_not_refresh_a_fresh_token(monkeypatch):
+    """A still-valid token is used as-is — no refresh round-trip."""
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"token_json_encrypted": "enc"})
+    monkeypatch.setattr(auto_sync, "decrypt_token_json", lambda enc: _fresh_github_tj())
+    import app.connectors.github_app as gh
+    called = {"n": 0}
+    monkeypatch.setattr(gh, "refresh_user_token",
+                        lambda rt: called.__setitem__("n", called["n"] + 1) or {})
+    monkeypatch.setattr(auto_sync, "GraphFacade", lambda *a, **k: object())
+    monkeypatch.setattr(auto_sync, "sync_provider",
+                        lambda f, c, p, *, token, **k: {"records": 1, "signals": 1, "errors": []})
+    monkeypatch.setattr(auto_sync.db, "update_connection_sync", lambda *a, **k: None)
+
+    auto_sync._run_sync("co-1", "github")
+    assert called["n"] == 0                  # fresh token → no refresh attempted
+
+
+def test_run_sync_reactive_refresh_on_401_then_retry(monkeypatch):
+    """A token that looks fresh but 401s mid-sync triggers ONE force-refresh +
+    retry with the new token, which succeeds."""
+    from fastapi import HTTPException
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"token_json_encrypted": "enc"})
+    monkeypatch.setattr(auto_sync, "decrypt_token_json", lambda enc: _fresh_github_tj())
+    _patch_github_refresh(monkeypatch)
+    monkeypatch.setattr(auto_sync, "GraphFacade", lambda *a, **k: object())
+
+    seen = []
+
+    def fake_sync(facade, cid, prov, *, token, **k):
+        seen.append(token)
+        if len(seen) == 1:
+            raise HTTPException(status_code=401, detail="expired")
+        return {"records": 1, "signals": 1, "errors": []}
+
+    monkeypatch.setattr(auto_sync, "sync_provider", fake_sync)
+    stamps = {}
+    monkeypatch.setattr(auto_sync.db, "update_connection_sync",
+                        lambda cid, prov, **kw: stamps.update(kw))
+
+    auto_sync._run_sync("co-1", "github")
+    assert seen == ["OLD", "NEW"]            # first 401 on OLD, retried on refreshed
+    assert stamps["last_sync_error"] is None
+
+
+def test_run_sync_reconnect_required_when_refresh_fails(monkeypatch, caplog):
+    """If refresh itself fails (refresh token expired/revoked), we fall back to
+    the graceful 'reconnect required' prompt — not an ERROR traceback."""
+    import logging
+
+    from fastapi import HTTPException
+    import app.connectors.github_app as gh
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"token_json_encrypted": "enc"})
+    monkeypatch.setattr(auto_sync, "decrypt_token_json", lambda enc: _expired_github_tj())
+
+    def refresh_boom(rt):
+        raise HTTPException(status_code=400, detail="GitHub token refresh failed")
+
+    monkeypatch.setattr(gh, "refresh_user_token", refresh_boom)
+    monkeypatch.setattr(auto_sync, "GraphFacade", lambda *a, **k: object())
+    monkeypatch.setattr(auto_sync, "sync_provider",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            HTTPException(status_code=401, detail="expired")))
+    stamps = {}
+    monkeypatch.setattr(auto_sync.db, "update_connection_sync",
+                        lambda cid, prov, **kw: stamps.update(kw))
+
+    with caplog.at_level(logging.WARNING, logger="app.kg_ingest.auto_sync"):
+        auto_sync._run_sync("co-1", "github")
+
+    assert stamps["last_sync_error"] == "github authorization expired — reconnect required"
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records
+                   if r.name == "app.kg_ingest.auto_sync")
+
+
+def test_maybe_refresh_noop_without_refresh_token_or_non_github(monkeypatch):
+    """No refresh_token, or a non-github provider, returns the token unchanged."""
+    tj = {"access_token": "x"}
+    assert auto_sync._maybe_refresh_token("co", "github", tj) is tj
+    tj2 = {"access_token": "x", "refresh_token": "r"}
+    assert auto_sync._maybe_refresh_token("co", "clickup", tj2) is tj2
 
 
 # ---------- kickoff fires from the connect callback ----------
