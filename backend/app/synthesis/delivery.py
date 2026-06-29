@@ -81,8 +81,10 @@ def _deliver_to_one(row: dict, brief: dict) -> dict:
         return {"user_id": user_id, "delivered": False, "reason": "no_bot_token"}
     try:
         fallback, blocks = _brief_blocks(brief)
+        # auto_join: self-add the bot to the target public channel if it was
+        # never invited, so the brief lands instead of failing not_in_channel.
         slack_oauth.post_message(bot_token, channel=channel,
-                                 text=fallback, blocks=blocks)
+                                 text=fallback, blocks=blocks, auto_join=True)
         return {"user_id": user_id, "delivered": True, "channel": channel}
     except Exception as e:  # noqa: BLE001 — one recipient never breaks the rest
         logger.exception("brief slack delivery failed for user %s", user_id)

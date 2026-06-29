@@ -63,12 +63,17 @@ SLACK_AUTH_TEST_URL = "https://slack.com/api/auth.test"
 SLACK_AUTH_REVOKE_URL = "https://slack.com/api/auth.revoke"
 SLACK_CONVERSATIONS_OPEN_URL = "https://slack.com/api/conversations.open"
 SLACK_CONVERSATIONS_HISTORY_URL = "https://slack.com/api/conversations.history"
+SLACK_CONVERSATIONS_JOIN_URL = "https://slack.com/api/conversations.join"
 SLACK_SEARCH_MESSAGES_URL = "https://slack.com/api/search.messages"
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
-# Channel-listing cap. Slack supports up to 1000 per page; 200 is a
-# generous default for the UI picker and avoids paginating in v1.
-CHANNELS_LIST_LIMIT = 200
+# Channel-listing cap across ALL pages. Slack returns up to 1000 channels per
+# page; we page through with the cursor until exhausted or this many channels
+# are collected, so the picker isn't silently truncated to one page in big
+# workspaces (a cause of "my channel isn't in the list").
+CHANNELS_LIST_LIMIT = 1000
+# Per-page size sent to conversations.list (Slack max is 1000).
+CHANNELS_PAGE_SIZE = 200
 
 
 def slack_configured() -> bool:
@@ -351,31 +356,13 @@ def token_payload_to_store(token_json: dict[str, Any]) -> str:
 # ───── Message delivery ─────
 
 
-def post_message(
+def _post_message_once(
     bot_access_token: str,
-    *,
-    channel: str,
-    text: str,
-    blocks: list[dict[str, Any]] | None = None,
-    thread_ts: str | None = None,
-) -> dict[str, Any]:
-    """Post a single message to a Slack channel. Used by the Comms Agent
-    (briefs, asks, alerts) — anywhere Sprntly needs to surface output in
-    Slack.
-
-    `channel` is the channel id (e.g. "C0123456789"), not the name.
-    `text` is the plain-text fallback that always renders even when
-    `blocks` is set (Slack requires it for accessibility + notifications).
-    `thread_ts` posts the message as a reply in that thread (used to keep
-    app_mention answers attached to the mention); omit it for flat posts/DMs.
-
-    On Slack-side rejection (ok:false), raises HTTPException(400) so the
-    caller surfaces a real error instead of silently dropping the message."""
-    body: dict[str, Any] = {"channel": channel, "text": text}
-    if blocks:
-        body["blocks"] = blocks
-    if thread_ts:
-        body["thread_ts"] = thread_ts
+    body: dict[str, Any],
+) -> tuple[bool, dict[str, Any], int]:
+    """Single chat.postMessage attempt. Returns (ok, parsed_body, http_status)
+    without raising so callers can branch on the Slack error code (e.g. retry
+    after joining the channel)."""
     resp = requests.post(
         SLACK_POST_MESSAGE_URL,
         headers={
@@ -390,16 +377,68 @@ def post_message(
         parsed = resp.json() or {}
     except ValueError:
         parsed = {}
-    if not resp.ok or not parsed.get("ok"):
+    return (resp.ok and bool(parsed.get("ok")), parsed, resp.status_code)
+
+
+def post_message(
+    bot_access_token: str,
+    *,
+    channel: str,
+    text: str,
+    blocks: list[dict[str, Any]] | None = None,
+    thread_ts: str | None = None,
+    auto_join: bool = False,
+) -> dict[str, Any]:
+    """Post a single message to a Slack channel. Used by the Comms Agent
+    (briefs, asks, alerts) — anywhere Sprntly needs to surface output in
+    Slack.
+
+    `channel` is the channel id (e.g. "C0123456789"), not the name.
+    `text` is the plain-text fallback that always renders even when
+    `blocks` is set (Slack requires it for accessibility + notifications).
+    `thread_ts` posts the message as a reply in that thread (used to keep
+    app_mention answers attached to the mention); omit it for flat posts/DMs.
+
+    `auto_join` (set by brief delivery) recovers the most common failure: the
+    bot was never invited to the target channel, so Slack rejects the post
+    with `not_in_channel`. When set, we self-join the public channel via
+    conversations.join and retry once. Private channels can't be self-joined,
+    so the retry still fails and we raise the actionable error below.
+
+    On Slack-side rejection (ok:false), raises HTTPException(400) so the
+    caller surfaces a real error instead of silently dropping the message.
+    `not_in_channel` is rewritten into a human instruction to invite the bot."""
+    body: dict[str, Any] = {"channel": channel, "text": text}
+    if blocks:
+        body["blocks"] = blocks
+    if thread_ts:
+        body["thread_ts"] = thread_ts
+
+    ok, parsed, status = _post_message_once(bot_access_token, body)
+    error = parsed.get("error")
+    if not ok and auto_join and error == "not_in_channel":
+        # Bot isn't a member — self-join the public channel and retry once.
+        if join_channel(bot_access_token, channel):
+            ok, parsed, status = _post_message_once(bot_access_token, body)
+            error = parsed.get("error")
+
+    if not ok:
         logger.warning(
             "Slack chat.postMessage failed: http=%s ok=%s err=%s",
-            resp.status_code,
+            status,
             parsed.get("ok"),
-            parsed.get("error"),
+            error,
         )
+        if error == "not_in_channel":
+            raise HTTPException(
+                400,
+                "Sprntly isn't a member of that channel. Invite the Sprntly "
+                "bot to it in Slack (type /invite @Sprntly in the channel), "
+                "or pick a public channel.",
+            )
         raise HTTPException(
             400,
-            f"Slack rejected the message: {parsed.get('error') or 'unknown error'}",
+            f"Slack rejected the message: {error or 'unknown error'}",
         )
     return parsed
 
@@ -561,56 +600,99 @@ def search_messages(
 
 
 def list_channels(bot_access_token: str) -> list[dict[str, Any]]:
-    """List channels the bot can see — public + any private channels the
-    bot has been added to. Used to back the channel picker in the
-    Configure drawer.
+    """List channels the bot can see — all public channels plus any private
+    channels the bot has been added to. Used to back the channel picker in
+    the Configure drawer.
+
+    Pages through conversations.list with the cursor until exhausted (or
+    CHANNELS_LIST_LIMIT is reached) so large workspaces aren't truncated to
+    a single page. Private channels need the `groups:read` bot scope; without
+    it Slack simply omits them (no error), so older installs that haven't
+    reconnected gracefully see public channels only.
 
     Returns a trimmed shape: [{id, name, is_private, is_member, is_archived}].
-    Archived channels are filtered out. Returns [] if the call fails
-    (network, ok:false, etc.) — the caller decides whether that's a
-    user-visible error."""
-    resp = requests.get(
-        SLACK_CONVERSATIONS_LIST_URL,
-        headers={"Authorization": f"Bearer {bot_access_token}"},
-        params={
-            # Public channels only. Listing private channels would require
-            # the `groups:read` scope, which we don't ask for by default —
-            # most users pick a public channel for notifications anyway,
-            # and asking for fewer scopes makes the install consent
-            # screen less intimidating. Add `groups:read` here + as a bot
-            # scope on the Slack app if private channels become a need.
-            "types": "public_channel",
+    Archived channels are filtered out. Returns whatever was collected before
+    a failed page (network, ok:false, etc.) — the caller decides whether an
+    empty list is a user-visible error."""
+    out: list[dict[str, Any]] = []
+    cursor: str | None = None
+    while len(out) < CHANNELS_LIST_LIMIT:
+        params: dict[str, Any] = {
+            "types": "public_channel,private_channel",
             "exclude_archived": "true",
-            "limit": str(CHANNELS_LIST_LIMIT),
+            "limit": str(min(CHANNELS_PAGE_SIZE, CHANNELS_LIST_LIMIT - len(out))),
+        }
+        if cursor:
+            params["cursor"] = cursor
+        resp = requests.get(
+            SLACK_CONVERSATIONS_LIST_URL,
+            headers={"Authorization": f"Bearer {bot_access_token}"},
+            params=params,
+            timeout=15,
+        )
+        if not resp.ok:
+            logger.warning(
+                "Slack conversations.list failed: %s %s",
+                resp.status_code,
+                resp.text[:200],
+            )
+            break
+        body = resp.json() or {}
+        if not body.get("ok"):
+            logger.warning(
+                "Slack conversations.list returned ok=false: %s",
+                body.get("error"),
+            )
+            break
+        for ch in body.get("channels") or []:
+            out.append(
+                {
+                    "id": ch.get("id"),
+                    "name": ch.get("name"),
+                    "is_private": bool(ch.get("is_private")),
+                    "is_member": bool(ch.get("is_member")),
+                    "is_archived": bool(ch.get("is_archived")),
+                }
+            )
+        cursor = (body.get("response_metadata") or {}).get("next_cursor")
+        if not cursor:
+            break
+    return out
+
+
+def join_channel(bot_access_token: str, channel_id: str) -> bool:
+    """Have the bot self-join a PUBLIC channel via conversations.join so it
+    can post there. Idempotent — joining a channel the bot is already in
+    returns ok:true. Requires the `channels:join` bot scope.
+
+    Returns True on success. Returns False (without raising) on any Slack
+    rejection — most importantly `method_not_allowed_for_channel_type`, which
+    Slack returns for private channels (a bot can't self-join those; it must
+    be invited). Callers use the False to fall through to an actionable
+    "invite the bot" error rather than crashing delivery."""
+    resp = requests.post(
+        SLACK_CONVERSATIONS_JOIN_URL,
+        headers={
+            "Authorization": f"Bearer {bot_access_token}",
+            "Content-Type": "application/json; charset=utf-8",
         },
+        json={"channel": channel_id},
         timeout=15,
     )
-    if not resp.ok:
-        logger.warning(
-            "Slack conversations.list failed: %s %s",
+    parsed: dict[str, Any] = {}
+    try:
+        parsed = resp.json() or {}
+    except ValueError:
+        parsed = {}
+    if not resp.ok or not parsed.get("ok"):
+        logger.info(
+            "Slack conversations.join did not join %s: http=%s err=%s",
+            channel_id,
             resp.status_code,
-            resp.text[:200],
+            parsed.get("error"),
         )
-        return []
-    body = resp.json() or {}
-    if not body.get("ok"):
-        logger.warning(
-            "Slack conversations.list returned ok=false: %s",
-            body.get("error"),
-        )
-        return []
-    out: list[dict[str, Any]] = []
-    for ch in body.get("channels") or []:
-        out.append(
-            {
-                "id": ch.get("id"),
-                "name": ch.get("name"),
-                "is_private": bool(ch.get("is_private")),
-                "is_member": bool(ch.get("is_member")),
-                "is_archived": bool(ch.get("is_archived")),
-            }
-        )
-    return out
+        return False
+    return True
 
 
 def format_brief_message(brief_payload: dict[str, Any]) -> str:

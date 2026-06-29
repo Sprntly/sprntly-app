@@ -382,7 +382,7 @@ def test_delivery_targets_each_user_own_slack(slack_env, monkeypatch):
                         lambda enc: json.dumps(tokens[enc]))
     monkeypatch.setattr(
         delivery.slack_oauth, "post_message",
-        lambda tok, *, channel, text, blocks: posts.append((tok, channel))
+        lambda tok, *, channel, text, blocks, **k: posts.append((tok, channel))
         or {"ok": True})
 
     out = delivery.deliver_brief_to_slack(

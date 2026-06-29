@@ -32,7 +32,7 @@ def test_delivers_with_blocks(isolated_settings, monkeypatch):
     monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: [row])
     monkeypatch.setattr(delivery, "decrypt_token_json", lambda s: json.dumps(token))
     monkeypatch.setattr(delivery.slack_oauth, "post_message",
-                        lambda tok, *, channel, text, blocks: sent.update(
+                        lambda tok, *, channel, text, blocks, **k: sent.update(
                             tok=tok, channel=channel, text=text, blocks=blocks) or {"ok": True})
 
     out = delivery.deliver_brief_to_slack("ent-A", _BRIEF)

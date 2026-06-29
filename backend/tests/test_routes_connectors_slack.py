@@ -364,11 +364,46 @@ def test_list_channels_posts_with_bearer_and_correct_params(slack_env):
     assert call_args.args[0] == "https://slack.com/api/conversations.list"
     assert call_args.kwargs["headers"]["Authorization"] == "Bearer xoxb-1234"
     params = call_args.kwargs["params"]
-    # public_channel only — see slack_oauth.list_channels for the
-    # rationale (private channels would require the groups:read scope
-    # we deliberately don't request).
-    assert params["types"] == "public_channel"
+    # Public + private — the picker offers both; the bot still can't self-join
+    # private channels, but listing them lets a user pick one they've invited
+    # the bot to. Requires the groups:read bot scope.
+    assert params["types"] == "public_channel,private_channel"
     assert params["exclude_archived"] == "true"
+
+
+def test_list_channels_paginates_until_cursor_exhausted(slack_env):
+    """conversations.list is cursor-paginated; a big workspace returns
+    several pages. list_channels must follow next_cursor or it silently
+    truncates the picker to the first page."""
+    from app.connectors import slack_oauth
+
+    page1 = MagicMock()
+    page1.ok = True
+    page1.json.return_value = {
+        "ok": True,
+        "channels": [
+            {"id": "C1", "name": "general", "is_private": False, "is_member": True},
+        ],
+        "response_metadata": {"next_cursor": "CURSOR2"},
+    }
+    page2 = MagicMock()
+    page2.ok = True
+    page2.json.return_value = {
+        "ok": True,
+        "channels": [
+            {"id": "C2", "name": "random", "is_private": False, "is_member": False},
+        ],
+        "response_metadata": {"next_cursor": ""},
+    }
+    with patch(
+        "app.connectors.slack_oauth.requests.get", side_effect=[page1, page2]
+    ) as mock_get:
+        channels = slack_oauth.list_channels("xoxb-1234")
+
+    assert [c["id"] for c in channels] == ["C1", "C2"]
+    assert mock_get.call_count == 2
+    # Second call must forward the cursor from page 1.
+    assert mock_get.call_args_list[1].kwargs["params"]["cursor"] == "CURSOR2"
 
 
 def test_list_channels_returns_empty_on_ok_false(slack_env):
@@ -444,6 +479,66 @@ def test_post_message_raises_400_on_ok_false(slack_env):
             )
     assert exc.value.status_code == 400
     assert "channel_not_found" in exc.value.detail
+
+
+def test_post_message_auto_joins_and_retries_on_not_in_channel(slack_env):
+    """The most common delivery failure: the bot was never invited to the
+    target public channel, so the first post fails not_in_channel. With
+    auto_join, post_message self-joins via conversations.join and retries —
+    the brief lands without anyone manually inviting the bot."""
+    from app.connectors import slack_oauth
+
+    first = MagicMock()
+    first.ok = True
+    first.json.return_value = {"ok": False, "error": "not_in_channel"}
+    retry = MagicMock()
+    retry.ok = True
+    retry.json.return_value = {"ok": True, "ts": "1.0", "channel": "C1"}
+    join = MagicMock()
+    join.ok = True
+    join.json.return_value = {"ok": True, "channel": {"id": "C1"}}
+
+    with patch(
+        "app.connectors.slack_oauth.requests.post",
+        side_effect=[first, join, retry],
+    ) as mock_post:
+        out = slack_oauth.post_message(
+            "xoxb-1234", channel="C1", text="hi", auto_join=True
+        )
+
+    assert out["ok"] is True
+    # post → join → post (3 calls); middle call is conversations.join.
+    assert mock_post.call_count == 3
+    assert mock_post.call_args_list[1].args[0] == (
+        "https://slack.com/api/conversations.join"
+    )
+
+
+def test_post_message_not_in_channel_raises_actionable_error(slack_env):
+    """A private channel can't be self-joined, so the retry still fails.
+    The error must tell the user to invite the bot, not leak the raw code."""
+    from app.connectors import slack_oauth
+    from fastapi import HTTPException
+
+    post_fail = MagicMock()
+    post_fail.ok = True
+    post_fail.json.return_value = {"ok": False, "error": "not_in_channel"}
+    join_fail = MagicMock()
+    join_fail.ok = True
+    join_fail.json.return_value = {
+        "ok": False,
+        "error": "method_not_allowed_for_channel_type",
+    }
+    with patch(
+        "app.connectors.slack_oauth.requests.post",
+        side_effect=[post_fail, join_fail, post_fail],
+    ):
+        with pytest.raises(HTTPException) as exc:
+            slack_oauth.post_message(
+                "xoxb-1234", channel="G-private", text="hi", auto_join=True
+            )
+    assert exc.value.status_code == 400
+    assert "invite" in exc.value.detail.lower()
 
 
 # ─────────────────────── /slack/channels route ───────────────────────

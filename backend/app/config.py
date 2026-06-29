@@ -181,9 +181,17 @@ class Settings(BaseSettings):
     # channels/DMs the bot has been added to (history scopes). Must mirror the
     # Bot Token Scopes configured on the Slack app for the consent screen to
     # grant them.
+    #
+    # `channels:join` lets the bot self-add to a public channel before posting,
+    # so a brief lands even when nobody invited it first (the #1 cause of
+    # "notifications never showed up"). `groups:read` lets us list private
+    # channels in the picker — the bot still can't self-join private channels
+    # (Slack forbids it), so those must be invited manually, but at least they
+    # become selectable. Both must be added to the Slack app's Bot Token Scopes
+    # in the dashboard; existing installs must reconnect to pick them up.
     slack_bot_scopes: str = (
-        "chat:write,im:write,channels:read,channels:history,"
-        "groups:history,im:history,mpim:history,users:read"
+        "chat:write,im:write,channels:read,channels:join,channels:history,"
+        "groups:read,groups:history,im:history,mpim:history,users:read"
     )
     # User scopes (xoxp): read the authorizing user's OWN messages + search,
     # acting as them. Rides on `user_scope=` in the authorize URL; Slack then

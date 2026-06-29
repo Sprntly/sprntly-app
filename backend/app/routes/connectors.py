@@ -2079,11 +2079,17 @@ def slack_save_config(
 ):
     """Save the user's selected notification-target channel. Stored on
     THIS user's own Slack connection row's config so the Comms Agent can
-    read it at post-time without a separate lookup table."""
+    read it at post-time without a separate lookup table.
+
+    Best-effort self-joins the chosen public channel right away (idempotent,
+    needs `channels:join`) so the very first brief posts cleanly instead of
+    failing not_in_channel. Private channels can't be self-joined — `joined`
+    comes back False and the UI can prompt the user to /invite the bot."""
+    channel_id = body.channel_id.strip()
     row = db.get_slack_connection(company.company_id, company.user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
-    patch: dict = {"channel_id": body.channel_id.strip()}
+    patch: dict = {"channel_id": channel_id}
     if body.channel_name:
         patch["channel_name"] = body.channel_name.strip()
     updated = db.patch_slack_connection_config(
@@ -2095,7 +2101,13 @@ def slack_save_config(
             config = json.loads(updated.get("config_json") or "{}")
         except (TypeError, ValueError):
             config = {}
-    return {"ok": True, "config": config}
+    joined = False
+    try:
+        bot_token, _row = _slack_bot_token(company.company_id, company.user_id)
+        joined = slack_oauth.join_channel(bot_token, channel_id)
+    except Exception:  # noqa: BLE001 — join is best-effort; never block the save
+        logger.exception("slack auto-join on config save failed")
+    return {"ok": True, "config": config, "joined": joined}
 
 
 class SlackSyncCorpusIn(BaseModel):
