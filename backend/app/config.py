@@ -265,6 +265,12 @@ class Settings(BaseSettings):
     # cycle after a member crosses its day_offset, and de-dup makes extra
     # cycles cheap no-ops.
     drip_interval_hours: int = 6
+    # Brief nudges: the Slack/email reminder sequence that drives users to open
+    # their weekly brief (app/brief_nudge.py). OFF by default — no real user is
+    # messaged until this is explicitly enabled. Day 0 sends inline at brief
+    # generation; the cycle sweeps Day 1/2/3 reminders while a brief is unopened.
+    brief_nudge_enabled: bool = False
+    brief_nudge_interval_hours: int = 6
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)
