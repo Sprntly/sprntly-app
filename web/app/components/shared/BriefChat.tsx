@@ -7,8 +7,7 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { useWorkspace } from "../../context/WorkspaceContext"
-import { ApiError, briefApi, type AskResponse } from "../../lib/api"
-import { runAskGeneration, resumeAskGeneration, getPendingAsk } from "../../lib/runAskGeneration"
+import { briefApi, type AskResponse } from "../../lib/api"
 import { runPrdGeneration, loadPrdById, loadLatestPrd } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
@@ -107,28 +106,6 @@ function buildGreeting(v2: BriefV2State | null, firstName: string | null): strin
   }
   const n = [v2.hero, ...v2.supporting].filter(Boolean).length
   return `${lead} Here's the top ${n} thing${n !== 1 ? "s" : ""} worth your attention this week.`
-}
-
-function parseAskError(e: unknown): string {
-  const detail =
-    e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
-      ? (e.body as { detail: unknown }).detail
-      : null
-  const detailStr =
-    typeof detail === "string"
-      ? detail
-      : Array.isArray(detail)
-        ? detail
-            .map((x) =>
-              typeof x === "object" && x && "msg" in x ? String((x as { msg: string }).msg) : String(x),
-            )
-            .join(" · ")
-        : null
-  return e instanceof ApiError
-    ? detailStr || e.message
-    : e instanceof Error
-      ? e.message
-      : "Something went wrong"
 }
 
 // ── Composer / header affordance icons ───────────────────────────────────────
@@ -397,7 +374,7 @@ function BriefGeneratingState() {
 }
 
 export function BriefChat() {
-  const { aiBarValue, setAIBarValue, openContentPanel, showToast } = useNavigation()
+  const { aiBarValue, setAIBarValue, openContentPanel, showToast, setPendingChatHandoff } = useNavigation()
   const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
@@ -714,68 +691,6 @@ export function BriefChat() {
     }
   }, [activeCompany, scrollToEnd])
 
-  const plainAsk = useCallback(
-    async (q: string) => {
-      const aId = uid()
-      // Persist a pending-ask marker keyed by this agent turn so a
-      // backgrounded/remounted tab re-attaches via the mount resume effect
-      // instead of orphaning the in-flight answer. The "thinking…" agent turn
-      // is itself persisted (STORAGE_PREFIX), so the working state survives too.
-      setTurns((t) => [...t, { id: aId, role: "agent", persona: "ds", status: "thinking…", state: "thinking", askPending: aId }])
-      scrollToEnd()
-      try {
-        // Fire-and-forget + visibility-aware poll (blur/remount-safe).
-        const res = await runAskGeneration(q, activeCompany, aId)
-        setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "done", status: undefined, reply: res, fresh: true, askPending: undefined } : x)))
-      } catch (e) {
-        const msg = parseAskError(e)
-        setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error: msg, askPending: undefined } : x)))
-        showToast("Ask failed", msg.slice(0, 120))
-      }
-    },
-    [activeCompany, scrollToEnd, showToast],
-  )
-
-  // ── Resume an orphaned in-flight ASK on (re)mount ─────────────────────────
-  // A plainAsk is fire-and-forget: the persisted "thinking…" agent turn carries
-  // an `askPending` marker, and the active ask_id is persisted (jobResume). On
-  // remount, re-attach to the visibility-aware poll against the existing status
-  // endpoint — NOT re-ask — and clear the working state when it resolves.
-  const resumedAskRef = useRef<Set<string>>(new Set())
-  useEffect(() => {
-    if (!activeCompany) return
-    for (const turn of turns) {
-      if (turn.role !== "agent" || !turn.askPending) continue
-      if (turn.reply !== undefined && turn.reply !== null) continue
-      if (resumedAskRef.current.has(turn.id)) continue
-      const pending = getPendingAsk(activeCompany, turn.id)
-      if (!pending) continue
-      const askId = Number(pending.id)
-      if (!Number.isFinite(askId)) continue
-      resumedAskRef.current.add(turn.id)
-      const aId = turn.id
-      busyRef.current = true
-      setBusy(true)
-      void (async () => {
-        try {
-          const res = await resumeAskGeneration(askId, activeCompany, aId)
-          if (!mountedRef.current) return
-          setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "done", status: undefined, reply: res, fresh: true, askPending: undefined } : x)))
-        } catch (e) {
-          if (!mountedRef.current) return
-          const msg = parseAskError(e)
-          setTurns((t) => t.map((x) => (x.id === aId ? { ...x, state: "error", error: msg, askPending: undefined } : x)))
-        } finally {
-          if (mountedRef.current) {
-            busyRef.current = false
-            setBusy(false)
-            scrollToEnd()
-          }
-        }
-      })()
-    }
-  }, [activeCompany, turns, scrollToEnd])
-
   const runGate = useCallback(
     async (fn: () => void | Promise<void>) => {
       if (busyRef.current) return
@@ -802,19 +717,27 @@ export function BriefChat() {
         return
       }
       if (busyRef.current) return
+      setDraft("")
+      if (composerRef.current) composerRef.current.style.height = "auto"
+      // A plain question is a CHAT — it never threads inline into the brief.
+      // Hand it to the host ChatScreen, which opens a fresh chat tab seeded with
+      // the query (one new tab per chat started here). PRD / prototype / tickets
+      // are COMMANDS that drive the right rail in place, so they stay on the brief.
+      const isCommand = isPrdCommand(q) || isPrototypeCommand(q) || isTicketsCommand(q)
+      if (!isCommand) {
+        setPendingChatHandoff({ query: q })
+        return
+      }
       // A PRD command opens its work in the right rail (no chat turn), so don't
       // echo it as a chat message either — it's a command, not a conversation.
       if (!isPrdCommand(q)) appendUser(q)
-      setDraft("")
-      if (composerRef.current) composerRef.current.style.height = "auto"
       void runGate(() => {
         if (isPrdCommand(q)) return prdFlow()
         if (isPrototypeCommand(q)) return prototypeFlow()
-        if (isTicketsCommand(q)) return ticketsFlow()
-        return plainAsk(q)
+        return ticketsFlow()
       })
     },
-    [appendUser, plainAsk, prdFlow, prototypeFlow, runGate, showToast, ticketsFlow],
+    [appendUser, prdFlow, prototypeFlow, runGate, showToast, ticketsFlow, setPendingChatHandoff],
   )
 
   const onAction = useCallback(
