@@ -500,25 +500,25 @@ describe("BriefChat composer — 'generate a prototype' navigation", () => {
   })
 })
 
-// ── Brief header: no duplicate "Weekly brief" title ───────────────────────────
-// The "Weekly brief" label lives in the chat tab name above the brief. Repeating
-// it as the header <h1> directly below the tab was a redundant duplicate, so the
-// header no longer renders a standalone title — only the week and company line
-// remain. The LIVE/REFRESHING status badge was also removed: a static
-// "REFRESHING" pill was confusing and carried no real signal.
-describe("BriefChat header — no duplicate brief title", () => {
-  it("renders no .bh-title element (the tab name is the single source of the label)", async () => {
+// ── Brief top bar removed ─────────────────────────────────────────────────────
+// The brief top bar (the .bh <header> with the "Week of … · <Company>" label and
+// the connectors (plug) + more (…) icon buttons) was removed entirely — the tab
+// name above the surface is the single source of context, so the strip was
+// redundant. The tab bar itself lives in ChatScreen, not here, so it is
+// unaffected; the brief now opens straight into its content.
+describe("BriefChat header — top bar removed", () => {
+  it("renders no .bh header bar (the brief opens straight into its content)", async () => {
     await act(async () => {
       renderBrief()
     })
-    const header = document.querySelector("header.bh") as HTMLElement | null
-    expect(header).not.toBeNull()
-    // The redundant title is gone…
-    expect(header!.querySelector(".bh-title")).toBeNull()
-    // …and the LIVE/REFRESHING status badge is gone too…
-    expect(header!.querySelector(".bh-live")).toBeNull()
-    // …but the week/company context still renders.
-    expect(within(header!).getByText(/Acme Health/)).not.toBeNull()
+    // The whole header bar and its chrome are gone…
+    expect(document.querySelector("header.bh")).toBeNull()
+    expect(document.querySelector(".bh-actions")).toBeNull()
+    // …including the connectors (plug) and more (…) icon buttons.
+    expect(screen.queryByLabelText("Open connectors")).toBeNull()
+    expect(screen.queryByLabelText("More options")).toBeNull()
+    // …but the brief content still renders.
+    expect(document.querySelector(".bc-scroll")).not.toBeNull()
   })
 })
 
