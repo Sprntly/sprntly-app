@@ -444,6 +444,24 @@ def invalidate_stale_prototypes(current_version: int, variant: str = "v1") -> in
     return len(stale_ids)
 
 
+def restore_template_demoted_prototypes() -> int:
+    """One-time: un-hide template-demoted prototypes. Flip status
+    'invalidated' -> 'ready' for rows that still have a bundle_url.
+    Operates across ALL workspaces (mirrors the system-wide demote it
+    reverses) — workspace_id is read-only and preserved per row.
+    Idempotent: a second run matches no rows and is a no-op.
+    """
+    c = require_client()
+    rows = (c.table(_TABLE).select("id")
+            .eq("status", "invalidated")
+            .not_.is_("bundle_url", "null")
+            .execute().data)
+    ids = [r["id"] for r in rows]
+    if ids:
+        c.table(_TABLE).update({"status": "ready"}).in_("id", ids).execute()
+    return len(ids)
+
+
 # ─── Preview-image backfill helpers ───────────────────────────────────────
 #
 # Used by the `python -m app.backfill_previews` one-off to repair prototypes

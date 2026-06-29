@@ -70,6 +70,17 @@ class Settings(BaseSettings):
     # deploy and a reloaded Settings singleton in tests stays honest.
     # Env-overridable via DESIGN_AGENT_WORKER_ENABLED.
     design_agent_worker_enabled: bool = False
+    # When True, a backend startup whose prototype template version is greater
+    # than an existing 'ready' prototype's stamped version demotes that prototype
+    # to 'invalidated' (the View path 404s it → the PRD screen drops to the
+    # "Generate" CTA). Default FALSE: a routine template bump is a generation-prompt
+    # cache refresh, NOT a render-safety break — the bundle is a self-contained
+    # static build that still renders — so existing ready prototypes are PRESERVED
+    # across the bump and remain viewable. Set True only for a deliberate breaking
+    # change where old bundles must be force-regenerated. Read at lifespan startup
+    # in app/main.py. Env-overridable via
+    # DESIGN_AGENT_INVALIDATE_PROTOTYPES_ON_TEMPLATE_BUMP.
+    design_agent_invalidate_prototypes_on_template_bump: bool = False
     # How many of a fresh brief's top insights get their PRD auto-generated
     # after brief generation (hero first, then confidence). Default 3 = every
     # insight in the brief (the brief surfaces MAX_INSIGHTS=3), so all three
