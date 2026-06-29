@@ -25,12 +25,14 @@ from types import SimpleNamespace
 import pytest
 
 
-def _reload_llm_with_cap(monkeypatch, cap: str | None):
-    """Reload app.llm so its module-level semaphore picks up LLM_MAX_CONCURRENCY.
+def _reload_llm_with_cap(monkeypatch, cap: str | None, bg: str | None = None):
+    """Reload app.llm so its module-level gate picks up LLM_MAX_CONCURRENCY
+    (and optionally LLM_BG_CAP).
 
-    The semaphore is created at import time from settings, so to exercise a
-    specific cap we set the env, reload app.config (so settings re-reads it),
-    then reload app.llm. Returns the freshly reloaded llm module.
+    The gate is created at import time from settings, so to exercise a specific
+    cap we set the env, reload app.config (so settings re-reads it), then reload
+    app.llm. `bg=None` clears LLM_BG_CAP so the default bg_cap (1) applies —
+    matching the pre-existing tests. Returns the freshly reloaded llm module.
     """
     import app.config as config_mod
 
@@ -38,6 +40,10 @@ def _reload_llm_with_cap(monkeypatch, cap: str | None):
         monkeypatch.delenv("LLM_MAX_CONCURRENCY", raising=False)
     else:
         monkeypatch.setenv("LLM_MAX_CONCURRENCY", cap)
+    if bg is None:
+        monkeypatch.delenv("LLM_BG_CAP", raising=False)
+    else:
+        monkeypatch.setenv("LLM_BG_CAP", bg)
     importlib.reload(config_mod)
     import app.llm as llm_mod
 
@@ -275,6 +281,65 @@ def test_background_lane_capped_at_one(isolated_settings, monkeypatch):
         t.join(timeout=10)
         assert not t.is_alive()
     assert errors == []
+
+
+def test_bg_cap_env_override_allows_more_concurrent_background(
+    isolated_settings, monkeypatch
+):
+    """LLM_BG_CAP=2 (with cap=4) lets TWO background calls run concurrently —
+    the warm-parallelism knob — while a third queues and interactive still has
+    a slot."""
+    llm = _reload_llm_with_cap(monkeypatch, "4", bg="2")
+    assert llm._resolve_bg_cap() == 2
+
+    release = threading.Event()
+    probe = _ConcurrencyProbe(response=_msg(), release_event=release)
+    monkeypatch.setattr(llm, "get_client", lambda: probe)
+
+    errors: list[BaseException] = []
+
+    def _bg():
+        try:
+            llm.call_md(system="s", user="u", background=True)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_bg) for _ in range(3)]
+    for t in threads:
+        t.start()
+
+    # TWO background calls may now be in flight at once (bg_cap=2)...
+    assert probe.started.acquire(timeout=5)
+    assert probe.started.acquire(timeout=5)
+    # ...but not a third — the bg lane is capped at 2.
+    assert not probe.started.acquire(timeout=0.5), (
+        "a third background call ran — bg_cap=2 not enforced"
+    )
+    assert probe.in_flight == 2
+
+    release.set()
+    for t in threads:
+        t.join(timeout=10)
+        assert not t.is_alive()
+    assert errors == []
+
+
+def test_resolve_bg_cap_fallbacks(isolated_settings, monkeypatch):
+    """A 0 / negative / unset LLM_BG_CAP falls back to the default (1)."""
+    llm = _reload_llm_with_cap(monkeypatch, "4", bg="0")
+    assert llm._resolve_bg_cap() == llm._DEFAULT_BG_CAP
+    llm = _reload_llm_with_cap(monkeypatch, "4", bg="-3")
+    assert llm._resolve_bg_cap() == llm._DEFAULT_BG_CAP
+    llm = _reload_llm_with_cap(monkeypatch, "4", bg=None)
+    assert llm._resolve_bg_cap() == llm._DEFAULT_BG_CAP
+
+
+def test_bg_cap_clamped_below_capacity(isolated_settings, monkeypatch):
+    """The gate clamps bg_cap to capacity-1 so background can never occupy
+    every slot (an interactive caller always has a reachable slot)."""
+    llm = _reload_llm_with_cap(monkeypatch, "3", bg="9")
+    # _resolve_bg_cap reflects the raw env; the gate clamps on construction.
+    assert llm._llm_gate._bg_cap == 2  # capacity(3) - 1
 
 
 def test_interactive_waiter_jumps_background_queue(isolated_settings, monkeypatch):
