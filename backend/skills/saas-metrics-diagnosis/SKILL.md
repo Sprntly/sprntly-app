@@ -10,7 +10,7 @@ Takes raw numbers and produces a diagnosis: it computes the standard SaaS metric
 
 ## When to use / when NOT to use
 - **Use** to find why growth is stalling or to run a health check.
-- **Do NOT use** to design a specific experiment (`experiment-design`).
+- **Do NOT use** to design a specific experiment (`experiment-design`) or build the metric structure (`metric-tree`).
 
 ## Inputs
 - **Required:** some metric inputs (signups, conversion, churn, ARPU, CAC — whatever is available).
