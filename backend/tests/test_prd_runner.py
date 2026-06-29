@@ -130,9 +130,10 @@ def test_run_sync_stores_only_human_prd_no_llm_part(isolated_settings, monkeypat
     assert (row.get("llm_part_source_hash") or "") == ""
 
 
-def test_human_prd_carries_block_contract(isolated_settings, monkeypatch):
-    """The human PRD is generated against the typed `:::`-block contract so its
-    output renders as first-class components instead of a raw markdown doc."""
+def test_human_prd_carries_lean_markdown_contract(isolated_settings, monkeypatch):
+    """The human PRD is generated against the LEAN MARKDOWN contract — the
+    9-section template with a single Requirements table and NO typed `:::`
+    blocks — so it renders as plain h2/p/ul/table."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
@@ -143,15 +144,16 @@ def test_human_prd_carries_block_contract(isolated_settings, monkeypatch):
     prd_runner._run_sync(prd_id, brief_id, 0)
 
     a_input = captured[0]["input"]
-    for block in (
-        ":::context-chip", ":::tldr", ":::problem", ":::hypothesis",
-        ":::requirements", ":::acceptance-criteria", ":::metrics", ":::risks",
-        ":::milestones", ":::dod",
-    ):
-        assert block in a_input, f"human PRD prompt missing {block} contract"
-    assert "Emit every named block EXACTLY" in a_input
-    # The directive forbids the Implementation Spec / separator in the human PRD.
-    assert "do NOT emit the `---`" in a_input
+    # The lean template's section headings reach the prompt…
+    for heading in ("## 1. Problem & evidence", "## 5. Requirements", "## 9. Done-when"):
+        assert heading in a_input, f"human PRD prompt missing section {heading!r}"
+    # …Requirements is steered to a markdown table, with the inheritance tags…
+    assert "ID | Requirement | Priority | Signal/Source | Acceptance" in a_input
+    assert "`[edge case]` / `[failure]`" in a_input
+    # …and NO typed `:::` blocks are imposed anymore.
+    assert ":::" not in a_input, "lean human PRD must not impose `:::` blocks"
+    # The directive still forbids the Implementation Spec / separator in Part A.
+    assert "do NOT emit a `---` separator" in a_input
 
 
 def test_run_sync_uses_fallback_title(isolated_settings, monkeypatch):

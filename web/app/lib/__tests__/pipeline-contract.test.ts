@@ -20,12 +20,13 @@
  * to the backend template files (see its `paths:`) so a backend-only edit that
  * breaks the contract still fails here.
  *
- * NB on PRD: the LIVE PRD runner emits its human half (`payload_md`) from the
- * `prd-author` SKILL template, which is plain `##` markdown (no `:::` blocks) —
- * so the PRD adapter renders it as h2/p/table/ul. The rich `:::tldr`/… PRD
- * blocks the adapter also supports come from the canonical `sprntly_prd_sample.md`
- * format; we guard BOTH below (the live plain-markdown shape AND the rich
- * adapter vocabulary) so neither regresses.
+ * NB on PRD: the LIVE PRD runner emits its human half (`payload_md`) as LEAN
+ * MARKDOWN — the `data/sprntly_prd_template.md` contract: a 9-section doc with a
+ * single Requirements table, NO typed `:::` blocks — so the adapter renders it as
+ * h2/p/table/ul. The rich `:::tldr`/… PRD blocks the adapter STILL supports (for
+ * PRDs generated before the lean switch) come from `sprntly_prd_sample.md`. We
+ * guard ALL THREE below (the live lean template, the prd-author skill template,
+ * and the rich back-compat vocabulary) so none regresses.
  */
 import { readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
@@ -41,6 +42,9 @@ const PRD_SKILL_TEMPLATE = join(
   HERE, "..", "..", "..", "..",
   "backend", "skills", "prd-author", "templates", "prd-template.md",
 )
+// The ACTUAL live template the PRD runner injects (load_prd_template()) — lean
+// markdown, no `:::` blocks. This is what new PRDs are shaped by.
+const PRD_LIVE_TEMPLATE = join(BACKEND_DATA, "sprntly_prd_template.md")
 
 const read = (p: string) => readFileSync(p, "utf-8")
 
@@ -150,5 +154,24 @@ describe("PRD pipeline contract (backend ↔ prd-adapter)", () => {
       .filter((s): s is Extract<PrdSection, { type: "h2" }> => s.type === "h2")
       .map((s) => s.text)
     expect(headings.some((h) => /Problem/i.test(h))).toBe(true)
+  })
+
+  it("renders the LIVE lean template (data/sprntly_prd_template.md) as plain markdown", () => {
+    // The runner now injects this lean-markdown template (no `:::` blocks). The
+    // adapter must render it as h2/p/ul/table with zero degraded blocks — and the
+    // Requirements section must parse as a real markdown `table` (not raw text),
+    // since that's the one structured element the lean PRD relies on.
+    const live = read(PRD_LIVE_TEMPLATE)
+    expect(blockOpeners(live), "live template must emit NO :::blocks").toEqual([])
+    const out = markdownToPrdState(live)
+    expect(fallbackSections(out.sections)).toEqual([])
+    expect(out.title.length).toBeGreaterThan(0)
+    const headings = out.sections
+      .filter((s): s is Extract<PrdSection, { type: "h2" }> => s.type === "h2")
+      .map((s) => s.text)
+    expect(headings.some((h) => /Problem/i.test(h))).toBe(true)
+    expect(headings.some((h) => /Requirements/i.test(h))).toBe(true)
+    // The Requirements markdown table parses into a typed `table` section.
+    expect(out.sections.some((s) => s.type === "table")).toBe(true)
   })
 })

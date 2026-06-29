@@ -87,7 +87,12 @@ EVIDENCE_VARIANT = "v3"
 #      a raw markdown doc in the renderer. Bump invalidates the plain-md
 #      cached PRDs so they re-render as first-class components. (Part B is
 #      generated separately by the implementation-spec skill.)
-PRD_TEMPLATE_VERSION = 5
+#  6 — Reverse of 5: the human PRD goes back to LEAN MARKDOWN (no typed
+#      `:::` blocks) — a 9-section doc with a single Requirements table —
+#      matching the simplified prd-author skill. The adapter renders it as
+#      h2/p/ul/table directly; the rich-block renderers stay for older PRDs.
+#      Bump re-renders cached `:::`-block PRDs into the leaner markdown shape.
+PRD_TEMPLATE_VERSION = 6
 
 
 # Bumped whenever the predefined Ask prompts list changes or the underlying
