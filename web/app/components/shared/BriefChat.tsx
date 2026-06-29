@@ -22,7 +22,6 @@ import type {
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
 import { IconClose, IconSendUp, IconSparkle, IconUndo } from "./app-icons"
-import { IconPlug } from "@tabler/icons-react"
 import { useBriefPrototypeMap } from "../design-agent/useBriefPrototypeMap"
 import { prototypeStateForInsight } from "../design-agent/briefPrototypeMap.helpers"
 import { GenerateModal } from "../design-agent/GenerateModal"
@@ -110,18 +109,6 @@ function buildGreeting(v2: BriefV2State | null, firstName: string | null): strin
   return `${lead} Here's the top ${n} thing${n !== 1 ? "s" : ""} worth your attention this week.`
 }
 
-function weekLabel(weekOf: string | null): string {
-  if (!weekOf) return ""
-  if (/week/i.test(weekOf)) return weekOf
-  // Bare ISO date → "Week of Jun 10"
-  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(weekOf)
-  if (m) {
-    const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]))
-    return `Week of ${d.toLocaleDateString([], { month: "short", day: "numeric" })}`
-  }
-  return weekOf
-}
-
 function parseAskError(e: unknown): string {
   const detail =
     e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
@@ -168,16 +155,6 @@ function IconAt({ size = 15 }: { size?: number }) {
     </svg>
   )
 }
-function IconMoreDots({ size = 15 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <circle cx="5" cy="12" r="1.7" />
-      <circle cx="12" cy="12" r="1.7" />
-      <circle cx="19" cy="12" r="1.7" />
-    </svg>
-  )
-}
-
 // ── Icons used inside the finding card ───────────────────────────────────────
 function IconFileText({ size = 15 }: { size?: number }) {
   return (
@@ -420,7 +397,7 @@ function BriefGeneratingState() {
 }
 
 export function BriefChat() {
-  const { aiBarValue, setAIBarValue, openContentPanel, showToast, goTo } = useNavigation()
+  const { aiBarValue, setAIBarValue, openContentPanel, showToast } = useNavigation()
   const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
@@ -1139,8 +1116,6 @@ export function BriefChat() {
 
   const userInitials = content.userInitials ?? (content.userName ? content.userName.slice(0, 2).toUpperCase() : "You")
   const userName = content.userName ?? "You"
-  const company = v2?.company ?? ""
-  const week = weekLabel(v2?.weekOf ?? null)
   // The brief is being generated when hydration reports "generating" AND we
   // don't yet have a brief to show. Once findings arrive (ready), the WIP
   // indicator is replaced by the real brief. The failed state never trips this.
@@ -1148,36 +1123,6 @@ export function BriefChat() {
 
   return (
     <section className="briefx" aria-label="Weekly brief">
-      <header className="bh">
-        <div className="bh-main">
-          {/* Title intentionally omitted — the "Weekly brief" label lives in the
-              tab name above; repeating it here was a redundant duplicate. */}
-          {week ? <span className="bh-week">{week}</span> : null}
-          {week && company ? <span className="bh-sep">·</span> : null}
-          {company ? <span className="bh-company">{company}</span> : null}
-        </div>
-        <div className="bh-actions">
-          <button
-            type="button"
-            className="bh-iconbtn"
-            title="Connectors"
-            aria-label="Open connectors"
-            onClick={() => goTo("connectors")}
-          >
-            <IconPlug />
-          </button>
-          <button
-            type="button"
-            className="bh-iconbtn"
-            title="More"
-            aria-label="More options"
-            onClick={() => showToast("More options", "No menu is wired up here yet.")}
-          >
-            <IconMoreDots />
-          </button>
-        </div>
-      </header>
-
         <div className="bc-scroll">
           <div className="bc-thread">
             {/* PM coworker brief message — greeting + stacked finding cards */}
