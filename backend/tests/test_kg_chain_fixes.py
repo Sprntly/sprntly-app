@@ -209,9 +209,9 @@ def test_call_md_stream_retries_on_transient(isolated_settings, patch_client, mo
 
 
 def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
-    """End-to-end-ish: prd_runner._run_sync drives the gateway via Part A
-    (prd-author) then the chained Part B (implementation-spec, fed Part A);
-    completion stores Part A → human_md, Part B → llm_part."""
+    """prd_runner._run_sync drives the gateway via the human PRD (prd-author)
+    ONLY — it does not chain an implementation-spec call — and completion stores
+    the human PRD via complete_prd."""
     import app.prd_runner as pr
 
     brief = {
@@ -228,13 +228,8 @@ def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
 
     def fake_llm(**kw):
         skills_seen.append(kw.get("skill"))
-        is_b = kw.get("purpose") == "generate_prd_part_b"
-        output = "IMPL SPEC BODY" if is_b else "HUMAN PRD BODY"
-        # Part B must be fed the finished Part A.
-        if is_b:
-            assert "HUMAN PRD BODY" in kw["input"]
         return SimpleNamespace(
-            output=output, model="m",
+            output="HUMAN PRD BODY", model="m",
             prompt_version=(kw["prompt_version"] + "+" + kw["skill"] + "@abc"),
         )
 
@@ -244,13 +239,13 @@ def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
         completed.update(kw)
 
     monkeypatch.setattr(pr, "llm_call", fake_llm)
-    monkeypatch.setattr(pr, "complete_prd_2part", fake_complete)
+    monkeypatch.setattr(pr, "complete_prd", fake_complete)
 
     pr._run_sync(prd_id=7, brief_id=1, insight_index=0)
 
-    assert skills_seen == ["prd-author", "implementation-spec"]
-    assert completed["human_md"] == "HUMAN PRD BODY"
-    assert completed["llm_part"] == "IMPL SPEC BODY"
+    # Exactly one call, the human PRD; the implementation-spec is on demand.
+    assert skills_seen == ["prd-author"]
+    assert completed["md"] == "HUMAN PRD BODY"
 
 
 # =====================================================================

@@ -150,6 +150,10 @@ CREATE TABLE prds (
     title            TEXT NOT NULL,
     payload_md       TEXT NOT NULL DEFAULT '',
     llm_part         TEXT,
+    -- Hash of the human PRD (payload_md) the cached llm_part was derived from
+    -- (mirrors 20260629120000_prd_llm_part_source_hash.sql). Keys the on-demand
+    -- Implementation Spec cache so it invalidates when the human PRD changes.
+    llm_part_source_hash TEXT,
     status           TEXT NOT NULL DEFAULT 'ready',
     error            TEXT,
     template_version INTEGER,

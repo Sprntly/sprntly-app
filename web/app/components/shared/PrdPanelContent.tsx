@@ -11,6 +11,7 @@ import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { PrdSections } from "./PrdSections"
 import { ArtifactFooterActions } from "./ArtifactFooterActions"
+import { SendToClaudeCode } from "./SendToClaudeCode"
 import { DesignAgentLauncher } from "../design-agent/DesignAgentLauncher"
 import { EmptyPane } from "./EmptyPane"
 import { ApiError, designAgentApi, multiAgentApi, prdApi, type PrototypeRecord } from "../../lib/api"
@@ -139,93 +140,11 @@ function PrototypeSection({ prdId, figmaFileKey, externalGeneratingId }: { prdId
   )
 }
 
-// ── LLM-readable view ─────────────────────────────────────────────────────
-export function LlmReadableView({ prd, generating, loading }: { prd: PrdState | null; generating?: boolean; loading?: boolean }) {
-  const { showToast } = useNavigation()
-
-  if (!prd) {
-    return (
-      <div className="llm-view-empty">
-        {generating ? (
-          <p data-testid="llm-generating"><span className="prd-loader" aria-hidden /> Generating PRD… the implementation brief will appear here.</p>
-        ) : loading ? (
-          <p>Loading PRD…</p>
-        ) : (
-          <p>No PRD yet — generate one and the implementation brief will appear here.</p>
-        )}
-      </div>
-    )
-  }
-
-  // Render the REAL Part B (implementation-spec markdown) the backend stores in
-  // `llm_part` — EARS requirements, design/contracts, dependency-ordered tasks,
-  // acceptance tests, Definition of Done, verification report. No reconstruction
-  // from Part A: parse the markdown and render it faithfully via PrdSections.
-  const llmPart = prd.llmPart?.trim() ?? ""
-  const partB = llmPart ? markdownToPrdState(llmPart) : null
-
-  return (
-    <div className="llm-view">
-      <div className="llm-view-header">
-        <span className="llm-view-label">LLM-READABLE · FOR AGENT IMPLEMENTATION</span>
-      </div>
-
-      <h2 className="llm-view-title">Implementation brief</h2>
-      <p className="llm-view-subtitle">
-        Plain-English, structured so an AI agent can implement, test, and verify against a clear definition of done.
-      </p>
-
-      <div className="llm-view-actions">
-        <button
-          type="button"
-          className="llm-action-btn"
-          disabled={!llmPart}
-          onClick={() => {
-            if (!llmPart) return
-            navigator.clipboard.writeText(llmPart).catch(() => {})
-            showToast("Copied", "Implementation brief copied to clipboard.")
-          }}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-          </svg>
-          Copy brief
-        </button>
-        <button
-          type="button"
-          className="llm-action-btn llm-action-btn--accent"
-          onClick={() => showToast("Sent to Claude Code", "The implementation brief has been sent to Claude Code.")}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" />
-          </svg>
-          Send to Claude Code
-        </button>
-      </div>
-
-      {partB ? (
-        <div className="llm-section" data-testid="llm-part-b">
-          <PrdSections sections={partB.sections} />
-        </div>
-      ) : (
-        <div className="llm-section">
-          <p className="llm-section-body" style={{ color: "var(--ink-2)" }} data-testid="llm-part-b-empty">
-            No implementation spec yet — it generates alongside the PRD.
-          </p>
-        </div>
-      )}
-    </div>
-  )
-}
-
-type PrdSubTab = "human" | "llm"
-
 export function PrdPanelContent() {
   const { showToast } = useNavigation()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const prd = content.prd
-  const [subTab, setSubTab] = useState<PrdSubTab>("human")
 
   // Tracks an in-flight prototype id when "Notify me when ready" was clicked in
   // the loading overlay — surfaces PrototypeGeneratingCard on the PRD without
@@ -361,48 +280,6 @@ export function PrdPanelContent() {
 
   return (
     <div className="cpanel-prd-wrap">
-      {/* Sub-tabs: Human-readable / LLM-readable */}
-      <div className="prd-subtab-bar">
-        <div className="prd-subtabs">
-          <button
-            type="button"
-            className={`prd-subtab${subTab === "human" ? " prd-subtab--active" : ""}`}
-            onClick={() => setSubTab("human")}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7" />
-            </svg>
-            Human-readable
-          </button>
-          <button
-            type="button"
-            className={`prd-subtab${subTab === "llm" ? " prd-subtab--active" : ""}`}
-            onClick={() => setSubTab("llm")}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <rect x="3" y="3" width="18" height="18" rx="3" /><path d="M8 12h8M8 8h5M8 16h3" />
-            </svg>
-            LLM-readable
-          </button>
-        </div>
-        {subTab === "llm" && (
-          <button
-            type="button"
-            className="prd-send-claude-btn"
-            onClick={() => showToast("Sent to Claude Code", "The implementation brief has been sent to Claude Code.")}
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" />
-            </svg>
-            Send to Claude Code
-          </button>
-        )}
-      </div>
-
-      {subTab === "llm" ? (
-        <LlmReadableView prd={prd} generating={content.prdGenerating} loading={prdLoading} />
-      ) : (
-      <>
       {prd && <PrdPatchBanner prdId={prd.prd_id} />}
 
       <div className="prd-frame">
@@ -486,6 +363,12 @@ export function PrdPanelContent() {
               <path d="M5 7L1 3h8z" />
             </svg>
           </button>
+          {/* Hand the PRD off to a coding agent: generate (and cache) the
+              machine-readable Implementation Spec on demand and copy it to the
+              clipboard. The machine PRD is no longer a viewable tab. */}
+          <div style={{ marginLeft: "auto" }}>
+            <SendToClaudeCode prdId={prd.prd_id} onToast={showToast} />
+          </div>
         </div>
       )}
 
@@ -537,8 +420,6 @@ export function PrdPanelContent() {
             </div>
           )}
         </div>
-      )}
-      </>
       )}
     </div>
   )

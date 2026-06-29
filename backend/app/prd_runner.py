@@ -1,54 +1,37 @@
-"""Background PRD generation. Triggered when a user clicks 'Generate PRD';
-the HTTP request returns immediately with a prd_id and status='generating',
-the actual Claude call runs in a worker thread, and the prds row gets
-updated to status='ready' (or 'failed') when done.
+"""Background PRD generation + on-demand Implementation Spec generation.
 
-Re-platformed onto the `prd-author` skill (the canonical 2-part method): the
-skill METHOD — Part A a human-readable PRD, a horizontal rule, then Part B an
-LLM-readable Implementation Spec — is bound via the gateway (`skill=`), so the
-agent-specific context (the brief insight being turned into a PRD, plus the
-evidence it was derived from) is the only thing the runner supplies as input.
+Two SEPARATE flows, deliberately decoupled:
 
-Performance (2-part concurrent generation): rather than ONE big sequential
-`llm_call` that emits both halves and then splitting on the `---` rule, the
-runner now issues TWO concurrent `prd-author` calls that share the SAME
-brief-insight context + KG grounding:
-  - Call A → produces ONLY Part A (the human-readable PRD).
-  - Call B → produces ONLY Part B (the LLM-readable Implementation Spec).
-Both stay coherent (same brief, same insight, same KG facts, same template);
-each is steered to emit just its half via a per-part directive layered on the
-shared `prd-author` skill binding (so the METHOD + version pin are preserved).
-The two calls run concurrently (`asyncio.gather` over `asyncio.to_thread`,
-since the gateway's `llm_call` is synchronous), so wall-clock is ~max(A, B)
-instead of A+B — roughly a 2× speedup.
+1. **Human PRD (Part A) — eager.** Triggered when a user clicks "Generate PRD";
+   the HTTP request returns immediately with a prd_id and status='generating',
+   the actual Claude call runs in a worker thread, and the prds row gets updated
+   to status='ready' (or 'failed') when done. This flow produces ONLY the
+   human-readable PRD via the `prd-author` skill — it no longer also generates
+   the machine spec.
+
+2. **Implementation Spec (Part B) — on demand + cached.** Generated the FIRST
+   time a user sends the PRD to Claude Code, via the dedicated
+   `implementation-spec` skill fed the FINISHED human PRD. The result is cached
+   in `prds.llm_part`, keyed to the human PRD's content hash
+   (`llm_part_source_hash`). A re-send whose human PRD is unchanged reuses the
+   cache; editing/restoring the human PRD clears it (db.prds.update_prd_content),
+   so the next send regenerates against the new text. See `ensure_impl_spec`.
+
+Why split: the machine spec is needless work (and latency) for the many PRDs
+that are never handed to a coding agent, and the user-facing machine-PRD view
+was removed. Generating it lazily keeps the human PRD fast and the spec fresh.
 
 Grounding is regrounded on the KNOWLEDGE GRAPH (consistent with brief/evidence/
 ask, which all answer from the brain): instead of dumping the per-dataset
 markdown corpus, the runner resolves the insight's KG evidence trail
 (insight → theme → synthesis-written hypothesis → SUPPORTS signals + theme
 convergence signals, each with content/source_type/provenance/confidence) via
-`graph.retrieval.insight_evidence_trail` and feeds THAT as the grounding. The
-PRD's problem/evidence section then cites the actual data-source signals that
-also back the brief insight.
+`graph.retrieval.insight_evidence_trail` and feeds THAT as the grounding. Both
+Part A and the (later) Part B share the SAME grounding so they stay coherent.
 
 Resilient: KG-first-with-fallback — if the insight has no KG backing (empty
 trail), the runner falls back to the corpus grounding so a PRD never
 hard-fails.
-
-Assembly + resilience:
-  - Part A output → `payload_md`  — what the frontend renders, unchanged.
-  - Part B output → `llm_part`    — for downstream coding-agent consumption.
-  Part A is the required half: if Part B comes back empty (degenerate output),
-  the PRD still completes with Part A + an empty `llm_part` (mirroring the old
-  `_split_2part` resilience). If Part B's CALL fails outright, the PRD still
-  completes with Part A + empty `llm_part`, and the Part-B failure is logged
-  (never silent). A Part-A failure fails the whole PRD.
-
-The generation is decision-logged (§4d) with the prd-author skill id + hash
-(which the gateway pins into `prompt_version`, `+prd-author@<hash>`, taken from
-the Part-A call so the audit row pins one consistent method version) plus
-`kg_refs` = the signal/hypothesis/theme ids the trail surfaced and
-`has_llm_part` reflecting whether Part B was produced.
 """
 import asyncio
 import json
@@ -59,9 +42,16 @@ import uuid
 from app.company_template import render_templates_for_prompt
 from app.config import settings
 from app.corpus import load_corpus, load_prd_template
-from app.db import complete_prd_2part, get_brief_by_id
+from app.db import complete_prd, get_brief_by_id
 from app.db.companies import company_id_for_slug
-from app.db.prds import fail_prd, find_existing_prd, start_prd
+from app.db.prds import (
+    fail_prd,
+    find_existing_prd,
+    get_prd_rendered,
+    prd_source_hash,
+    set_prd_impl_spec,
+    start_prd,
+)
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
@@ -72,11 +62,10 @@ logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "prd-author-v2"
 _SKILL = "prd-author"
-# Part B is now generated by the dedicated `implementation-spec` skill, fed the
-# FINISHED human PRD (Part A) — its method (EARS requirements, design/contracts,
-# dependency-ordered tasks, acceptance tests, DoD, independent verification) is
-# richer than the prd-author Part-B directive it replaces. Because it consumes
-# the whole Part A, Part B runs AFTER Part A (chained), not concurrently.
+# The machine-readable Implementation Spec (Part B) is generated on demand by the
+# dedicated `implementation-spec` skill, fed the FINISHED human PRD (Part A) — its
+# method (EARS requirements, design/contracts, dependency-ordered tasks,
+# acceptance tests, DoD, independent verification) consumes the whole human PRD.
 _SKILL_B = "implementation-spec"
 PROMPT_VERSION_B = "prd-impl-spec-v1"
 _AGENT = "prd"
@@ -84,18 +73,17 @@ _AGENT = "prd"
 # (routes/prd.py) and pre-warming below, so dedupe matches across both paths.
 PRD_VARIANT = "v2"
 
-# Agent-specific framing for Part A (the human PRD). The prd-author METHOD is
-# supplied by the bound skill; this system prompt states the agent's job +
-# grounding rules and adds the _PART_A_DIRECTIVE so the model emits only the
-# human PRD half. Part B (the Implementation Spec) is a SEPARATE, chained call
-# bound to the `implementation-spec` skill with its own _SYSTEM_B (below) — it
-# is fed the finished Part A, not steered by a directive.
+# Agent-specific framing for the human PRD. The prd-author METHOD is supplied by
+# the bound skill; this system prompt states the agent's job + grounding rules,
+# and the _PART_A_DIRECTIVE steers the output to the typed `:::`-block contract.
+# The Implementation Spec is a SEPARATE, on-demand call bound to the
+# `implementation-spec` skill with its own _SYSTEM_B (below).
 _SYSTEM = """\
 You are Sprntly's PRD agent. Following the METHOD above, turn the supplied \
-brief insight into the prd-author two-part deliverable: Part A a \
-human-readable PRD, and Part B an LLM-readable Implementation Spec a coding \
-agent builds and tests against. You will be asked to produce exactly ONE of \
-the two parts on this call — honor the PART DIRECTIVE in the request.
+brief insight into a human-readable Product Requirements Document for \
+stakeholder alignment and decisions: problem, evidence, goals, success metrics, \
+scope/non-goals, scenarios, requirements, acceptance criteria, risks, \
+milestones, and a testable done-gate.
 
 Ground every numeric claim, mechanism, metric, and acceptance criterion in \
 the supplied insight and the evidence it was derived from — falsifiable by a \
@@ -107,15 +95,14 @@ rules, or contracts; label unknowns per the METHOD (`[ASSUMPTION]` / \
 `[ASSUMPTION → T0]` / `[ESCALATE]`) rather than guessing.
 
 Emit Markdown only — no commentary outside the document. Produce ONLY the \
-part named in the PART DIRECTIVE; do NOT emit the other part and do NOT emit \
-the `---` horizontal rule that would separate them.""" + VOICE_GUARD
+human-readable PRD; do NOT emit an Implementation Spec and do NOT emit a `---` \
+horizontal rule.""" + VOICE_GUARD
 
-# Per-part directives. Each call carries the SAME shared context (insight +
-# evidence + template) plus exactly one of these so the model emits one half.
-# Part A and Part B derive from the same brief, so they stay coherent.
+# The human-PRD directive. Carries the insight + evidence + template and steers
+# the model to emit the typed `:::` blocks the frontend `prd-adapter` parses.
 _PART_A_DIRECTIVE = """\
-PART DIRECTIVE: Produce ONLY Part A — the human-readable Product Requirements \
-Document. Render it as the typed semantic `:::` blocks defined in the TEMPLATE \
+PART DIRECTIVE: Produce ONLY the human-readable Product Requirements Document. \
+Render it as the typed semantic `:::` blocks defined in the TEMPLATE \
 below (`:::context-chip`, `:::tldr`, `:::problem`, `:::hypothesis`, \
 `:::requirements`, `:::acceptance-criteria`, `:::metrics`, `:::risks`, \
 `:::milestones`, `:::dod`), in the template's order, with the prose Context \
@@ -126,26 +113,25 @@ governs the OUTPUT FORMAT. Emit every named block EXACTLY — never a paragraph,
 bullet list, or markdown table where the template specifies a `:::` block, or \
 the frontend cannot render it as a first-class component. Fill each placeholder \
 with concrete, grounded content; never keep a `[bracketed]` example. Do NOT \
-include Part B (the Implementation Spec), do NOT emit the `---` separator, and \
+include an Implementation Spec, do NOT emit the `---` separator, and \
 do NOT emit the template's trailing "How to use this template" section. Start \
 at the document title."""
 
 _USER_TEMPLATE = """\
 {part_directive}
 
-Write your assigned part of the two-part PRD for the following brief insight.
+Write the human-readable PRD for the following brief insight.
 
 BRIEF INSIGHT (the problem to turn into a PRD):
 {insight_json}
 
 {evidence}
-{exemplars}
-TEMPLATE (the full two-part structure — produce ONLY your assigned part of it):
+{exemplars}TEMPLATE (the PRD structure — produce it as your output):
 {template}
 """
 
-# Part B is generated by the `implementation-spec` skill (its SKILL.md is the
-# METHOD layer). Unlike Part A, it is fed the FINISHED human PRD — the skill
+# The Implementation Spec is generated by the `implementation-spec` skill (its
+# SKILL.md is the METHOD layer). It is fed the FINISHED human PRD — the skill
 # consumes the PRD's tagged requirements (untagged = happy path; `[edge case]`
 # / `[failure]` inline) and turns them into the LLM-readable spec.
 _SYSTEM_B = """\
@@ -164,15 +150,15 @@ the PRD's load-bearing tags: untagged requirements are the happy path, \
 `[edge case]` and `[failure]` requirements get their mandatory branches.
 
 Emit Markdown only — no commentary outside the document, and do NOT restate \
-Part A (the human PRD) or emit a `---` separator. Start at the Part B \
+the human PRD or emit a `---` separator. Start at the Implementation Spec \
 heading.""" + VOICE_GUARD
 
 _USER_TEMPLATE_B = """\
-Produce the LLM-readable Implementation Spec (Part B) for the human PRD below. \
+Produce the LLM-readable Implementation Spec for the human PRD below. \
 Derive every requirement, contract, task, and acceptance test from this PRD \
 and its evidence — trace each back to the PRD it implements.
 
-HUMAN PRD (Part A — the spec to implement):
+HUMAN PRD (the spec to implement):
 {human_prd}
 
 {evidence}
@@ -185,29 +171,6 @@ _CORPUS_BLOCK = (
     "SOURCE DATA (the evidence the insight was derived from — ground claims here):\n"
     "{corpus}"
 )
-
-# The horizontal rule the prd-author skill historically emitted between Part A
-# (human PRD) and Part B (Implementation Spec). The concurrent path produces the
-# two parts directly (no rule to split on), but `_split_2part` is retained for
-# back-compat with any caller that still consumes a single combined document.
-_PART_SEPARATOR = "\n---\n"
-
-
-def _split_2part(md: str) -> tuple[str, str]:
-    """Split a single combined prd-author document into (Part A, Part B).
-
-    Retained for back-compat: the concurrent generation path produces the two
-    halves directly and does NOT call this. Any caller still holding a single
-    combined document (Part A + `---` + Part B) can split it here. If no rule is
-    present (degenerate single-part output), Part A is the whole document and
-    Part B is empty.
-    """
-    idx = md.find(_PART_SEPARATOR)
-    if idx == -1:
-        return md.strip(), ""
-    part_a = md[:idx].strip()
-    part_b = md[idx + len(_PART_SEPARATOR):].strip()
-    return part_a, part_b
 
 
 def _corpus_grounding(dataset: str) -> str:
@@ -258,12 +221,12 @@ def _resolve_grounding(
 
 
 def _build_context(brief_id: int, insight_index: int) -> dict:
-    """Resolve everything BOTH part-calls share, exactly once.
+    """Resolve everything a generation call needs, exactly once.
 
-    Returns the shared inputs for the two concurrent prd-author calls: the
-    resolved company id, the evidence block + KG trail (so Part A and Part B are
-    grounded on the SAME facts), the rendered template, the insight, and the
-    title. Building this once guarantees the two halves are coherent.
+    Returns the shared inputs: the resolved company id, the evidence block + KG
+    trail, the rendered PRD template, the insight, and the title. Reused by the
+    human-PRD generation and (later) by the on-demand Implementation Spec, so
+    both halves are grounded on the SAME facts and stay coherent.
     """
     brief = get_brief_by_id(brief_id)
     if not brief:
@@ -282,25 +245,19 @@ def _build_context(brief_id: int, insight_index: int) -> dict:
     # Reground on the KG evidence trail (synthesis engine) — the same signals
     # that back the brief insight — falling back to the corpus when there's no
     # KG backing or under the legacy engine. `trail` (None on the corpus path)
-    # carries the kg_refs for the decision log. Resolved ONCE and shared by both
-    # part-calls so Part A and Part B cite the same evidence.
+    # carries the kg_refs for the decision log.
     evidence, trail = _resolve_grounding(dataset, brief, insight_index)
-    # Part A (the human PRD the user reads) is generated against the typed-
-    # `:::`-block contract (data/sprntly_prd_template.md) that the frontend
-    # `prd-adapter` parses into first-class components (hero/metrics/
-    # requirements/acceptance-criteria/…). The prd-author skill stays bound on
-    # the Part-A call for its METHOD + version pin; only the OUTPUT SHAPE comes
-    # from this template. Without these blocks the adapter degrades to plain
-    # markdown — the "PRD looks like a raw .md" failure. (Part B is generated
-    # separately by the implementation-spec skill and does NOT use this template.)
+    # The human PRD is generated against the typed-`:::`-block contract
+    # (data/sprntly_prd_template.md) that the frontend `prd-adapter` parses into
+    # first-class components. Without these blocks the adapter degrades to plain
+    # markdown — the "PRD looks like a raw .md" failure. (The Implementation Spec
+    # does NOT use this template.)
     template = load_prd_template()
     title = insight.get("title") or f"Insight #{insight_index + 1}"
     # FORMAT/STYLE EXEMPLARS — the company's uploaded gold-standard PRD examples
-    # ("what good looks like"). Additive context ONLY: when the company has
-    # uploaded templates, their extracted text is folded into BOTH part-calls so
+    # ("what good looks like"). Additive context ONLY: folded into the prompt so
     # the model MATCHES the house structure & voice. No templates (or no company
-    # for the slug) ⇒ empty string ⇒ a clean no-op (the prompt is unchanged from
-    # before). Best-effort: a read error must never break PRD generation.
+    # for the slug) ⇒ empty string ⇒ a clean no-op. Best-effort.
     exemplars = ""
     if company_id:
         try:
@@ -323,28 +280,30 @@ def _build_context(brief_id: int, insight_index: int) -> dict:
     }
 
 
-def _call_part(ctx: dict, *, purpose: str, directive: str, background: bool = False):
-    """One prd-author call that emits a single part.
-
-    Shares `ctx`'s insight + evidence + template across both parts and steers
-    the model to one half via `directive`. Keeps `skill=_SKILL` so the METHOD
-    and its `+prd-author@<hash>` version pin are preserved on every call.
-    """
-    # Exemplars (the company's gold-standard PRD format references) slot in
-    # between the evidence and the template when present; empty string ⇒ no-op.
+def _exemplars_block(ctx: dict) -> str:
+    """The FORMAT/STYLE EXEMPLARS block for a prompt, or '' when no templates."""
     exemplars = ctx.get("exemplars") or ""
-    exemplars_block = f"\n{exemplars}\n" if exemplars else ""
+    return f"\n{exemplars}\n" if exemplars else ""
+
+
+def _call_part_a(ctx: dict, background: bool = False):
+    """Generate the human-readable PRD via the `prd-author` skill.
+
+    Steers the model to the typed-`:::`-block human PRD via _PART_A_DIRECTIVE and
+    keeps `skill=_SKILL` so the METHOD + its `+prd-author@<hash>` version pin are
+    preserved.
+    """
     user = _USER_TEMPLATE.format(
-        part_directive=directive,
+        part_directive=_PART_A_DIRECTIVE,
         insight_json=json.dumps(ctx["insight"], indent=2),
         evidence=ctx["evidence"],
-        exemplars=exemplars_block,
+        exemplars=_exemplars_block(ctx),
         template=ctx["template"],
     )
     return llm_call(
         enterprise_id=ctx["company_id"] or ctx["dataset"],
         agent=_AGENT,
-        purpose=purpose,
+        purpose="generate_prd_part_a",
         prompt_version=PROMPT_VERSION,
         system=_SYSTEM,
         input=user,
@@ -353,25 +312,14 @@ def _call_part(ctx: dict, *, purpose: str, directive: str, background: bool = Fa
     )
 
 
-def _call_part_a(ctx: dict, background: bool = False):
-    """Concurrent call A — ONLY the human-readable PRD (Part A)."""
-    return _call_part(
-        ctx, purpose="generate_prd_part_a", directive=_PART_A_DIRECTIVE,
-        background=background,
-    )
-
-
-def _call_part_b(ctx: dict, human_prd: str, background: bool = False):
-    """Chained call B — the LLM Implementation Spec, via the `implementation-spec`
-    skill, fed the FINISHED human PRD (Part A). Runs AFTER Part A because the
-    skill consumes the whole PRD; binds `skill=_SKILL_B` so its METHOD + the
+def _call_impl_spec(ctx: dict, human_prd: str, background: bool = False):
+    """Generate the Implementation Spec via the `implementation-spec` skill, fed
+    the FINISHED human PRD. Binds `skill=_SKILL_B` so its METHOD + the
     `+implementation-spec@<hash>` version pin apply."""
-    exemplars = ctx.get("exemplars") or ""
-    exemplars_block = f"\n{exemplars}\n" if exemplars else ""
     user = _USER_TEMPLATE_B.format(
         human_prd=human_prd,
         evidence=ctx["evidence"],
-        exemplars=exemplars_block,
+        exemplars=_exemplars_block(ctx),
     )
     return llm_call(
         enterprise_id=ctx["company_id"] or ctx["dataset"],
@@ -385,41 +333,20 @@ def _call_part_b(ctx: dict, human_prd: str, background: bool = False):
     )
 
 
-def _finalize(prd_id: int, brief_id: int, insight_index: int, ctx: dict,
-              result_a, result_b, part_b_error: str | None) -> None:
-    """Assemble the two part-outputs, persist, and decision-log.
+def _finalize_part_a(
+    prd_id: int, brief_id: int, insight_index: int, ctx: dict, result_a
+) -> None:
+    """Persist the human PRD and decision-log the generation (§4d).
 
-    Part A is required (its result is always present here). Part B is best-
-    effort: an empty Part-B output OR a Part-B call failure (`part_b_error`)
-    both complete the PRD with Part A + an empty `llm_part` — mirroring the old
-    degenerate-output resilience — and the failure (if any) is logged, never
-    silent.
+    Stores ONLY the human PRD in `payload_md` (the machine spec is generated
+    separately, on demand). `result_a.prompt_version` carries the
+    `+prd-author@<hash>` suffix the gateway appended; kg_refs pins the exact KG
+    nodes this PRD was grounded on (empty on the corpus-fallback path).
     """
     human_part = str(result_a.output).strip()
-    if result_b is not None:
-        llm_part = str(result_b.output).strip()
-    else:
-        llm_part = ""
-    if part_b_error:
-        # Part A succeeded but Part B did not — complete with Part A alone
-        # (the human PRD is valid on its own) and surface the failure.
-        logger.error(
-            "PRD Part B generation failed prd_id=%s — completing with Part A only: %s",
-            prd_id, part_b_error,
-        )
-
     title = ctx["title"]
-    complete_prd_2part(
-        prd_id=prd_id, title=title, human_md=human_part, llm_part=llm_part
-    )
+    complete_prd(prd_id=prd_id, title=title, md=human_part)
 
-    # Decision-log the generation (§4d). `result_a.prompt_version` carries the
-    # `+prd-author@<hash>` suffix the gateway appended; both part-calls bind the
-    # same skill so they pin the same hash — the audit row records the Part-A
-    # one consistently. `has_llm_part` reflects whether Part B was produced.
-    # kg_refs: the signal/hypothesis/theme ids the evidence trail surfaced, so
-    # the §4d audit row pins the exact KG nodes this PRD was grounded on (empty
-    # on the corpus-fallback path, where `trail` is None).
     trail = ctx["trail"]
     company_id = ctx["company_id"]
     kg_refs = (trail or {}).get("kg_refs") or []
@@ -428,22 +355,9 @@ def _finalize(prd_id: int, brief_id: int, insight_index: int, ctx: dict,
             "prd_id": prd_id,
             "brief_id": brief_id,
             "insight_index": insight_index,
-            # Part A and Part B are now two different skills (the human PRD via
-            # prd-author, the Implementation Spec via implementation-spec).
             "skill": _SKILL,
-            "skill_part_a": _SKILL,
-            "skill_part_b": _SKILL_B,
-            # Part B's version pin (`+implementation-spec@<hash>`); None if Part B
-            # failed and produced no result.
-            "part_b_prompt_version": (
-                result_b.prompt_version if result_b is not None else None
-            ),
-            "has_llm_part": bool(llm_part),
             "grounding": "kg" if trail is not None else "corpus",
             "kg_signals": len((trail or {}).get("signals") or []),
-            # Record whether Part B failed (None on success) so the audit row
-            # never hides a half-complete generation.
-            "part_b_error": part_b_error,
         }
         log_agent_decision(
             enterprise_id=company_id,
@@ -457,92 +371,119 @@ def _finalize(prd_id: int, brief_id: int, insight_index: int, ctx: dict,
         )
 
 
-async def _generate_2part(
-    prd_id: int, brief_id: int, insight_index: int, background: bool = False,
-    human_only: bool = False,
+async def _generate_human_prd(
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False
 ) -> None:
-    """Build shared context, run Part A then (chained) Part B, finalize.
+    """Build context, generate the human PRD (Part A only), persist + log.
 
-    Part B is now the `implementation-spec` skill, which consumes the FINISHED
-    human PRD — so the two halves can no longer run concurrently. Part A runs
-    first; the moment it resolves, Part B is fed its output. Wall-clock is
-    A + B (the cost of the dedicated spec skill), run as clean async (the event
-    loop is never blocked — each synchronous `llm_call` runs in a worker
-    thread). Part A is required (its failure fails the whole PRD); Part B is
-    best-effort (its failure is captured and the PRD completes with Part A only).
-
-    `human_only=True` generates ONLY the human PRD (Part A) and skips the
-    implementation-spec call entirely — used by prefetch warming, which only
-    needs the human-readable PRD ready before the user opens the brief. The
-    PRD completes with an empty `llm_part`, exactly as a Part-B failure would.
+    Runs as clean async (the event loop is never blocked — the synchronous
+    `llm_call` runs in a worker thread). The Implementation Spec is NOT produced
+    here; it is generated on demand by `ensure_impl_spec`.
     """
     ctx = await asyncio.to_thread(_build_context, brief_id, insight_index)
-
-    # Part A first — required. A failure here fails the whole PRD.
     result_a = await asyncio.to_thread(_call_part_a, ctx, background)
-    human_prd = str(result_a.output).strip()
-
-    # Part B (implementation-spec), fed the finished Part A. Best-effort: its
-    # failure is captured and the PRD still completes with Part A only. Skipped
-    # entirely when human_only (prefetch warm needs only the human PRD).
-    part_b_error: str | None = None
-    result_b = None
-    if not human_only:
-        try:
-            result_b = await asyncio.to_thread(
-                _call_part_b, ctx, human_prd, background
-            )
-        except Exception as exc:  # noqa: BLE001 — Part B is best-effort
-            part_b_error = f"{type(exc).__name__}: {exc}"
-
     await asyncio.to_thread(
-        _finalize, prd_id, brief_id, insight_index, ctx,
-        result_a, result_b, part_b_error,
+        _finalize_part_a, prd_id, brief_id, insight_index, ctx, result_a
     )
 
 
 def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
     """Synchronous entry point (used by tests and any sync caller).
 
-    Drives the concurrent two-part generation to completion. `generate_prd`
-    calls `_generate_2part` directly on the running loop; this wrapper exists
-    for sync callers and runs it on a fresh loop.
+    Drives the human-PRD generation to completion on a fresh event loop.
     """
-    asyncio.run(_generate_2part(prd_id, brief_id, insight_index))
+    asyncio.run(_generate_human_prd(prd_id, brief_id, insight_index))
 
 
 async def generate_prd(
-    prd_id: int, brief_id: int, insight_index: int, background: bool = False,
-    human_only: bool = False,
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False
 ) -> None:
-    """Run the concurrent two-part PRD generation; update DB with result.
+    """Run the human-PRD generation; update DB with result.
 
-    `background=True` (pre-warming) routes both part-calls through the LLM
-    gate's low-priority lane: capped concurrency, and always behind any
-    interactive caller — a user's "Generate PRD" click is never queued
-    behind warm work.
-
-    `human_only=True` generates only the human PRD (Part A), skipping the
-    implementation-spec — see `_generate_2part`.
+    `background=True` (pre-warming) routes the call through the LLM gate's
+    low-priority lane: capped concurrency, and always behind any interactive
+    caller — a user's "Generate PRD" click is never queued behind warm work.
+    The Implementation Spec is never produced here — it is on demand
+    (`ensure_impl_spec`), so every generation path is human-PRD-only.
     """
     logger.info(
         "PRD generation starting prd_id=%s brief_id=%s insight_index=%s "
-        "priority=%s scope=%s",
+        "priority=%s",
         prd_id,
         brief_id,
         insight_index,
         "background" if background else "interactive",
-        "human_only" if human_only else "2part",
     )
     try:
-        await _generate_2part(
-            prd_id, brief_id, insight_index, background, human_only=human_only
-        )
+        await _generate_human_prd(prd_id, brief_id, insight_index, background)
         logger.info("PRD generation succeeded prd_id=%s", prd_id)
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
         logger.exception("PRD generation failed prd_id=%s", prd_id)
         fail_prd(prd_id, msg)
+
+
+# ── on-demand Implementation Spec (Part B) ───────────────────────────────────
+
+def ensure_impl_spec(prd_id: int) -> dict:
+    """Return the machine-readable Implementation Spec for a human PRD, generating
+    it on demand and caching the result.
+
+    Called when a user sends the PRD to Claude Code. Idempotent + cached:
+      - If a spec is already cached AND the human PRD is unchanged (its content
+        hash matches `llm_part_source_hash`), the cached spec is returned —
+        re-sends are free and deterministic.
+      - Otherwise the spec is generated by the `implementation-spec` skill (fed
+        the finished human PRD + the SAME evidence the PRD was grounded on),
+        persisted to `llm_part` keyed to the current PRD hash, and returned.
+
+    Cache invalidation is automatic: editing/restoring the human PRD clears
+    `llm_part`/`llm_part_source_hash` (db.prds.update_prd_content) AND changes the
+    PRD text, so the hash check alone would already force a regenerate.
+
+    Returns {"llm_part": <markdown>, "cached": <bool>}.
+    """
+    row = get_prd_rendered(prd_id)  # human PRD as the user sees it (patches folded)
+    if row is None:
+        raise RuntimeError(f"prd_id={prd_id} not found")
+    human_prd = (row.get("payload_md") or "").strip()
+    if not human_prd:
+        raise RuntimeError(f"prd_id={prd_id} has no human PRD to build a spec from")
+
+    source_hash = prd_source_hash(human_prd)
+    cached = (row.get("llm_part") or "").strip()
+    if cached and row.get("llm_part_source_hash") == source_hash:
+        logger.info("impl-spec cache HIT prd_id=%s", prd_id)
+        return {"llm_part": cached, "cached": True}
+
+    logger.info("impl-spec cache MISS prd_id=%s — generating", prd_id)
+    ctx = _build_context(row["brief_id"], row["insight_index"])
+    result_b = _call_impl_spec(ctx, human_prd)
+    llm_part = str(result_b.output).strip()
+    set_prd_impl_spec(prd_id, llm_part=llm_part, source_hash=source_hash)
+
+    company_id = ctx.get("company_id")
+    if company_id:
+        try:
+            log_agent_decision(
+                enterprise_id=company_id,
+                agent=_AGENT,
+                decision_type="generate_impl_spec",
+                factors={
+                    "prd_id": prd_id,
+                    "brief_id": row["brief_id"],
+                    "insight_index": row["insight_index"],
+                    "skill": _SKILL_B,
+                    "has_llm_part": bool(llm_part),
+                },
+                output={"prd_id": prd_id},
+                model=result_b.model,
+                prompt_version=result_b.prompt_version,
+            )
+        except Exception:  # noqa: BLE001 — audit logging must never fail the send
+            logger.exception("impl-spec decision log failed prd_id=%s", prd_id)
+
+    return {"llm_part": llm_part, "cached": False}
 
 
 def _top_insight_indices(insights: list, count: int) -> list[int]:
@@ -588,7 +529,7 @@ async def _warm_one_prd(brief_id: int, insight_index: int, title: str) -> None:
             prd_id, brief_id, insight_index, run_id,
         )
         await generate_prd(
-            prd_id, brief_id, insight_index, background=True, human_only=True
+            prd_id, brief_id, insight_index, background=True
         )
     except Exception:  # noqa: BLE001 — warming is best-effort
         logger.exception(
@@ -607,7 +548,8 @@ async def warm_prds_for_brief(brief: dict) -> None:
     yields to interactive callers — so a user's "Generate PRD" click is never
     queued behind warming, and the small prod box isn't flooded. Each warm
     dedupes against existing rows, so a brief that already warmed — or an insight
-    the user already generated — is skipped.
+    the user already generated — is skipped. Only the human PRD is warmed; the
+    Implementation Spec stays on demand (`ensure_impl_spec`).
 
     Per-insight work (human PRD only + run_id stamping) lives in `_warm_one_prd`.
     """

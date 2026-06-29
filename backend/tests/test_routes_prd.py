@@ -280,8 +280,9 @@ def test_generate_does_not_dedupe_against_v1_row(tenant_client, isolated_setting
 def test_generate_via_prd_author_skill_through_canonical_path(
     tenant_client, isolated_settings, monkeypatch
 ):
-    """A 2-part document flows end-to-end through the canonical
-    /v1/prd/generate path."""
+    """The human PRD flows end-to-end through the canonical /v1/prd/generate
+    path — bound to prd-author, NEVER triggering implementation-spec, and
+    llm_part stays empty (the machine spec is on demand)."""
     import asyncio
     from app import prd_runner
     from app.graph.gateway import LLMResult
@@ -291,27 +292,18 @@ def test_generate_via_prd_author_skill_through_canonical_path(
     db_mod = isolated_settings["db"]
     brief_id = _save_brief_with_insights(db_mod, dataset="acme")
 
-    captured: dict = {}
-    # Two-call generation: each call returns only its assigned half, keyed by
-    # the call's purpose (Part A vs Part B).
     part_a = (
         "# Claims — Move deductible upfront\n\n"
         "# Part A — Product Requirements Document (human-readable)\n"
         "## 1. Problem & evidence\n57% abandon.\n"
     )
-    part_b = (
-        "# Part B — Implementation Spec (LLM-readable / agent-executable)\n"
-        "WHEN x THE SYSTEM SHALL y.\n"
-    )
 
     skills_seen: list = []
 
     def _capture(**kwargs):
-        captured.update(kwargs)
         skills_seen.append(kwargs.get("skill"))
-        output = part_b if kwargs.get("purpose") == "generate_prd_part_b" else part_a
         return LLMResult(
-            output=output, model="claude-sonnet-4-6",
+            output=part_a, model="claude-sonnet-4-6",
             prompt_version=kwargs["prompt_version"] + "+prd-author@abc123",
             input_tokens=1, output_tokens=1, cache_read_input_tokens=0,
             cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=1,
@@ -333,12 +325,88 @@ def test_generate_via_prd_author_skill_through_canonical_path(
     finally:
         loop.close()
 
-    # Part A binds prd-author; Part B binds the dedicated implementation-spec.
-    assert "prd-author" in skills_seen
-    assert "implementation-spec" in skills_seen
+    # Only the prd-author (human PRD) skill was bound; no machine spec generated.
+    assert skills_seen == ["prd-author"]
+    assert "implementation-spec" not in skills_seen
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
     assert row["variant"] == "v2"
     assert "Part A — Product Requirements Document" in row["payload_md"]
-    assert "Part B — Implementation Spec" not in row["payload_md"]
-    assert "Part B — Implementation Spec" in row["llm_part"]
+    assert (row["llm_part"] or "") == ""
+
+
+# ---- POST /v1/prd/{id}/impl-spec (Send to Claude Code) ----------------------
+
+def _ready_prd_for_send(tenant_client, isolated_settings, slug="acme"):
+    """Seed a ready human PRD owned by `slug` and return (client, db_mod, prd_id)."""
+    t = tenant_client.make(slug=slug)
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset=slug)
+    prd_id = db_mod.start_prd(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=1, variant="v2",
+    )
+    db_mod.complete_prd(prd_id, title="t", md="# Human PRD\n\nProblem body.")
+    return t.client, db_mod, prd_id
+
+
+def test_impl_spec_generates_and_caches(tenant_client, isolated_settings, monkeypatch):
+    """POST /impl-spec generates the spec on the first send and caches it; a
+    re-send reuses the cache (no second model call)."""
+    from app import prd_runner
+    from app.graph.gateway import LLMResult
+
+    client, db_mod, prd_id = _ready_prd_for_send(tenant_client, isolated_settings)
+
+    calls = {"n": 0}
+
+    def _spec_call(**kwargs):
+        calls["n"] += 1
+        assert kwargs["skill"] == "implementation-spec"
+        return LLMResult(
+            output="# Implementation Spec\nWHEN x THE SYSTEM SHALL y.",
+            model="claude-sonnet-4-6", prompt_version="prd-impl-spec-v1",
+            input_tokens=1, output_tokens=1, cache_read_input_tokens=0,
+            cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=1,
+            stop_reason="end_turn",
+        )
+
+    monkeypatch.setattr(prd_runner, "llm_call", _spec_call)
+
+    first = client.post(f"/v1/prd/{prd_id}/impl-spec")
+    assert first.status_code == 200
+    body = first.json()
+    assert body["cached"] is False
+    assert "WHEN x THE SYSTEM SHALL y." in body["llm_part"]
+
+    second = client.post(f"/v1/prd/{prd_id}/impl-spec")
+    assert second.status_code == 200
+    assert second.json()["cached"] is True
+    # The model ran exactly once across both sends.
+    assert calls["n"] == 1
+
+
+def test_impl_spec_cross_tenant_returns_404(tenant_client, isolated_settings, monkeypatch):
+    """Company B cannot generate a spec for company A's PRD."""
+    from app import prd_runner
+    from app.graph.gateway import LLMResult
+
+    _client_a, _db, prd_id = _ready_prd_for_send(
+        tenant_client, isolated_settings, slug="company-a"
+    )
+    monkeypatch.setattr(
+        prd_runner, "llm_call",
+        lambda **kw: LLMResult(
+            output="x", model="m", prompt_version="v", input_tokens=1,
+            output_tokens=1, cache_read_input_tokens=0,
+            cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=1,
+            stop_reason="end_turn",
+        ),
+    )
+    b = tenant_client.make(slug="company-b")
+    assert b.client.post(f"/v1/prd/{prd_id}/impl-spec").status_code == 404
+
+
+def test_impl_spec_without_auth_returns_401(unauth_client, isolated_settings):
+    resp = unauth_client.post("/v1/prd/1/impl-spec")
+    assert resp.status_code == 401

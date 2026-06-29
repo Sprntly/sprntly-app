@@ -394,6 +394,14 @@ export type PrdRecord = {
   variant?: string
 }
 
+/** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable
+ *  Implementation Spec produced when a PRD is sent to Claude Code. `cached` is
+ *  true when an unchanged PRD reused a previously-generated spec. */
+export type ImplSpecResponse = {
+  llm_part: string
+  cached: boolean
+}
+
 export type EvidenceStartResponse = {
   evidence_id: number
   status: "generating" | "ready" | "failed"
@@ -1225,6 +1233,12 @@ export const prdApi = {
   latest: (dataset: string) => api.get<PrdRecord>(`/v1/prd/latest?dataset=${encodeURIComponent(dataset)}`),
   /** Old name retained for compatibility. */
   byId: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
+  /** Generate (or reuse the cached) machine-readable Implementation Spec for a
+   *  PRD — backs the "Send to Claude Code" action. Synchronous: resolves with the
+   *  agent-ready spec markdown to paste into Claude Code. The spec is cached on
+   *  the PRD until its human content changes. */
+  sendToClaudeCode: (id: number) =>
+    api.post<ImplSpecResponse>(`/v1/prd/${id}/impl-spec`, {}),
   /** Save PRD edits (title + markdown). Auto-creates a version snapshot. */
   update: (id: number, body: { title: string; payload_md: string }) =>
     api.put<PrdRecord>(`/v1/prd/${id}`, body),

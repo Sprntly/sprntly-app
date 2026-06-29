@@ -315,27 +315,27 @@ def _setup_kg_prd(isolated_settings, facade, *, support_n=2):
 
 
 def test_prd_grounds_on_kg_trail_not_corpus(isolated_settings, facade, monkeypatch):
-    """Part A's input carries the KG trail's signals (cited) and NOT the corpus
-    dump (KG-first grounding). Part A binds prd-author; Part B (chained) binds
-    implementation-spec."""
+    """The human PRD's input carries the KG trail's signals (cited) and NOT the
+    corpus dump (KG-first grounding). It binds prd-author — and the human-PRD
+    flow makes exactly one call (no implementation-spec)."""
     db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
 
     calls: list[dict] = []
     monkeypatch.setattr(prd_runner, "llm_call",
-                        lambda **kw: (calls.append(kw), _llm_result(_TWO_PART))[1])
+                        lambda **kw: (calls.append(kw), _llm_result(_PART_A))[1])
     prd_runner._run_sync(prd_id, brief_id, 0)
 
-    by_purpose = {c["purpose"]: c for c in calls}
-    inp = by_purpose["generate_prd_part_a"]["input"]
+    assert len(calls) == 1
+    inp = calls[0]["input"]
     assert "KNOWLEDGE GRAPH EVIDENCE" in inp
     assert "KG_SIGNAL_MARK abandon at pay" in inp
     assert "customer_voice" in inp           # source_type cited
     assert "zendesk" in inp                   # provenance cited
     assert "CORPUS_FALLBACK_MARK" not in inp  # corpus is NOT dumped
-    # Part A binds prd-author; Part B the dedicated implementation-spec skill.
-    assert by_purpose["generate_prd_part_a"]["skill"] == "prd-author"
-    assert by_purpose["generate_prd_part_b"]["skill"] == "implementation-spec"
-    assert all(c["agent"] == "prd" for c in calls)
+    # The human PRD binds prd-author, on the prd agent; no machine spec.
+    assert calls[0]["purpose"] == "generate_prd_part_a"
+    assert calls[0]["skill"] == "prd-author"
+    assert calls[0]["agent"] == "prd"
 
 
 def test_prd_decision_log_carries_kg_refs(isolated_settings, facade, monkeypatch):
@@ -427,20 +427,18 @@ def test_prd_no_company_falls_back_to_corpus(isolated_settings, monkeypatch):
     assert "CORPUS_FALLBACK_MARK" in captured["input"]
 
 
-def test_prd_2part_split_and_storage_unchanged_on_kg(isolated_settings, facade, monkeypatch):
-    """Regrounding doesn't touch the 2-part contract: Part A → payload_md,
-    Part B → llm_part, status ready."""
+def test_prd_human_storage_unchanged_on_kg(isolated_settings, facade, monkeypatch):
+    """Regrounding doesn't touch the human-PRD storage contract: the human PRD →
+    payload_md, llm_part stays empty (the spec is on demand), status ready."""
     db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
 
-    monkeypatch.setattr(prd_runner, "llm_call", _two_call)
+    monkeypatch.setattr(prd_runner, "llm_call", lambda **kw: _llm_result(_PART_A))
     prd_runner._run_sync(prd_id, brief_id, 0)
 
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
     assert "Part A — Product Requirements Document" in row["payload_md"]
-    assert "Part B — Implementation Spec" not in row["payload_md"]
-    assert "Part B — Implementation Spec" in row["llm_part"]
-    assert "WHEN x THE SYSTEM SHALL y." in row["llm_part"]
+    assert (row["llm_part"] or "") == ""
 
 
 def test_prd_kg_read_failure_falls_back_to_corpus(isolated_settings, facade, monkeypatch):
