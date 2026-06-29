@@ -157,6 +157,30 @@ def test_does_not_reuse_single_prd_row_without_run_id(
     assert len(stub_orchestrator) == 1
 
 
+def test_reuses_warmed_run_id_stamped_prd(
+    tenant_client, isolated_settings, stub_orchestrator
+):
+    """A prefetch-warmed PRD is run_id-stamped, so clicking 'Generate PRD'
+    resolves the warm run instead of restarting — the warm↔click unification."""
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_brief_with_insights(db_mod, dataset="acme")
+    warmed = db_mod.start_prd(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=1, variant="v2", run_id="warm-run-1",
+    )
+    db_mod.complete_prd(warmed, title="t", md="# warmed human PRD")
+
+    resp = t.client.post(
+        "/v1/multi-agent/generate", json={"brief_id": brief_id, "insight_index": 0}
+    )
+    body = resp.json()
+    assert body["reused"] is True
+    assert body["run_id"] == "warm-run-1"
+    assert _count_prds(brief_id, 0) == 1          # no restart, no duplicate
+    assert len(stub_orchestrator) == 0            # orchestrator not re-run
+
+
 def test_other_insight_is_independent(
     tenant_client, isolated_settings, stub_orchestrator
 ):
