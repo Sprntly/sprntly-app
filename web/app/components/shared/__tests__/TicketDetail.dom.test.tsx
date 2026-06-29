@@ -50,7 +50,7 @@ vi.mock("../../../context/NavigationContext", async (orig) => {
   return { ...actual, useNavigation: () => ({ showToast }) }
 })
 
-import { TicketDetail, ticketKeyFor } from "../TicketDetail"
+import { TicketDetail, ticketKeyFor, normalizePriority } from "../TicketDetail"
 
 const STORY = {
   title: "Guest alert data model",
@@ -85,6 +85,27 @@ async function renderDetail(onBack = vi.fn()) {
   return onBack
 }
 
+describe("normalizePriority", () => {
+  it("maps the skill's free-form words onto canonical P0–P3 labels", () => {
+    expect(normalizePriority("urgent")).toBe("P0 — Critical")
+    expect(normalizePriority("high")).toBe("P1 — High")
+    expect(normalizePriority("normal")).toBe("P2 — Medium")
+    expect(normalizePriority("low")).toBe("P3 — Low")
+  })
+  it("is idempotent on already-canonical labels and bare P-codes", () => {
+    for (const p of ["P0 — Critical", "P1 — High", "P2 — Medium", "P3 — Low"]) {
+      expect(normalizePriority(p)).toBe(p)
+    }
+    expect(normalizePriority("P1")).toBe("P1 — High")
+    expect(normalizePriority("p0")).toBe("P0 — Critical")
+  })
+  it("falls back to P2 — Medium for empty/unknown values", () => {
+    expect(normalizePriority(null)).toBe("P2 — Medium")
+    expect(normalizePriority("")).toBe("P2 — Medium")
+    expect(normalizePriority("banana")).toBe("P2 — Medium")
+  })
+})
+
 describe("ticketKeyFor", () => {
   it("prefers the content-derived id when present", () => {
     expect(ticketKeyFor(7, { ...STORY, id: "3e7b3c1fa35a" })).toBe("prd-7-3e7b3c1fa35a")
@@ -111,6 +132,17 @@ describe("TicketDetail", () => {
     expect((screen.getByPlaceholderText("Add a description…") as HTMLTextAreaElement).value)
       .toBe("One-click guest-alert for Deal Alerts.")
     expect((screen.getByDisplayValue("Admin can enable in one click")) as HTMLInputElement).toBeTruthy()
+  })
+
+  it("shows a generated free-form priority as its canonical pill label", async () => {
+    // Regression: the user-stories skill emits "high"; the pill used to render
+    // that raw word (matching no P0–P3 option). It must show "P1 — High".
+    await act(async () => {
+      render(React.createElement(TicketDetail, { story: { ...STORY, priority: "high" }, index: 0, prdId: 7, onBack: vi.fn() }))
+    })
+    await waitFor(() => expect(api.getData).toHaveBeenCalled())
+    expect(screen.getByText("P1 — High")).toBeTruthy()
+    expect(screen.queryByText("high")).toBeNull()
   })
 
   it("saved overrides win over the generated story", async () => {
