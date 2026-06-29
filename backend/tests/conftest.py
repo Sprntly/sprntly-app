@@ -153,7 +153,8 @@ CREATE TABLE prds (
     status           TEXT NOT NULL DEFAULT 'ready',
     error            TEXT,
     template_version INTEGER,
-    variant          TEXT NOT NULL DEFAULT 'v1'
+    variant          TEXT NOT NULL DEFAULT 'v1',
+    run_id           TEXT
 );
 
 CREATE TABLE evidences (
