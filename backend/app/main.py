@@ -161,8 +161,13 @@ async def lifespan(app: FastAPI):
         # bump). Sync helpers, across ALL workspaces — system-wide cleanup, not a
         # user-driven query (Rule #23) — mirroring the prd/evidence invalidation above.
         proto_orphans = invalidate_orphan_generating_prototypes()
-        proto_stale = invalidate_stale_prototypes(
-            DESIGN_AGENT_TEMPLATE_VERSION, variant="v1")
+        if settings.design_agent_invalidate_prototypes_on_template_bump:
+            proto_stale = invalidate_stale_prototypes(
+                DESIGN_AGENT_TEMPLATE_VERSION, variant="v1")
+        else:
+            proto_stale = 0
+            logger.info(
+                "prototype template-demote skipped (gate off) — existing ready prototypes preserved across the version bump")
         if proto_orphans or proto_stale:
             logger.info(
                 "Invalidated %d orphan generating prototype(s), %d stale prototype(s)",
