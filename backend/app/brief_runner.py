@@ -138,12 +138,13 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
     cached entries return immediately (dedupe lives in _warm_evidence /
     ask_runner._warm_one).
 
-    PRDs warm too, but through a different throttle: warm_prds_for_brief runs
-    the top-N insights' PRDs sequentially in the LLM gate's BACKGROUND lane
-    (app.llm._PriorityGate) — at most one warm model-call in flight, and every
-    interactive caller (including a user's "Generate PRD" click on routes/
-    prd.py) jumps ahead of it. That removes the old reason PRDs were on-demand
-    only: warming can no longer stall a click behind the backlog.
+    PRDs warm too, but through a different throttle: warm_prds_for_brief fans
+    out the top-N insights' human PRDs concurrently in the LLM gate's BACKGROUND
+    lane (app.llm._PriorityGate) — which still bounds in-flight warm model-calls
+    (bg_cap) and lets every interactive caller (including a user's "Generate PRD"
+    click) jump ahead. That removes the old reason PRDs were on-demand only:
+    warming can no longer stall a click behind the backlog. Each warm PRD is
+    run_id-stamped so the multi-agent click path dedupes against it.
     Ask warming runs in parallel with evidence, hitting the same throughput cap.
     """
     brief_id = brief.get("id")

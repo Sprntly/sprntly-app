@@ -261,6 +261,30 @@ def test_run_sync_stores_both_parts(isolated_settings, monkeypatch):
     assert "WHEN x THE SYSTEM SHALL y." in row["llm_part"]
 
 
+def test_human_only_skips_part_b(isolated_settings, monkeypatch):
+    """human_only=True makes a SINGLE llm_call (Part A) — the implementation-spec
+    Part B is never invoked — and the PRD completes ready with an empty llm_part.
+    This is the prefetch-warm scope: have the human PRD ready, skip the spec."""
+    import asyncio
+
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _two_call_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    asyncio.run(prd_runner.generate_prd(prd_id, brief_id, 0, human_only=True))
+
+    # Exactly one call, and it was Part A — no Part B.
+    assert len(captured) == 1
+    assert captured[0]["purpose"] == "generate_prd_part_a"
+    row = db_mod.get_prd(prd_id)
+    assert row["status"] == "ready"
+    assert "Users can't X." in row["payload_md"]
+    assert (row["llm_part"] or "") == ""
+
+
 def test_run_sync_part_a_renders_as_before(isolated_settings, monkeypatch):
     """Frontend-compat: payload_md is the human PRD only, no separator artifacts;
     get_prd_rendered returns the same."""
