@@ -35,6 +35,15 @@ from tests._company_helpers import (
     supabase_bearer,
 )
 
+# The brief Slack message is drafted by the brief-nudge skill; delivery tests
+# mock the (LLM) draft so they exercise only the per-user fan-out + routing.
+_NUDGE = {
+    "slack": {"headline": "h", "intro": "i", "items": [],
+              "cta_label": "Open", "cta_url": "https://app.sprntly.ai/brief"},
+    "email": {"subject": "s", "title": "t", "intro": "i",
+              "cta_label": "c", "cta_url": "u"},
+}
+
 
 def _reload_app_modules():
     for name in (
@@ -378,11 +387,12 @@ def test_delivery_targets_each_user_own_slack(slack_env, monkeypatch):
     posts: list[tuple[str, str]] = []
 
     monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: rows)
+    monkeypatch.setattr(delivery, "generate_nudge", lambda *a, **k: _NUDGE)
     monkeypatch.setattr(delivery, "decrypt_token_json",
                         lambda enc: json.dumps(tokens[enc]))
     monkeypatch.setattr(
         delivery.slack_oauth, "post_message",
-        lambda tok, *, channel, text, blocks: posts.append((tok, channel))
+        lambda tok, *, channel, text, blocks, **k: posts.append((tok, channel))
         or {"ok": True})
 
     out = delivery.deliver_brief_to_slack(
@@ -404,6 +414,7 @@ def test_delivery_skips_user_without_channel(slack_env, monkeypatch):
          "token_json_encrypted": "encB"},
     ]
     monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: rows)
+    monkeypatch.setattr(delivery, "generate_nudge", lambda *a, **k: _NUDGE)
     monkeypatch.setattr(delivery, "decrypt_token_json",
                         lambda enc: json.dumps({"access_token": "t"}))
     monkeypatch.setattr(delivery.slack_oauth, "post_message",
@@ -415,6 +426,36 @@ def test_delivery_skips_user_without_channel(slack_env, monkeypatch):
     assert by_user["A"]["delivered"] is True
     assert by_user["B"]["delivered"] is False
     assert by_user["B"]["reason"] == "no_channel_configured"
+
+
+def test_delivery_dm_target_routes_to_user_dm(slack_env, monkeypatch):
+    """A user whose target_type is 'dm' gets the brief in their own DM — no
+    channel needed; the installing user's authed_user_id is the recipient."""
+    from app.synthesis import delivery
+
+    rows = [
+        {"user_id": "A", "status": "active",
+         "config": {"target_type": "dm"},  # no channel_id
+         "token_json_encrypted": "encA"},
+    ]
+    calls: list[dict] = []
+    monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: rows)
+    monkeypatch.setattr(delivery, "generate_nudge", lambda *a, **k: _NUDGE)
+    monkeypatch.setattr(
+        delivery, "decrypt_token_json",
+        lambda enc: json.dumps({"access_token": "xoxb-A", "authed_user_id": "U-A"}))
+    monkeypatch.setattr(
+        delivery.slack_oauth, "post_to_target",
+        lambda tok, *, config, authed_user_id, text, blocks: calls.append(
+            {"tok": tok, "config": config, "authed_user_id": authed_user_id})
+        or {"ok": True, "channel": "D-A"})
+
+    out = delivery.deliver_brief_to_slack(
+        "ent-A", {"summary_headline": "h", "week_label": "w", "insights": []})
+    assert out["delivered"] is True
+    # The DM config + the resolved installing user flow through to the router.
+    assert calls[0]["config"]["target_type"] == "dm"
+    assert calls[0]["authed_user_id"] == "U-A"
 
 
 # ─────────────────────────── regression: other providers untouched ───────────────────────────

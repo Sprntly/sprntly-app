@@ -122,21 +122,32 @@ describe("connectorsApi Slack methods", () => {
     expect(lastCall!.init?.method ?? "GET").toBe("GET")
   })
 
-  it("setSlackConfig POSTs channel_id + channel_name in body only", async () => {
-    await connectorsApi.setSlackConfig("C123", "product-launches")
+  it("setSlackConfig (channel) POSTs target_type + channel_id + channel_name", async () => {
+    await connectorsApi.setSlackConfig({
+      targetType: "channel",
+      channelId: "C123",
+      channelName: "product-launches",
+    })
     expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/slack/config`)
     expect(lastCall!.init?.method).toBe("POST")
     expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
+      target_type: "channel",
       channel_id: "C123",
       channel_name: "product-launches",
     })
   })
 
-  it("setSlackConfig omits channel_name when not provided", async () => {
-    await connectorsApi.setSlackConfig("C123")
+  it("setSlackConfig (channel) omits channel_name when not provided", async () => {
+    await connectorsApi.setSlackConfig({ targetType: "channel", channelId: "C123" })
     const body = JSON.parse(String(lastCall!.init!.body))
+    expect(body.target_type).toBe("channel")
     expect(body.channel_id).toBe("C123")
     expect(body.channel_name).toBeUndefined()
+  })
+
+  it("setSlackConfig (dm) POSTs only target_type, no channel fields", async () => {
+    await connectorsApi.setSlackConfig({ targetType: "dm" })
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({ target_type: "dm" })
   })
 
   it("disconnectSlack DELETEs the bare endpoint", async () => {

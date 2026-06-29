@@ -209,11 +209,16 @@ def nudge_slack_blocks(nudge: dict, deep_link: str) -> tuple[str, list[dict]]:
 
 
 def _eligible(row: dict, enterprise_id: str, brief_id: int, day: int) -> bool:
-    """Cheap pre-checks (no token decode, no LLM): active connection, a channel,
-    not already sent, and — for reminders — the brief is still unopened."""
+    """Cheap pre-checks (no token decode, no LLM): active connection, a target
+    (channel picked, or a DM-to-self), not already sent, and — for reminders —
+    the brief is still unopened."""
     if row.get("status") != "active":
         return False
-    if not (row.get("config") or {}).get("channel_id"):
+    config = row.get("config") or {}
+    target_type = (config.get("target_type") or slack_oauth.TARGET_CHANNEL).strip()
+    # DM target resolves to the installing user's own DM at send time, so it
+    # needs no channel here; a channel target requires a picked channel.
+    if target_type == slack_oauth.TARGET_CHANNEL and not config.get("channel_id"):
         return False
     user_id = row.get("user_id")
     if not user_id:
@@ -231,7 +236,7 @@ def _deliver_to_one(
     """Send the rendered nudge to one per-user Slack connection + record it.
     Never raises."""
     user_id = row.get("user_id")
-    channel = ((row.get("config") or {}).get("channel_id") or "").strip()
+    config = row.get("config") or {}
     try:
         token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
     except (TokenEncryptionError, json.JSONDecodeError, KeyError) as e:
@@ -241,12 +246,18 @@ def _deliver_to_one(
     if not bot_token:
         return {"user_id": user_id, "delivered": False, "reason": "no_bot_token"}
     try:
-        slack_oauth.post_message(bot_token, channel=channel, text=text, blocks=blocks)
+        # Same target routing as brief delivery — DM the user or post to their
+        # channel — so the skill-drafted nudge honors the user's chosen target.
+        res = slack_oauth.post_to_target(
+            bot_token, config=config,
+            authed_user_id=token_json.get("authed_user_id"),
+            text=text, blocks=blocks)
     except Exception as e:  # noqa: BLE001 — one recipient never breaks the rest
         logger.exception("nudge slack delivery failed for user %s", user_id)
         return {"user_id": user_id, "delivered": False, "reason": f"error: {e}"}
     nudge_db.record_nudge_sent(enterprise_id, user_id, brief_id, day, SLACK)
-    return {"user_id": user_id, "delivered": True, "channel": channel}
+    return {"user_id": user_id, "delivered": True,
+            "channel": res.get("channel") or config.get("channel_id")}
 
 
 def deliver_brief_nudge_to_slack(
