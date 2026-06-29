@@ -56,7 +56,7 @@ RICE/WSJF give a number to rank by; **Kano gives each feature a *category*** tha
 
 ## How VoC Volume & Severity works (the framework for ranking problems)
 RICE/WSJF rank *solutions*; VoC Volume & Severity ranks *problems* — and it's built for B2B reality, where **how many companies are affected** matters more than raw user counts. It scores each problem on signals that should agree if the problem is real, then looks hard at where they don't:
-- **Voice** — complaint volume (as a rate) × **severity** (frustration, churn threats, blocker-vs-annoyance). From `third-party-feedback`.
+- **Voice** — complaint volume (as a rate) × **severity** (frustration, churn threats, blocker-vs-annoyance). From `voice-of-customer-report`.
 - **Behavior** — product **analytics**: companies/accounts hitting it, drop-off / task-failure, and **churn** correlation. From analytics connectors.
 - **Commercial** — **sales feedback** (lost deals, expansion blockers, account-team escalations from the CRM connector) and the revenue/logo value of who's affected.
 - **Strategic fit** — does fixing it move the goal (0–1).

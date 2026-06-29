@@ -1,0 +1,229 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>In their words — Sprntly team-adoption interviews</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,ital,wght@6..72,0,400;6..72,0,500;6..72,0,600;6..72,0,700;6..72,1,400;6..72,1,500&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#1a1813;--ink2:#403c34;--soft:#8a857a;--line:#e3e0d6;--rule:#cfcabc;--page:#fff;--bg:#ece9e1;
+--accent:#1f6f52;--red:#bb463c;--red-s:#fbecea;--amber:#a9762a;--amber-s:#f7efdd;--teal:#1f7a5a;--teal-s:#e9f3ed;--blue:#3a5a9a;--blue-s:#eaeef8;--neutral:#7a756a;
+--serif:'Newsreader',Georgia,serif;--sans:'Inter',system-ui,sans-serif;--quote:#16352a;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--serif);line-height:1.6;-webkit-font-smoothing:antialiased;padding:40px 16px 80px}
+.page{max-width:820px;margin:0 auto;background:var(--page);border:1px solid var(--line);border-radius:4px;box-shadow:0 1px 3px rgba(0,0,0,.04),0 8px 30px rgba(0,0,0,.05);padding:54px 64px 52px}
+.eyebrow{font-family:var(--sans);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);font-weight:700}
+.context{font-family:var(--sans);font-size:12px;color:var(--soft);font-weight:500;margin-top:5px}
+h1{font-weight:600;font-size:28px;line-height:1.15;margin:8px 0 4px}
+/* VOICES HERO */
+.voices{margin-top:26px;background:linear-gradient(180deg,#f3f6f3,#fbfaf6);border:1px solid #d4e3da;border-radius:16px;padding:34px 38px 30px;position:relative;overflow:hidden}
+.voices::before{content:"\201C";position:absolute;top:-22px;left:20px;font-size:150px;color:#cfe2d6;font-family:var(--serif);line-height:1;opacity:.7}
+.voices .vk{font-family:var(--sans);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent);font-weight:700;position:relative}
+.lead-q{font-size:27px;line-height:1.32;font-weight:500;color:var(--quote);margin:14px 0 6px;position:relative;letter-spacing:-.01em}
+.lead-q .who{display:block;font-family:var(--sans);font-size:12.5px;font-weight:600;font-style:normal;color:var(--soft);margin-top:11px;letter-spacing:0}
+.subvoices{display:grid;grid-template-columns:1fr 1fr;gap:18px 30px;margin-top:24px;padding-top:22px;border-top:1px solid #d4e3da;position:relative}
+.sv{font-size:17px;line-height:1.45;font-style:italic;color:var(--ink)}
+.sv .who{display:block;font-family:var(--sans);font-size:11.5px;font-weight:600;font-style:normal;color:var(--soft);margin-top:7px}
+.ctx{display:inline-block;font-family:var(--sans);font-size:9.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:1px 7px;border-radius:999px;margin-left:6px;vertical-align:middle}
+.ctx.churn{background:var(--red-s);color:var(--red)}.ctx.risk{background:var(--amber-s);color:var(--amber)}.ctx.exp{background:var(--teal-s);color:var(--teal)}
+h2{font-weight:600;font-size:13px;font-family:var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin:38px 0 0;padding-bottom:7px;border-bottom:2px solid var(--accent);display:inline-block}
+.sec{margin-top:8px}
+/* tldr */
+.synth{font-size:18px;line-height:1.6;margin-top:14px;color:var(--ink)}.synth b{font-weight:600}
+.enum .item{font-size:16px;line-height:1.5;margin:14px 0}
+.enum .hash{font-family:var(--sans);font-weight:700;color:var(--accent);font-size:14.5px;margin-right:6px}
+.enum .item b{font-weight:600}
+.enum .vq{display:block;font-size:15px;font-style:italic;color:var(--quote);margin:5px 0;padding-left:16px;border-left:3px solid #cfe2d6;margin-left:2px}
+.enum .beats{font-family:var(--sans);display:block;font-size:12.5px;color:var(--soft);padding-left:18px;margin-top:4px}
+.enum .beats b{color:var(--ink2)}
+/* THEMES - quote led */
+.theme{margin-top:22px;padding-top:20px;border-top:1px solid var(--line)}
+.theme:first-of-type{border-top:none;padding-top:8px}
+.theme .qlead{font-size:21px;line-height:1.4;font-style:italic;color:var(--quote);font-weight:500;letter-spacing:-.005em}
+.theme .qlead .who{display:block;font-family:var(--sans);font-size:11.5px;font-weight:600;font-style:normal;color:var(--soft);margin-top:8px}
+.theme .q2{font-size:15.5px;line-height:1.45;font-style:italic;color:var(--ink2);margin-top:12px;padding-left:15px;border-left:2px solid var(--tc)}
+.theme .q2 .who{display:block;font-family:var(--sans);font-size:11px;font-weight:600;font-style:normal;color:var(--soft);margin-top:4px}
+.theme.t1{--tc:var(--red)}.theme.t2{--tc:var(--amber)}.theme.t3{--tc:var(--teal)}
+.read{font-family:var(--sans);margin-top:15px;background:#faf9f5;border:1px solid var(--line);border-left:3px solid var(--tc);border-radius:9px;padding:13px 16px}
+.read .rt{font-size:14px;font-weight:700;color:var(--ink);display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+.sig{display:inline-flex;align-items:center;gap:7px;margin-left:auto}
+.sigbar{width:78px;height:7px;border-radius:4px;background:#eae6dc;overflow:hidden;display:inline-block}.sigfill{display:block;height:100%}
+.signum{font-size:11px;font-weight:700;color:var(--ink2)}
+.read .job{font-size:12.5px;color:var(--ink2);margin-top:7px}.read .job b{color:var(--ink)}
+.tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.tag{font-size:10px;font-weight:700;padding:3px 9px;border-radius:999px;border:1px solid var(--line);background:#fff;color:var(--ink2)}
+.tag.persist{background:var(--red-s);color:var(--red);border-color:#eccfc9}.tag.emerge{background:var(--amber-s);color:var(--amber);border-color:#ecd9b0}.tag.conv{background:var(--teal-s);color:var(--teal);border-color:#c9e3d4}
+.impact{font-size:11.5px;color:var(--ink2);margin-top:9px;padding-top:8px;border-top:1px dashed var(--line)}.impact b{color:var(--ink)}
+/* top pains */
+.tp{font-family:var(--sans);width:100%;border-collapse:collapse;font-size:12.5px;margin-top:14px;border:1px solid var(--rule);border-radius:8px;overflow:hidden}
+.tp th{background:#f4f2eb;text-align:left;padding:9px 11px;font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--ink2);font-weight:700}
+.tp td{padding:9px 11px;border-top:1px solid var(--line);color:var(--ink2)}.tp td b{color:var(--ink)}
+.s5{color:var(--red);font-weight:700}.s4{color:var(--amber);font-weight:700}.s1{color:var(--soft)}
+.pp{font-weight:700;font-size:10.5px;padding:1px 7px;border-radius:5px}.pp.p{background:var(--red-s);color:var(--red)}.pp.e{background:var(--amber-s);color:var(--amber)}.pp.n{background:#efeee9;color:var(--neutral)}
+/* rigor */
+.rigor{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+.rcard{border:1px solid var(--line);border-radius:10px;padding:14px 16px;border-top:3px solid var(--rc)}
+.rcard.surp{--rc:var(--blue)}.rcard.disc{--rc:var(--amber)}.rcard.open{--rc:var(--teal)}.rcard.sat{--rc:var(--neutral)}
+.rcard h4{font-family:var(--sans);font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--rc);font-weight:700;margin-bottom:8px}
+.rcard .it{font-size:13.5px;color:var(--ink2);line-height:1.45}
+/* about research (demoted) */
+.about{font-family:var(--sans);background:#faf9f5;border:1px solid var(--line);border-radius:11px;padding:16px 18px;margin-top:12px}
+.about .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 22px}
+.about .l{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--soft);font-weight:700}
+.about .v{font-size:13px;color:var(--ink2);line-height:1.5;margin-top:2px}.about .v b{color:var(--ink)}
+.about .bias{grid-column:1/-1;font-size:12px;color:#7a4f00;background:var(--amber-s);border:1px solid #ecd9b0;border-radius:8px;padding:9px 12px;margin-top:4px}
+/* recs */
+.recintro{font-family:var(--sans);font-size:12.5px;color:var(--ink2);background:#eef3f0;border:1px solid #cfe0d7;border-radius:8px;padding:10px 13px;margin-top:6px}
+.reccard{border:1px solid var(--line);border-radius:11px;padding:15px 18px;margin-top:12px;background:#fff;border-left:4px solid var(--accent)}
+.reccard .rh{display:flex;align-items:baseline;gap:11px;flex-wrap:wrap}
+.recnum2{font-family:var(--sans);width:25px;height:25px;border-radius:6px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0}
+.reccard .rt{font-size:16.5px;font-weight:600}
+.prio{font-family:var(--sans);margin-left:auto;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:3px 9px;border-radius:5px}.prio.hi{background:var(--red-s);color:var(--red)}.prio.med{background:var(--amber-s);color:var(--amber)}
+.reccard .rm{font-family:var(--sans);font-size:12.5px;color:var(--ink2);margin-top:7px}.reccard .rm b{color:var(--ink)}
+.recactions{display:flex;gap:9px;margin-top:12px;flex-wrap:wrap}
+.btn{font-family:var(--sans);font-size:12px;font-weight:600;line-height:1.4;border-radius:7px;padding:9px 14px;cursor:pointer;border:1px solid var(--line);background:#fff;color:var(--ink2);transition:.15s;display:inline-block}
+.btn:hover{background:#f3f1ea}.btn.prd{background:var(--accent);color:#fff;border-color:var(--accent)}.btn.prd:hover{background:#185a43}
+.statusmsg{font-family:var(--sans);font-size:11.5px;font-weight:600;margin-top:8px;color:var(--teal)}
+.backlog{margin-top:16px;border:1px dashed var(--rule);border-radius:10px;padding:13px 16px;background:#faf9f5}
+.backlog h4{font-family:var(--sans);font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--soft);font-weight:700;margin-bottom:8px}
+.blitem{font-family:var(--sans);font-size:13px;color:var(--ink2);padding:4px 0}
+.next{font-family:var(--sans);margin-top:15px;font-size:13.5px;color:var(--ink2);background:#f6f4ee;border:1px solid var(--line);border-radius:8px;padding:12px 15px}.next b{color:var(--ink)}
+.integrity{font-family:var(--sans);font-size:11.5px;line-height:1.65;color:var(--soft);margin-top:30px;border-top:1px solid var(--rule);padding-top:16px}.integrity b{color:var(--ink2)}
+.printbtn{position:fixed;top:15px;right:15px;background:var(--ink);color:#fff;border:none;border-radius:8px;padding:9px 15px;font-family:var(--sans);font-size:12.5px;font-weight:600;cursor:pointer}
+@media print{.printbtn{display:none}body{padding:0;background:#fff}.page{box-shadow:none;border:none;max-width:100%;padding:0}.theme,.reccard,.tp,.rcard,.about,.voices{break-inside:avoid}}
+@media(max-width:680px){.subvoices,.rigor,.about .grid{grid-template-columns:1fr}.page{padding:36px 24px}.lead-q{font-size:23px}}
+</style></head><body>
+<button class="printbtn" onclick="window.print()">⤓ PDF</button>
+<div class="page">
+
+<div class="eyebrow">Interview Synthesis · in their words</div>
+<h1>What's blocking team adoption &amp; expansion</h1>
+<div class="context">17 customer conversations · last quarter (Apr–Jun 2026)</div>
+
+<!-- VOICES HERO -->
+<div class="voices">
+<div class="vk">What customers told us</div>
+<div class="lead-q">The product was never the problem — getting my people in was.<span class="who">Priya, Director of Operations — Northbeam <span class="ctx churn">churned</span></span></div>
+<div class="subvoices">
+<div class="sv">"I paid for ten and I'm using three — not because it's bad, but because I never finished inviting everyone."<span class="who">Elena, Product Lead <span class="ctx risk">at risk</span></span></div>
+<div class="sv">"My partners decide renewals, and they never once opened the tool."<span class="who">Henry, Engagement Lead <span class="ctx churn">churned</span></span></div>
+<div class="sv">"Give me a way to paste in or upload my team roster and I'll expand this week."<span class="who">Sara, Head of Data <span class="ctx exp">ready to expand</span></span></div>
+<div class="sv">"Before I add the next fifty, my security team needs roles."<span class="who">James, Director PMO <span class="ctx exp">expansion</span></span></div>
+</div>
+</div>
+
+<!-- TLDR -->
+<h2>What it all adds up to</h2>
+<div class="sec">
+<p class="synth">Across 17 conversations the message was the same: <b>the product works — getting a team onto it and getting its value out to the people who pay don't.</b> Three problems carry nearly all the churn and the upside.</p>
+<div class="enum">
+<div class="item"><span class="hash">#1</span><b>Teams can't get onboarded — invites are one-by-one.</b>
+<span class="vq">"I had a spreadsheet of twelve people… I did four and ran out of patience."</span>
+<span class="beats"><b>Problem:</b> teams never hit activation critical mass. <b>Means for us:</b> 2 of 3 churns + a blocked $170K expansion. <b>Do:</b> bulk/team onboarding.</span></div>
+<div class="item"><span class="hash">#2</span><b>Value never reaches the people who renew.</b>
+<span class="vq">"My partners decide renewals, and they never once opened the tool."</span>
+<span class="beats"><b>Problem:</b> the brief is locked in-app. <b>Means for us:</b> renewals die at the top. <b>Do:</b> email-shareable brief.</span></div>
+<div class="item"><span class="hash">#3</span><b>Teams can't expand without access controls.</b>
+<span class="vq">"Right now everyone's an admin and that scares me."</span>
+<span class="beats"><b>Problem:</b> all-or-nothing access fails security review. <b>Means for us:</b> gates the biggest seat expansions. <b>Do:</b> role-based permissions.</span></div>
+</div>
+</div>
+
+<!-- THEMES quote-led -->
+<h2>The themes, in their voices</h2>
+<div class="sec">
+
+<div class="theme t1">
+<div class="qlead">"If I could have uploaded my ops team on day one, we'd still be customers."<span class="who">Priya, Director of Operations — Northbeam (churned)</span></div>
+<div class="q2">"It's death by a thousand 'add member' clicks."<span class="who">Elena, Product Lead (at risk)</span></div>
+<div class="read">
+<div class="rt">Team onboarding friction <span class="sig"><span class="sigbar"><span class="sigfill" style="width:47%;background:#bb463c"></span></span><span class="signum">8 of 17 interviews</span></span></div>
+<div class="job"><b>Job:</b> stand the team up fast enough to reach critical mass before momentum dies.</div>
+<div class="tags"><span class="tag persist">Persistent</span><span class="tag conv">✓ Converges across exit + at-risk + expansion</span><span class="tag">Severity 5/5</span></div>
+<div class="impact"><b>Impact (real data):</b> linked to 2 of 3 churns and a blocked $170K expansion. <i>Correlation from the calls — not proven causation.</i></div>
+</div>
+</div>
+
+<div class="theme t2">
+<div class="qlead">"The value is real but it's trapped inside the app. I need it to travel to people who'll never log in."<span class="who">Marcus, VP Product — Cobalt (at risk)</span></div>
+<div class="q2">"Every Monday I screenshot the brief and paste it into an email."<span class="who">Aisha, Senior PM (healthy)</span></div>
+<div class="read">
+<div class="rt">Value trapped in-app <span class="sig"><span class="sigbar"><span class="sigfill" style="width:29%;background:#a9762a"></span></span><span class="signum">5 of 17 interviews</span></span></div>
+<div class="job"><b>Job:</b> prove ROI upward to the execs/partners who decide renewals but never log in.</div>
+<div class="tags"><span class="tag persist">Persistent</span><span class="tag conv">✓ Converges across at-risk + healthy accounts</span><span class="tag">Severity 4/5</span></div>
+<div class="impact"><b>Impact (real data):</b> contributed to 1 churn (Marrow); named as the fix for the Cobalt renewal.</div>
+</div>
+</div>
+
+<div class="theme t3">
+<div class="qlead">"Bulk onboarding plus per-department roles — those two unlock the whole rollout."<span class="who">Rebecca, VP Product Ops — Quill ($170K expansion)</span></div>
+<div class="q2">"All-or-nothing access won't pass review."<span class="who">James, Director PMO (expansion)</span></div>
+<div class="read">
+<div class="rt">No access controls <span class="sig"><span class="sigbar"><span class="sigfill" style="width:23%;background:#1f7a5a"></span></span><span class="signum">4 of 17 interviews</span></span></div>
+<div class="job"><b>Job:</b> pass the customer's security/governance review before opening access wider.</div>
+<div class="tags"><span class="tag emerge">Emerging</span><span class="tag conv">⚡ Mostly in expansion-stage calls — lower saturation</span><span class="tag">Severity 4/5</span></div>
+<div class="impact"><b>Impact (real data):</b> gates the largest expansions (Vela 50→100, Quill $170K). <i>Emerging — validate with more expansion-stage interviews.</i></div>
+</div>
+</div>
+
+</div>
+
+<!-- TOP PAINS -->
+<h2>Top pain points at a glance</h2>
+<div class="sec"><table class="tp">
+<tr><th>Pain</th><th>Participants</th><th>Severity</th><th>Metric impact (real data)</th><th>Persistent / new</th><th>Convergence</th></tr>
+<tr><td><b>Team onboarding friction</b></td><td>8 of 17</td><td class="s5">5/5</td><td>2 churns · $170K blocked</td><td><span class="pp p">Persistent</span></td><td>Exit + at-risk + expansion</td></tr>
+<tr><td><b>Value trapped in-app</b></td><td>5 of 17</td><td class="s4">4/5</td><td>1 churn · Cobalt renewal</td><td><span class="pp p">Persistent</span></td><td>At-risk + healthy</td></tr>
+<tr><td><b>No access controls</b></td><td>4 of 17</td><td class="s4">4/5</td><td>Gates Vela, Quill</td><td><span class="pp e">Emerging</span></td><td>Expansion-stage only</td></tr>
+<tr><td>CSV export / mobile / dark mode</td><td>1 each</td><td class="s1">1/5</td><td>None</td><td><span class="pp n">New / one-off</span></td><td>Single mention</td></tr>
+</table></div>
+
+<!-- RIGOR -->
+<h2>Surprises · disconfirming · what we still don't know</h2>
+<div class="sec"><div class="rigor">
+<div class="rcard surp"><h4>💡 Surprises</h4><div class="it">Product quality was never the complaint — every churned and at-risk account praised the insights. The losses are GTM mechanics, not the product.</div></div>
+<div class="rcard disc"><h4>⚖ Disconfirming</h4><div class="it">A few healthy small-team accounts had <i>no</i> onboarding pain — the friction scales with team size. A boundary condition, not a contradiction.</div></div>
+<div class="rcard open"><h4>❓ Still unknown</h4><div class="it">Does bulk invite alone re-activate churned logos? Exact $ on at-risk renewals? Is IdP/SSO sync required, or is CSV paste enough?</div></div>
+<div class="rcard sat"><h4>📊 Saturation</h4><div class="it">Onboarding: <b>strong</b> (saturated). Distribution: <b>moderate</b>. Permissions: <b>emerging</b> — validate further.</div></div>
+</div></div>
+
+<!-- ABOUT (methodology demoted) -->
+<h2>About this research</h2>
+<div class="sec"><div class="about"><div class="grid">
+<div><div class="l">Sample &amp; method</div><div class="v"><b>17 interviews</b>, video call, CSM-led (Dana Cole, Reuben Ortiz). Mix: 3 churn-exit · ~5 at-risk renewal · ~9 discovery/expansion.</div></div>
+<div><div class="l">Participants &amp; window</div><div class="v">~15 accounts · Senior PM → VP/Director · Apr 11–Jun 20, 2026.</div></div>
+<div><div class="l">Recruiting</div><div class="v">Existing accounts in the CS motion — skews toward engaged customers and the recently-churned.</div></div>
+<div><div class="l">Saturation</div><div class="v">Onboarding saturated across all types; permissions still emerging.</div></div>
+<div class="bias">⚠ Read with the method in mind: CSM-led calls invite rapport/leading bias; exit interviews capture only churned users who agreed to talk (survivorship); n=17 is qualitative — themes are directional, reported as counts not percentages.</div>
+</div></div></div>
+
+<!-- RECS -->
+<h2>What we recommend</h2>
+<div class="sec">
+<p class="recintro">Each top finding is ready to become an evidence brief or go to the backlog. Ranked by signal strength × severity × metric impact.</p>
+<div id="recList">
+<div class="reccard" data-t="Bulk / team onboarding">
+<div class="rh"><span class="recnum2">1</span><span class="rt">Build bulk / team onboarding (paste · CSV · IdP)</span><span class="prio hi">Strong signal</span></div>
+<div class="rm"><b>Basis:</b> 8 of 17 · saturated · 2 churns + $170K blocked.</div>
+<div class="recactions"><button class="btn prd" onclick="brief(this)">Create brief</button><button class="btn bk" onclick="toBacklog(this)">↘ Add to backlog</button></div>
+<div class="statusmsg"></div></div>
+<div class="reccard" data-t="Email-shareable weekly brief">
+<div class="rh"><span class="recnum2">2</span><span class="rt">Build email-shareable weekly brief</span><span class="prio hi">Strong signal</span></div>
+<div class="rm"><b>Basis:</b> 5 of 17 · persistent · 1 churn + the Cobalt renewal. Low effort.</div>
+<div class="recactions"><button class="btn prd" onclick="brief(this)">Create brief</button><button class="btn bk" onclick="toBacklog(this)">↘ Add to backlog</button></div>
+<div class="statusmsg"></div></div>
+<div class="reccard" data-t="Role-based permissions">
+<div class="rh"><span class="recnum2">3</span><span class="rt">Scope role-based permissions</span><span class="prio med">Emerging — validate</span></div>
+<div class="rm"><b>Basis:</b> 4 of 17 · emerging (expansion-stage) · gates Vela &amp; Quill.</div>
+<div class="recactions"><button class="btn prd" onclick="brief(this)">Create brief</button><button class="btn bk" onclick="toBacklog(this)">↘ Add to backlog</button></div>
+<div class="statusmsg"></div></div>
+</div>
+<div class="backlog" id="backlog" style="display:none"><h4>📥 Backlog</h4><div id="backlogList"></div></div>
+<div class="next"><b>Next step:</b> create the brief for #1 and #2 (strong, saturated); send #3 to the backlog with a note to validate via more expansion-stage interviews.</div>
+</div>
+
+<div class="integrity"><b>Integrity &amp; confidence.</b> 17 qualitative interviews, CSM-led — rapport/leading bias and exit-interview survivorship flagged; n is small, so themes are directional hypotheses reported as participant counts, not population percentages. All quotes are real and attributed (from the call records); none invented. Severity is rated from the language; metric impact (churns, $170K) is from the calls — a correlation, not proven causation — and no product analytics were connected. Convergence here is across independent interview contexts (exit, at-risk, expansion); cross-checking against support or public reviews would strengthen it further.</div>
+
+</div>
+<script>
+function brief(b){var c=b.closest('.reccard');var s=c.querySelector('.statusmsg');s.textContent='\u2713 Brief requested \u2014 routed to evidence-brief / prd-author';b.disabled=true;b.textContent='Brief requested';b.style.opacity=.6;b.style.cursor='default';}
+function toBacklog(b){var c=b.closest('.reccard');var t=c.getAttribute('data-t');c.parentNode.removeChild(c);var bl=document.getElementById('backlog');bl.style.display='block';var it=document.createElement('div');it.className='blitem';it.textContent='\u2022 '+t;document.getElementById('backlogList').appendChild(it);}
+</script>
+</body></html>

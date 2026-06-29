@@ -28,7 +28,7 @@ NN/g journey mapping.
 The map (phases × actions/thoughts/emotions/pain), an emotion curve, then **prioritized opportunities** (phase · pain · evidence · impact · candidate move). Table for the phase grid; a visual emotion curve can be requested.
 
 ## Sprntly integration (optional)
-- **Inputs:** persona from `persona-segment`; pains from `third-party-feedback` / `interview-synthesis`; analytics for drop-off.
+- **Inputs:** persona from `persona-segment`; pains from `voice-of-customer-report` / `interview-synthesis`; analytics for drop-off.
 - **Outputs:** opportunities → `opportunity-tree` / `prioritize`; pains registered as signals.
 - **Degrades to:** standalone from actor + scenario (emotions labeled assumed).
 

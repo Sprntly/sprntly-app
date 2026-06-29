@@ -15,7 +15,7 @@ from app.skills.catalog import (
 )
 from app.skills.loader import get_skill, list_skills
 
-EXPECTED_MIN_SKILLS = 56  # 55 from the PM-Agent-Skills pack + repo-only third-party-feedback
+EXPECTED_MIN_SKILLS = 56  # PM-Agent-Skills pack + repo-only public-feedback-report
 
 
 def test_all_installed_skills_load():
