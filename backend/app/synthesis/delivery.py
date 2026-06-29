@@ -66,8 +66,11 @@ def _deliver_to_one(row: dict, brief: dict) -> dict:
         return {"user_id": user_id, "delivered": False,
                 "reason": "slack_not_connected"}
     config = row.get("config") or {}
-    channel = (config.get("channel_id") or "").strip()
-    if not channel:
+    target_type = (config.get("target_type") or slack_oauth.TARGET_CHANNEL).strip()
+    # A channel target needs a channel picked; a DM target needs nothing here
+    # (it resolves to the installing user's own DM at send time).
+    if target_type == slack_oauth.TARGET_CHANNEL and not (
+        config.get("channel_id") or "").strip():
         return {"user_id": user_id, "delivered": False,
                 "reason": "no_channel_configured"}
     try:
@@ -81,11 +84,14 @@ def _deliver_to_one(row: dict, brief: dict) -> dict:
         return {"user_id": user_id, "delivered": False, "reason": "no_bot_token"}
     try:
         fallback, blocks = _brief_blocks(brief)
-        # auto_join: self-add the bot to the target public channel if it was
-        # never invited, so the brief lands instead of failing not_in_channel.
-        slack_oauth.post_message(bot_token, channel=channel,
-                                 text=fallback, blocks=blocks, auto_join=True)
-        return {"user_id": user_id, "delivered": True, "channel": channel}
+        # Route to the user's chosen target — their own DM or a channel
+        # (self-joining a public channel so not_in_channel can't drop it).
+        res = slack_oauth.post_to_target(
+            bot_token, config=config,
+            authed_user_id=token_json.get("authed_user_id"),
+            text=fallback, blocks=blocks)
+        return {"user_id": user_id, "delivered": True,
+                "channel": res.get("channel") or config.get("channel_id")}
     except Exception as e:  # noqa: BLE001 — one recipient never breaks the rest
         logger.exception("brief slack delivery failed for user %s", user_id)
         return {"user_id": user_id, "delivered": False, "reason": f"error: {e}"}

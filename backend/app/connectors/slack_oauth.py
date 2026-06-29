@@ -500,6 +500,50 @@ def post_dm_to_user(
     )
 
 
+# Notification target types stored on the connection's config.target_type.
+TARGET_DM = "dm"
+TARGET_CHANNEL = "channel"
+
+
+def post_to_target(
+    bot_access_token: str,
+    *,
+    config: dict[str, Any],
+    authed_user_id: str | None,
+    text: str,
+    blocks: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Post a notification (weekly brief / nudge) to the user's chosen target.
+
+    The target lives on the connection's `config`:
+      - target_type == "dm"      → DM the installing user (open_dm on their
+        authed_user_id, captured at OAuth). Needs `im:write`.
+      - target_type == "channel" → post to config.channel_id, self-joining a
+        public channel first if needed (auto_join). Default when target_type
+        is absent, so existing channel configs keep working unchanged.
+
+    Raises HTTPException(400) on a missing/unusable target or Slack rejection
+    so callers (delivery, nudge) surface a real reason instead of a silent
+    drop. Shared by both delivery paths so DM-vs-channel behaves identically
+    whether the copy is the static brief summary or the skill-drafted nudge."""
+    target_type = (config.get("target_type") or TARGET_CHANNEL).strip()
+    if target_type == TARGET_DM:
+        if not authed_user_id:
+            raise HTTPException(
+                400, "Slack DM target has no user to message — reconnect Slack."
+            )
+        channel_id = open_dm(bot_access_token, authed_user_id)
+        return post_message(
+            bot_access_token, channel=channel_id, text=text, blocks=blocks
+        )
+    channel = (config.get("channel_id") or "").strip()
+    if not channel:
+        raise HTTPException(400, "No Slack channel configured for notifications.")
+    return post_message(
+        bot_access_token, channel=channel, text=text, blocks=blocks, auto_join=True
+    )
+
+
 def fetch_conversation_history(
     access_token: str,
     *,

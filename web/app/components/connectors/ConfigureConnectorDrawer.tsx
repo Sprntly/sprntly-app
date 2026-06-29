@@ -482,6 +482,9 @@ export function ConfigureConnectorDrawer({
     slot = (
       <>
         <SlackChannelPicker
+          savedTargetType={
+            connection?.config?.target_type as "channel" | "dm" | undefined
+          }
           savedChannelId={connection?.config?.channel_id as string | undefined}
           savedChannelName={connection?.config?.channel_name as string | undefined}
           onSaved={onDisconnected /* reuse the reload callback */}

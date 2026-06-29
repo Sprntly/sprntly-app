@@ -417,6 +417,35 @@ def test_delivery_skips_user_without_channel(slack_env, monkeypatch):
     assert by_user["B"]["reason"] == "no_channel_configured"
 
 
+def test_delivery_dm_target_routes_to_user_dm(slack_env, monkeypatch):
+    """A user whose target_type is 'dm' gets the brief in their own DM — no
+    channel needed; the installing user's authed_user_id is the recipient."""
+    from app.synthesis import delivery
+
+    rows = [
+        {"user_id": "A", "status": "active",
+         "config": {"target_type": "dm"},  # no channel_id
+         "token_json_encrypted": "encA"},
+    ]
+    calls: list[dict] = []
+    monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: rows)
+    monkeypatch.setattr(
+        delivery, "decrypt_token_json",
+        lambda enc: json.dumps({"access_token": "xoxb-A", "authed_user_id": "U-A"}))
+    monkeypatch.setattr(
+        delivery.slack_oauth, "post_to_target",
+        lambda tok, *, config, authed_user_id, text, blocks: calls.append(
+            {"tok": tok, "config": config, "authed_user_id": authed_user_id})
+        or {"ok": True, "channel": "D-A"})
+
+    out = delivery.deliver_brief_to_slack(
+        "ent-A", {"summary_headline": "h", "week_label": "w", "insights": []})
+    assert out["delivered"] is True
+    # The DM config + the resolved installing user flow through to the router.
+    assert calls[0]["config"]["target_type"] == "dm"
+    assert calls[0]["authed_user_id"] == "U-A"
+
+
 # ─────────────────────────── regression: other providers untouched ───────────────────────────
 
 

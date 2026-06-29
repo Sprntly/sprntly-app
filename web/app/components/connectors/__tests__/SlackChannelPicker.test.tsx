@@ -21,9 +21,12 @@ function render(override: Partial<Props> = {}): string {
     channels: CHANNELS,
     loading: false,
     error: null,
+    targetType: "channel",
     selectedChannelId: null,
     savedChannelName: null,
+    savedTargetType: null,
     isSaving: false,
+    onTargetTypeChange: noop,
     onSelect: noop,
     onSave: noop,
   }
@@ -39,15 +42,28 @@ describe("SlackChannelPickerView", () => {
     expect(html).toMatch(/🔒\s*design/) // private channel marked
   })
 
-  it("disables Save until a channel is selected", () => {
+  it("offers both a DM-to-me and a channel target", () => {
+    const html = render()
+    expect(html).toContain("Direct message to me")
+    expect(html).toContain("A channel")
+  })
+
+  it("disables Save until a channel is selected (channel target)", () => {
     const html = render({ selectedChannelId: null })
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>Save channel<\/button>/)
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Save<\/button>/)
   })
 
   it("enables Save when a channel is selected", () => {
     const html = render({ selectedChannelId: "C1" })
     // Negative: no `disabled` attr on the Save button
-    expect(html).not.toMatch(/<button[^>]*disabled[^>]*>Save channel<\/button>/)
+    expect(html).not.toMatch(/<button[^>]*disabled[^>]*>Save<\/button>/)
+  })
+
+  it("enables Save for a DM target without needing a channel", () => {
+    const html = render({ targetType: "dm", selectedChannelId: null })
+    expect(html).not.toMatch(/<button[^>]*disabled[^>]*>Save<\/button>/)
+    // The channel dropdown is hidden for the DM target.
+    expect(html).not.toContain("Target channel")
   })
 
   it("shows 'Saving…' and disables the button while a save is in flight", () => {
@@ -61,6 +77,11 @@ describe("SlackChannelPickerView", () => {
     // The channel name is wrapped in <strong>, so the literal string
     // doesn't appear contiguous — match the structure instead.
     expect(html).toMatch(/Posting to\s*<strong>#product-launches<\/strong>/)
+  })
+
+  it("shows the DM line when the saved target is a DM", () => {
+    const html = render({ savedTargetType: "dm" })
+    expect(html).toMatch(/direct message<\/strong>/)
   })
 
   it("renders an empty-state hint when channels is empty and not loading", () => {

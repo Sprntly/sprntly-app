@@ -2064,12 +2064,19 @@ def slack_search(
 
 
 class SlackConfigIn(BaseModel):
-    channel_id: str
+    # "channel" (post to channel_id) or "dm" (DM the installing user).
+    target_type: str = slack_oauth.TARGET_CHANNEL
+    channel_id: str | None = None
     channel_name: str | None = None
 
     def model_post_init(self, _context) -> None:
-        if not self.channel_id or not self.channel_id.strip():
-            raise ValueError("channel_id cannot be empty")
+        self.target_type = (self.target_type or slack_oauth.TARGET_CHANNEL).strip()
+        if self.target_type not in (slack_oauth.TARGET_CHANNEL, slack_oauth.TARGET_DM):
+            raise ValueError("target_type must be 'channel' or 'dm'")
+        # A channel target needs a channel; a DM target ignores channel fields.
+        if self.target_type == slack_oauth.TARGET_CHANNEL and not (
+            self.channel_id or "").strip():
+            raise ValueError("channel_id is required when target_type is 'channel'")
 
 
 @router.post("/slack/config")
@@ -2077,20 +2084,22 @@ def slack_save_config(
     body: SlackConfigIn,
     company: CompanyContext = Depends(require_company),
 ):
-    """Save the user's selected notification-target channel. Stored on
-    THIS user's own Slack connection row's config so the Comms Agent can
-    read it at post-time without a separate lookup table.
+    """Save the user's notification target — either a channel, or a DM to
+    themselves. Stored on THIS user's own Slack connection row's config so
+    the brief-delivery + nudge paths can read it at post-time.
 
-    Best-effort self-joins the chosen public channel right away (idempotent,
-    needs `channels:join`) so the very first brief posts cleanly instead of
-    failing not_in_channel. Private channels can't be self-joined — `joined`
-    comes back False and the UI can prompt the user to /invite the bot."""
-    channel_id = body.channel_id.strip()
+    For a channel target, best-effort self-joins the chosen public channel
+    right away (idempotent, needs `channels:join`) so the very first brief
+    posts cleanly instead of failing not_in_channel. Private channels can't be
+    self-joined — `joined` comes back False and the UI can prompt the user to
+    /invite the bot. DM targets never need a join, so `joined` stays False."""
     row = db.get_slack_connection(company.company_id, company.user_id)
     if not row:
         raise HTTPException(404, "Slack is not connected")
-    patch: dict = {"channel_id": channel_id}
-    if body.channel_name:
+    is_dm = body.target_type == slack_oauth.TARGET_DM
+    channel_id = "" if is_dm else (body.channel_id or "").strip()
+    patch: dict = {"target_type": body.target_type, "channel_id": channel_id}
+    if not is_dm and body.channel_name:
         patch["channel_name"] = body.channel_name.strip()
     updated = db.patch_slack_connection_config(
         company.company_id, company.user_id, patch
@@ -2102,11 +2111,12 @@ def slack_save_config(
         except (TypeError, ValueError):
             config = {}
     joined = False
-    try:
-        bot_token, _row = _slack_bot_token(company.company_id, company.user_id)
-        joined = slack_oauth.join_channel(bot_token, channel_id)
-    except Exception:  # noqa: BLE001 — join is best-effort; never block the save
-        logger.exception("slack auto-join on config save failed")
+    if not is_dm:
+        try:
+            bot_token, _row = _slack_bot_token(company.company_id, company.user_id)
+            joined = slack_oauth.join_channel(bot_token, channel_id)
+        except Exception:  # noqa: BLE001 — join is best-effort; never block save
+            logger.exception("slack auto-join on config save failed")
     return {"ok": True, "config": config, "joined": joined}
 
 

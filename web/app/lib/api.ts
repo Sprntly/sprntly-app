@@ -897,6 +897,7 @@ export type ConnectionSummary = {
     // Google Drive — files picked via the Google Picker (drive.file scope)
     files?: GoogleDrivePickedFile[]
     // Slack
+    target_type?: "channel" | "dm"
     channel_id?: string
     channel_name?: string
     // Figma (PAT-vs-OAuth distinction set by backend on save)
@@ -1081,10 +1082,19 @@ export const connectorsApi = {
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/slack`),
   listSlackChannels: () =>
     api.get<{ channels: SlackChannel[] }>(`/v1/connectors/slack/channels`),
-  setSlackConfig: (channelId: string, channelName?: string) =>
-    api.post<{ ok: true; config: ConnectionSummary["config"] }>(
+  setSlackConfig: (
+    target: { targetType: "channel"; channelId: string; channelName?: string }
+      | { targetType: "dm" },
+  ) =>
+    api.post<{ ok: true; config: ConnectionSummary["config"]; joined: boolean }>(
       `/v1/connectors/slack/config`,
-      { channel_id: channelId, channel_name: channelName },
+      target.targetType === "dm"
+        ? { target_type: "dm" }
+        : {
+            target_type: "channel",
+            channel_id: target.channelId,
+            channel_name: target.channelName,
+          },
     ),
   syncSlack: (dataset: string, historyDays = 90) =>
     api.post<{

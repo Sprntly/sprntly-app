@@ -541,6 +541,87 @@ def test_post_message_not_in_channel_raises_actionable_error(slack_env):
     assert "invite" in exc.value.detail.lower()
 
 
+# ─────────────────────── post_to_target helper ───────────────────────
+
+
+def test_post_to_target_channel_auto_joins(slack_env):
+    """A channel target posts to config.channel_id and auto-joins (so the
+    bot lands in a public channel it was never invited to)."""
+    from app.connectors import slack_oauth
+
+    ok = MagicMock()
+    ok.ok = True
+    ok.json.return_value = {"ok": True, "ts": "1.0", "channel": "C1"}
+    with patch(
+        "app.connectors.slack_oauth.requests.post", return_value=ok
+    ) as mock_post:
+        out = slack_oauth.post_to_target(
+            "xoxb-1234",
+            config={"target_type": "channel", "channel_id": "C1"},
+            authed_user_id="U1",
+            text="hi",
+        )
+    assert out["ok"] is True
+    # Single chat.postMessage to the channel (already a member here).
+    assert mock_post.call_args.args[0] == "https://slack.com/api/chat.postMessage"
+    assert mock_post.call_args.kwargs["json"]["channel"] == "C1"
+
+
+def test_post_to_target_dm_opens_dm_and_posts(slack_env):
+    """A dm target opens a DM with the installing user (authed_user_id) and
+    posts to that DM channel — no channel_id needed."""
+    from app.connectors import slack_oauth
+
+    opened = MagicMock()
+    opened.ok = True
+    opened.json.return_value = {"ok": True, "channel": {"id": "D9"}}
+    posted = MagicMock()
+    posted.ok = True
+    posted.json.return_value = {"ok": True, "ts": "1.0", "channel": "D9"}
+    with patch(
+        "app.connectors.slack_oauth.requests.post", side_effect=[opened, posted]
+    ) as mock_post:
+        out = slack_oauth.post_to_target(
+            "xoxb-1234",
+            config={"target_type": "dm"},
+            authed_user_id="U1",
+            text="hi",
+        )
+    assert out["ok"] is True
+    # open DM → post to the returned DM channel id.
+    assert mock_post.call_args_list[0].args[0] == (
+        "https://slack.com/api/conversations.open"
+    )
+    assert mock_post.call_args_list[0].kwargs["json"]["users"] == "U1"
+    assert mock_post.call_args_list[1].kwargs["json"]["channel"] == "D9"
+
+
+def test_post_to_target_dm_without_user_raises(slack_env):
+    """A dm target with no authed_user_id can't resolve a recipient."""
+    from app.connectors import slack_oauth
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        slack_oauth.post_to_target(
+            "xoxb-1234", config={"target_type": "dm"}, authed_user_id=None, text="hi"
+        )
+    assert exc.value.status_code == 400
+
+
+def test_post_to_target_defaults_to_channel_when_type_absent(slack_env):
+    """Legacy configs (no target_type) keep posting to their channel."""
+    from app.connectors import slack_oauth
+
+    ok = MagicMock()
+    ok.ok = True
+    ok.json.return_value = {"ok": True, "ts": "1.0", "channel": "C1"}
+    with patch("app.connectors.slack_oauth.requests.post", return_value=ok) as m:
+        slack_oauth.post_to_target(
+            "xoxb-1234", config={"channel_id": "C1"}, authed_user_id="U1", text="hi"
+        )
+    assert m.call_args.kwargs["json"]["channel"] == "C1"
+
+
 # ─────────────────────── /slack/channels route ───────────────────────
 
 
@@ -595,6 +676,8 @@ def test_channels_route_404_when_not_connected(slack_env, monkeypatch):
 
 
 def test_config_route_persists_selected_channel(slack_env, monkeypatch):
+    from app.connectors import slack_oauth
+
     ctx = company_client(monkeypatch)
     seed_connection(
         company_id=ctx.company_id,
@@ -603,6 +686,11 @@ def test_config_route_persists_selected_channel(slack_env, monkeypatch):
         token_blob={"access_token": "xoxb-real"},
         label="Meridian",
     )
+    join_calls: list = []
+    monkeypatch.setattr(
+        slack_oauth, "join_channel",
+        lambda tok, channel_id: join_calls.append(channel_id) or True)
+
     r = ctx.client.post(
         "/v1/connectors/slack/config",
         json={"channel_id": "C123", "channel_name": "product-launches"},
@@ -612,6 +700,9 @@ def test_config_route_persists_selected_channel(slack_env, monkeypatch):
     assert body["ok"] is True
     assert body["config"]["channel_id"] == "C123"
     assert body["config"]["channel_name"] == "product-launches"
+    # The chosen public channel is auto-joined so the first brief lands.
+    assert join_calls == ["C123"]
+    assert body["joined"] is True
 
     # And persisted on the connection row.
     listed = ctx.client.get(
@@ -620,6 +711,33 @@ def test_config_route_persists_selected_channel(slack_env, monkeypatch):
     slack_row = next(c for c in listed["connections"] if c["provider"] == "slack")
     assert slack_row["config"]["channel_id"] == "C123"
     assert slack_row["config"]["channel_name"] == "product-launches"
+
+
+def test_config_route_persists_dm_target_without_channel(slack_env, monkeypatch):
+    """A 'dm' target saves with no channel and never attempts a join."""
+    from app.connectors import slack_oauth
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real", "authed_user_id": "U1"},
+    )
+    join_calls: list = []
+    monkeypatch.setattr(
+        slack_oauth, "join_channel",
+        lambda *a, **k: join_calls.append(a) or True)
+
+    r = ctx.client.post(
+        "/v1/connectors/slack/config", json={"target_type": "dm"}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["config"]["target_type"] == "dm"
+    assert body["joined"] is False
+    # DM target must not try to join a channel.
+    assert join_calls == []
 
 
 def test_config_route_rejects_empty_channel_id(slack_env, monkeypatch):
