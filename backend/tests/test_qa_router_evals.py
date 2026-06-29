@@ -28,6 +28,11 @@ EVALS: list[tuple[str, str]] = [
     ("Triage this messy backlog and dedupe it", "backlog-triage"),
     ("Draft a decision memo: build vs buy for billing", "decision-memo"),
     ("Synthesize this pile of customer feedback into themes", "feedback-synthesis"),
+    ("Synthesize these user interviews into themes", "interview-synthesis"),
+    ("What did we learn from these customer calls?", "interview-synthesis"),
+    ("What are people saying about us on the App Store and Reddit?", "public-feedback-report"),
+    ("Mine our G2 and Trustpilot reviews for sentiment trends", "public-feedback-report"),
+    ("Analyze our support tickets and customer complaints", "voice-of-customer-report"),
     ("Run a competitive analysis vs Linear and Jira", "competitive-intelligence-review"),
     ("Write an incident runbook for a sev-1 outage", "incident-runbook"),
     # LLM-only skills (no regex rule) — regex must defer, not mis-route.

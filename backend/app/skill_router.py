@@ -54,15 +54,34 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\b(decision|build\s+vs?\s+buy|pivot|persevere|trade-?off)\b", re.I),
      "decision-memo", "Draft decision memo", 0.80),
 
-    # Feedback synthesis
+    # Interview synthesis (qualitative research: 1:1s, focus groups, usability,
+    # win/loss & churn-exit interviews → themes). Before feedback-synthesis; the
+    # two share no keywords.
+    (re.compile(r"\b(synthes\w*|analyz\w*|theme).{0,25}\b(interviews?|user\s+research|usability\s+(?:test|session)s?|focus\s+groups?|roundtables?)\b", re.I),
+     "interview-synthesis", "Synthesize interviews", 0.85),
+    (re.compile(r"\b(interviews?|usability\s+(?:test|session)s?|focus\s+groups?|user\s+research|win[\s/-]?loss|churn[\s-]?exit).{0,30}\b(synthes|analyz|theme|learn|insight|takeaway)\b", re.I),
+     "interview-synthesis", "Synthesize interviews", 0.85),
+    (re.compile(r"\binterview\s+(notes?|transcripts?)\b", re.I),
+     "interview-synthesis", "Synthesize interviews", 0.80),
+    (re.compile(r"\bwhat.{0,20}\b(learn|hear|find).{0,25}\b(call|interview|session|conversation)s?\b", re.I),
+     "interview-synthesis", "Synthesize interviews", 0.80),
+
+    # Feedback synthesis (quick thematic pass over a pile of feedback)
     (re.compile(r"\b(feedback|nps|csat|survey|sentiment).{0,20}\b(synthe|analyz|review|summary)\b", re.I),
      "feedback-synthesis", "Synthesize feedback", 0.85),
     (re.compile(r"\b(synthe|analyz|review).{0,20}\b(feedback|nps|csat|survey)\b", re.I),
      "feedback-synthesis", "Synthesize feedback", 0.85),
 
-    # Third-party feedback (customer reviews, tickets)
-    (re.compile(r"\b(customer|support).{0,20}\b(ticket|review|complaint|issue)\b", re.I),
-     "third-party-feedback", "Analyze customer feedback", 0.80),
+    # Public feedback report (external reviews & social: App Store, Google Play,
+    # Reddit, G2, X; "what are people saying about us online")
+    (re.compile(r"\b(review\s+mining|online\s+reputation|public\s+sentiment|app[\s-]?store|google\s+play|trustpilot|capterra|\bg2\b|reddit)\b", re.I),
+     "public-feedback-report", "Public feedback report", 0.85),
+    (re.compile(r"\bwhat.{0,25}\b(saying|people\s+say).{0,15}\babout\s+us\b", re.I),
+     "public-feedback-report", "Public feedback report", 0.85),
+
+    # Voice of customer (curated/first-party: support tickets, complaints, reviews)
+    (re.compile(r"\b(customer|support).{0,20}\b(ticket|review|complaint|issue)s?\b", re.I),
+     "voice-of-customer-report", "Analyze customer feedback", 0.80),
 
     # Competitive intelligence
     (re.compile(r"\b(competit|competitor|competitive\s+analysis|market\s+position)\b", re.I),

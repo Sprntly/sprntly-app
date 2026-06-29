@@ -19,7 +19,7 @@ from app.skills.loader import (
 BOUND_SKILLS = [
     "prioritize",
     "incident-runbook",
-    "third-party-feedback",
+    "public-feedback-report",
     "competitive-intelligence-review",
 ]
 
@@ -30,7 +30,7 @@ def test_lists_all_vendored_skills():
     ids = list_skills()
     # the vendored subset documented in skills/README.md
     expected = {
-        "prd-author", "prioritize", "decision-memo", "third-party-feedback",
+        "prd-author", "prioritize", "decision-memo", "public-feedback-report",
         "feedback-synthesis", "competitive-intelligence-review",
         "incident-runbook", "business-context", "fact-check",
     }
@@ -38,7 +38,7 @@ def test_lists_all_vendored_skills():
 
 
 @pytest.mark.parametrize("skill_id", [
-    "prd-author", "prioritize", "decision-memo", "third-party-feedback",
+    "prd-author", "prioritize", "decision-memo", "public-feedback-report",
     "feedback-synthesis", "competitive-intelligence-review",
     "incident-runbook", "business-context", "fact-check",
 ])
@@ -369,7 +369,7 @@ def test_oncall_binds_incident_runbook(isolated_settings, monkeypatch):
     assert prefix_text.startswith(f"## METHOD (skill: incident-runbook @{spec.content_hash})")
 
 
-def test_market_research_binds_third_party_feedback(isolated_settings, monkeypatch):
+def test_market_research_binds_public_feedback_report(isolated_settings, monkeypatch):
     from app import llm
     from app.research import market
 
@@ -384,10 +384,10 @@ def test_market_research_binds_third_party_feedback(isolated_settings, monkeypat
                         lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0})
     monkeypatch.setattr(market, "log_agent_decision", lambda **k: None)
 
-    spec = get_skill("third-party-feedback")
+    spec = get_skill("public-feedback-report")
     market.run_market_research(_FakeFacade(), "ent-A")
     # web-search path folds the method into the system prompt.
-    assert f"## METHOD (skill: third-party-feedback @{spec.content_hash})" in captured["system"]
+    assert f"## METHOD (skill: public-feedback-report @{spec.content_hash})" in captured["system"]
 
 
 def test_competitor_research_binds_cir(isolated_settings, monkeypatch):

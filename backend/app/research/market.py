@@ -102,7 +102,7 @@ def run_market_research(facade: GraphFacade, enterprise_id: str) -> dict:
              "(adapt them to the product category):\n" + sweeps,
         meta_out=meta,
         max_searches=int(cfg.get("max_searches", 12)),
-        skill="third-party-feedback",
+        skill="public-feedback-report",
     )
 
     totals = {"signals": 0, "themes": 0, "skipped": 0}

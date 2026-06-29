@@ -28,7 +28,7 @@ Teresa Torres' continuous discovery.
 The tree (outcome → opportunities → solutions → tests), opportunities tagged with evidence/hypothesis, smuggled-solutions flagged, then the recommended branch + next test. Indented text tree; a visual can be requested.
 
 ## Sprntly integration (optional)
-- **Inputs:** outcome from the knowledge graph; opportunities from `interview-synthesis` / `third-party-feedback` signal.
+- **Inputs:** outcome from the knowledge graph; opportunities from `interview-synthesis` / `voice-of-customer-report` signal.
 - **Outputs:** chosen solution + test → `experiment-design`; opportunities registered as discovery entities.
 - **Degrades to:** standalone from outcome + described signal.
 

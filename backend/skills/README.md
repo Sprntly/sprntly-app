@@ -24,7 +24,8 @@ Category prefixes from upstream (e.g. `03-prioritization-and-planning/`) are
 | prd-author | 04-definition-and-specs | templates/ |
 | prioritize | 03-prioritization-and-planning | scripts/ (scoring math ported to `app/synthesis/scoring.py`) |
 | decision-memo | 03-prioritization-and-planning | — |
-| third-party-feedback | 01-discovery-and-research | modules/ |
+| public-feedback-report | repo-only (public/external review & social mining) | examples/ |
+| interview-synthesis | 01-discovery-and-research | examples/ |
 | feedback-synthesis | 01-discovery-and-research | — |
 | competitive-intelligence-review | 02-strategy-and-positioning | modules/ (all), templates/ |
 | incident-runbook | 05-delivery-and-execution | — |

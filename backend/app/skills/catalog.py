@@ -96,7 +96,6 @@ SKILL_CATEGORY: dict[str, str] = {
     "proofread-polish": "Stakeholder & Communication",
     "stakeholder-map": "Stakeholder & Communication",
     "stakeholder-update": "Stakeholder & Communication",
-    "third-party-feedback": "Stakeholder & Communication",
     "fact-check": "Verification",
     "weekly-brief": "Stakeholder & Communication",
 }
