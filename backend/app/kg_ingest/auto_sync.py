@@ -12,8 +12,10 @@ with no ingest puller are silently no-ops.
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
+import time
 
 from app import db
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
@@ -23,22 +25,97 @@ from app.kg_ingest.runner import PULLERS, sync_provider, token_for
 
 logger = logging.getLogger(__name__)
 
+# Refresh an OAuth access token this many seconds BEFORE its nominal expiry, so
+# a sync never races a just-expired token.
+_TOKEN_REFRESH_SKEW_S = 300
+
+
+def _token_is_fresh(token_json: dict) -> bool:
+    """True iff we can PROVE the access token is still valid — `obtained_at +
+    expires_in` is in the future past a safety skew. If freshness can't be
+    proven (fields missing/non-numeric), return False so the caller refreshes
+    rather than risk a 401."""
+    obtained = token_json.get("obtained_at")
+    expires_in = token_json.get("expires_in")
+    if not isinstance(obtained, (int, float)) or not isinstance(expires_in, (int, float)):
+        return False
+    return time.time() < obtained + expires_in - _TOKEN_REFRESH_SKEW_S
+
+
+def _maybe_refresh_token(
+    company_id: str, provider: str, token_json: dict, *, force: bool = False
+) -> dict:
+    """Refresh an expiring OAuth access token, persist it, and return the updated
+    token_json.
+
+    GitHub user-to-server tokens expire ~8h, so a connection that synced
+    yesterday would 401 every cycle without this. Uses the stored `refresh_token`
+    (GitHub rotates it, so we persist the whole new payload). No-op for providers
+    without refresh, when there's no `refresh_token`, or (unless `force`) when the
+    current token is provably fresh.
+
+    Best-effort: a refresh failure (refresh token expired ~6mo / revoked / OAuth
+    not configured) logs a WARNING and returns the input unchanged, so the
+    caller's sync surfaces the usual 401 → "reconnect required"."""
+    if provider != "github":
+        return token_json
+    refresh_token = token_json.get("refresh_token")
+    if not refresh_token:
+        return token_json
+    if not force and _token_is_fresh(token_json):
+        return token_json
+    try:
+        from app.connectors import github_app
+        from app.connectors.tokens import encrypt_token_json
+
+        new_json_str = github_app.token_payload_to_store(
+            github_app.refresh_user_token(refresh_token)
+        )
+        db.update_connection_tokens(
+            company_id, provider, encrypt_token_json(new_json_str)
+        )
+        logger.info("auto-sync: refreshed %s access token for %s", provider, company_id)
+        return json.loads(new_json_str)
+    except Exception:  # noqa: BLE001 — refresh is best-effort
+        logger.warning(
+            "auto-sync: %s token refresh failed for %s — surfacing reconnect",
+            provider, company_id, exc_info=True,
+        )
+        return token_json
+
 
 def _run_sync(company_id: str, provider: str) -> None:
     """Blocking sync body — runs inside the daemon thread. Fully isolated:
     any failure is logged and stamped as last_sync_error, never raised."""
     try:
-        import json
-
         row = db.get_connection(company_id, provider)
         if not row:
             logger.info("auto-sync: %s no longer connected for %s — skipping",
                         provider, company_id)
             return
         token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
-        token = token_for(provider, token_json)
+        # Proactively refresh an expiring OAuth token (github) before the pull,
+        # so a day-old connection doesn't 401 on every sync.
+        token_json = _maybe_refresh_token(company_id, provider, token_json)
         facade = GraphFacade()
-        result = sync_provider(facade, company_id, provider, token=token)
+        try:
+            result = sync_provider(
+                facade, company_id, provider, token=token_for(provider, token_json)
+            )
+        except Exception as exc:  # noqa: BLE001 — narrow to auth, else re-raise
+            # Reactive fallback: a token that slipped past the freshness check
+            # (clock skew, or revoked-then-reissued server-side) — force one
+            # refresh + retry before surfacing the failure.
+            if getattr(exc, "status_code", None) not in (401, 403):
+                raise
+            refreshed = _maybe_refresh_token(
+                company_id, provider, token_json, force=True
+            )
+            if refreshed.get("access_token") in (None, token_json.get("access_token")):
+                raise  # refresh produced nothing new → graceful reconnect handling
+            result = sync_provider(
+                facade, company_id, provider, token=token_for(provider, refreshed)
+            )
         err = "; ".join(result.get("errors") or []) or None
         db.update_connection_sync(
             company_id, provider, last_sync_at=utc_now(),
