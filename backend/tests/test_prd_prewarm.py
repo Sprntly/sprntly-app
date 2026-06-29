@@ -6,7 +6,8 @@ instantly. These tests prove:
 
   * the top-N selection is hero-first (is_headline), then confidence desc,
   * warming dedupes against existing PRD rows,
-  * every warm generate_prd call runs with background=True and human_only=True,
+  * every warm generate_prd call runs with background=True (and only the human
+    PRD — the implementation spec is on demand, never warmed),
   * every warm PRD row is stamped with a run_id (so the multi-agent click path
     dedupes against the warm run instead of restarting it),
   * prd_warm_count=0 disables warming entirely,
@@ -71,10 +72,8 @@ def warm_spy(monkeypatch):
 
     monkeypatch.setattr(prd_runner, "start_prd", _start_prd)
 
-    async def _generate(
-        prd_id, brief_id, insight_index, background=False, human_only=False
-    ):
-        calls["generated"].append((prd_id, insight_index, background, human_only))
+    async def _generate(prd_id, brief_id, insight_index, background=False):
+        calls["generated"].append((prd_id, insight_index, background))
 
     monkeypatch.setattr(prd_runner, "generate_prd", _generate)
     return calls
@@ -86,10 +85,9 @@ def test_warm_generates_top_n_in_background(warm_spy, monkeypatch):
 
     asyncio.run(warm_prds_for_brief(_brief(insights)))
 
-    # Hero first, then highest confidence; all ran background=True + human_only.
+    # Hero first, then highest confidence; all ran in the background lane.
     assert sorted(g[1] for g in warm_spy["generated"]) == [1, 2]
     assert all(g[2] is True for g in warm_spy["generated"])
-    assert all(g[3] is True for g in warm_spy["generated"])  # human PRD only
     # start_prd used the shared variant so route dedupe matches warm rows, and
     # stamped a run_id so the multi-agent click path reuses the warm run.
     assert all(s[3] == prd_runner.PRD_VARIANT for s in warm_spy["started"])
@@ -134,12 +132,10 @@ def test_warm_failure_is_isolated_per_insight(warm_spy, monkeypatch):
     """One insight's warm failure must not stop the next insight's warm."""
     monkeypatch.setattr(prd_runner.settings, "prd_warm_count", 2)
 
-    async def _generate(
-        prd_id, brief_id, insight_index, background=False, human_only=False
-    ):
+    async def _generate(prd_id, brief_id, insight_index, background=False):
         if insight_index == 0:
             raise RuntimeError("boom")
-        warm_spy["generated"].append((prd_id, insight_index, background, human_only))
+        warm_spy["generated"].append((prd_id, insight_index, background))
 
     monkeypatch.setattr(prd_runner, "generate_prd", _generate)
     insights = [_insight("hero", 0.9, headline=True), _insight("b", 0.5)]

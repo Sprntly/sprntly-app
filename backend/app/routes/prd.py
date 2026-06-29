@@ -37,7 +37,7 @@ from app.db.prds import (
     update_prd_content,
 )
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
-from app.prd_runner import PRD_VARIANT, generate_prd
+from app.prd_runner import PRD_VARIANT, ensure_impl_spec, generate_prd
 from app.prompts import PRD_TEMPLATE_VERSION
 
 logger = logging.getLogger(__name__)
@@ -168,6 +168,30 @@ def get(
     if not row:
         raise HTTPException(404, "PRD not found")
     return row
+
+
+# ── Send to Claude Code: on-demand Implementation Spec ─────────────────
+
+
+@router.post("/{prd_id}/impl-spec")
+def generate_impl_spec(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Produce the machine-readable Implementation Spec for a PRD on demand.
+
+    Backs the PRD's "Send to Claude Code" action. The spec is generated the first
+    time (via the `implementation-spec` skill, fed the finished human PRD) and
+    cached in the PRD row; re-sends reuse the cache until the human PRD changes.
+    Synchronous: the caller shows a loading state and pastes the returned
+    `llm_part` into Claude Code. Returns {"llm_part": ..., "cached": ...}.
+    """
+    require_owned_prd(prd_id, company.company_id)
+    try:
+        return ensure_impl_spec(prd_id)
+    except RuntimeError as exc:
+        # Missing row / empty human PRD — nothing to build a spec from.
+        raise HTTPException(404, str(exc))
 
 
 # ── PRD editing + version control ──────────────────────────────────────

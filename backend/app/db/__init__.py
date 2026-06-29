@@ -43,7 +43,9 @@ from app.db.prds import (
     get_prd_rendered,
     invalidate_orphan_generating_prds,
     invalidate_stale_prds,
+    prd_source_hash,
     save_prd,
+    set_prd_impl_spec,
     start_prd,
 )
 
@@ -180,7 +182,9 @@ __all__ = [
     "get_prd_rendered",
     "invalidate_orphan_generating_prds",
     "invalidate_stale_prds",
+    "prd_source_hash",
     "save_prd",
+    "set_prd_impl_spec",
     "start_prd",
     # evidences
     "complete_evidence",

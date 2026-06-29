@@ -2,12 +2,29 @@
 
 One row per generation attempt for a (brief_id, insight_index, variant).
 `status` walks generating → ready (or failed/invalidated).
+
+The human PRD lives in `payload_md`. The machine-readable Implementation Spec
+(Part B) is NO LONGER generated alongside it — it is produced on demand the
+first time a user sends the PRD to Claude Code, then cached in `llm_part` and
+keyed to the human PRD's content via `llm_part_source_hash`. Editing/restoring
+the human PRD clears that cache so the next send regenerates the spec.
 """
+import hashlib
 import logging
 
 from app.db.client import require_client, retry_on_disconnect
 
 logger = logging.getLogger(__name__)
+
+
+def prd_source_hash(md: str) -> str:
+    """Stable content hash of a human PRD (its `payload_md`).
+
+    Keys the cached Implementation Spec (`llm_part`) to the exact human PRD it
+    was derived from: when the PRD text changes, the hash changes, and the
+    on-demand spec generation treats the cache as stale and regenerates.
+    """
+    return hashlib.sha256((md or "").encode("utf-8")).hexdigest()
 
 
 def save_prd(brief_id: int, insight_index: int, title: str, md: str) -> int:
@@ -111,6 +128,21 @@ def complete_prd_2part(prd_id: int, title: str, human_md: str, llm_part: str) ->
         "llm_part": llm_part,
         "status": "ready",
         "error": None,
+    }).eq("id", prd_id).execute()
+
+
+def set_prd_impl_spec(prd_id: int, llm_part: str, source_hash: str) -> None:
+    """Cache the on-demand Implementation Spec (Part B) for a human PRD.
+
+    Stores the generated spec in `llm_part` plus `llm_part_source_hash` (the hash
+    of the human PRD it was derived from). A re-send whose human PRD hash still
+    matches reuses this row instead of regenerating; an edit/restore that changes
+    the PRD clears it (see `update_prd_content` / `restore_prd_version`).
+    """
+    c = require_client()
+    c.table("prds").update({
+        "llm_part": llm_part,
+        "llm_part_source_hash": source_hash,
     }).eq("id", prd_id).execute()
 
 
@@ -265,11 +297,19 @@ def list_prds_by_brief(brief_id: int, variant: str = "v1") -> list[dict]:
 # ── PRD version control ──────────────────────────────────────────────────
 
 def update_prd_content(prd_id: int, title: str, payload_md: str) -> dict | None:
-    """Update the PRD's title and markdown content. Returns the updated row."""
+    """Update the PRD's title and markdown content. Returns the updated row.
+
+    Editing the human PRD INVALIDATES the cached Implementation Spec: the next
+    "Send to Claude Code" must regenerate Part B from the new text. We clear both
+    `llm_part` and `llm_part_source_hash` so a stale machine spec can never be
+    handed to a coding agent for an out-of-date PRD.
+    """
     c = require_client()
     c.table("prds").update({
         "title": title,
         "payload_md": payload_md,
+        "llm_part": None,
+        "llm_part_source_hash": None,
     }).eq("id", prd_id).execute()
     return get_prd(prd_id)
 
