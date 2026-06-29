@@ -62,9 +62,11 @@ _TWO_STORIES = {
 def test_user_stories_skill_is_vendored():
     spec = get_skill("user-stories")
     assert spec.id == "user-stories"
-    # honors the "As a <role>, I want <goal>, so that <benefit>" format.
-    assert "As a" in spec.method and "so that" in spec.method
-    assert "story-template.md" in spec.templates
+    # The vendored skill is the delivery-tickets rewrite: PRD requirements →
+    # tracker-ready tickets, auto story-map sizing, acceptance criteria inherited
+    # from the spec, multi-tool sync via the field-mapping reference.
+    assert "story map" in spec.method and "acceptance criteria" in spec.method
+    assert "field-mapping.md" in spec.method
 
 
 def _tool_msg(payload):

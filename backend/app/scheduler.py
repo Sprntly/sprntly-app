@@ -222,6 +222,21 @@ async def _run_drip_email_cycle() -> None:
         logger.error("Scheduler: drip cycle failed: %s", exc)
 
 
+async def _run_brief_nudge_cycle() -> None:
+    """Brief-nudge reminder cycle: send the due Day 1/2/3 reminder for each
+    company's current brief while it's still unopened (Day 0 is sent inline at
+    generation). Mirrors the drip job: error-isolated inside run_nudge_cycle,
+    blocking Supabase + Slack HTTP pushed off the event loop. Opt-in via
+    BRIEF_NUDGE_ENABLED."""
+    from app.brief_nudge import run_nudge_cycle
+
+    try:
+        summary = await asyncio.to_thread(run_nudge_cycle)
+        logger.info("Scheduler: brief nudge cycle → %s", summary)
+    except Exception as exc:  # noqa: BLE001 — never let one cycle kill the job
+        logger.error("Scheduler: brief nudge cycle failed: %s", exc)
+
+
 async def _run_scheduled_cycle() -> None:
     """Run the scheduled KG-synthesis cycle: seed + run_synthesis per company."""
     await _run_synthesis_for_all_companies()
@@ -275,6 +290,19 @@ def start_scheduler() -> None:
             trigger=IntervalTrigger(hours=drip_hours),
             id="drip_emails",
             name=f"Onboarding drip emails (every {drip_hours}h)",
+            replace_existing=True,
+        )
+
+    # Brief nudges: Day 1/2/3 reminders that drive users to open their weekly
+    # brief (Day 0 fires inline at generation). Opt-in via BRIEF_NUDGE_ENABLED;
+    # idempotent + open-state-gated so extra ticks are cheap no-ops.
+    if settings.brief_nudge_enabled:
+        nudge_hours = getattr(settings, "brief_nudge_interval_hours", 6) or 6
+        _scheduler.add_job(
+            _run_brief_nudge_cycle,
+            trigger=IntervalTrigger(hours=nudge_hours),
+            id="brief_nudges",
+            name=f"Brief nudge reminders (every {nudge_hours}h)",
             replace_existing=True,
         )
 

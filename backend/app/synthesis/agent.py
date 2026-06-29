@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
+from app.config import settings
 from app.db.briefs import save_brief
 from app.db.finding_state import get_finding_states, upsert_finding_state
 from app.business_context import load_business_context
@@ -683,4 +684,18 @@ def run_synthesis(
     ):
         logger.warning("brief email delivery: %s", email_delivery)
     brief["_email_delivery"] = email_delivery
+
+    # Day-0 brief nudge: the Slack announcement that drives users to open the
+    # brief (app/brief_nudge.py). Same side-effect contract — never raises,
+    # never blocks the brief. OFF unless BRIEF_NUDGE_ENABLED, so it's a clean
+    # no-op until enabled. Day 1/2/3 reminders are sent by the scheduler cycle.
+    if settings.brief_nudge_enabled:
+        try:
+            from app.brief_nudge import deliver_brief_nudge_to_slack
+
+            brief["_nudge_delivery_day_0"] = deliver_brief_nudge_to_slack(
+                enterprise_id, brief, day=0, brief_id=brief_id
+            )
+        except Exception:  # noqa: BLE001 — nudge never breaks the brief
+            logger.exception("day-0 brief nudge failed (brief unaffected)")
     return brief

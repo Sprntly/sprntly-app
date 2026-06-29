@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from app.auth import CompanyContext, require_company
 from app.brief_runner import get_status, set_status, warm_synthesis_drilldowns
 from app.db import get_current_brief
+from app.db import nudge as nudge_db
 from app.db.companies import display_name_for_slug
 from app.db.finding_state import set_finding_action
 from app.deps.ownership import require_owned_brief, require_owned_dataset
@@ -170,6 +171,20 @@ def dismiss(
 
     set_finding_action(company.company_id, theme_id, "dismissed")
     return {"dismissed": True, "theme_id": theme_id}
+
+
+@router.post("/{brief_id}/opened")
+def mark_opened(
+    brief_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Record that the signed-in user opened this brief. This is the open-state
+    signal the brief-nudge cadence reads: once a user opens the brief, the
+    Day 1/2/3 reminders stop for them (app/brief_nudge.py, app/db/nudge.py).
+    Tenant-gated via require_owned_brief; idempotent (upsert)."""
+    require_owned_brief(brief_id, company.company_id)
+    nudge_db.mark_brief_opened(company.company_id, company.user_id, brief_id)
+    return {"opened": True, "brief_id": brief_id}
 
 
 @router.get("/{brief_id}")
