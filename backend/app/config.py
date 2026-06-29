@@ -187,11 +187,15 @@ class Settings(BaseSettings):
     # "notifications never showed up"). `groups:read` lets us list private
     # channels in the picker — the bot still can't self-join private channels
     # (Slack forbids it), so those must be invited manually, but at least they
-    # become selectable. Both must be added to the Slack app's Bot Token Scopes
-    # in the dashboard; existing installs must reconnect to pick them up.
+    # become selectable. `team:read` backs team.info, which the Test-connection
+    # health check + the account label call — without it the freshly-minted
+    # token gets `missing_scope` on team.info and the connection shows as
+    # "slack rejected the stored credential" even though the token is valid.
+    # All three are already declared in the Slack app's Bot Token Scopes;
+    # existing installs must reconnect to pick them up.
     slack_bot_scopes: str = (
         "chat:write,im:write,channels:read,channels:join,channels:history,"
-        "groups:read,groups:history,im:history,mpim:history,users:read"
+        "groups:read,groups:history,im:history,mpim:history,users:read,team:read"
     )
     # User scopes (xoxp): read the authorizing user's OWN messages + search,
     # acting as them. Rides on `user_scope=` in the authorize URL; Slack then
