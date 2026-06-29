@@ -59,7 +59,7 @@ CREATE TABLE prototypes (
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
     / "supabase" / "migrations"
-    / "20260629120000_restore_template_demoted_prototypes.sql"
+    / "20260629150000_restore_template_demoted_prototypes.sql"
 )
 
 
