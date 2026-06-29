@@ -34,12 +34,14 @@ DEFAULT_MODEL = "claude-sonnet-4-6"
 DEEP_MODEL = "claude-opus-4-7"
 
 # --- Process-wide concurrency cap on in-flight Anthropic calls ---------------
-# The prod box is small (~916 MB RAM, limited CPU). 4+ concurrent streaming
-# model calls thrash it: streaming slows to a crawl, requests stall, and the
-# gateway's retry layer fires — which makes the contention WORSE. This semaphore
-# bounds how many calls are in flight at the single chokepoint
-# (`_create_with_retries`) at once; the Nth+1 call BLOCKS (queues) until a slot
-# frees, rather than piling on or failing.
+# Concurrent streaming model calls compete for RAM/CPU; past some point on a
+# given box, streaming slows to a crawl, requests stall, and the gateway's retry
+# layer fires — making the contention WORSE. This semaphore bounds how many
+# calls are in flight at the single chokepoint (`_create_with_retries`) at once;
+# the Nth+1 call BLOCKS (queues) until a slot frees, rather than piling on or
+# failing. Tune to the box: the default is conservative; the prod box has since
+# grown to ~3.8 GB, where 6 concurrent streams measured ~80 MB extra — see
+# LLM_MAX_CONCURRENCY / LLM_BG_CAP.
 #
 # Why a threading (not asyncio) semaphore: every heavy caller runs the blocking
 # Anthropic call inside a WORKER THREAD (the gateway's `llm_call` is sync and
@@ -50,11 +52,10 @@ DEEP_MODEL = "claude-opus-4-7"
 # worker thread (see callers rerouted through `asyncio.to_thread`) so the loop
 # is never blocked here.
 #
-# Default 3: lets one PRD's two parallel parts (Part A + Part B, each a stream)
-# run together PLUS one other call (brief/evidence/ask) — the common steady
-# state — while still capping total load well below the 4+ that stalls the box.
-# Tunable via LLM_MAX_CONCURRENCY; values <= 0 / unset fall back to the default
-# (never 0, which would deadlock every call).
+# Default 3: a conservative steady state (a couple of interactive calls plus a
+# warm) for an unsized box. Hosts with RAM headroom should raise it via
+# LLM_MAX_CONCURRENCY (and LLM_BG_CAP, to let warming use the extra slots).
+# Values <= 0 / unset fall back to the default (never 0, which would deadlock).
 _DEFAULT_MAX_CONCURRENCY = 3
 # How long a call may wait for a slot before we emit a (single) saturation log,
 # so sustained contention is observable without spamming every queued call.
@@ -68,6 +69,24 @@ def _resolve_max_concurrency() -> int:
     except (TypeError, ValueError):
         n = _DEFAULT_MAX_CONCURRENCY
     return n if n > 0 else _DEFAULT_MAX_CONCURRENCY
+
+
+_DEFAULT_BG_CAP = 1
+
+
+def _resolve_bg_cap() -> int:
+    """How many of the `capacity` slots background (warm) calls may hold at once.
+
+    Default 1 serializes warming; raising it (env LLM_BG_CAP) parallelizes the
+    per-insight PRD/evidence warm. The _PriorityGate clamps it to capacity-1 so
+    background can never occupy every slot (interactive callers stay reachable).
+    """
+    raw = getattr(settings, "llm_bg_cap", _DEFAULT_BG_CAP)
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = _DEFAULT_BG_CAP
+    return n if n > 0 else _DEFAULT_BG_CAP
 
 
 class _PriorityGate:
@@ -125,7 +144,7 @@ class _PriorityGate:
             self._cond.notify_all()
 
 
-_llm_gate = _PriorityGate(_resolve_max_concurrency())
+_llm_gate = _PriorityGate(_resolve_max_concurrency(), bg_cap=_resolve_bg_cap())
 
 # Retry policy for transient API failures. 4 attempts ≈ 0.5s + 2s + 8s of
 # backoff (+ jitter) worst-case before surfacing the error.

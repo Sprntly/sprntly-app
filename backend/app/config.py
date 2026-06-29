@@ -31,11 +31,18 @@ class Settings(BaseSettings):
     # in design_agent/storage.py:_vite_build_sync so it stays tunable + testable.
     design_agent_vite_build_timeout_seconds: int = 180
     # Process-wide cap on in-flight Anthropic model calls (see app/llm.py).
-    # The small prod box thrashes at 4+ concurrent streams, so calls beyond
-    # this QUEUE instead of piling on. Default 3 fits one PRD's two parallel
-    # parts + one other call. Env-overridable via LLM_MAX_CONCURRENCY; values
+    # Process-wide cap on concurrent in-flight Anthropic streams; calls beyond
+    # this QUEUE instead of piling on. The default is conservative for a small
+    # box; raise it (env LLM_MAX_CONCURRENCY) on hosts with RAM headroom —
+    # measured: 6 concurrent streams used ~80 MB on the 3.8 GB prod box. Values
     # <= 0 fall back to the default (never 0, which would deadlock).
     llm_max_concurrency: int = 3
+    # How many of those slots BACKGROUND (warm / pre-generation) calls may hold
+    # at once. Bounds warm parallelism while leaving (capacity - bg_cap) slots
+    # interactive callers can always reach, so a user's click is never queued
+    # behind warming. Default 1 (warm serialized); raise via LLM_BG_CAP to
+    # parallelize the per-insight PRD/evidence warm (clamped to capacity-1).
+    llm_bg_cap: int = 1
     # Tier 1 — process-wide cap on how many Design Agent generations may run
     # their HEAVY section (LLM recreate loop + vite build + screenshot) at once.
     # Default 1: on the 2-vCPU prod box, one generation already pins both cores
