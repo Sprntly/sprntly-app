@@ -166,7 +166,13 @@ export function ArtifactFooterActions({
     .filter((a) => a !== current && show[a])
     .map((a) => ({
       key: a,
-      label: `${exists[a] ? "View" : "Generate"} ${NOUN[a]}`,
+      // The prototype chip's label is ALWAYS "View prototype" — only its ACTION
+      // branches on existence (view if a prototype exists, else generate). The
+      // other artifacts keep their View/Generate label.
+      label:
+        a === "prototype"
+          ? `View ${NOUN.prototype}`
+          : `${exists[a] ? "View" : "Generate"} ${NOUN[a]}`,
       icon: ICONS[a],
       // Only the prototype chip has an async existence round-trip; disable it
       // until that resolves so it never navigates in the wrong direction.
