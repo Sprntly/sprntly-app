@@ -13,11 +13,13 @@ This file guards the backend half of the contract:
   - The template/sample files that ship in the repo are STRUCTURALLY VALID:
     every JSON-bodied `:::block` is valid JSON, and every required block is
     present. A broken edit fails here before it ever reaches the model.
-  - The block VOCABULARY is locked to an explicit expected set, so renaming or
-    adding a block forces an update here — the cue to also update the frontend
-    adapter case (guarded on the web side by `pipeline-contract.test.ts`).
-  - The LIVE `prd-author` skill template keeps the two-part (Part A / `---` /
-    Part B) structure the runner's `_split_2part` + per-part directives rely on.
+  - The rich block VOCABULARY is locked on the SAMPLE (kept so PRDs generated
+    before the lean-markdown switch keep rendering), so renaming or adding a
+    block forces an update here — the cue to also update the frontend adapter
+    case (guarded on the web side by `pipeline-contract.test.ts`).
+  - The LIVE template (`sprntly_prd_template.md`) and the `prd-author` skill
+    template are lean markdown — NO `:::` blocks, no Part B — matching the
+    simplified human PRD the runner now emits.
 
 NOTE: the EVIDENCE artifact has moved OFF this `:::block` contract — it is now
 the `evidence-brief` skill's self-contained HTML visual brief (rendered in a
@@ -94,6 +96,11 @@ def _skill_prd_template(repo_root) -> str:
 
 EVIDENCE_FILES = ("sprntly_evidence_template.md", "sprntly_evidence_sample.md")
 PRD_FILES = ("sprntly_prd_template.md", "sprntly_prd_sample.md")
+# Only the SAMPLE still carries the rich `:::block` vocabulary — it's the
+# reference doc that exercises every adapter case so PRDs generated before the
+# lean-markdown switch keep rendering. The LIVE template (sprntly_prd_template.md)
+# is now lean markdown with NO blocks (guarded separately below).
+PRD_RICH_FILES = ("sprntly_prd_sample.md",)
 
 
 # ── asset integrity: JSON bodies parse ────────────────────────────────────────
@@ -121,22 +128,32 @@ def test_evidence_files_emit_the_expected_block_vocabulary(repo_root, fname):
     assert _block_names(_data_file(repo_root, fname)) == EVIDENCE_FILE_BLOCKS
 
 
-@pytest.mark.parametrize("fname", PRD_FILES)
-def test_prd_files_emit_the_expected_block_vocabulary(repo_root, fname):
+@pytest.mark.parametrize("fname", PRD_RICH_FILES)
+def test_prd_sample_emits_the_expected_block_vocabulary(repo_root, fname):
+    """Lock the rich PRD block vocabulary on the SAMPLE (the back-compat reference
+    that keeps pre-lean PRDs rendering). A rename/add must be mirrored in the
+    prd-adapter (web pipeline-contract.test.ts enforces the other half)."""
     assert _block_names(_data_file(repo_root, fname)) == PRD_FILE_BLOCKS
 
 
-# ── live PRD skill template keeps the two-part structure ──────────────────────
+def test_live_prd_template_is_lean_markdown(repo_root):
+    """The LIVE template the runner injects (data/sprntly_prd_template.md) is now
+    lean markdown — NO typed `:::` blocks. New PRDs render as h2/p/ul/table. (The
+    matching web guard parses it through the real adapter.)"""
+    assert _block_names(_data_file(repo_root, "sprntly_prd_template.md")) == set()
 
-def test_prd_skill_template_keeps_two_part_structure(repo_root):
-    """The runner generates Part A + Part B against this template and relies on
-    the `# Part A` / `---` / `# Part B` shape (`_split_2part`, the per-part
-    directives). Guard it so a template refactor can't silently break the split."""
+
+# ── live PRD skill template is lean, Part-A-only markdown ─────────────────────
+
+def test_prd_skill_template_is_lean_part_a(repo_root):
+    """Post-#545 + lean switch: prd-author emits only the human PRD (Part A) as
+    lean markdown — no Part B, no `---` separator (Part B is the separate
+    implementation-spec skill). Guard the shape so it can't regress to two parts."""
     md = _skill_prd_template(repo_root)
-    assert "# Part A" in md
-    assert "# Part B" in md
-    # A standalone horizontal-rule line separates the two halves.
-    assert any(line.strip() == "---" for line in md.split("\n")), "missing `---` separator"
+    assert "# Part B" not in md
+    assert not any(line.strip() == "---" for line in md.split("\n")), "stray `---` separator"
+    assert "## 1. Problem & evidence" in md
+    assert "## 5. Requirements" in md
 
 
 # NOTE: the evidence-runner end-to-end `:::block` persistence test was removed

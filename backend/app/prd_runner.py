@@ -60,7 +60,7 @@ from app.prompts import VOICE_GUARD
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "prd-author-v2"
+PROMPT_VERSION = "prd-author-v3"
 _SKILL = "prd-author"
 # The machine-readable Implementation Spec (Part B) is generated on demand by the
 # dedicated `implementation-spec` skill, fed the FINISHED human PRD (Part A) — its
@@ -75,15 +75,17 @@ PRD_VARIANT = "v2"
 
 # Agent-specific framing for the human PRD. The prd-author METHOD is supplied by
 # the bound skill; this system prompt states the agent's job + grounding rules,
-# and the _PART_A_DIRECTIVE steers the output to the typed `:::`-block contract.
+# and the _PART_A_DIRECTIVE steers the output to lean Markdown per the template.
 # The Implementation Spec is a SEPARATE, on-demand call bound to the
 # `implementation-spec` skill with its own _SYSTEM_B (below).
 _SYSTEM = """\
 You are Sprntly's PRD agent. Following the METHOD above, turn the supplied \
-brief insight into a human-readable Product Requirements Document for \
-stakeholder alignment and decisions: problem, evidence, goals, success metrics, \
-scope/non-goals, scenarios, requirements, acceptance criteria, risks, \
-milestones, and a testable done-gate.
+brief insight into a lean, human-readable Product Requirements Document for \
+stakeholder alignment and decisions: problem & evidence, goals & guardrail \
+metrics, non-goals, users & scenarios, signal-linked requirements (with \
+inline `[edge case]` / `[failure]` tags on load-bearing branches), risks + the \
+single riskiest assumption, open questions, rollout & measurement, and a \
+testable done-when.
 
 Ground every numeric claim, mechanism, metric, and acceptance criterion in \
 the supplied insight and the evidence it was derived from — falsifiable by a \
@@ -99,23 +101,25 @@ human-readable PRD; do NOT emit an Implementation Spec and do NOT emit a `---` \
 horizontal rule.""" + VOICE_GUARD
 
 # The human-PRD directive. Carries the insight + evidence + template and steers
-# the model to emit the typed `:::` blocks the frontend `prd-adapter` parses.
+# the model to emit lean Markdown (headings, prose, bullets, and ONE requirements
+# table) per the template — no typed `:::` blocks. The frontend `prd-adapter`
+# renders this markdown directly (h2/p/ul/table + inline emphasis).
 _PART_A_DIRECTIVE = """\
-PART DIRECTIVE: Produce ONLY the human-readable Product Requirements Document. \
-Render it as the typed semantic `:::` blocks defined in the TEMPLATE \
-below (`:::context-chip`, `:::tldr`, `:::problem`, `:::hypothesis`, \
-`:::requirements`, `:::acceptance-criteria`, `:::metrics`, `:::risks`, \
-`:::milestones`, `:::dod`), in the template's order, with the prose Context \
-section as written. The METHOD above governs your REASONING and quality bar \
-(problem-first, no fabrication, EARS-grade requirements, Given/When/Then \
-acceptance criteria, guardrail metrics, a testable done-gate); the TEMPLATE \
-governs the OUTPUT FORMAT. Emit every named block EXACTLY — never a paragraph, \
-bullet list, or markdown table where the template specifies a `:::` block, or \
-the frontend cannot render it as a first-class component. Fill each placeholder \
-with concrete, grounded content; never keep a `[bracketed]` example. Do NOT \
-include an Implementation Spec, do NOT emit the `---` separator, and \
-do NOT emit the template's trailing "How to use this template" section. Start \
-at the document title."""
+PART DIRECTIVE: Produce ONLY the human-readable Product Requirements Document, \
+as clean Markdown following the TEMPLATE below — its section order and \
+headings, kept lean. The METHOD above governs your REASONING and quality bar \
+(problem-first, no fabrication, signal-linked requirements, a primary metric \
+split from guardrails, exactly one riskiest assumption with a three-line \
+pre-mortem, a testable done-when); the TEMPLATE governs the OUTPUT STRUCTURE. \
+Render Requirements as the Markdown table the template shows \
+(ID | Requirement | Priority | Signal/Source | Acceptance), and tag \
+load-bearing branches inline with `[edge case]` / `[failure]` so the downstream \
+Implementation Spec inherits them. Fill every [bracketed] placeholder with \
+concrete, grounded content; never keep a bracketed example; flag a missing \
+number `[NEED: …]` rather than inventing it. Keep the body lean — push \
+operational detail (A/B mechanics, tech notes, competitor scans, detailed \
+rollout) to an Appendix. Do NOT include an Implementation Spec and do NOT emit \
+a `---` separator. Start at the document title."""
 
 _USER_TEMPLATE = """\
 {part_directive}
