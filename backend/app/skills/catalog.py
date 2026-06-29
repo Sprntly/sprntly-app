@@ -67,6 +67,7 @@ SKILL_CATEGORY: dict[str, str] = {
     "experiment-readout": "Metrics, Experimentation & Growth",
     "funnel-activation": "Metrics, Experimentation & Growth",
     "growth-loop": "Metrics, Experimentation & Growth",
+    "metric-tree": "Metrics, Experimentation & Growth",
     "naming-brainstorm": "Metrics, Experimentation & Growth",
     "pricing-packaging": "Metrics, Experimentation & Growth",
     "product-market-fit": "Metrics, Experimentation & Growth",

@@ -10,7 +10,7 @@ Translates the metrics you need into a precise tracking plan - the events, prope
 
 ## When to use / when NOT to use
 - **Use** when a feature needs measurement, or to fix a gappy/inconsistent tracking plan.
-- **Do NOT use** to pick the North Star.
+- **Do NOT use** to pick the North Star or build the metric system (`metric-tree` does both).
 
 ## Inputs
 - **Required:** the feature + the questions/metrics it must answer.
