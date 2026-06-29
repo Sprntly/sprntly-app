@@ -12,7 +12,7 @@
 // order, the View/Generate semantics, the click wiring, and the gating.
 import * as React from "react"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 // The component's JSX compiles to React.createElement under the repo's classic
 // JSX runtime, so a global React must exist before the import below evaluates.
@@ -38,8 +38,28 @@ vi.mock("../../../context/ContentContext", async (orig) => {
   return { ...actual, useContent: () => ({ content, setContent: vi.fn() }) }
 })
 
+// The prototype chip now resolves REAL per-PRD existence via getByPrd (the same
+// per-PRD endpoint ApproveModal gates on), so the View/Generate decision is
+// async. Stub only getByPrd; preserve the rest of the api module.
+const getByPrd = vi.fn()
+vi.mock("../../../lib/api", async (orig) => {
+  const actual = await orig<typeof import("../../../lib/api")>()
+  return {
+    ...actual,
+    designAgentApi: {
+      ...actual.designAgentApi,
+      getByPrd: (...args: unknown[]) => getByPrd(...args),
+    },
+  }
+})
+
 import { ArtifactFooterActions } from "../ArtifactFooterActions"
 import { prototypePath } from "../../../lib/routes"
+
+beforeEach(() => {
+  // Default: this PRD has a ready prototype, so the chip resolves to "View".
+  getByPrd.mockResolvedValue({ status: "ready", bundle_url: "https://x/b.html" })
+})
 
 afterEach(() => {
   cleanup()
@@ -54,13 +74,15 @@ function chipLabels(): string[] {
 }
 
 describe("ArtifactFooterActions — per-view chip set", () => {
-  it("PRD view → Evidence, Prototype, Ticket (not PRD)", () => {
+  it("PRD view → Evidence, Prototype, Ticket (not PRD)", async () => {
     content = {
       prd: { prd_id: 42, title: "PRD" },
       evidence: { title: "Ev" },
     }
     render(<ArtifactFooterActions current="prd" />)
 
+    // Prototype label resolves async off getByPrd; wait for it to settle.
+    await screen.findByRole("button", { name: "View prototype" })
     expect(chipLabels()).toEqual([
       "View evidence",
       "View prototype",
@@ -69,13 +91,14 @@ describe("ArtifactFooterActions — per-view chip set", () => {
     expect(screen.queryByRole("button", { name: /prd/i })).toBeNull()
   })
 
-  it("Ticket view → Evidence, PRD, Prototype (not Ticket)", () => {
+  it("Ticket view → Evidence, PRD, Prototype (not Ticket)", async () => {
     content = {
       prd: { prd_id: 7, title: "PRD" },
       evidence: { title: "Ev" },
     }
     render(<ArtifactFooterActions current="tickets" />)
 
+    await screen.findByRole("button", { name: "View prototype" })
     expect(chipLabels()).toEqual([
       "View evidence",
       "View PRD",
@@ -84,13 +107,14 @@ describe("ArtifactFooterActions — per-view chip set", () => {
     expect(screen.queryByRole("button", { name: /ticket/i })).toBeNull()
   })
 
-  it("Evidence view → PRD, Ticket, Prototype (not Evidence)", () => {
+  it("Evidence view → PRD, Ticket, Prototype (not Evidence)", async () => {
     content = {
       prd: { prd_id: 7, title: "PRD" },
       evidence: { title: "Ev" },
     }
     render(<ArtifactFooterActions current="evidence" />)
 
+    await screen.findByRole("button", { name: "View prototype" })
     expect(chipLabels()).toEqual([
       "View PRD",
       "View ticket",
@@ -151,12 +175,12 @@ describe("ArtifactFooterActions — View vs Generate semantics", () => {
 })
 
 describe("ArtifactFooterActions — prototype wiring + gating", () => {
-  it("Prototype chip pushes prototypePath(prdId) with view-intent when ready", () => {
-    // A PRD-bearing prototype counts as existing → view-intent (no generate=1).
+  it("Prototype chip pushes prototypePath(prdId) with view-intent when ready", async () => {
+    // getByPrd → ready prototype → view-intent (no generate=1).
     content = { prd: { prd_id: 7, title: "PRD" }, evidence: { title: "Ev" } }
     render(<ArtifactFooterActions current="prd" />)
 
-    fireEvent.click(screen.getByRole("button", { name: /prototype/i }))
+    fireEvent.click(await screen.findByRole("button", { name: "View prototype" }))
     expect(pushSpy).toHaveBeenCalledWith(prototypePath(7))
   })
 
@@ -178,5 +202,60 @@ describe("ArtifactFooterActions — prototype wiring + gating", () => {
     expect(screen.getByRole("button", { name: "Generate PRD" })).toBeTruthy()
     expect(screen.queryByRole("button", { name: /prototype/i })).toBeNull()
     expect(screen.queryByRole("button", { name: /ticket/i })).toBeNull()
+  })
+})
+
+describe("ArtifactFooterActions — per-PRD prototype existence gate", () => {
+  it("reads 'View prototype' and navigates view-intent when this PRD has a ready prototype", async () => {
+    getByPrd.mockResolvedValue({ status: "ready", bundle_url: "https://x/b.html" })
+    content = { prd: { prd_id: 7, title: "PRD" }, evidence: { title: "Ev" } }
+    render(<ArtifactFooterActions current="prd" />)
+
+    const chip = await screen.findByRole("button", { name: "View prototype" })
+    fireEvent.click(chip)
+    // View intent: bare ?prd=, no generate flag.
+    expect(pushSpy).toHaveBeenCalledWith(prototypePath(7))
+    expect(getByPrd).toHaveBeenCalledWith(7)
+  })
+
+  it("reads 'Generate prototype' and carries generate intent when this PRD has no prototype", async () => {
+    getByPrd.mockResolvedValue(null) // 404 / no ready prototype for this PRD
+    content = { prd: { prd_id: 7, title: "PRD" }, evidence: { title: "Ev" } }
+    render(<ArtifactFooterActions current="prd" />)
+
+    const chip = await screen.findByRole("button", { name: "Generate prototype" })
+    fireEvent.click(chip)
+    expect(pushSpy).toHaveBeenCalledWith(prototypePath(7, { generate: true }))
+  })
+
+  it("generates when this PRD has no prototype even if a sibling PRD does", async () => {
+    // Load-bearing per-PRD-not-per-insight guard. The component keys the gate
+    // ONLY on getByPrd(thisPrdId); it never consults a per-insight signal that a
+    // duplicate sibling PRD's prototype could satisfy. So when getByPrd(thisPrd)
+    // → null, the chip MUST read "Generate prototype" + carry generate intent,
+    // regardless of any same-insight sibling having a ready prototype. (A
+    // per-insight signal would mis-read "View" here and dead-end on the empty
+    // Generate page — the live duplicate-PRD bug this fix closes.)
+    getByPrd.mockResolvedValue(null)
+    content = { prd: { prd_id: 250, title: "PRD" }, evidence: { title: "Ev" } }
+    render(<ArtifactFooterActions current="prd" />)
+
+    const chip = await screen.findByRole("button", { name: "Generate prototype" })
+    fireEvent.click(chip)
+    expect(pushSpy).toHaveBeenCalledWith(prototypePath(250, { generate: true }))
+    // Proof the gate is per-PRD: only THIS prdId was ever looked up.
+    expect(getByPrd).toHaveBeenCalledWith(250)
+    expect(getByPrd).toHaveBeenCalledTimes(1)
+  })
+
+  it("disables the prototype chip and does not navigate while existence is resolving", () => {
+    getByPrd.mockReturnValue(new Promise(() => {})) // never resolves → in flight
+    content = { prd: { prd_id: 7, title: "PRD" }, evidence: { title: "Ev" } }
+    render(<ArtifactFooterActions current="prd" />)
+
+    const chip = screen.getByRole("button", { name: /prototype/i }) as HTMLButtonElement
+    expect(chip.disabled).toBe(true)
+    fireEvent.click(chip)
+    expect(pushSpy).not.toHaveBeenCalled()
   })
 })

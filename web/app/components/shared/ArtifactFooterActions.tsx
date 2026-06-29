@@ -1,10 +1,12 @@
 "use client"
 
 import type { ReactNode } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { IconTicket, IconMicroscope, IconFileText, IconDeviceDesktop } from "@tabler/icons-react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
+import { designAgentApi } from "../../lib/api"
 import { prototypePath } from "../../lib/routes"
 
 export type ArtifactId = "prd" | "evidence" | "tickets"
@@ -90,15 +92,55 @@ export function ArtifactFooterActions({
   const router = useRouter()
   const prdId = content.prd?.prd_id ?? null
 
+  // REAL per-PRD prototype existence — NOT PRD existence. The prototype chip's
+  // action navigates to THIS specific prdId, so the View-vs-Generate decision
+  // must be keyed on the SAME prdId via getByPrd (the per-PRD endpoint that
+  // ApproveModal already gates on: ready + bundle_url). A per-insight signal is
+  // the wrong key here — it reports "ready" whenever ANY duplicate sibling PRD
+  // on the insight has a prototype, so a no-prototype PRD whose sibling has one
+  // would mis-read "View" and dead-end on the empty Generate page.
+  // null = still resolving (round-trip in flight).
+  const [prototypeExists, setPrototypeExists] = useState<boolean | null>(null)
+  useEffect(() => {
+    if (prdId == null) {
+      setPrototypeExists(false)
+      return
+    }
+    let cancelled = false
+    setPrototypeExists(null)
+    designAgentApi
+      .getByPrd(prdId)
+      .then((proto) => {
+        // Ignore a stale resolution if prdId changed (cleanup flips cancelled).
+        if (cancelled) return
+        setPrototypeExists(
+          Boolean(proto && proto.status === "ready" && proto.bundle_url),
+        )
+      })
+      .catch(() => {
+        // getByPrd already swallows 404→null; this guards transient throws.
+        // Treat any failure as "no prototype" (degrade to Generate), never crash.
+        if (!cancelled) setPrototypeExists(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [prdId])
+
+  // While the prototype lookup is in flight (prototypeExists === null) we DISABLE
+  // the prototype chip (chosen over a neutral-nav default as the lowest-footprint
+  // guard) so it can never mis-navigate before existence is known.
+  const prototypeLoading = prototypeExists === null
+
   // Existence of each sibling artifact, used to pick "View" vs "Generate".
   const exists: Record<FooterArtifact, boolean> = {
     prd: content.prd != null,
     evidence: content.evidence != null,
-    // A "tickets" / "prototype" artifact only ever exists once there's a PRD to
-    // derive it from; we don't track a separate ready flag in content, so the
-    // PRD presence is the existence signal (and the gate, below).
+    // A "tickets" artifact only ever exists once there's a PRD to derive it from;
+    // we don't track a separate ready flag in content, so PRD presence is the
+    // existence signal. Prototype uses the REAL per-PRD lookup above.
     tickets: prdId != null,
-    prototype: prdId != null,
+    prototype: prototypeExists === true,
   }
 
   // Prototype + tickets need a PRD as their source. Prototype additionally needs
@@ -126,6 +168,9 @@ export function ArtifactFooterActions({
       key: a,
       label: `${exists[a] ? "View" : "Generate"} ${NOUN[a]}`,
       icon: ICONS[a],
+      // Only the prototype chip has an async existence round-trip; disable it
+      // until that resolves so it never navigates in the wrong direction.
+      disabled: a === "prototype" && prototypeLoading,
       onClick: () => open(a),
     }))
 
@@ -151,6 +196,7 @@ export function ArtifactFooterActions({
           // Design: `.chip` (ghost) + `.chip.b` (brand-primary). The
           // first/most-forward sibling is the primary action.
           className={i === 0 ? "artifact-foot-chip is-primary" : "artifact-foot-chip"}
+          disabled={a.disabled}
           onClick={a.onClick}
         >
           {a.icon}
