@@ -87,6 +87,7 @@ SKILL_CATEGORY: dict[str, str] = {
     "story-mapping": "Delivery & Operations",
     "tech-discovery-docs": "Delivery & Operations",
     "working-backwards": "Delivery & Operations",
+    "brief-nudge": "Stakeholder & Communication",
     "customer-comms": "Stakeholder & Communication",
     "exec-narrative": "Stakeholder & Communication",
     "feedback-synthesis": "Stakeholder & Communication",

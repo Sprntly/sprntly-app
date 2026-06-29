@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Brief Nudge — Slack + Email, Day 0–3</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#16181d; --ink-2:#3f434d; --ink-soft:#7a7e89; --faint:#a7abb4;
+    --line:#e4e5e9; --canvas:#eceef1; --paper:#ffffff;
+    --green:#1a8a52; --green-dark:#13703f; --green-soft:#e6f3ec;
+    --sans:'Inter',-apple-system,system-ui,sans-serif;
+    --serif:'Spectral',Georgia,serif;
+    --c-comp:#b07a2e; --c-grow:#1a8a52; --c-rel:#c0473c; --c-dem:#5f57a6;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--canvas);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5;padding:34px 20px 80px}
+  .wrap{max-width:1120px;margin:0 auto}
+
+  .top h1{font-family:var(--serif);font-weight:600;font-size:27px;letter-spacing:-.01em;margin-bottom:6px}
+  .top p{color:var(--ink-2);font-size:14.5px;max-width:74ch}
+  .reco{display:flex;gap:11px;align-items:flex-start;background:var(--green-soft);border:1px solid #bfe2cd;border-radius:11px;padding:13px 16px;margin:18px 0 22px;font-size:13.5px;color:#155e38;max-width:78ch}
+  .reco b{color:var(--green-dark)}
+  .reco .ic{flex:none;width:18px;height:18px;color:var(--green);margin-top:1px}
+
+  /* day selector */
+  .tabs{display:inline-flex;background:#e2e4e8;border-radius:11px;padding:4px;gap:3px;margin-bottom:8px;flex-wrap:wrap}
+  .tab{font-family:var(--sans);font-size:13px;font-weight:600;color:var(--ink-2);background:transparent;border:0;border-radius:8px;padding:9px 15px;cursor:pointer;transition:.15s;white-space:nowrap}
+  .tab .dn{color:var(--faint);font-weight:600;margin-right:7px}
+  .tab.active{background:var(--paper);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+  .tab.active .dn{color:var(--green)}
+  .caption{font-size:12.5px;color:var(--ink-soft);margin:0 0 20px}
+
+  .cols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:26px;align-items:start}
+  @media(max-width:880px){.cols{grid-template-columns:1fr}}
+  .chan-label{display:flex;align-items:center;gap:9px;font-size:12px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:var(--ink-soft);margin-bottom:11px}
+  .chan-label .dot{width:8px;height:8px;border-radius:50%}
+
+  /* ---------- shared brand mark ---------- */
+  .mark{width:34px;height:34px;border-radius:9px;background:linear-gradient(150deg,#1fa362,#13703f);display:flex;align-items:center;justify-content:center;color:#fff;flex:none}
+  .mark svg{width:18px;height:18px}
+
+  /* ---------- SLACK ---------- */
+  .slack{background:var(--paper);border:1px solid var(--line);border-radius:13px;box-shadow:0 8px 26px -18px rgba(20,30,50,.4);overflow:hidden}
+  .slack-bar{display:flex;align-items:center;gap:8px;padding:10px 15px;border-bottom:1px solid #ededf0;font-size:12.5px;color:var(--ink-soft);background:#fafafb}
+  .slack-bar .hsh{color:#b9bcc4;font-weight:700}
+  .slack-msg{display:flex;gap:11px;padding:16px 17px 18px}
+  .slack-body{flex:1;min-width:0}
+  .slack-row{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+  .slack-row .nm{font-weight:700;font-size:15px;color:#1d1c1d}
+  .slack-row .app{font-size:10px;font-weight:700;letter-spacing:.04em;color:#616573;background:#e8e8ec;border-radius:3px;padding:1px 5px}
+  .slack-row .tm{font-size:12px;color:var(--faint)}
+  .slack-head{font-size:15px;font-weight:600;color:var(--ink);line-height:1.4;margin-bottom:7px}
+  .slack-intro{font-size:14px;color:var(--ink-2);margin-bottom:11px}
+  .s-items{display:flex;flex-direction:column;gap:8px;margin-bottom:15px}
+  .s-item{display:flex;gap:9px;font-size:13.5px;line-height:1.45}
+  .s-item .bar{width:3px;border-radius:2px;flex:none}
+  .s-item b{color:var(--ink);font-weight:600}
+  .s-item .imp{font-weight:700}
+  .s-btn{display:inline-flex;align-items:center;gap:8px;background:var(--green);color:#fff;font-size:14px;font-weight:600;border-radius:8px;padding:10px 16px;text-decoration:none;border:1px solid var(--green-dark)}
+  .s-link{display:block;font-family:'SFMono-Regular',ui-monospace,monospace;font-size:11px;color:var(--ink-soft);margin-top:9px}
+  .s-final{font-size:12.5px;color:var(--c-rel);margin-bottom:11px;font-weight:500}
+
+  /* ---------- EMAIL ---------- */
+  .inbox{display:flex;gap:11px;align-items:flex-start;background:var(--paper);border:1px solid var(--line);border-radius:12px 12px 0 0;border-bottom:0;padding:13px 16px}
+  .inbox .meta{flex:1;min-width:0}
+  .inbox .l1{display:flex;align-items:baseline;gap:8px}
+  .inbox .from{font-weight:700;font-size:14px;color:var(--ink)}
+  .inbox .tm{font-size:12px;color:var(--faint);margin-left:auto;white-space:nowrap}
+  .inbox .subj{font-size:14px;font-weight:600;color:var(--ink);margin:3px 0 1px;line-height:1.35}
+  .inbox .pre{font-size:13px;color:var(--ink-soft);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  .email{background:var(--paper);border:1px solid var(--line);border-top:2px solid var(--green);border-radius:0 0 12px 12px;box-shadow:0 8px 26px -18px rgba(20,30,50,.4);overflow:hidden}
+  .em-head{display:flex;align-items:center;gap:10px;padding:18px 26px 0}
+  .em-head .wm{font-weight:700;font-size:15px;letter-spacing:-.01em}
+  .em-body{padding:18px 26px 8px}
+  .em-eyebrow{font-size:11px;font-weight:700;letter-spacing:.13em;text-transform:uppercase;color:var(--green);margin-bottom:9px}
+  .em-title{font-family:var(--serif);font-weight:600;font-size:25px;line-height:1.18;letter-spacing:-.01em;color:var(--ink);margin-bottom:11px}
+  .em-intro{font-size:14.5px;color:var(--ink-2);line-height:1.6;margin-bottom:18px}
+  .em-seen{font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-soft);margin-bottom:10px}
+  .e-items{display:flex;flex-direction:column;gap:11px;margin-bottom:22px}
+  .e-item{display:flex;gap:13px;align-items:flex-start;border:1px solid var(--line);border-radius:10px;padding:13px 15px;background:#fcfcfb}
+  .e-item .bar{width:4px;align-self:stretch;border-radius:3px;flex:none}
+  .e-item .txt{flex:1;min-width:0}
+  .e-item .it{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;margin-bottom:3px}
+  .e-item .ih{font-size:14.5px;color:var(--ink);line-height:1.4;font-weight:500}
+  .e-item .ih b{font-weight:700}
+  .e-item .imp{font-family:var(--serif);font-weight:700;font-size:18px;white-space:nowrap;align-self:center}
+  .cta-wrap{text-align:center;margin:6px 0 4px}
+  .e-cta{display:inline-flex;align-items:center;gap:9px;background:var(--green);color:#fff;font-size:15.5px;font-weight:600;border-radius:10px;padding:14px 30px;text-decoration:none;box-shadow:0 8px 18px -9px rgba(26,138,82,.8)}
+  .e-route{font-size:11.5px;color:var(--ink-soft);text-align:center;margin-top:10px}
+  .e-route .mono{font-family:ui-monospace,monospace}
+  .e-jump{text-align:center;font-size:12.5px;color:var(--ink-soft);margin-top:16px;padding-top:14px;border-top:1px dashed var(--line)}
+  .e-jump a{color:var(--green-dark);font-weight:600;text-decoration:none}
+  .e-jump a:hover{text-decoration:underline}
+  .em-foot{border-top:1px solid var(--line);padding:15px 26px 20px;font-size:11.5px;color:var(--faint);line-height:1.7;background:#fbfbfa}
+  .em-foot a{color:var(--ink-soft);text-decoration:underline}
+  .em-foot .wsp{color:var(--ink-soft);font-weight:600}
+  .final-note{background:#fcefec;border:1px solid #f3d2c9;color:#9a3a26;font-size:12.5px;border-radius:8px;padding:10px 13px;margin-bottom:16px}
+
+  svg.cticon{flex:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <h1>Brief Nudge — getting the weekly brief opened</h1>
+    <p>The delivery layer for <b>weekly-brief</b>: a Day-0 announcement plus Day-1/2/3 reminders (sent only if unopened), on Slack and email. Switch days to compare. Recipient and figures are illustrative.</p>
+  </div>
+  <div class="reco">
+    <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+    <div><b>One dominant CTA, not three.</b> Every message drives a single action — <i>Open this week's brief</i>, deep-linked to the workspace → brief page. The top items are a scannable teaser, not competing buttons. Email adds an optional, quiet "jump straight in" row for power users (see Day 0).</div>
+  </div>
+
+  <div class="tabs" id="tabs"></div>
+  <p class="caption" id="caption"></p>
+
+  <div class="cols">
+    <div>
+      <div class="chan-label"><span class="dot" style="background:#611f69"></span>Slack · direct message from Sprntly</div>
+      <div id="slack"></div>
+    </div>
+    <div>
+      <div class="chan-label"><span class="dot" style="background:var(--green)"></span>Email</div>
+      <div id="email"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const ICON_DOC = '<svg class="cticon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
+const ICON_ARR = '<svg class="cticon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg>';
+const MARK = '<div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4M12 18v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M2 12h4M18 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg></div>';
+
+const C = {comp:'#b07a2e', grow:'#1a8a52', rel:'#c0473c'};
+const ITEMS = {
+  comp:{label:'Competitive', it:'A rival\'s new search cost <b>3 deals</b> this quarter', imp:'$1.6M', impLabel:'renewals protected', c:C.comp},
+  grow:{label:'Expansion',   it:'<b>42 accounts</b> have outgrown their plan',          imp:'$8.4M', impLabel:'expansion unclaimed', c:C.grow},
+  rel: {label:'Revenue leak', it:'A checkout bug is failing <b>1 in 6</b> iOS payments', imp:'$2.2M', impLabel:'per year at risk', c:C.rel},
+};
+
+const DAYS = [
+{
+  key:'Day 0', sub:'Announcement — sent when the brief is ready.',
+  slack:{ head:'Your weekly brief is ready — <b>$60M</b> in upside is on the table.',
+    intro:'I scouted every signal across your tools this week. The three plays that move the most:',
+    items:['comp','grow','rel'], cta:'Open this week\u2019s brief' },
+  email:{ from:'Sprntly', tm:'6:17 AM',
+    subject:'Your weekly brief: ~$60M in upside is on the table',
+    pre:'Three plays worth your attention — and the one to start with.',
+    eyebrow:'Weekly brief \u00b7 week of Jun 23',
+    title:'~$60M in revenue is within reach this week',
+    intro:'I scouted every signal across your tools. Five opportunities are ranked in your brief — here are the three that move the most.',
+    items:['comp','grow','rel'], cta:'Open this week\u2019s brief', jump:true }
+},
+{
+  key:'Day 1', sub:'Reminder — impact-led; the upside is slipping. Sent if still unopened.',
+  slack:{ head:'Your brief is unopened — <b>$60M</b> is still on the table.',
+    intro:'The two biggest plays are sitting unclaimed, and the longer they wait the harder they get to capture. Both are already drafted for your review:',
+    items:['grow','comp'], cta:'Open it now' },
+  email:{ from:'Sprntly', tm:'Yesterday',
+    subject:'~$60M is still unclaimed in your weekly brief',
+    pre:'The two biggest plays are sitting untouched.',
+    eyebrow:'Weekly brief \u00b7 reminder',
+    title:'$60M is still on the table — your brief is unopened',
+    intro:'A quick nudge: this week\u2019s brief hasn\u2019t been opened, and the upside doesn\u2019t wait. These two plays move the most — and both are already drafted, ready for your review.',
+    items:['grow','comp'], cta:'Open the brief', jump:false }
+},
+{
+  key:'Day 2', sub:'Reminder — focused on the biggest play + the cost of waiting.',
+  slack:{ head:'<b>$8.4M</b> in expansion is slipping while this sits unopened.',
+    intro:'42 of your accounts are ready to move up right now — several won\u2019t wait for next quarter. The upgrade flow is drafted; every day it\u2019s unshipped is expansion walking out the door:',
+    items:['grow'], cta:'Claim the $8.4M' },
+  email:{ from:'Sprntly', tm:'2 days ago',
+    subject:'$8.4M is slipping — 42 accounts are ready to expand now',
+    pre:'They won\u2019t wait for next quarter. The play is already drafted.',
+    eyebrow:'Weekly brief \u00b7 reminder',
+    title:'$8.4M is walking out the door — 42 accounts ready now',
+    intro:'The single biggest play in this week\u2019s brief is still untouched. 42 accounts have outgrown their plan and several are ready to move this quarter — but that window narrows as they settle in. The upgrade flow is drafted and waiting on you.',
+    items:['grow'], cta:'Claim the $8.4M', jump:false }
+},
+{
+  key:'Day 3', sub:'Final reminder — close date + an honest promise to stop.',
+  slack:{ head:'Final call — <b>$60M</b> across five plays rolls off Friday.',
+    final:'This is the last reminder — I\u2019ll pause after today.',
+    intro:'Friday\u2019s brief replaces this one, so this is your last prompt on these plays. The top one is drafted and still open:',
+    items:['grow'], cta:'Open before Friday' },
+  email:{ from:'Sprntly', tm:'3 days ago',
+    subject:'Final reminder — your $60M brief closes Friday',
+    pre:'Last one — we\u2019ll pause reminders after today.',
+    eyebrow:'Weekly brief \u00b7 final reminder',
+    title:'Last call — $60M rolls off Friday',
+    intro:'This is the final reminder for this brief. Friday\u2019s brief replaces it, so this is your last prompt on these specific plays — and the upside only gets harder to claim the longer it waits. Here\u2019s the one to act on first; it\u2019s drafted and ready.',
+    items:['grow'], cta:'Open before Friday', jump:false,
+    note:'This is the final reminder for this brief — we\u2019ll pause after today.' }
+}
+];
+
+const ROUTE = 'app.sprntly.com/w/acme/brief/jun-23';
+
+function slackItems(keys){
+  return keys.map(k=>{const i=ITEMS[k];
+    return `<div class="s-item"><span class="bar" style="background:${i.c}"></span><span>${i.it} — <span class="imp" style="color:${i.c}">${i.imp}</span> ${i.impLabel}.</span></div>`;
+  }).join('');
+}
+function renderSlack(d){
+  const s=d.slack;
+  return `<div class="slack">
+    <div class="slack-bar">${MARK_SMALL}<span><span class="hsh">#</span> direct message</span></div>
+    <div class="slack-msg">${MARK}
+      <div class="slack-body">
+        <div class="slack-row"><span class="nm">Sprntly</span><span class="app">APP</span><span class="tm">${s.tm||'9:00 AM'}</span></div>
+        ${s.final?`<div class="s-final">${s.final}</div>`:''}
+        <div class="slack-head">${s.head}</div>
+        <div class="slack-intro">${s.intro}</div>
+        <div class="s-items">${slackItems(s.items)}</div>
+        <a class="s-btn" href="#">${ICON_DOC} ${s.cta} ${ICON_ARR}</a>
+        <span class="s-link">\u2192 ${ROUTE}</span>
+      </div>
+    </div>
+  </div>`;
+}
+const MARK_SMALL='';
+
+function emailItems(keys){
+  return keys.map(k=>{const i=ITEMS[k];
+    return `<div class="e-item"><span class="bar" style="background:${i.c}"></span>
+      <div class="txt"><div class="it" style="color:${i.c}">${i.label}</div><div class="ih">${i.it}.</div></div>
+      <div class="imp" style="color:${i.c}">${i.imp}</div></div>`;
+  }).join('');
+}
+function renderEmail(d){
+  const e=d.email;
+  return `<div class="inbox">${MARK}
+      <div class="meta">
+        <div class="l1"><span class="from">${e.from}</span><span class="tm">${e.tm}</span></div>
+        <div class="subj">${e.subject}</div>
+        <div class="pre">${e.pre}</div>
+      </div>
+    </div>
+    <div class="email">
+      <div class="em-head">${MARK}<span class="wm">Sprntly</span></div>
+      <div class="em-body">
+        <div class="em-eyebrow">${e.eyebrow}</div>
+        <div class="em-title">${e.title}</div>
+        ${e.note?`<div class="final-note">${e.note}</div>`:''}
+        <div class="em-intro">${e.intro}</div>
+        <div class="em-seen">What we\u2019re seeing</div>
+        <div class="e-items">${emailItems(e.items)}</div>
+        <div class="cta-wrap"><a class="e-cta" href="#">${e.cta} ${ICON_ARR}</a>
+          <div class="e-route">Takes you straight to the <b>Acme</b> workspace \u2192 this week\u2019s brief<br><span class="mono">${ROUTE}</span></div>
+        </div>
+        ${e.jump?`<div class="e-jump">Prefer to jump straight in? <a href="#">Competitive gap</a> · <a href="#">Expansion</a> · <a href="#">Checkout fix</a></div>`:''}
+      </div>
+      <div class="em-foot">
+        Sent to you because you\u2019re a PM on the <span class="wsp">Acme</span> workspace.<br>
+        <a href="#">Manage notifications</a> · <a href="#">Get this weekly instead of daily</a> · <a href="#">Unsubscribe</a>
+      </div>
+    </div>`;
+}
+
+const tabsEl=document.getElementById('tabs');
+const capEl=document.getElementById('caption');
+const slackEl=document.getElementById('slack');
+const emailEl=document.getElementById('email');
+
+function select(idx){
+  [...tabsEl.children].forEach((b,i)=>b.classList.toggle('active',i===idx));
+  const d=DAYS[idx];
+  capEl.textContent=d.sub;
+  slackEl.innerHTML=renderSlack(d);
+  emailEl.innerHTML=renderEmail(d);
+}
+DAYS.forEach((d,i)=>{
+  const b=document.createElement('button');
+  b.className='tab';
+  b.innerHTML=`<span class="dn">${i===0?'NEW':'R'+i}</span>${d.key}`;
+  b.onclick=()=>select(i);
+  tabsEl.appendChild(b);
+});
+select(0);
+</script>
+</body>
+</html>
