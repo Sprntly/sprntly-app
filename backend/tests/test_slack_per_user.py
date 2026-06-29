@@ -35,6 +35,15 @@ from tests._company_helpers import (
     supabase_bearer,
 )
 
+# The brief Slack message is drafted by the brief-nudge skill; delivery tests
+# mock the (LLM) draft so they exercise only the per-user fan-out + routing.
+_NUDGE = {
+    "slack": {"headline": "h", "intro": "i", "items": [],
+              "cta_label": "Open", "cta_url": "https://app.sprntly.ai/brief"},
+    "email": {"subject": "s", "title": "t", "intro": "i",
+              "cta_label": "c", "cta_url": "u"},
+}
+
 
 def _reload_app_modules():
     for name in (
@@ -378,6 +387,7 @@ def test_delivery_targets_each_user_own_slack(slack_env, monkeypatch):
     posts: list[tuple[str, str]] = []
 
     monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: rows)
+    monkeypatch.setattr(delivery, "generate_nudge", lambda *a, **k: _NUDGE)
     monkeypatch.setattr(delivery, "decrypt_token_json",
                         lambda enc: json.dumps(tokens[enc]))
     monkeypatch.setattr(
@@ -404,6 +414,7 @@ def test_delivery_skips_user_without_channel(slack_env, monkeypatch):
          "token_json_encrypted": "encB"},
     ]
     monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: rows)
+    monkeypatch.setattr(delivery, "generate_nudge", lambda *a, **k: _NUDGE)
     monkeypatch.setattr(delivery, "decrypt_token_json",
                         lambda enc: json.dumps({"access_token": "t"}))
     monkeypatch.setattr(delivery.slack_oauth, "post_message",
@@ -429,6 +440,7 @@ def test_delivery_dm_target_routes_to_user_dm(slack_env, monkeypatch):
     ]
     calls: list[dict] = []
     monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: rows)
+    monkeypatch.setattr(delivery, "generate_nudge", lambda *a, **k: _NUDGE)
     monkeypatch.setattr(
         delivery, "decrypt_token_json",
         lambda enc: json.dumps({"access_token": "xoxb-A", "authed_user_id": "U-A"}))

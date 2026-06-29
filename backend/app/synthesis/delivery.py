@@ -1,13 +1,18 @@
 """Brief delivery — push a freshly generated brief to each recipient's Slack.
 
-Slack is PER-USER: every member who connected their own Slack gets the
-brief in their OWN workspace + chosen channel. The bot token lives on that
-user's connection row; the target channel lives in `config.channel_id` (set
-via the Settings channel picker / POST /v1/connectors/slack/config).
+Slack is PER-USER: every member who connected their own Slack gets the brief
+in their OWN workspace, at their chosen target (a channel, or a DM to
+themselves — config.target_type / config.channel_id, set via the Settings
+picker / POST /v1/connectors/slack/config).
+
+The message itself is ALWAYS drafted by the brief-nudge skill (the Day-0
+announcement) — there is no static fallback. The skill is composed once per
+company (one LLM call) and the same copy is fanned out to every recipient.
+A draft failure means no Slack post (logged), never a static stand-in.
 
 Delivery is a SIDE EFFECT of brief generation: it must never break or block
 the brief itself. Any failure is logged + reported in the return value, not
-raised. A user with no Slack connected / no channel configured is skipped;
+raised. A user with no Slack connected / no target configured is skipped;
 zero connected users ⇒ clean no-op.
 """
 from __future__ import annotations
@@ -16,51 +21,16 @@ import json
 import logging
 
 from app import db
-from app.config import settings
+from app.brief_nudge import brief_deep_link, generate_nudge, nudge_slack_blocks
 from app.connectors import slack_oauth
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 
 logger = logging.getLogger(__name__)
 
-MAX_INSIGHTS_IN_MESSAGE = 5
 
-_TAG_LABEL = {
-    "something_broken": ":wrench: FIX",
-    "something_new": ":hammer_and_pick: BUILD",
-    "something_better": ":chart_with_upwards_trend: OPTIMIZE",
-}
-
-
-def _brief_blocks(brief: dict) -> tuple[str, list[dict]]:
-    """(plain-text fallback, Slack Block Kit blocks) for a brief payload."""
-    headline = brief.get("summary_headline") or "Your weekly brief is ready"
-    week = brief.get("week_label", "")
-    insights = (brief.get("insights") or [])[:MAX_INSIGHTS_IN_MESSAGE]
-
-    lines = []
-    for i, ins in enumerate(insights):
-        tag = _TAG_LABEL.get(ins.get("tag", ""), ins.get("tag", ""))
-        lines.append(f"*{i + 1}. {tag}* — {ins.get('title', '')}")
-
-    app_url = (settings.frontend_url or "https://app.sprntly.ai").rstrip("/")
-    blocks = [
-        {"type": "header",
-         "text": {"type": "plain_text", "text": f"Weekly Brief — {week}"[:150]}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"*{headline}*"}},
-        {"type": "section", "text": {"type": "mrkdwn", "text": "\n".join(lines) or "_No insights._"}},
-        {"type": "actions", "elements": [{
-            "type": "button",
-            "text": {"type": "plain_text", "text": "Open in Sprntly"},
-            "url": f"{app_url}/brief",
-        }]},
-    ]
-    fallback = f"Weekly Brief — {week}: {headline}"
-    return fallback, blocks
-
-
-def _deliver_to_one(row: dict, brief: dict) -> dict:
-    """Deliver the brief to a single per-user Slack connection row.
-    Returns a per-recipient result dict; never raises."""
+def _deliver_to_one(row: dict, text: str, blocks: list[dict]) -> dict:
+    """Deliver the (already skill-drafted) brief message to a single per-user
+    Slack connection row. Returns a per-recipient result dict; never raises."""
     user_id = row.get("user_id")
     if row.get("status") != "active":
         return {"user_id": user_id, "delivered": False,
@@ -83,13 +53,12 @@ def _deliver_to_one(row: dict, brief: dict) -> dict:
     if not bot_token:
         return {"user_id": user_id, "delivered": False, "reason": "no_bot_token"}
     try:
-        fallback, blocks = _brief_blocks(brief)
         # Route to the user's chosen target — their own DM or a channel
         # (self-joining a public channel so not_in_channel can't drop it).
         res = slack_oauth.post_to_target(
             bot_token, config=config,
             authed_user_id=token_json.get("authed_user_id"),
-            text=fallback, blocks=blocks)
+            text=text, blocks=blocks)
         return {"user_id": user_id, "delivered": True,
                 "channel": res.get("channel") or config.get("channel_id")}
     except Exception as e:  # noqa: BLE001 — one recipient never breaks the rest
@@ -98,8 +67,9 @@ def _deliver_to_one(row: dict, brief: dict) -> dict:
 
 
 def deliver_brief_to_slack(enterprise_id: str, brief: dict) -> dict:
-    """Best-effort, PER-USER delivery: fan the brief out to every member of
-    the company who connected their own Slack and picked a channel. Each
+    """Best-effort, PER-USER delivery: draft the brief's Slack announcement
+    with the brief-nudge skill (once for the company), then fan it out to
+    every member who connected their own Slack and picked a target. Each
     recipient gets it in THEIR own workspace — never a company-shared bot.
 
     Returns an aggregate {delivered, recipients, reason?}. `delivered` is
@@ -109,7 +79,17 @@ def deliver_brief_to_slack(enterprise_id: str, brief: dict) -> dict:
         if not rows:
             return {"delivered": False, "reason": "slack_not_connected",
                     "recipients": []}
-        recipients = [_deliver_to_one(row, brief) for row in rows]
+        # Compose the message ONCE via the skill — no static fallback. A draft
+        # failure aborts Slack delivery for this brief (logged, brief intact).
+        try:
+            deep_link = brief_deep_link()
+            nudge = generate_nudge(enterprise_id, brief, 0, deep_link)
+            text, blocks = nudge_slack_blocks(nudge, deep_link)
+        except Exception as e:  # noqa: BLE001 — generation must not raise
+            logger.exception("brief slack draft (skill) failed for %s", enterprise_id)
+            return {"delivered": False, "reason": f"generation_error: {e}",
+                    "recipients": []}
+        recipients = [_deliver_to_one(row, text, blocks) for row in rows]
         any_delivered = any(r.get("delivered") for r in recipients)
         out: dict = {"delivered": any_delivered, "recipients": recipients}
         if not any_delivered:

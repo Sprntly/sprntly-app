@@ -23,11 +23,33 @@ def _row(channel="C0123", status="active", token={"access_token": "xoxb-1"},
             "token_json_encrypted": "enc"}, token
 
 
+# The brief Slack message is now drafted by the brief-nudge skill. Tests mock
+# the (LLM) draft and let the real nudge_slack_blocks render it.
+_NUDGE = {
+    "slack": {
+        "headline": "Offline sync is the week's dominant risk",
+        "intro": "Two plays this week.",
+        "items": [
+            {"label": "Offline sync", "detail": "failures 2.5x MoM", "impact": "$x"},
+        ],
+        "cta_label": "Open this week's brief",
+        "cta_url": "https://app.sprntly.ai/brief",
+    },
+    "email": {"subject": "s", "title": "t", "intro": "i",
+              "cta_label": "c", "cta_url": "u"},
+}
+
+
+def _mock_draft(monkeypatch, delivery):
+    monkeypatch.setattr(delivery, "generate_nudge", lambda *a, **k: _NUDGE)
+
+
 def test_delivers_with_blocks(isolated_settings, monkeypatch):
     from app.synthesis import delivery
 
     row, token = _row()
     sent = {}
+    _mock_draft(monkeypatch, delivery)
     # Delivery is per-user now: list_slack_connections returns this user's row.
     monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: [row])
     monkeypatch.setattr(delivery, "decrypt_token_json", lambda s: json.dumps(token))
@@ -41,12 +63,9 @@ def test_delivers_with_blocks(isolated_settings, monkeypatch):
         {"user_id": "user-1", "delivered": True, "channel": "C0123"}
     ]
     assert sent["tok"] == "xoxb-1"
+    # Message comes from the skill draft (headline + CTA), not static blocks.
     assert "Offline sync is the week's dominant risk" in sent["text"]
-    header = sent["blocks"][0]["text"]["text"]
-    assert "Week of June 8, 2026" in header
-    body = sent["blocks"][2]["text"]["text"]
-    assert "FIX" in body and "Offline sync failures" in body
-    assert "BUILD" in body
+    assert "Offline sync is the week's dominant risk" in sent["blocks"][0]["text"]["text"]
     assert sent["blocks"][-1]["elements"][0]["url"].endswith("/brief")
 
 
@@ -58,16 +77,33 @@ def test_delivers_with_blocks(isolated_settings, monkeypatch):
 def test_clean_noops(isolated_settings, monkeypatch, rows, reason):
     from app.synthesis import delivery
 
+    _mock_draft(monkeypatch, delivery)
     monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: rows)
     out = delivery.deliver_brief_to_slack("ent-A", _BRIEF)
     assert out["delivered"] is False
     assert out["reason"] == reason
 
 
+def test_draft_failure_never_raises_and_aborts_slack(isolated_settings, monkeypatch):
+    """No static fallback: if the skill draft fails, Slack delivery is a clean
+    no-op (logged) rather than falling back to static blocks or raising."""
+    from app.synthesis import delivery
+
+    row, token = _row()
+    monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: [row])
+    monkeypatch.setattr(delivery, "generate_nudge",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("llm down")))
+    out = delivery.deliver_brief_to_slack("ent-A", _BRIEF)
+    assert out["delivered"] is False
+    assert "generation_error" in out["reason"]
+    assert out["recipients"] == []
+
+
 def test_post_failure_never_raises(isolated_settings, monkeypatch):
     from app.synthesis import delivery
 
     row, token = _row()
+    _mock_draft(monkeypatch, delivery)
     monkeypatch.setattr(delivery.db, "list_slack_connections", lambda cid: [row])
     monkeypatch.setattr(delivery, "decrypt_token_json", lambda s: json.dumps(token))
     monkeypatch.setattr(delivery.slack_oauth, "post_message",
