@@ -110,6 +110,8 @@ export function ChatScreen() {
     setPendingSearchHandoff,
     pendingOndemandDraft,
     setPendingOndemandDraft,
+    pendingChatHandoff,
+    setPendingChatHandoff,
     showToast,
     openContentPanel,
     contentPanelTab,
@@ -692,7 +694,11 @@ export function ChatScreen() {
       // Capture the target tab ID up-front so async callbacks always write to
       // the right tab, even if the user switches tabs while the request is in-flight.
       let targetTabId: string
-      if (!activeTabId) {
+      // No active tab, OR the active "tab" is the synthetic, thread-less brief
+      // tab → spawn a FRESH chat tab seeded with the query. A chat started from
+      // the weekly brief must never thread inline into it (the brief tab carries
+      // no `tabs` entry, so appending would silently no-op anyway).
+      if (!activeTabId || activeTabId === BRIEF_TAB_ID) {
         const title = query.length > 40 ? `${query.slice(0, 37)}…` : query
         targetTabId = openTab(title, [{ id, query }])
       } else {
@@ -761,6 +767,19 @@ export function ChatScreen() {
     },
     [activeCompany, activeTabId, attachments, finalizeConversationTurn, openTab, pushPendingConversation, showToast],
   )
+
+  // ── Brief → new chat tab hand-off ─────────────────────────────────────────
+  // A question typed on the weekly-brief surface must open its OWN chat tab, not
+  // thread inline into the brief. BriefChat sets pendingChatHandoff; we consume
+  // it once here by running it through submitAsk. With the brief tab active (the
+  // only place this fires), submitAsk spawns a fresh tab seeded with the query —
+  // so every chat started from the brief lands in a new tab.
+  useEffect(() => {
+    if (!pendingChatHandoff) return
+    const { query } = pendingChatHandoff
+    setPendingChatHandoff(null)
+    void submitAsk(query)
+  }, [pendingChatHandoff, setPendingChatHandoff, submitAsk])
 
   // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
   // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps

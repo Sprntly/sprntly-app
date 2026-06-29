@@ -18,6 +18,12 @@ import { pathForScreen, screenIdFromPathname } from "../lib/routes"
 /** Top search hands off `/v1/ask` results to Ask Sprntly (in-page thread) without a second request. */
 export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: string }
 
+/** A question started from the weekly-brief surface. The brief is chat-read-only:
+ *  a question typed there must NOT thread inline into the brief — it opens its own
+ *  chat tab. BriefChat fills this; ChatScreen consumes it once, spawning a fresh
+ *  tab seeded with the query (one new tab per chat started from the brief). */
+export type PendingChatHandoff = { query: string }
+
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
 const AI_PANEL_C_KEY = "sprntly-ai-panel-collapsed"
 export const AI_PANEL_WIDTH_DEFAULT = 380
@@ -84,6 +90,11 @@ interface NavigationContextType {
   pendingOndemandDraft: string | null
   setPendingOndemandDraft: (value: string | null) => void
 
+  /** Filled by the weekly-brief composer when a chat is started there; consumed
+   *  once by ChatScreen, which opens a fresh chat tab seeded with the query. */
+  pendingChatHandoff: PendingChatHandoff | null
+  setPendingChatHandoff: (value: PendingChatHandoff | null) => void
+
   /** Narrow icon-only rail vs full labels */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
@@ -113,6 +124,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [aiBarValue, setAIBarValue] = useState("")
   const [pendingSearchHandoff, setPendingSearchHandoff] = useState<PendingSearchHandoff | null>(null)
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
+  const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [aiPanelWidth, setAiPanelWidthState] = useState(AI_PANEL_WIDTH_DEFAULT)
   /** Default collapsed; expanded only if user saved `sprntly-ai-panel-collapsed=0`. */
@@ -328,6 +340,8 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         setPendingSearchHandoff,
         pendingOndemandDraft,
         setPendingOndemandDraft,
+        pendingChatHandoff,
+        setPendingChatHandoff,
         sidebarCollapsed,
         toggleSidebar,
         aiPanelWidth,
