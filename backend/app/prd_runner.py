@@ -53,6 +53,7 @@ the Part-A call so the audit row pins one consistent method version) plus
 import asyncio
 import json
 import logging
+import uuid
 
 from app.company_template import render_templates_for_prompt
 from app.config import settings
@@ -456,7 +457,8 @@ def _finalize(prd_id: int, brief_id: int, insight_index: int, ctx: dict,
 
 
 async def _generate_2part(
-    prd_id: int, brief_id: int, insight_index: int, background: bool = False
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False,
+    human_only: bool = False,
 ) -> None:
     """Build shared context, run Part A then (chained) Part B, finalize.
 
@@ -467,6 +469,11 @@ async def _generate_2part(
     loop is never blocked — each synchronous `llm_call` runs in a worker
     thread). Part A is required (its failure fails the whole PRD); Part B is
     best-effort (its failure is captured and the PRD completes with Part A only).
+
+    `human_only=True` generates ONLY the human PRD (Part A) and skips the
+    implementation-spec call entirely — used by prefetch warming, which only
+    needs the human-readable PRD ready before the user opens the brief. The
+    PRD completes with an empty `llm_part`, exactly as a Part-B failure would.
     """
     ctx = await asyncio.to_thread(_build_context, brief_id, insight_index)
 
@@ -475,15 +482,17 @@ async def _generate_2part(
     human_prd = str(result_a.output).strip()
 
     # Part B (implementation-spec), fed the finished Part A. Best-effort: its
-    # failure is captured and the PRD still completes with Part A only.
+    # failure is captured and the PRD still completes with Part A only. Skipped
+    # entirely when human_only (prefetch warm needs only the human PRD).
     part_b_error: str | None = None
     result_b = None
-    try:
-        result_b = await asyncio.to_thread(
-            _call_part_b, ctx, human_prd, background
-        )
-    except Exception as exc:  # noqa: BLE001 — Part B is best-effort
-        part_b_error = f"{type(exc).__name__}: {exc}"
+    if not human_only:
+        try:
+            result_b = await asyncio.to_thread(
+                _call_part_b, ctx, human_prd, background
+            )
+        except Exception as exc:  # noqa: BLE001 — Part B is best-effort
+            part_b_error = f"{type(exc).__name__}: {exc}"
 
     await asyncio.to_thread(
         _finalize, prd_id, brief_id, insight_index, ctx,
@@ -502,7 +511,8 @@ def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
 
 
 async def generate_prd(
-    prd_id: int, brief_id: int, insight_index: int, background: bool = False
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False,
+    human_only: bool = False,
 ) -> None:
     """Run the concurrent two-part PRD generation; update DB with result.
 
@@ -510,16 +520,23 @@ async def generate_prd(
     gate's low-priority lane: capped concurrency, and always behind any
     interactive caller — a user's "Generate PRD" click is never queued
     behind warm work.
+
+    `human_only=True` generates only the human PRD (Part A), skipping the
+    implementation-spec — see `_generate_2part`.
     """
     logger.info(
-        "PRD generation starting prd_id=%s brief_id=%s insight_index=%s priority=%s",
+        "PRD generation starting prd_id=%s brief_id=%s insight_index=%s "
+        "priority=%s scope=%s",
         prd_id,
         brief_id,
         insight_index,
         "background" if background else "interactive",
+        "human_only" if human_only else "2part",
     )
     try:
-        await _generate_2part(prd_id, brief_id, insight_index, background)
+        await _generate_2part(
+            prd_id, brief_id, insight_index, background, human_only=human_only
+        )
         logger.info("PRD generation succeeded prd_id=%s", prd_id)
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"
@@ -541,18 +558,57 @@ def _top_insight_indices(insights: list, count: int) -> list[int]:
     return ranked[:count]
 
 
+async def _warm_one_prd(brief_id: int, insight_index: int, title: str) -> None:
+    """Warm a single insight's human PRD as a multi-agent run.
+
+    Mints a run_id and stamps it on the PRD row so the multi-agent "Generate
+    PRD" path dedupes against this warm run instead of restarting it (see
+    routes/multi_agent.find_existing_prd guard). Generates the human PRD only
+    (Part A) — the prefetch's job is to have the human-readable PRD ready, not
+    the implementation spec. Dedup-guarded and error-isolated: warming is a
+    perf optimization, never a correctness requirement.
+    """
+    from app.prompts import PRD_TEMPLATE_VERSION
+
+    try:
+        if find_existing_prd(brief_id, insight_index, variant=PRD_VARIANT):
+            return
+        run_id = str(uuid.uuid4())
+        prd_id = start_prd(
+            brief_id=brief_id,
+            insight_index=insight_index,
+            title=title,
+            template_version=PRD_TEMPLATE_VERSION,
+            variant=PRD_VARIANT,
+            run_id=run_id,
+        )
+        logger.info(
+            "Warming PRD prd_id=%s brief_id=%s insight_index=%s run_id=%s",
+            prd_id, brief_id, insight_index, run_id,
+        )
+        await generate_prd(
+            prd_id, brief_id, insight_index, background=True, human_only=True
+        )
+    except Exception:  # noqa: BLE001 — warming is best-effort
+        logger.exception(
+            "PRD warming failed brief_id=%s insight_index=%s",
+            brief_id, insight_index,
+        )
+
+
 async def warm_prds_for_brief(brief: dict) -> None:
-    """Pre-generate PRDs for the top insights of a freshly-saved brief.
+    """Pre-generate human PRDs for the top insights of a freshly-saved brief.
 
-    Runs strictly in the LLM gate's BACKGROUND lane (see app.llm._PriorityGate):
-    at most one warm model-call holds a slot at a time and any interactive
-    caller jumps ahead of it, so a user's "Generate PRD" click is never queued
-    behind warming. PRDs warm sequentially (cheapest way to keep the background
-    footprint at one call) and dedupe against existing rows, so a brief that
-    already warmed — or an insight the user already generated — is skipped.
+    Fans out one warm task per insight (concurrently, rather than sequentially)
+    so insight N's PRD never waits on insight N-1's to finish at the task level.
+    Each warm runs in the LLM gate's BACKGROUND lane (see app.llm._PriorityGate),
+    which still bounds in-flight warm model-calls (bg_cap, default 1) and always
+    yields to interactive callers — so a user's "Generate PRD" click is never
+    queued behind warming, and the small prod box isn't flooded. Each warm
+    dedupes against existing rows, so a brief that already warmed — or an insight
+    the user already generated — is skipped.
 
-    Error-isolated per insight: warming is a perf optimization, never a
-    correctness requirement.
+    Per-insight work (human PRD only + run_id stamping) lives in `_warm_one_prd`.
     """
     count = settings.prd_warm_count
     if count <= 0:
@@ -561,26 +617,12 @@ async def warm_prds_for_brief(brief: dict) -> None:
     insights = brief.get("insights") or []
     if not brief_id or not insights:
         return
-    from app.prompts import PRD_TEMPLATE_VERSION
 
-    for i in _top_insight_indices(insights, count):
-        try:
-            if find_existing_prd(brief_id, i, variant=PRD_VARIANT):
-                continue
-            title = (insights[i] or {}).get("title") or f"Insight #{i + 1}"
-            prd_id = start_prd(
-                brief_id=brief_id,
-                insight_index=i,
-                title=title,
-                template_version=PRD_TEMPLATE_VERSION,
-                variant=PRD_VARIANT,
+    await asyncio.gather(
+        *(
+            _warm_one_prd(
+                brief_id, i, (insights[i] or {}).get("title") or f"Insight #{i + 1}"
             )
-            logger.info(
-                "Warming PRD prd_id=%s brief_id=%s insight_index=%s",
-                prd_id, brief_id, i,
-            )
-            await generate_prd(prd_id, brief_id, i, background=True)
-        except Exception:  # noqa: BLE001 — warming is best-effort
-            logger.exception(
-                "PRD warming failed brief_id=%s insight_index=%s", brief_id, i
-            )
+            for i in _top_insight_indices(insights, count)
+        )
+    )
