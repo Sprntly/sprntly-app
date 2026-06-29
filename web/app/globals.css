@@ -14939,49 +14939,6 @@
     gap: 0;
   }
 
-  /* Sticky footer CTA */
-  .ev-panel-cta {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    padding: 12px 20px;
-    border-top: 1px solid var(--line);
-    flex-shrink: 0;
-    background: #fff;
-  }
-
-  .ev-cta-btn {
-    font-size: 12.5px;
-    font-weight: 500;
-    padding: 6px 16px;
-    border-radius: 8px;
-    border: 1px solid var(--line);
-    background: var(--surface);
-    color: var(--ink-2);
-    cursor: pointer;
-    transition: background 0.15s;
-  }
-
-  .ev-cta-btn:hover {
-    background: var(--surface-2);
-  }
-
-  .ev-cta-btn--primary {
-    background: var(--accent);
-    color: #fff;
-    border-color: transparent;
-  }
-
-  .ev-cta-btn--primary:hover {
-    opacity: 0.88;
-  }
-
-  .ev-cta-btn--primary:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
   /* ═══════════════════════════════════════════════════════════
      TICKET STATUS DROPDOWN
   ═══════════════════════════════════════════════════════════ */
@@ -16153,66 +16110,6 @@
 
   @keyframes bl-spin {
     to { transform: rotate(360deg); }
-  }
-
-  /* ═══════════════════════════════════════════════════════════
-     ARTIFACT FOOTER ACTIONS  (design: .art-foot + .chip / .chip.b)
-     Contextual 3-chip footer rendered at the bottom of each rail
-     artifact (PRD / Evidence / Tickets). Visual-only restyle —
-     wiring lives in ArtifactFooterActions.tsx (#472).
-  ═══════════════════════════════════════════════════════════ */
-  .artifact-foot-actions {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 14px 0 4px;
-    margin-top: 8px;
-    border-top: 1px solid var(--line);
-  }
-
-  .artifact-foot-lbl {
-    flex: 1;
-    font-size: 12px;
-    color: var(--ink-2);
-    line-height: 1.4;
-  }
-
-  .artifact-foot-lbl strong {
-    color: var(--ink);
-    font-weight: 500;
-  }
-
-  /* Design `.chip` — outlined ghost pill */
-  .artifact-foot-chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-size: 12.5px;
-    padding: 7px 14px;
-    border-radius: 30px;
-    border: 1px solid var(--line-strong);
-    background: var(--surface-2);
-    color: var(--ink-2);
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 0.12s, color 0.12s, border-color 0.12s;
-  }
-
-  .artifact-foot-chip:hover {
-    background: var(--surface-3);
-    color: var(--ink);
-  }
-
-  /* Design `.chip.b` — brand-green primary (the forward step) */
-  .artifact-foot-chip.is-primary {
-    border-color: var(--accent);
-    background: var(--accent);
-    color: #fff;
-  }
-
-  .artifact-foot-chip.is-primary:hover {
-    background: var(--accent-hover);
-    border-color: var(--accent-hover);
   }
 
   /* ═══════════════════════════════════════════════════════════

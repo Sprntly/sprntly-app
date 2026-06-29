@@ -8,11 +8,9 @@ import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
-import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { TicketDetail } from "./TicketDetail"
-import { ArtifactFooterActions } from "./ArtifactFooterActions"
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
 import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx } from "../../lib/prdExport"
 import type { PrdState } from "../../types/content"
@@ -229,7 +227,7 @@ export function ContentPanel() {
 }
 
 function EvidenceTab() {
-  const { expandAiPanel, setAIBarValue, showToast, openContentPanel, closeContentPanel } = useNavigation()
+  const { expandAiPanel, setAIBarValue } = useNavigation()
   const { content, setContent } = useContent()
   const { detail, evidence, evidenceGenerating } = content
 
@@ -241,7 +239,6 @@ function EvidenceTab() {
     | { kind: "loading" }
     | { kind: "error"; message: string }
   >({ kind: "idle" })
-  const [generatingPrd, setGeneratingPrd] = useState(false)
   const loadedKeyRef = useRef<string | null>(null)
   const prdEvidenceKeyRef = useRef<string | null>(null)
 
@@ -294,39 +291,6 @@ function EvidenceTab() {
       cancelled = true
     }
   }, [detail?.meta, prdMeta?.briefId, prdMeta?.insightIndex, evidence, setContent])
-
-  const handleGeneratePrd = async () => {
-    if (!detail?.meta) {
-      showToast("Can't generate PRD", "Open this evidence from the brief first.")
-      return
-    }
-    const currentPrdMeta = content.prdMeta
-    if (
-      content.prd &&
-      currentPrdMeta &&
-      currentPrdMeta.briefId === detail.meta.briefId &&
-      currentPrdMeta.insightIndex === detail.meta.insightIndex
-    ) {
-      openContentPanel("prd")
-      return
-    }
-    setGeneratingPrd(true)
-    // Switch the rail to the PRD tab immediately and show its generating spinner
-    // there, so the in-progress PRD is always on the right.
-    setContent({ prd: null, prdMeta: null, prdGenerating: true })
-    openContentPanel("prd")
-    try {
-      const result = await runPrdGeneration(detail.meta)
-      if (!result.ok) { setContent({ prdGenerating: false }); showToast("PRD generation failed", result.message.slice(0, 200)); return }
-      setContent({ prd: result.prd, prdMeta: detail.meta, prdGenerating: false })
-      openContentPanel("prd")
-    } catch (e) {
-      setContent({ prdGenerating: false })
-      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-    } finally {
-      setGeneratingPrd(false)
-    }
-  }
 
   // Unified loading flag: either local (brief flow) or external (chat flow)
   const isLoading = localState.kind === "loading" || evidenceGenerating
@@ -399,22 +363,6 @@ function EvidenceTab() {
           />
         ) : null}
 
-        {evidence && <ArtifactFooterActions current="evidence" />}
-      </div>
-
-      {/* Sticky footer CTA */}
-      <div className="ev-panel-cta">
-        <button type="button" className="ev-cta-btn" onClick={closeContentPanel}>
-          Snooze
-        </button>
-        <button
-          type="button"
-          className="ev-cta-btn ev-cta-btn--primary"
-          onClick={handleGeneratePrd}
-          disabled={generatingPrd}
-        >
-          {generatingPrd ? "Generating PRD…" : "Generate PRD"}
-        </button>
       </div>
     </div>
   )

@@ -10,7 +10,6 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { PrdSections } from "./PrdSections"
-import { ArtifactFooterActions } from "./ArtifactFooterActions"
 import { SendToClaudeCode } from "./SendToClaudeCode"
 import { DesignAgentLauncher } from "../design-agent/DesignAgentLauncher"
 import { EmptyPane } from "./EmptyPane"
@@ -325,8 +324,6 @@ export function PrdPanelContent() {
       </div>
 
       {prd && SHOW_PROTOTYPE_SECTION && <PrototypeSection prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} externalGeneratingId={notifyGenId} />}
-
-      {prd && <ArtifactFooterActions current="prd" />}
 
       {/* Bottom action row: autosave status (click = save now) + Version history
           toggle. Replaces the old mid-page footer; version history lives here at

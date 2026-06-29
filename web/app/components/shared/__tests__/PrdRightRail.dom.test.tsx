@@ -127,7 +127,6 @@ vi.mock("../../../lib/api", async () => {
 
 import { BriefChat } from "../BriefChat"
 import { PrdPanelContent } from "../PrdPanelContent"
-import { ContentPanel } from "../ContentPanel"
 
 const EMPTY_CONTENT = {
   prd: null,
@@ -198,46 +197,5 @@ describe("PRD panel renders an in-progress (generating) state in the rail", () =
     content = { ...EMPTY_CONTENT, prd: FAKE_PRD, prdGenerating: false }
     render(<PrdPanelContent />)
     expect(screen.queryByTestId("prd-generating")).toBeNull()
-  })
-})
-
-describe("PRD always opens the right rail — Evidence panel 'Generate PRD' CTA", () => {
-  it("clicking 'Generate PRD' in the Evidence rail switches to the PRD tab immediately (in-progress in the rail), then lands the PRD", async () => {
-    contentPanelTab = "evidence"
-    content = {
-      ...EMPTY_CONTENT,
-      detail: { title: "Day-30 retention", tags: [], evidenceSections: [], meta: { briefId: 7, insightIndex: 0 } } as unknown,
-    }
-    render(<ContentPanel />)
-    const btn = await screen.findByRole("button", { name: /Generate PRD/i })
-    fireEvent.click(btn)
-
-    await waitFor(() => expect(openContentPanel).toHaveBeenCalledWith("prd"))
-    const calls = setContentCalls()
-    expect(calls.some((c) => c.prdGenerating === true)).toBe(true)
-    await waitFor(() => {
-      const done = setContentCalls().find((c) => c.prd && (c.prd as { prd_id?: number }).prd_id === 42)
-      expect(done).toBeTruthy()
-      expect(done?.prdGenerating).toBe(false)
-    })
-  })
-
-  it("re-opening an already-generated PRD opens the rail without re-generating", async () => {
-    contentPanelTab = "evidence"
-    content = {
-      ...EMPTY_CONTENT,
-      prd: FAKE_PRD,
-      prdMeta: { briefId: 7, insightIndex: 0 },
-      detail: { title: "Day-30 retention", tags: [], evidenceSections: [], meta: { briefId: 7, insightIndex: 0 } } as unknown,
-    }
-    render(<ContentPanel />)
-    const btn = await screen.findByRole("button", { name: /Generate PRD/i })
-    fireEvent.click(btn)
-
-    await waitFor(() => expect(openContentPanel).toHaveBeenCalledWith("prd"))
-    // Same insight already has a PRD → must NOT re-generate, and must NOT flip
-    // the in-progress flag.
-    expect(runPrdGeneration).not.toHaveBeenCalled()
-    expect(setContentCalls().some((c) => c.prdGenerating === true)).toBe(false)
   })
 })
