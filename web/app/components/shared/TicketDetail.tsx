@@ -18,6 +18,22 @@ const PRIORITY_OPTIONS = ["P0 — Critical", "P1 — High", "P2 — Medium", "P3
 const STATUS_OPTIONS = ["Backlog", "To do", "In progress", "Review", "Done"]
 const SPRINT_OPTIONS = ["Sprint 25", "Sprint 26", "Unassigned sprint"]
 
+// Generated stories carry a free-form priority (urgent|high|normal|low — the
+// user-stories skill's enum); the picker's canonical labels are P0–P3. Map
+// either form (and an already-persisted "Pn — …" label) onto a canonical
+// option so the pill shows e.g. "P1 — High" instead of the raw "high" — which,
+// matching no option, also left the dropdown with nothing marked active.
+export function normalizePriority(value: string | null | undefined): string {
+  const v = (value || "").trim().toLowerCase()
+  if (!v) return "P2 — Medium"
+  if (v.startsWith("p0") || v.includes("urgent") || v.includes("critical")) return "P0 — Critical"
+  if (v.startsWith("p1") || v.includes("high")) return "P1 — High"
+  if (v.startsWith("p3") || v.includes("low")) return "P3 — Low"
+  // p2 / "normal" (the skill's word for medium) / "medium" all land here, as
+  // does anything unrecognized — a safe, neutral default.
+  return "P2 — Medium"
+}
+
 const AVATAR_PALETTE = [
   { bg: "#FDE2E4", color: "#C13838" }, { bg: "#E0F0E9", color: "#179463" },
   { bg: "#E4E9FD", color: "#3B5BDB" }, { bg: "#FBEAD7", color: "#B5740F" },
@@ -63,7 +79,7 @@ export function TicketDetail({ story, index, prdId, onBack }: {
   const key = useMemo(() => ticketKeyFor(prdId, story), [prdId, story])
 
   const [title, setTitle] = useState(story.title)
-  const [priority, setPriority] = useState(story.priority || "P2 — Medium")
+  const [priority, setPriority] = useState(normalizePriority(story.priority))
   const [status, setStatus] = useState("Backlog")
   const [sprint, setSprint] = useState("Unassigned sprint")
   const [assignee, setAssignee] = useState<TicketAssignee | null>(null)
@@ -85,7 +101,7 @@ export function TicketDetail({ story, index, prdId, onBack }: {
     ticketDataApi.getData(key).then((d) => {
       if (cancelled) return
       if (d.title != null) setTitle(d.title)
-      if (d.priority != null) setPriority(d.priority)
+      if (d.priority != null) setPriority(normalizePriority(d.priority))
       if (d.status != null) setStatus(d.status)
       if (d.sprint != null) setSprint(d.sprint)
       if (d.assignee != null) setAssignee(d.assignee)

@@ -94,10 +94,34 @@ async def generate(
     if (body.prd_id is None) == (body.insight is None):
         raise HTTPException(400, "provide exactly one of prd_id or insight")
 
+    # Idempotent while in-flight: breaking a PRD into tickets is a multi-minute
+    # call, and the Tickets tab re-kicks generation whenever it remounts (a tab
+    # switch) before the first run has persisted — the cache read still 404s/sees
+    # no fresh row, so the client falls through to /generate again. Re-attach
+    # that rapid second call to the running job instead of starting a parallel,
+    # wasteful one. Keyed by (company, prd_id|insight) since that's what the run
+    # is over. Once a job is ready/failed it's persisted (PRD) or terminal, so we
+    # only dedupe against still-"generating" jobs.
+    existing = next(
+        (
+            j["id"]
+            for j in _jobs.values()
+            if j["status"] == "generating"
+            and j["company_id"] == company.company_id
+            and j.get("prd_id") == body.prd_id
+            and j.get("insight") == body.insight
+        ),
+        None,
+    )
+    if existing is not None:
+        return {"job_id": existing, "status": "generating"}
+
     job_id = next(_job_ids)
     _jobs[job_id] = {
         "id": job_id,
         "company_id": company.company_id,
+        "prd_id": body.prd_id,
+        "insight": body.insight,
         "status": "generating",
         "stories": None,
         "error": None,
