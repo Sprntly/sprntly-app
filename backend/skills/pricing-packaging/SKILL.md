@@ -39,6 +39,10 @@ Chosen value metric + why · tier structure (who, what's included, upgrade fence
 - [ ] Prices are value/WTP-anchored or explicitly labeled hypotheses.
 - [ ] An expansion path within accounts exists.
 
+
+## Absorbed from the field (added capability)
+**Monetization-model exploration (added):** before settling tiers, optionally brainstorm 3-5 distinct monetization models (subscription, usage/consumption, seat, outcome-based, freemium, hybrid) for the product, each with the value-metric it implies and a cheap validation test — so packaging follows a deliberately-chosen model rather than defaulting to per-seat SaaS.
+
 ## Known gaps / limitations
 - WTP is best measured, not guessed; without data, prices are starting hypotheses to test.
 - Pricing changes have retention/perception effects beyond the model; pair with experiment + comms.

@@ -39,6 +39,10 @@ The four vectors populated with concrete options · risk + readiness rating each
 - [ ] Each vector has a risk + readiness rating.
 - [ ] The recommendation includes what to validate first.
 
+
+## Absorbed from the field (added capability)
+**GTM-motion fit (added):** when relevant, evaluate which go-to-market motion the vector implies — product-led / sales-led / marketing-led / community-led — with the trigger conditions and tooling each needs, so a chosen growth vector names the motion that delivers it rather than leaving execution implied.
+
 ## Known gaps / limitations
 - Demand for new vectors needs validation; the skill flags this rather than assuming.
 - It frames options; the actual bet needs `decision-memo` + `lean-canvas` for the numbers.

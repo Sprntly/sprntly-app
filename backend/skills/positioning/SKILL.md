@@ -39,6 +39,10 @@ The five Dunford components · a chosen market frame · a message hierarchy (val
 - [ ] The best-fit segment is specific (narrow beats broad).
 - [ ] Messaging traces directly from the positioning, not bolted on.
 
+
+## Absorbed from the field (added capability)
+**Value-proposition statements (added):** on request, also emit ready-to-use value-prop statements in a 6-part JTBD form — for whom · the job · the before-state · how we help · the after-state · vs. alternatives — and short variants tuned for sales, marketing, and onboarding surfaces. Keeps the Dunford positioning as the spine; the statements are the surface output teams paste.
+
 ## Known gaps / limitations
 - Positioning built on aspirational (not real) differentiation collapses on contact — pressure-test attributes with `red-team-review`.
 - Needs customer language to ring true; generic inputs yield generic output.

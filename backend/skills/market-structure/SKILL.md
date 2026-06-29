@@ -38,6 +38,10 @@ Five-forces table (rating + rationale) · TAM/SAM/SOM with assumptions · trajec
 - [ ] The verdict names the forces that dominate it.
 - [ ] Sizing distinguishes TAM from realistically obtainable SOM.
 
+
+## Absorbed from the field (added capability)
+**Standalone market sizing (added):** on request, run TAM/SAM/SOM as a focused deliverable using BOTH top-down and bottom-up methods, reconcile the two, and state the assumptions that move each number — so a size figure is defensible and its sensitivity is visible, not a single hand-wavy total.
+
 ## Known gaps / limitations
 - Sizing without data is an educated guess; the skill makes assumptions explicit but can't validate them.
 - Five Forces is a snapshot; fast-moving markets need re-assessment.
