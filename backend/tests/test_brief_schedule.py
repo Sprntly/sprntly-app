@@ -27,12 +27,61 @@ from app.brief_schedule import (
     DEFAULT_TIMEZONE,
     next_fire_time,
     previous_fire_time,
+    resolve_schedule,
     resolve_timezone,
     resolve_user_timezone,
     should_run_weekly_brief,
 )
 
 UTC = timezone.utc
+
+
+# ── resolve_schedule (user-chosen day/time from notification_settings) ───────
+
+
+def test_resolve_schedule_defaults_to_monday_0600():
+    assert resolve_schedule(None) == (0, 6, 0)
+    assert resolve_schedule({}) == (0, 6, 0)
+
+
+def test_resolve_schedule_reads_valid_values():
+    ns = {"brief_weekday": 3, "brief_hour": 14, "brief_minute": 30}
+    assert resolve_schedule(ns) == (3, 14, 30)
+
+
+def test_resolve_schedule_falls_back_per_field_on_bad_values():
+    # Out-of-range / wrong-type each fall back to their own default, not all-or-nothing.
+    assert resolve_schedule({"brief_weekday": 9}) == (0, 6, 0)
+    assert resolve_schedule({"brief_hour": 25, "brief_weekday": 2}) == (2, 6, 0)
+    assert resolve_schedule({"brief_minute": -1}) == (0, 6, 0)
+    assert resolve_schedule({"brief_hour": "8"}) == (0, 6, 0)  # str, not int
+    assert resolve_schedule({"brief_weekday": True}) == (0, 6, 0)  # bool rejected
+
+
+def test_configurable_day_time_shifts_the_fire_window():
+    """A company that picks Wednesday 14:00 is due then — not Monday 06:00."""
+    tz = ZoneInfo("America/New_York")
+    weekday, hour, minute = resolve_schedule(
+        {"brief_weekday": 2, "brief_hour": 14, "brief_minute": 0}  # Wed 14:00
+    )
+    # Wed 2026-07-01 14:30 local (within the 1h window after 14:00) → due.
+    wed = datetime(2026, 7, 1, 18, 30, tzinfo=UTC)  # 14:30 EDT
+    assert should_run_weekly_brief(
+        wed, tz, None, weekday=weekday, hour=hour, minute=minute
+    )
+    # The old Monday-06:00 instant is NOT due under the new schedule.
+    mon = datetime(2026, 6, 29, 10, 30, tzinfo=UTC)  # Mon 06:30 EDT
+    assert not should_run_weekly_brief(
+        mon, tz, None, weekday=weekday, hour=hour, minute=minute
+    )
+
+
+def test_next_fire_time_honors_custom_day_time():
+    tz = ZoneInfo("UTC")
+    # From Mon 2026-06-29, the next Wed-14:00 fire is Wed 2026-07-01 14:00 UTC.
+    after = datetime(2026, 6, 29, 0, 0, tzinfo=UTC)
+    nxt = next_fire_time(after, tz, weekday=2, hour=14, minute=0)
+    assert nxt == datetime(2026, 7, 1, 14, 0, tzinfo=UTC)
 
 
 # ── resolve_user_timezone (per-user entry point) ─────────────────────────────

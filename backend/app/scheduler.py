@@ -23,7 +23,11 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app import db
-from app.brief_schedule import resolve_user_timezone, should_run_weekly_brief
+from app.brief_schedule import (
+    resolve_schedule,
+    resolve_user_timezone,
+    should_run_weekly_brief,
+)
 from app.config import settings
 from app.db.companies import list_companies
 from app.kg_ingest.auto_sync import kickoff_sync
@@ -173,9 +177,20 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
         slug = company.get("slug") or company_id
         if not slug:
             continue
-        tz = resolve_user_timezone(company.get("owner_timezone"))
+        ns = company.get("notification_settings") or {}
+        # Timezone: prefer the company's chosen tz (Comms & Brief settings),
+        # else the owner's profile timezone, else UTC.
+        tz_name = ns.get("timezone") if isinstance(ns, dict) else None
+        tz = (
+            resolve_user_timezone(tz_name)
+            if isinstance(tz_name, str) and tz_name.strip()
+            else resolve_user_timezone(company.get("owner_timezone"))
+        )
+        weekday, hour, minute = resolve_schedule(ns)
         last_run = _last_brief_run.get(company_id) if company_id else None
-        if not should_run_weekly_brief(now, tz, last_run):
+        if not should_run_weekly_brief(
+            now, tz, last_run, weekday=weekday, hour=hour, minute=minute
+        ):
             continue
 
         logger.info(
