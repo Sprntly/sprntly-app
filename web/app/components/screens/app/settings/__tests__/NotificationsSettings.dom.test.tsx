@@ -32,6 +32,25 @@ vi.mock("../../../../../lib/onboarding/store", () => ({
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
 }))
 
+// The pane now fetches the per-user Slack connection + can launch OAuth. Mock
+// the API surface so these DOM tests stay focused on the schedule/email form.
+const listMock = vi.fn(() => Promise.resolve({ connections: [] }))
+vi.mock("../../../../../lib/api", () => ({
+  connectorsApi: {
+    list: () => listMock(),
+    startOauth: vi.fn(() => Promise.resolve({ authorize_url: "" })),
+    disconnectSlack: vi.fn(() => Promise.resolve({ deleted: true })),
+  },
+  ApiError: class ApiError extends Error {
+    status = 0
+    body: unknown = null
+  },
+  apiErrorMessage: (_s: number, _b: unknown) => "error",
+}))
+vi.mock("../../../../connectors/SlackChannelPicker", () => ({
+  SlackChannelPicker: () => null,
+}))
+
 import { NotificationsSettings } from "../NotificationsSettings"
 
 type Notif = Record<string, unknown>
@@ -103,5 +122,39 @@ describe("NotificationsSettings — email toggle round-trip", () => {
     expect(ns).not.toHaveProperty("email_digest")
     // refresh() is awaited after save so the toggle reflects persisted state.
     expect(refreshMock).toHaveBeenCalled()
+  })
+})
+
+describe("NotificationsSettings — schedule (when)", () => {
+  it("loads saved day/hour/timezone and persists them + merges existing keys", async () => {
+    mountWith({
+      brief_weekday: 2,
+      brief_hour: 14,
+      timezone: "America/New_York",
+      email_recipients: ["a@co.com"], // must be preserved on save
+    })
+
+    // Selects reflect the saved values (Wednesday / 2:00 PM / NY).
+    const selects = Array.from(
+      document.querySelectorAll("select.input"),
+    ) as HTMLSelectElement[]
+    const [daySel, hourSel, tzSel] = selects
+    expect(daySel.value).toBe("2")
+    expect(hourSel.value).toBe("14")
+    expect(tzSel.value).toBe("America/New_York")
+
+    const saveBtn = screen.getByRole("button", { name: /save notifications/i })
+    await act(async () => {
+      fireEvent.click(saveBtn)
+    })
+    await waitFor(() => expect(updateWorkspaceMock).toHaveBeenCalledTimes(1))
+    const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Notif]
+    const ns = patch.notification_settings as Notif
+    expect(ns.brief_weekday).toBe(2)
+    expect(ns.brief_hour).toBe(14)
+    expect(ns.brief_minute).toBe(0)
+    expect(ns.timezone).toBe("America/New_York")
+    // Untouched keys survive the merge.
+    expect(ns.email_recipients).toEqual(["a@co.com"])
   })
 })

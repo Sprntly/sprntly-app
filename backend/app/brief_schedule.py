@@ -84,6 +84,31 @@ def resolve_timezone(notification_settings: dict | None) -> ZoneInfo:
     return resolve_user_timezone(raw if isinstance(raw, str) else None)
 
 
+def resolve_schedule(notification_settings: dict | None) -> tuple[int, int, int]:
+    """Resolve ``(weekday, hour, minute)`` for the weekly brief from a company's
+    ``notification_settings`` JSONB, falling back to the Monday-06:00 defaults.
+
+    Users pick the brief's day + time on the Comms & Brief settings page, which
+    writes ``brief_weekday`` (0=Mon..6=Sun), ``brief_hour`` (0-23) and
+    ``brief_minute`` (0-59). Each is validated independently — an out-of-range or
+    non-int value falls back to its default rather than wedging the schedule, so
+    a bad write can't stop a tenant's brief from ever firing.
+    """
+    ns = notification_settings if isinstance(notification_settings, dict) else {}
+
+    def _int_in(key: str, default: int, lo: int, hi: int) -> int:
+        v = ns.get(key)
+        if isinstance(v, bool) or not isinstance(v, int):
+            return default
+        return v if lo <= v <= hi else default
+
+    return (
+        _int_in("brief_weekday", BRIEF_WEEKDAY, 0, 6),
+        _int_in("brief_hour", BRIEF_HOUR, 0, 23),
+        _int_in("brief_minute", BRIEF_MINUTE, 0, 59),
+    )
+
+
 def _as_utc(dt: datetime) -> datetime:
     """Coerce a datetime to an aware UTC datetime.
 
@@ -96,47 +121,62 @@ def _as_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)
 
 
-def previous_fire_time(now: datetime, tz: ZoneInfo) -> datetime:
-    """The most recent Monday-06:00-local fire instant at or before ``now``.
+def previous_fire_time(
+    now: datetime,
+    tz: ZoneInfo,
+    *,
+    weekday: int = BRIEF_WEEKDAY,
+    hour: int = BRIEF_HOUR,
+    minute: int = BRIEF_MINUTE,
+) -> datetime:
+    """The most recent ``weekday``-``hour``:``minute``-local fire instant at or
+    before ``now`` (defaults to Monday 06:00).
 
-    Returned as an aware UTC datetime. DST-correct: 06:00 *local* is resolved in
+    Returned as an aware UTC datetime. DST-correct: the fire time is resolved in
     ``tz`` first, then converted to UTC, so the UTC offset tracks whatever rule
-    is in effect on that Monday (e.g. America/New_York is UTC-5 in winter, UTC-4
-    in summer — the same 06:00 local maps to different UTC instants).
+    is in effect on that day (e.g. America/New_York is UTC-5 in winter, UTC-4
+    in summer — the same local time maps to different UTC instants).
     """
     now_utc = _as_utc(now)
     local_now = now_utc.astimezone(tz)
 
-    # Local midnight of the current local day, then walk back to Monday.
+    # Local midnight of the current local day, then walk back to the target day.
     local_day = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-    days_since_monday = local_day.weekday()  # Mon=0 .. Sun=6
-    this_week_monday = local_day - timedelta(days=days_since_monday)
+    days_since_target = (local_day.weekday() - weekday) % 7  # Mon=0 .. Sun=6
+    this_week_target = local_day - timedelta(days=days_since_target)
     fire_local = datetime.combine(
-        this_week_monday.date(), time(BRIEF_HOUR, BRIEF_MINUTE), tzinfo=tz
+        this_week_target.date(), time(hour, minute), tzinfo=tz
     )
 
-    # If we're earlier in the week than this Monday's 06:00 (e.g. it's Monday
-    # 05:00, or the local clock landed before the nominal time), the most recent
-    # fire was last Monday.
+    # If we're earlier in the week than this week's fire (e.g. an hour before the
+    # nominal time), the most recent fire was last week's.
     if fire_local > local_now:
         fire_local -= timedelta(days=7)
     return fire_local.astimezone(timezone.utc)
 
 
-def next_fire_time(after: datetime, tz: ZoneInfo) -> datetime:
-    """The next Monday-06:00-local fire instant strictly after ``after``.
+def next_fire_time(
+    after: datetime,
+    tz: ZoneInfo,
+    *,
+    weekday: int = BRIEF_WEEKDAY,
+    hour: int = BRIEF_HOUR,
+    minute: int = BRIEF_MINUTE,
+) -> datetime:
+    """The next ``weekday``-``hour``:``minute``-local fire instant strictly after
+    ``after`` (defaults to Monday 06:00).
 
-    Aware UTC datetime, DST-correct (06:00 local is resolved in ``tz`` then
+    Aware UTC datetime, DST-correct (the local time is resolved in ``tz`` then
     converted). Useful for "when will this company's brief next run?" surfaces
     and as the inverse of :func:`previous_fire_time` in tests.
     """
-    prev = previous_fire_time(after, tz)
+    prev = previous_fire_time(after, tz, weekday=weekday, hour=hour, minute=minute)
     # prev is the most recent fire <= after; the next one is exactly 7 local days
     # later. Resolve in local time so the 7-day step crosses DST boundaries
     # correctly (a +7-day UTC step would drift by an hour across a transition).
     prev_local = prev.astimezone(tz)
     nxt_local = (prev_local + timedelta(days=7)).replace(
-        hour=BRIEF_HOUR, minute=BRIEF_MINUTE, second=0, microsecond=0
+        hour=hour, minute=minute, second=0, microsecond=0
     )
     nxt = nxt_local.astimezone(timezone.utc)
     after_utc = _as_utc(after)
@@ -145,7 +185,7 @@ def next_fire_time(after: datetime, tz: ZoneInfo) -> datetime:
     # last week's and +7d is this week's — still strictly after. Belt-and-braces.
     if nxt <= after_utc:
         nxt_local = (nxt_local + timedelta(days=7)).replace(
-            hour=BRIEF_HOUR, minute=BRIEF_MINUTE, second=0, microsecond=0
+            hour=hour, minute=minute, second=0, microsecond=0
         )
         nxt = nxt_local.astimezone(timezone.utc)
     return nxt
@@ -156,6 +196,9 @@ def should_run_weekly_brief(
     tz: ZoneInfo,
     last_run: datetime | None,
     *,
+    weekday: int = BRIEF_WEEKDAY,
+    hour: int = BRIEF_HOUR,
+    minute: int = BRIEF_MINUTE,
     window: timedelta = DUE_WINDOW,
 ) -> bool:
     """Pure decision: is this company's weekly brief due right now?
@@ -177,7 +220,9 @@ def should_run_weekly_brief(
     (aware or naive-UTC). ``now`` is "right now" (aware or naive-UTC).
     """
     now_utc = _as_utc(now)
-    fire = previous_fire_time(now_utc, tz)
+    fire = previous_fire_time(
+        now_utc, tz, weekday=weekday, hour=hour, minute=minute
+    )
 
     # Outside the firing window for this week → not due.
     if not (fire <= now_utc <= fire + window):
