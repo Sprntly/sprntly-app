@@ -105,6 +105,30 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
 ]
 
 
+# ── Call-digest intent ──────────────────────────────────────────────────────
+# "summarize the customer calls from last week", "recap this week's meetings",
+# "what did we hear on our sales calls". This is NOT a plain skill route: it
+# triggers an on-demand fetch of every call in a time window from a connected
+# transcript source (Fireflies), then runs voice-of-customer-report over the
+# complete corpus. qa_agent checks this BEFORE the generic skill router, because
+# the generic rules would otherwise misroute it (e.g. "what did we hear on calls"
+# → interview-synthesis) and answer from the lossy KG instead of live calls.
+_CALL_NOUN = r"(?:customer|sales|user|client|cx|csm|discovery|success|support)?\s*(?:calls?|meetings?|stand-?ups?|qbrs?|check-?ins?|syncs?)"
+_DIGEST_VERB = r"(?:summari[sz]e|recap|digest|rundown|round-?up|catch me up|brief me|overview|go over|run through|what (?:happened|did we (?:hear|learn|discuss|talk about))|themes?|feedback|voice of(?: the)? customer|takeaways?)"
+_CALL_DIGEST_RULES: list[re.Pattern] = [
+    # verb ... noun  ("summarize all the customer calls", "recap this week's meetings")
+    re.compile(_DIGEST_VERB + r".{0,40}\b" + _CALL_NOUN, re.I),
+    # noun ... verb  ("customer calls — what did we hear", "this week's meetings recap")
+    re.compile(_CALL_NOUN + r".{0,40}\b" + _DIGEST_VERB, re.I),
+]
+
+
+def is_call_digest(question: str) -> bool:
+    """True if the question asks to summarize/recap customer calls or meetings —
+    the trigger for the on-demand call-digest path (see app/call_digest.py)."""
+    return any(p.search(question) for p in _CALL_DIGEST_RULES)
+
+
 def detect_intent(question: str) -> SkillMatch | None:
     """Match a user question to a skill via keyword rules.
 

@@ -28,7 +28,7 @@ from app.ask_runner import _ASK_RESPONSE_SCHEMA, compose_ask_answer
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
 from app.prompts import ASK_SYSTEM
-from app.skill_router import detect_intent
+from app.skill_router import detect_intent, is_call_digest
 from app.skills.catalog import COST_GATED, NON_ROUTABLE, routable_manifest
 from app.skills.loader import get_skill, list_skills
 from app.skills.scripts import SCRIPT_TOOLS
@@ -320,6 +320,18 @@ def answer(
 ) -> dict:
     """Answer a question via the best skill, or directly. `pinned_skill` skips
     routing (used when a confirm-gate follow-up has already chosen the skill)."""
+    # On-demand call digest: "summarize the customer calls from last week" needs a
+    # LIVE fetch of every call in a window + a VoC pass over the complete corpus.
+    # The generic router would misroute it (e.g. → interview-synthesis) and answer
+    # from the lossy, token-capped KG, so intercept it first — unless the user has
+    # pinned a specific skill via a follow-up.
+    if not pinned_skill and is_call_digest(question):
+        from app import call_digest
+
+        return call_digest.answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
+
     if pinned_skill and _routable(pinned_skill):
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)
     else:

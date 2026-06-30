@@ -114,6 +114,30 @@ def test_answer_prd_author_stays_on_sonnet(monkeypatch):
     assert captured["model"] == qa.ANSWER_MODEL
 
 
+def test_answer_intercepts_call_digest_before_routing(monkeypatch):
+    # "summarize the customer calls from last week" must short-circuit to the
+    # on-demand digest path, NOT flow through the generic skill router.
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "answer", lambda **k: {"answer": "digest", "_skill_source": "call-digest"})
+    router_calls = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: router_calls.append(k) or _route_out())
+    out = qa.answer(
+        enterprise_id="ent", question="summarize the customer calls from last week", dataset="acme"
+    )
+    assert out["_skill_source"] == "call-digest"
+    assert router_calls == []  # never reached the router/answer LLM
+
+
+def test_answer_pinned_skill_bypasses_call_digest(monkeypatch):
+    # A pinned follow-up wins even if the text looks like a call digest.
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+    out = qa.answer(enterprise_id="ent", question="summarize the customer calls",
+                    dataset="acme", pinned_skill="user-stories")
+    assert out["_skill"] == "user-stories"
+
+
 def test_answer_direct_path(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # router → none
     monkeypatch.setattr(
