@@ -323,6 +323,29 @@ def _capture_meta(meta_out: dict | None, msg, model: str) -> None:
     })
 
 
+def _unwrap_response_envelope(out, schema):
+    """Unwrap a lone ``{"response": {...}}`` envelope from a structured result.
+
+    Some models (observed on the non-streamed Opus path) nest the ENTIRE
+    structured object under a single ``response`` key — cued by the tool name
+    ``submit_response`` — even though the tool's ``input_schema`` is flat. Callers
+    then read their real fields (e.g. ``insights``) off the top level and get
+    nothing. This was silently emptying every regenerated weekly brief.
+
+    Safe + narrow: only unwraps when the result is EXACTLY ``{"response": <dict>}``
+    AND the requested schema does not itself declare a top-level ``response``
+    property (so a schema that legitimately has a ``response`` field is untouched).
+    """
+    if not isinstance(out, dict) or list(out.keys()) != ["response"]:
+        return out
+    inner = out["response"]
+    if not isinstance(inner, dict):
+        return out
+    if "response" in ((schema or {}).get("properties") or {}):
+        return out
+    return inner
+
+
 def call_json(
     *,
     system: str,
@@ -381,7 +404,8 @@ def call_json(
         _capture_meta(meta_out, msg, model)
         for block in msg.content:
             if block.type == "tool_use" and block.name == "submit_response":
-                return dict(block.input) if not isinstance(block.input, dict) else block.input
+                out = dict(block.input) if not isinstance(block.input, dict) else block.input
+                return _unwrap_response_envelope(out, schema)
         raise HTTPException(
             502, "LLM did not invoke the structured response tool"
         )
