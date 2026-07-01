@@ -262,6 +262,18 @@ export const briefApi = {
         `/v1/brief/regenerate?dataset=${encodeURIComponent(company)}`,
       )
       .then((r) => ({ started: r.started, company: r.dataset })),
+  /**
+   * Kick off the FULL regeneration pipeline: KG ingestion of the latest
+   * sources/connectors/uploads → weekly-brief synthesis → PRD generation →
+   * evidence generation. Fire-and-forget; poll `status()` for the brief stage.
+   * Backs the "Regenerate brief" button on the Connectors settings page.
+   */
+  regenerateAll: (company: string = "asurion") =>
+    api
+      .post<{ started: boolean; dataset: string }>(
+        `/v1/brief/regenerate-all?dataset=${encodeURIComponent(company)}`,
+      )
+      .then((r) => ({ started: r.started, company: r.dataset })),
   generate: () =>
     api
       .post<WireBrief & { brief_id: number }>("/v1/brief/generate")

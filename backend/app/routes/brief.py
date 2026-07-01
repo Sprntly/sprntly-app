@@ -6,13 +6,27 @@ from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
 from app.brief_runner import get_status, set_status, warm_synthesis_drilldowns
-from app.db import get_current_brief
+from app.db import (
+    find_existing_evidence,
+    find_existing_prd,
+    get_current_brief,
+    start_evidence,
+    start_prd,
+)
 from app.db import nudge as nudge_db
 from app.db.companies import display_name_for_slug
 from app.db.finding_state import set_finding_action
 from app.deps.ownership import require_owned_brief, require_owned_dataset
+from app.evidence_kg import generate_evidence_kg
+from app.kg_ingest.auto_sync import kickoff_corpus_seed
+from app.prd_runner import PRD_VARIANT, generate_prd
+from app.prompts import EVIDENCE_TEMPLATE_VERSION, PRD_TEMPLATE_VERSION
 from app.synthesis.agent import EmptyKnowledgeGraphError
-from app.synthesis_brief import generate_brief_for
+from app.synthesis_brief import generate_brief_for, resolve_company
+
+# Evidence rows are written with variant 'v2' (the current format) — mirrors
+# the local constant in routes/evidence.py, which doesn't export it.
+EVIDENCE_VARIANT = "v2"
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +86,108 @@ async def _synthesis_generate_bg(dataset: str) -> None:
     warm_synthesis_drilldowns(dataset)
 
 
+async def _generate_downstream_docs(dataset: str) -> None:
+    """Generate a PRD + an evidence doc for every insight in the current brief.
+
+    Runs after the fresh brief is saved so the whole workspace is warm — the
+    user lands on ready PRDs and evidence instead of empty "Generate" panes.
+    Skips (brief, insight) pairs that already have a ready/generating doc so a
+    repeated full-regen is cheap. Every generation is error-isolated: one
+    insight failing must not stop the rest of the fan-out.
+    """
+    brief = get_current_brief(dataset)
+    if not brief:
+        return
+    brief_id = brief.get("id")
+    insights = brief.get("insights") or []
+    if not brief_id or not insights:
+        return
+
+    for idx, insight in enumerate(insights):
+        title = insight.get("title") or f"Insight #{idx + 1}"
+        # PRD generation for this insight.
+        try:
+            if not find_existing_prd(brief_id, idx, variant=PRD_VARIANT):
+                prd_id = start_prd(
+                    brief_id=brief_id,
+                    insight_index=idx,
+                    title=title,
+                    template_version=PRD_TEMPLATE_VERSION,
+                    variant=PRD_VARIANT,
+                )
+                await generate_prd(prd_id, brief_id, idx)
+        except Exception:  # noqa: BLE001 — one insight's failure must not abort the rest
+            logger.exception(
+                "full-regen: PRD generation failed for brief=%s insight=%s",
+                brief_id, idx,
+            )
+        # Evidence generation for this insight.
+        try:
+            if not find_existing_evidence(brief_id, idx, variant=EVIDENCE_VARIANT):
+                evidence_id = start_evidence(
+                    brief_id=brief_id,
+                    insight_index=idx,
+                    title=title,
+                    template_version=EVIDENCE_TEMPLATE_VERSION,
+                    variant=EVIDENCE_VARIANT,
+                )
+                await generate_evidence_kg(evidence_id, brief_id, idx)
+        except Exception:  # noqa: BLE001 — isolate per insight
+            logger.exception(
+                "full-regen: evidence generation failed for brief=%s insight=%s",
+                brief_id, idx,
+            )
+
+
+async def _full_pipeline_bg(dataset: str) -> None:
+    """Background body for /regenerate-all — the full digest→brief→PRD→evidence chain.
+
+    Order matters:
+      1. Ingest newly-arrived source/connector/upload docs into the KG
+         (kickoff_corpus_seed — the PR #536 event-driven path).
+      2. Seed-if-needed + run synthesis to produce the fresh brief
+         (generate_brief_for re-runs the corpus seed synchronously, so the brief
+         reflects step 1's docs; the seed is content-hash deduped, so the double
+         pass is cheap and idempotent).
+      3. Generate a PRD for every insight in the fresh brief.
+      4. Generate an evidence doc for every insight.
+
+    Steps 3–4 only run once the brief is ready. Everything is error-isolated —
+    a failure leaves the prior cached brief/PRDs/evidence in place.
+    """
+    set_status(dataset, "generating")
+    # Step 1: digest the latest sources/connectors/uploads into the KG. This is
+    # fire-and-forget (a daemon thread) and never raises; generate_brief_for below
+    # re-seeds synchronously so the brief can't miss what this ingests.
+    try:
+        company_id, slug = resolve_company(dataset)
+        kickoff_corpus_seed(company_id, slug)
+    except Exception:  # noqa: BLE001 — ingestion kickoff is best-effort
+        logger.exception("full-regen: corpus-seed kickoff failed for %s", dataset)
+
+    # Step 2: seed-if-needed + synthesize the brief off the event loop.
+    try:
+        await asyncio.to_thread(generate_brief_for, dataset)
+        set_status(dataset, "ready")
+        logger.info("Full-pipeline brief generated for %s", dataset)
+    except EmptyKnowledgeGraphError:
+        set_status(dataset, "failed",
+                   error="No data to generate a brief from yet — upload files "
+                         "or connect a data source, then regenerate.")
+        logger.info("Full-pipeline brief skipped for %s — KG empty after seeding", dataset)
+        return
+    except Exception:  # noqa: BLE001 — fire-and-forget; prior brief stays
+        set_status(dataset, "failed",
+                   error="Brief generation failed — check server logs.")
+        logger.exception("Full-pipeline brief generation failed for %s", dataset)
+        return
+
+    # Steps 3 + 4: fan out PRD + evidence generation for the fresh brief, then
+    # warm the drill-downs. All error-isolated so they can't undo the brief.
+    await _generate_downstream_docs(dataset)
+    warm_synthesis_drilldowns(dataset)
+
+
 @router.get("/current")
 def current(
     dataset: str,
@@ -128,6 +244,27 @@ async def regenerate(
     """
     require_owned_dataset(dataset, company.company_id)
     _track(asyncio.create_task(_synthesis_generate_bg(dataset)))
+    return {"started": True, "dataset": dataset}
+
+
+@router.post("/regenerate-all")
+async def regenerate_all(
+    dataset: str,
+    company: CompanyContext = Depends(require_company),
+):
+    """Run the FULL regeneration pipeline in the background. Returns immediately.
+
+    Chains, in order: KG ingestion of the latest sources/connectors/uploads →
+    weekly-brief synthesis → PRD generation for each insight → evidence
+    generation for each insight. Used by the "Regenerate brief" button on the
+    Connectors settings page, where the user has just connected a tool or
+    uploaded files and wants the whole workspace rebuilt from the new data.
+
+    Poll `/v1/brief/status` for the brief stage; PRDs/evidence continue warming
+    after the brief flips to `ready`.
+    """
+    require_owned_dataset(dataset, company.company_id)
+    _track(asyncio.create_task(_full_pipeline_bg(dataset)))
     return {"started": True, "dataset": dataset}
 
 
