@@ -103,6 +103,11 @@ def status(
       - "generating": auto-gen is in flight; retry in a few seconds
       - "failed": last attempt failed (see `error`); will retry on service restart
       - "empty": nothing has been attempted yet
+
+    Additive flag:
+      - "regenerating": true — a fresh brief is being built *over* a still-cached
+        one (status stays "ready" so the current brief keeps rendering). The home
+        surface uses this to show a lightweight "refreshing your brief" indicator.
     """
     require_owned_dataset(dataset, company.company_id)
     return {"dataset": dataset, **get_status(dataset)}

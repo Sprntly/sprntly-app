@@ -569,6 +569,11 @@ export interface AppContentState {
    *  render a "generating…" WIP indicator without re-invoking the
    *  side-effectful hydration hook. `null` until the first hydration tick. */
   briefHydration: "idle" | "loading" | "ready" | "generating" | "failed" | "empty" | null
+  /** A fresh brief is being built *over* the currently-cached one (e.g. after a
+   *  connector was added and the workspace is regenerating). Mirrored from
+   *  `useBriefHydration`; drives the lightweight "refreshing your brief" banner
+   *  shown above the existing brief. `briefHydration` stays "ready" meanwhile. */
+  briefRegenerating: boolean
   pastWeeks: PastWeekRow[]
   shipped: ShippedState
   conversations: ConversationRow[]

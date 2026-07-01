@@ -373,6 +373,23 @@ function BriefGeneratingState() {
   )
 }
 
+// ── Brief refreshing banner ──────────────────────────────────────────────────
+// Shown ABOVE an existing brief while a fresh one is being built over it
+// (content.briefRegenerating, e.g. after a connector was added and the
+// workspace is regenerating). Unlike BriefGeneratingState it is non-destructive:
+// the current brief stays readable underneath. Clears itself when the new brief
+// lands and the flag flips back off.
+function BriefRefreshingBanner() {
+  return (
+    <div className="bc-refreshing" role="status" aria-live="polite">
+      <span className="bc-refreshing-spinner" aria-hidden />
+      <span className="bc-refreshing-copy">
+        Refreshing your brief with your latest sources…
+      </span>
+    </div>
+  )
+}
+
 export function BriefChat() {
   const { aiBarValue, setAIBarValue, openContentPanel, showToast, setPendingChatHandoff } = useNavigation()
   const router = useRouter()
@@ -1043,6 +1060,11 @@ export function BriefChat() {
   // don't yet have a brief to show. Once findings arrive (ready), the WIP
   // indicator is replaced by the real brief. The failed state never trips this.
   const generatingBrief = content.briefHydration === "generating" && findings.length === 0
+  // A fresh brief is being built over the one currently on screen (e.g. a
+  // connector was just added). Show a non-destructive "refreshing" banner above
+  // the existing brief. Skip when generatingBrief already owns the surface (no
+  // brief yet — the full generating state covers that case).
+  const refreshingBrief = content.briefRegenerating && !generatingBrief
 
   return (
     <section className="briefx" aria-label="Weekly brief">
@@ -1065,6 +1087,7 @@ export function BriefChat() {
                   <BriefGeneratingState />
                 ) : (
                 <>
+                {refreshingBrief ? <BriefRefreshingBanner /> : null}
                 {/* Single greeting paragraph: salutation + the agent's ongoing
                     value + the "top N this week" tail (buildGreeting). Replaces
                     the old separate persistent-intro + greeting that double-led
