@@ -227,6 +227,9 @@ export type BriefStatus = {
   company: string
   status: "ready" | "generating" | "failed" | "empty"
   error?: string
+  /** A fresh brief is being built over a still-cached one. `status` stays
+   *  "ready" (the current brief keeps rendering) while this is true. */
+  regenerating?: boolean
 }
 
 // Wire shapes from the backend — kept around so we can map cleanly.

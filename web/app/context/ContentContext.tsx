@@ -40,6 +40,7 @@ const EMPTY: AppContentState = {
   },
   briefV2: null,
   briefHydration: null,
+  briefRegenerating: false,
   pastWeeks: [],
   shipped: { stats: [], primary: [], supporting: [] },
   conversations: [],

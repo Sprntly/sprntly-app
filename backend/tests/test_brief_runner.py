@@ -21,6 +21,38 @@ def test_get_status_empty_for_unknown(isolated_settings):
     assert br.get_status("ghost") == {"status": "empty"}
 
 
+def _save_ready_brief(db, dataset: str = "acme") -> None:
+    db.insert_dataset(dataset, dataset.title())
+    db.save_brief(dataset, "Test Week", {"insights": [{"title": "A"}]})
+
+
+def test_get_status_ready_has_no_regenerating_flag(isolated_settings):
+    """A cached brief with no generation in flight reports plain "ready" — the
+    additive regenerating flag must be absent so nothing shows the banner."""
+    br = _reload_brief_runner()
+    _save_ready_brief(isolated_settings["db"])
+    assert br.get_status("acme") == {"status": "ready"}
+
+
+def test_get_status_regenerating_over_cached_brief(isolated_settings):
+    """A regen running OVER a still-cached brief keeps status "ready" (so the
+    current brief stays on screen) but surfaces regenerating=True so the home
+    surface can show the "refreshing your brief" banner. Without this the
+    in-flight regen is masked by the cached-brief short-circuit."""
+    br = _reload_brief_runner()
+    _save_ready_brief(isolated_settings["db"])
+    br.set_status("acme", "generating")
+    assert br.get_status("acme") == {"status": "ready", "regenerating": True}
+
+
+def test_get_status_generating_without_brief_is_not_regenerating(isolated_settings):
+    """First-run generation (no brief yet) reports "generating", NOT the
+    regenerating-over-existing flag — that path drives the full WIP state."""
+    br = _reload_brief_runner()
+    br.set_status("void", "generating")
+    assert br.get_status("void") == {"status": "generating"}
+
+
 # ── PRD pre-warming removed — warming covers evidence + Asks only ────────
 #
 # Perf optimization: a PRD is the most expensive drill-down (a large 2-part

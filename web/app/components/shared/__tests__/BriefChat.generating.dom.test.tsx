@@ -187,6 +187,24 @@ function Harness() {
       },
       "plain-empty",
     ),
+    React.createElement(
+      "button",
+      {
+        "data-testid": "set-refreshing-over-ready",
+        onClick: () =>
+          set({ briefHydration: "ready", briefV2: READY_BRIEF, briefRegenerating: true }),
+      },
+      "refreshing-over-ready",
+    ),
+    React.createElement(
+      "button",
+      {
+        "data-testid": "set-refreshing-no-brief",
+        onClick: () =>
+          set({ briefHydration: "generating", briefV2: null, briefRegenerating: true }),
+      },
+      "refreshing-no-brief",
+    ),
     React.createElement(BriefChat),
   )
 }
@@ -302,5 +320,37 @@ describe("BriefChat — generating / WIP indicator", () => {
     expect(screen.getByText(new RegExp(EMPTY_GREETING))).not.toBeNull()
     // …and the insufficient-evidence acknowledgement is NOT.
     expect(screen.queryByText(/We've got your data/)).toBeNull()
+  })
+
+  it("test_refreshing_over_ready_shows_banner: regenerating over an existing brief shows the refresh banner above the brief, not the full WIP state", () => {
+    mountHarness()
+    act(() => {
+      fireEvent.click(screen.getByTestId("set-refreshing-over-ready"))
+    })
+
+    // The lightweight "refreshing" banner is on screen with its live-region role.
+    const banner = document.querySelector(".bc-refreshing")
+    expect(banner).not.toBeNull()
+    expect(screen.getByText(/Refreshing your brief/)).not.toBeNull()
+    expect(banner?.querySelector(".bc-refreshing-spinner")).not.toBeNull()
+    // The existing brief stays readable underneath (non-destructive)…
+    expect(document.querySelector(".fc-title")?.textContent).toBe(
+      "Day-30 retention is slipping",
+    )
+    // …and the full-screen generating WIP block is NOT used here.
+    expect(screen.queryByText(WIP_TITLE)).toBeNull()
+    expect(document.querySelector(".bc-generating")).toBeNull()
+  })
+
+  it("test_refreshing_without_brief_uses_full_wip_not_banner: with no brief yet, the full generating state owns the surface and the banner is suppressed", () => {
+    mountHarness()
+    act(() => {
+      fireEvent.click(screen.getByTestId("set-refreshing-no-brief"))
+    })
+
+    // No brief to keep on screen → the full generating WIP block is shown…
+    expect(screen.getByText(WIP_TITLE)).not.toBeNull()
+    // …and the lightweight refresh banner is NOT (it would be redundant).
+    expect(document.querySelector(".bc-refreshing")).toBeNull()
   })
 })

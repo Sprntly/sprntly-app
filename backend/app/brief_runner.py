@@ -78,11 +78,22 @@ def _track(task: asyncio.Task) -> asyncio.Task:
 
 
 def get_status(dataset: str) -> dict:
-    """Return one of: ready, generating, failed, empty (+ error message if any)."""
+    """Return one of: ready, generating, failed, empty (+ error message if any).
+
+    When a brief is already cached, `status` stays "ready" (so the frontend keeps
+    the current brief on screen), but a regeneration running *over* that cached
+    brief is surfaced with an additive `regenerating: True` flag. Without this the
+    in-flight regen is invisible — `_status[dataset]` is "generating" but the
+    cached brief short-circuits us to "ready" — so the home surface can't show a
+    "refreshing your brief" indicator while a fresh brief is being built.
+    """
     if get_current_brief(dataset):
-        return {"status": "ready"}
+        out: dict = {"status": "ready"}
+        if _status.get(dataset) == "generating":
+            out["regenerating"] = True
+        return out
     s = _status.get(dataset, "empty")
-    out: dict = {"status": s}
+    out = {"status": s}
     if s == "failed" and dataset in _errors:
         out["error"] = _errors[dataset]
     return out
