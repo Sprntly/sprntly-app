@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 
 from app.business_context import load_business_context
-from app.db.backlog import upsert_backlog_item
+from app.db.backlog import prune_stale_backlog, upsert_backlog_item
 from app.graph.config_layers import config_get
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
@@ -117,6 +117,15 @@ def sequence_backlog(
     convergence = compute_convergence(facade, enterprise_id)
     # EVERY non-brief converged theme is sequenced into the backlog — no cap.
     cands = [c for c in convergence if c.theme_id not in exclude]
+
+    # REPLACE, don't APPEND: prune auto-generated backlog rows whose theme is no
+    # longer in the current converged set (a theme dropped out, moved into the
+    # brief, or the KG re-extraction gave it a fresh id) BEFORE persisting the
+    # current set. Without this, every re-sequence accumulated duplicates because
+    # (enterprise_id, theme_id) only dedupes when the id is stable across runs.
+    # Runs even when there are no candidates, so an emptied backlog is cleared.
+    prune_stale_backlog(enterprise_id, {c.theme_id for c in cands})
+
     if not cands:
         return []
 

@@ -511,3 +511,74 @@ def test_patch_backlog_tenant_isolation(isolated_settings, _override_company):
     # The other tenant's item is untouched.
     row = db.table("backlog_items").select("*").eq("id", other_item).execute().data[0]
     assert row["status"] == "backlog"
+
+
+# ─────────────────── replace-not-append (prune stale) ───────────────────
+
+def test_prune_stale_backlog_removes_only_stale_backlog_status(isolated_settings):
+    """prune_stale_backlog deletes 'backlog'-status rows whose theme isn't in the
+    keep-set, and preserves both kept themes AND user-managed (non-backlog) rows
+    and other tenants."""
+    from app.db.backlog import prune_stale_backlog, list_backlog_items
+    db = isolated_settings["supabase"]
+    _seed_company(db, "ent-A")   # backlog_items.enterprise_id → companies(id)
+    _seed_company(db, "ent-B")
+
+    def seed(ent, theme_id, status="backlog"):
+        db.table("backlog_items").insert({
+            "id": f"{ent}-{theme_id}", "enterprise_id": ent, "theme_id": theme_id,
+            "title": theme_id, "rank": 1, "score": 0.5, "status": status,
+        }).execute()
+
+    seed("ent-A", "keep-me")
+    seed("ent-A", "stale-1")
+    seed("ent-A", "stale-2")
+    seed("ent-A", "done-item", status="done")       # user-managed → preserved
+    seed("ent-B", "other-tenant")                    # different tenant → untouched
+
+    removed = prune_stale_backlog("ent-A", {"keep-me"})
+    assert removed == 2                              # stale-1, stale-2
+
+    remaining = {r["theme_id"] for r in list_backlog_items("ent-A")}
+    assert remaining == {"keep-me", "done-item"}     # kept + user-managed survive
+    # other tenant is never touched
+    assert {r["theme_id"] for r in list_backlog_items("ent-B")} == {"other-tenant"}
+
+
+def test_sequence_backlog_replaces_instead_of_appending(facade, isolated_settings):
+    """A re-sequence REPLACES the auto backlog: themes that dropped out (here, moved
+    into the brief) are pruned instead of accumulating, new themes appear, and a
+    user-marked item survives. Regression for the 153-item backlog bloat."""
+    from app.synthesis import backlog as bl
+    from app.db.backlog import list_backlog_items, update_backlog_status
+
+    _seed_company(isolated_settings["supabase"], "ent-A")
+    alpha = _seed_theme_with_signals(facade, "ent-A", "alpha", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 500000}, 0)])
+    beta = _seed_theme_with_signals(facade, "ent-A", "beta", [
+        ("customer_voice", "feature_request", {}, 0)])
+
+    # Run 1: both alpha + beta land in the backlog.
+    with patch.object(bl, "llm_call",
+                      return_value=_llm_result(_triage_for(alpha.id, beta.id))):
+        bl.sequence_backlog(facade, "ent-A", exclude_theme_ids=[])
+    rows1 = list_backlog_items("ent-A")
+    assert {r["theme_id"] for r in rows1} == {alpha.id, beta.id}
+
+    # User marks beta's item done (a lifecycle change we must never clobber).
+    beta_row = next(r for r in rows1 if r["theme_id"] == beta.id)
+    update_backlog_status("ent-A", beta_row["id"], "done")
+
+    # Run 2: alpha + beta now made the brief (excluded); a NEW theme gamma converges.
+    gamma = _seed_theme_with_signals(facade, "ent-A", "gamma", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 300000}, 0)])
+    with patch.object(bl, "llm_call",
+                      return_value=_llm_result(_triage_for(gamma.id))):
+        bl.sequence_backlog(facade, "ent-A", exclude_theme_ids=[alpha.id, beta.id])
+
+    rows2 = list_backlog_items("ent-A")
+    tids = {r["theme_id"] for r in rows2}
+    assert alpha.id not in tids          # pruned (was 'backlog', dropped out) — no append
+    assert gamma.id in tids              # fresh theme sequenced
+    assert beta.id in tids               # user-managed 'done' item preserved
+    assert len(rows2) == 2               # NOT 3 — the backlog did not accumulate
