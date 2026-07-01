@@ -69,6 +69,12 @@ CREATE TABLE prototype_checkpoints (
 
 _OTHER_WS = "other-workspace"
 
+# The company_client fixture seeds company _TEST_COMPANY_ID with slug
+# f"slug-{company_id}" (conftest._seed_company_membership). A brief is owned by
+# that company iff its `dataset` equals this slug — require_owned_brief resolves
+# brief.dataset → companies.slug → company_id.
+_OWNED_DATASET = f"slug-{_TEST_COMPANY_ID}"
+
 # PRD_VARIANT as defined in prd_runner.py — the variant the new endpoint filters on.
 _PRD_VARIANT = "v2"
 
@@ -111,6 +117,17 @@ def unauth(env) -> TestClient:
     return TestClient(env.main.app)
 
 
+@pytest.fixture(autouse=True)
+def _seed_owned_briefs(env):
+    """Seed an owned brief (dataset == the caller's company slug) for every
+    brief_id the core/filtering tests exercise, so the route's require_owned_brief
+    tenant gate resolves them to _TEST_COMPANY_ID and they behave as before the
+    gate existed. The gate's own 404 behaviour (foreign / missing brief) is
+    covered explicitly by the tenant-isolation tests, which use un-seeded ids."""
+    for bid in (1, 2, 3, 4, 5, 6, 7, 999):
+        _seed_brief(brief_id=bid)
+
+
 # ─── seeding helpers ──────────────────────────────────────────────────────────
 
 
@@ -149,6 +166,32 @@ def _seed_prototype(
         [prd_id, workspace_id, status, preview_image_url],
     )
     return cur.lastrowid
+
+
+def _seed_brief(*, brief_id: int, dataset: str = _OWNED_DATASET) -> int:
+    """Insert a briefs row (explicit id) whose `dataset` slug determines the
+    owning company. require_owned_brief resolves dataset → companies.slug →
+    company_id, so `dataset=_OWNED_DATASET` makes the brief owned by the caller."""
+    from tests import _fake_supabase
+
+    cur = _fake_supabase.get_fake_db().execute(
+        "INSERT INTO briefs (id, dataset, payload) VALUES (?, ?, '{}')",
+        [brief_id, dataset],
+    )
+    return cur.lastrowid
+
+
+def _seed_company(*, slug: str) -> str:
+    """Insert a companies row with `slug`; return its id. Used to own a brief
+    that the caller does NOT belong to (cross-tenant gate coverage)."""
+    from tests import _fake_supabase
+
+    cid = f"cid-{slug}"
+    _fake_supabase.get_fake_db().execute(
+        "INSERT INTO companies (id, slug, display_name) VALUES (?, ?, ?)",
+        [cid, slug, slug.title()],
+    )
+    return cid
 
 
 # ─── Core shape tests ─────────────────────────────────────────────────────────
@@ -308,10 +351,46 @@ def test_brief_prototype_map_prototype_workspace_isolated(client):
     resp = client.get("/v1/design-agent/brief-prototype-map", params={"brief_id": 5})
     assert resp.status_code == 200, resp.text
     entries = resp.json()["entries"]
-    # PRD is present (no workspace filter on PRDs by design — see route docstring flag).
+    # PRD is present — the brief is owned by the caller, and PRDs are brief-scoped
+    # (not additionally workspace-filtered). Only the prototype is workspace-scoped.
     assert len(entries) == 1
     # But prototype is null — cross-workspace prototype not visible.
     assert entries[0]["prototype"] is None
+
+
+# ─── Tenant isolation: brief ownership gate ──────────────────────────────────
+
+
+def test_brief_prototype_map_foreign_brief_is_404_and_leaks_nothing(client):
+    """A brief owned by ANOTHER company 404s — the caller cannot read its PRD
+    entries.
+
+    Regression: list_prds_by_brief filters only by brief_id/variant/status (NOT
+    workspace), so without the route's require_owned_brief gate a cross-tenant
+    brief_id would leak the foreign brief's PRD ids, titles, and insight indices.
+    (The workspace-scoped prototype lookup only nulls the `prototype` sub-object;
+    it does not suppress the leaked entries.)
+    """
+    _seed_company(slug="slug-foreign")
+    _seed_brief(brief_id=4242, dataset="slug-foreign")
+    # A ready PRD that WOULD surface in entries if the gate were missing.
+    _seed_prd(brief_id=4242, insight_index=0, title="Secret foreign PRD")
+
+    resp = client.get("/v1/design-agent/brief-prototype-map", params={"brief_id": 4242})
+    assert resp.status_code == 404, resp.text
+    # Nothing about the foreign brief leaks in the 404 body.
+    assert "entries" not in resp.json()
+    assert "Secret foreign PRD" not in resp.text
+
+
+def test_brief_prototype_map_missing_brief_is_404(client):
+    """A brief_id that resolves to no brief row 404s (fail-closed) rather than
+    returning a 200 empty map — a missing brief is indistinguishable from a
+    foreign one, so cross-tenant existence is never disclosed."""
+    resp = client.get(
+        "/v1/design-agent/brief-prototype-map", params={"brief_id": 123456}
+    )
+    assert resp.status_code == 404
 
 
 # ─── Auth + feature gate ──────────────────────────────────────────────────────

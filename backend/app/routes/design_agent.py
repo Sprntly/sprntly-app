@@ -91,6 +91,7 @@ from app.db.prototypes import (
     clear_pending_question,
 )
 from app.db.usage_events import finalize_usage_event, start_usage_event
+from app.deps.ownership import require_owned_brief  # tenant gate: brief → company
 from app.llm_telemetry import RunUsage
 from app.design_agent.client import get_design_agent_client
 from app.design_agent.prompts import (
@@ -806,18 +807,22 @@ def get_brief_prototype_map(
       - workspace_id resolved from the caller's company membership (require_company).
       - prototype lookup is workspace-scoped via find_ready_prototype_by_prd.
 
-    Brief ownership check: this endpoint does NOT explicitly verify that brief_id
-    belongs to the caller's workspace. Sibling read routes (e.g. GET /by-prd/{prd_id})
-    follow the same approach — cross-workspace containment is enforced at the
-    prototype layer (find_ready_prototype_by_prd filters by workspace_id), and a
-    foreign-workspace brief simply yields no PRD rows. The caller therefore learns
-    nothing about a brief they don't own — the entries list is empty. FLAG: if an
-    explicit brief→company ownership check is added to sibling routes, add the same
-    check here (see prds table brief_id → briefs table → company/dataset chain).
+    Brief ownership check: require_owned_brief resolves brief_id → dataset →
+    company and 404s when the brief is missing or belongs to another company.
+    This is REQUIRED here, not optional: list_prds_by_brief filters only by
+    brief_id/variant/status (NOT workspace), so without this gate a caller could
+    pass a foreign brief_id and read back another tenant's PRD ids, titles, and
+    insight indices — the workspace-scoped prototype lookup below only nulls the
+    `prototype` sub-object, it does not suppress the leaked entries. Mirrors the
+    tenant gate sibling read routes use (GET /v1/brief/{brief_id}, evidence, etc.).
     """
     _require_feature_enabled()
     workspace_id = company.company_id
     prd_variant = _prd_variant()
+
+    # Tenant gate FIRST (after the feature flag): a foreign/missing brief 404s
+    # here before any of its PRD rows are read, so nothing leaks cross-tenant.
+    require_owned_brief(brief_id, workspace_id)
 
     prds = list_prds_by_brief(brief_id=brief_id, variant=prd_variant)
 
