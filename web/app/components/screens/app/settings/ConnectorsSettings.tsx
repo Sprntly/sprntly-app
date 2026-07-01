@@ -29,6 +29,7 @@ import {
 } from "../../../../lib/connectorsCatalog"
 import {
   ApiError,
+  briefApi,
   companiesApi,
   connectorsApi,
   sourcesApi,
@@ -52,6 +53,7 @@ import type {
 } from "../../../../types/content"
 import { openOauthTab } from "../../../../lib/connectorsOauth"
 import { useConnectorConnectedSignal } from "../../../../lib/useConnectorConnectedSignal"
+import { notifyBriefRegenerating } from "../../../../lib/useBriefHydration"
 import { ApiKeyPromptModal } from "../../../connectors/ApiKeyPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
@@ -126,6 +128,15 @@ export type ConnectorsSettingsViewProps = {
    */
   uploading?: boolean
   /**
+   * Fired when the "Regenerate brief" button is clicked. Kicks off the full
+   * pipeline (KG ingest → brief → PRD → evidence) from the latest sources.
+   */
+  onRegenerateBrief: () => void
+  /** True while the full regeneration pipeline is in flight. */
+  regenerating: boolean
+  /** Inline error from the regenerate trigger, or null. */
+  regenerateError: string | null
+  /**
    * All files uploaded to the active company. The backend stores uploads at
    * the company level with no per-category attribution, so this is a single
    * company-wide list rendered once (not filtered per category).
@@ -143,6 +154,9 @@ export function ConnectorsSettingsView({
   onUpload,
   uploading = false,
   files,
+  onRegenerateBrief,
+  regenerating,
+  regenerateError,
 }: ConnectorsSettingsViewProps) {
   // Flat list for now — with only a handful of live connectors, category
   // grouping is noise. Re-introduce category sections once the list grows.
@@ -153,6 +167,38 @@ export function ConnectorsSettingsView({
       <div className="set-sub">
         Every source feeding your agents. Connect a tool or upload files.
       </div>
+
+      {/* Rebuild the weekly brief (and its PRDs + evidence) from the latest
+          sources. Prominent primary action right under the intro copy so it's
+          the obvious next step after connecting a tool or uploading files. */}
+      <div className="set-conn-regen">
+        <div className="set-conn-regen-copy">
+          <div className="set-conn-regen-t">Regenerate brief</div>
+          <div className="set-conn-regen-s">
+            Digest new sources and rebuild your weekly brief, PRDs, and evidence.
+          </div>
+        </div>
+        <button
+          type="button"
+          className="btn btn-primary set-conn-regen-btn"
+          disabled={regenerating}
+          aria-busy={regenerating}
+          onClick={onRegenerateBrief}
+        >
+          {regenerating ? (
+            <>
+              <span className="spinner" aria-hidden /> Regenerating…
+            </>
+          ) : (
+            "Regenerate brief"
+          )}
+        </button>
+      </div>
+      {regenerateError ? (
+        <p className="settings-msg settings-msg-error" role="alert">
+          Could not regenerate brief: {regenerateError}
+        </p>
+      ) : null}
 
       {loadError ? (
         <p className="settings-msg settings-msg-error" role="alert">
@@ -278,13 +324,15 @@ export function ConnectorsSettingsView({
 export function ConnectorsSettings() {
   const { activeCompany } = useCompany()
   const { setContent } = useContent()
-  const { showToast } = useNavigation()
+  const { showToast, goTo } = useNavigation()
 
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [files, setFiles] = useState<SourceFile[]>([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
+  const [regenerating, setRegenerating] = useState(false)
+  const [regenerateError, setRegenerateError] = useState<string | null>(null)
   const [configuringProviderId, setConfiguringProviderId] = useState<
     string | null
   >(null)
@@ -441,6 +489,36 @@ export function ConnectorsSettings() {
     setConfiguringProviderId(providerId)
   }, [])
 
+  // Trigger the full regeneration pipeline (KG ingest → brief → PRD →
+  // evidence) from the latest connected sources and uploads. The endpoint is
+  // fire-and-forget: it returns as soon as the background chain is scheduled,
+  // so a resolved promise means "started", not "finished". We surface a toast
+  // and send the user to the Weekly brief, which polls itself to `ready`.
+  const handleRegenerateBrief = useCallback(async () => {
+    if (regenerating) return
+    setRegenerating(true)
+    setRegenerateError(null)
+    try {
+      await briefApi.regenerateAll(activeCompany)
+      // Tell the home surface a regen is underway so it starts watching the
+      // brief `regenerating` flag immediately — even when the user lands on the
+      // brief directly here, with no preceding connector-connect signal. The
+      // banner + fresh-brief swap are owned by useBriefHydration / BriefChat.
+      notifyBriefRegenerating()
+      showToast(
+        "Regenerating brief",
+        "Digesting your latest sources — your brief, PRDs, and evidence will refresh shortly.",
+      )
+      goTo("brief")
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setRegenerateError(msg)
+      showToast("Regenerate failed", msg)
+    } finally {
+      setRegenerating(false)
+    }
+  }, [activeCompany, regenerating, showToast, goTo])
+
   const onUpload = useCallback(
     async (categoryKey: string, picked: FileList) => {
       const list = Array.from(picked)
@@ -498,6 +576,9 @@ export function ConnectorsSettings() {
         onUpload={onUpload}
         uploading={uploading}
         files={files}
+        onRegenerateBrief={handleRegenerateBrief}
+        regenerating={regenerating}
+        regenerateError={regenerateError}
       />
       <ConfigureConnectorDrawer
         providerId={configuringProviderId}
