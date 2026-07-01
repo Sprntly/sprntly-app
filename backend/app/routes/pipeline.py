@@ -16,6 +16,16 @@ from app.deps.ownership import require_owned_dataset
 
 router = APIRouter(prefix="/v1/pipeline", tags=["pipeline"])
 
+# Single-flight guard: datasets with a manual pipeline run currently in flight.
+# "Whip up brief" gives no instant feedback and a full run takes ~5 min, so users
+# click it repeatedly — which used to spawn N concurrent runs that race on the
+# same deterministic KG ids (duplicate-key errors) and exhaust the httpx pool
+# (Errno 11), tipping the synthesis into an empty brief. We collapse repeat
+# clicks onto the in-flight run. The set is cleared in a `finally` (even if the
+# run raises), so a crashed/stale run never wedges the button. In-process guard:
+# the backend runs a single uvicorn worker, so one set is authoritative.
+_INFLIGHT: set[str] = set()
+
 
 @router.post("/{dataset}/run")
 async def trigger_pipeline(
@@ -25,14 +35,33 @@ async def trigger_pipeline(
     """Trigger a full pipeline run for a dataset.
 
     Returns immediately with a run_id. The pipeline runs in the background.
+    Repeat requests while a run is already in flight are collapsed onto it
+    (no second run is started).
     """
     # Tenant guard: only run a pipeline on a dataset the caller's company owns
     # (404 otherwise — these are expensive runs and the slug is low-entropy).
     require_owned_dataset(dataset, company.company_id)
     from app.pipeline import run_full_pipeline
 
+    # Collapse repeat clicks onto the in-flight run. The check+add is atomic on
+    # the event loop (no await between), so concurrent requests can't both pass.
+    if dataset in _INFLIGHT:
+        return {
+            "started": False,
+            "already_running": True,
+            "dataset": dataset,
+            "message": "A pipeline run is already in progress for this dataset.",
+        }
+    _INFLIGHT.add(dataset)
+
+    async def _run_and_release() -> None:
+        try:
+            await run_full_pipeline(dataset, trigger="manual")
+        finally:
+            _INFLIGHT.discard(dataset)
+
     # Fire-and-forget: run the pipeline in the background
-    task = asyncio.create_task(run_full_pipeline(dataset, trigger="manual"))
+    asyncio.create_task(_run_and_release())
 
     return {
         "started": True,
