@@ -60,6 +60,42 @@ def upsert_backlog_item(
     ).execute()
 
 
+def prune_stale_backlog(
+    enterprise_id: str, keep_theme_ids, *, client=None
+) -> int:
+    """Delete auto-generated backlog rows whose theme is NOT in the current
+    converged set, so a re-sequence REPLACES the auto backlog instead of
+    APPENDING. Returns the number of rows removed.
+
+    Only ``status='backlog'`` rows are pruned — user-managed items
+    (``in_progress``/``done``/``dismissed``) are always preserved. Themes still
+    converging keep their row (the caller upserts them in place, idempotent on
+    (enterprise_id, theme_id)); everything else auto-generated is removed. This
+    is what stops the backlog growing without bound when a theme drops out of
+    convergence or the KG re-extraction gives it a fresh id across runs.
+
+    Filtered in Python (fetch → diff → delete-by-id) so it behaves identically
+    against real Supabase and the in-memory test fake; per-enterprise volumes are
+    tiny (one row per non-brief theme).
+    """
+    cli = client or require_client()
+    keep = {str(t) for t in keep_theme_ids if t}
+    rows = (
+        cli.table("backlog_items").select("id,theme_id,status")
+        .eq("enterprise_id", enterprise_id).eq("status", "backlog")
+        .execute().data or []
+    )
+    stale = [r["id"] for r in rows if str(r.get("theme_id")) not in keep]
+    if not stale:
+        return 0
+    (
+        cli.table("backlog_items").delete()
+        .eq("enterprise_id", enterprise_id).in_("id", stale)
+        .execute()
+    )
+    return len(stale)
+
+
 def list_backlog_items(
     enterprise_id: str,
     *,
