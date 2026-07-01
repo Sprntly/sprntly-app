@@ -256,6 +256,43 @@ def test_brief_prototype_map_excludes_non_ready_prds(client):
     assert entries[0]["prd_id"] == prd_ready
 
 
+# ─── Regeneration: newest ready PRD per insight ──────────────────────────────
+
+
+def test_brief_prototype_map_returns_newest_prd_per_insight(client):
+    """When an insight has MORE THAN ONE ready PRD (a regenerated / force-generated
+    PRD leaves the prior one ready too), the map returns exactly ONE entry for that
+    insight — the NEWEST (highest-id) one.
+
+    Regression: list_prds_by_brief used to return every ready row ordered only by
+    insight_index, so an insight emitted duplicate entries and the frontend's
+    last-wins map could bind a stale prd_id — the freshly generated PRD never
+    surfaced in the UI even though it existed.
+    """
+    # Insight 0: an OLD ready PRD, then a NEWER ready PRD (higher id).
+    old_prd = _seed_prd(brief_id=7, insight_index=0, title="Old PRD")
+    new_prd = _seed_prd(brief_id=7, insight_index=0, title="New PRD")
+    assert new_prd > old_prd  # autoincrement guarantees newer == higher id
+
+    # Insight 1: a single ready PRD — the simple case still works alongside.
+    solo_prd = _seed_prd(brief_id=7, insight_index=1, title="Solo PRD")
+
+    resp = client.get("/v1/design-agent/brief-prototype-map", params={"brief_id": 7})
+    assert resp.status_code == 200, resp.text
+    entries = resp.json()["entries"]
+
+    # One entry per insight — NOT one per ready PRD row.
+    assert len(entries) == 2
+    by_insight = {e["insight_index"]: e for e in entries}
+
+    # Insight 0 collapses to the newest PRD only.
+    assert by_insight[0]["prd_id"] == new_prd
+    assert by_insight[0]["prd_title"] == "New PRD"
+
+    # Insight 1 unaffected.
+    assert by_insight[1]["prd_id"] == solo_prd
+
+
 # ─── Workspace isolation ──────────────────────────────────────────────────────
 
 
