@@ -11,9 +11,9 @@ description: >
   ticket breakdown alone (user-stories), or to write the deep technical design
   (tech-spec).
 triggers:
-  - "write a PRD" / "draft a PRD" / "author a PRD"
-  - "spec out this feature" / "turn this brief into a PRD"
-  - "I have a problem + signals, define the product"
+  - '"write a PRD" / "draft a PRD" / "author a PRD"'
+  - '"spec out this feature" / "turn this brief into a PRD"'
+  - '"I have a problem + signals, define the product"'
 when_not_to_use:
   - Reviewing or grading an existing PRD            -> prd-critique
   - Breaking a PRD into agent/human tickets         -> user-stories
