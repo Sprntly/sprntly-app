@@ -28,6 +28,27 @@ const POLL_MS = 5000
 const MAX_POLL_MS = 5 * 60 * 1000 // 5 min ceiling on polling
 
 /**
+ * Same-tab event a caller dispatches the moment it kicks off a brief
+ * regeneration (e.g. the "Regenerate brief" button, shipped in a parallel PR),
+ * so the brief surface starts watching for the in-flight regen immediately —
+ * independent of connector-connect timing. Fire it via {@link notifyBriefRegenerating}.
+ */
+export const BRIEF_REGENERATING_EVENT = "sprntly:brief-regenerating"
+
+/**
+ * Signal that a brief regeneration was just triggered. Any mounted
+ * `useBriefHydration` (i.e. the home surface) then starts its bounded watch and
+ * shows the "refreshing your brief" banner while it runs. No-op during SSR.
+ *
+ * Integration point for the parallel regenerate-button work: call this right
+ * after the regenerate request is accepted.
+ */
+export function notifyBriefRegenerating(): void {
+  if (typeof window === "undefined") return
+  window.dispatchEvent(new Event(BRIEF_REGENERATING_EVENT))
+}
+
+/**
  * On mount, fetch the current brief and push it into ContentContext.
  * If the backend has no brief yet, poll /v1/brief/status until ready
  * (or for at most 5 minutes), then re-fetch.
@@ -36,8 +57,9 @@ const MAX_POLL_MS = 5 * 60 * 1000 // 5 min ceiling on polling
  * The backend keeps `status: "ready"` in that case (so the current brief stays
  * on screen) but flags `regenerating: true`. We surface that as `regenerating`
  * and, when it finishes, re-fetch /current to swap in the fresh brief. The watch
- * (re)starts whenever a connector is added (the connector-connected signal) and
- * also does a one-shot check on mount to catch a reload mid-regeneration.
+ * (re)starts whenever a connector is added (the connector-connected signal) or a
+ * regeneration is kicked off ({@link BRIEF_REGENERATING_EVENT}), and also does a
+ * one-shot check on mount to catch a reload mid-regeneration.
  *
  * Safe to call from anywhere inside the AuthGate. Re-runs on company change.
  */
@@ -47,8 +69,8 @@ export function useBriefHydration(company: string = "asurion"): BriefHydration {
   const [regenerating, setRegenerating] = useState(false)
   const cancelled = useRef(false)
   // Bumped to (re)start the regen watch: >0 means "actively wait for a regen to
-  // appear" (a connector was just added); the initial 0 value only does a
-  // one-shot mount check.
+  // appear" (a connector was just added, or a regeneration was kicked off); the
+  // initial 0 value only does a one-shot mount check.
   const [regenWatchNonce, setRegenWatchNonce] = useState(0)
 
   // ── Initial load + first-run generation polling ────────────────────────────
@@ -188,6 +210,16 @@ export function useBriefHydration(company: string = "asurion"): BriefHydration {
   // Restart the regen watch every time a connector is added, so the "refreshing
   // your brief" indicator appears while the resulting regeneration runs.
   useConnectorConnectedSignal(() => setRegenWatchNonce((n) => n + 1))
+
+  // …and whenever a regeneration is explicitly kicked off (e.g. the parallel
+  // "Regenerate brief" button calling notifyBriefRegenerating), so the banner
+  // shows even without a preceding connector-connect.
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const onRegen = () => setRegenWatchNonce((n) => n + 1)
+    window.addEventListener(BRIEF_REGENERATING_EVENT, onRegen)
+    return () => window.removeEventListener(BRIEF_REGENERATING_EVENT, onRegen)
+  }, [])
 
   return { state, regenerating }
 }
