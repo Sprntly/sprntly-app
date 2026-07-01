@@ -128,8 +128,10 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  * onbstrat):
  *
  *   1. business-info     → BusinessInfo     (onb1: company + product + website
- *                                            + pick-3 success metrics, combined)
- *      [analyzing]       → Analyzing        (unnumbered loader — NOT in this list)
+ *                                            + pick-3 success metrics, combined.
+ *                                            Kicks off the website analysis in
+ *                                            the BACKGROUND on Continue — no
+ *                                            interstitial.)
  *   2. workspace         → Workspace         (onbws: slim, name-only — captures
  *                                            the workspace name and continues.
  *                                            Invites + completion no longer live
@@ -142,9 +144,6 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  *                                            upload — the FINAL step that
  *                                            COMPLETES onboarding + kicks the
  *                                            first brief)
- *
- * The `analyzing` interstitial is deliberately absent: it is an unnumbered,
- * transient route excluded from the progress dots and the step count.
  *
  * The earlier 4-step flow merged product + metrics into TWO routes
  * (business-info → metrics); the redesign combines them into onb1, and re-adds
@@ -168,10 +167,7 @@ export type OnboardingStepSlug = (typeof ONBOARDING_STEP_SLUGS)[number]
 
 export const ONBOARDING_STEP_COUNT = ONBOARDING_STEP_SLUGS.length
 
-/** The unnumbered loader route between business-info (1) and workspace (2). */
-export const ONBOARDING_ANALYZING_SLUG = "analyzing"
-
-/** True for a valid numbered-step slug (excludes `analyzing`). */
+/** True for a valid numbered-step slug. */
 export function isOnboardingStepSlug(slug: string): slug is OnboardingStepSlug {
   return (ONBOARDING_STEP_SLUGS as readonly string[]).includes(slug)
 }

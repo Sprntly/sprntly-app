@@ -1,16 +1,16 @@
 // @vitest-environment jsdom
 //
 // Integrity tests for the semantic-slug onboarding flow (5-step redesign):
-//   business-info → [analyzing] → workspace → connectors → business-context → strategy
+//   business-info → workspace → connectors → business-context → strategy
 // (workspace moved EARLY; strategy is the closing step. The agent-naming
 //  `coworkers` step stays removed; the old metrics + first-brief routes were
-//  folded into business-info + strategy.)
+//  folded into business-info + strategy; the old `analyzing` loader route was
+//  removed — its work now runs in the background from business-info.)
 //
 // Asserts the slug→screen map renders the right component per numbered step (in
 // the right order, no gaps), that an unknown slug falls back to the first step,
-// that the dropped pages are unreachable, that the progress chrome renders
-// exactly ONBOARDING_STEP_COUNT dots with the active one matching the step, and
-// that the loader (analyzing) is NOT a counted step.
+// that the dropped pages are unreachable, and that the progress chrome renders
+// exactly ONBOARDING_STEP_COUNT dots with the active one matching the step.
 import * as React from "react"
 import { cleanup, render } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -28,7 +28,6 @@ vi.mock("../../screens/onboarding", () => ({
   BusinessContext: () => React.createElement("div", { "data-screen": "business-context" }),
   Strategy: () => React.createElement("div", { "data-screen": "strategy" }),
   Workspace: () => React.createElement("div", { "data-screen": "workspace" }),
-  Analyzing: () => React.createElement("div", { "data-screen": "analyzing" }),
 }))
 
 import { OnboardingStep } from "../../../(app)/onboarding/[slug]/OnboardingStep"
@@ -103,8 +102,9 @@ describe("onboarding flow order — slug → screen", () => {
     }
   })
 
-  it("does NOT render the analyzing loader from the numbered slug map", () => {
-    // analyzing is its own route, not part of the numbered [slug] map.
+  it("does NOT render an analyzing screen (the loader route was removed)", () => {
+    // `analyzing` is no longer a route at all — it isn't in the numbered [slug]
+    // map, so an unknown slug renders nothing (and bounces to the first step).
     const { container } = render(
       React.createElement(OnboardingStep, { slug: "analyzing" }),
     )

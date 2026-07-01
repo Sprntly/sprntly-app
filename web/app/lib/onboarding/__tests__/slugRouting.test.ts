@@ -3,16 +3,15 @@
 //   - clampStep      : keeps a persisted (possibly stale 7-step) index in range
 //   - slugForStep    : 1-based index → slug, clamped (resume mapping)
 //   - stepForSlug    : slug → 1-based index (null for non-numbered slugs)
-//   - isOnboardingStepSlug : slug guard (excludes the analyzing loader)
+//   - isOnboardingStepSlug : slug guard (excludes non-step slugs)
 //
 // Plus an integrity check that every Settings / shell onboarding deep-link in
-// the source points at a real onboarding route (a numbered slug or analyzing).
+// the source points at a real onboarding route (a numbered slug).
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 
 import {
-  ONBOARDING_ANALYZING_SLUG,
   ONBOARDING_STEP_COUNT,
   ONBOARDING_STEP_SLUGS,
   clampStep,
@@ -20,6 +19,10 @@ import {
   slugForStep,
   stepForSlug,
 } from "../types"
+
+// The old unnumbered interstitial slug — removed as a named export, kept here as
+// a literal so we still assert it routes like any other non-step slug.
+const ANALYZING_SLUG = "analyzing"
 
 describe("clampStep — out-of-range persisted indices", () => {
   it("keeps in-range steps unchanged", () => {
@@ -75,8 +78,8 @@ describe("stepForSlug — slug → 1-based index", () => {
     })
   })
 
-  it("returns null for the analyzing loader and unknown slugs", () => {
-    expect(stepForSlug(ONBOARDING_ANALYZING_SLUG)).toBeNull()
+  it("returns null for the (removed) analyzing loader and unknown slugs", () => {
+    expect(stepForSlug(ANALYZING_SLUG)).toBeNull()
     expect(stepForSlug("nope")).toBeNull()
   })
 })
@@ -86,7 +89,7 @@ describe("isOnboardingStepSlug", () => {
     for (const slug of ONBOARDING_STEP_SLUGS) {
       expect(isOnboardingStepSlug(slug)).toBe(true)
     }
-    expect(isOnboardingStepSlug(ONBOARDING_ANALYZING_SLUG)).toBe(false)
+    expect(isOnboardingStepSlug(ANALYZING_SLUG)).toBe(false)
     // The removed agent-naming step + folded-in standalone routes are no longer
     // numbered slugs.
     expect(isOnboardingStepSlug("coworkers")).toBe(false)
@@ -98,8 +101,8 @@ describe("isOnboardingStepSlug", () => {
 
 describe("Settings / shell onboarding deep-links are valid routes", () => {
   // Every hardcoded /onboarding/<...> link in these surfaces must resolve to a
-  // real onboarding route: a numbered slug or the analyzing loader. This guards
-  // against a deep-link rotting back to a removed numeric path.
+  // real onboarding route: a numbered slug. This guards against a deep-link
+  // rotting back to a removed numeric path (or the removed analyzing loader).
   const FILES = [
     "components/screens/app/settings/WorkspaceSettings.tsx",
     "components/screens/app/settings/FeatureFlagsSettings.tsx",
@@ -108,12 +111,9 @@ describe("Settings / shell onboarding deep-links are valid routes", () => {
     "components/screens/app/settings/StrategicSettings.tsx",
     "components/shared/CompanySwitcher.tsx",
   ]
-  const VALID = new Set<string>([
-    ...ONBOARDING_STEP_SLUGS,
-    ONBOARDING_ANALYZING_SLUG,
-  ])
+  const VALID = new Set<string>([...ONBOARDING_STEP_SLUGS])
 
-  it("only links to numbered slugs or the analyzing loader", () => {
+  it("only links to numbered slugs", () => {
     const appDir = join(__dirname, "..", "..", "..")
     let linkCount = 0
     for (const rel of FILES) {

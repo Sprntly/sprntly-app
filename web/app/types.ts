@@ -7,9 +7,6 @@ export type ScreenId =
   | "ob-connectors"
   | "ob-business-context"
   | "ob-strategy"
-  // Unnumbered loader interstitial — its own route, excluded from the numbered
-  // ONBOARDING_SCREENS list and the progress dots.
-  | "ob-analyzing"
   | "chat"
   | "chats"
   | "brief"
@@ -30,8 +27,7 @@ export type ScreenId =
   // examples. Design data-view="templates", bookmark icon.
   | "templates"
 
-// The NUMBERED onboarding screens, in flow order. `ob-analyzing` is deliberately
-// absent — it is the unnumbered loader, not a counted step.
+// The NUMBERED onboarding screens, in flow order.
 export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-business-info",
   "ob-workspace",
@@ -67,8 +63,6 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   "ob-connectors": "Setup · Step 3 of 5",
   "ob-business-context": "Setup · Step 4 of 5",
   "ob-strategy": "Setup · Step 5 of 5",
-  // Unnumbered loader — no step counter.
-  "ob-analyzing": "Setup",
   chat: "Home",
   chats: "All chats",
   brief: "Weekly brief",

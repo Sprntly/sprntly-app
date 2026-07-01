@@ -1,18 +1,13 @@
 // Slug-routing integrity for the semantic-routes onboarding flow. The flow is
 // the product-approved 5-step redesign (business-info → workspace → connectors →
-// business-context → strategy) plus an unnumbered `analyzing` loader. The
-// earlier `metrics` and `first-brief` routes were folded in (metrics →
-// business-info; brief generation → strategy); the agent-naming `coworkers`
-// step stays removed. These guard the total step count, the
-// slug↔screen mapping (no gaps, dropped pages gone), and that the loader is
-// excluded from the numbered screen list / progress dots.
+// business-context → strategy). The earlier `metrics` and `first-brief` routes
+// were folded in (metrics → business-info; brief generation → strategy); the
+// agent-naming `coworkers` step and the old unnumbered `analyzing` loader both
+// stay removed. These guard the total step count and the slug↔screen mapping
+// (no gaps, dropped pages gone).
 import { describe, expect, it } from "vitest"
 
-import {
-  ONBOARDING_STEP_COUNT,
-  ONBOARDING_STEP_SLUGS,
-  ONBOARDING_ANALYZING_SLUG,
-} from "../types"
+import { ONBOARDING_STEP_COUNT, ONBOARDING_STEP_SLUGS } from "../types"
 import { screenIdFromPathname, SCREEN_PATH } from "../../routes"
 import { ONBOARDING_SCREENS } from "../../../types"
 
@@ -59,15 +54,11 @@ describe("onboarding slug routing", () => {
     expect(screenIdFromPathname("/onboarding/coworkers")).toBe("chat")
   })
 
-  it("the analyzing interstitial is NOT a numbered onboarding step", () => {
-    // /onboarding/analyzing is a transient, unnumbered route — it resolves to
-    // its own ob-analyzing ScreenId, which is deliberately EXCLUDED from the
-    // numbered ONBOARDING_SCREENS list (so it's off the progress-dot count).
+  it("the removed analyzing interstitial no longer resolves to a screen", () => {
+    // The website analysis now runs in the BACKGROUND from business-info; the
+    // old `/onboarding/analyzing` loader route is gone, so its path falls
+    // through to chat and there is no ob-analyzing screen anymore.
     expect(ONBOARDING_SCREENS).not.toContain("ob-analyzing")
-    const analyzingScreen = screenIdFromPathname(
-      `/onboarding/${ONBOARDING_ANALYZING_SLUG}`,
-    )
-    expect(analyzingScreen).toBe("ob-analyzing")
-    expect(ONBOARDING_SCREENS.includes(analyzingScreen)).toBe(false)
+    expect(screenIdFromPathname("/onboarding/analyzing")).toBe("chat")
   })
 })

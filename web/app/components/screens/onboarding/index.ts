@@ -1,6 +1,5 @@
 export { YourName } from "./YourName"
 export { BusinessInfo } from "./BusinessInfo"
-export { Analyzing } from "./Analyzing"
 // Metrics is no longer a standalone numbered route — its pick-3 view + helpers
 // are reused inline by BusinessInfo (onb1). Kept exported for that reuse + tests.
 export { Metrics } from "./Metrics"

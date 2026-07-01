@@ -75,6 +75,7 @@ export function makeOnboardingCtx(over: Record<string, unknown> = {}) {
     setWorkspace: () => {},
     websiteAnalysis: null,
     setWebsiteAnalysis: () => {},
+    startWebsiteAnalysis: () => {},
     ...over,
   }
 }
