@@ -1,70 +1,138 @@
 ---
 name: prd-author
-description: Turn a feature idea, request, or problem into a lean, human-readable Product Requirements Document for alignment and decisions — problem, evidence, goals, success metrics, scope/non-goals, scenarios, requirements, risks, and a testable "done when." Use when the user says "write a PRD", "draft a spec", "turn this into requirements", "I need a PRD for X", or describes a feature to build. The PRD intent is the only required input; problem evidence / design system / prototype / codebase are optional grounding that raise fidelity and reduce hallucination. Refuses to start from the solution and never invents a number, business rule, or metric — unknowns are labeled or escalated. Pairs with implementation-spec (this = what & why; that = how it's built, on demand).
+description: >
+  Author a Product Requirements Document from a problem, a set of signals, and
+  (optionally) a codebase or prior spec. Produces a two-part artifact: Part A, a
+  lean human-readable PRD, and Part B, a machine-readable Implementation Spec an
+  engineering agent can execute. Use when the user says "write a PRD", "draft a
+  spec for this feature", "turn this brief into a PRD", or hands you an evidence
+  brief / problem statement and asks for a definition document. Do NOT use to
+  critique an existing PRD (that's prd-critique), to produce the engineering
+  ticket breakdown alone (user-stories), or to write the deep technical design
+  (tech-spec).
+triggers:
+  - "write a PRD" / "draft a PRD" / "author a PRD"
+  - "spec out this feature" / "turn this brief into a PRD"
+  - "I have a problem + signals, define the product"
+when_not_to_use:
+  - Reviewing or grading an existing PRD            -> prd-critique
+  - Breaking a PRD into agent/human tickets         -> user-stories
+  - Deep technical/architecture design              -> tech-spec
+  - Pure prioritization of multiple initiatives     -> prioritize
+inputs:
+  required:
+    - problem: a problem statement, brief, or evidence brief
+  optional:
+    - signals: quantitative + qualitative evidence (links, metrics, quotes)
+    - codebase: repo access or file tree (enables real contracts instead of assumptions)
+    - prior_spec: an existing Part B to inherit acceptance criteria from
+  degradation:
+    - No signals       -> write the PRD, flag every metric/baseline with [NEED: …]
+    - No codebase      -> label all interface/data contracts [ASSUMPTION → T0]
+    - No prior_spec    -> generate Part B fresh; mark unresolved product calls [ESCALATE]
+outputs:
+  - Part A: human PRD (lean body, operational detail in appendices)
+  - Part B: Implementation Spec (EARS requirements, dependency-ordered tasks, spec-first tests, verification)
+guardrails:
+  - NO INVENTED NUMBERS. If a baseline, target, or rate isn't in the signals, write [NEED: …]. Never fabricate.
+  - SIGNAL-LINKING IS NON-NEGOTIABLE. Every requirement and metric traces to a signal, a decision, or an explicit [ASSUMPTION]/[ESCALATE]. No orphan claims.
+  - NAME THE RISKIEST ASSUMPTION. Exactly one, with a three-line pre-mortem. Don't bury it in a risk table.
+  - PROTECT INTENT, RICHNESS, AND VOICE. Lean ≠ generic. Preserve the author's domain insight; cut bloat, not substance.
+  - REQUIREMENTS GO IN A TABLE. Always. (ID | Requirement | Priority | Signal/Source | Acceptance.)
+  - DON'T GUESS PRODUCT DECISIONS. Mark them [ESCALATE] and route to a human owner.
 ---
 
-# PRD Author — the human-readable PRD
+---
 
-## What it does
-Produces a **human-readable Product Requirements Document**: problem, evidence, goals, success metrics, scope/non-goals, scenarios, requirements, risks, and a testable "done when." For stakeholder alignment and decisions.
+# prd-author
 
-It refuses to start from the solution (forces a real problem and measurable goals first), and it **never invents** a requirement, business rule, or metric — unknowns are labeled, escalated, or routed to research, never guessed.
+Author a PRD that a human can approve and an agent can execute. The output is
+**two parts**: a lean human PRD (Part A) and a machine-readable Implementation
+Spec (Part B). Part A is for the reader; Part B is a schema that enforces
+traceability and completeness — its structure matters for that reason, not for
+looks.
 
-**The one hard dependency is the PRD intent itself.** Everything else — problem evidence, a design system/Figma, a prototype, the codebase — is *optional grounding*: each artifact present converts a class of assumptions into sourced facts; each absent becomes a clearly-labeled gap, never a fabrication. The skill produces a complete, usable document from the intent alone.
+## Operating modes
 
-The machine-readable, agent-executable half (EARS requirements, contracts, dependency-ordered tasks, acceptance tests) is **NOT** produced here — it is the separate `implementation-spec` skill, generated on demand from this approved PRD when the work is actually handed to a coding agent.
+**Prose mode (default).** You have a problem and some signals, no prior spec.
+Write Part A in full, then generate Part B fresh.
 
-## When to use / when NOT to use
-- **Use** to specify a feature/problem for humans to align on and decide.
-- **Do NOT use** to produce the machine-readable build spec (`implementation-spec` — fed this PRD), to *critique* an existing PRD (`prd-critique`), to deep-design system architecture (`tech-spec`), or to cut human tracker tickets (`user-stories`).
+**Spec-aware mode.** A prior Part B (or tech-spec) exists. *Inherit* acceptance
+criteria from it rather than re-deriving them — trace each requirement back to
+its prior task/requirement ID. Add `[ESCALATE]` decision tickets for anything
+the prior spec left unresolved.
 
-## Inputs
-- **Required:** a feature idea OR problem (one line is enough).
-- **Optional grounding (each raises fidelity, none required):** target user/segment, **problem evidence**, current metric/baseline, **design system / Figma**, **prototype**, **codebase**, constraints (timeline, platform, compliance), the project **constitution** (engineering standards/conventions/prior decisions — in Sprntly from `business-context`/knowledge graph). *Missing optional inputs are derived from the PRD or labeled `[ASSUMPTION]` — never asked of a human mid-run, never invented.*
+## Method
 
-## Method (methodology)
-Grounded in Cagan/SVPG (problem before solution), Amazon Working Backwards, and Shreyas Doshi (pre-mortem + metric guardrails). Keep the body lean — operational detail (A/B mechanics, tech notes, competitor scans, detailed rollout) moves to appendices, present but out of the critical reading path.
+1. **Restate the problem with evidence.** One or two sentences, then the signals
+   that establish it. If a signal type is missing, say so — don't pad. Surface
+   the single interpretation assumption you're making about scope up front, so it
+   can be corrected before everything downstream inherits it.
+2. **Set goals and metrics.** Split a **primary metric** from **guardrail
+   metrics** (the things you must not break to move the primary). Give each a
+   formula and an explicit baseline. Unknown baseline → `[NEED: …]`. Do not
+   collapse primary and guardrails into one list.
+3. **Declare non-goals.** What this explicitly does not do this cycle. A PRD with
+   no non-goals is under-scoped.
+4. **Users & scenarios.** Who, in what situation, hitting what. Concrete, not
+   personas-for-decoration.
+5. **Requirements — in a table.** `ID | Requirement | Priority | Signal/Source |
+   Acceptance`. Every row links to a signal or carries an explicit
+   `[ASSUMPTION → T0]` / `[ESCALATE]`. This is the spine; keep the prose around
+   it thin.
+6. **Risks + the riskiest assumption.** A short risk table, then **one** named
+   riskiest assumption with a three-line pre-mortem (what we believe / how it
+   fails / what we'd see first if it's wrong).
+7. **Open questions.** Real unknowns with owners, not rhetorical ones.
+8. **Rollout & measurement.** Phasing, the read-out plan, and how you'll know it
+   worked. Detailed mechanics go to an appendix.
+9. **Done-when.** The crisp exit condition for the cycle.
 
-1. **De-smuggle the problem.** Restate the request as a problem naming the user, job, and pain — no embedded solution. Surface up front the single interpretation assumption you're making about scope, so it can be corrected before everything downstream inherits it.
-2. **Anchor the outcome.** Split a **primary success metric** (baseline + target if known) from **1–2 guardrail metrics** (the things you must not break to move the primary). Give each a formula and an explicit baseline; unknown baseline → `[NEED: …]`. No vanity metrics; don't collapse primary and guardrails into one list.
-3. **Scope & non-goals.** What's in v1 + an explicit non-goals list; push extra scope to "later." A PRD with no non-goals is under-scoped.
-4. **Users & scenarios.** Who, in what situation, hitting what — concrete, not personas-for-decoration. Include key states (empty / error / edge). Reference, don't pixel-design.
-5. **Requirements.** Each functional requirement names its data source, business rule, and exception handling, and links to a signal or carries an explicit `[ASSUMPTION → T0]` / `[ESCALATE]`. **Never invent a business rule the team hasn't confirmed** — mark `[ASSUMPTION]` or open question. Tag the load-bearing branches inline so the downstream spec inherits them: `[edge case]` and `[failure]` where they matter.
-6. **Risks + the riskiest assumption.** A short risk list, then **one** named riskiest assumption with a three-line pre-mortem (what we believe / how it fails / what we'd see first if it's wrong). Don't bury it in a table.
-7. **Open questions.** Real unknowns with owners, not rhetorical ones; product decisions the PRD can't make are `[ESCALATE]`.
-8. **Rollout & measurement.** Phasing (flag / % / cohort), the read-out plan (how and when the §2 metrics are read), and the kill criteria. Detailed schedules and A/B mechanics go to an appendix.
-9. **Done-when.** A testable exit condition for the cycle.
+Keep the body lean. A/B mechanics, tech-stack notes, competitor scans, and
+detailed rollout schedules move to **appendices** — present but out of the
+critical reading path.
 
 ## Output spec
-A single **lean Markdown** document (no typed `:::` blocks) in the order of `templates/prd-template.md`: a title + one-line summary + an Author/Status/Date line, then **1. Problem & evidence · 2. Goals & metrics** (primary split from guardrails, with baselines) **· 3. Non-goals · 4. Users & scenarios · 5. Requirements · 6. Risks & riskiest assumption** (3-line pre-mortem) **· 7. Open questions** (owners) **· 8. Rollout & measurement · 9. Done-when**. **Requirements go in a single Markdown table** — `ID | Requirement | Priority | Signal/Source | Acceptance (Given/When/Then)` — with `[edge case]` / `[failure]` tags inline on load-bearing rows so the `implementation-spec` skill inherits them (acceptance lives in the table's last column, not a separate section). Keep the body lean; push operational detail to appendices. **Optional Word export** via the `docx` skill.
 
-## Sprntly integration (optional)
-- **Inputs from Sprntly:** problem + ranked evidence from the Weekly Brief; the **constitution from `business-context`/knowledge graph** (so the PM agent inherits engineering constraints, never re-asks); DS/Synthesis agents' analysis; the connected codebase/design system/prototype as grounding.
-- **Outputs to Sprntly:** the human PRD for approval; metrics registered to the outcome graph; trust-ladder stage = `Alpha (PRD draft)`; `[ESCALATE]` items raised as the only human/agent decisions required. When the approved PRD is handed to a coding agent, the `implementation-spec` skill generates the machine-readable spec from it on demand.
-- **Degrades to:** PRD-only — produces a complete document from the idea alone, labeling every optional-artifact gap.
+```
+PART A — <Feature> PRD
+  One-line summary
+  Authors · Status · Priority · Last updated [NEED if absent]
+  1. Problem (with evidence)
+  2. Goals & Metrics  (primary | guardrails, with formulas + baselines)
+  3. Non-goals
+  4. Users & scenarios
+  5. Requirements  (TABLE: ID | Requirement | Priority | Signal/Source | Acceptance)
+  6. Risks + Riskiest Assumption (3-line pre-mortem)
+  7. Open questions (owners)
+  8. Rollout & measurement
+  9. Done-when
+  Appendices: A/B plan, tech notes, competitor scan, full rollout, risk detail
+```
 
-## Quality checklist (the bar)
-- [ ] **Works from the intent alone**; fewer artifacts → more labeled assumptions, never more invention.
-- [ ] Problem has no smuggled solution; the single scope-interpretation assumption is stated up front.
-- [ ] Primary metric is separated from guardrails; each has a formula and a baseline (or `[NEED: …]`) — zero invented numbers.
-- [ ] Non-goals present; scope is one release; "done when" is testable.
-- [ ] Every requirement links to a signal, decision, or explicit `[ASSUMPTION]`/`[ESCALATE]`; no orphan claims; `[edge case]`/`[failure]` tagged where load-bearing.
-- [ ] Exactly one riskiest assumption is named with a three-line pre-mortem.
-- [ ] Open questions have owners; product decisions the PRD can't make are `[ESCALATE]`, not guessed.
-- [ ] Body is lean; operational detail is in appendices; author's intent, domain richness, and voice are preserved.
+## Quality bar (self-check before returning)
 
-## Known gaps / limitations
-- Formalizes the input — a wrong PRD yields precise-but-wrong output; the checks catch fabrication and gaps, not bad intent (pair with `prd-critique`/`continuous-discovery` upstream).
-- A labeled `[ASSUMPTION]` is only as good as the reviewer who confirms it; the PRD surfaces gaps, it doesn't resolve them.
-- "Done when" is only a real check where the exit condition is observable; otherwise it's an aspiration.
+- [ ] Every metric has a formula and a baseline (or a `[NEED: …]` flag) — zero invented numbers.
+- [ ] Every requirement traces to a signal, decision, or explicit assumption/escalation.
+- [ ] Primary metric is separated from guardrails.
+- [ ] Non-goals are present.
+- [ ] Exactly one riskiest assumption is named with a pre-mortem.
+- [ ] Requirements are in a table.
+- [ ] Body is lean; operational detail is in appendices.
+- [ ] Part B EARS requirements all trace to Part A IDs.
+- [ ] Every product decision the spec couldn't make is `[ESCALATE]`, not guessed.
+- [ ] Author's intent, domain richness, and voice are preserved.
 
-## Worked example
-**Input:** "We keep losing enterprise accounts; build better collaboration." (intent only — no design system, no codebase.)
-**Output (abridged):**
-- **Problem:** >50-seat accounts churn; exit surveys cite no real-time co-edit `[ASSUMPTION: primary driver — confirm vs churn data]`.
-- **Goals & metrics:** primary = logo churn 4.2%→3.4%/qtr; guardrail = p95 doc-load latency (must not regress).
-- **Non-goals:** offline, permissions redesign.
-- **Requirements:** "two users edit the same doc → non-conflicting edits merge, overlaps surface a conflict UI" `[edge case]`; "realtime channel drops → queue local edits, reconcile on reconnect" `[failure]`.
-- **Riskiest assumption:** real-time co-edit is the churn driver — *we believe* exit surveys; *it fails* if churn is really about price; *first signal* would be pilots citing cost, not collaboration.
-- **Open questions:** `[ESCALATE]` which document types ship in v1 — a product decision.
-- **Done-when:** 2 design partners run a 2-wk pilot and cite it for a renewal.
+## Worked example (abridged)
+
+**Input:** a brief for emoji support in the Facebook Boost Post composer, no
+metric baselines available, no codebase access.
+
+**Output:** Part A in the 9-section structure — interpretation assumption stated
+up front ("emoji *inside* the composer's creative fields", not a new emoji ad
+unit); all metric baselines flagged `[NEED: …]`; riskiest assumption =
+cross-placement emoji rendering consistency, with a three-line pre-mortem;
+requirements in a table. Part B — EARS requirements traced to Part A IDs, all
+interface contracts `[ASSUMPTION → T0]` (no codebase), four product decisions
+`[ESCALATE]`, spec-first tests covering success and failure branches, and a
+verification section confirming zero invented contracts.
