@@ -66,7 +66,12 @@ class GraphFacade:
             "config": source.config,
             "status": source.status,
         }
-        self._tbl("kg_source").insert(row).execute()
+        # Idempotent by id: source ids are DETERMINISTIC (e.g. corpus docs use
+        # uuid5("corpus-doc|{company}|{sha}")), so a plain insert throws a
+        # duplicate-key (23505) on every re-seed of an unchanged doc — which used
+        # to abort corpus seeding and leave the brief empty. Upsert makes a re-seed
+        # (or a concurrent pipeline run racing on the same id) a no-op-y update.
+        self._tbl("kg_source").upsert(row, on_conflict="id").execute()
         return source
 
     def create_entity(self, enterprise_id: str, entity: Entity) -> Entity:

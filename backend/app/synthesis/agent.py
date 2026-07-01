@@ -61,6 +61,19 @@ class EmptyKnowledgeGraphError(ValueError):
     unaffected.
     """
 
+
+class BriefCompositionError(RuntimeError):
+    """Raised when the weekly-brief compose step yields ZERO insights even though
+    the evidence gate passed and there were ranked candidates to compose from.
+
+    This is NOT the benign "not enough evidence" outcome (that path is
+    `_save_empty_brief`, taken earlier, and is a valid empty brief). Reaching the
+    compose step with candidates but getting nothing back means a transient
+    LLM/compose failure — so we must NOT persist a blank brief over a possibly
+    good prior one. Callers fail the run and keep the previous brief instead.
+    """
+
+
 _BRIEF_SCHEMA = {
     "type": "object",
     "properties": {
@@ -535,6 +548,20 @@ def run_synthesis(
     # no information). Unit-mixing is steered by the prompt; this guard catches
     # the deterministic no-information cases.
     _sanitize_chart_hints(insights)
+
+    # GUARD: we passed the evidence gate and had ranked candidates, so an empty
+    # composition here is a transient compose/LLM failure — NOT a valid empty
+    # brief (that path is `_save_empty_brief`, taken earlier). Persisting this
+    # would overwrite a possibly-good prior brief with a blank one that still
+    # reports "completed" — the exact bug where the UI silently shows no brief.
+    # Fail instead so the caller keeps the previous brief and can retry.
+    if not insights:
+        raise BriefCompositionError(
+            f"weekly-brief compose returned 0 insights for {enterprise_id} "
+            f"despite {len(cands)} ranked candidate(s) — treating as a transient "
+            "compose failure, not persisting a blank brief"
+        )
+
     by_id = {c.theme_id: c for c in cands}
 
     # LEDGER: each chosen insight becomes a hypothesis Entity w/ SUPPORTS edges.

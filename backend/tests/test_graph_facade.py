@@ -323,3 +323,31 @@ def test_flush_decision_log_is_safe_to_call(isolated_settings):
     rows = isolated_settings["supabase"].table("agent_decision_log") \
         .select("*").eq("enterprise_id", "ent-A").execute().data
     assert len(rows) == 1  # inline-under-pytest: row is present immediately
+
+
+def test_create_source_is_idempotent_on_duplicate_id(facade):
+    """create_source upserts by id, so re-seeding an unchanged doc (deterministic
+    id) is a no-op update, not a duplicate-key crash.
+
+    Regression: a plain INSERT threw 23505 on every re-seed of an unchanged
+    corpus doc, aborting seeding and leaving the brief empty. See
+    facade.create_source / synthesis_brief._seed_from_corpus.
+    """
+    from app.graph import Source
+
+    src = Source(
+        enterprise_id="ent-A", source_type="corpus_doc", label="doc-1",
+        config={"content_sha": "abc"}, id="fixed-source-id",
+    )
+    facade.create_source("ent-A", src)
+    # Second call with the SAME id must not raise (previously duplicate-key).
+    updated = Source(
+        enterprise_id="ent-A", source_type="corpus_doc", label="doc-1-relabeled",
+        config={"content_sha": "abc"}, id="fixed-source-id",
+    )
+    facade.create_source("ent-A", updated)  # no exception
+
+    rows = facade.list_sources("ent-A", source_type="corpus_doc")
+    assert len(rows) == 1                      # one row, not two
+    assert rows[0].id == "fixed-source-id"
+    assert rows[0].label == "doc-1-relabeled"  # upsert applied the new values

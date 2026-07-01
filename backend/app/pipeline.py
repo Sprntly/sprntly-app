@@ -82,6 +82,17 @@ async def run_full_pipeline(
         if run_id:
             update_run_stage(run_id, "brief", stage5)
 
+        # The brief IS the point of the run: if its stage errored (e.g. a
+        # transient compose failure), the run failed — don't report "completed"
+        # with a blank/absent brief. A benign "skipped" (no data yet) is fine.
+        if stage5.get("status") == "error":
+            result["status"] = "failed"
+            result["error"] = stage5.get("error") or "brief generation failed"
+            if run_id:
+                fail_run(run_id, result["error"])
+            result["run_id"] = run_id
+            return result
+
         result["status"] = "completed"
         if run_id:
             complete_run(run_id)
@@ -301,11 +312,27 @@ async def _stage_brief_generation(dataset: str) -> dict[str, Any]:
     t0 = time.time()
 
     try:
-        from app.synthesis.agent import EmptyKnowledgeGraphError
+        from app.synthesis.agent import (
+            BriefCompositionError,
+            EmptyKnowledgeGraphError,
+        )
         from app.synthesis_brief import generate_brief_for
 
         try:
             await asyncio.to_thread(generate_brief_for, dataset)
+        except BriefCompositionError as exc:
+            # Compose returned 0 insights on real candidates — a transient
+            # failure. run_synthesis already declined to persist a blank brief
+            # (the prior brief is preserved), so surface this as an error stage
+            # (which fails the run) rather than a silent "completed".
+            logger.warning("pipeline: brief compose failed for %s: %s", dataset, exc)
+            return {
+                "status": "error",
+                "reason": "brief_compose_failed",
+                "error": str(exc),
+                "engine": "synthesis",
+                "duration_s": round(time.time() - t0, 1),
+            }
         except EmptyKnowledgeGraphError:
             # Benign: nothing ingested yet. Not a pipeline failure — the
             # user just needs to connect a source or upload files first.

@@ -1571,3 +1571,32 @@ def test_skill_registered_non_routable_in_catalog():
     entry = next(e for e in build_manifest() if e["id"] == "weekly-brief")
     assert entry["routable"] is False
     assert entry["category"]
+
+
+def test_run_synthesis_empty_compose_raises_and_persists_nothing(facade, isolated_settings):
+    """When the weekly-brief compose step returns ZERO insights despite real
+    ranked candidates (a transient LLM/compose failure), run_synthesis raises
+    BriefCompositionError and does NOT persist a blank brief over the prior one.
+
+    Regression: an empty compose result was saved as a `completed`, is_current
+    brief with blank greeting/headline/insights — so the UI silently showed no
+    brief. This is DISTINCT from the evidence-gate empty brief (_save_empty_brief),
+    which is a valid outcome and is taken earlier for insufficient evidence.
+    """
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    assert theme  # evidence gate passes with this multi-source seed (see above)
+
+    empty_compose = {"summary_headline": "", "greeting": "", "insights": [], "cards": []}
+    with patch.object(synth, "llm_call", return_value=_llm_result(empty_compose)):
+        with pytest.raises(synth.BriefCompositionError):
+            synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    # No brief row persisted — a possibly-good prior brief is left untouched.
+    rows = isolated_settings["supabase"].table("briefs").select("*") \
+        .eq("dataset", "acme").execute().data
+    assert rows == []
