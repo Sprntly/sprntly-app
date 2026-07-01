@@ -62,17 +62,19 @@ function canSaveOnb1Metrics(picked: SupportingMetric[]): boolean {
  *      seeding logic the standalone metrics page used (now lifted into the
  *      shared Metrics view + helpers).
  *   2. On Continue we (a) persist the workspace + primary product, (b) PUT the
- *      3–5 picks to the KPI tree, then navigate to the blocking
- *      `/onboarding/analyzing` interstitial (it awaits the website analysis and
- *      forwards to the next numbered step, connectors).
+ *      3–5 picks to the KPI tree, (c) kick off the website analysis in the
+ *      BACKGROUND (fire-and-forget — no interstitial), then navigate straight to
+ *      the next numbered step (workspace).
  *
- * The website analysis still runs from the interstitial; here we only seed the
- * picker from whatever analysis result is already available so the PM sees
- * sensible candidates immediately.
+ * The website analysis runs server-side and lands on the onboarding context for
+ * the later business-context step to read; here we only seed the picker from
+ * whatever analysis result is already available so the PM sees sensible
+ * candidates immediately.
  */
 export function BusinessInfo() {
   const auth = useAuth()
-  const { workspace, refresh, setWorkspace, websiteAnalysis, loading } = useOnboarding()
+  const { workspace, refresh, setWorkspace, websiteAnalysis, startWebsiteAnalysis, loading } =
+    useOnboarding()
   const router = useRouter()
   // Restore draft from localStorage (survives tab switches)
   const draft = loadDraft(DRAFT_KEY)
@@ -250,8 +252,8 @@ export function BusinessInfo() {
       // onb1 captures company + product + website + the metric picks only. The
       // tech stack and predicted industry / business type are confirmed later in
       // the business-context step, so we no longer write them here. (industry /
-      // business_type are still auto-drafted server-side from the website during
-      // the /analyzing interstitial that follows.)
+      // business_type are still auto-drafted server-side from the website by the
+      // background analysis kicked off on Continue below.)
       const companyPayload = { companyName, productName, productWebsite: website }
       let ws = workspace
       if (workspace) {
@@ -284,9 +286,13 @@ export function BusinessInfo() {
       }
       clearDraft(DRAFT_KEY)
       if (andContinue) {
-        // Route to the blocking analyzing interstitial; it runs the website
-        // analysis and forwards to the workspace step.
-        router.push("/onboarding/analyzing")
+        // Kick off the website analysis in the BACKGROUND (no interstitial) and
+        // go straight to the next numbered step. The job runs server-side and
+        // the onboarding provider outlives this navigation, so the result lands
+        // on context for the business-context step to read — the PM never waits
+        // on a "Gathering information…" loader.
+        if (ws) startWebsiteAnalysis(ws.product?.website ?? website, ws.id)
+        router.push("/onboarding/workspace")
       } else {
         await refresh()
       }

@@ -3,10 +3,11 @@
 // Container-level mount test for the onboarding step 01 — "Tell us about your
 // product" (design scene onb1). The 5-step redesign COMBINES product + metrics
 // onto this one screen:
-//   - renders the new .onb-card design WITH the pick-3 metric picker inline,
-//   - NO LONGER fires the website analysis in the background, and
-//   - on Continue persists the workspace + KPI-tree picks then navigates to the
-//     BLOCKING /onboarding/analyzing interstitial (which runs the analysis).
+//   - renders the new .onb-card design WITH the pick-3 metric picker inline, and
+//   - on Continue persists the workspace + KPI-tree picks, kicks off the website
+//     analysis in the BACKGROUND (via the onboarding context's
+//     startWebsiteAnalysis — no interstitial), then navigates straight to the
+//     next numbered step, /onboarding/workspace.
 // Mounts the real container under jsdom with mocked auth/onboarding/router/store.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
@@ -205,11 +206,17 @@ describe("BusinessInfo (container) — Product + metrics page", () => {
     expect("teamSize" in payload).toBe(false)
   })
 
-  it("Continue persists the workspace + KPI picks then navigates to the analyzing interstitial (no background analysis)", async () => {
+  it("Continue persists the workspace + KPI picks, fires the background analysis, then navigates to the workspace step", async () => {
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     createWorkspaceMock.mockResolvedValue(makeWorkspace())
     kpiTreePutMock.mockResolvedValue({ ok: true, version: 1 })
-    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: null }))
+    const startWebsiteAnalysisMock = vi.fn()
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: null,
+        startWebsiteAnalysis: startWebsiteAnalysisMock,
+      }),
+    )
 
     render(React.createElement(BusinessInfo))
 
@@ -232,9 +239,15 @@ describe("BusinessInfo (container) — Product + metrics page", () => {
     expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
     // The 3 seeded metric picks are persisted to the KPI tree on this screen.
     expect(kpiTreePutMock).toHaveBeenCalledTimes(1)
-    // Analysis is NOT fired from this page anymore — the interstitial owns it.
+    // The website analysis is kicked off in the BACKGROUND via the context —
+    // there is no interstitial route anymore. It runs against the created
+    // workspace (id "ws-1") and the entered website.
+    expect(startWebsiteAnalysisMock).toHaveBeenCalledTimes(1)
+    expect(startWebsiteAnalysisMock).toHaveBeenCalledWith("https://acme.com", "ws-1")
+    // BusinessInfo itself never POSTs the analysis directly.
     expect(analyzeWebsiteMock).not.toHaveBeenCalled()
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/analyzing")
+    // Straight to the next numbered step — no /onboarding/analyzing detour.
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
   })
 
   it("blocks Continue (and does not navigate) when required fields are empty", async () => {

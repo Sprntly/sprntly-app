@@ -18,8 +18,9 @@ import {
  * The ordered onboarding step list — the single source of truth pairing each
  * semantic slug with its screen component, in flow order (5-step redesign):
  *
- *   1. business-info     → BusinessInfo    (onb1: product + pick-3 metrics)
- *      [analyzing]       → Analyzing       (its own /onboarding/analyzing route, NOT here)
+ *   1. business-info     → BusinessInfo    (onb1: product + pick-3 metrics;
+ *                                           kicks off the website analysis in the
+ *                                           background on Continue)
  *   2. workspace         → Workspace       (onbws: slim, name-only — continues)
  *   3. connectors        → Connectors      (onb4: connect your tools)
  *   4. business-context  → BusinessContext (onbctx: auto-drafted, editable)
@@ -27,8 +28,7 @@ import {
  *                                           the FINAL step — completes onboarding)
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
- * `onboarding_step` is the 1-based index into both). The analyzing interstitial
- * is deliberately absent — it is an unnumbered route with its own folder.
+ * `onboarding_step` is the 1-based index into both).
  */
 export const ONBOARDING_STEPS: ReadonlyArray<{
   slug: OnboardingStepSlug

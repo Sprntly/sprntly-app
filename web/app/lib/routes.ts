@@ -1,8 +1,5 @@
 import type { ScreenId } from "../types"
-import {
-  ONBOARDING_ANALYZING_SLUG,
-  ONBOARDING_STEP_SLUGS,
-} from "./onboarding/types"
+import { ONBOARDING_STEP_SLUGS } from "./onboarding/types"
 
 /** Base path for the prototype surface. The prototype canvas renders in-tab at
  *  `/prototype?prd=<id>` (the PRD context is carried as a query param); there is
@@ -52,7 +49,6 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-connectors": "/onboarding/connectors",
   "ob-business-context": "/onboarding/business-context",
   "ob-strategy": "/onboarding/strategy",
-  "ob-analyzing": `/onboarding/${ONBOARDING_ANALYZING_SLUG}`,
   chat: "/",
   chats: "/chats",
   brief: "/brief",
@@ -99,8 +95,6 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
 for (const slug of ONBOARDING_STEP_SLUGS) {
   PATH_TO_SCREEN[`/onboarding/${slug}`] = `ob-${slug}` as ScreenId
 }
-// The unnumbered loader route resolves to its own ScreenId.
-PATH_TO_SCREEN[`/onboarding/${ONBOARDING_ANALYZING_SLUG}`] = "ob-analyzing"
 
 /** Normalize pathname from `usePathname()` (strip trailing slash). */
 export function normalizePathname(pathname: string | null): string {
