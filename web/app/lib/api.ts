@@ -324,6 +324,14 @@ export const backlogApi = {
   /** Move one item to a new status (in_progress | done | dismissed). */
   setStatus: (itemId: string, status: Exclude<BacklogStatus, "backlog">) =>
     api.patch<BacklogItem>(`/v1/backlog/${encodeURIComponent(itemId)}`, { status }),
+  /** Create a user-added backlog item ("+ Add idea"). `tag` is an optional
+   *  BacklogTag when the idea-type maps cleanly, else null. Returns the row. */
+  create: (title: string, tag: BacklogTag | null = null) =>
+    api.post<BacklogItem>("/v1/backlog", { title, tag }),
+  /** Persist a new rank order (drag-to-rerank / Re-sequence). `orderedIds` is
+   *  the full visible order; each item's rank becomes its position. */
+  reorder: (orderedIds: string[]) =>
+    api.post<BacklogList>("/v1/backlog/reorder", { ordered_ids: orderedIds }),
 }
 
 export type AskCitation = { source: string; evidence: string }
@@ -1250,6 +1258,15 @@ export const prdApi = {
     api.post<PrdStartResponse>("/v1/prd/generate", {
       brief_id: briefId,
       insight_index: insightIndex,
+      force,
+    }),
+  /** Kick off PRD generation for a BACKLOG item (a theme ranked ≥ 4, not in the
+   *  brief's top-3). Same fire-and-forget contract as `generate`: returns a
+   *  prd_id to poll via prdApi.get(id). The backend synthesizes the insight from
+   *  the backlog row and grounds it on the company's current brief. */
+  generateFromBacklog: (backlogItemId: string, force = false) =>
+    api.post<PrdStartResponse>("/v1/prd/generate-from-backlog", {
+      backlog_item_id: backlogItemId,
       force,
     }),
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */

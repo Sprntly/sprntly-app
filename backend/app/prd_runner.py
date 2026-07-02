@@ -185,10 +185,15 @@ def _corpus_grounding(dataset: str) -> str:
     return _CORPUS_BLOCK.format(corpus=corpus.joined())
 
 
-def _kg_trail(dataset: str, brief: dict, insight_index: int) -> dict | None:
+def _kg_trail(
+    dataset: str, brief: dict, insight_index: int, insight: dict | None = None
+) -> dict | None:
     """Best-effort KG evidence trail for the insight. Returns the trail dict
     (when it has KG backing) or None when there's no tenant context, the trail
     is empty, or any read fails — the caller then grounds on the corpus.
+
+    `insight` overrides brief.insights[insight_index] (the backlog PRD path);
+    when None the insight is read from the brief at insight_index.
 
     Resilient by construction: a slug that owns no company, an empty KG, a fake
     backend with no pgvector, or any read error all collapse to None so the PRD
@@ -199,7 +204,9 @@ def _kg_trail(dataset: str, brief: dict, insight_index: int) -> dict | None:
         return None
     try:
         facade = GraphFacade()
-        trail = insight_evidence_trail(facade, company_id, brief, insight_index)
+        trail = insight_evidence_trail(
+            facade, company_id, brief, insight_index, insight=insight
+        )
     except Exception:  # noqa: BLE001 — KG read must never break PRD generation
         logger.exception("PRD KG grounding failed for slug=%s — corpus fallback", dataset)
         return None
@@ -209,38 +216,49 @@ def _kg_trail(dataset: str, brief: dict, insight_index: int) -> dict | None:
 
 
 def _resolve_grounding(
-    dataset: str, brief: dict, insight_index: int
+    dataset: str, brief: dict, insight_index: int, insight: dict | None = None
 ) -> tuple[str, dict | None]:
     """Resolve the evidence block + (the KG trail it came from, or None).
 
     KG-first, consistent with brief/evidence/ask: the insight's evidence trail
     when it has backing, else corpus fallback (an empty KG, a legacy corpus
     dataset, or any KG read error). The returned trail (None on the corpus
-    fallback) drives kg_refs in the decision log.
+    fallback) drives kg_refs in the decision log. `insight` overrides
+    brief.insights[insight_index] (backlog PRD path).
     """
-    trail = _kg_trail(dataset, brief, insight_index)
+    trail = _kg_trail(dataset, brief, insight_index, insight)
     if trail is not None:
         return render_evidence_trail_section(trail), trail
     return _corpus_grounding(dataset), None
 
 
-def _build_context(brief_id: int, insight_index: int) -> dict:
+def _build_context(
+    brief_id: int, insight_index: int, insight_override: dict | None = None
+) -> dict:
     """Resolve everything a generation call needs, exactly once.
 
     Returns the shared inputs: the resolved company id, the evidence block + KG
     trail, the rendered PRD template, the insight, and the title. Reused by the
     human-PRD generation and (later) by the on-demand Implementation Spec, so
     both halves are grounded on the SAME facts and stay coherent.
+
+    `insight_override` supplies the insight directly (the backlog PRD path: the
+    theme is NOT in brief.insights, so there is no valid insight_index to read).
+    When given, insight_index is only a storage sentinel and is NOT used to index
+    the brief. When None, the insight is read from brief.insights[insight_index].
     """
     brief = get_brief_by_id(brief_id)
     if not brief:
         raise RuntimeError(f"brief_id={brief_id} not found")
-    insights = brief.get("insights") or []
-    if not (0 <= insight_index < len(insights)):
-        raise RuntimeError(
-            f"insight_index={insight_index} out of range (0..{len(insights) - 1})"
-        )
-    insight = insights[insight_index]
+    if insight_override is not None:
+        insight = insight_override
+    else:
+        insights = brief.get("insights") or []
+        if not (0 <= insight_index < len(insights)):
+            raise RuntimeError(
+                f"insight_index={insight_index} out of range (0..{len(insights) - 1})"
+            )
+        insight = insights[insight_index]
     dataset = brief.get("dataset", "asurion")
     # The decision log is tenant-scoped by company UUID, not the dataset slug.
     # Resolve it once; a dataset that owns no company (legacy corpus datasets)
@@ -250,7 +268,14 @@ def _build_context(brief_id: int, insight_index: int) -> dict:
     # that back the brief insight — falling back to the corpus when there's no
     # KG backing or under the legacy engine. `trail` (None on the corpus path)
     # carries the kg_refs for the decision log.
-    evidence, trail = _resolve_grounding(dataset, brief, insight_index)
+    # Brief path keeps the original 3-arg call (the insight is read from the
+    # brief at insight_index); the backlog path passes the synthesized insight so
+    # the trail resolves the right theme. Splitting the call keeps existing
+    # monkeypatches of _resolve_grounding (3-arg) working.
+    if insight_override is not None:
+        evidence, trail = _resolve_grounding(dataset, brief, insight_index, insight)
+    else:
+        evidence, trail = _resolve_grounding(dataset, brief, insight_index)
     # The human PRD is generated against the typed-`:::`-block contract
     # (data/sprntly_prd_template.md) that the frontend `prd-adapter` parses into
     # first-class components. Without these blocks the adapter degrades to plain
@@ -376,15 +401,19 @@ def _finalize_part_a(
 
 
 async def _generate_human_prd(
-    prd_id: int, brief_id: int, insight_index: int, background: bool = False
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False,
+    insight_override: dict | None = None,
 ) -> None:
     """Build context, generate the human PRD (Part A only), persist + log.
 
     Runs as clean async (the event loop is never blocked — the synchronous
     `llm_call` runs in a worker thread). The Implementation Spec is NOT produced
-    here; it is generated on demand by `ensure_impl_spec`.
+    here; it is generated on demand by `ensure_impl_spec`. `insight_override`
+    routes the backlog PRD path (the theme is not in brief.insights).
     """
-    ctx = await asyncio.to_thread(_build_context, brief_id, insight_index)
+    ctx = await asyncio.to_thread(
+        _build_context, brief_id, insight_index, insight_override
+    )
     result_a = await asyncio.to_thread(_call_part_a, ctx, background)
     await asyncio.to_thread(
         _finalize_part_a, prd_id, brief_id, insight_index, ctx, result_a
@@ -400,7 +429,8 @@ def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
 
 
 async def generate_prd(
-    prd_id: int, brief_id: int, insight_index: int, background: bool = False
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False,
+    insight_override: dict | None = None,
 ) -> None:
     """Run the human-PRD generation; update DB with result.
 
@@ -409,6 +439,9 @@ async def generate_prd(
     caller — a user's "Generate PRD" click is never queued behind warm work.
     The Implementation Spec is never produced here — it is on demand
     (`ensure_impl_spec`), so every generation path is human-PRD-only.
+
+    `insight_override` supplies the insight directly (the backlog PRD path):
+    insight_index is then a storage sentinel, not a brief index.
     """
     logger.info(
         "PRD generation starting prd_id=%s brief_id=%s insight_index=%s "
@@ -419,7 +452,9 @@ async def generate_prd(
         "background" if background else "interactive",
     )
     try:
-        await _generate_human_prd(prd_id, brief_id, insight_index, background)
+        await _generate_human_prd(
+            prd_id, brief_id, insight_index, background, insight_override
+        )
         logger.info("PRD generation succeeded prd_id=%s", prd_id)
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"

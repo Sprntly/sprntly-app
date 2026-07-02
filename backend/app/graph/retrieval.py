@@ -355,6 +355,8 @@ def insight_evidence_trail(
     enterprise_id: str,
     brief: dict,
     insight_index: int,
+    *,
+    insight: dict | None = None,
 ) -> dict[str, Any]:
     """Resolve the KG evidence trail behind one brief insight.
 
@@ -362,6 +364,12 @@ def insight_evidence_trail(
     SUPPORTS signals, and folds in the theme's convergence signals for breadth.
     Each signal carries content/source_type/provenance/confidence so the
     consumer (evidence OR PRD) can cite the actual data-source signals.
+
+    `insight` overrides brief.insights[insight_index] when supplied — used by the
+    backlog PRD path, where the theme is NOT in the brief payload but carries the
+    same shape ({theme_id, title, ...}). When omitted, the insight is read from
+    the brief at insight_index (the brief-insight path). The walk depends only on
+    the insight's theme_id/title, so both paths resolve the identical trail.
 
     Returns a dict:
       {
@@ -380,12 +388,13 @@ def insight_evidence_trail(
     parallel evidence branch at merge — that is intentional; both consumers
     want exactly this shape.
     """
-    insights = (brief.get("insights") or []) if isinstance(brief, dict) else []
-    insight = (
-        insights[insight_index]
-        if 0 <= insight_index < len(insights)
-        else {}
-    )
+    if insight is None:
+        insights = (brief.get("insights") or []) if isinstance(brief, dict) else []
+        insight = (
+            insights[insight_index]
+            if 0 <= insight_index < len(insights)
+            else {}
+        )
     theme_id = _theme_id_for_insight(insight)
     insight_title = insight.get("title") if isinstance(insight, dict) else None
 

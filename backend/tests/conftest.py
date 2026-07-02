@@ -158,7 +158,12 @@ CREATE TABLE prds (
     error            TEXT,
     template_version INTEGER,
     variant          TEXT NOT NULL DEFAULT 'v1',
-    run_id           TEXT
+    run_id           TEXT,
+    -- Backlog-sourced PRDs (mirrors 20260702000000_prds_backlog_source.sql):
+    -- source='backlog' + theme_id set for a PRD generated from a backlog item;
+    -- source='brief' + theme_id NULL for a brief-insight PRD.
+    source           TEXT NOT NULL DEFAULT 'brief',
+    theme_id         TEXT
 );
 
 CREATE TABLE evidences (

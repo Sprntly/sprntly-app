@@ -26,7 +26,23 @@ vi.mock("../../../../lib/api", () => ({
     list: () => listMock(),
     completed: () => completedMock(),
     setStatus: vi.fn(),
+    create: vi.fn(),
+    reorder: vi.fn(),
   },
+}))
+
+// The screen wires Generate PRD / prototype through these; stub them so the
+// Proposed/Completed rendering tests mount without a router or real generation.
+vi.mock("../../../../lib/runPrdGeneration", () => ({
+  runPrdGenerationFromBacklog: vi.fn(),
+}))
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn() }),
+}))
+
+vi.mock("../../../../context/ContentContext", () => ({
+  useContent: () => ({ content: {}, setContent: vi.fn(), resetContent: vi.fn() }),
 }))
 
 // AppLayout pulls in the whole app chrome (sidebar, AI bar, …) — stub it to a

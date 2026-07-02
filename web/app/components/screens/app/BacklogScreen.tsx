@@ -1,9 +1,13 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import { AppLayout } from "./AppLayout"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useCompany } from "../../../context/CompanyContext"
+import { useContent } from "../../../context/ContentContext"
+import { runPrdGenerationFromBacklog } from "../../../lib/runPrdGeneration"
+import { prototypePath } from "../../../lib/routes"
 import { backlogApi, type BacklogItem, type BacklogTag, type CompletedItem } from "../../../lib/api"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -24,6 +28,10 @@ interface BacklogIdea {
   type: IdeaType
   impact: string
   impactClass: "positive" | "negative" | "neutral"
+  /** The analysis score behind the item (0 for user-added ideas). Drives the
+   *  "Re-sequence" action, which re-orders by real impact score. Optional so the
+   *  static mock rows (INITIAL_IDEAS) need not carry it. */
+  score?: number
 }
 
 // ── Static data ───────────────────────────────────────────────────────────────
@@ -64,6 +72,16 @@ const TAG_TO_TYPE: Record<BacklogTag, IdeaType> = {
   something_better: "UI",           // OPTIMIZE
 }
 
+// Reverse of TAG_TO_TYPE for persisting a user-added idea's type. Only the three
+// types that map cleanly to a BacklogTag are stored; Infra/Research have no tag
+// (null), so they reload as the default "New initiative" — a known, acceptable
+// fidelity loss for manual items (the backlog taxonomy has three tags).
+const TYPE_TO_TAG: Partial<Record<IdeaType, BacklogTag>> = {
+  Bug: "something_broken",
+  "New initiative": "something_new",
+  UI: "something_better",
+}
+
 function backlogItemToIdea(item: BacklogItem): BacklogIdea {
   return {
     id: item.id,
@@ -76,6 +94,7 @@ function backlogItemToIdea(item: BacklogItem): BacklogIdea {
     type: item.tag ? TAG_TO_TYPE[item.tag] : "New initiative",
     impact: "—",
     impactClass: "neutral",
+    score: item.score ?? 0,
   }
 }
 
@@ -381,11 +400,15 @@ type LoadState = "loading" | "ready" | "error"
 
 function ProposedContent({
   addHandlerRef,
+  resequenceHandlerRef,
+  reloadKey,
   onSelectIdea,
   selectedIdeaId,
   onCountChange,
 }: {
   addHandlerRef: React.MutableRefObject<((title: string, type: IdeaType) => void) | null>
+  resequenceHandlerRef: React.MutableRefObject<(() => void) | null>
+  reloadKey: number
   onSelectIdea: (idea: BacklogIdea) => void
   selectedIdeaId: string | null
   onCountChange?: (count: number) => void
@@ -399,7 +422,8 @@ function ProposedContent({
   const [dragOverId, setDragOverId] = useState<string | null>(null)
 
   // Fetch the backlog (ranks ≥ 4 of the latest analysis). The route is
-  // session-scoped to the company; `activeCompany` is only a re-fetch trigger.
+  // session-scoped to the company; `activeCompany` and `reloadKey` (bumped by
+  // "Sync with backlog") are re-fetch triggers.
   useEffect(() => {
     let cancelled = false
     setLoad("loading")
@@ -420,10 +444,19 @@ function ProposedContent({
         setLoad("error")
       })
     return () => { cancelled = true }
-  }, [activeCompany])
+  }, [activeCompany, reloadKey])
 
   // Keep the parent's count badge in sync with the loaded list.
   useEffect(() => { onCountChange?.(ideas.length) }, [ideas.length, onCountChange])
+
+  // Persist a new rank order to the backend (best-effort — the optimistic UI
+  // order already applied; a failed save just warns so a refresh won't surprise
+  // the user with the old order).
+  const persistOrder = useCallback((ordered: BacklogIdea[]) => {
+    backlogApi.reorder(ordered.map((i) => i.id)).catch(() => {
+      showToast("Couldn't save order", "Your new order may not persist on refresh.")
+    })
+  }, [showToast])
 
   const handleTypeChange = (id: string, type: IdeaType) =>
     setIdeas((prev) => prev.map((i) => i.id === id ? { ...i, type } : i))
@@ -434,25 +467,44 @@ function ProposedContent({
   const handleDrop      = (_e: React.DragEvent, targetId: string) => {
     const fromId = dragId.current
     if (!fromId || fromId === targetId) { handleDragEnd(); return }
-    setIdeas((prev) => {
-      const from = prev.findIndex((i) => i.id === fromId)
-      const to   = prev.findIndex((i) => i.id === targetId)
-      if (from === -1 || to === -1) return prev
-      const next = [...prev]
+    const from = ideas.findIndex((i) => i.id === fromId)
+    const to   = ideas.findIndex((i) => i.id === targetId)
+    if (from !== -1 && to !== -1) {
+      const next = [...ideas]
       const [moved] = next.splice(from, 1)
       next.splice(to, 0, moved)
-      return next.map((item, idx) => ({ ...item, rank: idx + 1 }))
-    })
+      const ranked = next.map((item, idx) => ({ ...item, rank: idx + 1 }))
+      setIdeas(ranked)
+      persistOrder(ranked)  // drag-to-rerank saves server-side
+    }
     handleDragEnd()
   }
 
-  // Expose add handler to parent via ref — updated every render so parent always has the latest
+  // Expose add handler to parent via ref — reassigned every render so the parent
+  // always calls the latest closure. Persists the idea to the backend, then
+  // appends the returned row (with its real id) so it can be dragged/generated.
   addHandlerRef.current = (title: string, type: IdeaType) => {
-    setIdeas((prev) => [...prev, {
-      id: `b${Date.now()}`, rank: prev.length + 1,
-      title, sub: "", source: "backlog", type, impact: "—", impactClass: "neutral",
-    }])
-    showToast("Idea added", `"${title}" added to the backlog.`)
+    backlogApi
+      .create(title, TYPE_TO_TAG[type] ?? null)
+      .then((item) => {
+        setIdeas((prev) => [...prev, { ...backlogItemToIdea(item), type }])
+        showToast("Idea added", `"${title}" saved to the backlog.`)
+      })
+      .catch(() => showToast("Couldn't add idea", "Please try again."))
+  }
+
+  // Re-sequence: re-order by real analysis impact score (desc) and persist.
+  // User-added ideas (score 0) sink to the bottom.
+  resequenceHandlerRef.current = () => {
+    if (!ideas.length) return
+    const ranked = ideas
+      .slice()
+      .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+      .map((item, idx) => ({ ...item, rank: idx + 1 }))
+    setGroup("Impact (ranked)")
+    setIdeas(ranked)
+    persistOrder(ranked)
+    showToast("Re-sequenced", "Backlog re-ordered by impact and saved.")
   }
 
   if (load === "loading") {
@@ -507,15 +559,19 @@ function ProposedContent({
           <select className="bl-group-select" value={group} onChange={(e) => {
             const fw = e.target.value as PrioritizationFramework
             setGroup(fw)
-            // Re-sort ideas by the selected framework
-            setIdeas((prev) => {
-              const scored = prev.map((idea, i) => ({
-                ...idea,
-                _score: generateScores(idea, i),
-              }))
-              scored.sort((a, b) => (b._score[fw] ?? 0) - (a._score[fw] ?? 0))
-              return scored.map((item, idx) => ({ ...item, rank: idx + 1 }))
+            // Re-sort ideas by the selected framework, then persist the new order
+            // so the re-prioritization survives a refresh.
+            const scored = ideas.map((idea, i) => ({
+              ...idea,
+              _score: generateScores(idea, i),
+            }))
+            scored.sort((a, b) => (b._score[fw] ?? 0) - (a._score[fw] ?? 0))
+            const ranked = scored.map(({ _score, ...item }, idx) => {
+              void _score
+              return { ...item, rank: idx + 1 }
             })
+            setIdeas(ranked)
+            persistOrder(ranked)
           }}>
             {PRIORITIZE_OPTIONS.map((o) => (
               <option key={o.value} value={o.value} title={o.description}>{o.label}</option>
@@ -684,34 +740,96 @@ function SyncingOverlay() {
 
 export function BacklogScreen() {
   const { showToast, openContentPanel }     = useNavigation()
+  const { setContent }                      = useContent()
+  const router                              = useRouter()
   const [tab, setTab]                       = useState<BacklogTab>("proposed")
   const [proposedCount, setProposedCount]   = useState<number | null>(null)
   const [completedCount, setCompletedCount] = useState<number | null>(null)
   const [showAddIdea, setShowAddIdea]       = useState(false)
   const [isSyncing, setIsSyncing]           = useState(false)
+  const [reloadKey, setReloadKey]           = useState(0)
+  const [busy, setBusy]                     = useState<null | "prd" | "prototype">(null)
   const [chatValue, setChatValue]           = useState("")
   const [selectedIdea, setSelectedIdea]     = useState<BacklogIdea | null>(null)
   const textareaRef                         = useRef<HTMLTextAreaElement>(null)
-  // Bridge to ProposedContent's add-idea handler without lifting ideas state
+  // Bridges to ProposedContent's handlers without lifting its ideas state.
   const addHandlerRef = useRef<((title: string, type: IdeaType) => void) | null>(null)
+  const resequenceHandlerRef = useRef<(() => void) | null>(null)
 
   const handleSelectIdea = useCallback((idea: BacklogIdea) => {
     setSelectedIdea(idea)
   }, [])
 
+  // Real sync: re-pull the backlog from the backend (bumps ProposedContent's
+  // reloadKey). The brief overlay just gives the refetch a visible beat.
   const handleSync = () => {
     if (isSyncing) return
     setIsSyncing(true)
+    setReloadKey((k) => k + 1)
     setTimeout(() => {
       setIsSyncing(false)
       showToast("Synced", "Your backlog is up to date.")
-    }, 2400)
+    }, 800)
   }
+
+  // Generate PRD from a backlog item: kick off real generation and stream the
+  // result into the app's standard PRD content panel (same viewer the brief
+  // uses). AppShell renders <ContentPanel/> on every (app) route, so this works
+  // in-page. See runPrdGenerationFromBacklog.
+  const handleGeneratePrd = useCallback(async (idea: BacklogIdea) => {
+    setBusy("prd")
+    setContent({ prd: null, prdMeta: null, prdGenerating: true })
+    openContentPanel("prd")
+    try {
+      const result = await runPrdGenerationFromBacklog(idea.id)
+      if (!result.ok) {
+        setContent({ prdGenerating: false })
+        showToast("PRD generation failed", result.message)
+        return
+      }
+      setContent({
+        prd: result.prd,
+        // No brief-insight meta: a backlog PRD isn't at a brief insight_index, so
+        // the panel must NOT offer brief-based regenerate (that would target the
+        // wrong insight). The PRD renders from `prd` alone.
+        prdMeta: null,
+        prdGenerating: false,
+      })
+      openContentPanel("prd")
+    } catch (err) {
+      setContent({ prdGenerating: false })
+      showToast("PRD generation failed", err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }, [openContentPanel, setContent, showToast])
+
+  // Generate a prototype from a backlog item: a prototype builds from a PRD, so
+  // ensure the theme's PRD exists first (dedup returns it instantly if already
+  // generated), then hand off to the prototype route with ?generate=1.
+  const handleGeneratePrototype = useCallback(async (idea: BacklogIdea) => {
+    setBusy("prototype")
+    showToast("Preparing prototype…", "Building the PRD your prototype is based on.")
+    try {
+      const result = await runPrdGenerationFromBacklog(idea.id)
+      if (!result.ok) {
+        showToast("Prototype blocked", result.message)
+        return
+      }
+      router.push(prototypePath(result.prd.prd_id, { generate: true }))
+    } catch (err) {
+      showToast("Prototype failed", err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusy(null)
+    }
+  }, [router, showToast])
 
   const handleChat = (e: React.FormEvent) => {
     e.preventDefault()
     if (!chatValue.trim()) return
-    showToast("Re-prioritizing…", `Running: "${chatValue}"`)
+    // Free-text re-prioritization (natural-language re-ranking) isn't wired yet;
+    // the concrete "Re-sequence" chip below performs a real, persisted re-order.
+    showToast("Not yet available", "Use “Re-sequence” to re-order by impact — free-text re-prioritization is coming soon.")
     setChatValue("")
     if (textareaRef.current) textareaRef.current.style.height = "auto"
   }
@@ -765,7 +883,7 @@ export function BacklogScreen() {
         <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
           <div className="bl-body" style={{ flex: 1, overflow: "auto" }}>
             {tab === "proposed"
-              ? <ProposedContent addHandlerRef={addHandlerRef} onSelectIdea={handleSelectIdea} selectedIdeaId={selectedIdea?.id ?? null} onCountChange={setProposedCount} />
+              ? <ProposedContent addHandlerRef={addHandlerRef} resequenceHandlerRef={resequenceHandlerRef} reloadKey={reloadKey} onSelectIdea={handleSelectIdea} selectedIdeaId={selectedIdea?.id ?? null} onCountChange={setProposedCount} />
               : <CompletedContent onCountChange={setCompletedCount} />}
           </div>
 
@@ -807,18 +925,14 @@ export function BacklogScreen() {
                 {/* Actions */}
                 <div className="bl-detail-label">Next steps</div>
                 <div className="bl-detail-actions">
-                  <button type="button" className="bl-detail-btn bl-detail-btn--primary" onClick={() => {
-                    // Navigate to chat with a PRD generation prompt
-                    localStorage.setItem("sprntly_resume_conv", JSON.stringify({
-                      dbId: 0, title: selectedIdea.title,
-                      turns: [
-                        { role: "user", content: `Generate a PRD for: ${selectedIdea.title}. Context: ${selectedIdea.sub}. Expected impact: ${selectedIdea.impact}` },
-                      ],
-                    }))
-                    window.location.href = "/"
-                  }}>
+                  <button
+                    type="button"
+                    className="bl-detail-btn bl-detail-btn--primary"
+                    disabled={busy !== null}
+                    onClick={() => handleGeneratePrd(selectedIdea)}
+                  >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                    Generate PRD
+                    {busy === "prd" ? "Generating PRD…" : "Generate PRD"}
                   </button>
                   <button type="button" className="bl-detail-btn bl-detail-btn--ghost" onClick={() => {
                     localStorage.setItem("sprntly_resume_conv", JSON.stringify({
@@ -832,11 +946,14 @@ export function BacklogScreen() {
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                     Continue in chat
                   </button>
-                  <button type="button" className="bl-detail-btn bl-detail-btn--ghost" onClick={() => {
-                    showToast("Prototype", `Starting prototype generation for "${selectedIdea.title}"…`)
-                  }}>
+                  <button
+                    type="button"
+                    className="bl-detail-btn bl-detail-btn--ghost"
+                    disabled={busy !== null}
+                    onClick={() => handleGeneratePrototype(selectedIdea)}
+                  >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-                    Generate prototype
+                    {busy === "prototype" ? "Preparing prototype…" : "Generate prototype"}
                   </button>
                 </div>
               </div>
@@ -887,7 +1004,7 @@ export function BacklogScreen() {
                     Voice
                   </button>
                   <button type="button" className="bl-chat-action-btn"
-                    onClick={() => showToast("Re-sequencing…", "Sprntly is re-ranking ideas by impact.")}>
+                    onClick={() => resequenceHandlerRef.current?.()}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                       <line x1="17" y1="10" x2="3" y2="10" /><line x1="21" y1="6" x2="3" y2="6" />
                       <line x1="21" y1="14" x2="3" y2="14" /><line x1="17" y1="18" x2="3" y2="18" />

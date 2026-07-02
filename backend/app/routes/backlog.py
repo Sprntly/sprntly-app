@@ -24,12 +24,14 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
 from app.db.backlog import (
     PATCHABLE_STATUSES,
+    create_manual_backlog_item,
     list_backlog_items,
+    reorder_backlog_items,
     update_backlog_status,
 )
 from app.db.briefs import get_current_brief
@@ -43,6 +45,20 @@ router = APIRouter(prefix="/v1/backlog", tags=["backlog"])
 
 class StatusUpdate(BaseModel):
     status: str
+
+
+# BacklogTag values (see backlog_items.tag). Manual "+ Add idea" rows may carry
+# one when the UI's idea-type maps cleanly, else null.
+_ALLOWED_TAGS = ("something_broken", "something_new", "something_better")
+
+
+class CreateItem(BaseModel):
+    title: str = Field(..., min_length=1)
+    tag: str | None = None
+
+
+class ReorderIn(BaseModel):
+    ordered_ids: list[str] = Field(..., min_length=1)
 
 
 def _company_has_brief(company_id: str) -> bool:
@@ -96,6 +112,33 @@ def get_completed(company: CompanyContext = Depends(require_company)):
         }
         for r in rows
     ]
+    return {"items": items, "count": len(items)}
+
+
+@router.post("")
+def create_backlog_item(
+    body: CreateItem,
+    company: CompanyContext = Depends(require_company),
+):
+    """Create a user-added backlog item (the "+ Add idea" flow). Returns the
+    created row so the client can render it without a full refetch."""
+    if body.tag is not None and body.tag not in _ALLOWED_TAGS:
+        raise HTTPException(
+            400, f"Unknown tag {body.tag!r}; expected one of {_ALLOWED_TAGS}"
+        )
+    return create_manual_backlog_item(
+        company.company_id, title=body.title.strip(), tag=body.tag
+    )
+
+
+@router.post("/reorder")
+def reorder_backlog(
+    body: ReorderIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Persist a new backlog rank order (drag-to-rerank / Re-sequence). Returns
+    the reordered list (rank-ascending)."""
+    items = reorder_backlog_items(company.company_id, body.ordered_ids)
     return {"items": items, "count": len(items)}
 
 
