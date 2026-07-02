@@ -598,19 +598,21 @@ async def generate(
     # heartbeat, or a failed enqueue all land here.
     task = asyncio.create_task(_run_generation_bg(**bg_kwargs))
     _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
     # Also register in the generation-only, prototype_id-keyed registry so the
-    # cancel endpoint can find and abort this task. Both registrations are torn
-    # down together in the done-callback below.
+    # cancel endpoint can find and abort this task. Cleared via a SEPARATE
+    # done-callback so the shared-set strong-ref idiom above is left exactly as
+    # every other create_task site does it (add + add_done_callback(discard)).
     _inflight_generation_tasks[prototype_id] = task
 
-    def _clear_generation_task(t: asyncio.Task, _pid: int = prototype_id) -> None:
-        _inflight_tasks.discard(t)
-        # Only remove the entry if it still points at this task — a subsequent
-        # regeneration for the same prototype_id could have overwritten it.
+    def _clear_generation_entry(t: asyncio.Task, _pid: int = prototype_id) -> None:
+        # Clobber-guard: only remove the entry if it still points at THIS task —
+        # a subsequent regeneration for the same prototype_id could have replaced
+        # it, and that newer task must keep its registration.
         if _inflight_generation_tasks.get(_pid) is t:
             _inflight_generation_tasks.pop(_pid, None)
 
-    task.add_done_callback(_clear_generation_task)
+    task.add_done_callback(_clear_generation_entry)
 
     return GenerateResponse(prototype_id=prototype_id, status="generating")
 
