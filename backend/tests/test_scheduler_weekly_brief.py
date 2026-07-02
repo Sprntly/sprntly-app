@@ -36,7 +36,7 @@ def _run_tick(now, companies):
 
     generated: list[str] = []
 
-    async def _fake_gen(slug):
+    async def _fake_gen(company_id, slug):
         generated.append(slug)
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
@@ -88,7 +88,7 @@ def test_tick_is_idempotent_within_the_window():
     companies = [{"id": "co-x", "slug": "acme", "owner_timezone": "UTC"}]
     generated: list[str] = []
 
-    async def _fake_gen(slug):
+    async def _fake_gen(company_id, slug):
         generated.append(slug)
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
@@ -129,7 +129,7 @@ def test_tick_isolates_per_company_failure():
     ]
     seen: list[str] = []
 
-    async def _gen(slug):
+    async def _gen(company_id, slug):
         if slug == "acme":
             raise RuntimeError("brief blew up for acme")
         seen.append(slug)
@@ -161,3 +161,37 @@ def test_tick_off_schedule_generates_nothing():
     ]
     # Wednesday 2026-06-10 10:00 UTC.
     assert _run_tick(datetime(2026, 6, 10, 10, 0, tzinfo=UTC), companies) == []
+
+
+# ── delivery decoupling: the tick delivers a CACHED brief, not a fresh one ────
+
+
+def test_weekly_tick_delivers_cached_brief():
+    """On a quiet, unchanged-KG week generate_brief_for returns the existing
+    brief (flagged `_from_cache`). The tick must still DELIVER it so the
+    scheduled Slack/email push happens even though synthesis was skipped."""
+    from app import scheduler as sched_mod
+
+    delivered: list[str] = []
+    with patch("app.synthesis_brief.generate_brief_for",
+               return_value={"id": 1, "_from_cache": True}), \
+         patch("app.synthesis.delivery.deliver_brief",
+               side_effect=lambda eid, brief: delivered.append(eid) or {}), \
+         patch("app.brief_runner.warm_synthesis_drilldowns"):
+        asyncio.run(sched_mod._generate_weekly_brief_for_company("co-1", "acme"))
+    assert delivered == ["co-1"]
+
+
+def test_weekly_tick_does_not_double_deliver_a_fresh_brief():
+    """When the tick itself regenerated (fresh brief, no `_from_cache`),
+    run_synthesis already delivered it — the tick must NOT deliver again."""
+    from app import scheduler as sched_mod
+
+    delivered: list[str] = []
+    with patch("app.synthesis_brief.generate_brief_for",
+               return_value={"id": 2}), \
+         patch("app.synthesis.delivery.deliver_brief",
+               side_effect=lambda eid, brief: delivered.append(eid) or {}), \
+         patch("app.brief_runner.warm_synthesis_drilldowns"):
+        asyncio.run(sched_mod._generate_weekly_brief_for_company("co-1", "acme"))
+    assert delivered == []

@@ -198,7 +198,7 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
             company_id, slug, tz.key,
         )
         try:
-            await _generate_weekly_brief_for_company(slug)
+            await _generate_weekly_brief_for_company(company_id, slug)
             if company_id:
                 _last_brief_run[company_id] = now.astimezone(timezone.utc)
             logger.info("Weekly brief tick: brief for %s → ok", slug)
@@ -206,14 +206,26 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
             logger.error("Weekly brief tick: brief failed for %s: %s", slug, exc)
 
 
-async def _generate_weekly_brief_for_company(slug: str) -> None:
-    """Generate one company's weekly brief via the KG synthesis engine, off the
-    event loop (LLM + Supabase are blocking). Synthesis is the only path since
-    the legacy brief/KG engine was retired (main #321)."""
+async def _generate_weekly_brief_for_company(company_id: str | None, slug: str) -> None:
+    """Generate + DELIVER one company's weekly brief on schedule, off the event
+    loop (LLM, Supabase, and Slack/email are all blocking). Synthesis is the
+    only path since the legacy brief/KG engine was retired (main #321).
+
+    `generate_brief_for` returns the current brief — freshly synthesized when
+    the KG changed (in which case run_synthesis ALREADY delivered it, the
+    mid-week "new brief" push), or the EXISTING one from cache when the KG was
+    unchanged. We deliver here ONLY in the cache case, so a quiet, unchanged-KG
+    week still gets its scheduled Slack/email push — without double-sending a
+    brief run_synthesis just delivered. Net: exactly one push per weekly tick,
+    plus the separate mid-week push whenever a genuinely new brief is produced.
+    Delivery is best-effort and never blocks the brief."""
     from app.brief_runner import warm_synthesis_drilldowns
+    from app.synthesis.delivery import deliver_brief
     from app.synthesis_brief import generate_brief_for
 
-    await asyncio.to_thread(generate_brief_for, slug)
+    brief = await asyncio.to_thread(generate_brief_for, slug)
+    if brief and company_id and brief.get("_from_cache"):
+        await asyncio.to_thread(deliver_brief, company_id, brief)
     # Warm evidence/PRD/Ask drill-downs so the first user click is instant.
     # Error-isolated in the helper.
     warm_synthesis_drilldowns(slug)

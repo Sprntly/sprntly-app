@@ -309,10 +309,9 @@ def test_synthesis_attaches_email_delivery_status(isolated_settings, monkeypatch
         model="m", prompt_version="t", input_tokens=1, output_tokens=1,
         cache_read_input_tokens=0, cache_creation_input_tokens=0,
         cost_usd=0, latency_ms=1, stop_reason="end_turn"))
-    monkeypatch.setattr(synth, "deliver_brief_to_slack",
-                        lambda eid, brief: {"delivered": False, "reason": "slack_not_connected"})
-    monkeypatch.setattr(synth, "deliver_brief_to_email",
-                        lambda eid, brief: {"delivered": False, "reason": "email_disabled",
-                                            "recipients": []})
+    # run_synthesis delivers via the deliver_brief helper (Slack + email).
+    monkeypatch.setattr(synth, "deliver_brief", lambda eid, brief: {
+        "slack": {"delivered": False, "reason": "slack_not_connected"},
+        "email": {"delivered": False, "reason": "email_disabled", "recipients": []}})
     brief = synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
     assert brief["_email_delivery"]["reason"] == "email_disabled"
