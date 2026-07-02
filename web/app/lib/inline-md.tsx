@@ -3,6 +3,13 @@
  * Supports: **bold**, *italic*, _italic_, `code`, [text](url).
  * Not a full markdown parser — just enough to make the PRD body look like
  * formatted prose instead of raw asterisks and backticks.
+ *
+ * Underscore emphasis (`_italic_` / `__bold__`) only fires at WORD BOUNDARIES,
+ * matching GitHub-flavored markdown. Intra-word underscores are literal — PRD
+ * text is full of identifiers like `customer_voice`, `deal_blocker`, `pm_manual`
+ * and `signal_id`, which used to get mangled into spurious italics
+ * (`customer_voice/deal_blocker` → "customer<em>voice/deal</em>blocker"),
+ * wrecking every `[Source: …]` citation. `*asterisk*` emphasis is unaffected.
  */
 import type { ReactNode } from "react"
 
@@ -13,8 +20,10 @@ type Token =
   | { type: "code"; value: string }
   | { type: "link"; href: string; children: ReactNode }
 
+// `(?<![A-Za-z0-9])` / `(?![A-Za-z0-9])` guard the underscore forms so an `_`
+// glued to a word char (e.g. inside `customer_voice`) never opens emphasis.
 const PATTERN =
-  /(\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\n]+)\*|_([^_\n]+)_|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/
+  /(\*\*([^*]+)\*\*|(?<![A-Za-z0-9])__([^_]+)__(?![A-Za-z0-9])|\*([^*\n]+)\*|(?<![A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])|`([^`]+)`|\[([^\]]+)\]\(([^)]+)\))/
 
 function tokenize(text: string): Token[] {
   const out: Token[] = []
