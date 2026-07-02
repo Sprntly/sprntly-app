@@ -270,6 +270,10 @@ def generate_brief_for(company_id_or_slug: str) -> dict:
             "(slug=%s) — skipping synthesis, returning existing brief",
             prior.get("id"), prior_ts, company_id, slug,
         )
+        # Flag that this brief came from cache (synthesis skipped ⇒ NOT delivered
+        # this run). The weekly scheduler tick uses this to deliver the brief on
+        # schedule without double-sending a brief run_synthesis just delivered.
+        prior["_from_cache"] = True
         return prior
 
     return run_synthesis(facade, company_id, dataset_slug=slug)

@@ -113,7 +113,9 @@ def test_post_failure_never_raises(isolated_settings, monkeypatch):
     assert "slack 500" in out["recipients"][0]["reason"]
 
 
-def test_synthesis_attaches_delivery_status(isolated_settings, monkeypatch):
+def test_synthesis_delivers_on_generation(isolated_settings, monkeypatch):
+    """A freshly generated brief is delivered immediately (the mid-week
+    "new brief" push) and its status is attached to the payload."""
     from app.graph import GraphFacade
     from app.graph.gateway import LLMResult
     from app.synthesis import agent as synth
@@ -129,7 +131,28 @@ def test_synthesis_attaches_delivery_status(isolated_settings, monkeypatch):
         model="m", prompt_version="t", input_tokens=1, output_tokens=1,
         cache_read_input_tokens=0, cache_creation_input_tokens=0,
         cost_usd=0, latency_ms=1, stop_reason="end_turn"))
-    monkeypatch.setattr(synth, "deliver_brief_to_slack",
-                        lambda eid, brief: {"delivered": False, "reason": "slack_not_connected"})
+    # run_synthesis calls the deliver_brief helper (Slack + email).
+    monkeypatch.setattr(synth, "deliver_brief", lambda eid, brief: {
+        "slack": {"delivered": False, "reason": "slack_not_connected"},
+        "email": {"delivered": False, "reason": "email_disabled"}})
     brief = synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
     assert brief["_slack_delivery"]["reason"] == "slack_not_connected"
+    assert brief["_email_delivery"]["reason"] == "email_disabled"
+
+
+def test_deliver_brief_pushes_slack_and_email(isolated_settings, monkeypatch):
+    """deliver_brief (the weekly-tick entry point) fans a brief out to BOTH
+    Slack and email, regardless of how the brief was produced."""
+    from app.synthesis import delivery
+    import app.synthesis.email_delivery as email_delivery
+
+    calls = []
+    monkeypatch.setattr(delivery, "deliver_brief_to_slack",
+                        lambda eid, b: calls.append(("slack", eid)) or {"delivered": True})
+    monkeypatch.setattr(email_delivery, "deliver_brief_to_email",
+                        lambda eid, b: calls.append(("email", eid)) or {"delivered": True})
+
+    out = delivery.deliver_brief("ent-A", _BRIEF)
+    assert ("slack", "ent-A") in calls
+    assert ("email", "ent-A") in calls
+    assert out["slack"]["delivered"] and out["email"]["delivered"]

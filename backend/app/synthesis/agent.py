@@ -33,9 +33,8 @@ from app.synthesis.convergence import (
     compute_convergence,
     has_sufficient_evidence,
 )
-from app.synthesis.delivery import deliver_brief_to_slack
-from app.synthesis.email_delivery import deliver_brief_to_email
 from app.synthesis.backlog import sequence_backlog
+from app.synthesis.delivery import deliver_brief
 from app.synthesis.dedup import suppress_unchanged
 from app.synthesis.scoring import classify_theme_fit, score_candidates
 from app.synthesis.weekly_brief_skill import (
@@ -693,26 +692,14 @@ def run_synthesis(
         logger.exception("backlog sequencing failed (brief unaffected)")
         brief["_backlog_count"] = None
 
-    # The brief's Slack announcement is drafted by the brief-nudge skill (Day 0)
-    # inside deliver_brief_to_slack — this IS the day-0 nudge, so there is no
-    # separate day-0 nudge call below. Day 1/2/3 reminders are sent later by the
-    # scheduler cycle (app.brief_nudge.run_nudge_cycle), still flag-gated.
-    delivery = deliver_brief_to_slack(enterprise_id, brief)
-    if not delivery.get("delivered") and delivery.get("reason") not in (
-        "slack_not_connected", "no_channel_configured"
-    ):
-        logger.warning("brief slack delivery: %s", delivery)
-    brief["_slack_delivery"] = delivery
-
-    # Email is a SECOND, independent delivery channel (v0 checklist 2.4). Same
-    # side-effect contract as Slack: never raises, never blocks the brief. Gated
-    # per-company by notification_settings.email_enabled (default OFF), so it is
-    # a clean no-op until a company opts in.
-    email_delivery = deliver_brief_to_email(enterprise_id, brief)
-    if not email_delivery.get("delivered") and email_delivery.get("reason") not in (
-        "email_disabled", "no_recipients", "resend_not_configured"
-    ):
-        logger.warning("brief email delivery: %s", email_delivery)
-    brief["_email_delivery"] = email_delivery
+    # Deliver on generation — this is the mid-week "a new brief was produced"
+    # push (Slack + email). The weekly scheduler tick ALSO delivers the current
+    # brief at the user's configured day/time so a quiet, unchanged-KG week
+    # still gets its scheduled push; to avoid a double send when the tick itself
+    # regenerated, the tick only delivers a brief it got from CACHE (see
+    # app.scheduler + synthesis_brief.generate_brief_for's `_from_cache`).
+    _delivery = deliver_brief(enterprise_id, brief)
+    brief["_slack_delivery"] = _delivery["slack"]
+    brief["_email_delivery"] = _delivery["email"]
 
     return brief

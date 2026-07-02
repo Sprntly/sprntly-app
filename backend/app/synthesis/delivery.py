@@ -66,6 +66,34 @@ def _deliver_to_one(row: dict, text: str, blocks: list[dict]) -> dict:
         return {"user_id": user_id, "delivered": False, "reason": f"error: {e}"}
 
 
+def deliver_brief(enterprise_id: str, brief: dict) -> dict:
+    """Push a brief to ALL of a company's configured destinations — per-user
+    Slack + email — logging any real failure. Best-effort; never raises.
+
+    Invoked by the WEEKLY SCHEDULER TICK (app.scheduler), not by synthesis.
+    Delivery is a scheduled action, not a side effect of generating a brief:
+    the tick delivers whatever brief is current at the configured day/time —
+    whether it was freshly synthesized this run or returned from cache because
+    the KG hadn't changed. (Delivery used to live inside run_synthesis, so an
+    unchanged-KG week skipped synthesis AND silently skipped delivery — the
+    "my scheduled brief never arrived" bug.)"""
+    from app.synthesis.email_delivery import deliver_brief_to_email
+
+    slack = deliver_brief_to_slack(enterprise_id, brief)
+    if not slack.get("delivered") and slack.get("reason") not in (
+        "slack_not_connected", "no_channel_configured"
+    ):
+        logger.warning("brief slack delivery: %s", slack)
+
+    email = deliver_brief_to_email(enterprise_id, brief)
+    if not email.get("delivered") and email.get("reason") not in (
+        "email_disabled", "no_recipients", "resend_not_configured"
+    ):
+        logger.warning("brief email delivery: %s", email)
+
+    return {"slack": slack, "email": email}
+
+
 def deliver_brief_to_slack(enterprise_id: str, brief: dict) -> dict:
     """Best-effort, PER-USER delivery: draft the brief's Slack announcement
     with the brief-nudge skill (once for the company), then fan it out to
