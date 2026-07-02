@@ -47,10 +47,15 @@ def start_prd(
     template_version: int | None = None,
     variant: str = "v1",
     run_id: str | None = None,
+    source: str = "brief",
+    theme_id: str | None = None,
 ) -> int:
     """Insert an empty PRD row in 'generating' state. Returns the new id.
 
     `run_id` ties the row to a multi-agent run (NULL for single-PRD runs).
+    `source`/`theme_id` mark a backlog-sourced PRD (source='backlog', theme_id
+    set) vs a brief PRD (source='brief', theme_id NULL — its theme resolves from
+    brief.insights[insight_index]). See the 20260702 migration.
     """
     c = require_client()
     resp = c.table("prds").insert({
@@ -62,6 +67,8 @@ def start_prd(
         "template_version": template_version,
         "variant": variant,
         "run_id": run_id,
+        "source": source,
+        "theme_id": theme_id,
     }).execute()
     return resp.data[0]["id"]
 
@@ -192,24 +199,58 @@ def get_prd_rendered(prd_id: int) -> dict | None:
 
 @retry_on_disconnect
 def list_prd_generations(prd_id: int) -> list[dict]:
-    """All generation attempts sharing this PRD's (brief_id, insight_index),
-    newest first. Each regeneration creates a new prds row; this returns the
-    whole family so the Version History can offer prior generations. Returns []
-    when the PRD doesn't exist. None-safe on insight_index (filtered in Python so
-    a NULL insight_index groups correctly, mirroring db/artifacts.py)."""
+    """All generation attempts in this PRD's family, newest first. Each
+    regeneration creates a new prds row; this returns the whole family so the
+    Version History can offer prior generations. Returns [] when the PRD doesn't
+    exist.
+
+    Grouping key: backlog PRDs (theme_id set) group by (brief_id, theme_id) —
+    they share a sentinel insight_index, so the theme is what distinguishes one
+    backlog PRD family from another under the same brief. Brief PRDs group by
+    (brief_id, insight_index) as before. Filtered in Python so a NULL
+    insight_index groups correctly (mirrors db/artifacts.py)."""
     c = require_client()
     row = get_prd(prd_id)
     if row is None:
         return []
     resp = (
         c.table("prds")
-        .select("id, title, status, generated_at, insight_index")
+        .select("id, title, status, generated_at, insight_index, theme_id")
         .eq("brief_id", row["brief_id"])
         .order("generated_at", desc=True)
         .execute()
     )
+    theme = row.get("theme_id")
+    if theme:
+        return [r for r in (resp.data or []) if r.get("theme_id") == theme]
     ins = row.get("insight_index")
-    return [r for r in (resp.data or []) if r.get("insight_index") == ins]
+    return [
+        r for r in (resp.data or [])
+        if not r.get("theme_id") and r.get("insight_index") == ins
+    ]
+
+
+@retry_on_disconnect
+def find_existing_prd_for_theme(
+    brief_id: int, theme_id: str, variant: str = "v1"
+) -> dict | None:
+    """Most recent ready/generating backlog PRD (of the given variant) for a
+    (brief, theme). The backlog analogue of find_existing_prd — backlog PRDs
+    dedupe on theme_id rather than insight_index. Variant-scoped so distinct PRD
+    formats don't dedupe against each other."""
+    c = require_client()
+    resp = (
+        c.table("prds")
+        .select("*")
+        .eq("brief_id", brief_id)
+        .eq("theme_id", theme_id)
+        .eq("variant", variant)
+        .in_("status", ["ready", "generating"])
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
 
 
 @retry_on_disconnect

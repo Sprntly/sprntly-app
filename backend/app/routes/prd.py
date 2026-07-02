@@ -27,7 +27,11 @@ from app.db import (
     get_prd_rendered,
     start_prd,
 )
+from app.db.backlog import get_backlog_item
+from app.db.briefs import get_current_brief
+from app.db.companies import slug_for_company_id
 from app.db.prds import (
+    find_existing_prd_for_theme,
     get_prd,
     latest_prd_for_dataset,
     list_prd_generations,
@@ -128,6 +132,98 @@ async def generate(
 
     task = asyncio.create_task(
         generate_prd(prd_id, body.brief_id, body.insight_index)
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return {
+        "prd_id": prd_id,
+        "status": "generating",
+        "title": title,
+        "variant": PRD_VARIANT,
+    }
+
+
+# Sentinel insight_index for backlog PRDs. The theme isn't in brief.insights, so
+# there is no real index; backlog PRDs dedupe + group by (brief_id, theme_id)
+# instead (see db.prds.find_existing_prd_for_theme / list_prd_generations).
+_BACKLOG_INSIGHT_INDEX = 0
+
+
+class BacklogGenerateIn(BaseModel):
+    backlog_item_id: str = Field(..., min_length=1)
+    force: bool = False
+
+
+@router.post("/generate-from-backlog")
+async def generate_from_backlog(
+    body: BacklogGenerateIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Kick off PRD generation for a BACKLOG item (a theme ranked ≥ 4 that never
+    made the weekly brief's top-3).
+
+    Backlog themes aren't in brief.insights, so we synthesize an insight from the
+    backlog row ({theme_id, title, summary}) — the same shape the KG evidence
+    trail and PRD prompt consume — and attach the PRD to the company's CURRENT
+    brief for tenant/dataset grounding. Dedup + version history key on
+    (brief_id, theme_id). Fire-and-forget like /generate: returns the prd_id
+    immediately; poll GET /v1/prd/{prd_id} until status == 'ready'.
+    """
+    # Tenant gate: the item must belong to the caller's company (404 otherwise).
+    item = get_backlog_item(company.company_id, body.backlog_item_id)
+    if item is None:
+        raise HTTPException(404, "Backlog item not found")
+
+    # Backlog PRDs anchor to the company's current brief (dataset grounding).
+    # No brief ⇒ no analysis ⇒ nothing to ground a PRD on.
+    slug = slug_for_company_id(company.company_id)
+    brief = get_current_brief(slug) if slug else None
+    if not brief:
+        raise HTTPException(
+            409, "No current brief for this company — generate a brief first."
+        )
+    brief_id = brief["id"]
+
+    theme_id = item.get("theme_id")
+    title = item.get("title") or "Backlog item"
+    # Synthetic insight — mirrors a brief insight so the KG trail (theme_id) and
+    # the PRD prompt (title/summary) resolve identically to the brief path.
+    insight = {
+        "theme_id": theme_id,
+        "title": title,
+        "summary": item.get("reasoning") or "",
+        "hypothesis_id": item.get("hypothesis_id"),
+    }
+
+    if not body.force and theme_id:
+        existing = find_existing_prd_for_theme(
+            brief_id, theme_id, variant=PRD_VARIANT
+        )
+        if existing:
+            return {
+                "prd_id": existing["id"],
+                "status": existing["status"],
+                "title": existing["title"],
+                "variant": PRD_VARIANT,
+            }
+
+    prd_id = start_prd(
+        brief_id=brief_id,
+        insight_index=_BACKLOG_INSIGHT_INDEX,
+        title=title,
+        template_version=PRD_TEMPLATE_VERSION,
+        variant=PRD_VARIANT,
+        source="backlog",
+        theme_id=theme_id,
+    )
+    # Lifecycle: mark the theme prd_created so it lands in the Completed tab
+    # (keyed by theme_id — works identically for backlog and brief themes).
+    _record_prd_action(company.company_id, insight)
+
+    task = asyncio.create_task(
+        generate_prd(
+            prd_id, brief_id, _BACKLOG_INSIGHT_INDEX, insight_override=insight
+        )
     )
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)

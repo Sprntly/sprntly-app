@@ -60,6 +60,67 @@ def upsert_backlog_item(
     ).execute()
 
 
+def create_manual_backlog_item(
+    enterprise_id: str,
+    *,
+    title: str,
+    tag: Optional[str] = None,
+    client=None,
+) -> dict:
+    """Create a USER-ADDED backlog item (the "+ Add idea" flow).
+
+    Unlike synthesis-produced rows, a manual item has no KG theme behind it, so
+    its `theme_id` is a synthetic ``manual:<uuid>`` (kept unique so it never
+    collides with a real theme or another manual row, and so the (enterprise_id,
+    theme_id) unique key holds). It lands at the end of the ranking (max rank + 1)
+    with a zero score. Returns the created row.
+    """
+    cli = client or require_client()
+    now = utc_now()
+    existing = list_backlog_items(enterprise_id, client=cli)
+    next_rank = max((r.get("rank", 0) for r in existing), default=0) + 1
+    item_id = str(uuid.uuid4())
+    cli.table("backlog_items").insert(
+        {
+            "id": item_id,
+            "enterprise_id": enterprise_id,
+            "theme_id": f"manual:{uuid.uuid4()}",
+            "title": title,
+            "tag": tag,
+            "rank": next_rank,
+            "score": 0.0,
+            "status": STATUS_BACKLOG,
+            "updated_at": now,
+        }
+    ).execute()
+    return get_backlog_item(enterprise_id, item_id, client=cli)
+
+
+def reorder_backlog_items(
+    enterprise_id: str, ordered_ids: list[str], *, client=None
+) -> list[dict]:
+    """Persist a new manual rank order (drag-to-rerank / Re-sequence).
+
+    `ordered_ids` is the full desired order; each listed item gets
+    ``rank = position + 1``. Ids that don't belong to this enterprise are ignored
+    (tenant isolation). Items not in the list keep their current rank — the
+    frontend always sends the complete visible order, so this is a full rewrite
+    in practice. Returns the reordered list (rank-ascending)."""
+    cli = client or require_client()
+    owned = {r["id"] for r in list_backlog_items(enterprise_id, client=cli)}
+    now = utc_now()
+    for idx, item_id in enumerate(ordered_ids):
+        if item_id not in owned:
+            continue
+        (
+            cli.table("backlog_items")
+            .update({"rank": idx + 1, "updated_at": now})
+            .eq("enterprise_id", enterprise_id).eq("id", item_id)
+            .execute()
+        )
+    return list_backlog_items(enterprise_id, client=cli)
+
+
 def prune_stale_backlog(
     enterprise_id: str, keep_theme_ids, *, client=None
 ) -> int:
