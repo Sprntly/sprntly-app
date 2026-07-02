@@ -317,6 +317,11 @@ export type PostGenerationResultViewProps = {
   onToggleComments?: () => void
   platform?: Platform
   onPlatformChange?: (platform: Platform) => void
+  /** Per-device toggle visibility, derived by the container from the prototype's
+   *  `target_platform`. Default both true so any surface that omits them (public
+   *  viewer, direct view calls) keeps showing both toggles. */
+  showDesktop?: boolean
+  showMobile?: boolean
   /** mark-and-comment pin flow state,
    *  owned by the container and threaded into the SSR-renderable view (same
    *  pattern as `fullscreenOpen`). `markMode` toggles the crosshair overlay; the
@@ -628,6 +633,8 @@ export function DaControlBar({
   onShared,
   platform,
   onPlatformChange,
+  showDesktop = true,
+  showMobile = true,
   onRefreshBundle,
   commentsOpen,
   onToggleComments,
@@ -648,6 +655,13 @@ export function DaControlBar({
   onShared?: (token: string | null) => void
   platform: Platform
   onPlatformChange?: (platform: Platform) => void
+  /** Whether each device toggle is offered. Driven by the prototype's
+   *  `target_platform`: a desktop-only prototype hides Mobile, a mobile-only
+   *  prototype hides Desktop, and any other value shows both (legacy-safe).
+   *  When only one device remains, the whole toggle group is hidden — a single
+   *  option needs no toggle. Default both true. */
+  showDesktop?: boolean
+  showMobile?: boolean
   /** Manual "Refresh preview" trigger. When provided (signed-in editor only) a
    *  Refresh button renders to the right of the Desktop/Mobile toggle and calls
    *  this; the parent reuses the `bundleReloadNonce` bump so it cascades to the
@@ -694,28 +708,33 @@ export function DaControlBar({
             {prdTitle ?? "Untitled prototype"}
           </span>
         )}
-        <div
-          className="platform-toggle da-controlbar-platform"
-          role="group"
-          aria-label="Preview platform"
-        >
-          <button
-            type="button"
-            className={platform === "desktop" ? "active" : ""}
-            aria-pressed={platform === "desktop"}
-            onClick={() => onPlatformChange?.("desktop")}
+        {/* Only render the toggle group when BOTH devices are offered — when a
+            prototype targets a single form factor there is nothing to switch
+            between, so the group is omitted entirely. */}
+        {showDesktop && showMobile && (
+          <div
+            className="platform-toggle da-controlbar-platform"
+            role="group"
+            aria-label="Preview platform"
           >
-            Desktop
-          </button>
-          <button
-            type="button"
-            className={platform === "mobile" ? "active" : ""}
-            aria-pressed={platform === "mobile"}
-            onClick={() => onPlatformChange?.("mobile")}
-          >
-            Mobile
-          </button>
-        </div>
+            <button
+              type="button"
+              className={platform === "desktop" ? "active" : ""}
+              aria-pressed={platform === "desktop"}
+              onClick={() => onPlatformChange?.("desktop")}
+            >
+              Desktop
+            </button>
+            <button
+              type="button"
+              className={platform === "mobile" ? "active" : ""}
+              aria-pressed={platform === "mobile"}
+              onClick={() => onPlatformChange?.("mobile")}
+            >
+              Mobile
+            </button>
+          </div>
+        )}
         {/* Manual refresh — sits to the RIGHT of the Desktop/Mobile toggle.
             Rendered only when `onRefreshBundle` is provided (signed-in editor);
             the public viewer + fullscreen don't pass it, so no dead button. It
@@ -996,6 +1015,8 @@ export function PostGenerationResultView({
   onToggleComments,
   platform = "desktop",
   onPlatformChange,
+  showDesktop = true,
+  showMobile = true,
   onRefreshBundle,
   markMode = false,
   onToggleMark,
@@ -1107,6 +1128,8 @@ export function PostGenerationResultView({
       onShared={onShared}
       platform={platform}
       onPlatformChange={onPlatformChange}
+      showDesktop={showDesktop}
+      showMobile={showMobile}
       onRefreshBundle={onRefreshBundle}
       commentsOpen={commentsOpen}
       onToggleComments={onToggleComments}
@@ -1435,7 +1458,17 @@ export function PostGenerationResult({
   // the Desktop/Mobile toggle lifted out of PrototypeViewer lives here too.
   const [leftOpen, setLeftOpen] = useState<boolean>(true)
   const [commentsOpen, setCommentsOpen] = useState<boolean>(false)
-  const [platform, setPlatform] = useState<Platform>("desktop")
+  // Device-toggle visibility is driven by the prototype's chosen form factor.
+  // Only an explicit "desktop"/"mobile" hides the other device; every other
+  // value (both / legacy "web" / null / missing) shows BOTH, so old prototypes
+  // never lose a needed view. When a single device remains it is the active
+  // view — a mobile-only prototype defaults to "mobile", not "desktop".
+  const targetPlatform = prototype.target_platform
+  const showDesktop = targetPlatform !== "mobile"
+  const showMobile = targetPlatform !== "desktop"
+  const [platform, setPlatform] = useState<Platform>(
+    targetPlatform === "mobile" ? "mobile" : "desktop",
+  )
 
   // mark-and-comment pin flow — now driven by the shared usePinMarking hook (C2b)
   // so the public viewer runs the SAME implementation. The signed-in create-fn is
@@ -1540,6 +1573,8 @@ export function PostGenerationResult({
       onToggleComments={() => setCommentsOpen((v) => !v)}
       platform={platform}
       onPlatformChange={(p) => setPlatform(p)}
+      showDesktop={showDesktop}
+      showMobile={showMobile}
       markMode={pin.markMode}
       onToggleMark={pin.toggleMark}
       onStageClick={pin.handleStageClick}
