@@ -360,13 +360,6 @@ function AddIdeaCard({
 
       <div className="bl-add-card-footer">
         <div className="bl-add-card-left">
-          <button type="button" className="bl-add-card-action">
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-            </svg>
-            Voice
-          </button>
           <div className="bl-add-card-types">
             {IDEA_TYPES.map((t) => {
               const s = TYPE_STYLE[t]
@@ -995,14 +988,6 @@ export function BacklogScreen() {
               />
               <div className="bl-chat-footer">
                 <div className="bl-chat-footer-left">
-                  <button type="button" className="bl-chat-action-btn"
-                    onClick={() => showToast("Voice", "Voice input coming soon.")}>
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
-                      <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8" />
-                    </svg>
-                    Voice
-                  </button>
                   <button type="button" className="bl-chat-action-btn"
                     onClick={() => resequenceHandlerRef.current?.()}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
