@@ -320,7 +320,9 @@ def test_synthesis_binds_weekly_brief(isolated_settings, monkeypatch):
 
     spec = get_skill("weekly-brief")
     with patch.object(synth, "save_brief"), \
-         patch.object(synth, "deliver_brief_to_slack", return_value={"delivered": False, "reason": "slack_not_connected"}), \
+         patch.object(synth, "deliver_brief", return_value={
+             "slack": {"delivered": False, "reason": "slack_not_connected"},
+             "email": {"delivered": False, "reason": "email_disabled"}}), \
          patch.object(synth, "log_agent_decision"):
         # The fake client returns text, not a tool_use block, so call_json's
         # schema path raises after capturing kwargs — that's enough to assert
