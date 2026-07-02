@@ -64,6 +64,7 @@ import {
   IconCopy,
   IconShare,
   IconPlus,
+  IconChevronLeft,
 } from "../../components/shared/app-icons"
 import {
   designAgentApi,
@@ -673,6 +674,26 @@ export function PrototypeRoute() {
     setGenLoading(true)
   }
 
+  // Escape hatch from the full-screen generating overlay: true abort. Best-effort
+  // cancels the in-flight generation server-side (stops further LLM spend +
+  // deletes the row + resets the PRD to draft), then ALWAYS clears the loading
+  // state and returns the user to the PRD (brief) screen — a failed cancel must
+  // never trap the user, so the navigation is unconditional. Mirrors the
+  // generate-config Cancel target (`goTo("brief")`, the GenerateModal onClose).
+  const handleGenCancel = async () => {
+    const id = genProtoId
+    if (id != null) {
+      try {
+        await designAgentApi.cancel(id)
+      } catch {
+        /* best-effort — a failed cancel must never trap the user */
+      }
+    }
+    genLoadingRef.current = false
+    setGenLoading(false)
+    goTo("brief")
+  }
+
   // Terminal generation outcome. On SUCCESS reveal the new prototype IN-TAB:
   // stash the completed row in local state so the canvas branch renders it,
   // keeping the URL on /prototype?prd={prdId} (no overlay navigation). When the
@@ -812,6 +833,19 @@ export function PrototypeRoute() {
           data-testid="prototype-route-loading"
           aria-busy="true"
         >
+          {/* Back affordance so the transient resolving state is never a
+              dead-end — mirrors the `ready` branch's title-bar back
+              (router.back()). */}
+          <button
+            type="button"
+            className={`da-ctl-back ${styles.resolvingBack}`}
+            data-testid="prototype-route-loading-back"
+            title="Back"
+            aria-label="Back"
+            onClick={() => router.back()}
+          >
+            <IconChevronLeft size={16} />
+          </button>
           {/* Minimal loading indicator — reuses the shared .da-spinner SVG
               pattern (DesignAgentLauncher / da-prototype-generating) so this is no
               longer a blank flash while getActiveByPrd is in flight. */}
@@ -918,6 +952,7 @@ export function PrototypeRoute() {
             figmaFileKey={genFigmaKey}
             githubRepo={genGithubRepo}
             prototypeId={genProtoId}
+            onCancel={handleGenCancel}
             locatePhase={locatePhase ?? undefined}
           />
         </GenerateSurfaceErrorBoundary>

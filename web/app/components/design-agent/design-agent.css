@@ -2090,7 +2090,21 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  gap: 8px;
   margin-top: 20px;
+}
+/* Top-right close/cancel affordance: an unmistakable escape hatch pinned to the
+   overlay corner, independent of the footer. */
+.design-agent-surface.proto-gen-overlay .proto-gen-close {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  line-height: 1;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-cancel-btn:hover {
+  text-decoration: underline;
+  background: transparent;
+  border-color: transparent;
 }
 .design-agent-surface.proto-gen-overlay .proto-gen-notify-btn {
   /* inherits .btn .btn-ghost .btn-sm; no override needed here */
