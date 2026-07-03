@@ -473,3 +473,39 @@ describe("hideChrome edge-to-edge preview", () => {
     expect(html).toContain("Mobile")
   })
 })
+
+// ── Load mask (Glitch A) ──────────────────────────────────────────────────
+// The opt-in `maskUntilLoaded` renders a NEUTRAL surface-colored cover over the
+// iframe until its first `load` fires, so the black initial-paint / grant-mint
+// gap is never shown. Public + every other caller omit the prop → nothing extra
+// renders (byte-for-byte unchanged). The load→removed behaviour is exercised in
+// the jsdom companion (PrototypeViewer.load-mask.dom.test.tsx).
+describe("load mask (Glitch A)", () => {
+  function renderWithMask(maskUntilLoaded: boolean): string {
+    return renderToStaticMarkup(
+      React.createElement(PrototypeViewer, {
+        bundleUrl: BUNDLE,
+        isComplete: false,
+        maskUntilLoaded,
+      }),
+    )
+  }
+
+  it("renders a neutral surface placeholder before load when masking is opted in", () => {
+    const html = renderWithMask(true)
+    expect(html).toContain('data-testid="da-viewer-placeholder"')
+    // NOT the black / apply copy — it's a bare neutral cover.
+    expect(html).not.toContain("Applying changes")
+    // The neutral cover is surface-colored via a scoped CSS rule.
+    expect(CSS).toMatch(
+      /\.design-agent-surface\s+\.da-viewer-placeholder\s*\{[^}]*background:\s*var\(--surface\)/,
+    )
+  })
+
+  it("renders NO placeholder when masking is not opted in (public / default path unchanged)", () => {
+    const html = renderWithMask(false)
+    expect(html).not.toContain('data-testid="da-viewer-placeholder"')
+    // default renderViewer (no prop at all) is also clean
+    expect(renderViewer()).not.toContain('data-testid="da-viewer-placeholder"')
+  })
+})

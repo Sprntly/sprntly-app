@@ -112,7 +112,7 @@ describe("Bundle-loading overlay (Focus scrim restyle) — gated on bundleNotRea
   // `bundleNotReady` flip (set/cleared by the useViewGrant probe). These
   // assert structure/copy/gating only (jsdom doesn't compute CSS) — the non-vacuity
   // is present-when-notReady / absent-when-ready.
-  it("renders the overlay (spinner + 'Applying changes…' label) when bundleNotReady is true", () => {
+  it("renders the overlay with a passive 'Loading…' label when bundleNotReady without an iterate", () => {
     const html = renderInternal({ bundleUrl: BUNDLE, bundleNotReady: true })
     // Present, with the preserved testid + a11y semantics + reused spinner.
     expect(html).toContain('data-testid="da-bundle-loading"')
@@ -120,11 +120,20 @@ describe("Bundle-loading overlay (Focus scrim restyle) — gated on bundleNotRea
     expect(html).toContain('aria-live="polite"')
     // Reused .da-spinner via a modifier — no forked spinner class.
     expect(html).toContain("da-spinner da-bundle-loading-spinner")
-    // The stacked label node + restyled copy.
+    // The stacked label node.
     expect(html).toContain('class="da-bundle-loading-label"')
-    expect(html).toContain("Applying changes…")
+    // Label is now iterate-aware: a passive (re)load says "Loading…", NOT the
+    // misleading "Applying changes…" (which is reserved for a genuine iterate).
+    expect(html).toContain("Loading…")
+    expect(html).not.toContain("Applying changes…")
     // The pre-restyle copy is gone (no stale assertion left behind).
     expect(html).not.toContain("Loading preview…")
+  })
+
+  it("renders the overlay with 'Applying changes…' only during a genuine iterate", () => {
+    const html = renderInternal({ bundleUrl: BUNDLE, bundleNotReady: true, iterateRunning: true })
+    expect(html).toContain('data-testid="da-bundle-loading"')
+    expect(html).toContain("Applying changes…")
   })
 
   it("does NOT render the overlay when bundleNotReady is false (default)", () => {

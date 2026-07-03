@@ -1084,6 +1084,37 @@
 .design-agent-surface .proto-fullscreen:fullscreen .proto-dot,
 .design-agent-surface .proto-fullscreen:fullscreen .proto-url { display: none; }
 
+/* ── persistent-viewer host + load mask ────────────────────────
+   The single PrototypeViewer is wrapped in a STABLE host that becomes the
+   fullscreen surface in-place (no DOM reparent → no iframe reload on the
+   fullscreen toggle). Inline, the host + body are transparent flex
+   pass-throughs so the viewer still fills the `.da-stage` canvas exactly as
+   before. In fullscreen the host swaps to `.proto-fullscreen` / its body to
+   `.proto-fullscreen-body` (rules above), so these inline rules don't apply. */
+.design-agent-surface .da-viewer-host {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.design-agent-surface .da-viewer-host-body {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Glitch A: neutral surface cover over the iframe until it paints. Sits inside
+   the position:relative `.proto-stage`, above the iframe; removed on the first
+   `load`. Surface-colored — never black, never the "Applying changes…" copy. */
+.design-agent-surface .da-viewer-placeholder {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--surface);
+}
+
 
 /* ── Passcode gate states (PasscodeGate / UX-8 / P6-18) ───────────────────
  * Styles the public passcode-mode share gate. NEW here — P6-11 styled the

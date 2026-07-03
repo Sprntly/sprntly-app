@@ -1341,3 +1341,33 @@ describe("DaControlBar — manual Refresh-preview button (reuses bundleReloadNon
     expect((bar!.props as { onRefreshBundle?: unknown }).onRefreshBundle).toBe(onRefreshBundle)
   })
 })
+
+// ─── bundle-cover label semantics (Glitch B, AC2) ─────────────────
+// The bundle-not-ready cover must NOT claim "Applying changes…" on a passive
+// (re)load or readiness cover — only a genuine iterate/apply says that. A passive
+// cover shows the neutral "Loading…". (The persistent iframe means the fullscreen
+// toggle no longer triggers this cover at all; this guards the copy defensively.)
+describe("PostGenerationResultView — bundle-cover label is iterate-aware (AC2)", () => {
+  const BUNDLE = "https://cdn/x/bundle/index.html"
+
+  it("shows the neutral 'Loading…' (NOT 'Applying changes…') on a passive readiness cover", () => {
+    const html = renderView({
+      bundleUrl: BUNDLE,
+      bundleNotReady: true,
+      iterateRunning: false,
+    })
+    expect(html).toContain('data-testid="da-bundle-loading"')
+    expect(html).toContain("Loading…")
+    expect(html).not.toContain("Applying changes…")
+  })
+
+  it("shows 'Applying changes…' ONLY during a genuine iterate/apply", () => {
+    const html = renderView({
+      bundleUrl: BUNDLE,
+      bundleNotReady: true,
+      iterateRunning: true,
+    })
+    expect(html).toContain('data-testid="da-bundle-loading"')
+    expect(html).toContain("Applying changes…")
+  })
+})

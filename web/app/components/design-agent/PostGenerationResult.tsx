@@ -887,88 +887,100 @@ export function DaControlBar({
   )
 }
 
-function FullscreenOverlay({
-  bundleUrl,
-  isComplete,
+/**
+ * Persistent-viewer fullscreen host (Glitch B).
+ *
+ * WHY IN-PLACE, NOT A PORTAL: moving an <iframe> to a new DOM parent — which a
+ * React portal container-swap does — makes the browser re-fetch its `src` (the
+ * HTML spec navigates an iframe on insertion), producing the blank/white gap +
+ * the misleading "Applying changes…" flash on the fullscreen toggle. So the ONE
+ * PrototypeViewer/iframe never moves: it stays inside a STABLE body wrapper here,
+ * and fullscreen is achieved by upgrading THIS host element in-place — swapping
+ * its class to `.proto-fullscreen` (dialog chrome + close pill) and calling
+ * `requestFullscreen()` on the host, which already contains the iframe. No
+ * reparent → no reload → same iframe node across the on↔off transition (AC1).
+ *
+ * The child STRUCTURE is invariant across the toggle (close slot held by a
+ * conditional at a fixed index; the body wrapper + its viewer keep the same tree
+ * position), so React updates attributes on the same DOM nodes instead of
+ * remounting the iframe. The mark/pin overlays stay OUTSIDE this host (siblings
+ * in `.da-stage`), so native fullscreen — which only shows the host subtree —
+ * keeps the fullscreen presentation view-only, exactly as the old separate
+ * overlay did.
+ */
+function ViewerFullscreenHost({
+  fullscreenOpen,
   onCloseFullscreen,
-  onAssetError,
-  showDesktop = true,
-  showMobile = true,
-  initialPlatform = "desktop",
+  children,
 }: {
-  bundleUrl: string
-  isComplete: boolean
+  fullscreenOpen: boolean
   onCloseFullscreen?: () => void
-  onAssetError?: () => void
-  /** Per-device toggle visibility + the device the overlay opens on, derived by
-   *  the container from the prototype's `target_platform`. A mobile-only proto
-   *  hides the Desktop button and opens on mobile; a desktop-only proto hides
-   *  Mobile; both/legacy shows both. Defaults keep any other caller unchanged. */
-  showDesktop?: boolean
-  showMobile?: boolean
-  initialPlatform?: Platform
+  children: ReactNode
 }) {
-  const fullscreenRef = useRef<HTMLDivElement>(null)
+  const hostRef = useRef<HTMLDivElement>(null)
 
+  // Enter/exit native fullscreen on the SAME persistent host element as the open
+  // state changes. Guarded (`requestFullscreen?.`) so the node-env / jsdom test
+  // lanes (no Fullscreen API) are no-ops. Never reparents the iframe.
   useEffect(() => {
-    if (fullscreenRef.current) {
-      fullscreenRef.current.requestFullscreen().catch(() => {})
+    const el = hostRef.current
+    if (!el) return
+    if (fullscreenOpen) {
+      if (document.fullscreenElement !== el) {
+        el.requestFullscreen?.().catch(() => {})
+      }
+    } else if (document.fullscreenElement === el) {
+      document.exitFullscreen?.().catch(() => {})
     }
-  }, [])
+  }, [fullscreenOpen])
 
+  // If the user leaves native fullscreen (Esc / browser chrome) close the overlay
+  // state too, so the app view and the browser stay in sync.
   useEffect(() => {
+    if (!fullscreenOpen) return
     const handler = () => {
       if (!document.fullscreenElement) onCloseFullscreen?.()
     }
-    document.addEventListener('fullscreenchange', handler)
-    return () => document.removeEventListener('fullscreenchange', handler)
-  }, [onCloseFullscreen])
-
-  // Single-device fullscreen keeps a slim chrome bar (chrome-less reads as
-  // broken); the toggle's vacated slot is filled with a settled device
-  // indicator. Both-device passes no headControls → the live toggle renders
-  // unchanged.
-  const singleDevice = showDesktop !== showMobile
-  const headControls = singleDevice ? (
-    <span className="proto-fs-device">
-      {showMobile ? <IconPhone size={16} /> : <IconMonitor size={16} />}
-      <span className="lbl">{showMobile ? "Mobile" : "Desktop"}</span>
-    </span>
-  ) : undefined
+    document.addEventListener("fullscreenchange", handler)
+    return () => document.removeEventListener("fullscreenchange", handler)
+  }, [fullscreenOpen, onCloseFullscreen])
 
   return (
     <div
-      ref={fullscreenRef}
-      className="proto-fullscreen"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Prototype full screen"
-      data-testid="proto-fullscreen"
+      ref={hostRef}
+      className={fullscreenOpen ? "proto-fullscreen" : "da-viewer-host"}
+      {...(fullscreenOpen
+        ? {
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-label": "Prototype full screen",
+            "data-testid": "proto-fullscreen",
+          }
+        : {})}
     >
-      <button
-        type="button"
-        className="proto-fullscreen-close"
-        aria-label="Close full screen"
-        data-testid="proto-fullscreen-close"
-        onClick={() => { document.exitFullscreen().catch(() => {}); onCloseFullscreen?.() }}
-      >
-        <IconClose size={16} />
-        <span className="proto-fs-close-label">Close</span>
-      </button>
-      <div className="proto-fullscreen-body">
-        {/* Edge-to-edge: suppress the cosmetic browser-frame decoration (traffic
-            lights + URL bar) so the prototype fills the full-screen surface. The
-            platform toggle is unaffected (not gated by hideChrome). */}
-        <PrototypeViewer
-          bundleUrl={bundleUrl}
-          isComplete={isComplete}
-          hideChrome
-          onAssetError={onAssetError}
-          showDesktop={showDesktop}
-          showMobile={showMobile}
-          initialPlatform={initialPlatform}
-          headControls={headControls}
-        />
+      {/* Close slot is a fixed child index (null holds it when inline) so the
+          body wrapper below never shifts position — the iframe is never
+          remounted by the toggle. The always-on-top labeled Close pill
+          (z-index:2, #572) is the fullscreen exit. */}
+      {fullscreenOpen ? (
+        <button
+          type="button"
+          className="proto-fullscreen-close"
+          aria-label="Close full screen"
+          data-testid="proto-fullscreen-close"
+          onClick={() => {
+            document.exitFullscreen?.().catch(() => {})
+            onCloseFullscreen?.()
+          }}
+        >
+          <IconClose size={16} />
+          <span className="proto-fs-close-label">Close</span>
+        </button>
+      ) : null}
+      {/* STABLE body wrapper — the persistent PrototypeViewer lives here in BOTH
+          states, so its iframe keeps the same DOM position/identity. */}
+      <div className={fullscreenOpen ? "proto-fullscreen-body" : "da-viewer-host-body"}>
+        {children}
       </div>
     </div>
   )
@@ -1123,26 +1135,45 @@ export function PostGenerationResultView({
   // trigger) is NO LONGER rendered on the canvas — the `chrome` slot is left empty.
   // The ManualEditOverlay component file is kept intact; we just don't mount its
   // trigger here. Mark-and-comment (CHANGE 3) is the canvas annotation path now.
-  const viewer = bundleUrl && !fullscreenOpen ? (
+  // (Glitch B): ONE persistent viewer, mounted whenever a bundle exists
+  // — NO LONGER unmounted when `fullscreenOpen` flips. Fullscreen is applied
+  // in-place by <ViewerFullscreenHost> (native requestFullscreen on the ancestor
+  // that already holds this iframe), so the fullscreen on↔off transition never
+  // remounts the iframe or re-fetches its `src`. The `key` is deliberately
+  // independent of `fullscreenOpen` (it still folds the bundle path + reload
+  // nonce + grant reload key, which ARE genuine iterate/grant reloads).
+  const singleDevice = showDesktop !== showMobile
+  // Single-device fullscreen keeps a slim chrome bar (chrome-less reads as
+  // broken); the toggle's vacated slot is filled with a settled device indicator
+  // (#572). Inline + both-device pass none. Only meaningful in fullscreen.
+  const fullscreenDevicePill =
+    fullscreenOpen && singleDevice ? (
+      <span className="proto-fs-device">
+        {showMobile ? <IconPhone size={16} /> : <IconMonitor size={16} />}
+        <span className="lbl">{showMobile ? "Mobile" : "Desktop"}</span>
+      </span>
+    ) : undefined
+  const viewer = bundleUrl ? (
     <PrototypeViewer
-      // cache-busted url so a completed
-      // iterate reloads the rebuilt bundle (the iframe src changes → reload). The
-      // `key` follows BOTH the bundle path and the nonce, so React mounts a fresh
-      // iframe when the build advances to a new path AND when a same-path rebuild
-      // bumps the nonce — the canvas never reuses a frame stuck on a prior build.
-      // The remount key folds in the grant reload key so a bounded re-mint
-      // forces a fresh iframe load of the now-re-authorized bundle.
       key={`${viewerRemountKey(bundleUrl, bundleReloadNonce)}-g${bundleGrantReloadKey}`}
       bundleUrl={reloadBundleUrl ?? bundleUrl}
       isComplete={isComplete}
       platform={platform}
       onPlatformChange={onPlatformChange}
-      hideToggle
-      // Edge-to-edge signed-in editor preview: suppress the cosmetic browser-frame
-      // decoration (traffic lights + URL bar). The toggle is already lifted into
-      // the top control bar (`hideToggle`), so the iframe sits flush. The public
-      // viewer + fullscreen overlay leave this unset and keep the full chrome.
+      // Inline: the Desktop/Mobile toggle is lifted into the control bar
+      // (`hideToggle`). In fullscreen the control bar is off-screen, so the
+      // in-frame toggle renders again for a both-device prototype (single-device
+      // stays gated — nothing to toggle to — and shows the device pill instead).
+      hideToggle={!fullscreenOpen}
+      // Edge-to-edge in both modes: suppress the cosmetic browser-frame
+      // decoration (traffic lights + URL bar). The toggle / device pill are NOT
+      // gated by hideChrome, so they still render where applicable.
       hideChrome
+      showDesktop={showDesktop}
+      showMobile={showMobile}
+      headControls={fullscreenDevicePill}
+      // Glitch A: neutral surface cover until the iframe paints.
+      maskUntilLoaded
       onAssetError={onBundleAssetError}
       onBundleLoad={onBundleLoad}
     />
@@ -1309,11 +1340,25 @@ export function PostGenerationResultView({
           className={`da-stage${markMode ? " marking" : ""}`}
           data-testid="da-canvas-center"
         >
-          {viewer}
+          {/* The persistent viewer lives inside the fullscreen host so the ONE
+              iframe survives the fullscreen toggle in-place (Glitch B). The
+              mark/pin overlays stay OUTSIDE the host (siblings below) so native
+              fullscreen keeps the fullscreen presentation view-only. */}
+          {viewer && (
+            <ViewerFullscreenHost
+              fullscreenOpen={fullscreenOpen}
+              onCloseFullscreen={onCloseFullscreen}
+            >
+              {viewer}
+            </ViewerFullscreenHost>
+          )}
           {/* Bundle briefly unavailable (a 404 through the proxy on a not-yet-
               staged build). Cover the iframe with a neutral loading overlay so the
               raw 404 body is never seen; it clears automatically once a re-probe
-              finds the bundle ready (the viewer reloads it). */}
+              finds the bundle ready (the viewer reloads it). The label is
+              iterate-aware (AC2): only a genuine iterate/apply says
+              "Applying changes…"; a passive (re)load / readiness cover says the
+              neutral "Loading…" — never the misleading apply copy. */}
           {bundleNotReady && viewer && (
             <div
               className="da-bundle-loading"
@@ -1322,7 +1367,9 @@ export function PostGenerationResultView({
               data-testid="da-bundle-loading"
             >
               <span className="da-spinner da-bundle-loading-spinner" aria-hidden="true" />
-              <span className="da-bundle-loading-label">Applying changes…</span>
+              <span className="da-bundle-loading-label">
+                {iterateRunning ? "Applying changes…" : "Loading…"}
+              </span>
             </div>
           )}
           {/* View-grant failure (initial mint failed, or the bounded re-mint was
@@ -1418,23 +1465,11 @@ export function PostGenerationResultView({
           </div>
         </aside>
       </div>
-      {/* The full-screen overlay reuses the SAME device frame (P6-12
-          `<PrototypeViewer>`) at viewport scale — not a bare iframe (keeps the
-          browser-frame chrome + Desktop/Mobile toggle + the P6-17 sandbox). It is
-          view-only (no `chrome` → no second ManualEditOverlay editor). Mounted
-          only while open AND a bundle exists; the inline viewer is unmounted while
-          it is open (selector-collision guard above). */}
-      {fullscreenOpen && bundleUrl && (
-        <FullscreenOverlay
-          bundleUrl={bundleUrl}
-          isComplete={isComplete}
-          onCloseFullscreen={onCloseFullscreen}
-          onAssetError={onBundleAssetError}
-          showDesktop={showDesktop}
-          showMobile={showMobile}
-          initialPlatform={platform}
-        />
-      )}
+      {/* the fullscreen presentation is no longer a SEPARATE overlay
+          with its OWN PrototypeViewer (that second iframe was the source of the
+          fullscreen→edit reload). The single persistent viewer above is upgraded
+          in-place to fullscreen by <ViewerFullscreenHost>, so exactly ONE iframe
+          exists at all times and it never reloads on the fullscreen toggle. */}
     </div>
   )
 }

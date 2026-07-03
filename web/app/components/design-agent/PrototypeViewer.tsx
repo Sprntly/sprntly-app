@@ -100,6 +100,14 @@ type Props = {
    *  PostGenerationResult call site (which keeps its own `.da-stage` overlay and
    *  passes no stageOverlay) is byte-for-byte unchanged. */
   stageOverlay?: ReactNode
+  /** Opt-in load mask (Glitch A): while set, a NEUTRAL surface-colored cover is
+   *  rendered over the iframe until its FIRST `load` event fires, so the black
+   *  initial-paint / grant-mint gap is never shown to the user. The cover is keyed
+   *  to THIS viewer instance's mount, so a genuine reload (a new `key` remounts the
+   *  viewer) re-shows it until the fresh bundle paints. Undefined/false on the
+   *  public `/p/<token>` surface and every other caller → nothing extra renders, so
+   *  those paths are byte-for-byte unchanged (AC6). */
+  maskUntilLoaded?: boolean
 }
 
 export function PrototypeViewer({
@@ -118,7 +126,17 @@ export function PrototypeViewer({
   onAssetError,
   onBundleLoad,
   hideChrome = false,
+  maskUntilLoaded = false,
 }: Props) {
+  // Glitch A: mask the iframe with a neutral surface cover until it has painted
+  // (first `load`). Local to this instance, so a genuine reload (new `key`
+  // remounts the viewer) resets it and re-masks the fresh bundle's dark
+  // pre-paint. A passive re-render never resets it.
+  const [loaded, setLoaded] = useState(false)
+  const handleLoad = () => {
+    setLoaded(true)
+    onBundleLoad?.()
+  }
   // UX-EXPLORE (throwaway — REVERT): controlled when a `platform` prop is given;
   // otherwise own the state locally as before. Either way `platform` below is the
   // effective value the stage class reads, so the single iframe is never
@@ -225,8 +243,22 @@ export function PrototypeViewer({
             // A 404-bodied document fires `load`, not `error`; the authed
             // container probes the real status here to cover a briefly-
             // unavailable bundle. No-op when no handler is wired (public surface).
-            onLoad={onBundleLoad ? () => onBundleLoad() : undefined}
+            // When the load mask is opted in we also need the first `load` to
+            // lift the cover, so wire `handleLoad` whenever EITHER concern applies.
+            onLoad={
+              maskUntilLoaded || onBundleLoad ? handleLoad : undefined
+            }
           />
+          {/* Glitch A: neutral surface cover over the iframe until it paints.
+              Opt-in (signed-in editor + fullscreen) — the public surface omits
+              `maskUntilLoaded` so it renders nothing here. */}
+          {maskUntilLoaded && !loaded && (
+            <div
+              className="da-viewer-placeholder"
+              data-testid="da-viewer-placeholder"
+              aria-hidden="true"
+            />
+          )}
           {/* C2b: optional marking overlay, layered over the iframe inside the
               position:relative stage. Undefined → nothing (signed-in path). */}
           {stageOverlay}
