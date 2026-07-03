@@ -1025,6 +1025,11 @@
 }
 .design-agent-surface .proto-fullscreen-close {
   position: absolute;
+  /* The fullscreen exit MUST always sit above the prototype iframe/canvas —
+     when a single-device prototype suppresses the chrome head, the iframe fills
+     to the top and would otherwise occlude this control, trapping the user with
+     no way out (Escape/browser-back only). Stack it above the body content. */
+  z-index: 2;
   /* Align with the chrome bar's row: the frame-head's 11px top padding places
      the Desktop/Mobile toggle's top edge at 11px, and the toggle is the same
      36px height as this control, so matching top lines up both their top and

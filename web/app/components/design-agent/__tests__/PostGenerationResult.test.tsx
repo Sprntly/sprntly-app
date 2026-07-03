@@ -166,6 +166,31 @@ describe("PostGenerationResultView — full-screen overlay (P6-16 AC2/AC3/AC3b)"
     expect(closed).not.toContain('data-testid="proto-fullscreen"')
   })
 
+  it("keeps the fullscreen exit (close X) for a single-device prototype — never traps", () => {
+    // A single-device prototype suppresses the in-frame toggle + chrome head in
+    // fullscreen; the exit MUST still render (Escape/browser-back is not an
+    // acceptable only-way-out). Both mobile-only and desktop-only.
+    const mobileOnly = renderView({
+      bundleUrl: BUNDLE,
+      fullscreenOpen: true,
+      showDesktop: false,
+      showMobile: true,
+      platform: "mobile",
+    })
+    expect(mobileOnly).toContain('data-testid="proto-fullscreen-close"')
+    // and the toggle is gated away (the actual single-device behaviour)
+    expect(mobileOnly).not.toContain('aria-label="Preview platform"')
+
+    const desktopOnly = renderView({
+      bundleUrl: BUNDLE,
+      fullscreenOpen: true,
+      showDesktop: true,
+      showMobile: false,
+      platform: "desktop",
+    })
+    expect(desktopOnly).toContain('data-testid="proto-fullscreen-close"')
+  })
+
   it("never renders the overlay without a bundle even if fullscreenOpen is true", () => {
     const html = renderView({ bundleUrl: null, fullscreenOpen: true })
     expect(html).not.toContain('data-testid="proto-fullscreen"')
