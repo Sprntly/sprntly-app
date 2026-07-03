@@ -3789,9 +3789,7 @@
   text-align: center;
   padding: 40px 28px;
   min-height: 60vh;
-  background:
-    radial-gradient(ellipse at center, var(--accent-alpha-06) 0%, transparent 60%),
-    var(--surface);
+  background: radial-gradient(ellipse at center, var(--accent-alpha-06) 0%, transparent 60%), var(--surface);
 }
 /* The banner is the centered composition; its own direct children stack. */
 .design-agent-surface .generation-error-banner {
@@ -3851,14 +3849,8 @@
   flex: 0 0 auto;
 }
 @keyframes daFade {
-  from {
-    opacity: 0;
-    transform: translateY(4px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .design-agent-surface .generation-error-banner {
