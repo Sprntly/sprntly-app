@@ -178,11 +178,17 @@ export function usePinMarking({
 
   // Bind occlusion tracking to the prototype iframe WHEN IT MOUNTS — independent of
   // `pins`. The iframe mounts LATER than this effect (it appears only after the
-  // grant/bundleUrl resolves), so the old `querySelector(...); if (!iframe) return`
-  // at mount early-returned before the iframe existed and never re-ran (its only
-  // trigger was a `pins` change). Result: on a fresh viewer the observer was never
-  // bound and an in-iframe modal open never auto-hid the pin. This effect instead
-  // runs ONCE and rAF-retries (bounded) until the iframe is present, then binds:
+  // grant POST + bundle fetch resolve and the `<iframe>` mounts). Detecting it must
+  // NOT use a bounded poll: on a COLD load the grant + bundle fetch + iframe mount
+  // take LONGER than any fixed frame budget, so a bounded retry EXHAUSTS before the
+  // iframe appears and the observer never binds — and because the `load`-reattach
+  // fallback is wired only AFTER the iframe is found, it never installs either, so
+  // the pin can never auto-hide on a modal open (a warm load lands the iframe inside
+  // the budget, masking the race). Instead we detect the iframe by a reliable mount
+  // SIGNAL: bind immediately if it is already present, else watch `document.body`
+  // with a DOM MutationObserver for `.da-prototype-iframe` to appear. That fires
+  // WHENEVER the iframe mounts, however late (cold loads included) — no bound, no
+  // exhaustion. Once found we bind:
   //   • element-level, attached ONCE (the iframe ELEMENT persists — single
   //     persistent-iframe design): window `resize` + the iframe `load` event.
   //   • document-level, (re)bound by attachDoc on the initial bind AND on every
@@ -198,10 +204,9 @@ export function usePinMarking({
   // and pins still render + track — occlusion-hiding is a progressive enhancement.
   useEffect(() => {
     let cancelled = false
-    let rafRetry: number | null = null
     let rafRecompute: number | null = null
-    let retries = 0
     let observer: MutationObserver | null = null
+    let iframeWatcher: MutationObserver | null = null
     let boundWin: Window | null = null
     let iframeEl: HTMLIFrameElement | null = null
 
@@ -246,19 +251,11 @@ export function usePinMarking({
 
     const onLoad = () => { attachDoc() }
 
-    // rAF-retry until the iframe mounts, then bind. Bounded so a viewer whose iframe
-    // NEVER appears (grant/bundle failure) does not spin a frame loop forever — it
-    // gives up quietly after the cap (pins still render). Once bound, the loop stops.
-    const MAX_BIND_RETRIES = 50 // ~50 frames (~1s at 60fps) — generous for grant resolve
-    const tryBind = () => {
-      if (cancelled) return
-      const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-      if (!iframe) {
-        if (retries >= MAX_BIND_RETRIES) return
-        retries += 1
-        rafRetry = requestAnimationFrame(tryBind)
-        return
-      }
+    // Bind the element-level + document-level listeners to a mounted iframe. Called
+    // once the iframe is present (immediately, or via `iframeWatcher` when it mounts
+    // late). The iframe ELEMENT persists, so resize + load bind ONCE here; attachDoc
+    // (re)binds the per-document scroll + MutationObserver, now and on every `load`.
+    const bind = (iframe: HTMLIFrameElement) => {
       iframeEl = iframe
       // element-level listeners — attached ONCE (the iframe element persists).
       window.addEventListener("resize", recompute, { passive: true })
@@ -267,11 +264,35 @@ export function usePinMarking({
       attachDoc()
     }
 
-    tryBind()
+    // Detect the iframe by a reliable mount SIGNAL, not a bounded poll. If it is
+    // already present → bind now. Otherwise watch document.body for it to appear —
+    // this fires WHENEVER the iframe mounts, however late (cold loads included), so
+    // there is no bound to exhaust. Disconnect the watcher the moment it is found.
+    const found = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+    if (found) {
+      bind(found)
+    } else {
+      try {
+        iframeWatcher = new MutationObserver(() => {
+          const el = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+          if (el) {
+            iframeWatcher?.disconnect()
+            iframeWatcher = null
+            if (!cancelled) bind(el)
+          }
+        })
+        iframeWatcher.observe(document.body, { childList: true, subtree: true })
+      } catch {
+        // document.body unavailable (should not happen once effects run) → no
+        // watcher; pins still render + track, occlusion-hiding is progressive.
+        iframeWatcher = null
+      }
+    }
 
     return () => {
       cancelled = true
-      if (rafRetry != null) cancelAnimationFrame(rafRetry)
+      try { iframeWatcher?.disconnect() } catch { /* noop */ }
+      iframeWatcher = null
       if (rafRecompute != null) cancelAnimationFrame(rafRecompute)
       try { boundWin?.removeEventListener("scroll", recompute) } catch { /* noop */ }
       window.removeEventListener("resize", recompute)
