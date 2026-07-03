@@ -3773,3 +3773,95 @@
   color: var(--accent);
   flex: 0 0 auto;
 }
+
+/* ------------------------------------------------------------------
+ * Generation-failed recovery ("Generation didn't finish").
+ * Mirrors the .da-empty-hero-stage centered-stage pattern so a failed
+ * run reads as a calm, sibling-grade recovery moment rather than a bare
+ * validation error. Adds a --surface base with a faint --accent radial
+ * (same wash as the empty-hero). Danger hue is confined to the art tile;
+ * the mapped reasonCopy body is calm --ink-2, never red. Tokens only.
+ * ------------------------------------------------------------------ */
+.design-agent-surface.da-gen-error-stage {
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 40px 28px;
+  min-height: 60vh;
+  background:
+    radial-gradient(ellipse at center, var(--accent-alpha-06) 0%, transparent 60%),
+    var(--surface);
+}
+/* The banner is the centered composition; its own direct children stack. */
+.design-agent-surface .generation-error-banner {
+  max-width: 480px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  border: 0;
+  background: none;
+  padding: 0;
+  animation: daFade 0.28s ease-out;
+}
+.design-agent-surface .da-gen-error-art {
+  width: 96px;
+  height: 96px;
+  border-radius: var(--radius-lg);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  color: var(--danger);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 22px;
+}
+.design-agent-surface .da-gen-error-title {
+  font-family: var(--font-serif);
+  font-size: 30px;
+  font-weight: 400;
+  letter-spacing: -0.012em;
+  line-height: 1.1;
+  color: var(--ink);
+  margin: 0 0 10px;
+}
+.design-agent-surface .generation-error-message {
+  font-size: 14.5px;
+  line-height: 1.6;
+  color: var(--ink-2);
+  max-width: 420px;
+  margin: 0 0 22px;
+}
+.design-agent-surface .generation-error-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+.design-agent-surface .da-gen-error-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 16px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.design-agent-surface .da-gen-error-note svg {
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+@keyframes daFade {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .design-agent-surface .generation-error-banner {
+    animation: none;
+  }
+}

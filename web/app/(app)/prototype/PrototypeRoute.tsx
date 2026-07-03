@@ -814,21 +814,14 @@ export function PrototypeRoute() {
     return (
       <AppLayout>
         <div
-          className="design-agent-surface da-prototype-empty"
+          className="design-agent-surface da-prototype-empty da-gen-error-stage"
           data-testid="prototype-route-gen-error"
         >
           <GenerationErrorBanner
             reason={reasonCopy(genError)}
             onRetry={handleGenErrorRetry}
+            onBack={() => goTo("brief")}
           />
-          <button
-            type="button"
-            className="btn"
-            data-testid="prototype-route-gen-error-back"
-            onClick={() => goTo("brief")}
-          >
-            Back to brief
-          </button>
         </div>
       </AppLayout>
     )
