@@ -1,16 +1,22 @@
 // @vitest-environment jsdom
 //
-// Occlusion behaviour for the shared pin engine: a comment pin is a parent-app
-// overlay (z-index above the same-origin prototype iframe). When an in-iframe
-// modal is drawn OVER the pin's anchored element, the pin must HIDE (not float on
-// top of the modal); when the modal closes, the pin must RE-SHOW — driven by a
-// MutationObserver on the iframe document, not a page reload.
+// Comment-pin OCCLUSION behaviour for the shared pin engine. A comment pin is a
+// parent-app overlay (z-index above the same-origin prototype iframe). When an
+// in-iframe modal is drawn OVER the pin's anchored element the pin must HIDE (not
+// float on top of the modal); when the modal closes the pin must RE-SHOW — driven
+// by a MutationObserver on the iframe document, not a page reload.
+//
+// The lifecycle is three cleanly-separated concerns:
+//   1. iframe lifecycle binding — keep ONE content observer bound to the live doc
+//      across late mount, React-key remount, and same-URL document swap.
+//   2. the content observer's mutation handler — ALWAYS schedule a recompute.
+//   3. the occlusion recompute — hide/show pins by elementFromPoint.
 //
 // Exercised on real jsdom because the behaviour depends on effects, a
 // MutationObserver on the iframe `contentDocument`, and elementFromPoint. jsdom
 // does no layout, so the anchor-position bridge + getBoundingClientRect +
-// elementFromPoint are stubbed to model "topmost element at the pin's point";
-// the hook's occlusion decision + observer wiring under test are the real code.
+// elementFromPoint are stubbed to model "topmost element at the pin's point"; the
+// hook's binding lifecycle + occlusion decision under test are the real code.
 import * as React from "react"
 import { act, cleanup, fireEvent, render } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -56,23 +62,28 @@ function Harness() {
   })
 }
 
-beforeEach(() => {
-  iframe = document.createElement("iframe")
-  iframe.className = "da-prototype-iframe"
-  document.body.appendChild(iframe)
-  doc = iframe.contentDocument!
+// jsdom does no layout: model a real iframe viewport + a topmost element on the
+// given element's CURRENT contentDocument (re-appending an iframe can hand back a
+// fresh document in jsdom).
+function wireDoc(el: HTMLIFrameElement) {
+  iframe = el
+  doc = el.contentDocument!
   anchorEl = doc.createElement("div")
   anchorEl.setAttribute("data-anchor-id", "a1")
   doc.body.appendChild(anchorEl)
-
   bridge.pos = { xPct: 50, yPct: 50 }
   bridge.anchorEl = anchorEl
   topEl = anchorEl // unoccluded by default
-
-  // jsdom does no layout: model a real iframe viewport + a topmost element.
-  iframe.getBoundingClientRect = () =>
+  el.getBoundingClientRect = () =>
     ({ width: 1000, height: 800, left: 0, top: 0, right: 1000, bottom: 800, x: 0, y: 0, toJSON() {} }) as DOMRect
   doc.elementFromPoint = () => topEl
+}
+
+beforeEach(() => {
+  const el = document.createElement("iframe")
+  el.className = "da-prototype-iframe"
+  document.body.appendChild(el)
+  wireDoc(el)
 })
 
 afterEach(() => {
@@ -88,53 +99,171 @@ async function dropPin() {
   })
 }
 
-// Let the MutationObserver's rAF-debounced recompute run + React re-render.
+// Let the content observer's rAF-debounced recompute run + React re-render.
 async function flushObserver() {
   await act(async () => {
     await new Promise((r) => setTimeout(r, 30))
   })
 }
 
-describe("usePinMarking — pin occlusion by an in-iframe overlay", () => {
-  it("renders the pin when its anchor is the topmost element at the pin point", async () => {
-    render(React.createElement(Harness))
-    await dropPin()
-    // topEl === anchorEl (unoccluded) → the pin dot is drawn.
-    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
+// Flush ONLY microtasks — NO frame tick (rAF), NO timer. Proves a bind is driven
+// by the mount SIGNAL (the microtask-batched body MutationObserver), not a poll.
+async function flushMicrotasks() {
+  await act(async () => {
+    await Promise.resolve()
+    await Promise.resolve()
   })
+}
 
-  it("hides the pin when a different element (a modal) is topmost at the pin point", async () => {
+// Only the OCCLUSION (content) observers target the iframe's contentDocument; the
+// Concern-1 mount/remount watcher targets document.body. This discriminator counts
+// content observers so tests assert the occlusion binding, not the signal detector.
+function contentObserverBinds(observe: ReturnType<typeof vi.spyOn>): number {
+  return observe.mock.calls.filter(([t]) => t !== document.body && t !== document).length
+}
+
+describe("usePinMarking — comment-pin occlusion lifecycle", () => {
+  // ── Concern 1: binding across every way the iframe can appear/change ──
+
+  it("warm mount — binds to an iframe already present at render (sync initial check)", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe")
     render(React.createElement(Harness))
-    // Prove non-vacuous: with the anchor topmost the pin renders…
+    // The iframe was in the DOM before render → the synchronous initial check binds
+    // the content observer to its document immediately.
+    expect(contentObserverBinds(observe)).toBeGreaterThanOrEqual(1)
+    // And it drives occlusion: a modal over the anchor hides the pin.
     await dropPin()
     expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
-    // …now a modal covers the anchor point → topmost is a different element.
     const modal = doc.createElement("div")
     doc.body.appendChild(modal)
     topEl = modal
-    // append fires the MutationObserver → rAF recompute → occluded.
     await flushObserver()
     expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
   })
 
-  it("re-shows the pin when the overlay is removed — observer-driven, no reload", async () => {
+  it("late cold mount — binds on the iframe-appearance SIGNAL, not a frame poll", async () => {
+    // Model a fresh viewer: no `.da-prototype-iframe` at render. A COLD load (grant
+    // POST + bundle fetch + `<iframe>` mount) takes longer than any fixed frame
+    // budget, so a bounded poll would exhaust before the iframe appears. The bind
+    // must instead ride the DOM-insert signal, however late.
+    iframe.remove()
+    expect(document.querySelector(".da-prototype-iframe")).toBeNull()
+
+    const observe = vi.spyOn(MutationObserver.prototype, "observe")
     render(React.createElement(Harness))
+    // Iframe absent → no content observer can have bound (only the body mount-watcher).
+    expect(contentObserverBinds(observe)).toBe(0)
+
+    // The iframe mounts LATER. Flush ONLY microtasks — NO frame tick. A poll re-checks
+    // only on a frame tick, so with no frame allowed it would still be unbound (RED);
+    // the document.body MutationObserver fires on the DOM-insert microtask and binds
+    // immediately (GREEN) — proving the bind is signal-driven, not frame-polled.
+    const late = document.createElement("iframe")
+    late.className = "da-prototype-iframe"
+    await act(async () => {
+      document.body.appendChild(late)
+      wireDoc(late)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(contentObserverBinds(observe)).toBeGreaterThanOrEqual(1)
+
+    // The late-bound observer actually drives occlusion on the late-mounted document.
     await dropPin()
-    // open the modal → observer hides the pin.
+    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
     const modal = doc.createElement("div")
     doc.body.appendChild(modal)
     topEl = modal
     await flushObserver()
     expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
-    // close the modal: remove it + the anchor is topmost again. The removal is an
-    // in-iframe mutation the observer reacts to (NOT a page reload) → re-show.
+  })
+
+  it("element remount (React key bump) — re-binds to the NEW element's document", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe")
+    render(React.createElement(Harness))
+    await dropPin()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
+    const before = contentObserverBinds(observe)
+    expect(before).toBeGreaterThanOrEqual(1)
+
+    // A grant re-mint bumps the iframe's React `key` → React REPLACES the element
+    // (old removed + new appended with a FRESH contentDocument). The permanent
+    // document.body watcher catches the childList remount and re-binds onto the new
+    // element+doc. Flush ONLY microtasks (no frame). Stranded on the old wiring the
+    // watcher/load-listener are dead → nothing re-binds (RED).
+    iframe.remove()
+    const next = document.createElement("iframe")
+    next.className = "da-prototype-iframe"
+    document.body.appendChild(next)
+    wireDoc(next)
+    await flushMicrotasks()
+    expect(contentObserverBinds(observe)).toBeGreaterThan(before)
+
+    // The RE-BOUND observer drives occlusion on the LATEST doc: a modal in the NEW
+    // document hides the pin, flushing ONLY the rAF debounce (no scroll, no manual
+    // recompute). Stranded on the old doc this mutation never fires → pin stays (RED).
+    const modal = doc.createElement("div")
+    doc.body.appendChild(modal)
+    topEl = modal
+    await flushObserver()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
+  })
+
+  it("same-URL doc swap — re-binds to the fresh document on an iframe load", async () => {
+    const observe = vi.spyOn(MutationObserver.prototype, "observe")
+    render(React.createElement(Harness))
+    await dropPin()
+    const before = contentObserverBinds(observe)
+
+    // Same ELEMENT, its document replaced in place (in-page navigation to the same
+    // URL) → the element-level `load` handler re-attaches (disconnect old + observe
+    // the new doc).
+    await act(async () => {
+      fireEvent.load(iframe)
+    })
+    expect(contentObserverBinds(observe)).toBeGreaterThan(before)
+  })
+
+  // ── Concern 2 → 3: the mutation → observer → recompute → hide/show chain ──
+
+  it("modal open HIDES the pin — driven THROUGH the content observer (no direct recompute)", async () => {
+    render(React.createElement(Harness))
+    // Non-vacuous: with the anchor topmost the pin renders…
+    await dropPin()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
+
+    // …now a modal covers the anchor point. Append it to the bound contentDocument
+    // and set it topmost, then flush ONLY the content observer's rAF debounce — NO
+    // scroll dispatch, NO direct recompute call. The pin can hide ONLY if the content
+    // observer fired on the appendChild → scheduled → recomputed. This is the exact
+    // chain that a binding-sync-conflated handler left dead.
+    const modal = doc.createElement("div")
+    doc.body.appendChild(modal)
+    topEl = modal
+    await flushObserver()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
+  })
+
+  it("modal close RE-SHOWS the pin — observer-driven, no reload", async () => {
+    render(React.createElement(Harness))
+    await dropPin()
+    const modal = doc.createElement("div")
+    doc.body.appendChild(modal)
+    topEl = modal
+    await flushObserver()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
+
+    // Close the modal: its removal is another in-iframe mutation the content observer
+    // reacts to (NOT a page reload) → the anchor is topmost again → the pin re-shows.
     modal.remove()
     topEl = anchorEl
     await flushObserver()
     expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
   })
 
-  it("keeps positioning a visible pin from its anchor on scroll (no anchor-tracking regression)", async () => {
+  // ── Concern 3 preserved: anchor tracking + the show-on-null fallback ──
+
+  it("scroll no-regression — a visible pin still repositions from its anchor", async () => {
     render(React.createElement(Harness))
     await dropPin()
     expect(api.computedPinPositions[1]).toEqual({ xPct: 50, yPct: 50 })
@@ -147,149 +276,19 @@ describe("usePinMarking — pin occlusion by an in-iframe overlay", () => {
     // still visible (anchor topmost) → still rendered.
     expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
   })
-})
 
-// The live bug: on a COLD load the iframe mounts AFTER the hook's effects run — the
-// grant POST + bundle fetch + `<iframe>` mount take LONGER than any fixed frame
-// budget, so a bounded rAF-retry EXHAUSTS before the iframe appears and never binds
-// (and the load-reattach fallback, wired only after the iframe is found, never
-// installs either). The occlusion observer must bind on the iframe-appearance
-// SIGNAL, however late — a DOM MutationObserver on document.body — not a bounded
-// poll. The other occlusion tests render with the iframe ALREADY present, so they
-// never exercise this race. This one models it: no `.da-prototype-iframe` at render,
-// appended only AFTER the point a bounded poll would have exhausted.
-describe("usePinMarking — occlusion binds when the iframe mounts LATE (cold-load race)", () => {
-  // (Re)build the same-origin doc state on the iframe's CURRENT contentDocument
-  // (re-appending an iframe can hand back a fresh document in jsdom).
-  function rebuildDoc() {
-    doc = iframe.contentDocument!
-    anchorEl = doc.createElement("div")
-    anchorEl.setAttribute("data-anchor-id", "a1")
-    doc.body.appendChild(anchorEl)
-    bridge.anchorEl = anchorEl
-    topEl = anchorEl
-    doc.elementFromPoint = () => topEl
-  }
-
-  it("binds on the iframe-mount SIGNAL, not a frame poll — the iframe appears with only microtasks flushed (no frame ticks)", async () => {
-    // No iframe in the DOM at render → the mount effect must watch for it, not
-    // early-return. (beforeEach appended one; detach it to model the fresh viewer.)
-    iframe.remove()
-    expect(document.querySelector(".da-prototype-iframe")).toBeNull()
-
-    const observe = vi.spyOn(MutationObserver.prototype, "observe")
-    // Discriminator: the OCCLUSION observer targets the iframe's contentDocument.
-    // The mount watcher targets document.body — exclude it so this asserts the
-    // occlusion observer specifically, not the signal detector.
-    const occlusionObserverBound = () =>
-      observe.mock.calls.some(([t]) => t !== document.body && t !== document)
-
-    render(React.createElement(Harness))
-    // Iframe absent → the occlusion observer cannot have bound to any contentDocument
-    // (only the document.body mount-watcher is observing).
-    expect(occlusionObserverBound()).toBe(false)
-
-    // The iframe mounts LATER (cold grant + bundle finally resolved). Flush ONLY
-    // microtasks — NO frame tick (rAF), NO timer. A bounded rAF-poll re-checks for
-    // the iframe only on a frame tick, so with no frame allowed it would still be
-    // unbound here (RED). The document.body MutationObserver fires on the DOM-insert
-    // microtask and binds immediately (GREEN) — proving the bind is tied to the
-    // iframe-appearance signal, not a poll.
-    await act(async () => {
-      document.body.appendChild(iframe)
-      rebuildDoc()
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-    expect(occlusionObserverBound()).toBe(true)
-
-    // Behavioral proof the late-bound observer actually drives occlusion. Drop a
-    // pin; anchor is topmost → it renders visible.
-    await dropPin()
-    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
-
-    // Now a modal covers the anchor point. Append it to the LATE-mounted iframe's
-    // document and set it topmost — then flush ONLY the rAF debounce. No scroll
-    // dispatch, no manual recompute: the pin can hide ONLY if the observer bound to
-    // the late-mounted document and drove scheduleRecompute.
-    const modal = doc.createElement("div")
-    doc.body.appendChild(modal)
-    topEl = modal
-    await flushObserver()
-    expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
-  })
-})
-
-// The live "stranded observer" bug: after the initial bind, a grant re-mint bumps a
-// reloadKey that feeds the `<iframe>`'s React `key`, so React REPLACES the element
-// (old removed + new appended, same URL → a third `load`). The element-level `load`
-// listener lived on the OLD element (now dead → no re-bind), and a one-shot mount
-// watcher would already be disconnected → the observer strands on the OLD document
-// while the live doc is the NEW element's document, so an in-iframe modal never
-// reaches it and the pin never auto-hides. The permanent document.body watcher must
-// catch the childList remount and re-bind onto the NEW element's document.
-describe("usePinMarking — occlusion re-binds when the iframe ELEMENT is replaced (remount)", () => {
-  // Build same-origin doc state on the CURRENT iframe's fresh contentDocument and
-  // model a real viewport + a topmost element (jsdom does no layout).
-  function rebuildDocOn(el: HTMLIFrameElement) {
-    iframe = el
-    doc = el.contentDocument!
-    anchorEl = doc.createElement("div")
-    anchorEl.setAttribute("data-anchor-id", "a1")
-    doc.body.appendChild(anchorEl)
-    bridge.anchorEl = anchorEl
-    topEl = anchorEl
-    el.getBoundingClientRect = () =>
-      ({ width: 1000, height: 800, left: 0, top: 0, right: 1000, bottom: 800, x: 0, y: 0, toJSON() {} }) as DOMRect
-    doc.elementFromPoint = () => topEl
-  }
-
-  it("re-binds to the NEW element's document after a remount and drives occlusion on it", async () => {
-    const observe = vi.spyOn(MutationObserver.prototype, "observe")
-    // Count only OCCLUSION observers (target the iframe contentDocument), excluding
-    // the document.body mount/remount watcher.
-    const occlusionBinds = () =>
-      observe.mock.calls.filter(([t]) => t !== document.body && t !== document).length
-
+  it("shows the pin when elementFromPoint returns null (off-viewport / unresolvable)", async () => {
     render(React.createElement(Harness))
     await dropPin()
-    // Bound to the first document; anchor topmost → pin visible.
-    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
-    const bindsBefore = occlusionBinds()
-    expect(bindsBefore).toBeGreaterThanOrEqual(1)
-
-    // REPLACE the iframe ELEMENT: remove the old `.da-prototype-iframe` and append a
-    // NEW one with a FRESH contentDocument (React remount / third load to same URL).
-    iframe.remove()
-    const next = document.createElement("iframe")
-    next.className = "da-prototype-iframe"
-    document.body.appendChild(next)
-    rebuildDocOn(next)
-
-    // Flush ONLY microtasks → the permanent document.body watcher fires on the
-    // childList remount and syncBinding re-binds onto the new element+doc. On the
-    // old "disconnect-after-first-find + load-listener-on-old-element" wiring the
-    // watcher is gone and the load listener is dead, so nothing re-binds (RED).
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-    expect(occlusionBinds()).toBeGreaterThan(bindsBefore)
-
-    // Behavioural proof the RE-BOUND observer drives occlusion on the LATEST doc: a
-    // modal drawn over the anchor in the NEW document hides the pin, flushing ONLY the
-    // rAF debounce (no scroll dispatch, no manual recompute). Stranded on the old doc
-    // this mutation never fires → the pin stays visible → the assertion fails (RED).
-    const modal = doc.createElement("div")
-    doc.body.appendChild(modal)
-    topEl = modal
+    // A null topmost must NEVER be treated as an occlusion → the pin stays visible.
+    topEl = null
     await flushObserver()
-    expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
   })
-})
 
-describe("usePinMarking — occlusion same-origin guard + cleanup", () => {
-  it("falls back to SHOWING the pin when iframe document access throws (cross-origin)", async () => {
+  // ── Same-origin guard + teardown ──
+
+  it("cross-origin guard — falls back to SHOWING the pin when document access throws", async () => {
     // Simulate a cross-origin document: contentDocument access throws.
     Object.defineProperty(iframe, "contentDocument", {
       configurable: true,
@@ -303,21 +302,32 @@ describe("usePinMarking — occlusion same-origin guard + cleanup", () => {
     expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
   })
 
-  it("removes scroll/resize/load listeners + disconnects the observer on unmount", async () => {
+  it("cleanup — unmount disconnects both observers, removes listeners, cancels the frame", async () => {
     const winRemove = vi.spyOn(iframe.contentWindow as Window, "removeEventListener")
     const windowRemove = vi.spyOn(window, "removeEventListener")
     const iframeRemove = vi.spyOn(iframe, "removeEventListener")
     const disconnect = vi.spyOn(MutationObserver.prototype, "disconnect")
+    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame")
     const view = render(React.createElement(Harness))
     await dropPin()
+
+    // Leave a recompute pending so cleanup has a frame to cancel: the in-iframe
+    // mutation fires the content observer (microtask) which SCHEDULES the rAF; flush
+    // ONLY microtasks so the frame is still pending (not yet run) at unmount.
+    const modal = doc.createElement("div")
+    doc.body.appendChild(modal)
+    topEl = modal
+    await flushMicrotasks()
+
     view.unmount()
     expect(winRemove).toHaveBeenCalledWith("scroll", expect.any(Function))
     expect(windowRemove).toHaveBeenCalledWith("resize", expect.any(Function))
     expect(iframeRemove).toHaveBeenCalledWith("load", expect.any(Function))
-    expect(disconnect).toHaveBeenCalled()
+    expect(disconnect).toHaveBeenCalled() // content observer + body watcher
+    expect(cancelFrame).toHaveBeenCalled()
   })
 
-  it("disconnects the iframe-mount watcher on unmount — no bind after teardown", async () => {
+  it("cleanup — the mount watcher is dead after unmount (no bind on a late iframe)", async () => {
     // No iframe at render → the effect installs the document.body mount watcher.
     iframe.remove()
     const observe = vi.spyOn(MutationObserver.prototype, "observe")
@@ -327,28 +337,15 @@ describe("usePinMarking — occlusion same-origin guard + cleanup", () => {
     expect(observe.mock.calls.some(([t]) => t === document.body)).toBe(true)
 
     view.unmount()
-    // cleanup disconnects the watcher (and cancels the effect).
     expect(disconnect).toHaveBeenCalled()
 
     // proof the watcher is truly dead: a late iframe insertion must NOT bind now.
     const before = observe.mock.calls.length
-    document.body.appendChild(iframe)
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
+    const late = document.createElement("iframe")
+    late.className = "da-prototype-iframe"
+    document.body.appendChild(late)
+    await flushMicrotasks()
     expect(observe.mock.calls.length).toBe(before)
-  })
-
-  it("re-attaches the observer to the fresh document on an iframe load (swap)", async () => {
-    const observe = vi.spyOn(MutationObserver.prototype, "observe")
-    render(React.createElement(Harness))
-    await dropPin()
-    const before = observe.mock.calls.length
-    await act(async () => {
-      fireEvent.load(iframe)
-    })
-    // the load handler re-attaches (disconnect old + observe the new doc).
-    expect(observe.mock.calls.length).toBeGreaterThan(before)
+    late.remove()
   })
 })

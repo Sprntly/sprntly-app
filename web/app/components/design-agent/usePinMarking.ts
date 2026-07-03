@@ -165,73 +165,50 @@ export function usePinMarking({
     setOccludedPins(occluded)
   }, [pins])
 
-  // Keep the latest `recomputePinPositions` in a ref so the attach lifecycle below
-  // does NOT depend on it. This effect also RE-RUNS the recompute whenever `pins`
-  // changes (recomputePinPositions changes identity on a pins change) — that is how
-  // a freshly-dropped pin gets positioned + occlusion-checked, decoupled from the
-  // one-time iframe binding.
+  // Keep the latest `recomputePinPositions` in a ref so the binding lifecycle below
+  // does NOT depend on `[pins]`. This effect also RE-RUNS the recompute whenever
+  // `pins` changes (recomputePinPositions changes identity on a pins change) — that
+  // is how a freshly-dropped pin gets positioned + occlusion-checked, decoupled from
+  // the iframe binding.
   const recomputeRef = useRef(recomputePinPositions)
   useEffect(() => {
     recomputeRef.current = recomputePinPositions
     recomputePinPositions()
   }, [recomputePinPositions])
 
-  // Bind occlusion tracking to the prototype iframe and KEEP it bound to the LIVE
-  // document across every way the iframe can be replaced or re-navigated — the
-  // binding is SELF-HEALING, independent of `pins`. Two things move underneath it:
-  //   1. The iframe mounts LATER than this effect (only after the grant POST +
-  //      bundle fetch resolve and the `<iframe>` mounts). A COLD load takes LONGER
-  //      than any fixed frame budget, so a bounded poll EXHAUSTS before the iframe
-  //      appears and never binds (a warm load masks the race). We instead detect the
-  //      iframe by a reliable mount SIGNAL.
-  //   2. The iframe ELEMENT is REMOUNTED, not just re-navigated: a grant re-mint
-  //      bumps a `reloadKey` that feeds the `<iframe>`'s React `key`, so React
-  //      REPLACES the element (old removed + new appended). The element-level `load`
-  //      listener lived on the OLD element (now dead → no re-bind), and a one-shot
-  //      mount watcher would already be disconnected → the observer strands on the
-  //      OLD document while the live doc is the NEW one, so in-iframe mutations never
-  //      reach it and the pin never auto-hides.
-  // The fix: a PERMANENTLY-connected `document.body` MutationObserver (`iframeWatcher`)
-  // — a React remount of the `<iframe>` is a childList mutation in the body subtree,
-  // so the watcher fires on the remount as well as the first mount. Every fire (and
-  // the initial mount, and each iframe `load`) runs `syncBinding()`, which re-queries
-  // `.da-prototype-iframe` and re-binds ONLY when the element or its document actually
-  // changed:
-  //   • element-level: window `resize` (bound once, element-independent) + the iframe
-  //     `load` event (moved to the NEW element when the element is replaced).
-  //   • document-level, via attachDoc: the iframe `contentWindow` `scroll` + a
-  //     MutationObserver on the `contentDocument`. A modal open/close is an internal
-  //     iframe mutation no scroll/resize/load ever sees; the observer is what
-  //     recomputes occlusion for it (rAF-debounced so bursty mutations coalesce).
-  // syncBinding is CHEAP — a querySelector + identity compares, doing real work only
-  // when the element or document drifted — because the permanent body observer fires
-  // on app-wide DOM changes. The watcher calls syncBinding SYNCHRONOUSLY (no rAF):
-  // MutationObserver callbacks are already microtask-batched, and binding on the
-  // mount signal (not a frame tick) is what lets a cold-load bind before any frame.
+  // ── Occlusion lifecycle: THREE cleanly-separated concerns, wired linearly ──
+  //
+  //   iframe appears/changes ─(1)─▶ bind the content observer to the LIVE doc
+  //   in-iframe DOM mutation ─(2)─▶ schedule a recompute (ALWAYS, unconditionally)
+  //   recompute ─────────────(3)─▶ hide/show pins by occlusion (recomputeRef)
+  //
+  // Concern 1 (iframe lifecycle binding) is the ONLY thing that (re)binds. Concern 2
+  // (the content observer's mutation handler) does ONE thing: schedule a recompute —
+  // it MUST NOT call the binding-sync (that conflation is what left a real modal
+  // mutation unable to hide a pin). Concern 3 (`recomputePinPositions`, above) is
+  // preserved verbatim: it owns the occlusion decision + anchor tracking.
+  //
   // ALL contentWindow / contentDocument / observer access is try/catch-guarded: on
   // failure (cross-origin public/token path, detached doc) the observer stays null
   // and pins still render + track — occlusion-hiding is a progressive enhancement.
   useEffect(() => {
     let cancelled = false
     let rafRecompute: number | null = null
-    let observer: MutationObserver | null = null
-    let iframeWatcher: MutationObserver | null = null
+    let contentObserver: MutationObserver | null = null // Concern 2 — on the live doc
+    let bodyWatcher: MutationObserver | null = null      // Concern 1 — mount/remount signal
+    let boundIframe: HTMLIFrameElement | null = null
     let boundWin: Window | null = null
     let boundDoc: Document | null = null
-    let iframeEl: HTMLIFrameElement | null = null
 
-    // Stable recompute that always reads the latest callback via the ref, so the
-    // listeners bound here never go stale as `pins` changes. Defensive self-heal:
-    // re-verify the binding before every recompute so ANY recompute trigger
-    // (scroll / resize / pins-change / load / observer) also re-binds if the element
-    // or document drifted — belt-and-suspenders on top of the permanent watcher.
-    // syncBinding is a no-op when already bound to the live element+doc, so this
-    // stays cheap and cannot recurse (attachDoc sets boundDoc before it recomputes).
-    const recompute = () => {
-      syncBinding()
-      recomputeRef.current()
-    }
+    // Concern 3 driver: a stable recompute that always reads the latest callback via
+    // the ref, so listeners/observers bound here never go stale as `pins` changes.
+    // It does NOT touch the binding — recompute is pure occlusion work.
+    const recompute = () => { recomputeRef.current() }
 
+    // ── Concern 2: the content observer's mutation handler → ALWAYS recompute. ──
+    // Dead-simple + unconditional: a modal open/close in the iframe fires the content
+    // observer, which schedules exactly one pending frame (coalescing bursts), and the
+    // flush runs the occlusion recompute. It NEVER routes through the binding-sync.
     const scheduleRecompute = () => {
       if (rafRecompute != null) return
       rafRecompute = requestAnimationFrame(() => {
@@ -240,102 +217,114 @@ export function usePinMarking({
       })
     }
 
-    // (Re)bind the per-DOCUMENT listeners to `iframeEl`'s CURRENT document: drop the
-    // scroll listener from the previous contentWindow + disconnect the previous
-    // observer, then attach a fresh scroll listener + MutationObserver to the live
-    // contentWindow/contentDocument, recording `boundDoc` so syncBinding can detect
-    // the NEXT document replacement. Called on the initial bind, on each `load`, and
-    // by syncBinding when the element or document changed.
-    const attachDoc = () => {
+    // ── Concern 1: keep exactly ONE content observer bound to the CURRENT doc. ──
+
+    // Tear down the per-DOCUMENT bindings (contentWindow `scroll` + the content
+    // MutationObserver) for whatever document is currently bound. The element-level
+    // `load` listener + the window `resize` listener are managed separately — they
+    // survive a same-element document swap.
+    const unbindDoc = () => {
       try { boundWin?.removeEventListener("scroll", recompute) } catch { /* noop */ }
       boundWin = null
-      try { observer?.disconnect() } catch { /* noop */ }
-      observer = null
+      try { contentObserver?.disconnect() } catch { /* noop */ }
+      contentObserver = null
       boundDoc = null
+    }
+
+    // Bind the per-DOCUMENT listeners to `boundIframe`'s CURRENT document: a fresh
+    // `scroll` listener on its contentWindow (anchor tracking) + a fresh content
+    // MutationObserver (Concern 2's signal), recording `boundDoc` so `rebindIfChanged`
+    // can detect the NEXT document replacement. Then recompute against the new doc.
+    const bindDoc = () => {
       try {
-        const win = iframeEl?.contentWindow ?? null
+        const win = boundIframe?.contentWindow ?? null
         if (win) {
           win.addEventListener("scroll", recompute, { passive: true })
           boundWin = win
         }
-        const doc = iframeEl?.contentDocument ?? null
+        const doc = boundIframe?.contentDocument ?? null
         if (doc) {
-          observer = new MutationObserver(scheduleRecompute)
-          observer.observe(doc, { subtree: true, childList: true, attributes: true })
+          contentObserver = new MutationObserver(scheduleRecompute)
+          contentObserver.observe(doc, { subtree: true, childList: true, attributes: true })
           boundDoc = doc
         }
       } catch {
-        // same-origin access failed → observer stays null; pins still render.
-        observer = null
+        // same-origin access failed → observer stays null; pins still render + track.
+        contentObserver = null
         boundDoc = null
       }
       recompute()
     }
 
-    const onLoad = () => { attachDoc() }
+    // Same element, new document (in-place re-navigation to the same URL): rebind the
+    // content listeners onto the replaced document.
+    const onLoad = () => {
+      unbindDoc()
+      bindDoc()
+    }
 
-    // Re-verify + re-bind the occlusion tracking against the LIVE iframe. Cheap by
-    // design: a querySelector + identity compares, doing work only on a real change.
-    //   • iframe absent → wait for the next watcher fire.
-    //   • NEW element (React remount) → detach the OLD element's listeners + observer,
-    //     move the `load` listener to the new element, attachDoc onto its document.
-    //   • SAME element, document replaced (in-place re-navigation) → attachDoc.
+    // The ONLY (re)bind decision — idempotent. If the current `.da-prototype-iframe`
+    // element or its `contentDocument` differs from what's bound, tear down the old
+    // content bindings and bind fresh to the live doc; otherwise no-op.
+    //   • iframe absent → wait for the next body-watcher fire.
+    //   • NEW element (late mount or React-key remount) → move the `load` listener to
+    //     the new element and bind its document.
+    //   • SAME element, document replaced → rebind the content listeners.
     //   • already bound to the live element+doc → no-op.
-    function syncBinding() {
-      // Cheap teardown guard: the permanent body observer can outlive an unmount
-      // that never ran (e.g. a test env torn down without unmounting) and fire once
-      // the document global is gone — bail before touching `document`. In production
-      // `document` always exists, so this is a no-op there.
+    const rebindIfChanged = () => {
+      // The permanent body observer can outlive an unmount that never ran (e.g. a test
+      // env torn down without unmounting) and fire once the document global is gone —
+      // bail before touching `document`. In production `document` always exists.
       if (cancelled || typeof document === "undefined" || !document.body) return
       const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
       if (!iframe) return
-      if (iframe !== iframeEl) {
-        try { boundWin?.removeEventListener("scroll", recompute) } catch { /* noop */ }
-        boundWin = null
-        try { observer?.disconnect() } catch { /* noop */ }
-        observer = null
-        boundDoc = null
-        try { iframeEl?.removeEventListener("load", onLoad) } catch { /* noop */ }
-        iframeEl = iframe
+      if (iframe !== boundIframe) {
+        unbindDoc()
+        try { boundIframe?.removeEventListener("load", onLoad) } catch { /* noop */ }
+        boundIframe = iframe
         iframe.addEventListener("load", onLoad)
-        attachDoc()
+        bindDoc()
         return
       }
       let liveDoc: Document | null = boundDoc
       try { liveDoc = iframe.contentDocument } catch { liveDoc = boundDoc }
-      if (liveDoc !== boundDoc) attachDoc()
+      if (liveDoc !== boundDoc) {
+        unbindDoc()
+        bindDoc()
+      }
     }
 
     // window `resize` is element-independent → bind once for the effect's lifetime.
     window.addEventListener("resize", recompute, { passive: true })
 
-    // Permanent mount/remount watcher. It fires on the FIRST mount (cold loads
-    // included — no bound to exhaust) AND on every subsequent remount of the
-    // `<iframe>` (a childList mutation in the body subtree), and is NEVER disconnected
-    // until cleanup, so a replaced element always re-heals. The callback runs
-    // syncBinding SYNCHRONOUSLY (no rAF) so a cold-load binds on the mount signal
-    // itself; it is a cheap no-op when the binding is already current.
+    // Concern 1's signal: a PERMANENTLY-connected `document.body` MutationObserver.
+    // It fires on the FIRST mount (cold loads included — no fixed budget to exhaust)
+    // AND on every subsequent remount of the `<iframe>` (a childList mutation in the
+    // body subtree), and is NEVER disconnected until cleanup, so a replaced element
+    // always re-heals. The callback runs `rebindIfChanged` SYNCHRONOUSLY (no rAF):
+    // MutationObserver callbacks are already microtask-batched, and binding on the
+    // mount signal (not a frame tick) is what lets a cold-load bind before any frame.
     try {
-      iframeWatcher = new MutationObserver(() => { syncBinding() })
-      iframeWatcher.observe(document.body, { childList: true, subtree: true })
+      bodyWatcher = new MutationObserver(() => { rebindIfChanged() })
+      bodyWatcher.observe(document.body, { childList: true, subtree: true })
     } catch {
       // document.body unavailable (should not happen once effects run) → no watcher;
       // pins still render + track, occlusion-hiding is progressive.
-      iframeWatcher = null
+      bodyWatcher = null
     }
 
-    // Initial bind — the iframe may already be present (warm load).
-    syncBinding()
+    // Synchronous initial check — the iframe may already be present (warm load).
+    rebindIfChanged()
 
     return () => {
       cancelled = true
-      try { iframeWatcher?.disconnect() } catch { /* noop */ }
-      iframeWatcher = null
+      try { bodyWatcher?.disconnect() } catch { /* noop */ }
+      bodyWatcher = null
       if (rafRecompute != null) cancelAnimationFrame(rafRecompute)
-      try { boundWin?.removeEventListener("scroll", recompute) } catch { /* noop */ }
+      unbindDoc()
       window.removeEventListener("resize", recompute)
-      try { iframeEl?.removeEventListener("load", onLoad) } catch { /* noop */ }
-      try { observer?.disconnect() } catch { /* noop */ }
+      try { boundIframe?.removeEventListener("load", onLoad) } catch { /* noop */ }
+      boundIframe = null
     }
   }, [])
 
