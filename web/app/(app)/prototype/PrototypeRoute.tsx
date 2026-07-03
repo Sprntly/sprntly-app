@@ -50,6 +50,11 @@ import { useWorkspace } from "../../context/WorkspaceContext"
 import { prdIdFromPrototypeSearch, prototypePath } from "../../lib/routes"
 import { AppLayout } from "../../components/screens/app/AppLayout"
 import { GenerateModal } from "../../components/design-agent/GenerateModal"
+import {
+  acknowledge,
+  markCancelled,
+  wasCancelled,
+} from "../../components/design-agent/notificationStore"
 import { GenerationErrorBanner, reasonCopy } from "../../components/design-agent/GenerationErrorBanner"
 import { GenerateSurfaceErrorBoundary } from "../../components/design-agent/GenerateSurfaceErrorBoundary"
 import { GenerationLoadingScreen, type LocatePhaseState } from "../../components/design-agent/GenerationLoadingScreen"
@@ -683,6 +688,8 @@ export function PrototypeRoute() {
   const handleGenCancel = async () => {
     const id = genProtoId
     if (id != null) {
+      markCancelled(id) // suppress the false "Generation failed" toast for this id
+      acknowledge(id) // drop any pending ready entry so no stale replay
       try {
         await designAgentApi.cancel(id)
       } catch {
@@ -729,7 +736,12 @@ export function PrototypeRoute() {
       // persistent error + Retry instead of silently falling through to the bare
       // empty/PRD state. runDesignAgentGeneration always carries a `message` on
       // the `{ ok: false }` shape; the no-arg path falls back to a generic line.
-      setGenError(result && !result.ok ? result.message : "Generation failed")
+      if (genProtoId != null && wasCancelled(genProtoId)) {
+        // User cancelled — the deleted row's terminal 404 is not a genuine
+        // failure, so do not surface the in-panel error.
+      } else {
+        setGenError(result && !result.ok ? result.message : "Generation failed")
+      }
     }
   }
 
