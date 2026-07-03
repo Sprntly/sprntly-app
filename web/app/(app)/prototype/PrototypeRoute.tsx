@@ -50,6 +50,11 @@ import { useWorkspace } from "../../context/WorkspaceContext"
 import { prdIdFromPrototypeSearch, prototypePath } from "../../lib/routes"
 import { AppLayout } from "../../components/screens/app/AppLayout"
 import { GenerateModal } from "../../components/design-agent/GenerateModal"
+import {
+  acknowledge,
+  markCancelled,
+  wasCancelled,
+} from "../../components/design-agent/notificationStore"
 import { GenerationErrorBanner, reasonCopy } from "../../components/design-agent/GenerationErrorBanner"
 import { GenerateSurfaceErrorBoundary } from "../../components/design-agent/GenerateSurfaceErrorBoundary"
 import { GenerationLoadingScreen, type LocatePhaseState } from "../../components/design-agent/GenerationLoadingScreen"
@@ -64,6 +69,7 @@ import {
   IconCopy,
   IconShare,
   IconPlus,
+  IconChevronLeft,
 } from "../../components/shared/app-icons"
 import {
   designAgentApi,
@@ -673,6 +679,28 @@ export function PrototypeRoute() {
     setGenLoading(true)
   }
 
+  // Escape hatch from the full-screen generating overlay: true abort. Best-effort
+  // cancels the in-flight generation server-side (stops further LLM spend +
+  // deletes the row + resets the PRD to draft), then ALWAYS clears the loading
+  // state and returns the user to the PRD (brief) screen — a failed cancel must
+  // never trap the user, so the navigation is unconditional. Mirrors the
+  // generate-config Cancel target (`goTo("brief")`, the GenerateModal onClose).
+  const handleGenCancel = async () => {
+    const id = genProtoId
+    if (id != null) {
+      markCancelled(id) // suppress the false "Generation failed" toast for this id
+      acknowledge(id) // drop any pending ready entry so no stale replay
+      try {
+        await designAgentApi.cancel(id)
+      } catch {
+        /* best-effort — a failed cancel must never trap the user */
+      }
+    }
+    genLoadingRef.current = false
+    setGenLoading(false)
+    goTo("brief")
+  }
+
   // Terminal generation outcome. On SUCCESS reveal the new prototype IN-TAB:
   // stash the completed row in local state so the canvas branch renders it,
   // keeping the URL on /prototype?prd={prdId} (no overlay navigation). When the
@@ -708,7 +736,12 @@ export function PrototypeRoute() {
       // persistent error + Retry instead of silently falling through to the bare
       // empty/PRD state. runDesignAgentGeneration always carries a `message` on
       // the `{ ok: false }` shape; the no-arg path falls back to a generic line.
-      setGenError(result && !result.ok ? result.message : "Generation failed")
+      if (genProtoId != null && wasCancelled(genProtoId)) {
+        // User cancelled — the deleted row's terminal 404 is not a genuine
+        // failure, so do not surface the in-panel error.
+      } else {
+        setGenError(result && !result.ok ? result.message : "Generation failed")
+      }
     }
   }
 
@@ -781,21 +814,14 @@ export function PrototypeRoute() {
     return (
       <AppLayout>
         <div
-          className="design-agent-surface da-prototype-empty"
+          className="design-agent-surface da-prototype-empty da-gen-error-stage"
           data-testid="prototype-route-gen-error"
         >
           <GenerationErrorBanner
             reason={reasonCopy(genError)}
             onRetry={handleGenErrorRetry}
+            onBack={() => goTo("brief")}
           />
-          <button
-            type="button"
-            className="btn"
-            data-testid="prototype-route-gen-error-back"
-            onClick={() => goTo("brief")}
-          >
-            Back to brief
-          </button>
         </div>
       </AppLayout>
     )
@@ -812,6 +838,19 @@ export function PrototypeRoute() {
           data-testid="prototype-route-loading"
           aria-busy="true"
         >
+          {/* Back affordance so the transient resolving state is never a
+              dead-end — mirrors the `ready` branch's title-bar back
+              (router.back()). */}
+          <button
+            type="button"
+            className={`da-ctl-back ${styles.resolvingBack}`}
+            data-testid="prototype-route-loading-back"
+            title="Back"
+            aria-label="Back"
+            onClick={() => router.back()}
+          >
+            <IconChevronLeft size={16} />
+          </button>
           {/* Minimal loading indicator — reuses the shared .da-spinner SVG
               pattern (DesignAgentLauncher / da-prototype-generating) so this is no
               longer a blank flash while getActiveByPrd is in flight. */}
@@ -918,6 +957,7 @@ export function PrototypeRoute() {
             figmaFileKey={genFigmaKey}
             githubRepo={genGithubRepo}
             prototypeId={genProtoId}
+            onCancel={handleGenCancel}
             locatePhase={locatePhase ?? undefined}
           />
         </GenerateSurfaceErrorBoundary>

@@ -115,6 +115,15 @@ export function pendingCompleted(): CompletedNotification[] {
 
 const seenThisLoad = new Set<number>()
 
+// Cancel-aware suppression: prototype ids the user explicitly cancelled. The
+// app-wide generation poll + the route's failure surface consult this so a
+// user-cancelled run does NOT show a "Generation failed" toast when they later
+// observe the deleted row. In-memory (per page-load, like seenThisLoad) — a
+// genuine failure (never cancelled) is unaffected.
+const cancelledIds = new Set<number>()
+export function markCancelled(prototypeId: number): void { cancelledIds.add(prototypeId) }
+export function wasCancelled(prototypeId: number): boolean { return cancelledIds.has(prototypeId) }
+
 /** Mark an id as shown during this page-load (so the shell replay does not
  *  re-fire on every authed-route mount within the same load). */
 export function markSeenThisLoad(prototypeId: number): void {
@@ -175,4 +184,5 @@ export function shouldAckOnClear(
 export function __resetPageLoadGuards(): void {
   seenThisLoad.clear()
   lastReplayShow = null
+  cancelledIds.clear()
 }

@@ -15,6 +15,7 @@ import {
 } from "../DesignAgentDrawer"
 import {
   __resetPageLoadGuards,
+  markCancelled,
   markCompleted,
   markPending,
   pendingCompleted,
@@ -208,6 +209,65 @@ describe("runGenerateFlow (AC1, AC5)", () => {
     expect(onOpenChange).not.toHaveBeenCalled()
     expect(runGeneration).not.toHaveBeenCalled()
     expect(setSubmitting).toHaveBeenLastCalledWith(false)
+  })
+})
+
+describe("cancelled generation suppresses the failure toast", () => {
+  const params = {
+    prd_id: 9,
+    target_platform: "desktop" as const,
+    instructions: "",
+    figma_file_key: null,
+  }
+
+  afterEach(() => {
+    // The cancelled-ids registry is module-level in-memory; reset between cases.
+    __resetPageLoadGuards()
+  })
+
+  it("does NOT toast 'Generation failed' for an id the user cancelled", async () => {
+    // The kickoff returns prototype_id 8; the user cancelled that id, so the
+    // still-running task's terminal 404 must not surface a false failure toast.
+    markCancelled(8)
+    const genResult = Promise.resolve({ ok: false as const, message: "Not found" })
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params,
+      generate: vi.fn().mockResolvedValue({ prototype_id: 8, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+    })
+    await genResult
+    await Promise.resolve()
+
+    expect(showToast).not.toHaveBeenCalledWith(
+      "Generation failed",
+      expect.any(String),
+    )
+  })
+
+  it("STILL toasts 'Generation failed' for a genuine (never-cancelled) failure", async () => {
+    // No markCancelled for id 8 → a real generation failure must still toast.
+    const genResult = Promise.resolve({ ok: false as const, message: "timed out" })
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params,
+      generate: vi.fn().mockResolvedValue({ prototype_id: 8, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+    })
+    await genResult
+    await Promise.resolve()
+
+    expect(showToast).toHaveBeenCalledWith("Generation failed", "timed out")
   })
 })
 

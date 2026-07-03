@@ -29,6 +29,7 @@ import {
   markSeenThisLoad,
   pendingCompleted,
   recordReplayShow,
+  wasCancelled,
   wasSeenThisLoad,
 } from "./notificationStore"
 import { ensureNotifyPermission, fireReadyNotification } from "./browserNotify"
@@ -252,7 +253,10 @@ export async function runGenerateFlow({
           body: READY_TOAST_SUB,
           prdId: params.prd_id,
         })
-      } else {
+      } else if (!wasCancelled(kickoff.prototype_id)) {
+        // Suppress the false failure toast for a user-cancelled run (the cancel
+        // path deletes the row; the still-running task's terminal write 404s).
+        // A genuine, never-cancelled failure still toasts.
         showToast("Generation failed", result.message)
       }
       // P2-12: hand the terminal outcome to the host launcher so it can mount

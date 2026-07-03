@@ -3,12 +3,14 @@ import {
   __resetPageLoadGuards,
   acknowledge,
   getLastReplayShow,
+  markCancelled,
   markCompleted,
   markPending,
   markSeenThisLoad,
   pendingCompleted,
   recordReplayShow,
   shouldAckOnClear,
+  wasCancelled,
   wasSeenThisLoad,
 } from "../notificationStore"
 
@@ -142,6 +144,23 @@ describe("per-page-load guard (P6-05)", () => {
     expect(wasSeenThisLoad(5)).toBe(true)
     __resetPageLoadGuards()
     expect(wasSeenThisLoad(5)).toBe(false)
+  })
+})
+
+describe("cancel-aware failure suppression", () => {
+  it("markCancelled makes wasCancelled return true for that id only", () => {
+    expect(wasCancelled(42)).toBe(false)
+    markCancelled(42)
+    expect(wasCancelled(42)).toBe(true)
+    // An un-marked id is unaffected — a genuine failure never marks the id.
+    expect(wasCancelled(43)).toBe(false)
+  })
+
+  it("__resetPageLoadGuards clears the cancelled-ids registry (fresh page-load)", () => {
+    markCancelled(42)
+    expect(wasCancelled(42)).toBe(true)
+    __resetPageLoadGuards()
+    expect(wasCancelled(42)).toBe(false)
   })
 })
 

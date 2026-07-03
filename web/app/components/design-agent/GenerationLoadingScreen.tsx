@@ -73,6 +73,7 @@ export function GenerationLoadingScreen({
   mode = "generate",
   prototypeId,
   onNotifyWhenReady,
+  onCancel,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   locatePhase: _locatePhase,
 }: {
@@ -91,6 +92,12 @@ export function GenerationLoadingScreen({
   /** When provided and mode === "generate", renders a "Notify me when ready"
    *  button that dismisses the overlay and arms background-completion notification. */
   onNotifyWhenReady?: () => void
+  /** When provided and mode === "generate", renders a visible Cancel control
+   *  (footer button + top-right close) and an Escape-key handler that stop the
+   *  in-flight generation and return the user to the PRD screen. The stop is
+   *  best-effort (it halts future LLM turns, not the current one), so copy stays
+   *  "Cancel" / "Stop generating" — never "instant abort". */
+  onCancel?: () => void
   /** The pre-build locate phase (locating / crumb / picker) emitted by
    *  GenerateModal. Reserved for the locate-in-loading-screen rollout; accepted
    *  here so PrototypeRoute can pass it without a type error. */
@@ -236,6 +243,27 @@ export function GenerationLoadingScreen({
     }, 200)
   }
 
+  const handleCancel = () => {
+    if (!onCancel) return
+    onCancel()
+  }
+
+  // Escape-key escape hatch for the generating overlay: mirror the Cancel
+  // control so a user who realises they picked the wrong PRD/source is never
+  // trapped. Only armed while the overlay is open, in generate mode, and a
+  // cancel handler is wired; cleaned up on unmount / dependency change.
+  useEffect(() => {
+    if (!open || mode !== "generate" || !onCancel) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault()
+        onCancel()
+      }
+    }
+    window.addEventListener("keydown", onKeyDown)
+    return () => window.removeEventListener("keydown", onKeyDown)
+  }, [open, mode, onCancel])
+
   if (!open) return null
 
   const isLive = liveSteps.length > 0
@@ -268,6 +296,18 @@ export function GenerationLoadingScreen({
       aria-live="polite"
       aria-label={headline}
     >
+      {onCancel && mode === "generate" && (
+        <button
+          type="button"
+          className="btn btn-ghost btn-sm proto-gen-close"
+          data-testid="proto-gen-cancel-x"
+          title="Cancel generation"
+          aria-label="Cancel generation"
+          onClick={handleCancel}
+        >
+          ✕
+        </button>
+      )}
       <div className="proto-gen-inner">
         <div className="proto-gen-orb" aria-hidden="true">
           <div className="r1" />
@@ -323,15 +363,27 @@ export function GenerationLoadingScreen({
                 )
               })}
         </div>
-        {onNotifyWhenReady && mode === "generate" && (
+        {mode === "generate" && (onNotifyWhenReady || onCancel) && (
           <div className="proto-gen-footer">
-            <button
-              type="button"
-              className="btn btn-ghost btn-sm proto-gen-notify-btn"
-              onClick={handleNotifyClick}
-            >
-              Notify me when ready
-            </button>
+            {onNotifyWhenReady && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm proto-gen-notify-btn"
+                onClick={handleNotifyClick}
+              >
+                Notify me when ready
+              </button>
+            )}
+            {onCancel && (
+              <button
+                type="button"
+                className="btn btn-ghost btn-sm proto-gen-cancel-btn"
+                data-testid="proto-gen-cancel-btn"
+                onClick={handleCancel}
+              >
+                Cancel
+              </button>
+            )}
           </div>
         )}
       </div>
