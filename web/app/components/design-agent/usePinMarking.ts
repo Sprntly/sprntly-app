@@ -207,10 +207,19 @@ export function usePinMarking({
 
     // ── Concern 2: the content observer's mutation handler → ALWAYS recompute. ──
     // Dead-simple + unconditional: a modal open/close in the iframe fires the content
-    // observer, which schedules exactly one pending frame (coalescing bursts), and the
+    // observer, which schedules a recompute (coalescing bursts into one frame), and the
     // flush runs the occlusion recompute. It NEVER routes through the binding-sync.
+    //
+    // CANCEL-AND-RESCHEDULE (not first-wins): every call cancels any pending frame and
+    // schedules a fresh one. A first-wins guard (`if (rafRecompute != null) return`) can
+    // wedge PERMANENTLY — the handle is nulled only in the flush, so if a pending frame
+    // is ever cancelled without firing (e.g. an iframe re-bind / StrictMode teardown
+    // cancels it), `rafRecompute` stays a dead non-null handle and every later call
+    // bails → the observer fires but the recompute never runs → the pin never hides.
+    // Rescheduling is self-healing: a stale handle is simply cancelled (a no-op if dead)
+    // and a new frame is scheduled, so a mutation always drives a recompute.
     const scheduleRecompute = () => {
-      if (rafRecompute != null) return
+      if (rafRecompute != null) cancelAnimationFrame(rafRecompute)
       rafRecompute = requestAnimationFrame(() => {
         rafRecompute = null
         recompute()
@@ -320,7 +329,7 @@ export function usePinMarking({
       cancelled = true
       try { bodyWatcher?.disconnect() } catch { /* noop */ }
       bodyWatcher = null
-      if (rafRecompute != null) cancelAnimationFrame(rafRecompute)
+      if (rafRecompute != null) { cancelAnimationFrame(rafRecompute); rafRecompute = null }
       unbindDoc()
       window.removeEventListener("resize", recompute)
       try { boundIframe?.removeEventListener("load", onLoad) } catch { /* noop */ }

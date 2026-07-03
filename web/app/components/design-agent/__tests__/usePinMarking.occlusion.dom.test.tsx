@@ -261,6 +261,116 @@ describe("usePinMarking — comment-pin occlusion lifecycle", () => {
     expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
   })
 
+  it("a second content mutation while a recompute frame is pending CANCELS the prior frame and reschedules (not first-wins)", async () => {
+    render(React.createElement(Harness))
+    await dropPin()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
+    // Settle any real frame so no recompute is pending before we freeze rAF.
+    await flushObserver()
+
+    // Freeze frames: rAF hands back an ever-increasing handle but NEVER invokes its
+    // callback, so a scheduled recompute stays PENDING across both mutations. The
+    // handle is nulled only inside that (never-firing) callback → this reproduces the
+    // "pending frame that never flushes" state the wedge got permanently stuck in.
+    let fakeHandle = 0
+    const rafSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => ++fakeHandle)
+    const cafSpy = vi.spyOn(window, "cancelAnimationFrame")
+
+    // First in-iframe mutation → the content observer fires on the microtask →
+    // scheduleRecompute schedules frame #1 (rafRecompute now a non-null, never-firing
+    // handle). Flush ONLY microtasks — no timer, no frame — so the frame stays pending.
+    await act(async () => {
+      doc.body.appendChild(doc.createElement("div"))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const firstHandle = fakeHandle
+    expect(rafSpy).toHaveBeenCalled()
+    expect(firstHandle).toBeGreaterThan(0)
+    expect(cafSpy).not.toHaveBeenCalled()
+
+    // Second mutation while frame #1 is STILL pending → the observer fires again →
+    // scheduleRecompute. Cancel-and-reschedule CANCELS handle #1 and schedules a fresh
+    // frame, so the recompute always gets a live frame. A first-wins guard
+    // (`if (rafRecompute != null) return`) would instead bail here and NEVER call
+    // cancelAnimationFrame — the exact wedge that leaves the occlusion recompute dead.
+    await act(async () => {
+      doc.body.appendChild(doc.createElement("div"))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(cafSpy).toHaveBeenCalledWith(firstHandle)
+
+    rafSpy.mockRestore()
+    cafSpy.mockRestore()
+  })
+
+  it("a pending recompute frame that was cancelled without firing does not wedge the occlusion hide", async () => {
+    render(React.createElement(Harness))
+    await dropPin()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
+    // Settle any real frame so no recompute is pending before we model frames ourselves.
+    await flushObserver()
+
+    // rAF mock that MODELS CANCELLATION: a cancelled handle's callback does NOT fire on
+    // flush. This reproduces the exact live wedge — a recompute frame stranded (cancelled
+    // WITHOUT firing) by an iframe re-bind / StrictMode teardown — as an in-suite symptom.
+    const handles = new Map<number, { cb: FrameRequestCallback; cancelled: boolean }>()
+    let nextId = 1
+    const rafSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
+      const id = nextId++
+      handles.set(id, { cb, cancelled: false })
+      return id
+    })
+    const cafSpy = vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
+      const h = handles.get(id)
+      if (h) h.cancelled = true
+    })
+    const flushRaf = () => {
+      for (const [id, h] of [...handles]) {
+        handles.delete(id)
+        if (!h.cancelled) h.cb(performance.now())
+      }
+    }
+
+    // STRAND a handle: one benign in-iframe mutation fires the content observer →
+    // scheduleRecompute schedules a frame (the hook's internal rafRecompute is now set).
+    // Then simulate the teardown/re-bind that CANCELS that frame without firing it — the
+    // hook does NOT null its internal handle, so rafRecompute is left a dead non-null
+    // value. That is the wedge that stayed invisible to mechanism-only assertions.
+    await act(async () => {
+      doc.body.appendChild(doc.createElement("div"))
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const strandedId = rafSpy.mock.results[rafSpy.mock.results.length - 1]!.value as number
+    window.cancelAnimationFrame(strandedId)
+
+    // The REAL modal mutation: a modal covers the anchor point (topmost). The content
+    // observer fires → scheduleRecompute. Cancel-and-reschedule cancels the stranded
+    // handle (a no-op) and schedules a FRESH frame; first-wins bails on the dead non-null
+    // handle and schedules nothing.
+    const modal = doc.createElement("div")
+    doc.body.appendChild(modal)
+    topEl = modal
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // Flush frames: the stranded/cancelled handle is skipped; only a freshly scheduled
+    // frame runs the recompute. Fixed → recompute runs → the pin HIDES (symptom cured).
+    // First-wins → no fresh frame → the recompute never runs → the pin STAYS (the exact
+    // live symptom that passed every plumbing test yet failed in the browser).
+    await act(async () => {
+      flushRaf()
+    })
+    expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
+
+    rafSpy.mockRestore()
+    cafSpy.mockRestore()
+  })
+
   // ── Concern 3 preserved: anchor tracking + the show-on-null fallback ──
 
   it("scroll no-regression — a visible pin still repositions from its anchor", async () => {
