@@ -197,6 +197,55 @@ describe("PostGenerationResultView — full-screen overlay (P6-16 AC2/AC3/AC3b)"
   })
 })
 
+// ─── full-screen overlay honours target_platform ────────────────────────────
+// Regression: the fullscreen overlay rendered its OWN in-frame toggle (not the
+// gated control-bar toggle), so a single-device prototype showed BOTH buttons
+// AND opened on Desktop. The container now threads showDesktop/showMobile +
+// initialPlatform into FullscreenOverlay so it matches the inline gating.
+describe("PostGenerationResultView — full-screen overlay honours target_platform", () => {
+  const BUNDLE = "https://cdn/x/bundle/index.html"
+
+  // Isolate the fullscreen dialog's markup from the always-rendered control bar
+  // (which owns its own gated toggle) — the overlay is the last node rendered.
+  function fullscreenHtml(html: string): string {
+    const idx = html.indexOf('data-testid="proto-fullscreen"')
+    return idx === -1 ? "" : html.slice(idx)
+  }
+
+  it("mobile-only prototype in fullscreen hides the toggle group and opens on mobile", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: false,
+        showMobile: true,
+        platform: "mobile",
+      }),
+    )
+    // The in-frame Desktop/Mobile toggle is NOT in the fullscreen DOM.
+    expect(fs).not.toContain('aria-label="Preview platform"')
+    expect(fs).not.toContain('class="platform-toggle"')
+    // …and the stage opens on the single (mobile) device, not the Desktop default.
+    expect(fs).toContain('class="proto-stage mobile"')
+    expect(fs).not.toContain('class="proto-stage desktop"')
+  })
+
+  it("both-target prototype in fullscreen shows both toggle buttons", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: true,
+        showMobile: true,
+        platform: "desktop",
+      }),
+    )
+    expect(fs).toContain('aria-label="Preview platform"')
+    expect(fs).toMatch(/>Desktop<\/button>/)
+    expect(fs).toMatch(/>Mobile<\/button>/)
+  })
+})
+
 // ─── control bar + 3-section body ───────────
 // The signed-in post-gen surface mounts a compact control bar (`.da-controlbar`)
 // + a `.da-ready` flex body with a LEFT collapsible sidebar (`.da-left`: PRD +

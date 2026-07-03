@@ -890,11 +890,21 @@ function FullscreenOverlay({
   isComplete,
   onCloseFullscreen,
   onAssetError,
+  showDesktop = true,
+  showMobile = true,
+  initialPlatform = "desktop",
 }: {
   bundleUrl: string
   isComplete: boolean
   onCloseFullscreen?: () => void
   onAssetError?: () => void
+  /** Per-device toggle visibility + the device the overlay opens on, derived by
+   *  the container from the prototype's `target_platform`. A mobile-only proto
+   *  hides the Desktop button and opens on mobile; a desktop-only proto hides
+   *  Mobile; both/legacy shows both. Defaults keep any other caller unchanged. */
+  showDesktop?: boolean
+  showMobile?: boolean
+  initialPlatform?: Platform
 }) {
   const fullscreenRef = useRef<HTMLDivElement>(null)
 
@@ -934,7 +944,15 @@ function FullscreenOverlay({
         {/* Edge-to-edge: suppress the cosmetic browser-frame decoration (traffic
             lights + URL bar) so the prototype fills the full-screen surface. The
             platform toggle is unaffected (not gated by hideChrome). */}
-        <PrototypeViewer bundleUrl={bundleUrl} isComplete={isComplete} hideChrome onAssetError={onAssetError} />
+        <PrototypeViewer
+          bundleUrl={bundleUrl}
+          isComplete={isComplete}
+          hideChrome
+          onAssetError={onAssetError}
+          showDesktop={showDesktop}
+          showMobile={showMobile}
+          initialPlatform={initialPlatform}
+        />
       </div>
     </div>
   )
@@ -1396,6 +1414,9 @@ export function PostGenerationResultView({
           isComplete={isComplete}
           onCloseFullscreen={onCloseFullscreen}
           onAssetError={onBundleAssetError}
+          showDesktop={showDesktop}
+          showMobile={showMobile}
+          initialPlatform={platform}
         />
       )}
     </div>

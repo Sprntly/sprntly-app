@@ -43,6 +43,8 @@ function renderViewer(
     isComplete?: boolean
     hideChrome?: boolean
     hideToggle?: boolean
+    showDesktop?: boolean
+    showMobile?: boolean
   } = {},
 ): string {
   return renderToStaticMarkup(
@@ -54,6 +56,8 @@ function renderViewer(
       initialPlatform: over.initialPlatform,
       hideChrome: over.hideChrome,
       hideToggle: over.hideToggle,
+      showDesktop: over.showDesktop,
+      showMobile: over.showMobile,
     }),
   )
 }
@@ -192,6 +196,57 @@ describe("platform toggle (AC2)", () => {
     // and back to desktop
     const back = renderViewer({ initialPlatform: "desktop" })
     expect(back).toContain('class="proto-stage desktop"')
+  })
+})
+
+// ── single-device prototypes suppress the in-frame toggle ──────────────────
+// A prototype targeting one form factor has nothing to toggle to, so the
+// Desktop/Mobile group is hidden (mirroring DaControlBar). The stage class still
+// tracks the initial platform, so the canvas width stays correct.
+describe("single-device toggle suppression", () => {
+  it("hides the toggle group for a mobile-only prototype and stages mobile", () => {
+    const html = renderViewer({
+      showDesktop: false,
+      showMobile: true,
+      initialPlatform: "mobile",
+    })
+    // The toggle group (and its buttons) are absent — there is no second device.
+    expect(html).not.toContain('class="platform-toggle"')
+    expect(html).not.toContain('aria-label="Preview platform"')
+    // …but the stage still reflects the single device, so width is correct.
+    expect(html).toContain('class="proto-stage mobile"')
+  })
+
+  it("hides the toggle group for a desktop-only prototype and stages desktop", () => {
+    const html = renderViewer({
+      showDesktop: true,
+      showMobile: false,
+      initialPlatform: "desktop",
+    })
+    expect(html).not.toContain('class="platform-toggle"')
+    expect(html).not.toContain('aria-label="Preview platform"')
+    expect(html).toContain('class="proto-stage desktop"')
+  })
+
+  it("keeps both toggle buttons when both devices apply (default / legacy)", () => {
+    // Defaults are both-true, so every existing caller is unchanged.
+    const html = renderViewer()
+    expect(html).toContain('class="platform-toggle"')
+    expect(html).toContain("Desktop")
+    expect(html).toContain("Mobile")
+  })
+
+  it("with hideChrome AND a single device, the frame head disappears entirely (fullscreen edge-to-edge)", () => {
+    // Fullscreen mobile-only: decoration suppressed by hideChrome, toggle
+    // suppressed by the single device → no empty chrome bar remains.
+    const html = renderViewer({
+      hideChrome: true,
+      showDesktop: false,
+      showMobile: true,
+      initialPlatform: "mobile",
+    })
+    expect(html).not.toContain('class="proto-frame-head"')
+    expect(html).toContain('class="proto-stage mobile"')
   })
 })
 
