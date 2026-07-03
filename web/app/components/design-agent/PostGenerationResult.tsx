@@ -70,6 +70,8 @@ import {
   IconCopy,
   IconUndo,
   IconRefresh,
+  IconPhone,
+  IconMonitor,
 } from "../shared/app-icons"
 // subtle breadcrumb at the top of the
 // canvas ("PRDs / {PRD title} / Design"). Clicking a crumb closes the canvas and
@@ -922,6 +924,18 @@ function FullscreenOverlay({
     return () => document.removeEventListener('fullscreenchange', handler)
   }, [onCloseFullscreen])
 
+  // Single-device fullscreen keeps a slim chrome bar (chrome-less reads as
+  // broken); the toggle's vacated slot is filled with a settled device
+  // indicator. Both-device passes no headControls → the live toggle renders
+  // unchanged.
+  const singleDevice = showDesktop !== showMobile
+  const headControls = singleDevice ? (
+    <span className="proto-fs-device">
+      {showMobile ? <IconPhone size={16} /> : <IconMonitor size={16} />}
+      <span className="lbl">{showMobile ? "Mobile" : "Desktop"}</span>
+    </span>
+  ) : undefined
+
   return (
     <div
       ref={fullscreenRef}
@@ -938,7 +952,8 @@ function FullscreenOverlay({
         data-testid="proto-fullscreen-close"
         onClick={() => { document.exitFullscreen().catch(() => {}); onCloseFullscreen?.() }}
       >
-        ×
+        <IconClose size={16} />
+        <span className="proto-fs-close-label">Close</span>
       </button>
       <div className="proto-fullscreen-body">
         {/* Edge-to-edge: suppress the cosmetic browser-frame decoration (traffic
@@ -952,6 +967,7 @@ function FullscreenOverlay({
           showDesktop={showDesktop}
           showMobile={showMobile}
           initialPlatform={initialPlatform}
+          headControls={headControls}
         />
       </div>
     </div>

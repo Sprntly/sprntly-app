@@ -218,6 +218,28 @@ export function IconPin({ size = 16 }: { size?: number }) {
   )
 }
 
+/** Phone / mobile-device indicator. */
+export function IconPhone({ size = 14, title }: { size?: number; title?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={title ? undefined : true} role={title ? "img" : undefined}>
+      {title ? <title>{title}</title> : null}
+      <path d="M9 3h6a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" {...stroke} />
+      <path d="M10.5 18h3" {...stroke} />
+    </svg>
+  )
+}
+
+/** Monitor / desktop-device indicator. */
+export function IconMonitor({ size = 14, title }: { size?: number; title?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden={title ? undefined : true} role={title ? "img" : undefined}>
+      {title ? <title>{title}</title> : null}
+      <path d="M4 5h16a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" {...stroke} />
+      <path d="M9 20h6M12 16v4" {...stroke} />
+    </svg>
+  )
+}
+
 export function IconMore({ size = 16 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>

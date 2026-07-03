@@ -271,6 +271,84 @@ describe("PostGenerationResultView — full-screen overlay honours target_platfo
   })
 })
 
+// ─── single-device fullscreen presentation ──────────────────────────────────
+// A single-device prototype keeps a slim chrome bar in fullscreen (chrome-less
+// reads as broken); the vacated toggle slot is filled with a settled device
+// indicator, and the bare "×" is upgraded to a labeled Close pill. Both-device
+// keeps the live toggle and adopts the same Close pill.
+describe("PostGenerationResultView — single-device fullscreen presentation", () => {
+  const BUNDLE = "https://cdn/x/bundle/index.html"
+
+  function fullscreenHtml(html: string): string {
+    const idx = html.indexOf('data-testid="proto-fullscreen"')
+    return idx === -1 ? "" : html.slice(idx)
+  }
+
+  it("mobile-only fullscreen shows a Mobile device indicator + labeled Close pill", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: false,
+        showMobile: true,
+        platform: "mobile",
+      }),
+    )
+    expect(fs).toContain('class="proto-fs-device"')
+    expect(fs).toMatch(/proto-fs-device[\s\S]*Mobile/)
+    expect(fs).toContain('class="proto-fs-close-label"')
+    expect(fs).toMatch(/proto-fs-close-label">Close/)
+    // exit stays intact
+    expect(fs).toContain('data-testid="proto-fullscreen-close"')
+  })
+
+  it("desktop-only fullscreen shows a Desktop device indicator + labeled Close pill", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: true,
+        showMobile: false,
+        platform: "desktop",
+      }),
+    )
+    expect(fs).toContain('class="proto-fs-device"')
+    expect(fs).toMatch(/proto-fs-device[\s\S]*Desktop/)
+    expect(fs).toContain('class="proto-fs-close-label"')
+    expect(fs).toContain('data-testid="proto-fullscreen-close"')
+  })
+
+  it("both-device fullscreen keeps the live toggle, no device indicator, same Close pill", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: true,
+        showMobile: true,
+        platform: "desktop",
+      }),
+    )
+    expect(fs).toContain('aria-label="Preview platform"')
+    expect(fs).not.toContain('class="proto-fs-device"')
+    expect(fs).toContain('class="proto-fs-close-label"')
+    expect(fs).toContain('data-testid="proto-fullscreen-close"')
+  })
+
+  it("single-device fullscreen keeps the toggle gated away (no regression)", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: false,
+        showMobile: true,
+        platform: "mobile",
+      }),
+    )
+    expect(fs).not.toContain('aria-label="Preview platform"')
+    expect(fs).toContain('data-testid="proto-fullscreen-close"')
+  })
+})
+
 // ─── control bar + 3-section body ───────────
 // The signed-in post-gen surface mounts a compact control bar (`.da-controlbar`)
 // + a `.da-ready` flex body with a LEFT collapsible sidebar (`.da-left`: PRD +
