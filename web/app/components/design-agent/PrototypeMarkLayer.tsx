@@ -109,14 +109,24 @@ export function MarkOverlay({
 export function PinLayer({
   pins,
   computedPinPositions = {},
+  occludedPins,
 }: {
   pins: PinComment[]
   computedPinPositions?: Record<number, { xPct: number; yPct: number }>
+  /** Pins whose anchored element is currently hidden behind an in-iframe overlay
+   *  (a modal drawn over it). These are SKIPPED here so the parent-app pin layer
+   *  (z-index above the iframe) never floats a pin on top of the modal that
+   *  visually covers its element. Empty / undefined → nothing is hidden. */
+  occludedPins?: Set<number>
 }) {
   if (pins.length === 0) return null
+  const visiblePins = occludedPins
+    ? pins.filter((pin) => !occludedPins.has(pin.n))
+    : pins
+  if (visiblePins.length === 0) return null
   return (
     <div className="da-pin-layer" data-testid="da-pin-layer" aria-hidden="true">
-      {pins.map((pin) => {
+      {visiblePins.map((pin) => {
         const pos = computedPinPositions[pin.n] ?? { xPct: pin.xPct, yPct: pin.yPct }
         return (
           <span

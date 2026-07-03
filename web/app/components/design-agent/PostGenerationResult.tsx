@@ -368,6 +368,11 @@ export type PostGenerationResultViewProps = {
    *  Keyed by pin.n; when present overrides the static xPct/yPct so pins track
    *  the DOM element they were placed on across scroll and resize events. */
   computedPinPositions?: Record<number, { xPct: number; yPct: number }>
+  /** Pins whose anchored element is currently hidden behind an in-iframe overlay
+   *  (a modal drawn over it) — forwarded to <PinLayer> so an occluded pin is not
+   *  drawn on top of the modal. Recomputed by usePinMarking on in-iframe DOM
+   *  mutations so a pin re-appears when the modal closes. */
+  occludedPins?: Set<number>
   /** Ref forwarded from the container so the activity-scroll useEffect (which
    *  can only live in a client component) can scrollIntoView the activity section
    *  when the first SSE event arrives. Threaded through the pure view without a
@@ -1083,6 +1088,7 @@ export function PostGenerationResultView({
   onPinIterate,
   bundleReloadNonce = 0,
   computedPinPositions = {},
+  occludedPins,
   leftPanelRef,
   hideBreadcrumb,
   isInTab,
@@ -1394,7 +1400,7 @@ export function PostGenerationResultView({
               `placed` triggers David's `pinDrop` animation. Always rendered above
               the overlay so pins stay visible after mark mode exits. */}
           {viewer && (
-            <PinLayer pins={pins} computedPinPositions={computedPinPositions} />
+            <PinLayer pins={pins} computedPinPositions={computedPinPositions} occludedPins={occludedPins} />
           )}
         </div>
 
@@ -1679,6 +1685,7 @@ export function PostGenerationResult({
       bundleReloadNonce={bundleReloadNonce}
       onRefreshBundle={onRefreshBundle}
       computedPinPositions={pin.computedPinPositions}
+      occludedPins={pin.occludedPins}
       leftPanelRef={leftPanelRef}
       hideBreadcrumb={hideBreadcrumb}
       isInTab={isInTab}

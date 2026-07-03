@@ -220,7 +220,7 @@ export function PublicTokenViewer() {
             stageOverlay={
               <>
                 <MarkOverlay markMode={pin.markMode} onStageClick={pin.handleStageClick} />
-                <PinLayer pins={pin.pins} computedPinPositions={pin.computedPinPositions} />
+                <PinLayer pins={pin.pins} computedPinPositions={pin.computedPinPositions} occludedPins={pin.occludedPins} />
               </>
             }
             chrome={
