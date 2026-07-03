@@ -88,9 +88,15 @@ def _data_file(repo_root, name: str) -> str:
     return (repo_root / "data" / name).read_text(encoding="utf-8")
 
 
-def _skill_prd_template(repo_root) -> str:
+def _skill_prd_template_part_a(repo_root) -> str:
     return (
-        repo_root / "skills" / "prd-author" / "templates" / "prd-template.md"
+        repo_root / "skills" / "prd-author" / "templates" / "prd-template-part-a.html"
+    ).read_text(encoding="utf-8")
+
+
+def _skill_prd_template_part_b(repo_root) -> str:
+    return (
+        repo_root / "skills" / "prd-author" / "templates" / "prd-template-part-b.md"
     ).read_text(encoding="utf-8")
 
 
@@ -143,17 +149,36 @@ def test_live_prd_template_is_lean_markdown(repo_root):
     assert _block_names(_data_file(repo_root, "sprntly_prd_template.md")) == set()
 
 
-# ── live PRD skill template is lean, Part-A-only markdown ─────────────────────
+# ── prd-author v4.2 ships two templates: HTML Part A + Markdown Part B ────────
+# The runner's *injected* live template stays data/sprntly_prd_template.md
+# (guarded above); these guard the skill's own bundled reference templates, which
+# v4.2 restructured — Part A as a styled, editable HTML page in the normative
+# visual system, Part B as the derived Implementation Spec.
 
-def test_prd_skill_template_is_lean_part_a(repo_root):
-    """Post-#545 + lean switch: prd-author emits only the human PRD (Part A) as
-    lean markdown — no Part B, no `---` separator (Part B is the separate
-    implementation-spec skill). Guard the shape so it can't regress to two parts."""
-    md = _skill_prd_template(repo_root)
-    assert "# Part B" not in md
-    assert not any(line.strip() == "---" for line in md.split("\n")), "stray `---` separator"
-    assert "## 1. Problem & evidence" in md
-    assert "## 5. Requirements" in md
+def test_prd_skill_part_a_template_is_html_visual_system(repo_root):
+    """prd-author v4.2 Part A is a single-file, editable HTML page in the
+    normative visual system, in the v4.1 section order (Context → Problem →
+    Evidence → Users → Goal → Hypothesis → Requirements → User input needed →
+    Appendix) — not lean markdown. Guard the shape + section order so it can't
+    regress."""
+    html = _skill_prd_template_part_a(repo_root)
+    assert "<!DOCTYPE html>" in html
+    assert 'contenteditable="true"' in html  # obviously editable
+    # v4.1 normative section order, top to bottom.
+    order = ["Context", "Problem", "Evidence", "Users", "Goal", "Hypothesis",
+             "Requirements", "User input needed", "Appendix"]
+    positions = [html.find(f">{label}") for label in order]
+    assert all(p != -1 for p in positions), f"missing section: {order}, {positions}"
+    assert positions == sorted(positions), "sections out of v4.1 order"
+
+
+def test_prd_skill_part_b_template_is_derived_impl_spec(repo_root):
+    """Part B is the machine-readable Implementation Spec, derived ONLY from a
+    Part A: a B0 derivation header plus EARS requirements traced to Part A IDs."""
+    md = _skill_prd_template_part_b(repo_root)
+    assert "## B0. Derivation" in md
+    assert "## B3. Requirements (EARS, traced to Part A IDs)" in md
+    assert "traces to a Part A" in md  # the hard derivation rule
 
 
 # NOTE: the evidence-runner end-to-end `:::block` persistence test was removed
