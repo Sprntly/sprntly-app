@@ -82,6 +82,11 @@ export type UsePinMarkingReturn = {
   toggleMark: () => void
   pins: PinComment[]
   computedPinPositions: Record<number, { xPct: number; yPct: number }>
+  /** Pins whose anchored element is currently HIDDEN behind an in-iframe overlay
+   *  (a modal opened over it). The pin layer skips rendering these so the pin
+   *  never floats on top of a modal that visually covers its element. Recomputed
+   *  on scroll / resize / load AND on in-iframe DOM mutations (modal open/close). */
+  occludedPins: Set<number>
   handleStageClick: (
     xPct: number,
     yPct: number,
@@ -114,20 +119,50 @@ export function usePinMarking({
   const [pins, setPins] = useState<PinComment[]>([])
   const pinCounter = useRef<number>(0)
   const [computedPinPositions, setComputedPinPositions] = useState<Record<number, { xPct: number; yPct: number }>>({})
+  const [occludedPins, setOccludedPins] = useState<Set<number>>(() => new Set())
 
   const recomputePinPositions = useCallback(() => {
     const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
     const updates: Record<number, { xPct: number; yPct: number }> = {}
+    const occluded = new Set<number>()
     for (const pin of pins) {
       if (pin.anchor) {
         const pos =
           pin.xPctInEl != null && pin.yPctInEl != null
             ? getAnchorPositionWithOffset(iframe, pin.anchor, pin.xPctInEl, pin.yPctInEl)
             : getAnchorPosition(iframe, pin.anchor)
-        if (pos) updates[pin.n] = pos
+        if (pos) {
+          updates[pin.n] = pos
+          // Occlusion check: is the pin's anchored element actually the topmost
+          // thing at the pin's point, or has an in-iframe overlay/modal been drawn
+          // over it? Same-origin only (`allow-same-origin` iframe). ALL access is
+          // try/catch-guarded — on ANY failure (cross-origin public/token path,
+          // detached doc, missing element) we fall through to treating the pin as
+          // VISIBLE so a pin never disappears because the check errored.
+          try {
+            const doc = iframe?.contentDocument
+            if (doc && iframe) {
+              const ir = iframe.getBoundingClientRect()
+              const xInFrame = (pos.xPct / 100) * ir.width
+              const yInFrame = (pos.yPct / 100) * ir.height
+              const top = doc.elementFromPoint(xInFrame, yInFrame)
+              const anchorEl = findByAnchor(iframe, pin.anchor)
+              // Only HIDE when we positively resolved a real topmost element that
+              // is neither the anchor nor a descendant of it (i.e. something is
+              // drawn OVER the anchor). A null topmost (point off-viewport / not
+              // resolvable) falls back to SHOWING the pin — never a false hide.
+              if (anchorEl && top && !(top === anchorEl || anchorEl.contains(top))) {
+                occluded.add(pin.n)
+              }
+            }
+          } catch {
+            // same-origin access failed → leave the pin visible (never throw).
+          }
+        }
       }
     }
     setComputedPinPositions(updates)
+    setOccludedPins(occluded)
   }, [pins])
 
   useEffect(() => {
@@ -142,11 +177,49 @@ export function usePinMarking({
     }
   }, [recomputePinPositions])
 
+  // Track in-iframe DOM changes (a modal opening/closing is an internal mutation
+  // the scroll/resize/load listeners never see) so pin occlusion + positions stay
+  // current. A MutationObserver on the same-origin `contentDocument`, rAF-debounced
+  // so bursty mutations coalesce into one recompute. This is what RE-SHOWS a pin
+  // when the modal closes: the observer fires → recompute finds the anchor
+  // un-occluded again. Re-attaches to the fresh document after an iframe reload/swap
+  // (the `load` event) and disconnects + cancels any pending frame on cleanup.
   useEffect(() => {
     const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
     if (!iframe) return
-    iframe.addEventListener("load", recomputePinPositions)
-    return () => iframe.removeEventListener("load", recomputePinPositions)
+    let rafId: number | null = null
+    let observer: MutationObserver | null = null
+    const scheduleRecompute = () => {
+      if (rafId != null) return
+      rafId = requestAnimationFrame(() => {
+        rafId = null
+        recomputePinPositions()
+      })
+    }
+    const attach = () => {
+      try { observer?.disconnect() } catch { /* noop */ }
+      observer = null
+      // Same-origin guard: a cross-origin document throws on access / observe.
+      // On failure the observer simply stays null (occlusion-hiding is a
+      // progressive enhancement; pins still render + track via scroll/resize).
+      try {
+        const doc = iframe.contentDocument
+        if (doc) {
+          observer = new MutationObserver(scheduleRecompute)
+          observer.observe(doc, { subtree: true, childList: true, attributes: true })
+        }
+      } catch {
+        observer = null
+      }
+    }
+    attach()
+    const onLoad = () => { attach(); recomputePinPositions() }
+    iframe.addEventListener("load", onLoad)
+    return () => {
+      iframe.removeEventListener("load", onLoad)
+      if (rafId != null) cancelAnimationFrame(rafId)
+      try { observer?.disconnect() } catch { /* noop */ }
+    }
   }, [recomputePinPositions])
 
   // Clear any active element highlight whenever mark mode is exited.
@@ -376,6 +449,7 @@ export function usePinMarking({
     toggleMark,
     pins,
     computedPinPositions,
+    occludedPins,
     handleStageClick,
     handlePinDraftChange,
     handlePinRemove,

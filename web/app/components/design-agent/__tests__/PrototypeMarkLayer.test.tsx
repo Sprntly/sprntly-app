@@ -98,6 +98,47 @@ describe("PinLayer — numbered teardrops", () => {
     // the static fallback is NOT used when a computed position exists
     expect(html).not.toContain("left:10%")
   })
+
+  it("pin hidden when its anchor is occluded — an occludedPins member is not rendered", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PinLayer, {
+        pins: [pinComment({ n: 1, xPct: 40, yPct: 60 })],
+        occludedPins: new Set([1]),
+      }),
+    )
+    // the only pin is occluded → the whole layer collapses to nothing.
+    expect(html).toBe("")
+  })
+
+  it("only occluded pins are skipped — unoccluded siblings still render", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PinLayer, {
+        pins: [
+          pinComment({ n: 1, xPct: 40, yPct: 60 }),
+          pinComment({ n: 2, xPct: 10, yPct: 10 }),
+        ],
+        occludedPins: new Set([1]),
+      }),
+    )
+    expect(html).not.toContain('data-testid="da-pin-1"') // occluded → skipped
+    expect(html).toContain('data-testid="da-pin-2"') // visible → rendered
+  })
+
+  it("an empty / undefined occludedPins set hides nothing (no-regression fallback)", () => {
+    const withEmpty = renderToStaticMarkup(
+      React.createElement(PinLayer, {
+        pins: [pinComment({ n: 1, xPct: 40, yPct: 60 })],
+        occludedPins: new Set<number>(),
+      }),
+    )
+    expect(withEmpty).toContain('data-testid="da-pin-1"')
+    const withUndef = renderToStaticMarkup(
+      React.createElement(PinLayer, {
+        pins: [pinComment({ n: 1, xPct: 40, yPct: 60 })],
+      }),
+    )
+    expect(withUndef).toContain('data-testid="da-pin-1"')
+  })
 })
 
 describe("PrototypeMarkLayer — pin-comment rows", () => {
