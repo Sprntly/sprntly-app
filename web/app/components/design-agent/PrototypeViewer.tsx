@@ -56,6 +56,14 @@ type Props = {
    *  toggle is NOT rendered (it has been lifted into the control bar). The stage
    *  class still tracks `platform`, so canvas width still switches. */
   hideToggle?: boolean
+  /** Per-device toggle visibility, derived by the caller from the prototype's
+   *  `target_platform` (mirrors DaControlBar). When a SINGLE device applies
+   *  (`showDesktop` XOR `showMobile`) the in-frame toggle group is suppressed —
+   *  there is nothing to toggle to. Default both true so every existing caller
+   *  (public viewer, direct view) keeps rendering both buttons unchanged. The
+   *  stage class still tracks `platform`, so the canvas width stays correct. */
+  showDesktop?: boolean
+  showMobile?: boolean
   /** C2a: optional control group rendered in the browser-frame head, to the
    *  right of the platform toggle (e.g. the public viewer's Mark + Comment
    *  buttons). Purely additive — when undefined nothing extra renders, so the
@@ -103,6 +111,8 @@ export function PrototypeViewer({
   platform: platformProp,
   onPlatformChange,
   hideToggle = false,
+  showDesktop = true,
+  showMobile = true,
   headControls,
   stageOverlay,
   onAssetError,
@@ -121,6 +131,10 @@ export function PrototypeViewer({
     onPlatformChange?.(p)
   }
   const slug = urlSlug ?? DEFAULT_URL_SLUG
+  // The in-frame toggle renders only when it's not lifted out (`hideToggle`) AND
+  // both devices apply. A single-device prototype (showDesktop XOR showMobile)
+  // has nothing to toggle to, so the group is suppressed — mirroring DaControlBar.
+  const showToggle = !hideToggle && showDesktop && showMobile
   return (
     <div
       className="da-prototype-viewer"
@@ -135,7 +149,7 @@ export function PrototypeViewer({
             disappears entirely and the iframe sits edge-to-edge. The toggle and
             headControls are NOT gated by `hideChrome` — only the decoration is —
             so a caller that keeps its in-frame toggle still renders it. */}
-        {(!hideChrome || !hideToggle || headControls) && (
+        {(!hideChrome || showToggle || headControls) && (
           <div className="proto-frame-head">
             {/* Cosmetic, non-navigable decoration — suppressed for the signed-in
                 edge-to-edge editor preview via `hideChrome`. */}
@@ -152,7 +166,7 @@ export function PrototypeViewer({
             {/* The toggle is hidden when lifted
                 into the control bar (`hideToggle`); otherwise it renders in-frame
                 exactly as before for the public viewer + fullscreen overlay. */}
-            {!hideToggle && (
+            {showToggle && (
               <div
                 className="platform-toggle"
                 role="group"

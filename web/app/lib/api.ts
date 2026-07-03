@@ -1354,6 +1354,13 @@ export type PrototypeRecord = {
   //    OPTIONAL/nullable to match the posture above so existing literals keep
   //    typechecking.
   preview_image_url?: string | null
+  // ── (append-only): the form factor chosen in the Generate flow
+  //    ("desktop" | "mobile" | "both"). GET /{id} / by-prd both `select("*")`,
+  //    so the column flows through automatically — no api method change. Typed
+  //    OPTIONAL/permissive (the `| string` tail covers legacy `web` rows) so
+  //    existing literals keep typechecking and the viewer defaults to showing
+  //    both device toggles for any absent/unrecognised value.
+  target_platform?: "desktop" | "mobile" | "both" | string | null
 }
 
 /** 202 kickoff response from POST /v1/design-agent/generate. */

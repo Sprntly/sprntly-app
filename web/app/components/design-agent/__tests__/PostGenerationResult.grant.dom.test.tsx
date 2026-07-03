@@ -120,3 +120,82 @@ describe("PostGenerationResult — authed view-grant gates the iframe (DOM)", ()
     expect(container.querySelector("iframe.da-prototype-iframe")).toBeNull()
   })
 })
+
+// The device toggle now honours the prototype's chosen form factor: a single-
+// form-factor prototype offers no way to switch to the device it was never built
+// for, and the one form factor it targets is the active/default view. Any other
+// value (both / legacy "web" / null / missing) keeps BOTH toggles so older
+// prototypes never lose a needed view.
+describe("PostGenerationResult — device toggle honours the target platform (DOM)", () => {
+  // The lifted Desktop/Mobile toggle group in the control bar.
+  const TOGGLE_GROUP = ".da-controlbar-platform"
+
+  function toggleButtonLabels(root: ParentNode): string[] {
+    const group = root.querySelector(TOGGLE_GROUP)
+    if (!group) return []
+    return Array.from(group.querySelectorAll("button")).map(
+      (b) => b.textContent?.trim() ?? "",
+    )
+  }
+
+  it("both-target prototype shows both Desktop and Mobile toggles", () => {
+    const { container } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ target_platform: "both" }),
+      }),
+    )
+    expect(container.querySelector(TOGGLE_GROUP)).not.toBeNull()
+    expect(toggleButtonLabels(container)).toEqual(["Desktop", "Mobile"])
+  })
+
+  it("desktop-target prototype hides the Mobile toggle and defaults the view to desktop", async () => {
+    const { container } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ target_platform: "desktop", bundle_url: BUNDLE }),
+      }),
+    )
+    // A single form factor needs no toggle — the whole group is gone, so there is
+    // no Mobile button to switch to a layout that was never generated.
+    expect(container.querySelector(TOGGLE_GROUP)).toBeNull()
+    expect(toggleButtonLabels(container)).not.toContain("Mobile")
+    // Desktop is the active/default view.
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="proto-stage"]')).not.toBeNull()
+    })
+    expect(container.querySelector('[data-testid="proto-stage"]')?.className).toContain(
+      "desktop",
+    )
+  })
+
+  it("mobile-target prototype hides the Desktop toggle and defaults the view to mobile", async () => {
+    const { container } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ target_platform: "mobile", bundle_url: BUNDLE }),
+      }),
+    )
+    expect(container.querySelector(TOGGLE_GROUP)).toBeNull()
+    expect(toggleButtonLabels(container)).not.toContain("Desktop")
+    // Mobile is the active/default view (NOT desktop).
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="proto-stage"]')).not.toBeNull()
+    })
+    const stageClass = container.querySelector('[data-testid="proto-stage"]')?.className ?? ""
+    expect(stageClass).toContain("mobile")
+    expect(stageClass).not.toContain("desktop")
+  })
+
+  it("legacy prototype (target_platform absent / null / \"web\") shows both toggles", () => {
+    for (const legacy of [
+      proto(),
+      proto({ target_platform: null }),
+      proto({ target_platform: "web" }),
+    ]) {
+      const { container, unmount } = render(
+        React.createElement(PostGenerationResult, { prototype: legacy }),
+      )
+      expect(container.querySelector(TOGGLE_GROUP)).not.toBeNull()
+      expect(toggleButtonLabels(container)).toEqual(["Desktop", "Mobile"])
+      unmount()
+    }
+  })
+})

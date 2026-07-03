@@ -261,7 +261,7 @@ DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE = """\
 PRD:
 {prd_md}
 
-Target platform: {target_platform}
+{platform_directive}
 
 Additional instructions from the user:
 {instructions}
@@ -274,6 +274,43 @@ Figma context:
 Generate the interactive prototype now. Use `write` to create each file.
 End your turn with a 1-2 sentence summary when the prototype is complete.
 """
+
+
+# ─── Target-platform directive ────────────────────────────────────────────
+# The actionable form-factor instruction injected into the scaffold user turn.
+# Keyed on the normalised (lowercased) target platform; anything unrecognised
+# (legacy "web", empty, None) falls back to the responsive directive so old
+# rows never crash and never accidentally hide a needed form factor.
+_PLATFORM_DIRECTIVE: dict[str, str] = {
+    "desktop": (
+        "Target platform: DESKTOP ONLY. Build a single desktop layout designed "
+        "for a ~1440px-wide viewport. Do NOT include a mobile or tablet layout, "
+        "and do NOT add responsive breakpoints that reflow, stack, or collapse "
+        "the design for small screens. This prototype is desktop-only."
+    ),
+    "mobile": (
+        "Target platform: MOBILE ONLY. Build a single mobile layout designed for "
+        "a ~390px-wide viewport. Do NOT include a desktop or tablet layout, and "
+        "do NOT add responsive breakpoints that expand or widen the design for "
+        "large screens. This prototype is mobile-only."
+    ),
+    "both": (
+        "Target platform: RESPONSIVE (desktop + mobile). Build one fully "
+        "responsive, mobile-first design that adapts gracefully from a ~390px "
+        "mobile viewport up to a ~1440px desktop viewport. Include the responsive "
+        "breakpoints needed for both form factors."
+    ),
+}
+
+
+def _platform_directive(target_platform: str | None) -> str:
+    """Return the form-factor directive for the (normalised) target platform.
+
+    Pure + deterministic. Unrecognised values (legacy "web", "", None) fall
+    back to the responsive ("both") directive.
+    """
+    key = (target_platform or "both").strip().lower()
+    return _PLATFORM_DIRECTIVE.get(key, _PLATFORM_DIRECTIVE["both"])
 
 
 def render_scaffold_user(
@@ -302,7 +339,7 @@ def render_scaffold_user(
     )
     return DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE.format(
         prd_md=prd_md.strip() or "(PRD is empty)",
-        target_platform=target_platform or "both",
+        platform_directive=_platform_directive(target_platform),
         instructions=(instructions.strip() or "(none)"),
         figma_frames=figma_frames.strip() or "(no Figma source detected)",
         codebase_repo=codebase_block,

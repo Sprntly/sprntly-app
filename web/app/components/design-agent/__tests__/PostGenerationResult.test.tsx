@@ -166,6 +166,31 @@ describe("PostGenerationResultView — full-screen overlay (P6-16 AC2/AC3/AC3b)"
     expect(closed).not.toContain('data-testid="proto-fullscreen"')
   })
 
+  it("keeps the fullscreen exit (close X) for a single-device prototype — never traps", () => {
+    // A single-device prototype suppresses the in-frame toggle + chrome head in
+    // fullscreen; the exit MUST still render (Escape/browser-back is not an
+    // acceptable only-way-out). Both mobile-only and desktop-only.
+    const mobileOnly = renderView({
+      bundleUrl: BUNDLE,
+      fullscreenOpen: true,
+      showDesktop: false,
+      showMobile: true,
+      platform: "mobile",
+    })
+    expect(mobileOnly).toContain('data-testid="proto-fullscreen-close"')
+    // and the toggle is gated away (the actual single-device behaviour)
+    expect(mobileOnly).not.toContain('aria-label="Preview platform"')
+
+    const desktopOnly = renderView({
+      bundleUrl: BUNDLE,
+      fullscreenOpen: true,
+      showDesktop: true,
+      showMobile: false,
+      platform: "desktop",
+    })
+    expect(desktopOnly).toContain('data-testid="proto-fullscreen-close"')
+  })
+
   it("never renders the overlay without a bundle even if fullscreenOpen is true", () => {
     const html = renderView({ bundleUrl: null, fullscreenOpen: true })
     expect(html).not.toContain('data-testid="proto-fullscreen"')
@@ -194,6 +219,133 @@ describe("PostGenerationResultView — full-screen overlay (P6-16 AC2/AC3/AC3b)"
     const open = renderView({ bundleUrl: BUNDLE, fullscreenOpen: true })
     expect(countOccurrences(open, 'class="da-prototype-iframe"')).toBe(1)
     expect(open).not.toContain('data-testid="manual-edit-overlay"')
+  })
+})
+
+// ─── full-screen overlay honours target_platform ────────────────────────────
+// Regression: the fullscreen overlay rendered its OWN in-frame toggle (not the
+// gated control-bar toggle), so a single-device prototype showed BOTH buttons
+// AND opened on Desktop. The container now threads showDesktop/showMobile +
+// initialPlatform into FullscreenOverlay so it matches the inline gating.
+describe("PostGenerationResultView — full-screen overlay honours target_platform", () => {
+  const BUNDLE = "https://cdn/x/bundle/index.html"
+
+  // Isolate the fullscreen dialog's markup from the always-rendered control bar
+  // (which owns its own gated toggle) — the overlay is the last node rendered.
+  function fullscreenHtml(html: string): string {
+    const idx = html.indexOf('data-testid="proto-fullscreen"')
+    return idx === -1 ? "" : html.slice(idx)
+  }
+
+  it("mobile-only prototype in fullscreen hides the toggle group and opens on mobile", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: false,
+        showMobile: true,
+        platform: "mobile",
+      }),
+    )
+    // The in-frame Desktop/Mobile toggle is NOT in the fullscreen DOM.
+    expect(fs).not.toContain('aria-label="Preview platform"')
+    expect(fs).not.toContain('class="platform-toggle"')
+    // …and the stage opens on the single (mobile) device, not the Desktop default.
+    expect(fs).toContain('class="proto-stage mobile"')
+    expect(fs).not.toContain('class="proto-stage desktop"')
+  })
+
+  it("both-target prototype in fullscreen shows both toggle buttons", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: true,
+        showMobile: true,
+        platform: "desktop",
+      }),
+    )
+    expect(fs).toContain('aria-label="Preview platform"')
+    expect(fs).toMatch(/>Desktop<\/button>/)
+    expect(fs).toMatch(/>Mobile<\/button>/)
+  })
+})
+
+// ─── single-device fullscreen presentation ──────────────────────────────────
+// A single-device prototype keeps a slim chrome bar in fullscreen (chrome-less
+// reads as broken); the vacated toggle slot is filled with a settled device
+// indicator, and the bare "×" is upgraded to a labeled Close pill. Both-device
+// keeps the live toggle and adopts the same Close pill.
+describe("PostGenerationResultView — single-device fullscreen presentation", () => {
+  const BUNDLE = "https://cdn/x/bundle/index.html"
+
+  function fullscreenHtml(html: string): string {
+    const idx = html.indexOf('data-testid="proto-fullscreen"')
+    return idx === -1 ? "" : html.slice(idx)
+  }
+
+  it("mobile-only fullscreen shows a Mobile device indicator + labeled Close pill", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: false,
+        showMobile: true,
+        platform: "mobile",
+      }),
+    )
+    expect(fs).toContain('class="proto-fs-device"')
+    expect(fs).toMatch(/proto-fs-device[\s\S]*Mobile/)
+    expect(fs).toContain('class="proto-fs-close-label"')
+    expect(fs).toMatch(/proto-fs-close-label">Close/)
+    // exit stays intact
+    expect(fs).toContain('data-testid="proto-fullscreen-close"')
+  })
+
+  it("desktop-only fullscreen shows a Desktop device indicator + labeled Close pill", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: true,
+        showMobile: false,
+        platform: "desktop",
+      }),
+    )
+    expect(fs).toContain('class="proto-fs-device"')
+    expect(fs).toMatch(/proto-fs-device[\s\S]*Desktop/)
+    expect(fs).toContain('class="proto-fs-close-label"')
+    expect(fs).toContain('data-testid="proto-fullscreen-close"')
+  })
+
+  it("both-device fullscreen keeps the live toggle, no device indicator, same Close pill", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: true,
+        showMobile: true,
+        platform: "desktop",
+      }),
+    )
+    expect(fs).toContain('aria-label="Preview platform"')
+    expect(fs).not.toContain('class="proto-fs-device"')
+    expect(fs).toContain('class="proto-fs-close-label"')
+    expect(fs).toContain('data-testid="proto-fullscreen-close"')
+  })
+
+  it("single-device fullscreen keeps the toggle gated away (no regression)", () => {
+    const fs = fullscreenHtml(
+      renderView({
+        bundleUrl: BUNDLE,
+        fullscreenOpen: true,
+        showDesktop: false,
+        showMobile: true,
+        platform: "mobile",
+      }),
+    )
+    expect(fs).not.toContain('aria-label="Preview platform"')
+    expect(fs).toContain('data-testid="proto-fullscreen-close"')
   })
 })
 

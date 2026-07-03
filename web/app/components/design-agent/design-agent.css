@@ -1021,32 +1021,65 @@
    positioned close (×, right:22px + 36px wide) does not overlap the
    Desktop/Mobile platform toggle, which otherwise sits at the bar's right edge. */
 .design-agent-surface .proto-fullscreen .proto-frame-head {
-  padding-right: 70px;
+  padding-right: 124px;
+}
+/* Single-device fullscreen: a settled device indicator fills the toggle's
+   vacated slot so the chrome bar reads as intentional, not empty. */
+.design-agent-surface .proto-fs-device {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px 7px 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-sm);
+}
+.design-agent-surface .proto-fs-device svg {
+  color: var(--accent);
+}
+.design-agent-surface .proto-fs-device .lbl {
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--ink);
 }
 .design-agent-surface .proto-fullscreen-close {
   position: absolute;
+  /* The fullscreen exit MUST always sit above the prototype iframe/canvas —
+     when a single-device prototype suppresses the chrome head, the iframe fills
+     to the top and would otherwise occlude this control, trapping the user with
+     no way out (Escape/browser-back only). Stack it above the body content. */
+  z-index: 2;
   /* Align with the chrome bar's row: the frame-head's 11px top padding places
      the Desktop/Mobile toggle's top edge at 11px, and the toggle is the same
      36px height as this control, so matching top lines up both their top and
      bottom edges with that row. */
   top: 11px;
   right: 22px;
-  width: 36px;
+  width: auto;
   height: 36px;
-  display: flex;
+  padding: 0 13px 0 11px;
+  display: inline-flex;
   align-items: center;
+  gap: 7px;
   justify-content: center;
-  font-size: 22px;
   line-height: 1;
   color: var(--ink);
   background: var(--surface-2);
-  border: 1px solid var(--line);
+  border: 1px solid var(--line-strong);
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow-md);
   cursor: pointer;
 }
+.design-agent-surface .proto-fs-close-label {
+  font-size: 12.5px;
+  font-weight: 500;
+}
 .design-agent-surface .proto-fullscreen-close:hover {
   background: var(--surface-3);
+}
+.design-agent-surface .proto-fullscreen .proto-stage.mobile {
+  align-items: center;
 }
 .design-agent-surface .proto-fullscreen:fullscreen .proto-dot,
 .design-agent-surface .proto-fullscreen:fullscreen .proto-url { display: none; }

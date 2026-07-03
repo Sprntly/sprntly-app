@@ -159,15 +159,16 @@ def test_shadcn_inventory_present_in_system_prompt():
 def test_user_template_has_five_placeholders():
     template = p.DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE
     found = set(re.findall(r"\{(\w+)\}", template))
-    # `codebase_repo` was added as an additive context block (existing
-    # placeholders unchanged) — the optional connected-repo "match this
-    # codebase" line, rendered by render_scaffold_user.
+    # `platform_directive` replaces the former bare `target_platform` label — the
+    # template now carries the actionable form-factor instruction computed in
+    # render_scaffold_user, not the raw platform value. `codebase_repo` is the
+    # optional connected-repo "match this codebase" line.
     assert found == {
-        "prd_md", "target_platform", "instructions", "figma_frames", "codebase_repo",
+        "prd_md", "platform_directive", "instructions", "figma_frames", "codebase_repo",
     }
     # .format(...) with exactly those five kwargs must not raise.
     template.format(
-        prd_md="a", target_platform="b", instructions="c",
+        prd_md="a", platform_directive="b", instructions="c",
         figma_frames="d", codebase_repo="e",
     )
 
@@ -193,6 +194,88 @@ def test_render_scaffold_user_empty_instructions_falls_back_to_none():
 def test_render_scaffold_user_empty_figma_falls_back_to_no_source_detected():
     out = p.render_scaffold_user("x", "mobile", "y", "")
     assert "(no Figma source detected)" in out
+
+
+# ---- form-factor directive --------------------------------------------------
+#
+# The rendered user prompt must not merely LABEL the selected form factor — it
+# must instruct the model to build that layout and exclude the others. These
+# assert the rendered prompt (deterministic); generation output itself is a
+# real-LLM call and cannot be asserted in a unit test.
+
+def _exclusion_instruction(text: str) -> bool:
+    """True if the text carries a 'build one, not the other' style instruction
+    (an explicit exclusion), not just a bare platform label."""
+    lowered = text.lower()
+    return ("do not" in lowered) or ("only" in lowered) or ("exclude" in lowered)
+
+
+def test_desktop_directive_names_desktop_and_excludes_mobile():
+    out = p.render_scaffold_user("prd body", "desktop", "instr", "figma")
+    lowered = out.lower()
+    # desktop named as the sole layout ...
+    assert "desktop" in lowered
+    # ... AND an explicit exclusion instruction referencing mobile/responsive.
+    assert _exclusion_instruction(out)
+    assert "mobile" in lowered
+    # The exclusion must be near the mobile reference, not a stray "only".
+    assert re.search(r"do not include a mobile", lowered)
+
+
+def test_mobile_directive_names_mobile_and_excludes_desktop():
+    out = p.render_scaffold_user("prd body", "mobile", "instr", "figma")
+    lowered = out.lower()
+    assert "mobile" in lowered
+    assert _exclusion_instruction(out)
+    assert "desktop" in lowered
+    assert re.search(r"do not include a desktop", lowered)
+
+
+def test_both_directive_is_responsive_with_no_single_device_exclusion():
+    out = p.render_scaffold_user("prd body", "both", "instr", "figma")
+    lowered = out.lower()
+    assert "responsive" in lowered
+    # Must reference BOTH form factors (adapts across viewports), not exclude one.
+    assert "mobile" in lowered and "desktop" in lowered
+    assert "do not include a mobile" not in lowered
+    assert "do not include a desktop" not in lowered
+
+
+def test_desktop_and_mobile_directives_differ_by_more_than_the_label_word():
+    # AC4: the desktop and mobile renders must diverge by an actual build/exclusion
+    # instruction, not merely the platform word. Strip every occurrence of the two
+    # platform words and confirm the remaining directive text still differs.
+    desktop = p.render_scaffold_user("prd", "desktop", "i", "f")
+    mobile = p.render_scaffold_user("prd", "mobile", "i", "f")
+
+    def _scrub(s: str) -> str:
+        return re.sub(r"desktop|mobile", "X", s, flags=re.IGNORECASE)
+
+    assert _scrub(desktop) != _scrub(mobile)
+
+
+def test_unrecognised_platform_falls_back_to_responsive_directive():
+    # Legacy "web" rows exist in prod — they must render the responsive directive,
+    # never crash, never a single-device exclusion.
+    out = p.render_scaffold_user("prd", "web", "i", "f")
+    lowered = out.lower()
+    assert "responsive" in lowered
+    assert "do not include a mobile" not in lowered
+    assert "do not include a desktop" not in lowered
+
+
+def test_empty_and_none_platform_default_to_responsive_directive():
+    for value in ("", None):
+        out = p.render_scaffold_user("prd", value, "i", "f")  # type: ignore[arg-type]
+        assert "responsive" in out.lower()
+
+
+def test_platform_directive_helper_is_case_insensitive_and_pure():
+    # The pure helper is the deterministically-testable unit.
+    assert p._platform_directive("DESKTOP") == p._platform_directive("desktop")
+    assert p._platform_directive("  Mobile ") == p._platform_directive("mobile")
+    assert p._platform_directive("web") == p._PLATFORM_DIRECTIVE["both"]
+    assert p._platform_directive(None) == p._PLATFORM_DIRECTIVE["both"]
 
 
 # ---- cache readiness --------------------------------------------------------
