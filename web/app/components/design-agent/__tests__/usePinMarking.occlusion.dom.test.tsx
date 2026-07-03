@@ -261,94 +261,116 @@ describe("usePinMarking — comment-pin occlusion lifecycle", () => {
     expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
   })
 
-  it("a second content mutation while a recompute frame is pending CANCELS the prior frame and reschedules (not first-wins)", async () => {
+  it("a second content mutation while a recompute timer is pending CANCELS the prior timer and reschedules (not first-wins)", async () => {
     render(React.createElement(Harness))
     await dropPin()
     expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
-    // Settle any real frame so no recompute is pending before we freeze rAF.
+    // Settle any real timer so no recompute is pending before we freeze the debounce.
     await flushObserver()
 
-    // Freeze frames: rAF hands back an ever-increasing handle but NEVER invokes its
-    // callback, so a scheduled recompute stays PENDING across both mutations. The
-    // handle is nulled only inside that (never-firing) callback → this reproduces the
-    // "pending frame that never flushes" state the wedge got permanently stuck in.
+    // Freeze the debounce timer: the hook's `setTimeout(fn, 0)` hands back an
+    // ever-increasing handle but NEVER invokes its callback, so a scheduled recompute
+    // stays PENDING across both mutations. The handle is nulled only inside that
+    // (never-firing) callback → this reproduces the "pending timer that never flushes"
+    // state the wedge got permanently stuck in. Only the hook's 0-delay debounce is
+    // intercepted; every other timer (React internals, harness) runs on the real clock.
+    const realSetTimeout = window.setTimeout.bind(window)
     let fakeHandle = 0
-    const rafSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation(() => ++fakeHandle)
-    const cafSpy = vi.spyOn(window, "cancelAnimationFrame")
+    const setTimeoutSpy = vi
+      .spyOn(window, "setTimeout")
+      .mockImplementation(((fn: TimerHandler, delay?: number, ...rest: unknown[]) => {
+        if (delay === 0) return ++fakeHandle as unknown as ReturnType<typeof setTimeout>
+        return realSetTimeout(fn as never, delay, ...(rest as never[]))
+      }) as typeof setTimeout)
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout")
 
     // First in-iframe mutation → the content observer fires on the microtask →
-    // scheduleRecompute schedules frame #1 (rafRecompute now a non-null, never-firing
-    // handle). Flush ONLY microtasks — no timer, no frame — so the frame stays pending.
+    // scheduleRecompute schedules timer #1 (recomputeTimer now a non-null, never-firing
+    // handle). Flush ONLY microtasks — no timer flush — so the timer stays pending.
     await act(async () => {
       doc.body.appendChild(doc.createElement("div"))
       await Promise.resolve()
       await Promise.resolve()
     })
     const firstHandle = fakeHandle
-    expect(rafSpy).toHaveBeenCalled()
+    expect(setTimeoutSpy).toHaveBeenCalled()
     expect(firstHandle).toBeGreaterThan(0)
-    expect(cafSpy).not.toHaveBeenCalled()
+    // The first schedule found no pending timer, so it never cleared THIS handle.
+    expect(clearTimeoutSpy).not.toHaveBeenCalledWith(firstHandle)
 
-    // Second mutation while frame #1 is STILL pending → the observer fires again →
-    // scheduleRecompute. Cancel-and-reschedule CANCELS handle #1 and schedules a fresh
-    // frame, so the recompute always gets a live frame. A first-wins guard
-    // (`if (rafRecompute != null) return`) would instead bail here and NEVER call
-    // cancelAnimationFrame — the exact wedge that leaves the occlusion recompute dead.
+    // Second mutation while timer #1 is STILL pending → the observer fires again →
+    // scheduleRecompute. Cancel-and-reschedule CLEARS handle #1 and schedules a fresh
+    // timer, so the recompute always gets a live timer. A first-wins guard
+    // (`if (recomputeTimer != null) return`) would instead bail here and NEVER call
+    // clearTimeout — the exact wedge that leaves the occlusion recompute dead.
     await act(async () => {
       doc.body.appendChild(doc.createElement("div"))
       await Promise.resolve()
       await Promise.resolve()
     })
-    expect(cafSpy).toHaveBeenCalledWith(firstHandle)
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(firstHandle)
 
-    rafSpy.mockRestore()
-    cafSpy.mockRestore()
+    setTimeoutSpy.mockRestore()
+    clearTimeoutSpy.mockRestore()
   })
 
-  it("a pending recompute frame that was cancelled without firing does not wedge the occlusion hide", async () => {
+  it("a pending recompute timer that was cancelled without firing does not wedge the occlusion hide", async () => {
     render(React.createElement(Harness))
     await dropPin()
     expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
-    // Settle any real frame so no recompute is pending before we model frames ourselves.
+    // Settle any real timer so no recompute is pending before we model timers ourselves.
     await flushObserver()
 
-    // rAF mock that MODELS CANCELLATION: a cancelled handle's callback does NOT fire on
-    // flush. This reproduces the exact live wedge — a recompute frame stranded (cancelled
+    // setTimeout mock that MODELS CANCELLATION: a cleared handle's callback does NOT fire
+    // on flush. This reproduces the exact live wedge — a recompute timer stranded (cleared
     // WITHOUT firing) by an iframe re-bind / StrictMode teardown — as an in-suite symptom.
-    const handles = new Map<number, { cb: FrameRequestCallback; cancelled: boolean }>()
+    // Only the hook's 0-delay debounce is captured; every other timer runs on the real
+    // clock so React internals + the harness are unaffected.
+    const realSetTimeout = window.setTimeout.bind(window)
+    const realClearTimeout = window.clearTimeout.bind(window)
+    const timers = new Map<number, { cb: () => void; cancelled: boolean }>()
     let nextId = 1
-    const rafSpy = vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb) => {
-      const id = nextId++
-      handles.set(id, { cb, cancelled: false })
-      return id
-    })
-    const cafSpy = vi.spyOn(window, "cancelAnimationFrame").mockImplementation((id) => {
-      const h = handles.get(id)
-      if (h) h.cancelled = true
-    })
-    const flushRaf = () => {
-      for (const [id, h] of [...handles]) {
-        handles.delete(id)
-        if (!h.cancelled) h.cb(performance.now())
+    const setTimeoutSpy = vi
+      .spyOn(window, "setTimeout")
+      .mockImplementation(((fn: TimerHandler, delay?: number, ...rest: unknown[]) => {
+        if (delay === 0) {
+          const id = nextId++
+          timers.set(id, { cb: fn as () => void, cancelled: false })
+          return id as unknown as ReturnType<typeof setTimeout>
+        }
+        return realSetTimeout(fn as never, delay, ...(rest as never[]))
+      }) as typeof setTimeout)
+    const clearTimeoutSpy = vi
+      .spyOn(window, "clearTimeout")
+      .mockImplementation(((id?: ReturnType<typeof setTimeout>) => {
+        const key = id as unknown as number
+        const t = timers.get(key)
+        if (t) { t.cancelled = true; return }
+        realClearTimeout(id as never)
+      }) as typeof clearTimeout)
+    const flushTimers = () => {
+      for (const [id, t] of [...timers]) {
+        timers.delete(id)
+        if (!t.cancelled) t.cb()
       }
     }
 
     // STRAND a handle: one benign in-iframe mutation fires the content observer →
-    // scheduleRecompute schedules a frame (the hook's internal rafRecompute is now set).
-    // Then simulate the teardown/re-bind that CANCELS that frame without firing it — the
-    // hook does NOT null its internal handle, so rafRecompute is left a dead non-null
+    // scheduleRecompute schedules a timer (the hook's internal recomputeTimer is now set).
+    // Then simulate the teardown/re-bind that CLEARS that timer without firing it — the
+    // hook does NOT null its internal handle, so recomputeTimer is left a dead non-null
     // value. That is the wedge that stayed invisible to mechanism-only assertions.
     await act(async () => {
       doc.body.appendChild(doc.createElement("div"))
       await Promise.resolve()
       await Promise.resolve()
     })
-    const strandedId = rafSpy.mock.results[rafSpy.mock.results.length - 1]!.value as number
-    window.cancelAnimationFrame(strandedId)
+    const strandedId = [...timers.keys()].at(-1)!
+    window.clearTimeout(strandedId as unknown as ReturnType<typeof setTimeout>)
 
     // The REAL modal mutation: a modal covers the anchor point (topmost). The content
-    // observer fires → scheduleRecompute. Cancel-and-reschedule cancels the stranded
-    // handle (a no-op) and schedules a FRESH frame; first-wins bails on the dead non-null
+    // observer fires → scheduleRecompute. Cancel-and-reschedule clears the stranded
+    // handle (a no-op) and schedules a FRESH timer; first-wins bails on the dead non-null
     // handle and schedules nothing.
     const modal = doc.createElement("div")
     doc.body.appendChild(modal)
@@ -358,17 +380,17 @@ describe("usePinMarking — comment-pin occlusion lifecycle", () => {
       await Promise.resolve()
     })
 
-    // Flush frames: the stranded/cancelled handle is skipped; only a freshly scheduled
-    // frame runs the recompute. Fixed → recompute runs → the pin HIDES (symptom cured).
-    // First-wins → no fresh frame → the recompute never runs → the pin STAYS (the exact
+    // Flush timers: the stranded/cancelled handle is skipped; only a freshly scheduled
+    // timer runs the recompute. Fixed → recompute runs → the pin HIDES (symptom cured).
+    // First-wins → no fresh timer → the recompute never runs → the pin STAYS (the exact
     // live symptom that passed every plumbing test yet failed in the browser).
     await act(async () => {
-      flushRaf()
+      flushTimers()
     })
     expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
 
-    rafSpy.mockRestore()
-    cafSpy.mockRestore()
+    setTimeoutSpy.mockRestore()
+    clearTimeoutSpy.mockRestore()
   })
 
   // ── Concern 3 preserved: anchor tracking + the show-on-null fallback ──
@@ -412,18 +434,19 @@ describe("usePinMarking — comment-pin occlusion lifecycle", () => {
     expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
   })
 
-  it("cleanup — unmount disconnects both observers, removes listeners, cancels the frame", async () => {
+  it("cleanup — unmount disconnects both observers, removes listeners, clears the timer", async () => {
     const winRemove = vi.spyOn(iframe.contentWindow as Window, "removeEventListener")
     const windowRemove = vi.spyOn(window, "removeEventListener")
     const iframeRemove = vi.spyOn(iframe, "removeEventListener")
     const disconnect = vi.spyOn(MutationObserver.prototype, "disconnect")
-    const cancelFrame = vi.spyOn(window, "cancelAnimationFrame")
+    const clearTimer = vi.spyOn(window, "clearTimeout")
     const view = render(React.createElement(Harness))
     await dropPin()
 
-    // Leave a recompute pending so cleanup has a frame to cancel: the in-iframe
-    // mutation fires the content observer (microtask) which SCHEDULES the rAF; flush
-    // ONLY microtasks so the frame is still pending (not yet run) at unmount.
+    // Leave a recompute pending so cleanup has a timer to clear: the in-iframe
+    // mutation fires the content observer (microtask) which SCHEDULES the setTimeout(0);
+    // flush ONLY microtasks so the macrotask timer is still pending (not yet run) at
+    // unmount — a microtask flush never runs a queued setTimeout.
     const modal = doc.createElement("div")
     doc.body.appendChild(modal)
     topEl = modal
@@ -434,7 +457,7 @@ describe("usePinMarking — comment-pin occlusion lifecycle", () => {
     expect(windowRemove).toHaveBeenCalledWith("resize", expect.any(Function))
     expect(iframeRemove).toHaveBeenCalledWith("load", expect.any(Function))
     expect(disconnect).toHaveBeenCalled() // content observer + body watcher
-    expect(cancelFrame).toHaveBeenCalled()
+    expect(clearTimer).toHaveBeenCalled()
   })
 
   it("cleanup — the mount watcher is dead after unmount (no bind on a late iframe)", async () => {

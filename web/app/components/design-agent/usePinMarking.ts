@@ -193,7 +193,7 @@ export function usePinMarking({
   // and pins still render + track — occlusion-hiding is a progressive enhancement.
   useEffect(() => {
     let cancelled = false
-    let rafRecompute: number | null = null
+    let recomputeTimer: ReturnType<typeof setTimeout> | null = null
     let contentObserver: MutationObserver | null = null // Concern 2 — on the live doc
     let bodyWatcher: MutationObserver | null = null      // Concern 1 — mount/remount signal
     let boundIframe: HTMLIFrameElement | null = null
@@ -207,23 +207,28 @@ export function usePinMarking({
 
     // ── Concern 2: the content observer's mutation handler → ALWAYS recompute. ──
     // Dead-simple + unconditional: a modal open/close in the iframe fires the content
-    // observer, which schedules a recompute (coalescing bursts into one frame), and the
+    // observer, which schedules a recompute (coalescing bursts into one tick), and the
     // flush runs the occlusion recompute. It NEVER routes through the binding-sync.
     //
-    // CANCEL-AND-RESCHEDULE (not first-wins): every call cancels any pending frame and
-    // schedules a fresh one. A first-wins guard (`if (rafRecompute != null) return`) can
-    // wedge PERMANENTLY — the handle is nulled only in the flush, so if a pending frame
-    // is ever cancelled without firing (e.g. an iframe re-bind / StrictMode teardown
-    // cancels it), `rafRecompute` stays a dead non-null handle and every later call
-    // bails → the observer fires but the recompute never runs → the pin never hides.
-    // Rescheduling is self-healing: a stale handle is simply cancelled (a no-op if dead)
-    // and a new frame is scheduled, so a mutation always drives a recompute.
+    // Debounced with a MACROTASK timer (setTimeout), not requestAnimationFrame. rAF was
+    // unreliable here: after a grant-driven iframe remount, a scheduled animation frame
+    // never fired (wrong/detached paint context) so the recompute never ran even once
+    // the guard was fixed. setTimeout fires from the parent window's macrotask queue
+    // regardless of animation-frame/paint state, so a mutation always drives a recompute.
+    //
+    // CANCEL-AND-RESCHEDULE (not first-wins): every call clears any pending timer and
+    // schedules a fresh one. A first-wins guard (`if (recomputeTimer != null) return`)
+    // can wedge PERMANENTLY — the handle is nulled only in the flush, so if a pending
+    // timer is ever cleared without firing (an iframe re-bind / StrictMode teardown),
+    // the handle stays a dead non-null value and every later call bails → the observer
+    // fires but the recompute never runs. Rescheduling self-heals: a stale handle is
+    // simply cleared (a no-op if dead) and a fresh timer scheduled.
     const scheduleRecompute = () => {
-      if (rafRecompute != null) cancelAnimationFrame(rafRecompute)
-      rafRecompute = requestAnimationFrame(() => {
-        rafRecompute = null
+      if (recomputeTimer != null) clearTimeout(recomputeTimer)
+      recomputeTimer = setTimeout(() => {
+        recomputeTimer = null
         recompute()
-      })
+      }, 0)
     }
 
     // ── Concern 1: keep exactly ONE content observer bound to the CURRENT doc. ──
@@ -329,7 +334,7 @@ export function usePinMarking({
       cancelled = true
       try { bodyWatcher?.disconnect() } catch { /* noop */ }
       bodyWatcher = null
-      if (rafRecompute != null) { cancelAnimationFrame(rafRecompute); rafRecompute = null }
+      if (recomputeTimer != null) { clearTimeout(recomputeTimer); recomputeTimer = null }
       unbindDoc()
       window.removeEventListener("resize", recompute)
       try { boundIframe?.removeEventListener("load", onLoad) } catch { /* noop */ }
