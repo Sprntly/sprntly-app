@@ -106,7 +106,7 @@ type Props = {
    *  to THIS viewer instance's mount, so a genuine reload (a new `key` remounts the
    *  viewer) re-shows it until the fresh bundle paints. Undefined/false on the
    *  public `/p/<token>` surface and every other caller → nothing extra renders, so
-   *  those paths are byte-for-byte unchanged (AC6). */
+   *  those paths are byte-for-byte unchanged. */
   maskUntilLoaded?: boolean
 }
 

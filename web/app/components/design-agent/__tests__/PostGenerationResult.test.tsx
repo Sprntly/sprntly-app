@@ -1342,12 +1342,12 @@ describe("DaControlBar — manual Refresh-preview button (reuses bundleReloadNon
   })
 })
 
-// ─── bundle-cover label semantics (Glitch B, AC2) ─────────────────
+// ─── bundle-cover label semantics (Glitch B) ─────────────────
 // The bundle-not-ready cover must NOT claim "Applying changes…" on a passive
 // (re)load or readiness cover — only a genuine iterate/apply says that. A passive
 // cover shows the neutral "Loading…". (The persistent iframe means the fullscreen
 // toggle no longer triggers this cover at all; this guards the copy defensively.)
-describe("PostGenerationResultView — bundle-cover label is iterate-aware (AC2)", () => {
+describe("PostGenerationResultView — bundle-cover label is iterate-aware", () => {
   const BUNDLE = "https://cdn/x/bundle/index.html"
 
   it("shows the neutral 'Loading…' (NOT 'Applying changes…') on a passive readiness cover", () => {

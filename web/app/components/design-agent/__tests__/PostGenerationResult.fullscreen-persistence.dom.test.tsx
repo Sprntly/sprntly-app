@@ -43,7 +43,7 @@ function iframeOf(container: HTMLElement): HTMLIFrameElement | null {
   return container.querySelector("iframe.da-prototype-iframe")
 }
 
-describe("persistent iframe across fullscreen (AC1)", () => {
+describe("persistent iframe across fullscreen", () => {
   it("keeps the SAME iframe node — no remount, no new src — across a fullscreen ON↔OFF toggle", () => {
     const { container, rerender } = render(
       <PostGenerationResultView {...baseProps({ fullscreenOpen: false })} />,
@@ -72,7 +72,7 @@ describe("persistent iframe across fullscreen (AC1)", () => {
     expect(after!.getAttribute("src")).toBe(beforeSrc)
   })
 
-  it("does NOT show 'Applying changes…' when returning from fullscreen with no iterate in flight (AC2)", () => {
+  it("does NOT show 'Applying changes…' when returning from fullscreen with no iterate in flight", () => {
     const { container, rerender } = render(
       <PostGenerationResultView
         {...baseProps({ fullscreenOpen: true, iterateRunning: false })}
@@ -87,7 +87,7 @@ describe("persistent iframe across fullscreen (AC1)", () => {
   })
 })
 
-describe("#572 fullscreen presentation preserved on the refactored tree (AC4)", () => {
+describe("#572 fullscreen presentation preserved on the refactored tree", () => {
   it("single-device (mobile-only) fullscreen → device pill + labeled Close pill, toggle gated, opens on mobile", () => {
     const { container } = render(
       <PostGenerationResultView

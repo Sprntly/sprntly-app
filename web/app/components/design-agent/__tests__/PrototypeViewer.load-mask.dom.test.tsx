@@ -16,7 +16,7 @@ afterEach(() => cleanup())
 
 const BUNDLE = "https://cdn/x/bundle/index.html"
 
-describe("load mask lifts on first paint (AC3)", () => {
+describe("load mask lifts on first paint", () => {
   it("shows the neutral placeholder before load, then removes it after the iframe load", () => {
     const { container } = render(
       <PrototypeViewer bundleUrl={BUNDLE} isComplete={false} maskUntilLoaded />,

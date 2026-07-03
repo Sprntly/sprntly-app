@@ -898,7 +898,7 @@ export function DaControlBar({
  * and fullscreen is achieved by upgrading THIS host element in-place — swapping
  * its class to `.proto-fullscreen` (dialog chrome + close pill) and calling
  * `requestFullscreen()` on the host, which already contains the iframe. No
- * reparent → no reload → same iframe node across the on↔off transition (AC1).
+ * reparent → no reload → same iframe node across the on↔off transition.
  *
  * The child STRUCTURE is invariant across the toggle (close slot held by a
  * conditional at a fixed index; the body wrapper + its viewer keep the same tree
@@ -1356,7 +1356,7 @@ export function PostGenerationResultView({
               staged build). Cover the iframe with a neutral loading overlay so the
               raw 404 body is never seen; it clears automatically once a re-probe
               finds the bundle ready (the viewer reloads it). The label is
-              iterate-aware (AC2): only a genuine iterate/apply says
+              iterate-aware: only a genuine iterate/apply says
               "Applying changes…"; a passive (re)load / readiness cover says the
               neutral "Loading…" — never the misleading apply copy. */}
           {bundleNotReady && viewer && (
