@@ -4,6 +4,7 @@
    module only owns the centered layout for the resolving placeholder so it is no
    longer a blank aria-busy div (visual polish). */
 .resolving {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -11,6 +12,15 @@
   gap: 10px;
   min-height: 240px;
   color: var(--muted);
+}
+
+/* Pin the resolving-state back affordance to the top-left corner so it reads as
+   a title-bar back (mirroring the ready branch) rather than floating above the
+   centered spinner. */
+.resolvingBack {
+  position: absolute;
+  top: 12px;
+  left: 12px;
 }
 
 .resolvingLabel {

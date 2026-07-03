@@ -148,6 +148,18 @@ def _prd_variant() -> str:
 # later; this is the minimum to keep the task alive.
 _inflight_tasks: set[asyncio.Task] = set()
 
+# Separate, generation-only registry keyed by prototype_id, used ONLY by the
+# cancel endpoint to look up the in-flight generation task for a given prototype
+# and best-effort cancel it. Deliberately NOT the shared `_inflight_tasks` set:
+# that set is shared across five task types (generate/iterate/drain/manual-edit/
+# locate) and the SIGTERM drain iterates it as a set of Tasks, so re-keying it to
+# a dict would break draining and collide prototype_ids across task types. The
+# generate task registers in BOTH (the set keeps the drain strong-ref; this dict
+# powers cancel lookup); the done-callback removes from both. When the task isn't
+# in this process (multi-worker), the lookup misses and cancel is a no-op — the
+# endpoint's unconditional DB cleanup still leaves a correct user-facing state.
+_inflight_generation_tasks: dict[int, asyncio.Task] = {}
+
 
 # ── Tier 0: graceful drain ───────────────────────────────────────────────────
 # Set True by the lifespan teardown (via request_shutdown()) when the process is
@@ -587,6 +599,20 @@ async def generate(
     task = asyncio.create_task(_run_generation_bg(**bg_kwargs))
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
+    # Also register in the generation-only, prototype_id-keyed registry so the
+    # cancel endpoint can find and abort this task. Cleared via a SEPARATE
+    # done-callback so the shared-set strong-ref idiom above is left exactly as
+    # every other create_task site does it (add + add_done_callback(discard)).
+    _inflight_generation_tasks[prototype_id] = task
+
+    def _clear_generation_entry(t: asyncio.Task, _pid: int = prototype_id) -> None:
+        # Clobber-guard: only remove the entry if it still points at THIS task —
+        # a subsequent regeneration for the same prototype_id could have replaced
+        # it, and that newer task must keep its registration.
+        if _inflight_generation_tasks.get(_pid) is t:
+            _inflight_generation_tasks.pop(_pid, None)
+
+    task.add_done_callback(_clear_generation_entry)
 
     return GenerateResponse(prototype_id=prototype_id, status="generating")
 
@@ -1323,6 +1349,52 @@ def delete_prototype_route(
     return Response(status_code=204)
 
 
+@router.post("/{prototype_id}/cancel", status_code=204, dependencies=[Depends(require_same_origin)])
+def cancel_prototype_route(
+    prototype_id: int,
+    company: CompanyContext = Depends(require_company),
+) -> Response:
+    """Cancel an in-flight generation and return the user to a clean slate.
+
+    Two-part abort:
+      1. Unconditional DB cleanup — delete the prototype row + reset its PRD to
+         draft (mirrors DELETE /{prototype_id}). This is what makes the
+         user-facing outcome correct regardless of which worker holds the task,
+         and there is no `cancelled` status: clean-slate matches the "I picked
+         the wrong thing, undo it" intent.
+      2. Best-effort task abort — if the in-flight generation task is running in
+         THIS process, cancel it so it stops spending on further LLM turns. When
+         the task lives in another worker (or has already finished), this is a
+         no-op and step 1 still leaves the correct state.
+
+    Workspace-scoped exactly like the DELETE route: a prototype in another
+    workspace returns 404, never 403, so cross-tenant existence is not disclosed.
+    Idempotent/safe: an already-gone prototype returns 404, not 500.
+    """
+    _require_feature_enabled()
+    workspace_id = company.company_id
+    existing = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="Prototype not found")
+
+    # 1. Unconditional DB cleanup (idempotent; correct under multi-worker prod).
+    delete_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
+    reset_prd_to_draft(existing["prd_id"])
+
+    # 2. Best-effort abort of the local in-flight generation task. A `cancel()`
+    # raises CancelledError at the next await boundary — it stops the NEXT LLM
+    # turn but cannot kill the turn currently running on a worker thread, so this
+    # is a best-effort stop of future turns, not an instant mid-stream kill.
+    task = _inflight_generation_tasks.get(prototype_id)
+    if task is not None and not task.done():
+        task.cancel()
+        logger.info(
+            "design_agent.generation_cancelled prototype_id=%s", prototype_id,
+        )
+
+    return Response(status_code=204)
+
+
 # NOTE: GET /by-prd/{prd_id} is defined ABOVE (near the other PRD routes), not
 # here — a second identical definition used to live at this spot, which produced
 # a duplicate operation id and a redundant route registration. Removed; the
@@ -1672,6 +1744,23 @@ async def _run_generation_bg(
                     event_id, workspace_id, prototype_id,
                     getattr(result, "error_class", None) or f"status_{result.status}",
                 )
+    except asyncio.CancelledError:
+        # The cancel endpoint called task.cancel() (the user aborted from the
+        # loading screen). CancelledError is a BaseException, so it already
+        # escapes the `except Exception` below WITHOUT reaching fail_prototype —
+        # this narrow handler is here for explicitness and future-proofing: it
+        # must NEVER write a terminal status (complete_prototype/fail_prototype)
+        # for the now-deleted id, so a cancelled run cannot resurrect the row the
+        # user just discarded. The cancel endpoint has already deleted the
+        # prototype row, so there is no DB cleanup to do here; the storage/bundle
+        # dir (if any) is staged deep inside _stage_complete_run from a virtual
+        # FS and its path is not available at this scope, so there is no partial
+        # on-disk dir to remove on this path. Re-raise so the cancellation
+        # propagates normally.
+        logger.info(
+            "design_agent.generation_cancelled_bg prototype_id=%s", prototype_id,
+        )
+        raise
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
         # error_class only in the structured log (no PII / no PRD /
         # no instructions / no figma contents); the full message is stored in

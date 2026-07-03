@@ -1460,6 +1460,12 @@ export const designAgentApi = {
     api.post<{ ok: boolean }>(`/v1/design-agent/${prototypeId}/dismiss-question`),
   delete: (prototypeId: number) =>
     api.delete<void>(`/v1/design-agent/${prototypeId}`),
+  /** True abort of an in-flight generation: deletes the prototype row, resets
+   *  the PRD to draft, and best-effort cancels the running generation task so it
+   *  stops spending on further LLM turns. Same-origin + credentialed like the
+   *  other DA mutations. Returns 204 / void. */
+  cancel: (prototypeId: number) =>
+    api.post<void>(`/v1/design-agent/${prototypeId}/cancel`),
   /**
    * READ-ONLY "does this PRD have a ready prototype?" lookup, by PRD id. Powers
    * the PRD-screen preview card and the "View Prototype" vs "Generate Prototype"

@@ -112,6 +112,68 @@ describe("GenerationErrorBanner — render + retry (AC1/AC3/AC6)", () => {
     expect(onRetry).toHaveBeenCalledTimes(1)
   })
 
+  it("renders the calm composition — art tile + serif title (test_banner_composition)", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(GenerationErrorBanner, {
+        reason: "The prototype failed to build. Try regenerating.",
+        onRetry: noop,
+      }),
+    )
+    // Art tile (danger icon lives inside; the tile itself is decorative).
+    expect(html).toContain('class="da-gen-error-art"')
+    // Serif calming title.
+    expect(html).toContain('class="da-gen-error-title"')
+    expect(html).toContain("Generation")
+    expect(html).toContain("finish")
+    // Reassurance line copy is preserved.
+    expect(html).toContain("Your PRD and brief are saved")
+  })
+
+  it("renders the in-banner Back affordance only when onBack is provided (test_banner_back_optional)", () => {
+    const withoutBack = renderToStaticMarkup(
+      React.createElement(GenerationErrorBanner, {
+        reason: "Generation failed. Try regenerating.",
+        onRetry: noop,
+      }),
+    )
+    expect(withoutBack).not.toContain('data-testid="prototype-route-gen-error-back"')
+
+    const withBack = renderToStaticMarkup(
+      React.createElement(GenerationErrorBanner, {
+        reason: "Generation failed. Try regenerating.",
+        onRetry: noop,
+        onBack: noop,
+      }),
+    )
+    expect(withBack).toContain('data-testid="prototype-route-gen-error-back"')
+    expect(withBack).toContain("Back to brief")
+  })
+
+  it("the Back button's onClick calls onBack (test_back_callback)", () => {
+    const onBack = vi.fn()
+    const tree = GenerationErrorBanner({
+      reason: "Generation failed. Try regenerating.",
+      onRetry: noop,
+      onBack,
+    }) as React.ReactElement
+    const children = React.Children.toArray(
+      (tree.props as { children: React.ReactNode }).children,
+    ) as React.ReactElement[]
+    const actions = children.find(
+      (c) =>
+        typeof c.props === "object" &&
+        (c.props as { className?: string }).className ===
+          "generation-error-actions",
+    ) as React.ReactElement
+    // Back is the SECOND child of the actions row (Retry is first).
+    const back = React.Children.toArray(
+      (actions.props as { children: React.ReactNode }).children,
+    )[1] as React.ReactElement
+    expect(back.type).toBe("button")
+    ;(back.props as { onClick: () => void }).onClick()
+    expect(onBack).toHaveBeenCalledTimes(1)
+  })
+
   it("never renders the raw backend error string verbatim (test_banner_never_renders_raw_error, AC2)", () => {
     // The launcher feeds the banner `reasonCopy(rawMessage)`. A raw message with a
     // stderr tail / internal path must NOT survive into the DOM — only the mapped

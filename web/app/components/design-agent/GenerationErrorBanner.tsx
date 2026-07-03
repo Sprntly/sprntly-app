@@ -36,6 +36,8 @@
  * utilities, mirroring `PrdPatchBanner`.
  */
 
+import { IconAlertTriangle, IconCircleCheck } from "@tabler/icons-react"
+
 export type GenerationErrorBannerProps = {
   /** Human-readable, already-mapped failure copy (the launcher passes
    *  `reasonCopy(failure.message)`). Rendered verbatim — never the raw backend
@@ -44,6 +46,9 @@ export type GenerationErrorBannerProps = {
   /** Clears the failure + re-opens the drawer so the user can re-kick a
    *  generation. Does NOT auto-re-POST (the user re-initiates explicitly). */
   onRetry: () => void
+  /** Optional deliberate exit (the route wires `goTo("brief")`). When omitted,
+   *  the in-banner "Back to brief" affordance is not rendered. */
+  onBack?: () => void
 }
 
 /**
@@ -68,12 +73,16 @@ export function reasonCopy(raw: string): string {
 
 /**
  * Pure presentational banner — no hooks, no I/O → SSR-renderable in node-env
- * vitest. `role="alert"` so assistive tech announces the failure. The Retry button
- * carries the global `btn btn-accent` styling so it is visibly actionable.
+ * vitest. `role="alert"` so assistive tech announces the failure. Centered,
+ * calm composition (art tile + serif title + curated body + actions +
+ * reassurance) so a build-failed run reads as a recoverable moment, not a bare
+ * validation error. `.generation-error-actions` stays a DIRECT child of the root
+ * with the Retry button FIRST (the retry-shape test walks that exact structure).
  */
 export function GenerationErrorBanner({
   reason,
   onRetry,
+  onBack,
 }: GenerationErrorBannerProps) {
   return (
     <div
@@ -81,6 +90,10 @@ export function GenerationErrorBanner({
       data-testid="generation-error-banner"
       role="alert"
     >
+      <div className="da-gen-error-art" aria-hidden>
+        <IconAlertTriangle size={40} stroke={1.6} aria-hidden />
+      </div>
+      <h2 className="da-gen-error-title">Generation didn&rsquo;t finish</h2>
       <p
         className="generation-error-message"
         data-testid="generation-error-message"
@@ -90,12 +103,26 @@ export function GenerationErrorBanner({
       <div className="generation-error-actions">
         <button
           type="button"
-          className="btn btn-accent btn-sm"
+          className="btn btn-accent"
           onClick={onRetry}
           data-testid="generation-error-retry"
         >
-          Retry
+          Retry generation
         </button>
+        {onBack ? (
+          <button
+            type="button"
+            className="btn"
+            onClick={onBack}
+            data-testid="prototype-route-gen-error-back"
+          >
+            Back to brief
+          </button>
+        ) : null}
+      </div>
+      <div className="da-gen-error-note">
+        <IconCircleCheck size={14} stroke={1.7} aria-hidden />
+        Your PRD and brief are saved — nothing was lost.
       </div>
     </div>
   )
