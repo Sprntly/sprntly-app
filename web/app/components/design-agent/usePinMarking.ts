@@ -165,62 +165,120 @@ export function usePinMarking({
     setOccludedPins(occluded)
   }, [pins])
 
+  // Keep the latest `recomputePinPositions` in a ref so the attach lifecycle below
+  // does NOT depend on it. This effect also RE-RUNS the recompute whenever `pins`
+  // changes (recomputePinPositions changes identity on a pins change) — that is how
+  // a freshly-dropped pin gets positioned + occlusion-checked, decoupled from the
+  // one-time iframe binding.
+  const recomputeRef = useRef(recomputePinPositions)
   useEffect(() => {
+    recomputeRef.current = recomputePinPositions
     recomputePinPositions()
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    const win = iframe?.contentWindow
-    win?.addEventListener("scroll", recomputePinPositions, { passive: true })
-    window.addEventListener("resize", recomputePinPositions, { passive: true })
-    return () => {
-      win?.removeEventListener("scroll", recomputePinPositions)
-      window.removeEventListener("resize", recomputePinPositions)
-    }
   }, [recomputePinPositions])
 
-  // Track in-iframe DOM changes (a modal opening/closing is an internal mutation
-  // the scroll/resize/load listeners never see) so pin occlusion + positions stay
-  // current. A MutationObserver on the same-origin `contentDocument`, rAF-debounced
-  // so bursty mutations coalesce into one recompute. This is what RE-SHOWS a pin
-  // when the modal closes: the observer fires → recompute finds the anchor
-  // un-occluded again. Re-attaches to the fresh document after an iframe reload/swap
-  // (the `load` event) and disconnects + cancels any pending frame on cleanup.
+  // Bind occlusion tracking to the prototype iframe WHEN IT MOUNTS — independent of
+  // `pins`. The iframe mounts LATER than this effect (it appears only after the
+  // grant/bundleUrl resolves), so the old `querySelector(...); if (!iframe) return`
+  // at mount early-returned before the iframe existed and never re-ran (its only
+  // trigger was a `pins` change). Result: on a fresh viewer the observer was never
+  // bound and an in-iframe modal open never auto-hid the pin. This effect instead
+  // runs ONCE and rAF-retries (bounded) until the iframe is present, then binds:
+  //   • element-level, attached ONCE (the iframe ELEMENT persists — single
+  //     persistent-iframe design): window `resize` + the iframe `load` event.
+  //   • document-level, (re)bound by attachDoc on the initial bind AND on every
+  //     `load`: the iframe `contentWindow` `scroll` + a MutationObserver on the
+  //     `contentDocument`. A modal open/close is an internal iframe mutation no
+  //     scroll/resize/load ever sees; the observer is what recomputes occlusion for
+  //     it (rAF-debounced so bursty mutations coalesce). When the iframe NAVIGATES
+  //     (bundle reload / grant re-mint → a NEW document), `load` fires and attachDoc
+  //     re-binds scroll + observer to the LIVE document so the observer is never
+  //     stranded on a replaced document.
+  // ALL contentWindow / contentDocument / observer access is try/catch-guarded: on
+  // failure (cross-origin public/token path, detached doc) the observer stays null
+  // and pins still render + track — occlusion-hiding is a progressive enhancement.
   useEffect(() => {
-    const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
-    if (!iframe) return
-    let rafId: number | null = null
+    let cancelled = false
+    let rafRetry: number | null = null
+    let rafRecompute: number | null = null
+    let retries = 0
     let observer: MutationObserver | null = null
+    let boundWin: Window | null = null
+    let iframeEl: HTMLIFrameElement | null = null
+
+    // Stable recompute that always reads the latest callback via the ref, so the
+    // listeners bound here never go stale as `pins` changes.
+    const recompute = () => recomputeRef.current()
+
     const scheduleRecompute = () => {
-      if (rafId != null) return
-      rafId = requestAnimationFrame(() => {
-        rafId = null
-        recomputePinPositions()
+      if (rafRecompute != null) return
+      rafRecompute = requestAnimationFrame(() => {
+        rafRecompute = null
+        recompute()
       })
     }
-    const attach = () => {
+
+    // (Re)bind the per-DOCUMENT listeners to the iframe's CURRENT document: drop the
+    // scroll listener from the previous contentWindow + disconnect the previous
+    // observer, then attach a fresh scroll listener + MutationObserver to the live
+    // contentWindow/contentDocument. Called on the initial bind and on every `load`.
+    const attachDoc = () => {
+      try { boundWin?.removeEventListener("scroll", recompute) } catch { /* noop */ }
+      boundWin = null
       try { observer?.disconnect() } catch { /* noop */ }
       observer = null
-      // Same-origin guard: a cross-origin document throws on access / observe.
-      // On failure the observer simply stays null (occlusion-hiding is a
-      // progressive enhancement; pins still render + track via scroll/resize).
       try {
-        const doc = iframe.contentDocument
+        const win = iframeEl?.contentWindow ?? null
+        if (win) {
+          win.addEventListener("scroll", recompute, { passive: true })
+          boundWin = win
+        }
+        const doc = iframeEl?.contentDocument ?? null
         if (doc) {
           observer = new MutationObserver(scheduleRecompute)
           observer.observe(doc, { subtree: true, childList: true, attributes: true })
         }
       } catch {
+        // same-origin access failed → observer stays null; pins still render.
         observer = null
       }
+      recompute()
     }
-    attach()
-    const onLoad = () => { attach(); recomputePinPositions() }
-    iframe.addEventListener("load", onLoad)
+
+    const onLoad = () => { attachDoc() }
+
+    // rAF-retry until the iframe mounts, then bind. Bounded so a viewer whose iframe
+    // NEVER appears (grant/bundle failure) does not spin a frame loop forever — it
+    // gives up quietly after the cap (pins still render). Once bound, the loop stops.
+    const MAX_BIND_RETRIES = 50 // ~50 frames (~1s at 60fps) — generous for grant resolve
+    const tryBind = () => {
+      if (cancelled) return
+      const iframe = document.querySelector<HTMLIFrameElement>(".da-prototype-iframe")
+      if (!iframe) {
+        if (retries >= MAX_BIND_RETRIES) return
+        retries += 1
+        rafRetry = requestAnimationFrame(tryBind)
+        return
+      }
+      iframeEl = iframe
+      // element-level listeners — attached ONCE (the iframe element persists).
+      window.addEventListener("resize", recompute, { passive: true })
+      iframe.addEventListener("load", onLoad)
+      // document-level listeners for the current document.
+      attachDoc()
+    }
+
+    tryBind()
+
     return () => {
-      iframe.removeEventListener("load", onLoad)
-      if (rafId != null) cancelAnimationFrame(rafId)
+      cancelled = true
+      if (rafRetry != null) cancelAnimationFrame(rafRetry)
+      if (rafRecompute != null) cancelAnimationFrame(rafRecompute)
+      try { boundWin?.removeEventListener("scroll", recompute) } catch { /* noop */ }
+      window.removeEventListener("resize", recompute)
+      try { iframeEl?.removeEventListener("load", onLoad) } catch { /* noop */ }
       try { observer?.disconnect() } catch { /* noop */ }
     }
-  }, [recomputePinPositions])
+  }, [])
 
   // Clear any active element highlight whenever mark mode is exited.
   useEffect(() => {

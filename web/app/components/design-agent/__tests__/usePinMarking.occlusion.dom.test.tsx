@@ -149,6 +149,60 @@ describe("usePinMarking — pin occlusion by an in-iframe overlay", () => {
   })
 })
 
+// The live bug: the iframe mounts AFTER the hook's effects run (it appears only
+// once the grant/bundleUrl resolves). The occlusion observer must bind to the
+// iframe WHEN IT APPEARS, not require it to already be present at effect-run. The
+// other occlusion tests above render with the iframe ALREADY in the DOM, so they
+// never exercise this race — they passed even while the observer never bound live.
+// These model the race: no `.da-prototype-iframe` at render, appended AFTER mount.
+describe("usePinMarking — occlusion binds when the iframe mounts LATE (mount-race)", () => {
+  // (Re)build the same-origin doc state on the iframe's CURRENT contentDocument
+  // (re-appending an iframe can hand back a fresh document in jsdom).
+  function rebuildDoc() {
+    doc = iframe.contentDocument!
+    anchorEl = doc.createElement("div")
+    anchorEl.setAttribute("data-anchor-id", "a1")
+    doc.body.appendChild(anchorEl)
+    bridge.anchorEl = anchorEl
+    topEl = anchorEl
+    doc.elementFromPoint = () => topEl
+  }
+
+  it("binds the MutationObserver once the iframe appears, then auto-hides an occluded pin with NO scroll/recompute", async () => {
+    // No iframe in the DOM at render → the mount effect must rAF-retry, not
+    // early-return. (beforeEach appended one; detach it to model the fresh viewer.)
+    iframe.remove()
+    expect(document.querySelector(".da-prototype-iframe")).toBeNull()
+
+    const observe = vi.spyOn(MutationObserver.prototype, "observe")
+    render(React.createElement(Harness))
+    // At this instant the iframe is still absent — the observer cannot have bound.
+    expect(observe.mock.calls.length).toBe(0)
+
+    // The iframe mounts LATER (grant resolved) → re-append + rebuild its document.
+    document.body.appendChild(iframe)
+    rebuildDoc()
+    // Flush the rAF-retry loop: tryBind now finds the iframe and binds the observer.
+    await flushObserver()
+    expect(observe.mock.calls.length).toBeGreaterThan(0)
+
+    // Drop a pin; anchor is topmost → it renders visible.
+    await dropPin()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).not.toBeNull()
+
+    // Now a modal covers the anchor point. Append it to the LATE-mounted iframe's
+    // document and set it topmost — then flush ONLY rAF. No scroll dispatch, no
+    // manual recompute: the pin can hide ONLY if the observer bound to the
+    // late-mounted document. On the old early-return wiring the observer never
+    // bound, so this stays visible → RED. With the mount-race fix → GREEN.
+    const modal = doc.createElement("div")
+    doc.body.appendChild(modal)
+    topEl = modal
+    await flushObserver()
+    expect(document.querySelector('[data-testid="da-pin-1"]')).toBeNull()
+  })
+})
+
 describe("usePinMarking — occlusion same-origin guard + cleanup", () => {
   it("falls back to SHOWING the pin when iframe document access throws (cross-origin)", async () => {
     // Simulate a cross-origin document: contentDocument access throws.
