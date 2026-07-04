@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import app.call_digest as cd
 from app.kg_ingest.pullers.fireflies import CallTranscript
-from app.skill_router import is_call_digest
+from app.skill_router import is_call_digest, is_voc_report_request
 
 # A fixed "now" so window math is deterministic. 2026-06-24 is a Wednesday.
 NOW = datetime(2026, 6, 24, 15, 30, tzinfo=timezone.utc)
@@ -43,6 +43,15 @@ def test_is_call_digest_negative():
         "what are users asking for?",
     ]:
         assert not is_call_digest(q), q
+
+
+def test_is_voc_report_request():
+    # Bare VoC asks (no call-noun) — is_call_digest misses these, is_voc_report_request catches them.
+    for q in ["give me a voice of customer report", "VoC report please", "voice of customer"]:
+        assert is_voc_report_request(q), q
+        assert not is_call_digest(q), q  # no call-noun → not the call-digest matcher
+    for q in ["summarize the customer calls", "generate a PRD", "what's our churn rate?"]:
+        assert not is_voc_report_request(q), q
 
 
 # ── window parsing ───────────────────────────────────────────────────────────
@@ -96,6 +105,16 @@ def _call(i):
         participants=["p@x.com"], overview=f"overview {i}",
         quotes=[{"speaker": "Cust", "text": f"quote {i}"}],
     )
+
+
+def test_has_call_source_true_when_key_present(monkeypatch):
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    assert cd.has_call_source("co") is True
+
+
+def test_has_call_source_false_when_no_key(monkeypatch):
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    assert cd.has_call_source("co") is False
 
 
 def test_build_corpus_not_connected(monkeypatch):

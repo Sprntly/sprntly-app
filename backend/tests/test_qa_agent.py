@@ -129,6 +129,36 @@ def test_answer_intercepts_call_digest_before_routing(monkeypatch):
     assert router_calls == []  # never reached the router/answer LLM
 
 
+def test_answer_voc_request_diverts_to_digest_when_source_connected(monkeypatch):
+    # A bare "voice of customer report" (no call-noun, so is_call_digest misses
+    # it) must divert to the live digest when a call source IS connected —
+    # instead of the corpus-less skill answer that wrongly reports "no sources".
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "has_call_source", lambda cid: True)
+    monkeypatch.setattr(cd, "answer", lambda **k: {"answer": "digest", "_skill_source": "call-digest"})
+    router_calls = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: router_calls.append(k) or _route_out())
+    out = qa.answer(enterprise_id="ent", question="give me a voice of customer report", dataset="acme")
+    assert out["_skill_source"] == "call-digest"
+    assert router_calls == []  # never reached the router/answer LLM
+
+
+def test_answer_voc_request_falls_through_when_no_source(monkeypatch):
+    # With NO call source connected, the same bare request must fall through to
+    # the normal skill route (which explains what to connect), NOT the digest.
+    import app.call_digest as cd
+
+    monkeypatch.setattr(cd, "has_call_source", lambda cid: False)
+    def _no_digest(**k):
+        raise AssertionError("call_digest.answer must not run when no source is connected")
+    monkeypatch.setattr(cd, "answer", _no_digest)
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+    out = qa.answer(enterprise_id="ent", question="give me a voice of customer report", dataset="acme")
+    assert out["_skill"] == "voice-of-customer-report"  # regex fast-path → skill route
+
+
 def test_answer_pinned_skill_bypasses_call_digest(monkeypatch):
     # A pinned follow-up wins even if the text looks like a call digest.
     captured = {}
