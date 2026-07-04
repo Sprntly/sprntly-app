@@ -1,86 +1,172 @@
 ---
 name: voice-of-customer-report
-description: Turn CURATED, direct-access customer feedback — user interviews, recorded customer/CSM calls and their notes, support tickets and complaint logs, internal feedback collection (in-product feedback, surveys/NPS you ran), and any user data you hold (spend, usage, churn, segment) — into one clean, report-style artifact that goes straight from voice of customer to recommendations. It reads like a document: a written TL;DR that names the source ("synthesized from 17 calls with ~15 accounts last quarter") and describes the findings in prose; a themes section laid out as cards (2–3 per row), each sized, described, impact-quantified, and backed by 2–3 strong real quotes; and a short list of recommendations. It is for feedback where you have DIRECT ACCESS to the user — it deliberately EXCLUDES public, anonymous, volume-based channels (app-store / Play reviews, Twitter/X, Reddit, public review sites, social listening). It never invents counts or quotes, never overstates the voice, never guesses root cause, and adapts how it ranks to the data on hand. Use when the user says "synthesize these calls / tickets / interviews", "voice of customer", "what are the themes", "what should we build", or pastes curated first-party feedback.
+description: Turn the company's own direct-access feedback corpus — CSM call transcripts/notes, support tickets, customer and churn/exit interviews, sales notes, NPS verbatims — into a decision-grade Voice of Customer report. Problems are framed as user problems, sized with real counts (never percentages), rated on paired low/med/high volume and severity scales, and quantified by the metric each impacts and by how much — with revenue impact always shown (a sourced figure, or 🅘 unknown; never estimated). A prioritization gate caps recommendations at the 5–7 most important. Triggers: "voice of customer", "VoC report", "what are customers telling us", "analyze our calls/tickets/interviews", "which problem should we fix first", "rank complaints", "quantify user pain". Direct-access sources only — public channels (app stores, Reddit, X, review sites) are out of scope and route to public-feedback-report. Replaces the retired third-party-feedback and voc-volume-severity skills.
 ---
 
 # Voice of Customer Report
 
-## What it does
-Takes curated, first-party feedback and produces **one report-style artifact**, read top to bottom:
-1. **TL;DR (written).** A short prose opening that (a) **names the source and method** — "synthesized from 17 recorded CSM calls across ~15 accounts, Apr–Jun 2026" — and (b) **describes and enumerates the findings in a paragraph**, so a reader gets the whole story before any visuals.
-2. **Themes — what we're seeing.** The findings as a **grid of cards (2–3 per row)**. Each theme: a **size** (how many / what share), a plain description, an **impact read** sized by whatever user data exists (accounts, % of base, % of high-spend users, $ at risk, churn), and **2–3 strong, real quotes** that make the pain vivid.
-3. **Recommendations.** The most important actions (**max ~5**) — do X, Y, Z — each tied to the metric it moves and a route (→ `prd-author`). No separate deep-dive: themes lead straight here.
+Synthesize the first-party feedback corpus into one report a product team can act
+on: what users struggle with (in their words and framed as user problems), how
+big and how severe each problem is, which metric it moves and by how much, and
+the 5–7 most important actions — nothing more.
 
-It answers, in order: **where did this come from · what are users saying · what's the impact · what should we do.** And it **adapts how it ranks to the data on hand** (see *Recommendation basis*).
+This skill **replaces** `third-party-feedback` and `voc-volume-severity`. Their
+jobs — decision-grade feedback analysis and problem prioritization by
+volume × severity × hard signals — are merged here as one pass over one corpus.
 
-## Sources — curated, direct-access only
-**Built for (any one, or a combination):**
-- **User / customer interviews** — discovery, problem, solution, win/loss.
-- **Recorded customer & CSM calls + their notes/transcripts** — check-ins, QBRs, save calls, expansion calls (e.g. Fireflies notes).
-- **Churn / exit interviews.**
-- **Support tickets & complaint logs you own** — Zendesk, Intercom, Help Scout.
-- **Internal feedback collection** — in-product feedback, feedback forms, surveys and NPS/CSAT verbatims you ran.
-- **Your own sales / success call notes.**
-- **Optional — user data you hold, to size impact:** spend / ARR, seat & usage data, churn status, account segment, plan tier.
+## Scope
 
-**Out of scope — deliberately NOT this skill:**
-- Public **app-store / Play Store** reviews.
-- **Twitter/X, Reddit**, forums, social listening.
-- Public review sites (**G2, Trustpilot, Capterra**) and any **scraped, anonymous, or volume-based public channel**.
+- **In:** sources the company has direct access to — CSM call transcripts and
+  notes, support tickets, customer interviews, churn/exit interviews, sales-call
+  notes, NPS/CSAT verbatims with account linkage. Real counts are possible, so
+  real counts are required.
+- **Out:** public, anonymous, volume-based channels (app-store reviews, Reddit,
+  X, G2, forums). Those are a biased sample and belong to
+  `public-feedback-report`. If the user asks for both, run both skills and
+  cross-reference convergence; never mix corpora in one count.
 
-> Why the line: this skill is for feedback where you **have direct access to the user** and can attach who said it and what they're worth. Anonymous public volume is a different job (review-mining) — not handled here, so the voice stays curated and the impact stays real.
+## Triggers
 
-## The discipline (non-negotiable)
-- **Voice only when real.** Quotes are real, sourced, verbatim — never invented, never a paraphrase in quotation marks, never overstated. If a theme lacks a strong quote, say so.
-- **Counts only with a denominator.** Sizes are real (you own the corpus); never a count without a denominator.
-- **No root-cause guessing.** Report what customers say, not a guessed "why."
-- **Rank by impact, not raw volume.** A quiet, costly theme can outrank a loud, cheap one — show why.
-- **Adapt, don't fabricate.** Use the richest data you actually have; label what's missing rather than invent it.
+"voice of customer" · "VoC report" · "what are customers telling us" ·
+"analyze our calls / tickets / interviews" · "which problem should we fix
+first" · "rank complaints" · "prioritize feedback" · "quantify user pain" ·
+a corpus of transcripts/tickets/interviews is provided and the user wants to
+know what matters.
+
+## Inputs
+
+1. **The corpus** (required): files, exports, or pasted content. Declare what
+   was received (source types, item counts, time window) — the report header
+   names all of it.
+2. **Goal metrics** (requested if absent): the metrics the team is tracking this
+   quarter (e.g. activation, NRR). Recommendations are selected by fit to these.
+   If none are given, state the assumption used and mark it `[ASSUMPTION → T0]`.
+3. **Commercial data** (optional): ARR per account, expansion pipeline, churn
+   records. When connected, the revenue line in the impact column becomes hard
+   (🅗); when absent, it reads `🅘 unknown` — never an estimate.
 
 ## Method
-0. **Declare source · N · window · the team's goals & metrics · data on hand.** Which curated sources, how many items/accounts, the window. **Pull the team's goals and the metrics they actually prioritize on** — the North Star and the company's tracked metrics (e.g. activation rate, gross/net retention, expansion/NRR, time-to-value, engagement) from `business-context` / the stated goal. Note which signals exist (volume always; frustration from language; behavior = churn/usage if you hold it; commercial = spend/ARR/value if you hold it). This sets both the *recommendation basis* and the *goal lens* recommendations are selected against.
-1. **Normalize every item** (verbatim · date · source · account/segment · sentiment). De-dupe; state the rule.
-2. **Group into themes & enumerate exhaustively** (a theme = one thing users raise), with classification-coverage %. Could be 2, could be 10+.
-3. **Size each theme** — count / accounts / share of feedback.
-4. **Impact-size each theme against the metrics the company cares about.** Beyond churn / volume / revenue, map each theme to the **team's own tracked metrics** — which goal metric it moves and by roughly how much: accounts & % of base; % of highest-spend users / $ at risk (if you hold billing); churn link (if you hold it); and the company metric in play (e.g. "drags team-activation rate," "threatens gross retention," "gates net-revenue-retention / expansion"). **Label any missing signal — never invent.**
-5. **Pull 2–3 strong real quotes per theme** that make the pain vivid and convey the frustration. Gaps flagged, never fabricated.
-6. **Triangulate for ranking** — Voice (volume × frustration) vs Behavior (churn/usage) vs Commercial (value × goal-fit), scored independently; flag silent killers (quiet but costly) and vocal minorities (loud but low-impact); never average a divergence away.
-7. **Choose the recommendation basis adaptively** (below) and rank.
-8. **Select the most important ~5 by GOAL FIT, not raw volume.** Recommendations are chosen for how much they move the metrics this team prioritizes — a loud theme that doesn't advance a goal metric is named but **not** auto-promoted; a quieter theme that directly moves the North Star is **elevated**. Each recommendation states the goal metric it moves and routes to `prd-author`.
 
-## Output spec (report-style — locked order: written TL;DR → at-a-glance table → themes → recommendations)
-**A. Title + run line** — report title · sources · N · window · **the team's goal & metrics** · **recommendation basis** · confidence.
-**B. TL;DR (written, prose — user first).** Lead with the **user's problems in their own voice** — what customers are experiencing — *before* any business framing. Open with a source/method sentence, then **enumerate the key findings with `#1`, `#2`, `#3` each starting on its own line** (the user problem + a touch of voice). **Only after** the user problems, a short "what this means for us" close (what we're losing/gaining). The customer comes first — that's the point of the report.
-**C. Problems at a glance — table.** Every problem in one scannable table: problem · volume (accounts/share) · churn · $ at risk · **the company metric it moves** · severity. The quick index before the detailed cards.
-**D. Themes — cards, 2–3 per row.** Every theme (long tail included): **size** · plain description · **impact read** (sized against the company's metrics; missing signals labeled) · **2–3 strong real quotes**. Ranked by goal impact. Minor one-offs grouped compactly.
-**E. Recommendations.** The **most important ~5, selected by goal fit**, each = action + **the goal metric it moves** + route (→ `prd-author`). End in the single next step.
-**F. Sources & integrity note.** Which curated sources were used, what data was/wasn't on hand, verified-vs-inferred, and — if volume-only — that the ranking would change with spend/churn data.
+1. **Classify the corpus.** Tag every item to a problem. Report classification
+   coverage (% of items tagged) in the header.
+2. **Name each problem as a user problem.** The name states the difficulty from
+   the user's side — "Difficult to export PRDs for leadership", "Hard to get
+   connected in the first week" — never internal/solution framing ("export
+   feature gap", "onboarding funnel issue").
+3. **Size volume.** Participant/item counts per source ("11 of 17 calls · 19
+   tickets"), never percentages, and a **low / med / high** rating on the shared
+   pill scale.
+4. **Rate severity** on the same **low / med / high** scale, with a 2–4 word
+   justification ("blocks all value", "workaround exists"). Volume and severity
+   always render adjacent so divergence is visible at a glance.
+5. **Quantify impact.** For each problem: the **metric it impacts** (one metric,
+   named) and **by how much** — a delta computed or quoted from the corpus with
+   a confidence tier (🅗 hard / 🅢 soft-stated / 🅘 inferred-unknown).
+   **Revenue impact is always shown**: a sourced figure when stated or when
+   commercial data is connected, otherwise `revenue: 🅘 unknown`. Never
+   estimated, never omitted.
+6. **Flag silent killers 🔇.** Any problem whose volume rating is low but whose
+   severity or dollar impact is high gets the flag — impact sizing elevates it
+   above its voice volume.
+7. **Build recommendation candidates.** Every problem generates candidate
+   actions; when 🅘 gaps dominate the impact column, one candidate must be the
+   instrumentation/investigation that closes them.
+8. **Run the prioritization gate** (see below) and write the report.
 
-Render as a clean, **report / Word-document-style** artifact (generous margins, prose TL;DR, sectioned, easy to read and share). Fall back to structured Markdown if no rich surface. A worked example ships in `examples/sprntly-voc-report.html` — reference it for the exact look.
+## Prioritization gate (hard rule)
 
-## Recommendation basis (adaptive)
-Rank by the **richest data actually on hand**, and say so in the run line:
-- **Tier 1 — volume only (just feedback).** Rank themes by **volume × frustration**; state "ranked on how often & how angrily it comes up; add usage/billing to weight by real impact."
-- **Tier 2 — + behavior (churn / usage held).** Triangulate voice vs behavior; surface **silent killers** and **vocal minorities**.
-- **Tier 3 — + commercial (spend / ARR / value held).** **Impact-size** each theme ($ at risk, % of highest-spend users) and rank by **business impact against the goal**.
-Use the highest tier the data supports, theme by theme; never fabricate a signal to climb a tier; the run line states which tier the recommendation rests on.
+The report never ships a long recommendation list.
 
-## Quality checklist (the bar)
-- [ ] **Reads as a report: written TL;DR → at-a-glance table → themes cards → recommendations.**
-- [ ] TL;DR is **prose, user/voice FIRST** (before any business framing), names the source/method, and **enumerates findings with `#1`/`#2`/`#3` each on its own line.**
-- [ ] **Problems-at-a-glance table** present — problem · volume · churn · $ · **company metric** · severity.
-- [ ] Themes are **cards (2–3 per row)**, each with **size + description + impact read + 2–3 strong real quotes**.
-- [ ] **Impact sized against the metrics the company cares about** (not just churn/volume/revenue); missing signals labeled, never invented.
-- [ ] **Recommendations selected by GOAL FIT** (not raw volume), capped at ~5, each naming the goal metric it moves + a route.
-- [ ] **Recommendation basis declared** and matches the data on hand.
-- [ ] **Sources curated/direct-access only**; public volume channels excluded.
-- [ ] **Voice never fabricated or overstated; no counts without a denominator; no root-cause guessing.**
+- Rank all candidate actions by impact (metric moved × size of movement ×
+  goal fit; revenue-bearing candidates rank on the dollars).
+- Select the **top 5**. Extend to at most **7** only when candidates at the
+  cutoff have approximately equal impact — a tie at the cut is the only
+  exception.
+- Everything below the cut routes to monitor/backlog and is **not listed** in
+  the report.
+- Render proof the gate ran, as one mono line under the Recommendations header:
+  `PRIORITIZATION GATE PASSED ✓ — N candidates identified · K selected · cap
+  5–7 unless impacts tie at the cut · N−K routed to monitor/backlog`.
 
-## Merges / replaces
-Absorbs the old `third-party-feedback` (exhaustive honest counting + real quotes) and `voc-volume-severity` (voice-vs-behavior-vs-commercial triangulation, silent-killer flags) into one curated-feedback → recommendations report. (The lighter `feedback-synthesis` remains for quick thematic passes.)
+## Output spec (section order is fixed)
 
-## Known gaps / limitations
-- Only as complete as the curated corpus — gaps in what you collected become gaps here; stated, not hidden.
-- Correlation ≠ causation: a churn-linked theme isn't proven to cause churn — flagged; an experiment settles it.
-- Survivorship: feedback misses users who already left over a problem — trend/exit signals partially cover this.
-- Triangulation weights are judgment; the decomposition makes them debatable, not objective.
+Delivered as a document (HTML/Word style). Sections in order:
+
+1. **Title + header chips** — skill name, scope note ("curated, direct-access
+   sources only"), basis chip ("volume + impact + commercial").
+2. **TL;DR panel** (designed block, not plain prose):
+   - Header strip in a light tint with the label and the **sources as chips**
+     (each source type + count, plus the time window). Light backgrounds only —
+     never a dark/heavy block.
+   - A one-sentence serif lede naming the arc of the quarter.
+   - The top findings (**#1/#2/#3**) as rows: numbered disc · **user problem in
+     bold** · one plain-language sentence · an `IMPACTS →` mono line (metric +
+     quantified delta + tier) · **VOL and SEV mini-pills right-aligned** on the
+     shared low/med/high scale. Silent killers carry 🔇 in the row.
+3. **User problems at a glance** — table with this exact column contract:
+   `User problem | Volume | Severity | Metric it impacts | By how much`
+   - Volume and Severity are **adjacent columns** with the same low/med/high
+     pill scale; the raw count sits beneath the volume pill, the justification
+     beneath the severity pill.
+   - "Metric it impacts" and "By how much" are **separate columns**. "By how
+   much" holds the quantified delta + tier, and the always-present revenue
+   line.
+   - A final long-tail row aggregates items below the reporting threshold
+     ("monitor — no metric movement claimed").
+4. **Themes — in the customer's words.** Card grid, 2 per row: user-problem
+   title · counts + persistence tag (persistent / new) · short description ·
+   2–3 **verbatim** quotes with source + date attribution · an impact box
+   restating metric + delta.
+5. **Recommendations.** Gate line first (see above), then 5–7 cards:
+   - rank (R1…) · **title = the action**
+   - **description: 1–2 plain sentences that let a reader with no context
+     understand what the recommendation actually is** — what gets built or
+     done, and what changes for the user. Never lead with ranking rationale;
+     the "why it ranks" sentence comes after the description.
+   - `IMPACTS →` mono line: metric + expected/current delta + tier.
+   - CTAs: **Generate PRD** (primary) · **Move to backlog** (ghost).
+     Investigation-only items carry backlog CTA only.
+6. **No footer.** There is no recommendation-basis block; scope and basis live
+   in the header chips, tiers are legended inline on first use.
+
+## Hard rules
+
+- **No fabricated data.** Every figure is computed from the corpus, quoted with
+  attribution, or labeled with a tier; unknowns say 🅘 unknown. Tiers: 🅗 hard
+  (counted from the corpus) · 🅢 soft (stated, unverified) · 🅘
+  inferred/unknown.
+- **Counts, never percentages** for qualitative sources — n is too small.
+- **User-problem framing everywhere** — TL;DR, table, themes, and
+  recommendations all name problems from the user's side.
+- **Revenue always shown** in the impact column, figure or 🅘 — never estimated,
+  never omitted. Soft-stated dollars carry 🅢 and a verification note (e.g.
+  "verify vs CRM").
+- **Quotes are verbatim** from the corpus; a paraphrase is never quoted.
+- **5–7 recommendations max**, gate line rendered as proof.
+- Direct-access corpus only; public channels route to `public-feedback-report`.
+
+## Quality bar
+
+- [ ] Header declares sources, counts, window, classification coverage.
+- [ ] Every problem name is a user problem, not a solution or internal label.
+- [ ] Volume and severity adjacent, same pill scale, counts under volume.
+- [ ] Metric and "by how much" are separate columns; every row has both.
+- [ ] Revenue line present on every problem (figure w/ tier, or 🅘 unknown).
+- [ ] 🔇 applied where volume is low but severity/dollars are high.
+- [ ] Gate line rendered; recommendation count is 5–7 (or ≤5), tie rule noted
+      if 7.
+- [ ] Each recommendation is understandable from its own card — description
+      sentences first, ranking rationale second.
+- [ ] No basis footer; no percentages; no invented figures; quotes verbatim.
+- [ ] TL;DR uses the light-tint panel — no dark background blocks.
+
+## Sprntly integration
+
+- **Generate PRD** on a recommendation → routes the problem + its signals into
+  `prd-author` (the signals section arrives pre-filled with counts, quotes, and
+  the impact line).
+- **Move to backlog** → creates a backlog item carrying the metric line and
+  tier labels.
+- Convergence with `interview-synthesis` and `public-feedback-report` outputs
+  is flagged with ⇄ when the same problem appears in another source family —
+  cross-source convergence is the strongest confidence signal in the suite.

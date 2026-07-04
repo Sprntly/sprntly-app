@@ -79,6 +79,18 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\bwhat.{0,25}\b(saying|people\s+say).{0,15}\babout\s+us\b", re.I),
      "public-feedback-report", "Public feedback report", 0.85),
 
+    # Voice of customer — call recordings & transcripts (Fireflies/Gong/Zoom).
+    # Summarizing what customers said on CSM/sales/discovery calls and the
+    # feedback in those recordings. Distinct from interview-synthesis's
+    # "what did we learn from calls" (thematic research) — this is the
+    # first-party VoC corpus pass, so it wins recording/summary phrasings.
+    (re.compile(r"\b(fireflies|gong|otter|zoom\s+recordings?|call\s+recordings?|recorded\s+calls?|meeting\s+recordings?|call\s+transcripts?)\b", re.I),
+     "voice-of-customer-report", "Voice of customer report", 0.85),
+    (re.compile(r"\b(summari[sz]e|summary\s+of|feedback\s+(?:from|on|in|across)|takeaways?\s+from)\b.{0,30}\bcalls?\b", re.I),
+     "voice-of-customer-report", "Voice of customer report", 0.80),
+    (re.compile(r"\b(voice\s+of\s+customer|voc\s+report)\b", re.I),
+     "voice-of-customer-report", "Voice of customer report", 0.85),
+
     # Voice of customer (curated/first-party: support tickets, complaints, reviews)
     (re.compile(r"\b(customer|support).{0,20}\b(ticket|review|complaint|issue)s?\b", re.I),
      "voice-of-customer-report", "Analyze customer feedback", 0.80),
