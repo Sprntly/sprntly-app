@@ -48,6 +48,9 @@ function render(
     onConfigure: noop,
     onUpload: noopUpload,
     files: [],
+    onRegenerateBrief: noop,
+    regenerating: false,
+    regenerateError: null,
   }
   return renderToStaticMarkup(
     React.createElement(ConnectorsSettingsView, { ...defaults, ...override }),
@@ -67,6 +70,45 @@ describe("ConnectorsSettingsView — chrome", () => {
 
   it("shows error message when loadError is set", () => {
     expect(render({ loadError: "API 500" })).toContain("Could not load connections: API 500")
+  })
+})
+
+describe("ConnectorsSettingsView — Regenerate brief", () => {
+  it("renders the Regenerate brief action and its explainer copy", () => {
+    const html = render()
+    expect(html).toContain("Regenerate brief")
+    expect(html).toContain(
+      "Digest new sources and rebuild your weekly brief",
+    )
+    // Idle button is enabled and labeled "Regenerate brief".
+    expect(html).toMatch(
+      /<button[^>]*class="btn btn-primary set-conn-regen-btn"[^>]*>Regenerate brief<\/button>/,
+    )
+  })
+
+  it("shows the spinner + 'Regenerating…' label and disables the button while in flight", () => {
+    const html = render({ regenerating: true })
+    expect(html).toContain("Regenerating…")
+    expect(html).toContain("spinner")
+    // The button carries the disabled + aria-busy attributes when regenerating.
+    expect(html).toMatch(/<button[^>]*class="btn btn-primary set-conn-regen-btn"[^>]*disabled/)
+    expect(html).toMatch(/aria-busy="true"/)
+  })
+
+  it("is not disabled when idle", () => {
+    const html = render({ regenerating: false })
+    expect(html).not.toMatch(
+      /<button[^>]*class="btn btn-primary set-conn-regen-btn"[^>]*disabled/,
+    )
+  })
+
+  it("surfaces a regenerate error inline", () => {
+    const html = render({ regenerateError: "API 503" })
+    expect(html).toContain("Could not regenerate brief: API 503")
+  })
+
+  it("renders no regenerate error banner when there is none", () => {
+    expect(render()).not.toContain("Could not regenerate brief")
   })
 })
 
