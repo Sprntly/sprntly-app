@@ -216,6 +216,32 @@ def test_delete_fireflies_disconnects(fireflies_env, monkeypatch):
     assert not any(c["provider"] == "fireflies" for c in listed["connections"])
 
 
+def test_connect_does_not_spawn_background_sync_thread(fireflies_env, monkeypatch):
+    """Regression for the intermittent pytest-integration failure.
+
+    Connecting a provider used to fire kickoff_sync → a real daemon thread that
+    hit the live Fireflies API and, racing the per-test DB reset, poisoned
+    _owner_column() into caching "workspace_id" — after which upsert_connection
+    inserted a NULL company_id ("NOT NULL constraint failed: connections.company_id").
+    The conftest autouse fixture neutralizes the kickoff; assert no auto-sync
+    thread is spawned so a future reload/ordering change can't silently
+    reintroduce the flake."""
+    import threading
+
+    ctx = company_client(monkeypatch)
+    mock_resp = MagicMock()
+    mock_resp.ok = True
+    mock_resp.json.return_value = {"data": {"user": {"email": "x@y.com"}}}
+    with patch("app.connectors.fireflies_apikey.requests.post", return_value=mock_resp):
+        r = ctx.client.post(
+            "/v1/connectors/fireflies/apikey",
+            json={"api_key": "k"},
+        )
+    assert r.status_code == 200
+    lingering = [t for t in threading.enumerate() if t.name.startswith("auto-sync")]
+    assert lingering == [], f"connect spawned background sync thread(s): {lingering}"
+
+
 def test_delete_fireflies_404_when_not_connected(fireflies_env, monkeypatch):
     ctx = company_client(monkeypatch)
     r = ctx.client.delete(

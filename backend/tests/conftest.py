@@ -783,6 +783,13 @@ def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.Mo
 
     # Wire the in-memory fake Supabase + reset the schema per-test.
     reset_fake_db(_FAKE_SCHEMA)
+    # Re-detect the connections tenant column against the FRESH db. _owner_column()
+    # caches its probe result in a module global; if that probe ever ran against a
+    # closed/half-reset db (e.g. a background sync thread racing reset_fake_db) it
+    # would cache the legacy "workspace_id" and every later upsert_connection would
+    # insert a NULL company_id. Clearing it here forces a clean re-detect per test.
+    import app.db.connections as _conn_db
+    _conn_db._OWNER_COL = None
     fake_client = FakeSupabaseClient()
     import app.db.client as db_client_mod
     monkeypatch.setattr(db_client_mod, "supabase_client", lambda: fake_client)
@@ -798,6 +805,58 @@ def isolated_settings(tmp_path: Path, tmp_data_dir: Path, monkeypatch: pytest.Mo
         "data_dir": tmp_data_dir,
         "supabase": fake_client,
     }
+
+
+@pytest.fixture(autouse=True)
+def _no_background_connector_sync(request, monkeypatch):
+    """Keep connect / upload / scheduler routes from spawning real background
+    sync threads during tests.
+
+    kickoff_sync and kickoff_corpus_seed each start a daemon thread (see
+    app.kg_ingest.auto_sync) that pulls from a provider's LIVE API and writes
+    sync stamps back through the shared in-memory test DB. In the full suite
+    that thread is doubly harmful: (a) it makes real network calls (the
+    api.fireflies.ai hits seen in CI), and (b) it races the per-test
+    reset_fake_db() — if its db.get_connection() → _owner_column() probe runs
+    while the DB is mid-reset, the probe SELECT throws and _OWNER_COL caches the
+    legacy "workspace_id", after which every upsert_connection inserts a NULL
+    company_id ("NOT NULL constraint failed: connections.company_id"). That is
+    the intermittent, order-dependent pytest-integration failure.
+
+    Patch the SOURCE functions in app.kg_ingest.auto_sync to no-ops. The route
+    modules (app.routes.connectors/.brief/.datasets) are reloaded per test, so a
+    reloaded `from auto_sync import kickoff_sync` re-binds to whatever the source
+    exposes now — auto_sync itself is never reloaded, so this patch sticks. The
+    scheduler is NOT reloaded, so its already-bound reference is patched directly.
+
+    The two modules that unit-test these helpers directly (real thread-spawn
+    behavior, with internals mocked) opt out. Tests that patch a route/scheduler
+    reference themselves run after this fixture and win for that test."""
+    if request.module.__name__.rsplit(".", 1)[-1] in (
+        "test_connector_auto_sync",
+        "test_corpus_seed_kickoff",
+    ):
+        yield
+        return
+
+    def _noop_sync(*_a, **_k):
+        return False
+
+    def _noop_seed(*_a, **_k):
+        return None
+
+    try:
+        auto_sync = importlib.import_module("app.kg_ingest.auto_sync")
+        monkeypatch.setattr(auto_sync, "kickoff_sync", _noop_sync, raising=False)
+        monkeypatch.setattr(auto_sync, "kickoff_corpus_seed", _noop_seed, raising=False)
+    except Exception:
+        pass
+    try:
+        scheduler_mod = importlib.import_module("app.scheduler")
+        monkeypatch.setattr(scheduler_mod, "kickoff_sync", _noop_sync, raising=False)
+    except Exception:
+        pass
+    yield
 
 
 @pytest.fixture(autouse=True)
