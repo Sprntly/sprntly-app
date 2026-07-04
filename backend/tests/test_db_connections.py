@@ -190,3 +190,61 @@ def test_helpers_reject_missing_company_id(isolated_settings):
         db.list_connections()  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         db.delete_connection("figma")  # type: ignore[call-arg]
+
+
+# ───────────────────── owner-column probe hardening ─────────────────────
+#
+# _owner_column() detects whether connections are scoped by company_id (current)
+# or workspace_id (legacy). The bug: it used to cache ANY probe failure as
+# "workspace_id", so a transient DB error (a closed/mid-reset connection, a
+# blip) pinned the process to the legacy column for good — after which every
+# upsert_connection wrote a NULL company_id
+# ("NOT NULL constraint failed: connections.company_id").
+
+def _boom_client(message: str):
+    """A require_client() stand-in whose connections probe raises `message`."""
+    class _Boom:
+        def table(self, *_a, **_k):
+            return self
+
+        def select(self, *_a, **_k):
+            return self
+
+        def limit(self, *_a, **_k):
+            return self
+
+        def execute(self, *_a, **_k):
+            raise RuntimeError(message)
+
+    return _Boom()
+
+
+def test_owner_column_transient_probe_failure_is_not_cached(isolated_settings, monkeypatch):
+    from app.db import connections as conn
+
+    conn._OWNER_COL = None
+    real_require = conn.require_client
+
+    # A transient failure (looks nothing like a missing column) must fall back to
+    # company_id WITHOUT caching, so it re-probes once the DB is healthy again.
+    monkeypatch.setattr(conn, "require_client",
+                        lambda: _boom_client("Cannot operate on a closed database"))
+    assert conn._owner_column() == "company_id"
+    assert conn._OWNER_COL is None            # crucially NOT poisoned to workspace_id
+
+    monkeypatch.setattr(conn, "require_client", real_require)
+    conn._OWNER_COL = None
+    assert conn._owner_column() == "company_id"
+    assert conn._OWNER_COL == "company_id"     # a clean probe caches the real answer
+
+
+def test_owner_column_missing_column_caches_workspace_id(isolated_settings, monkeypatch):
+    from app.db import connections as conn
+
+    conn._OWNER_COL = None
+    # A genuinely absent company_id column IS the legacy schema — cache it.
+    monkeypatch.setattr(conn, "require_client",
+                        lambda: _boom_client("no such column: company_id"))
+    assert conn._owner_column() == "workspace_id"
+    assert conn._OWNER_COL == "workspace_id"
+    conn._OWNER_COL = None                      # don't leak the legacy answer to later tests

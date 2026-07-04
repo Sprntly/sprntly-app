@@ -35,17 +35,49 @@ logger = logging.getLogger(__name__)
 _OWNER_COL: str | None = None
 
 
+def _is_undefined_column_error(e: Exception) -> bool:
+    """True only when the probe failed because `company_id` genuinely does not
+    exist (the legacy `workspace_id` schema) — NOT a transient failure.
+
+    Covers sqlite ("no such column", tests) and Postgres/PostgREST
+    (undefined_column / SQLSTATE 42703 / "column ... does not exist")."""
+    if getattr(e, "code", None) == "42703":
+        return True
+    msg = str(e).lower()
+    return (
+        "no such column" in msg          # sqlite
+        or "undefined_column" in msg      # postgrest error code text
+        or "does not exist" in msg        # postgres: column "company_id" does not exist
+    )
+
+
 def _owner_column() -> str:
-    """Return the column name used to scope connections to a tenant."""
+    """Return the column name used to scope connections to a tenant.
+
+    Cache ONLY a definitive result. A transient probe failure (a closed/
+    mid-reset DB, a network blip) must never be cached: doing so would pin
+    the process to the legacy "workspace_id" and make every subsequent
+    upsert_connection write a NULL company_id ("NOT NULL constraint failed:
+    connections.company_id") until restart. On a transient failure we fall
+    back to the current-schema default for this one call and re-probe next
+    time, so the detection self-heals."""
     global _OWNER_COL
     if _OWNER_COL is not None:
         return _OWNER_COL
     c = require_client()
     try:
         c.table("connections").select("company_id").limit(0).execute()
-        _OWNER_COL = "company_id"
-    except Exception:
-        _OWNER_COL = "workspace_id"
+    except Exception as e:  # noqa: BLE001
+        if _is_undefined_column_error(e):
+            _OWNER_COL = "workspace_id"          # genuine legacy schema — cache it
+            return _OWNER_COL
+        # Transient — don't poison the cache; default to the live schema column.
+        logger.warning(
+            "connections owner-column probe failed transiently; "
+            "defaulting to company_id without caching", exc_info=True,
+        )
+        return "company_id"
+    _OWNER_COL = "company_id"
     return _OWNER_COL
 
 
