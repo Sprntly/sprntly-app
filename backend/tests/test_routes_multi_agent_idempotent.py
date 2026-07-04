@@ -81,7 +81,7 @@ def test_generate_creates_prd_stamped_with_run_id(
     )
     assert len(rows) == 1
     assert rows[0]["run_id"] == run_id
-    assert rows[0]["variant"] == "v2"
+    assert rows[0]["variant"] == "v3"
 
 
 def test_repeat_generate_reuses_run_without_new_prd(
@@ -142,7 +142,7 @@ def test_does_not_reuse_single_prd_row_without_run_id(
     brief_id = _save_brief_with_insights(db_mod, dataset="acme")
     legacy = db_mod.start_prd(
         brief_id=brief_id, insight_index=0, title="t",
-        template_version=1, variant="v2",  # run_id defaults to None
+        template_version=1, variant="v3",  # run_id defaults to None
     )
     db_mod.complete_prd(legacy, title="t", md="# single-PRD body")
 
@@ -167,7 +167,7 @@ def test_reuses_warmed_run_id_stamped_prd(
     brief_id = _save_brief_with_insights(db_mod, dataset="acme")
     warmed = db_mod.start_prd(
         brief_id=brief_id, insight_index=0, title="t",
-        template_version=1, variant="v2", run_id="warm-run-1",
+        template_version=1, variant="v3", run_id="warm-run-1",
     )
     db_mod.complete_prd(warmed, title="t", md="# warmed human PRD")
 

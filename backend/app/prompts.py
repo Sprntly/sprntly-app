@@ -92,7 +92,19 @@ EVIDENCE_VARIANT = "v3"
 #      matching the simplified prd-author skill. The adapter renders it as
 #      h2/p/ul/table directly; the rich-block renderers stay for older PRDs.
 #      Bump re-renders cached `:::`-block PRDs into the leaner markdown shape.
-PRD_TEMPLATE_VERSION = 6
+#  7 — prd-author v4.2: Part A is now a self-contained, editable HTML page in
+#      the normative visual system (same pattern as the evidence HTML brief) —
+#      variant bumped v2 → v3 so the frontend branches rendering (v3 = sandboxed
+#      HTML page; v1/v2 = legacy markdown). Part B (Implementation Spec) moved to
+#      the standalone `implementation-spec` skill (B0–B9). New rows store
+#      variant='v3'; old v2 rows stay readable under the markdown renderer.
+PRD_TEMPLATE_VERSION = 7
+
+# Storage variant for PRD rows. Bumped v2 → v3 with the HTML-page switch so the
+# frontend can branch rendering on it (v3 = sandboxed HTML PRD page; v1/v2 =
+# legacy `:::block`/lean markdown). Single source of truth — every PRD row
+# create, dedupe, and invalidation references this so the variant can't drift.
+PRD_VARIANT = "v3"
 
 
 # Bumped whenever the predefined Ask prompts list changes or the underlying

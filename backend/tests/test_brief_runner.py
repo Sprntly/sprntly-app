@@ -257,7 +257,7 @@ async def test_on_demand_prd_generate_runs_immediately_with_no_existing(
 
     started: list[tuple] = []
 
-    async def fake_generate_prd(prd_id, b_id, idx):
+    async def fake_generate_prd(prd_id, b_id, idx, **kwargs):
         started.append((prd_id, b_id, idx))
 
     monkeypatch.setattr(prd_routes, "generate_prd", fake_generate_prd)
@@ -265,6 +265,7 @@ async def test_on_demand_prd_generate_runs_immediately_with_no_existing(
 
     class _Ctx:
         company_id = "acme"
+        user_name = "Test Author"
 
     body = prd_routes.GenerateIn(brief_id=brief_id, insight_index=0)
     resp = await prd_routes.generate(body, company=_Ctx())

@@ -3,6 +3,7 @@
 import { useMemo } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
+import { htmlPrdToPlainText } from "../../lib/htmlBrief"
 import type { DetailState, PrdState } from "../../types/content"
 import { IconClose, IconSparkle } from "./app-icons"
 
@@ -45,6 +46,12 @@ function truncate(s: string, n = 360): string {
 
 function sectionGroups(prd: PrdState): Map<string, string[]> {
   const groups = new Map<string, string[]>()
+  // v3 HTML PRD: no parsed sections — feed the page's plain text as one bundle.
+  if (prd.html) {
+    const text = htmlPrdToPlainText(prd.html)
+    if (text) groups.set("PRD", text.split("\n"))
+    return groups
+  }
   let current = "Overview"
   for (const sec of prd.sections) {
     if (sec.type === "h2") {

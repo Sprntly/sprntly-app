@@ -252,3 +252,55 @@ export async function downloadPrdDocx(prd: PrdContent): Promise<void> {
   const blob = await Packer.toBlob(document)
   await saveBlob(blob, `${slugifyTitle(prd.title)}.docx`)
 }
+
+// ── v3 HTML PRD export ───────────────────────────────────────────────────────
+// The v4.2 PRD is a self-contained HTML page with a print stylesheet that
+// strips the editing chrome, so export is the page itself — printed to PDF or
+// handed to Word — rather than the (empty) parsed-section path above.
+
+/**
+ * Print the HTML PRD page (browser Print → "Save as PDF"). Opens the document
+ * in a hidden same-origin iframe, prints it, then removes the iframe. Throws if
+ * the iframe can't be created so the caller can surface a failure toast.
+ */
+export function printPrdHtml(prd: PrdContent): void {
+  const html = prd.html
+  if (!html) throw new Error("no HTML PRD to print")
+  const frame = document.createElement("iframe")
+  frame.style.position = "fixed"
+  frame.style.right = "0"
+  frame.style.bottom = "0"
+  frame.style.width = "0"
+  frame.style.height = "0"
+  frame.style.border = "0"
+  document.body.appendChild(frame)
+  const cdoc = frame.contentDocument
+  const cwin = frame.contentWindow
+  if (!cdoc || !cwin) {
+    frame.remove()
+    throw new Error("could not open a print frame")
+  }
+  cdoc.open()
+  cdoc.write(html)
+  cdoc.close()
+  const cleanup = () => setTimeout(() => frame.remove(), 1000)
+  cwin.addEventListener("afterprint", cleanup)
+  // Give the browser a tick to lay out (fonts/styles) before printing.
+  setTimeout(() => {
+    cwin.focus()
+    cwin.print()
+    cleanup()
+  }, 250)
+}
+
+/**
+ * Download the HTML PRD page as a Word document (`<slug>.doc`). Word opens
+ * HTML `.doc` files directly, so the visual system survives the export — no
+ * lossy re-parse. file-saver is lazy-imported.
+ */
+export async function downloadPrdHtmlDoc(prd: PrdContent): Promise<void> {
+  const html = prd.html
+  if (!html) throw new Error("no HTML PRD to export")
+  const blob = new Blob([html], { type: "application/msword" })
+  await saveBlob(blob, `${slugifyTitle(prd.title)}.doc`)
+}

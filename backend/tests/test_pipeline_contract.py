@@ -89,14 +89,17 @@ def _data_file(repo_root, name: str) -> str:
 
 
 def _skill_prd_template_part_a(repo_root) -> str:
+    # Part A is the prd-author skill's HTML page template.
     return (
-        repo_root / "skills" / "prd-author" / "templates" / "prd-template-part-a.html"
+        repo_root / "skills" / "prd-author" / "templates" / "prd-template.html"
     ).read_text(encoding="utf-8")
 
 
 def _skill_prd_template_part_b(repo_root) -> str:
+    # Part B moved to the standalone implementation-spec skill (v4.2 split).
     return (
-        repo_root / "skills" / "prd-author" / "templates" / "prd-template-part-b.md"
+        repo_root / "skills" / "implementation-spec" / "templates"
+        / "implementation-spec-template.md"
     ).read_text(encoding="utf-8")
 
 

@@ -12,7 +12,7 @@ import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../
 import { PrdPanelContent } from "./PrdPanelContent"
 import { TicketDetail } from "./TicketDetail"
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
-import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx } from "../../lib/prdExport"
+import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
 import type { PrdState } from "../../types/content"
 
 const TABS = [
@@ -57,7 +57,10 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
     if (!prd) return
     setOpen(false)
     try {
-      await downloadPrdPdf(prd)
+      // v3 HTML PRD: print the page itself (its print stylesheet strips the
+      // editing chrome) rather than the empty parsed-section PDF.
+      if (prd.html) printPrdHtml(prd)
+      else await downloadPrdPdf(prd)
     } catch {
       onToast("PDF export failed", "Could not generate the PDF. Please try again.")
     }
@@ -66,7 +69,10 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
     if (!prd) return
     setOpen(false)
     try {
-      await downloadPrdDocx(prd)
+      // v3 HTML PRD exports as an HTML .doc (Word opens it directly), keeping
+      // the visual system; markdown PRDs use the docx builder.
+      if (prd.html) await downloadPrdHtmlDoc(prd)
+      else await downloadPrdDocx(prd)
     } catch {
       onToast("DOCX export failed", "Could not generate the document. Please try again.")
     }

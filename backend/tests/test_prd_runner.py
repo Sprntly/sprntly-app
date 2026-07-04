@@ -130,10 +130,11 @@ def test_run_sync_stores_only_human_prd_no_llm_part(isolated_settings, monkeypat
     assert (row.get("llm_part_source_hash") or "") == ""
 
 
-def test_human_prd_carries_lean_markdown_contract(isolated_settings, monkeypatch):
-    """The human PRD is generated against the LEAN MARKDOWN contract — the
-    9-section template with a single Requirements table and NO typed `:::`
-    blocks — so it renders as plain h2/p/ul/table."""
+def test_human_prd_carries_html_page_contract(isolated_settings, monkeypatch):
+    """Part A (prd-author v4.2) is generated against the HTML PAGE contract — the
+    skill's HTML template (with the canonical `<style>` + `contenteditable` page)
+    reaches the prompt, and the directive steers to ONE self-contained HTML
+    document, no `:::` blocks, no code fence, no Implementation Spec."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
@@ -144,16 +145,20 @@ def test_human_prd_carries_lean_markdown_contract(isolated_settings, monkeypatch
     prd_runner._run_sync(prd_id, brief_id, 0)
 
     a_input = captured[0]["input"]
-    # The lean template's section headings reach the prompt…
-    for heading in ("## 1. Problem & evidence", "## 5. Requirements", "## 9. Done-when"):
-        assert heading in a_input, f"human PRD prompt missing section {heading!r}"
-    # …Requirements is steered to a markdown table, with the inheritance tags…
-    assert "ID | Requirement | Priority | Signal/Source | Acceptance" in a_input
-    assert "`[edge case]` / `[failure]`" in a_input
-    # …and NO typed `:::` blocks are imposed anymore.
-    assert ":::" not in a_input, "lean human PRD must not impose `:::` blocks"
-    # The directive still forbids the Implementation Spec / separator in Part A.
-    assert "do NOT emit a `---` separator" in a_input
+    # The skill's HTML template (markup + design system) reaches the prompt…
+    assert "<!DOCTYPE html>" in a_input
+    assert 'contenteditable="true"' in a_input
+    # …in the v4.1 section order (eyebrows)…
+    for label in (">Context", ">Problem", ">Evidence", ">Requirements", ">Appendix"):
+        assert label in a_input, f"human PRD prompt missing section {label!r}"
+    # …the directive steers to a self-contained HTML page, not markdown / blocks…
+    assert "self-contained HTML page" in a_input
+    assert ":::" not in a_input, "HTML human PRD must not impose `:::` blocks"
+    assert "Start your output at `<!DOCTYPE html>`" in a_input
+    # …and _run_sync passes no author → the byline renders the [NEED: author] slot.
+    assert prd_runner._AUTHOR_FALLBACK in a_input
+    # The system prompt carries the raw-HTML / no-code-fence output contract.
+    assert "Markdown code fence" in captured[0]["system"]
 
 
 def test_run_sync_uses_fallback_title(isolated_settings, monkeypatch):
@@ -243,7 +248,7 @@ def test_ensure_impl_spec_generates_via_implementation_spec_skill(
     assert len(captured) == 1
     assert captured[0]["skill"] == "implementation-spec"
     assert captured[0]["purpose"] == "generate_prd_part_b"
-    assert "HUMAN PRD (the spec to implement)" in captured[0]["input"]
+    assert "PART A — HUMAN PRD" in captured[0]["input"]
     assert "Ship the thing" in captured[0]["input"]  # human PRD text flows in
     # Persisted to llm_part keyed to the human PRD hash.
     row = db_mod.get_prd(prd_id)
@@ -392,7 +397,7 @@ def test_real_gateway_human_prd_carries_prd_author_method(isolated_settings, mon
     prd_runner._run_sync(prd_id, brief_id, 0)
 
     assert "METHOD (skill: prd-author" in systems["a"]
-    assert "Sprntly's PRD agent" in systems["a"]
+    assert "Sprntly's PRD Page generator" in systems["a"]
     # The human-PRD flow must NOT carry the implementation-spec METHOD.
     assert "METHOD (skill: implementation-spec" not in systems["a"]
 
@@ -414,7 +419,7 @@ def test_real_gateway_spec_carries_implementation_spec_method(
 
     def _call_md(**kwargs):
         systems["b"] = kwargs["system"]
-        assert "HUMAN PRD (the spec to implement)" in kwargs["user"]
+        assert "PART A — HUMAN PRD" in kwargs["user"]
         return _PART_B
 
     import app.graph.gateway as gw

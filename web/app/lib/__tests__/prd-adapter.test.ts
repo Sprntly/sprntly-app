@@ -7,6 +7,34 @@ describe("markdownToPrdState", () => {
     expect(out.title).toBe("The PRD")
   })
 
+  // ── v3 HTML PRD (prd-author v4.2) ─────────────────────────────────────────
+  it("routes a self-contained HTML PRD page to the `html` escape hatch", () => {
+    const html =
+      '<!DOCTYPE html><html><head><meta charset="utf-8"></head>' +
+      '<body><div class="page" contenteditable="true">' +
+      "<h1>Perch — Faster onboarding</h1><p>body</p></div></body></html>"
+    const out = markdownToPrdState(html)
+    // Rendered as an HTML page, not parsed into `:::block` sections.
+    expect(out.html).toBeTruthy()
+    expect(out.html).toContain("contenteditable")
+    expect(out.sections).toEqual([])
+    // Title is read from the page's <h1> so the panel header + export are named.
+    expect(out.title).toBe("Perch — Faster onboarding")
+  })
+
+  it("unwraps a ```html code fence around an HTML PRD page", () => {
+    const html = "<!DOCTYPE html><html><body><h1>Fenced PRD</h1></body></html>"
+    const out = markdownToPrdState("```html\n" + html + "\n```")
+    expect(out.html).toBe(html)
+    expect(out.title).toBe("Fenced PRD")
+  })
+
+  it("still parses lean markdown as sections (no false HTML positive)", () => {
+    const out = markdownToPrdState("# Markdown PRD\n\n## Problem\n\nbody")
+    expect(out.html).toBeUndefined()
+    expect(out.sections.length).toBeGreaterThan(0)
+  })
+
   it("falls back to a default title when no H1 is present", () => {
     const out = markdownToPrdState("body only")
     expect(out.title).toBe("PRD")
