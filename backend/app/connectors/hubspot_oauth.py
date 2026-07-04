@@ -2,12 +2,16 @@
 
 Supports both HubSpot OAuth API generations:
 
-  - v1 (legacy): /oauth/v1/token + GET /oauth/v1/access-tokens/{token}
+  - v1 (legacy): /oauth/v1/token for the code exchange.
                  Sunset-pending; only usable from older HubSpot accounts.
-  - v3 (modern, default): /oauth/v3/token + POST /oauth/v3/introspect
-                 30-minute access tokens, RFC 7662 introspection. New
-                 HubSpot accounts can only create v3-compatible apps
-                 (via `hs project create` in the HubSpot CLI).
+  - v3 (modern, default): /oauth/v3/token for the code exchange.
+                 30-minute access tokens. New HubSpot accounts can only
+                 create v3-compatible apps (via `hs project create` in the
+                 HubSpot CLI).
+
+Token identity for BOTH versions is fetched via
+GET /oauth/v1/access-tokens/{token} — that v1 metadata endpoint accepts
+v3 tokens too. (There is no working /oauth/v3/introspect endpoint; it 404s.)
 
 Dispatch is on `settings.hubspot_oauth_version` (defaults to "v3").
 Public functions — `authorize_url`, `exchange_code_for_token`,
@@ -29,11 +33,12 @@ What's the same across v1/v3:
     - Token POST body fields: grant_type, client_id, client_secret,
       redirect_uri, code
     - Token response: {access_token, refresh_token, expires_in, token_type}
+    - Identity lookup: GET /oauth/v1/access-tokens/{token} — this v1
+      metadata endpoint works for BOTH v1 and v3 tokens. (The RFC-7662
+      /oauth/v3/introspect endpoint does not exist / 404s.)
 
 What differs:
     - Token URL: hubapi.com (v1) vs hubspot.com (v3)
-    - Identity lookup: GET path-param (v1) vs POST body (v3 RFC 7662 introspect)
-    - Introspection response shape: HubSpot-native (v1) vs RFC-7662 (v3)
     - Access token TTL: ~6h (v1) vs 30min (v3)
 """
 from __future__ import annotations
@@ -59,9 +64,10 @@ HUBSPOT_AUTH_URL = "https://app.hubspot.com/oauth/authorize"  # same in both
 HUBSPOT_TOKEN_URL_V1 = "https://api.hubapi.com/oauth/v1/token"
 HUBSPOT_TOKEN_INFO_URL_V1 = "https://api.hubapi.com/oauth/v1/access-tokens"
 
-# v3 (modern)
+# v3 (modern). NOTE: there is no working `/oauth/v3/introspect` endpoint
+# (it 404s); token identity for v3 tokens is fetched via the v1
+# access-tokens endpoint above — see fetch_token_info().
 HUBSPOT_TOKEN_URL_V3 = "https://api.hubspot.com/oauth/v3/token"
-HUBSPOT_INTROSPECT_URL_V3 = "https://api.hubspot.com/oauth/v3/introspect"
 
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
@@ -161,61 +167,38 @@ def exchange_code_for_token(code: str) -> dict[str, Any]:
 def fetch_token_info(access_token: str) -> dict[str, Any]:
     """Look up the portal/user identity for an access token.
 
-    Normalises both response shapes into the same dict — callers see:
+    Uses HubSpot's access-token metadata endpoint
+    `GET /oauth/v1/access-tokens/{token}`, which works for access tokens
+    minted by BOTH v1- and v3-generation OAuth apps and returns the
+    HubSpot-native shape callers rely on:
       {
-        "user": "<email>",                # v1: "user", v3: "username"
-        "hub_id": <int>,                  # both
-        "hub_domain": "<str>",            # both
-        "scopes": ["...", "...", ...],    # v1: list, v3: space-separated → list
-        "user_id": <int>,                 # both
+        "user": "<email>",                # authenticated user's email
+        "hub_id": <int>,
+        "hub_domain": "<str>",
+        "scopes": ["...", "...", ...],    # list of granted scopes
+        "user_id": <int>,
+        # ... plus app_id, token_type, expires_in, etc.
       }
-    Returns {} on any non-2xx so the calling code can fall back to other
-    label sources (e.g. hub_domain).
-    """
-    version = _oauth_version()
 
-    if version == "v1":
-        resp = requests.get(
-            f"{HUBSPOT_TOKEN_INFO_URL_V1}/{access_token}",
-            timeout=10,
-        )
-    else:
-        # v3 follows RFC 7662 — POST with the token in the body.
-        resp = requests.post(
-            HUBSPOT_INTROSPECT_URL_V3,
-            data={"token": access_token},
-            timeout=10,
-        )
+    NOTE: despite the module name, there is NO working RFC-7662
+    `/oauth/v3/introspect` endpoint — it 404s — so v3 tokens are
+    introspected through this same v1 metadata endpoint. Returns {} on any
+    non-2xx so callers can fall back to other label sources (e.g. hub_domain).
+    """
+    resp = requests.get(
+        f"{HUBSPOT_TOKEN_INFO_URL_V1}/{access_token}",
+        timeout=10,
+    )
 
     if not resp.ok:
         logger.warning(
-            "HubSpot token-info (%s) failed: %s %s",
-            version, resp.status_code, resp.text[:200],
+            "HubSpot token-info failed: %s %s",
+            resp.status_code, resp.text[:200],
         )
         return {}
 
-    raw = resp.json() or {}
-
-    if version == "v1":
-        return raw  # already in the {user, hub_id, hub_domain, scopes[list]} shape
-
-    # v3 introspect — RFC 7662 shape with HubSpot extras. Normalise:
-    scopes_raw = raw.get("scope") or raw.get("scopes") or ""
-    if isinstance(scopes_raw, str):
-        scopes_list = [s for s in scopes_raw.split(" ") if s]
-    elif isinstance(scopes_raw, list):
-        scopes_list = scopes_raw
-    else:
-        scopes_list = []
-    return {
-        "user": raw.get("username") or raw.get("user"),
-        "hub_id": raw.get("hub_id"),
-        "hub_domain": raw.get("hub_domain"),
-        "scopes": scopes_list,
-        "user_id": raw.get("user_id"),
-        # Preserve the rest in case callers need it.
-        "_raw_v3_introspect": raw,
-    }
+    # Native shape: {user, hub_id, hub_domain, scopes[list], user_id, ...}
+    return resp.json() or {}
 
 
 def token_payload_to_store(token_json: dict[str, Any]) -> str:
