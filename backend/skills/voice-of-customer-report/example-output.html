@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Voice of Customer Report — Sprntly (Sample v2)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400;1,500&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --desk:#E9E7E2; --page:#FFFFFF; --ink:#1F241F; --sec:#5B615B; --accent:#1A6B47;
+    --happy-bg:#E7F1EA; --happy-fg:#1A6B47; --edge-bg:#FBF0DC; --edge-fg:#8A5A12;
+    --fail-bg:#F9E7E4; --fail-fg:#9C3223; --hair:#E3E1DC; --quiet:#F6F5F2;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--desk);font-family:'Inter',sans-serif;font-size:15px;line-height:1.6;color:var(--ink);padding:40px 16px}
+  .page{max-width:900px;margin:0 auto;background:var(--page);border-radius:2px;box-shadow:0 2px 14px rgba(31,36,31,.10);padding:72px;position:relative}
+  .sample-banner{max-width:900px;margin:0 auto 14px;background:var(--edge-bg);color:var(--edge-fg);border-radius:2px;padding:10px 16px;font-family:'IBM Plex Mono',monospace;font-size:12px}
+  .chips{max-width:900px;margin:0 auto 12px;display:flex;gap:8px;flex-wrap:wrap;font-family:'IBM Plex Mono',monospace;font-size:11.5px}
+  .chip{padding:4px 10px;border-radius:2px;background:#fff;color:var(--sec);box-shadow:0 1px 3px rgba(31,36,31,.08)}
+  .chip.green{background:var(--happy-bg);color:var(--happy-fg)}
+  h1{font-family:'Spectral',serif;font-weight:600;font-size:33px;line-height:1.25;margin-bottom:22px}
+  .eyebrow{font-size:10.5px;text-transform:uppercase;letter-spacing:.14em;color:var(--accent);font-weight:600;margin:44px 0 14px;padding-top:22px;border-top:1px solid var(--hair)}
+  p{margin-bottom:12px}
+
+  /* ===== TL;DR panel (redesigned) ===== */
+  .tldr{background:var(--quiet);border-radius:2px;padding:0;overflow:hidden;margin-bottom:8px}
+  .tldr-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 26px;background:var(--happy-bg);border-bottom:2px solid var(--accent)}
+  .tldr-head .t{font-size:11px;text-transform:uppercase;letter-spacing:.18em;color:var(--accent);font-weight:600}
+  .tldr-src{display:flex;gap:6px;flex-wrap:wrap}
+  .srcchip{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent);background:#fff;border:1px solid #C7DCCE;border-radius:2px;padding:2px 8px}
+  .tldr-lede{font-family:'Spectral',serif;font-size:19px;line-height:1.5;padding:22px 26px 6px}
+  .tldr-lede b{font-weight:600}
+  .tfind{display:grid;grid-template-columns:44px 1fr 172px;gap:14px;align-items:start;padding:16px 26px;border-top:1px solid var(--hair)}
+  .tfind .disc{width:30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;font-family:'IBM Plex Mono',monospace;font-size:12px;display:flex;align-items:center;justify-content:center;margin-top:2px}
+  .tfind h4{font-size:15px;font-weight:600;margin-bottom:2px}
+  .tfind .d{font-size:13.5px;color:var(--sec)}
+  .tfind .metric{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent);margin-top:5px}
+  .tfind .side{display:flex;flex-direction:column;gap:5px;align-items:flex-end}
+  .mini{font-family:'IBM Plex Mono',monospace;font-size:10.5px;padding:3px 8px;border-radius:2px;white-space:nowrap}
+  .mini .k{opacity:.65;margin-right:4px}
+  .mini.high{background:var(--fail-bg);color:var(--fail-fg)}
+  .mini.med{background:var(--edge-bg);color:var(--edge-fg)}
+  .mini.low{background:var(--happy-bg);color:var(--happy-fg)}
+  .flag{display:inline-block;background:var(--fail-bg);color:var(--fail-fg);font-family:'IBM Plex Mono',monospace;font-size:10.5px;padding:2px 7px;border-radius:2px;margin-left:6px;vertical-align:middle}
+
+  /* ===== at a glance ===== */
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin:6px 0 4px}
+  th{font-size:10.5px;text-transform:uppercase;letter-spacing:.08em;color:var(--sec);text-align:left;padding:8px 10px;border-bottom:1.5px solid var(--ink)}
+  th.pair{border-bottom-color:var(--accent);color:var(--accent)}
+  td{padding:11px 10px;border-bottom:1px solid var(--hair);vertical-align:top}
+  .mono{font-family:'IBM Plex Mono',monospace;font-size:12px}
+  .pill{display:inline-block;padding:3px 10px;border-radius:2px;font-family:'IBM Plex Mono',monospace;font-size:11px;white-space:nowrap}
+  .pill.high{background:var(--fail-bg);color:var(--fail-fg)}
+  .pill.med{background:var(--edge-bg);color:var(--edge-fg)}
+  .pill.low{background:var(--happy-bg);color:var(--happy-fg)}
+  .sub{display:block;font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--sec);margin-top:4px}
+  td.vs{border-left:2px solid var(--quiet)}
+  .impact-metric{font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--accent);display:block;margin-bottom:2px}
+  .impact-how{font-size:12.5px}
+  .impact-rev{display:block;font-family:'IBM Plex Mono',monospace;font-size:11px;margin-top:4px;color:var(--fail-fg)}
+  .impact-rev.na{color:var(--sec)}
+
+  /* themes */
+  .themes{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .theme{border:1px solid var(--hair);border-radius:2px;padding:18px 20px}
+  .theme h3{font-family:'Spectral',serif;font-weight:600;font-size:18px;margin-bottom:4px}
+  .theme .size{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--sec);margin-bottom:8px}
+  .theme .size b{color:var(--accent);font-weight:500}
+  .theme .desc{font-size:13.5px;color:var(--sec);margin-bottom:10px}
+  .quote{font-family:'Spectral',serif;font-style:italic;font-size:15px;line-height:1.5;margin:0 0 8px;padding-left:12px;border-left:3px solid var(--accent)}
+  .quote .attr{display:block;font-family:'IBM Plex Mono',monospace;font-style:normal;font-size:10.5px;color:var(--sec);margin-top:3px}
+  .impact{background:var(--happy-bg);border-radius:2px;padding:8px 12px;font-size:12.5px;color:var(--happy-fg);margin-top:6px}
+  .impact.warn{background:var(--edge-bg);color:var(--edge-fg)}
+
+  /* recs */
+  .rec{border:1px solid var(--hair);border-radius:2px;padding:16px 20px;margin-bottom:12px;display:flex;gap:16px;align-items:flex-start}
+  .rec .rank{font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--accent);font-weight:500;flex:0 0 30px;padding-top:2px}
+  .rec h4{font-size:15px;font-weight:600;margin-bottom:4px}
+  .rec .why{font-size:13px;color:var(--sec);margin-bottom:8px}
+  .rec .metric{font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--accent);margin-bottom:10px}
+  .cta{display:inline-block;font-family:'IBM Plex Mono',monospace;font-size:11.5px;padding:6px 12px;border-radius:2px;margin-right:8px;cursor:pointer}
+  .cta.primary{background:var(--accent);color:#fff}
+  .cta.ghost{border:1px solid var(--accent);color:var(--accent)}
+  .basis{background:var(--quiet);border-radius:2px;padding:14px 18px;font-size:12.5px;color:var(--sec);margin-top:8px}
+  .basis b{color:var(--ink)}
+  .brand{position:absolute;top:26px;right:28px;display:flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--sec)}
+  .brand .dot{width:15px;height:15px;border-radius:50%;border:2px solid var(--ink);display:flex;align-items:center;justify-content:center}
+  .brand .dot::after{content:'';width:5px;height:5px;border-radius:50%;background:var(--accent)}
+  @media(max-width:760px){.page{padding:32px 20px}.themes{grid-template-columns:1fr}.tfind{grid-template-columns:38px 1fr}.tfind .side{flex-direction:row;justify-content:flex-start;grid-column:2}}
+  @media print{body{background:#fff;padding:0}.sample-banner,.chips{display:none}.page{box-shadow:none;padding:40px}}
+</style>
+</head>
+<body>
+
+<div class="sample-banner">⚠ SAMPLE OUTPUT — all figures, accounts, and quotes are illustrative demo data, not real customer records. This shows the report format only.</div>
+
+<div class="chips">
+  <span class="chip green">voice-of-customer-report · v2</span>
+  <span class="chip">curated, direct-access sources only</span>
+  <span class="chip">basis: volume + impact + commercial</span>
+</div>
+
+<div class="page">
+  <div class="brand"><span class="dot"></span> by VoidAI</div>
+
+  <h1>Voice of Customer — Q2 2026</h1>
+
+  <!-- ===== REDESIGNED TL;DR ===== -->
+  <div class="tldr">
+    <div class="tldr-head">
+      <span class="t">TL;DR</span>
+      <span class="tldr-src">
+        <span class="srcchip">17 CSM calls · ~15 accounts</span>
+        <span class="srcchip">42 support tickets</span>
+        <span class="srcchip">6 churn/exit interviews</span>
+        <span class="srcchip">Apr–Jun 2026</span>
+      </span>
+    </div>
+    <div class="tldr-lede">Customers love what the agent produces — and struggle to <b>start it</b>, <b>scope it</b>, and <b>share it</b>. All three are user problems, not quality problems.</div>
+
+    <div class="tfind">
+      <div class="disc">#1</div>
+      <div>
+        <h4>Hard to get connected in the first week</h4>
+        <div class="d">Users stall wiring Sprntly to their tracker before any agent has done anything for them — "the excitement window closes."</div>
+        <div class="metric">IMPACTS → activation rate · 11 of 15 accounts stalled &gt;1 wk before first agent run 🅗</div>
+      </div>
+      <div class="side"><span class="mini high"><span class="k">VOL</span>high · 11/17</span><span class="mini high"><span class="k">SEV</span>high</span></div>
+    </div>
+
+    <div class="tfind">
+      <div class="disc">#2</div>
+      <div>
+        <h4>Can't control what agents can access <span class="flag">🔇 SILENT KILLER</span></h4>
+        <div class="d">Admins can't fence agent read/write per workspace, so rollout stops at one team — quiet on volume, loud in dollars.</div>
+        <div class="metric">IMPACTS → NRR / expansion · $170K expansion gated across 3 accounts 🅢</div>
+      </div>
+      <div class="side"><span class="mini low"><span class="k">VOL</span>low · 5/17</span><span class="mini high"><span class="k">SEV</span>high</span></div>
+    </div>
+
+    <div class="tfind">
+      <div class="disc">#3</div>
+      <div>
+        <h4>Difficult to export PRDs for leadership</h4>
+        <div class="d">The doc is trusted but can't travel — users screenshot it into slides and lose the traceability they praised.</div>
+        <div class="metric">IMPACTS → weekly active PMs · 8 of 17 report the screenshot workaround 🅗 · revenue: 🅘 unknown</div>
+      </div>
+      <div class="side"><span class="mini med"><span class="k">VOL</span>med · 8/17</span><span class="mini med"><span class="k">SEV</span>med</span></div>
+    </div>
+  </div>
+
+  <!-- ===== AT A GLANCE ===== -->
+  <div class="eyebrow">User problems at a glance</div>
+  <table>
+    <tr>
+      <th>User problem</th>
+      <th class="pair">Volume</th>
+      <th class="pair">Severity</th>
+      <th>Metric it impacts</th>
+      <th>By how much</th>
+    </tr>
+    <tr>
+      <td>Hard to get connected in the first week</td>
+      <td><span class="pill high">high</span><span class="sub">11/17 calls · 19 tix</span></td>
+      <td class="vs"><span class="pill high">high</span><span class="sub">blocks all value</span></td>
+      <td><span class="impact-metric">activation rate</span></td>
+      <td>
+        <span class="impact-how">11 of 15 accounts stalled &gt;1 week before first agent run 🅗</span>
+        <span class="impact-rev na">revenue: 🅘 unknown — ARR not connected; instrument (R5)</span>
+      </td>
+    </tr>
+    <tr>
+      <td>Can't control what agents can access <span class="flag">🔇</span></td>
+      <td><span class="pill low">low</span><span class="sub">5/17 calls</span></td>
+      <td class="vs"><span class="pill high">high</span><span class="sub">blocks rollout</span></td>
+      <td><span class="impact-metric">NRR / expansion</span></td>
+      <td>
+        <span class="impact-how">multi-team rollout blocked at all 5 raising accounts 🅗</span>
+        <span class="impact-rev">revenue: $170K expansion gated across 3 accounts 🅢 (stated — verify vs CRM)</span>
+      </td>
+    </tr>
+    <tr>
+      <td>Difficult to export PRDs for leadership</td>
+      <td><span class="pill med">med</span><span class="sub">8/17 calls · 7 tix</span></td>
+      <td class="vs"><span class="pill med">med</span><span class="sub">workaround exists</span></td>
+      <td><span class="impact-metric">weekly active PMs</span></td>
+      <td>
+        <span class="impact-how">8 of 17 rebuild PRDs in slides; ~1 hr lost per doc (stated) 🅢</span>
+        <span class="impact-rev na">revenue: 🅘 unknown</span>
+      </td>
+    </tr>
+    <tr>
+      <td>Hard to see what the agent changed before approving</td>
+      <td><span class="pill med">med</span><span class="sub">6/17 calls</span></td>
+      <td class="vs"><span class="pill med">med</span><span class="sub">slows, doesn't block</span></td>
+      <td><span class="impact-metric">agent-run adoption</span></td>
+      <td>
+        <span class="impact-how">review time ≈ authoring time (stated on 4 calls) 🅢</span>
+        <span class="impact-rev na">revenue: 🅘 unknown</span>
+      </td>
+    </tr>
+    <tr>
+      <td>Long tail (7 items: notification noise, seat mgmt, …)</td>
+      <td><span class="pill low">low</span><span class="sub">≤2 each</span></td>
+      <td class="vs"><span class="pill low">low</span></td>
+      <td><span class="impact-how" style="color:var(--sec)">—</span></td>
+      <td><span class="impact-how" style="color:var(--sec)">monitor — no metric movement claimed</span></td>
+    </tr>
+  </table>
+
+  <!-- ===== THEMES ===== -->
+  <div class="eyebrow">Themes — in the customer's words</div>
+  <div class="themes">
+    <div class="theme">
+      <h3>Hard to get connected</h3>
+      <div class="size">🅗 <b>11 of 17</b> calls · 19 of 42 tickets · persistent (top theme last quarter too)</div>
+      <div class="desc">Connecting Jira/Linear and reaching the first agent run is where trials stall — described as losing steam, not hitting bugs.</div>
+      <div class="quote">"We were excited on the demo call, and then it took us nine days to see one agent do one thing."<span class="attr">CSM call — mid-market account, May (sample)</span></div>
+      <div class="quote">"I gave up on the Jira connection twice before someone on your team walked me through it."<span class="attr">Support ticket #4, Apr (sample)</span></div>
+      <div class="impact warn">Impact: activation — 11 of 15 accounts stalled &gt;1 wk 🅗. Blocks value before it lands.</div>
+    </div>
+    <div class="theme">
+      <h3>Can't control agent access <span class="flag">🔇</span></h3>
+      <div class="size">🅗 <b>5 of 17</b> calls · new this quarter · all 5 are the largest accounts on calls</div>
+      <div class="desc">Admins want per-workspace scoping of what agents read and write. Low volume, elevated on impact: it gates the quarter's biggest stated dollars.</div>
+      <div class="quote">"Legal won't let me turn this on for the platform org until I can fence what the agent sees."<span class="attr">CSM call — enterprise account, Jun (sample)</span></div>
+      <div class="quote">"We'd add three more teams tomorrow. The blocker isn't budget, it's access control."<span class="attr">Expansion call, Jun (sample)</span></div>
+      <div class="impact warn">Impact: NRR — 🅢 ~$170K expansion explicitly conditioned on this across 3 accounts (stated; verify vs CRM).</div>
+    </div>
+    <div class="theme">
+      <h3>Difficult to export PRDs</h3>
+      <div class="size">🅗 <b>8 of 17</b> calls · 7 tickets · persistent</div>
+      <div class="desc">PMs trust the doc but can't hand it upward — they screenshot into slides, stripping the traceability that made it good.</div>
+      <div class="quote">"My VP is never going to log into Sprntly. I need the doc to come to her."<span class="attr">CSM call, May (sample)</span></div>
+      <div class="quote">"I spent an hour making the PRD, and another hour making it presentable."<span class="attr">Interview P6 (sample)</span></div>
+      <div class="impact">Impact: weekly active PMs — ~1 hr lost per shared doc 🅢. Adoption ceiling, no revenue signal attached.</div>
+    </div>
+    <div class="theme">
+      <h3>Hard to review the agent's work</h3>
+      <div class="size">🅗 <b>6 of 17</b> calls · new this quarter</div>
+      <div class="desc">Users like agent tickets but can't see what the agent inferred vs. what the spec said — so they re-read everything.</div>
+      <div class="quote">"I don't distrust it. I just can't tell what it changed without reading everything twice."<span class="attr">CSM call, Jun (sample)</span></div>
+      <div class="quote">"Show me what it inferred and I'll approve in seconds."<span class="attr">Interview P2 (sample)</span></div>
+      <div class="impact">Impact: agent-run adoption — review time ≈ authoring time 🅢, stated on 4 calls.</div>
+    </div>
+  </div>
+
+  <!-- ===== RECOMMENDATIONS ===== -->
+  <div class="eyebrow">Recommendations — selected by fit to this quarter's goals (activation · NRR)</div>
+  <div style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--sec);margin:-4px 0 14px">PRIORITIZATION GATE PASSED ✓ — 12 candidate actions identified · 5 selected · cap 5–7 unless impacts tie at the cut · 7 routed to monitor/backlog, not listed here</div>
+
+  <div class="rec">
+    <div class="rank">R1</div>
+    <div>
+      <h4>Guided tracker-connection flow with a first-agent-run checkpoint</h4>
+      <div class="why">Build a guided setup flow that takes a new account from signup to a connected tracker and a first successful agent run — progress visible at each step, with a human handoff when a connection fails. Attacks the highest volume × severity problem, and activation is a tracked goal metric this quarter.</div>
+      <div class="metric">IMPACTS → activation rate · today 11 of 15 accounts stall &gt;1 wk 🅗 · revenue link 🅘 pending R5</div>
+      <span class="cta primary">Generate PRD</span><span class="cta ghost">Move to backlog</span>
+    </div>
+  </div>
+  <div class="rec">
+    <div class="rank">R2</div>
+    <div>
+      <h4>Workspace-scoped agent permissions (read/write fencing)</h4>
+      <div class="why">Let admins scope, per workspace, what each agent can read and write — so a customer can enable Sprntly for one team without exposing the rest of the org. The silent killer: lowest volume, highest dollars; verify the $170K against CRM before sequencing above R1.</div>
+      <div class="metric">IMPACTS → NRR / expansion · $170K gated across 3 accounts 🅢</div>
+      <span class="cta primary">Generate PRD</span><span class="cta ghost">Move to backlog</span>
+    </div>
+  </div>
+  <div class="rec">
+    <div class="rank">R3</div>
+    <div>
+      <h4>Leadership-ready PRD export (Word/PDF, traceability preserved)</h4>
+      <div class="why">Add one-click export of any PRD to Word or PDF with evidence links and traceability preserved, so PMs can send the document to leadership instead of screenshotting it into slides. Removes a daily-felt workaround with a measurable time cost.</div>
+      <div class="metric">IMPACTS → weekly active PMs · ~1 hr recovered per shared doc 🅢</div>
+      <span class="cta primary">Generate PRD</span><span class="cta ghost">Move to backlog</span>
+    </div>
+  </div>
+  <div class="rec">
+    <div class="rank">R4</div>
+    <div>
+      <h4>Agent-change diff view on generated tickets</h4>
+      <div class="why">Show a diff on every agent-generated ticket that separates what the spec stated from what the agent inferred, with approve-in-place. Turns review from a full re-read into a scan of the changes.</div>
+      <div class="metric">IMPACTS → agent-run adoption · halves the stated review burden if review ≈ authoring today 🅢</div>
+      <span class="cta primary">Generate PRD</span><span class="cta ghost">Move to backlog</span>
+    </div>
+  </div>
+  <div class="rec">
+    <div class="rank">R5</div>
+    <div>
+      <h4>Investigate: connect ARR + onboarding drop-off instrumentation</h4>
+      <div class="why">Connect CRM ARR data and instrument the onboarding funnel so drop-off and dollar impact are measured instead of unknown. Three of four problems above show revenue 🅘 — this closes those gaps and makes the impact column fully dynamic.</div>
+      <div class="metric">IMPACTS → confidence of this ranking · closes the 🅘 gaps in the impact column</div>
+      <span class="cta ghost">Move to backlog</span>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>
