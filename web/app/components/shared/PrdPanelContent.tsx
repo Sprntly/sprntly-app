@@ -10,6 +10,7 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { PrdSections } from "./PrdSections"
+import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
 import { SendToClaudeCode } from "./SendToClaudeCode"
 import { DesignAgentLauncher } from "../design-agent/DesignAgentLauncher"
 import { EmptyPane } from "./EmptyPane"
@@ -202,8 +203,12 @@ export function PrdPanelContent() {
   }, [qaBriefId, qaInsightIndex])
 
   const bodyRef = useRef<HTMLDivElement>(null)
+  const htmlViewRef = useRef<PrdHtmlHandle>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [saveStatus, setSaveStatus] = useState<SaveStatus>("saved")
+  // v3 PRDs are a self-contained HTML page (prd-author v4.2), rendered + edited
+  // in a sandboxed iframe (PrdHtmlView) rather than the markdown section editor.
+  const isHtmlPrd = !!prd?.html
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [showVersions, setShowVersions] = useState(false)
   const [versionsLoading, setVersionsLoading] = useState(false)
@@ -264,7 +269,22 @@ export function PrdPanelContent() {
   // edit (handleInput, debounced); this lets the user force a save now and is
   // also where the autosave status is surfaced.
   const saveNow = useCallback(async () => {
-    if (!prd || !bodyRef.current) return
+    if (!prd) return
+    // v3 HTML PRD: the iframe view owns persistence (round-trips the full HTML
+    // document, not flattened text) — delegate the manual save to it.
+    if (prd.html) {
+      setSaveStatus("saving")
+      try {
+        await htmlViewRef.current?.save()
+        setSaveStatus("saved")
+        showToast("Saved", "Your PRD has been saved.")
+      } catch {
+        showToast("Save failed", "Could not save to server. Local draft preserved.")
+        setSaveStatus("saved")
+      }
+      return
+    }
+    if (!bodyRef.current) return
     setSaveStatus("saving")
     saveDraft(prd.prd_id, bodyRef.current.innerHTML)
     try {
@@ -275,15 +295,33 @@ export function PrdPanelContent() {
       showToast("Save failed", "Could not save to server. Local draft preserved.")
       setSaveStatus("saved")
     }
-  }, [prd])
+  }, [prd, showToast])
 
   return (
     <div className="cpanel-prd-wrap">
       {prd && <PrdPatchBanner prdId={prd.prd_id} />}
 
       <div className="prd-frame">
-        <PrdToolbar hasDoc={!!prd} saveStatus={saveStatus} exec={exec} />
-        {prd ? (
+        {/* The markdown editor toolbar (execCommand) doesn't apply to the v3
+            HTML page — it's edited natively inside the iframe — so hide it. */}
+        {!isHtmlPrd && <PrdToolbar hasDoc={!!prd} saveStatus={saveStatus} exec={exec} />}
+        {prd && isHtmlPrd ? (
+          <>
+            <PrdHtmlView
+              ref={htmlViewRef}
+              html={prd.html ?? ""}
+              prdId={prd.prd_id}
+              title={prd.title}
+              onStatus={setSaveStatus}
+            />
+            {qaSections.length > 0 && (
+              <div className="prd-qa-scenarios" data-testid="prd-qa-scenarios">
+                <h2 className="prd-h2">Test Scenarios</h2>
+                <PrdSections sections={qaSections} />
+              </div>
+            )}
+          </>
+        ) : prd ? (
           <>
             <PrdSummaryStrip prd={prd} />
             <div

@@ -19,14 +19,17 @@ def test_warm_sema_reusable_across_consecutive_asyncio_run_loops():
     async def use_it():
         sema = _warm_sema()
         async with sema:  # binds the semaphore to the current loop
-            return id(sema)
+            return sema
 
     # Two separate event loops (mirrors two scheduler passes). Pre-fix the second
     # `async with` raised "bound to a different event loop"; now each pass gets a
-    # fresh loop-bound semaphore and neither raises.
+    # fresh loop-bound semaphore and neither raises. Hold BOTH objects alive and
+    # compare identity, not id(): once the first loop is GC'd its semaphore is
+    # freed, and the allocator can hand the second run the same address, so an
+    # `id(first) != id(second)` check flakes (identical ids for distinct objects).
     first = asyncio.run(use_it())
     second = asyncio.run(use_it())
-    assert first != second  # distinct semaphore per loop
+    assert first is not second  # distinct semaphore object per loop
 
 
 def test_warm_sema_is_stable_within_one_loop():

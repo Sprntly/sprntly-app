@@ -131,7 +131,10 @@ async def generate(
     _record_prd_action(company.company_id, insight)
 
     task = asyncio.create_task(
-        generate_prd(prd_id, body.brief_id, body.insight_index)
+        generate_prd(
+            prd_id, body.brief_id, body.insight_index,
+            author=company.user_name,
+        )
     )
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
@@ -222,7 +225,8 @@ async def generate_from_backlog(
 
     task = asyncio.create_task(
         generate_prd(
-            prd_id, brief_id, _BACKLOG_INSIGHT_INDEX, insight_override=insight
+            prd_id, brief_id, _BACKLOG_INSIGHT_INDEX, insight_override=insight,
+            author=company.user_name,
         )
     )
     _inflight_tasks.add(task)

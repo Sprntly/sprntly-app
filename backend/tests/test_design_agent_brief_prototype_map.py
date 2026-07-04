@@ -69,8 +69,9 @@ CREATE TABLE prototype_checkpoints (
 
 _OTHER_WS = "other-workspace"
 
-# PRD_VARIANT as defined in prd_runner.py — the variant the new endpoint filters on.
-_PRD_VARIANT = "v2"
+# PRD_VARIANT as defined in prd_runner.py — the variant the new endpoint filters
+# on. Imported so the test tracks the constant instead of hardcoding it.
+from app.prd_runner import PRD_VARIANT as _PRD_VARIANT
 
 
 @pytest.fixture

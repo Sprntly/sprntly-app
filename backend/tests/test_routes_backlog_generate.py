@@ -63,7 +63,7 @@ def test_generate_from_backlog_happy_path(tenant_client, isolated_settings):
     body = resp.json()
     assert body["status"] in ("generating", "ready")
     assert body["title"] == "Bulk onboarding"
-    assert body["variant"] == "v2"
+    assert body["variant"] == "v3"
 
     # The row is discriminated as a backlog PRD, keyed on the theme.
     row = _prd_row(body["prd_id"])
@@ -79,7 +79,7 @@ def test_generate_from_backlog_dedup_when_not_forced(tenant_client, isolated_set
 
     existing = db_mod.start_prd(
         brief_id=brief_id, insight_index=0, title="Bulk onboarding",
-        template_version=1, variant="v2", source="backlog", theme_id="theme-x",
+        template_version=1, variant="v3", source="backlog", theme_id="theme-x",
     )
     db_mod.complete_prd(existing, title="Bulk onboarding", md="# Already here")
 

@@ -33,6 +33,7 @@ from app.prompts import (
     EVIDENCE_TEMPLATE_VERSION,
     EVIDENCE_VARIANT,
     PRD_TEMPLATE_VERSION,
+    PRD_VARIANT,
 )
 from app.routes import (
     agent_chat,
@@ -112,10 +113,11 @@ async def lifespan(app: FastAPI):
             ev_invalidated,
             EVIDENCE_TEMPLATE_VERSION,
         )
-    # And the same for PRDs. Variant-scoped to v2 (the only variant we
-    # generate now); historical v1 rows are read-only and left untouched.
+    # And the same for PRDs. Variant-scoped to the current PRD_VARIANT (v3, the
+    # HTML PRD page); historical v1/v2 rows are read-only and left untouched so
+    # they keep rendering under the legacy markdown path.
     prd_invalidated = db.invalidate_stale_prds(
-        PRD_TEMPLATE_VERSION, variant="v2"
+        PRD_TEMPLATE_VERSION, variant=PRD_VARIANT
     )
     if prd_invalidated:
         logger.info(

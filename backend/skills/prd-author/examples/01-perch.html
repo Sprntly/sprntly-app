@@ -1,0 +1,93 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Automatic Invoice Follow-Up — Perch</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Spectral:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+:root{--green:#1A6B47;--ink:#1F241F;--sub:#5B615B;--page:#FFFFFF;--desk:#E9E7E2;--rule:#E3E1D8;
+--happy:#E7F1EA;--happy-t:#1A6B47;--edge:#FBF0DC;--edge-t:#8A5A12;--fail:#F9E7E4;--fail-t:#9C3223;}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--desk);font-family:'Inter',sans-serif;color:var(--ink);font-size:15px;line-height:1.55;padding:40px 16px 80px}
+.frame{max-width:780px;margin:0 auto}
+.toolbar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
+.chip{font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:.04em;padding:6px 10px;border-radius:999px;border:1px solid var(--rule);background:#fff;color:var(--sub)}
+.chip.a{background:var(--green);border-color:var(--green);color:#fff}
+.chip.edit{color:var(--green);border-color:#BFD8CB;background:#F3F9F5;display:inline-flex;align-items:center;gap:6px}
+.chip.edit .dot{width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+@media(prefers-reduced-motion:reduce){.chip.edit .dot{animation:none}}
+.toolbar .hint{margin-left:auto;font-size:12px;color:var(--sub)}
+.page{position:relative;background:var(--page);border:1px solid #DDDBD3;border-radius:2px;box-shadow:0 1px 2px rgba(31,36,31,.06),0 14px 36px rgba(31,36,31,.08);padding:64px 72px 76px;caret-color:var(--green)}
+.page ::selection{background:#DCEEE4}
+.page[contenteditable]:focus{outline:none}
+.page > *:hover{outline:1px dashed #A8CBB8;outline-offset:6px;border-radius:2px;cursor:text}
+.page .goal:hover,.page table:hover{outline-offset:8px}
+.brand{position:absolute;top:26px;right:30px;display:flex;align-items:center;gap:7px;user-select:none}
+.brand svg{display:block}
+.brand .bw{font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:.06em;color:var(--sub)}
+.brand .bw strong{color:var(--ink);font-weight:500}
+.page > .brand:hover{outline:none;cursor:default}
+h1{font:600 33px/1.2 'Spectral',serif;letter-spacing:-.01em;margin-bottom:10px;padding-right:110px}
+.byline{font:500 12.5px/1 'IBM Plex Mono',monospace;color:var(--sub);margin-bottom:34px}
+.byline .bk{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin-right:9px}
+.eyebrow{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin:30px 0 8px;padding-top:18px;border-top:1px solid var(--rule)}
+.eyebrow:first-of-type{border-top:none;padding-top:0;margin-top:0}
+.evhead{display:flex;align-items:baseline;justify-content:space-between;gap:12px}
+.evhead a{font:500 11px/1 'IBM Plex Mono',monospace;letter-spacing:.02em;text-transform:none;color:var(--green);text-decoration:none;white-space:nowrap}
+.evhead a:hover{text-decoration:underline}
+p{margin-bottom:8px}
+.term{border-bottom:1.5px dotted #B9B5A6}
+.scope{font-style:italic;color:var(--sub);font-size:14px;margin-bottom:8px}
+ul{list-style:none}
+ul.ev li{padding:10px 0 10px 16px;position:relative;border-bottom:1px dashed var(--rule)}
+ul.ev li:last-child{border-bottom:none}
+ul.ev li::before{content:'';position:absolute;left:0;top:19px;width:6px;height:6px;border-radius:50%;background:var(--green)}
+.evmeta{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline;margin-top:4px;font:400 12.5px/1.5 'IBM Plex Mono',monospace;color:var(--sub)}
+.evtype{font:500 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:.08em;text-transform:uppercase;padding:4px 7px;border-radius:4px;background:#EFEDE6;color:var(--sub)}
+.evquote{font-family:'Spectral',serif;font-style:italic;font-size:16px;line-height:1.5}
+.src{color:var(--sub);font-size:13.5px}
+.goal{border:1px solid var(--rule);border-radius:6px;background:#FCFBF8;padding:16px 18px;display:grid;gap:9px}
+.goal .row{display:grid;grid-template-columns:118px 1fr;gap:12px;align-items:baseline}
+.goal .k{font:500 11px/1.5 'IBM Plex Mono',monospace;letter-spacing:.03em;color:var(--sub);text-transform:uppercase}
+.formula{font-family:'IBM Plex Mono',monospace;font-size:13.5px}
+.impact-blank{display:inline-block;min-width:230px;border-bottom:2px dotted #B9B5A6;color:#9A968A;font-size:13.5px;font-style:italic;padding-bottom:2px}
+.conf{font:500 10.5px/1 'IBM Plex Mono',monospace;padding:3px 7px;border-radius:4px;margin-left:6px;vertical-align:1px}
+.conf.med{background:var(--edge);color:var(--edge-t)} .conf.low{background:var(--fail);color:var(--fail-t)}
+ol.users{list-style:none;counter-reset:u;display:grid;gap:8px}
+ol.users li{counter-increment:u;padding-left:34px;position:relative}
+ol.users li::before{content:counter(u);position:absolute;left:0;top:1px;width:22px;height:22px;border-radius:50%;background:var(--green);color:#fff;font:600 11.5px/22px 'Inter',sans-serif;text-align:center}
+.hyp{border-left:3px solid var(--green);padding:2px 0 2px 16px;font-size:15.5px}
+table{width:100%;border-collapse:collapse;font-size:13.5px;background:#fff;border:1px solid var(--rule);border-radius:6px;overflow:hidden}
+th{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.1em;text-transform:uppercase;color:var(--sub);text-align:left;padding:10px 12px;border-bottom:1px solid var(--rule);background:#FCFBF8}
+td{padding:10px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td.id{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--sub);white-space:nowrap}
+td.req{font-weight:600;min-width:130px}
+.pill{display:inline-block;font:500 11px/1 'Inter',sans-serif;padding:5px 9px;border-radius:999px;white-space:nowrap}
+.pill.h{background:var(--happy);color:var(--happy-t)} .pill.e{background:var(--edge);color:var(--edge-t)} .pill.f{background:var(--fail);color:var(--fail-t)}
+ul.inputs li{display:flex;gap:10px;align-items:baseline;margin-bottom:8px}
+ul.inputs .box{width:13px;height:13px;border:1.5px solid #B9B5A6;border-radius:3px;flex:none;transform:translateY(2px)}
+.tag{font:500 10.5px/1 'IBM Plex Mono',monospace;padding:3px 7px;border-radius:4px;flex:none}
+.tag.esc{background:var(--fail);color:var(--fail-t)} .tag.need{background:var(--edge);color:var(--edge-t)}
+.owner{color:var(--sub);font-size:13px;white-space:nowrap}
+.appendix{margin-top:44px;border-top:2px solid var(--ink);padding-top:14px}
+.appendix .label{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--ink)}
+.appendix .note{color:var(--sub);font-size:12.5px;margin:4px 0 16px}
+.appendix h3{font:600 12px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--sub);margin:16px 0 6px}
+.riskiest{border:1px solid var(--rule);border-left:3px solid var(--fail-t);background:#fff;border-radius:0 6px 6px 0;padding:13px 16px;margin-top:8px}
+.riskiest .rk{font:600 11px/1 'IBM Plex Mono',monospace;color:var(--fail-t);letter-spacing:.05em;text-transform:uppercase}
+.riskiest p{margin:6px 0 0}
+.pre{margin-top:10px;padding-top:10px;border-top:1px dashed var(--rule);font-size:13.5px;color:var(--sub);font-style:italic}
+@media(max-width:640px){.page{padding:34px 22px 44px}.goal .row{grid-template-columns:1fr}h1{padding-right:0;padding-top:34px}}
+@media print{body{background:#fff;padding:0}.toolbar{display:none}.page{border:none;box-shadow:none;padding:20px}.page > *:hover{outline:none}}
+</style></head><body><div class="frame">
+<div class="toolbar"><span class="chip a">Part A — PRD (for people)</span><span class="chip">Example 1 — Perch</span>
+<span class="chip">prd-author v4.2</span><span class="chip edit"><span class="dot"></span>Editing on — click any text to change it</span><span class="hint">Print or export to Word when done</span></div>
+<div class="page" contenteditable="true" spellcheck="false"><div class="brand" contenteditable="false" aria-label="by VoidAI"><svg width="15" height="15" viewBox="0 0 15 15" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="7.5" cy="7.5" r="6.2" stroke="#1F241F" stroke-width="1.4"/><circle cx="7.5" cy="7.5" r="2.2" fill="#1A6B47"/></svg><span class="bw">by <strong>VoidAI</strong></span></div><h1>Automatic Invoice Follow-Up</h1><div class="byline"><span class="bk">Author</span>David Mumuni</div><div class="eyebrow">Context</div><p>Perch is invoicing software for freelancers and micro-agencies (1–10 people): designers, developers, consultants, and small studios who bill clients directly. A user creates an invoice in Perch, sends it by email, and records payment when it arrives — either manually or via a connected Stripe account. Perch's involvement ends at "send": there is no product behavior between an invoice going out and a payment being recorded. The gap between those two moments is where this document lives; the time it spans is called <span class="term">days-to-paid</span>, and everything an invoice sender does during it — reminder emails, awkward nudges — currently happens outside the product.</p><div class="eyebrow">Problem</div><p class="scope">Scope assumption: follow-up on already-sent invoices only — not payment processing, collections, or subscription dunning.</p><p>Late payments are the top pain in user interviews, but Perch does nothing after "send." For the business, users churn to tools that "handle the awkward part"; for the user, chasing money is uncomfortable, so they delay — and get paid later.</p><div class="eyebrow evhead">Evidence <a href="https://app.sprntly.ai/evidence/prd-perch-invoice-followup" target="_blank" rel="noopener">View evidence page in Sprntly ↗</a></div><ul class="ev"><li><strong>41%</strong> of invoices sent via Perch are paid after their due date<div class="evmeta"><span class="evtype">Data analysis</span><span>— billing data, all active accounts</span><span>·</span><span>May 2026</span></div></li><li><span class="evquote">“I wait three days past the due date before I send anything — I don’t want to seem desperate.”</span><div class="evmeta"><span class="evtype">User quote</span><span>— discovery interview, participant P07</span><span>·</span><span>May 2026</span></div></li><li><strong>3</strong> churn exits explicitly mentioned a competitor’s auto-reminder feature<div class="evmeta"><span class="evtype">Churn interviews</span><span>— churn interview notes</span><span>·</span><span>Q2 2026</span></div></li><li><strong>2 of 3</strong> direct competitors ship automatic reminders as a default-on feature<div class="evmeta"><span class="evtype">Competitive analysis</span><span>— competitive scan</span><span>·</span><span>Jun 2026</span></div></li><li><span class="tag need">[NEED]</span> Share of late invoices that ever receive a manual follow-up today<div class="evmeta"><span>— not yet in Sprntly; appears on the evidence page when the signal lands</span></div></li></ul><div class="eyebrow">Users</div><ol class="users"><li><strong>Freelancer</strong> — hates the chasing email more than the late payment; wants it handled without sounding aggressive to a client she needs next quarter.</li><li><strong>Micro-agency owner</strong> — 30+ open invoices; needs to see which are being chased without managing each one.</li></ol><div class="eyebrow">Goal</div><div class="goal">
+<div class="row"><span class="k">Primary metric</span><span><strong>Median days-to-paid</strong> <span class="formula">= median(paid_date − sent_date)</span> · Baseline: <strong>24 days</strong></span></div>
+<div class="row"><span class="k">Projected impact</span><span><span class="impact-blank">blank — fills after pilot; no reminder-effectiveness data for this user base</span></span></div>
+<div class="row"><span class="k">Guardrails</span><span>Client unsubscribe/complaint rate on reminders · invoice send volume (no chilling effect)</span></div></div><div class="eyebrow">Hypothesis</div><p class="hyp">If Perch sends polite, scheduled reminders automatically after an invoice passes due — with the user approving tone once, not per email — late invoices will get paid sooner without damaging client relationships.</p><div class="eyebrow">Requirements</div><table><thead><tr><th>#</th><th>Requirement</th><th>Description</th><th>Type</th></tr></thead><tbody><tr><td class="id">R1</td><td class="req">Reminder schedule</td><td>Default reminders at due+3, due+7, due+14; user can edit per invoice.</td><td><span class="pill h">Happy path</span></td></tr><tr><td class="id">R2</td><td class="req">Tone approval once</td><td>User picks a reminder voice (friendly / neutral / firm) at setup; applies to all.</td><td><span class="pill h">Happy path</span></td></tr><tr><td class="id">R3</td><td class="req">Stop on payment</td><td>Any recorded payment (full or partial) halts remaining reminders immediately.</td><td><span class="pill e">Edge case</span></td></tr><tr><td class="id">R4</td><td class="req">Bounce / opt-out handling</td><td>A bounced address or client opt-out stops reminders and flags the invoice for manual action.</td><td><span class="pill f">Failure</span></td></tr><tr><td class="id">R5</td><td class="req">Follow-up visibility</td><td>Invoice list shows reminder status (scheduled / sent / stopped) per invoice.</td><td><span class="pill h">Happy path</span></td></tr></tbody></table><div class="eyebrow">User input needed</div><ul class="inputs"><li><span class="box"></span><span class="tag esc">[ESCALATE]</span><span>Reminders on by default for new invoices, or opt-in per invoice? <span class="owner">— owner: PM</span></span></li><li><span class="box"></span><span class="tag need">[NEED]</span><span>Manual follow-up rate today (for baseline) <span class="owner">— owner: Data</span></span></li><li><span class="box"></span><span class="tag esc">[ESCALATE]</span><span>Does “firm” tone mention late fees? Legal exposure varies by region <span class="owner">— owner: PM + Legal</span></span></li></ul><div class="appendix"><div class="label">Appendix</div><div class="note">Renders with Part A — not a separate file.</div>
+<h3>Non-goals</h3><p>Payment processing changes · collections/escalation to agencies · SMS reminders (V2 candidate).</p>
+<h3>Risks</h3><p>Reminders that feel robotic damage the client relationship the freelancer is protecting; partial payments create ambiguous states.</p>
+<div class="riskiest"><span class="rk">Riskiest assumption — exactly one</span><p>Clients pay faster because of reminders — rather than paying on their own AP schedule regardless.</p>
+<div class="pre">Pre-mortem: It's six weeks later and this failed because reminded and unreminded invoices paid on the same curve. The earliest signal was no separation in the pilot cohort by week three. We should have run a holdout group from day one.</div></div>
+<h3>Alignment</h3><p>Attacks the top interview pain and the named churn driver.</p><h3>Rollout</h3><p>Opt-in beta to 100 accounts with a holdout cohort.</p><h3>Done-when</h3><p>Reminder pipeline live, holdout comparison readable, unsubscribe rate &lt; 1%.</p></div></div>
+</div></body></html>

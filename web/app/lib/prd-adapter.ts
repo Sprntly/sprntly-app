@@ -28,6 +28,19 @@ import type {
   PrdContent,
   QaScenarioRow,
 } from "../types/content"
+import { looksLikeHtmlBrief, stripHtmlCodeFence } from "./htmlBrief"
+
+/**
+ * Pull a display title out of the v3 HTML PRD page: the document `<h1>` text
+ * (the PRD title), falling back to `<title>`. Tags/entities are stripped so the
+ * result is plain text for the panel header + export. Empty string when neither
+ * is present (caller defaults to "PRD").
+ */
+function extractHtmlTitle(html: string): string {
+  const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1]
+  const raw = h1 ?? html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? ""
+  return raw.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
+}
 
 const HEADING_RULE = /^─+$/
 const CHART_KINDS: PrdChartKind[] = ["bar", "line", "pie", "donut", "stat", "gauge"]
@@ -467,6 +480,14 @@ function parseSemanticBlock(name: string, _attrs: string, body: string): PrdSect
 /* ---------- main entry ---------- */
 
 export function markdownToPrdState(markdown: string): PrdContent {
+  // v3 escape hatch (prd-author v4.2): a self-contained, editable HTML PRD page
+  // — NOT `:::block`/lean markdown. Detect it (after unwrapping any code fence),
+  // stash the raw HTML on `html`, and leave `sections` empty; the panel renders
+  // it in a sandboxed iframe. The display title is read from the page's <h1>.
+  if (looksLikeHtmlBrief(markdown)) {
+    const html = stripHtmlCodeFence(markdown)
+    return { metaLine: "", title: extractHtmlTitle(html) || "PRD", sections: [], html }
+  }
   const lines = markdown.replace(/\r\n/g, "\n").split("\n")
   let title = ""
   const sections: PrdSection[] = []

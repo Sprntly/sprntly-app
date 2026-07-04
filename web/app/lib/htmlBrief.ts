@@ -27,3 +27,34 @@ export function stripHtmlCodeFence(s: string): string {
 export function looksLikeHtmlBrief(payload: string | null | undefined): boolean {
   return /^\s*<(?:!doctype|meta|html|div|style)\b/i.test(stripHtmlCodeFence(payload ?? ""))
 }
+
+/**
+ * Extract readable plain text from an HTML document (the v3 PRD/brief page):
+ * drop <style>/<script>/<head> and the editing chrome, keep visible text, and
+ * insert line breaks at block boundaries. Used by non-rendering consumers
+ * (ticket description, Claude-context builder) that need the PRD's prose when
+ * there are no parsed `:::block` sections. Best-effort; empty string on failure.
+ */
+export function htmlPrdToPlainText(html: string | null | undefined): string {
+  const src = stripHtmlCodeFence(html ?? "")
+  if (!src) return ""
+  try {
+    return src
+      .replace(/<style[\s\S]*?<\/style>/gi, " ")
+      .replace(/<script[\s\S]*?<\/script>/gi, " ")
+      .replace(/<head[\s\S]*?<\/head>/gi, " ")
+      .replace(/<\/(?:p|div|h1|h2|h3|li|tr|section)>/gi, "\n")
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/<[^>]+>/g, " ")
+      .replace(/&nbsp;/gi, " ")
+      .replace(/&amp;/gi, "&")
+      .replace(/&lt;/gi, "<")
+      .replace(/&gt;/gi, ">")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .split("\n").map((l) => l.trim()).filter(Boolean).join("\n")
+      .trim()
+  } catch {
+    return ""
+  }
+}

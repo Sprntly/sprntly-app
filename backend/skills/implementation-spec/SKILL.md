@@ -1,12 +1,18 @@
 ---
 name: implementation-spec
-description: Turn a human PRD into an LLM-readable, agent-executable Implementation Spec a coding agent builds and tests against without ambiguity. Use when the user says "turn this PRD into a spec", "make this agent-ready", "implementation spec", "spec-driven", "generate the build spec", or hands a PRD (Problem / Evidence / Goal / Non-goals / Users / Requirements) and wants the machine-readable half. Consumes the PRD's tagged requirements (untagged = happy path; `[edge case]` / `[failure]` inline) and produces EARS requirements, design/contracts, dependency-ordered tasks, acceptance tests, and a Definition of Done, with an independent no-hallucination check. Never invents a requirement, rule, or contract — unknowns are split into research-resolvable vs. must-escalate. Pairs with the PRD skill (PRD = what & why; this = how it's built, verified, and done).
+description: Turn a human PRD (Part A from `prd-author`) into an LLM-readable, agent-executable Implementation Spec (Part B) a coding agent builds and tests against without ambiguity. Use when the user says "turn this PRD into a spec", "make this agent-ready", "implementation spec", "spec-driven", "generate the build spec", or hands a Part A PRD (Context / Problem / Evidence / Users / Goal / Hypothesis / Requirements) and wants the machine-readable half. Derived ONLY from a finished Part A; opens with a B0 derivation header naming its source. Consumes the PRD's typed requirements (Happy path / Edge case / Failure) and produces EARS requirements traced to Part A IDs, interface contracts, dependency-ordered tasks, acceptance tests, and a Definition of Done, with an independent no-hallucination check. Never invents a requirement, rule, or contract — unknowns are split into research-resolvable vs. must-escalate. Pairs with `prd-author` (PRD = what & why; this = how it's built, verified, and done).
 ---
 
-# Implementation Spec — the LLM-readable half of a PRD
+# Implementation Spec — Part B, the LLM-readable half of a PRD
 
 ## What it does
-Consumes a **human PRD** (the *what & why*) and emits the **agent-executable spec** (the *how, verified, and done*): the Spec-Driven-Development artifact a coding agent implements and tests against. The PRD declares intent and tagged requirements; this skill converts each requirement into testable EARS criteria, binds every fact to a source or labels it, orders the work, and owns completion — because the human PRD deliberately carries no "done when," **done-ness lives here.**
+Consumes a **human PRD** (Part A — the *what & why*, authored by `prd-author`) and emits the **agent-executable spec** (Part B — the *how, verified, and done*): the Spec-Driven-Development artifact a coding agent implements and tests against. The PRD declares intent and typed requirements; this skill converts each requirement into testable EARS criteria, binds every fact to a source or labels it, orders the work, and owns completion — because the human PRD deliberately carries no "done when," **done-ness lives here.**
+
+## Derivation rule (hard)
+Part B is derived **ONLY from a finished Part A** — never directly from raw signals. The spec opens with a **B0 Derivation header** naming the source Part A (its title + author byline). Every B3 requirement **traces to a Part A requirement ID**; content with no Part A anchor may not appear. If invoked with no Part A available, the Part A PRD must be authored first (via `prd-author`) — never skip to Part B. This keeps the human-approved document the single source of truth: what the agent builds is exactly what a person signed off on.
+
+## Requirement-type inheritance (Part A → Part B)
+Part A's Requirements table tags every row `Happy path` / `Edge case` / `Failure`. These tags are load-bearing and inherited verbatim: a **Happy path** row needs only its happy-path EARS line; an **Edge case** row must yield an edge EARS branch + test; a **Failure** row must yield a failure EARS branch + test. (Legacy inline `[edge case]` / `[failure]` tags map to the same branches.)
 
 It **never invents** a requirement, business rule, contract, or metric. Each unknown is either `[ASSUMPTION → T0]` (a coding agent can resolve it by reading the code) or `[ESCALATE]` (a product/external decision no research step can settle — the only places a human is genuinely required).
 
@@ -33,8 +39,20 @@ Implements Spec-Driven Development (Kiro 3-artifact + EARS, Spec-Kit constitutio
 9. **Acceptance tests & Definition of Done (merged).** For each requirement, a Given/When/Then test *derived before implementation* (so the agent implements to pass tests it did not author) — **including every inherited edge/failure branch.** Then ONE Definition of Done: done = every acceptance test passes AND every requirement has a passing test AND no `[ESCALATE]` is open AND the cross-cutting checklist is addressed/waived AND independent verification passes.
 10. **Independent verification (checker ≠ generator; NOT self-grading).** A separate adversarial pass: find any claim no artifact supports; find unstated assumptions; surface cross-artifact conflicts; confirm verbatim binding for every fact/contract; confirm every PRD requirement (and every inherited tag) has a tracing EARS line, a task, and a test. Report PASS + the open `[ESCALATE]` items.
 
-## Output spec
-A single document headed **Implementation Spec** with sections: Available artifacts & grounding · Stakes & autonomy gate · Constitution · Requirements (EARS, traced to PRD IDs + bound, tags inherited) · Design & contracts · Out-of-scope / not-constrained / unresolved (`[ASSUMPTION → T0]` vs `[ESCALATE]`) · Cross-cutting checklist · Tasks (dependency-ordered, `[P]`, T0 first) · Acceptance tests & Definition of Done (merged) · Independent verification report. Optionally appended below the human PRD (separated by a horizontal rule) so the pair travels together.
+## Output spec (B0–B9 — normative; skeleton in `templates/implementation-spec-template.md`)
+A single Markdown document headed **Implementation Spec**, in this order:
+1. **B0 Derivation header** — names the source Part A (title + author) it was derived from; asserts every B3 requirement traces to a Part A ID.
+2. **B1 Context for the agent** — what exists, what's being added, constraints/constitution.
+3. **B2 Stakes gate** — what happens if built wrong; sets verification depth and any single human checkpoint for irreversible work.
+4. **B3 Requirements (EARS)** — each traced to a Part A requirement ID (`WHEN <trigger>, the system SHALL <response>`; IF-failure branches included), tags inherited, each bound to an artifact or labeled.
+5. **B4 Interface contracts** — APIs/schemas/events; no codebase → `[ASSUMPTION → T0]`; facts bind verbatim.
+6. **B5 Escalations** — carried over from Part A's `[ESCALATE]` items; the agent must not decide them.
+7. **B6 Cross-cutting checklist** — auth, privacy, telemetry, i18n, accessibility, error states, performance — addressed or explicitly waived.
+8. **B7 Tasks** — dependency-ordered; `[P]` parallel-safe; T0 is always the research gate for `[ASSUMPTION → T0]`.
+9. **B8 Acceptance tests & Definition of Done (merged)** — Given/When/Then per B3 requirement incl. failure branches, derived BEFORE implementation; DoD = all tests pass + every requirement has a passing test + no open `[ESCALATE]` + cross-cutting addressed or waived + B9 passes.
+10. **B9 Independent verification** — separate checker pass: no hallucinated APIs, every requirement has a passing test, Part A ↔ B3 traceability intact.
+
+Emit Markdown only. May be appended below the human PRD (separated by a horizontal rule) so the pair travels together.
 
 ## Integration & degradation
 - **Inputs from upstream:** the human PRD (required); a `business-context` / knowledge-graph **constitution** so the agent inherits engineering constraints; connected codebase/design system/prototype as grounding.
@@ -42,8 +60,9 @@ A single document headed **Implementation Spec** with sections: Available artifa
 - **Degrades to:** PRD-only — full spec from the PRD alone, every optional-artifact gap labeled.
 
 ## Quality checklist (the bar)
-- [ ] Every PRD requirement maps to ≥1 EARS line that **traces to its PRD ID** and **binds to an artifact or is labeled**.
-- [ ] **Tags inherited:** every `[edge case]` PRD requirement has an edge EARS line + test; every `[failure]` one has a failure EARS line + test.
+- [ ] **B0 derivation header present** — names the source Part A (title + author); nothing in Part B lacks a Part A anchor.
+- [ ] Every Part A requirement maps to ≥1 EARS line that **traces to its Part A ID** and **binds to an artifact or is labeled**.
+- [ ] **Tags inherited:** every `Edge case` (or legacy `[edge case]`) requirement has an edge EARS line + test; every `Failure` (`[failure]`) one has a failure EARS line + test.
 - [ ] Contracts **bind verbatim**; nothing invented; unknowns split `[ASSUMPTION → T0]` vs `[ESCALATE]`; every PRD Open Question is placed in one bucket.
 - [ ] Stakes gate set (one human checkpoint for irreversible work, naming what it gates).
 - [ ] Cross-cutting checklist addressed or explicitly waived; out-of-scope / not-constrained stated.
@@ -70,3 +89,8 @@ A single document headed **Implementation Spec** with sections: Available artifa
 - **Tasks:** T0 research/clear-gate → T1 data model → T2 OCR `[P]` → … → T7 dispatch (idempotent) → T9 status.
 - **Acceptance & Done:** Given/When/Then per requirement incl. the R2/R6/R10 branches; **Done = all tests pass + the three `[ESCALATE]` decisions closed + cross-cutting addressed + verifier passes.**
 - **Independent verification:** all 10 PRD requirements trace to EARS ✓; tags inherited (2 failure, 2 edge) ✓; 0 invented contracts (all labeled) ✓; 3 `[ESCALATE]` flagged ✓ — **PASS**, with those three as the only required human input.
+
+## Contents
+- `SKILL.md` — this method (B0–B9 output spec, derivation rule, tag inheritance, verification bar).
+- `templates/implementation-spec-template.md` — the B0–B9 skeleton incl. the B0 derivation header and merged B8 tests + DoD.
+- `examples/01-perch.md` · `examples/02-tandem.md` · `examples/03-copperline.md` — Part B specs derived from the matching `prd-author` Part A examples (same three cases): B0 names the source Part A, B3 traced to Part A IDs, copperline carries three `[ESCALATE]` items A→B.

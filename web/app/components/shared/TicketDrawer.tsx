@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { connectorsApi, type ConnectionSummary } from "../../lib/api"
+import { htmlPrdToPlainText } from "../../lib/htmlBrief"
 import type { PrdState } from "../../types/content"
 import { saveTicket } from "../screens/app/TicketsScreen"
 import { IconCheck, IconClose } from "./app-icons"
@@ -18,6 +19,8 @@ function hasTicketConnector(connections: ConnectionSummary[]): boolean {
 
 function prdDescription(prd: PrdState | null): string {
   if (!prd) return ""
+  // v3 HTML PRD: no parsed sections — derive the description from the page text.
+  if (prd.html) return htmlPrdToPlainText(prd.html).slice(0, 800)
   const lines: string[] = []
   for (const sec of prd.sections) {
     if (sec.type === "h2") lines.push(`\n${sec.text}`)

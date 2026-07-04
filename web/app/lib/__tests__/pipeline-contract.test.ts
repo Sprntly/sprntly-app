@@ -38,12 +38,10 @@ import type { PrdSection } from "../../types/content"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const BACKEND_DATA = join(HERE, "..", "..", "..", "..", "backend", "data")
-const PRD_SKILL_TEMPLATE = join(
-  HERE, "..", "..", "..", "..",
-  "backend", "skills", "prd-author", "templates", "prd-template.md",
-)
 // The ACTUAL live template the PRD runner injects (load_prd_template()) — lean
-// markdown, no `:::` blocks. This is what new PRDs are shaped by.
+// markdown, no `:::` blocks. This is what new PRDs are shaped by. (The
+// prd-author skill's own bundled Part A template is now a styled HTML page, not
+// markdown — its shape is guarded backend-side in test_pipeline_contract.py.)
 const PRD_LIVE_TEMPLATE = join(BACKEND_DATA, "sprntly_prd_template.md")
 
 const read = (p: string) => readFileSync(p, "utf-8")
@@ -121,7 +119,6 @@ describe("evidence pipeline contract (backend template ↔ evidence-adapter)", (
 
 describe("PRD pipeline contract (backend ↔ prd-adapter)", () => {
   const sample = read(join(BACKEND_DATA, "sprntly_prd_sample.md"))
-  const skillTemplate = read(PRD_SKILL_TEMPLATE)
 
   it("every :::block the canonical PRD sample emits is one the adapter handles", () => {
     const unknown = blockOpeners(sample).filter((b) => !PRD_KNOWN_BLOCKS.includes(b))
@@ -139,21 +136,6 @@ describe("PRD pipeline contract (backend ↔ prd-adapter)", () => {
     ]) {
       expect(types.has(t as PrdSection["type"]), `missing ${t}`).toBe(true)
     }
-  })
-
-  it("renders the LIVE plain-markdown PRD (the prd-author skill template) without degrading", () => {
-    // The live runner's Part A is this skill template's plain `##` structure —
-    // the adapter must turn it into a non-empty, readable section list (headings,
-    // tables, lists, paragraphs) and never throw or emit a parse-failure block.
-    const out = markdownToPrdState(skillTemplate)
-    expect(fallbackSections(out.sections)).toEqual([])
-    expect(out.sections.length).toBeGreaterThan(0)
-    expect(out.title.length).toBeGreaterThan(0)
-    // The 2-part method headings survive into the rendered section stream.
-    const headings = out.sections
-      .filter((s): s is Extract<PrdSection, { type: "h2" }> => s.type === "h2")
-      .map((s) => s.text)
-    expect(headings.some((h) => /Problem/i.test(h))).toBe(true)
   })
 
   it("renders the LIVE lean template (data/sprntly_prd_template.md) as plain markdown", () => {

@@ -233,7 +233,7 @@ def test_generate_happy_path_returns_generating_status(
     assert "prd_id" in body
     assert body["status"] in ("generating", "ready")
     assert body["title"] == "Insight A — number leads with $1M"
-    assert body["variant"] == "v2"
+    assert body["variant"] == "v3"
 
 
 def test_generate_returns_existing_prd_when_not_forced(
@@ -244,7 +244,7 @@ def test_generate_returns_existing_prd_when_not_forced(
     brief_id = _save_brief_with_insights(db_mod, dataset="acme")
     existing_id = db_mod.start_prd(
         brief_id=brief_id, insight_index=0, title="t",
-        template_version=1, variant="v2",
+        template_version=1, variant="v3",
     )
     db_mod.complete_prd(existing_id, title="t", md="# Already here")
 
@@ -274,7 +274,7 @@ def test_generate_does_not_dedupe_against_v1_row(tenant_client, isolated_setting
     assert resp.status_code == 200
     body = resp.json()
     assert body["prd_id"] != v1_id
-    assert body["variant"] == "v2"
+    assert body["variant"] == "v3"
 
 
 def test_generate_via_prd_author_skill_through_canonical_path(
@@ -330,7 +330,7 @@ def test_generate_via_prd_author_skill_through_canonical_path(
     assert "implementation-spec" not in skills_seen
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
-    assert row["variant"] == "v2"
+    assert row["variant"] == "v3"
     assert "Part A — Product Requirements Document" in row["payload_md"]
     assert (row["llm_part"] or "") == ""
 

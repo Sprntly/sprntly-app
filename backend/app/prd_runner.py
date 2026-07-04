@@ -41,9 +41,10 @@ import uuid
 
 from app.company_template import render_templates_for_prompt
 from app.config import settings
-from app.corpus import load_corpus, load_prd_template
+from app.corpus import load_corpus
 from app.db import complete_prd, get_brief_by_id
 from app.db.companies import company_id_for_slug
+from app.db.evidences import find_existing_evidence
 from app.db.prds import (
     fail_prd,
     find_existing_prd,
@@ -56,113 +57,137 @@ from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.retrieval import insight_evidence_trail, render_evidence_trail_section
-from app.prompts import VOICE_GUARD
+from app.llm import strip_code_fence
+from app.prompts import EVIDENCE_VARIANT, PRD_VARIANT, VOICE_GUARD
+from app.skills.loader import get_skill
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "prd-author-v3"
+# Part A is now an HTML page (prd-author v4.2), so the byline / evidence-page
+# link / visual system all live in the prompt below. Bumped v3 → v4.
+PROMPT_VERSION = "prd-author-v4"
 _SKILL = "prd-author"
 # The machine-readable Implementation Spec (Part B) is generated on demand by the
 # dedicated `implementation-spec` skill, fed the FINISHED human PRD (Part A) — its
-# method (EARS requirements, design/contracts, dependency-ordered tasks,
-# acceptance tests, DoD, independent verification) consumes the whole human PRD.
+# method (B0–B9: derivation header, EARS requirements traced to Part A IDs,
+# contracts, dependency-ordered tasks, acceptance tests + DoD, independent
+# verification) consumes the whole human PRD.
 _SKILL_B = "implementation-spec"
-PROMPT_VERSION_B = "prd-impl-spec-v1"
+PROMPT_VERSION_B = "prd-impl-spec-v2"
 _AGENT = "prd"
-# Storage variant for new PRD rows — shared by the on-demand route
-# (routes/prd.py) and pre-warming below, so dedupe matches across both paths.
-PRD_VARIANT = "v2"
+# PRD_VARIANT ("v3", the HTML PRD page) is imported from app.prompts above and
+# re-exported here so routes/prd.py and multi_agent keep importing it from here.
+# Base URL for the single per-PRD "View evidence page in Sprntly" link the
+# prd-author skill renders in the Evidence header.
+_EVIDENCE_PAGE_BASE = "https://app.sprntly.ai/evidence"
+# Byline fallback when the generating identity is unavailable (skill rule).
+_AUTHOR_FALLBACK = "[NEED: author]"
 
-# Agent-specific framing for the human PRD. The prd-author METHOD is supplied by
-# the bound skill; this system prompt states the agent's job + grounding rules,
-# and the _PART_A_DIRECTIVE steers the output to lean Markdown per the template.
-# The Implementation Spec is a SEPARATE, on-demand call bound to the
-# `implementation-spec` skill with its own _SYSTEM_B (below).
+# Agent-specific framing for the human PRD (Part A). The prd-author v4.2 METHOD
+# is supplied by the bound skill; this system prompt states the agent's job +
+# grounding rules, and the _PART_A_DIRECTIVE steers the output to a self-contained
+# HTML page per the skill's visual system (same pattern as the evidence HTML
+# brief). The Implementation Spec (Part B) is a SEPARATE, on-demand call bound to
+# the `implementation-spec` skill with its own _SYSTEM_B (below).
 _SYSTEM = """\
-You are Sprntly's PRD agent. Following the METHOD above, turn the supplied \
-brief insight into a lean, human-readable Product Requirements Document for \
-stakeholder alignment and decisions: problem & evidence, goals & guardrail \
-metrics, non-goals, users & scenarios, signal-linked requirements (with \
-inline `[edge case]` / `[failure]` tags on load-bearing branches), risks + the \
-single riskiest assumption, open questions, rollout & measurement, and a \
-testable done-when.
+You are Sprntly's PRD Page generator, running the **prd-author** skill's METHOD \
+(prepended above). Turn the supplied brief insight into Part A — a \
+decision-ready, human-readable Product Requirements Document for stakeholder \
+alignment — in the skill's normative section order: Context, Problem, Evidence, \
+Users, Goal, Hypothesis, Requirements, User input needed, Appendix. Tag every \
+Requirements row Happy path / Edge case / Failure so the downstream \
+Implementation Spec inherits the branches.
 
 Ground every numeric claim, mechanism, metric, and acceptance criterion in \
 the supplied insight and the evidence it was derived from — falsifiable by a \
 reader who can pull the same data. The evidence is the company's \
 connected-source signals (the same trail that backs the brief insight) when \
 present, else the company's source data. Cite signals by source_type (and \
-provenance where present). Never invent numbers, users, sources, business \
-rules, or contracts; label unknowns per the METHOD (`[ASSUMPTION]` / \
-`[ASSUMPTION → T0]` / `[ESCALATE]`) rather than guessing.
+provenance where present) with a type label per item, and render the single \
+`View evidence page in Sprntly ↗` link in the Evidence header. Never invent \
+numbers, users, sources, business rules, contracts, or the evidence-page URL; \
+label unknowns per the METHOD (`[NEED: …]` / `[ASSUMPTION]` / `[ESCALATE]`) \
+rather than guessing.
 
-Emit Markdown only — no commentary outside the document. Produce ONLY the \
-human-readable PRD; do NOT emit an Implementation Spec and do NOT emit a `---` \
-horizontal rule.""" + VOICE_GUARD
+OUTPUT FORMAT — follow the METHOD's visual specification EXACTLY. Emit ONE \
+self-contained HTML document: a `<meta charset>`, one inline `<style>` block \
+(copy the canonical design system verbatim from the TEMPLATE below, keeping the \
+`:root` tokens unchanged), then the editable `contenteditable` document page \
+with the VoidAI brand mark. No external CSS/JS, no markdown, no `:::` blocks, no \
+Implementation Spec, no commentary outside the document. Output the raw HTML \
+document ONLY — do NOT wrap it in a Markdown code fence; the first characters of \
+your response must be the HTML itself (e.g. `<!DOCTYPE html>`).""" + VOICE_GUARD
 
-# The human-PRD directive. Carries the insight + evidence + template and steers
-# the model to emit lean Markdown (headings, prose, bullets, and ONE requirements
-# table) per the template — no typed `:::` blocks. The frontend `prd-adapter`
-# renders this markdown directly (h2/p/ul/table + inline emphasis).
+# The Part A directive. Carries the byline author, the evidence-page link, the
+# insight + evidence, and the HTML TEMPLATE, and steers the model to fill the
+# template's {{placeholders}} into a finished HTML page. The frontend renders
+# this HTML in a sandboxed iframe (variant v3).
 _PART_A_DIRECTIVE = """\
-PART DIRECTIVE: Produce ONLY the human-readable Product Requirements Document, \
-as clean Markdown following the TEMPLATE below — its section order and \
-headings, kept lean. The METHOD above governs your REASONING and quality bar \
-(problem-first, no fabrication, signal-linked requirements, a primary metric \
-split from guardrails, exactly one riskiest assumption with a three-line \
-pre-mortem, a testable done-when); the TEMPLATE governs the OUTPUT STRUCTURE. \
-Render Requirements as the Markdown table the template shows \
-(ID | Requirement | Priority | Signal/Source | Acceptance), and tag \
-load-bearing branches inline with `[edge case]` / `[failure]` so the downstream \
-Implementation Spec inherits them. Fill every [bracketed] placeholder with \
-concrete, grounded content; never keep a bracketed example; flag a missing \
-number `[NEED: …]` rather than inventing it. Keep the body lean — push \
-operational detail (A/B mechanics, tech notes, competitor scans, detailed \
-rollout) to an Appendix. Do NOT include an Implementation Spec and do NOT emit \
-a `---` separator. Start at the document title."""
+PART DIRECTIVE: Produce ONLY Part A — the human PRD — as ONE self-contained HTML \
+page built from the TEMPLATE below (copy its `<style>` and skeleton verbatim, \
+keep the `:root` tokens). The METHOD governs your REASONING and quality bar \
+(cold-reader Context, signal-linked Evidence with type labels + verbatim quotes, \
+one primary metric split from guardrails with a projected-impact slot, a \
+Hypothesis before Requirements, exactly one riskiest assumption with a \
+three-line pre-mortem in the Appendix); the TEMPLATE governs the OUTPUT MARKUP. \
+Render the Requirements table with a color-coded Type pill per row \
+(Happy path / Edge case / Failure). Fill EVERY {{placeholder}} with concrete, \
+grounded content; never leave a {{placeholder}} or a bracketed example in place; \
+flag a missing number `[NEED: …]` rather than inventing it.
+
+BYLINE: render the author byline directly under the title as `{author}` — do \
+NOT invent or substitute a name. EVIDENCE LINK: set the single Evidence-header \
+link's href to `{evidence_page}` exactly; if that is empty, keep the link text \
+but note that items appear on the evidence page when the signal lands. Do NOT \
+include an Implementation Spec. Start your output at `<!DOCTYPE html>`."""
 
 _USER_TEMPLATE = """\
 {part_directive}
 
-Write the human-readable PRD for the following brief insight.
+Write Part A (the human PRD HTML page) for the following brief insight.
 
 BRIEF INSIGHT (the problem to turn into a PRD):
 {insight_json}
 
 {evidence}
-{exemplars}TEMPLATE (the PRD structure — produce it as your output):
+{exemplars}TEMPLATE (the HTML skeleton + design system — produce a filled copy as your output):
 {template}
 """
 
-# The Implementation Spec is generated by the `implementation-spec` skill (its
-# SKILL.md is the METHOD layer). It is fed the FINISHED human PRD — the skill
-# consumes the PRD's tagged requirements (untagged = happy path; `[edge case]`
-# / `[failure]` inline) and turns them into the LLM-readable spec.
+# The Implementation Spec (Part B) is generated by the `implementation-spec`
+# skill (its SKILL.md is the METHOD layer, B0–B9). It is fed the FINISHED Part A
+# human PRD — which is now an HTML page — and consumes its typed Requirements
+# (Happy path / Edge case / Failure) to produce the LLM-readable spec.
 _SYSTEM_B = """\
 You are Sprntly's Implementation Spec agent. Following the METHOD above \
-(the implementation-spec skill), turn the supplied human PRD into the \
-LLM-readable Implementation Spec a coding agent can build and test against \
-without ambiguity: EARS requirements traced to the PRD, design & contracts, \
-dependency-ordered tasks, acceptance tests, a Definition of Done, and the \
-independent verification report.
+(the implementation-spec skill), turn the supplied Part A human PRD into Part B \
+— the LLM-readable Implementation Spec a coding agent can build and test against \
+without ambiguity, in the skill's B0–B9 structure: a B0 derivation header naming \
+the source Part A (its title + author byline), B1 context, B2 stakes gate, B3 \
+EARS requirements each traced to a Part A requirement ID, B4 interface \
+contracts, B5 escalations, B6 cross-cutting checklist, B7 dependency-ordered \
+tasks (T0 = research gate), B8 acceptance tests + Definition of Done (merged), \
+and B9 independent verification.
 
-Consume ONLY the supplied PRD and evidence. Every requirement traces to a PRD \
-goal; every contract binds verbatim to the PRD or evidence. Never invent a \
-requirement, rule, or contract — split unknowns into research-resolvable \
-(`[ASSUMPTION → T0]`) vs must-escalate (`[ESCALATE]`) per the METHOD. Inherit \
-the PRD's load-bearing tags: untagged requirements are the happy path, \
-`[edge case]` and `[failure]` requirements get their mandatory branches.
+The Part A PRD is an HTML document — read its content, ignore the markup/CSS. \
+Consume ONLY the supplied PRD and evidence. Every B3 requirement traces to a \
+Part A requirement ID; every contract binds verbatim to the PRD or evidence. \
+Never invent a requirement, rule, or contract — split unknowns into \
+research-resolvable (`[ASSUMPTION → T0]`) vs must-escalate (`[ESCALATE]`) per \
+the METHOD. Inherit the Part A Requirement-table tags: Happy path rows get the \
+happy path, Edge case and Failure rows get their mandatory branches.
 
 Emit Markdown only — no commentary outside the document, and do NOT restate \
-the human PRD or emit a `---` separator. Start at the Implementation Spec \
-heading.""" + VOICE_GUARD
+the human PRD or emit an HTML document. Start at the `# Implementation Spec` \
+heading (B0).""" + VOICE_GUARD
 
 _USER_TEMPLATE_B = """\
-Produce the LLM-readable Implementation Spec for the human PRD below. \
-Derive every requirement, contract, task, and acceptance test from this PRD \
-and its evidence — trace each back to the PRD it implements.
+Produce the LLM-readable Implementation Spec (Part B) for the Part A human PRD \
+below. Derive every requirement, contract, task, and acceptance test from this \
+PRD and its evidence — trace each B3 requirement back to the Part A requirement \
+ID it implements. Open with the B0 derivation header naming this Part A.
 
-HUMAN PRD (the spec to implement):
+PART A — HUMAN PRD (HTML; read the content, build the spec from it):
 {human_prd}
 
 {evidence}
@@ -276,13 +301,18 @@ def _build_context(
         evidence, trail = _resolve_grounding(dataset, brief, insight_index, insight)
     else:
         evidence, trail = _resolve_grounding(dataset, brief, insight_index)
-    # The human PRD is generated against the typed-`:::`-block contract
-    # (data/sprntly_prd_template.md) that the frontend `prd-adapter` parses into
-    # first-class components. Without these blocks the adapter degrades to plain
-    # markdown — the "PRD looks like a raw .md" failure. (The Implementation Spec
-    # does NOT use this template.)
-    template = load_prd_template()
+    # Part A is generated as a self-contained HTML page in the prd-author visual
+    # system. The template is the skill's own HTML skeleton (with {{placeholders}}
+    # + the canonical `<style>`) — injected verbatim so the model copies the design
+    # system rather than reproducing ~90 lines of CSS from prose. (The
+    # Implementation Spec does NOT use this template.)
+    template = _load_part_a_template()
     title = insight.get("title") or f"Insight #{insight_index + 1}"
+    # Single per-PRD evidence-page link the skill renders in the Evidence header:
+    # the evidence page for THIS (brief, insight), when one already exists.
+    # Best-effort — an empty URL tells the model to use the "appears when the
+    # signal lands" note instead of fabricating a link.
+    evidence_page_url = _resolve_evidence_page_url(brief_id, insight_index)
     # FORMAT/STYLE EXEMPLARS — the company's uploaded gold-standard PRD examples
     # ("what good looks like"). Additive context ONLY: folded into the prompt so
     # the model MATCHES the house structure & voice. No templates (or no company
@@ -306,7 +336,35 @@ def _build_context(
         "exemplars": exemplars,
         "insight": insight,
         "title": title,
+        "evidence_page_url": evidence_page_url,
     }
+
+
+def _load_part_a_template() -> str:
+    """The prd-author skill's Part A HTML skeleton (with {{placeholders}} + the
+    canonical inline `<style>`). Injected verbatim into the prompt so the model
+    fills a copy of the exact visual system."""
+    return get_skill(_SKILL).templates["prd-template.html"]
+
+
+def _resolve_evidence_page_url(brief_id: int, insight_index: int) -> str:
+    """Best-effort URL of the Sprntly evidence page for this (brief, insight).
+
+    Returns the app.sprntly.ai evidence link when an evidence row already exists
+    for this insight, else "" (the prompt then uses the "appears when the signal
+    lands" note rather than a fabricated URL). Never raises — a missing evidence
+    page must not fail PRD generation."""
+    try:
+        row = find_existing_evidence(brief_id, insight_index, variant=EVIDENCE_VARIANT)
+    except Exception:  # noqa: BLE001 — evidence-link lookup is best-effort
+        logger.exception(
+            "PRD evidence-page lookup failed brief_id=%s insight_index=%s",
+            brief_id, insight_index,
+        )
+        return ""
+    if not row:
+        return ""
+    return f"{_EVIDENCE_PAGE_BASE}/{row['id']}"
 
 
 def _exemplars_block(ctx: dict) -> str:
@@ -315,15 +373,21 @@ def _exemplars_block(ctx: dict) -> str:
     return f"\n{exemplars}\n" if exemplars else ""
 
 
-def _call_part_a(ctx: dict, background: bool = False):
-    """Generate the human-readable PRD via the `prd-author` skill.
+def _call_part_a(ctx: dict, author: str | None = None, background: bool = False):
+    """Generate the human-readable PRD (Part A) as an HTML page via the
+    `prd-author` skill.
 
-    Steers the model to the typed-`:::`-block human PRD via _PART_A_DIRECTIVE and
+    Steers the model to the HTML visual-system page via _PART_A_DIRECTIVE and
     keeps `skill=_SKILL` so the METHOD + its `+prd-author@<hash>` version pin are
-    preserved.
+    preserved. `author` fills the byline (the logged-in user's name); when
+    unavailable it renders `[NEED: author]` per the skill rule.
     """
+    directive = _PART_A_DIRECTIVE.format(
+        author=author or _AUTHOR_FALLBACK,
+        evidence_page=ctx.get("evidence_page_url") or "",
+    )
     user = _USER_TEMPLATE.format(
-        part_directive=_PART_A_DIRECTIVE,
+        part_directive=directive,
         insight_json=json.dumps(ctx["insight"], indent=2),
         evidence=ctx["evidence"],
         exemplars=_exemplars_block(ctx),
@@ -371,8 +435,11 @@ def _finalize_part_a(
     separately, on demand). `result_a.prompt_version` carries the
     `+prd-author@<hash>` suffix the gateway appended; kg_refs pins the exact KG
     nodes this PRD was grounded on (empty on the corpus-fallback path).
+
+    Part A is a raw HTML document — any stray ```html code fence is stripped so
+    the stored `payload_md` is a clean document the frontend renders directly.
     """
-    human_part = str(result_a.output).strip()
+    human_part = strip_code_fence(str(result_a.output).strip())
     title = ctx["title"]
     complete_prd(prd_id=prd_id, title=title, md=human_part)
 
@@ -402,19 +469,20 @@ def _finalize_part_a(
 
 async def _generate_human_prd(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
-    insight_override: dict | None = None,
+    insight_override: dict | None = None, author: str | None = None,
 ) -> None:
     """Build context, generate the human PRD (Part A only), persist + log.
 
     Runs as clean async (the event loop is never blocked — the synchronous
     `llm_call` runs in a worker thread). The Implementation Spec is NOT produced
     here; it is generated on demand by `ensure_impl_spec`. `insight_override`
-    routes the backlog PRD path (the theme is not in brief.insights).
+    routes the backlog PRD path (the theme is not in brief.insights). `author`
+    fills the Part A byline (the logged-in user); None → `[NEED: author]`.
     """
     ctx = await asyncio.to_thread(
         _build_context, brief_id, insight_index, insight_override
     )
-    result_a = await asyncio.to_thread(_call_part_a, ctx, background)
+    result_a = await asyncio.to_thread(_call_part_a, ctx, author, background)
     await asyncio.to_thread(
         _finalize_part_a, prd_id, brief_id, insight_index, ctx, result_a
     )
@@ -430,7 +498,7 @@ def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
 
 async def generate_prd(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
-    insight_override: dict | None = None,
+    insight_override: dict | None = None, author: str | None = None,
 ) -> None:
     """Run the human-PRD generation; update DB with result.
 
@@ -441,7 +509,9 @@ async def generate_prd(
     (`ensure_impl_spec`), so every generation path is human-PRD-only.
 
     `insight_override` supplies the insight directly (the backlog PRD path):
-    insight_index is then a storage sentinel, not a brief index.
+    insight_index is then a storage sentinel, not a brief index. `author` fills
+    the Part A byline (the logged-in user's name); interactive routes pass it,
+    warm/multi-agent paths leave it None → the byline renders `[NEED: author]`.
     """
     logger.info(
         "PRD generation starting prd_id=%s brief_id=%s insight_index=%s "
@@ -453,7 +523,7 @@ async def generate_prd(
     )
     try:
         await _generate_human_prd(
-            prd_id, brief_id, insight_index, background, insight_override
+            prd_id, brief_id, insight_index, background, insight_override, author
         )
         logger.info("PRD generation succeeded prd_id=%s", prd_id)
     except Exception as exc:
