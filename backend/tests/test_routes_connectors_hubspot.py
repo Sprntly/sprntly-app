@@ -3,7 +3,9 @@
 `hubspot_oauth.py` dispatches on `settings.hubspot_oauth_version`
 (default "v3"). Public function signatures (authorize_url,
 exchange_code_for_token, fetch_token_info, etc.) are identical across
-versions — only the URLs and introspection response shape differ.
+versions — only the token URL and access-token TTL differ. Token identity
+for BOTH versions is fetched via GET /oauth/v1/access-tokens/{token}
+(the /oauth/v3/introspect endpoint does not exist / 404s).
 
 All outbound HTTP is mocked. Routes are multitenant — every authenticated
 request passes ?company_id=...; the membership dep + signed state
@@ -138,30 +140,51 @@ def test_v3_exchange_code_for_token_posts_to_hubspot_v3_endpoint(hubspot_env_v3)
     assert data["client_secret"] == "test-hubspot-client-secret"
 
 
-def test_v3_fetch_token_info_uses_introspect_endpoint(hubspot_env_v3):
-    """v3 follows RFC 7662 — POST /oauth/v3/introspect with token in body."""
+def test_v3_fetch_token_info_uses_v1_access_tokens_endpoint(hubspot_env_v3):
+    """Regression: the RFC-7662 /oauth/v3/introspect endpoint does not exist
+    (404s), so v3 tokens are introspected via GET /oauth/v1/access-tokens/
+    {token} — the same endpoint as v1. Previously fetch_token_info POSTed to
+    /v3/introspect; the 404 silently emptied hub_id/hub_domain/scopes, which
+    made the Test-connection route report "rejected the stored credential"
+    and dropped the account label, even for a fully valid token.
+    """
     from app.connectors import hubspot_oauth
 
     mock_resp = MagicMock()
     mock_resp.ok = True
     mock_resp.json.return_value = {
-        "active": True,
-        "username": "sarah@meridian.health",
+        "user": "sarah@meridian.health",
         "hub_id": 12345678,
         "hub_domain": "meridian.hubspotcrm.com",
-        "scope": "oauth crm.objects.contacts.read",
+        "scopes": ["oauth", "crm.objects.contacts.read"],
         "user_id": 99,
     }
-    with patch("app.connectors.hubspot_oauth.requests.post", return_value=mock_resp) as mock_post:
+    with patch("app.connectors.hubspot_oauth.requests.get", return_value=mock_resp) as mock_get:
         info = hubspot_oauth.fetch_token_info("hub-v3-access")
 
     assert info["user"] == "sarah@meridian.health"
     assert info["hub_id"] == 12345678
     assert info["scopes"] == ["oauth", "crm.objects.contacts.read"]
 
-    call_args = mock_post.call_args
-    assert call_args.args[0] == "https://api.hubspot.com/oauth/v3/introspect"
-    assert call_args.kwargs["data"] == {"token": "hub-v3-access"}
+    call_args = mock_get.call_args
+    assert call_args.args[0] == (
+        "https://api.hubapi.com/oauth/v1/access-tokens/hub-v3-access"
+    )
+    # Must NOT hit the non-existent introspect endpoint.
+    assert "introspect" not in call_args.args[0]
+
+
+def test_fetch_token_info_returns_empty_dict_on_non_2xx(hubspot_env_v3):
+    """A non-2xx (e.g. the historical 404) yields {} so callers fall back to
+    other label sources rather than crashing."""
+    from app.connectors import hubspot_oauth
+
+    mock_resp = MagicMock()
+    mock_resp.ok = False
+    mock_resp.status_code = 404
+    mock_resp.text = "Not Found"
+    with patch("app.connectors.hubspot_oauth.requests.get", return_value=mock_resp):
+        assert hubspot_oauth.fetch_token_info("any-token") == {}
 
 
 def test_v3_start_oauth_returns_hubspot_url(hubspot_env_v3, monkeypatch):
@@ -189,24 +212,20 @@ def test_v3_callback_stores_connection_with_normalised_label(hubspot_env_v3, mon
         "expires_in": 1800,
         "token_type": "bearer",
     }
-    mock_introspect = MagicMock()
-    mock_introspect.ok = True
-    mock_introspect.json.return_value = {
-        "active": True,
-        "username": "sarah@meridian.health",
+    # Token identity comes from GET /oauth/v1/access-tokens/{token} (native shape).
+    mock_info = MagicMock()
+    mock_info.ok = True
+    mock_info.json.return_value = {
+        "user": "sarah@meridian.health",
         "hub_id": 99,
         "hub_domain": "meridian.hubspotcrm.com",
-        "scope": "oauth",
+        "scopes": ["oauth"],
     }
 
-    def post_side_effect(url, *args, **kwargs):
-        if "/v3/token" in url:
-            return mock_token
-        if "/v3/introspect" in url:
-            return mock_introspect
-        raise AssertionError(f"Unexpected POST to {url}")
-
-    with patch("app.connectors.hubspot_oauth.requests.post", side_effect=post_side_effect):
+    with (
+        patch("app.connectors.hubspot_oauth.requests.post", return_value=mock_token),
+        patch("app.connectors.hubspot_oauth.requests.get", return_value=mock_info),
+    ):
         r = ctx.client.get(
             "/v1/connectors/hubspot/callback",
             params={"code": "auth-code", "state": state},
@@ -356,14 +375,14 @@ def test_delete_hubspot_disconnects(hubspot_env_v3, monkeypatch):
     mock_token.json.return_value = {
         "access_token": "x", "refresh_token": "y", "expires_in": 1, "token_type": "bearer",
     }
-    mock_introspect = MagicMock()
-    mock_introspect.ok = True
-    mock_introspect.json.return_value = {"active": True, "username": "x@y.com", "hub_id": 1}
+    mock_info = MagicMock()
+    mock_info.ok = True
+    mock_info.json.return_value = {"user": "x@y.com", "hub_id": 1, "scopes": []}
 
-    def post_side_effect(url, *args, **kwargs):
-        return mock_introspect if "/introspect" in url else mock_token
-
-    with patch("app.connectors.hubspot_oauth.requests.post", side_effect=post_side_effect):
+    with (
+        patch("app.connectors.hubspot_oauth.requests.post", return_value=mock_token),
+        patch("app.connectors.hubspot_oauth.requests.get", return_value=mock_info),
+    ):
         ctx.client.get(
             "/v1/connectors/hubspot/callback",
             params={"code": "x", "state": state},
