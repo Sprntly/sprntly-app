@@ -35,6 +35,16 @@ import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
 
+/**
+ * Provider page (keyed by connector id) where the user can view and copy
+ * their API key. Rendered as a link in the api-key blurb so they don't have
+ * to hunt through the provider's menus. Omit a connector to fall back to the
+ * plain "paste yours below" copy.
+ */
+const APIKEY_PAGE_URL: Record<string, string> = {
+  fireflies: "https://app.fireflies.ai/integrations/custom/fireflies",
+}
+
 // ─────────────────────────── Pure View ───────────────────────────
 
 export type ConnectorConnectModalViewProps = {
@@ -169,7 +179,22 @@ export function ConnectorConnectModalView({
             /* ─── Pre-connect API-key form ─── */
             <>
               <p className="conn-modal-blurb">
-                {item.name} uses an API key. Paste yours below.
+                {item.name} uses an API key.{" "}
+                {APIKEY_PAGE_URL[item.id] ? (
+                  <>
+                    Open your{" "}
+                    <a
+                      href={APIKEY_PAGE_URL[item.id]}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {item.name} API settings
+                    </a>
+                    {" "}and paste your key below.
+                  </>
+                ) : (
+                  "Paste yours below."
+                )}
               </p>
               <label className="field-label" htmlFor="conn-modal-apikey">
                 API key

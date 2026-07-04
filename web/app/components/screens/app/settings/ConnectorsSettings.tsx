@@ -18,7 +18,7 @@
  */
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useContent } from "../../../../context/ContentContext"
 import { useNavigation } from "../../../../context/NavigationContext"
@@ -59,13 +59,27 @@ import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnector
 import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
 
 /**
- * Per-connector help text shown in the API-key modal. Keep it short and
- * point at the provider's own docs page where the key lives. Falls back
- * to a generic "look in your account settings" if not listed.
+ * Provider page (keyed by connector id) where the user can view and copy
+ * their API key. Rather than telling them to hunt through menus, the modal
+ * links straight here. Omit a connector to render no help link.
  */
-const APIKEY_HELP: Record<string, string> = {
-  fireflies:
-    "Get your key from fireflies.ai → Settings → Integrations → Fireflies API.",
+const APIKEY_PAGE_URL: Record<string, string> = {
+  fireflies: "https://app.fireflies.ai/integrations/custom/fireflies",
+}
+
+/** Builds the "open your … API settings" help copy for the api-key modal. */
+export function apiKeyHelp(connectorId: string, connectorName: string): ReactNode {
+  const url = APIKEY_PAGE_URL[connectorId]
+  if (!url) return null
+  return (
+    <>
+      Open your{" "}
+      <a href={url} target="_blank" rel="noopener noreferrer">
+        {connectorName} API settings
+      </a>
+      {" "}and copy your API key.
+    </>
+  )
 }
 
 /**
@@ -592,7 +606,7 @@ export function ConnectorsSettings() {
         connectorName={apiKeyConnectingItem?.name ?? ""}
         helpText={
           apiKeyConnectingItem
-            ? APIKEY_HELP[apiKeyConnectingItem.id] ?? null
+            ? apiKeyHelp(apiKeyConnectingItem.id, apiKeyConnectingItem.name)
             : null
         }
         onConnect={handleApiKeyConnect}
