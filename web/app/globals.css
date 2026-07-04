@@ -3881,6 +3881,17 @@
     flex: 1 1 auto;
   }
 
+  /* Vertical stack for modals whose header carries a badge + title + sub
+     (e.g. FeedbackModal). flex-start keeps the pill badge from stretching
+     to the column's full width. */
+  .modal-head-text {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
   /* Connector brand-logo tile shown next to the title in the connect modal. */
   .conn-modal-logo {
     flex: 0 0 auto;
@@ -12993,6 +13004,113 @@
   .conn-modal-prompt-actions {
     display: flex;
     gap: 8px;
+  }
+
+  /* ─── SlackChannelPicker (connected-state config slot) ─── */
+  .conn-slack-setup {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .conn-slack-saved {
+    font-size: 13px;
+    color: var(--ink-2);
+    padding: 9px 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+
+  .conn-slack-saved strong {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  /* Reset the browser's default fieldset chrome — the radios are laid out
+     as our own selectable cards. */
+  .conn-slack-target {
+    border: 0;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .conn-slack-radio {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    color: var(--ink);
+    cursor: pointer;
+    padding: 11px 13px;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .conn-slack-radio:hover {
+    border-color: var(--ink-3);
+    background: var(--surface-2);
+  }
+
+  .conn-slack-radio:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .conn-slack-radio input {
+    accent-color: var(--accent);
+    margin: 0;
+    width: 16px;
+    height: 16px;
+  }
+
+  .conn-slack-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--ink-2);
+    margin: 2px 0 -6px;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+  }
+
+  .conn-slack-select {
+    width: 100%;
+    padding: 10px 12px;
+    border-radius: 9px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface-2);
+    color: var(--ink);
+    font-size: 14px;
+  }
+
+  .conn-slack-select:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .conn-slack-hint,
+  .conn-slack-empty {
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.5;
+    margin: 0;
+  }
+
+  .conn-slack-error {
+    font-size: 13px;
+    color: #c0392b;
+    margin: 0;
+  }
+
+  .conn-slack-actions {
+    display: flex;
+    justify-content: flex-end;
   }
 
   /* ─── Configure drawer — Test connection block (commit K) ─── */

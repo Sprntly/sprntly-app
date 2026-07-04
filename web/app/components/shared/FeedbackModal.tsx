@@ -72,6 +72,17 @@ export function FeedbackModal({
     >
       <div className="modal feedback-modal">
         <div className="modal-head">
+          {/* Badge + title + sub stack vertically in their own column; the
+              close button sits opposite them. Without the wrapper, .modal-head's
+              flex-row would lay all four children side-by-side and collide. */}
+          <div className="modal-head-text">
+            <div className="modal-badge">Feedback</div>
+            <h2 className="modal-title">Send feedback</h2>
+            <p className="modal-sub">
+              Request a new connector, suggest a feature, or report a bug. It
+              goes straight to the team.
+            </p>
+          </div>
           <button
             type="button"
             className="modal-close"
@@ -80,12 +91,6 @@ export function FeedbackModal({
           >
             <IconClose size={16} />
           </button>
-          <div className="modal-badge">Feedback</div>
-          <h2 className="modal-title">Send feedback</h2>
-          <p className="modal-sub">
-            Request a new connector, suggest a feature, or report a bug. It goes
-            straight to the team.
-          </p>
         </div>
 
         {done ? (
