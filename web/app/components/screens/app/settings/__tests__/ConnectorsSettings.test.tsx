@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest"
 import {
   ADMIN_GATE_CONNECT_MESSAGE,
   ConnectorsSettingsView,
+  apiKeyHelp,
   connectStartErrorMessage,
   isAdminGateError,
 } from "../ConnectorsSettings"
@@ -130,6 +131,21 @@ describe("ConnectorsSettingsView — flat list (no category grouping)", () => {
     expect(html).not.toContain("powers On-Call Agent")
     expect(html).not.toContain("Project Management")
     expect(html).not.toContain("Customer Voice")
+  })
+})
+
+describe("apiKeyHelp — api-key modal help copy", () => {
+  it("links Fireflies straight to its API-key page so the user can copy the key", () => {
+    const html = renderToStaticMarkup(<>{apiKeyHelp("fireflies", "Fireflies")}</>)
+    expect(html).toContain(
+      'href="https://app.fireflies.ai/integrations/custom/fireflies"',
+    )
+    expect(html).toContain("Fireflies API settings")
+    expect(html).toMatch(/rel="noopener noreferrer"/)
+  })
+
+  it("returns null for a connector with no known key page", () => {
+    expect(apiKeyHelp("unknown", "Unknown")).toBeNull()
   })
 })
 

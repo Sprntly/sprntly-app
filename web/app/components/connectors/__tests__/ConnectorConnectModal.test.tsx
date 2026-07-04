@@ -122,6 +122,16 @@ describe("ConnectorConnectModalView — pre-connect API-key mode (Fireflies)", (
     expect(html).not.toContain("Connect with Fireflies")
   })
 
+  it("links to the Fireflies API-key page so the user can copy their key", () => {
+    const html = render({ item: FIREFLIES_ITEM, authType: "apikey" })
+    expect(html).toContain(
+      'href="https://app.fireflies.ai/integrations/custom/fireflies"',
+    )
+    expect(html).toContain("Fireflies API settings")
+    // Opens the provider in a new tab, safely.
+    expect(html).toMatch(/rel="noopener noreferrer"/)
+  })
+
   it("disables Submit until the api key is non-empty", () => {
     const html = render({
       item: FIREFLIES_ITEM,
