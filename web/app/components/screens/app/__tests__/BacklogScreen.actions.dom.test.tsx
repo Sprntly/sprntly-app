@@ -162,4 +162,15 @@ describe("BacklogScreen — wired actions", () => {
 
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2))
   })
+
+  it("renders no Voice buttons (removed — voice input was never wired)", async () => {
+    await renderWith([item({ id: "a", theme_id: "t4", title: "Existing", rank: 4 })])
+    // Chat-bar Voice button was a "coming soon" no-op.
+    expect(screen.queryByText("Voice")).toBeNull()
+
+    // Add-idea card Voice button had no handler at all.
+    await act(async () => { fireEvent.click(screen.getByText("+ Add idea")) })
+    await screen.findByPlaceholderText(/Title, then a line on the problem/)
+    expect(screen.queryByText("Voice")).toBeNull()
+  })
 })
