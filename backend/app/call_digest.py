@@ -154,6 +154,15 @@ def _load_api_key(company_id: str) -> str | None:
     return token_json.get("api_key") or None
 
 
+def has_call_source(company_id: str) -> bool:
+    """True when a live call source (Fireflies) is connected and its credential
+    is readable — i.e. build_corpus can actually fetch calls. Lets the router
+    divert a bare 'voice of customer' request to the live digest only when it
+    will find data; with none connected, the caller falls through to the skill's
+    what-to-connect guidance instead."""
+    return _load_api_key(company_id) is not None
+
+
 def _select_within_budget(calls: list[CallTranscript]) -> list[CallTranscript]:
     """Keep the most recent calls (input is newest-first) that fit the char
     budget, so a busy month can't blow the context. The first call is always

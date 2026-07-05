@@ -28,7 +28,7 @@ from app.ask_runner import _ASK_RESPONSE_SCHEMA, compose_ask_answer
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
 from app.prompts import ASK_SYSTEM
-from app.skill_router import detect_intent, is_call_digest
+from app.skill_router import detect_intent, is_call_digest, is_voc_report_request
 from app.skills.catalog import COST_GATED, NON_ROUTABLE, routable_manifest
 from app.skills.loader import get_skill, list_skills
 from app.skills.scripts import SCRIPT_TOOLS
@@ -331,6 +331,20 @@ def answer(
         return call_digest.answer(
             enterprise_id=enterprise_id, question=question, history=history
         )
+
+    # Bare "voice of customer" / "VoC report" asks carry no call-noun, so
+    # is_call_digest misses them — they'd fall to the corpus-less skill answer,
+    # which reports "no sources connected" even when Fireflies has calls. When a
+    # call source IS connected, run the same live digest so the natural phrasing
+    # yields a real report; when it isn't, fall through to the skill route so it
+    # can explain what to connect.
+    if not pinned_skill and is_voc_report_request(question):
+        from app import call_digest
+
+        if call_digest.has_call_source(enterprise_id):
+            return call_digest.answer(
+                enterprise_id=enterprise_id, question=question, history=history
+            )
 
     if pinned_skill and _routable(pinned_skill):
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)

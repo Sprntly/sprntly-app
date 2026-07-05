@@ -141,6 +141,20 @@ def is_call_digest(question: str) -> bool:
     return any(p.search(question) for p in _CALL_DIGEST_RULES)
 
 
+# Bare "voice of customer" / "VoC report" asks — no call-noun, so is_call_digest
+# misses them. qa_agent diverts these to the live call digest too, but only when
+# a call source is connected (else they fall to the skill's what-to-connect
+# guidance). Mirrors the router's VoC rule at line ~91.
+_VOC_REPORT_RULE = re.compile(r"\b(voice\s+of\s+customer|voc\s+report)\b", re.I)
+
+
+def is_voc_report_request(question: str) -> bool:
+    """True for a bare 'voice of customer' / 'VoC report' request. Distinct from
+    is_call_digest (which needs a call-noun); used by qa_agent to route these to
+    the live call digest when a call source is connected."""
+    return bool(_VOC_REPORT_RULE.search(question))
+
+
 def detect_intent(question: str) -> SkillMatch | None:
     """Match a user question to a skill via keyword rules.
 
