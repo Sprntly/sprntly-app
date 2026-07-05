@@ -168,6 +168,15 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   /** True while the sidebar is collapsed *by the content panel* (not the user),
    *  so it can be restored when the panel closes. Cleared on any manual toggle. */
   const autoCollapsedRef = useRef(false)
+  /** The route-change effect below closes the content panel on every pathname
+   *  change. `openPrdTab` routes to `/` for the sole purpose of OPENING the PRD
+   *  panel there — that one navigation must not trigger the close. This flag,
+   *  set by openPrdTab, tells the effect to skip the close for the imminent
+   *  arrival at `/`; it's consumed on the next real pathname change. */
+  const skipPanelCloseOnNavRef = useRef(false)
+  /** Previous pathname, so the route-change effect can tell a genuine navigation
+   *  from a no-op re-run and only act on real changes. */
+  const prevPathnameRef = useRef(pathname)
 
   useEffect(() => {
     try {
@@ -204,9 +213,19 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   }, [sidebarCollapsed])
 
   // The content panel (Evidence / PRD / Tickets) opens in-place without changing
-  // the route, so a route change always means the user navigated to another page
-  // — close the panel so it never lingers over the new screen.
+  // the route, so a route change normally means the user navigated to another
+  // page — close the panel so it never lingers over the new screen. The one
+  // exception is openPrdTab's own route to `/`: that navigation exists to OPEN
+  // the panel, so skip the close for it (else the close races the deferred open
+  // in ChatScreen and swallows it — Next updates usePathname inside a transition,
+  // so the close can land after the open). The flag is consumed on this change.
   useEffect(() => {
+    const prev = prevPathnameRef.current
+    if (prev === pathname) return // no real navigation — nothing to close
+    prevPathnameRef.current = pathname
+    const skip = skipPanelCloseOnNavRef.current && pathname === "/"
+    skipPanelCloseOnNavRef.current = false
+    if (skip) return
     setContentPanelTab(null)
   }, [pathname])
 
@@ -315,6 +334,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
 
   const openPrdTab = useCallback((request: PrdTabRequest) => {
     setPendingPrdTab(request)
+    // This navigation to `/` is *for* opening the PRD panel — tell the
+    // route-change effect not to close the panel when we land there.
+    skipPanelCloseOnNavRef.current = true
     // Route to the chat surface so ChatScreen mounts (from /brief, /backlog, …)
     // and its pending-PRD-tab effect consumes the request — spawning the tab and
     // opening the panel. Harmless when already on `/` (the state change alone
