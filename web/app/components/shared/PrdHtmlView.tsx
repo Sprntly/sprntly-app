@@ -131,7 +131,7 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
         borderRadius: 10,
         display: "block",
         colorScheme: "light",
-        background: "#E9E7E2",
+        background: "#FFFFFF",
       }}
     />
   )
