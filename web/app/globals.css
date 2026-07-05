@@ -15665,6 +15665,13 @@
   }
 
   /* ── Project title + sub ── */
+  /* Allow the 1fr project track to shrink so long text ellipsizes
+     instead of forcing the grid wider than its container. */
+  .bl-cell--project,
+  .bl-cell--initiative {
+    min-width: 0;
+  }
+
   .bl-project-title {
     font-size: 13px;
     font-weight: 600;
