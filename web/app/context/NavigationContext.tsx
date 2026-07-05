@@ -13,6 +13,7 @@ import {
 import { usePathname, useRouter } from "next/navigation"
 import type { ScreenId } from "../types"
 import type { AskResponse } from "../lib/api"
+import type { PrdState } from "../types/content"
 import { pathForScreen, screenIdFromPathname } from "../lib/routes"
 
 /** Top search hands off `/v1/ask` results to Ask Sprntly (in-page thread) without a second request. */
@@ -23,6 +24,30 @@ export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: 
  *  chat tab. BriefChat fills this; ChatScreen consumes it once, spawning a fresh
  *  tab seeded with the query (one new tab per chat started from the brief). */
 export type PendingChatHandoff = { query: string }
+
+/** The brief-insight pointer a PRD is generated from / anchored to. Null for a
+ *  backlog PRD (no insight_index) — it renders from the PRD payload alone. */
+export type PrdTabMeta = { briefId: number; insightIndex: number }
+
+/** A request to open a PRD as a NEW CHAT TAB on the chat surface, with the
+ *  right-side content panel (Evidence / PRD / Tickets) sliding over it. Every
+ *  "view PRD" / "generate PRD" affordance (brief finding cards, the brief
+ *  composer, a backlog item) hands one of these off via `openPrdTab`; ChatScreen
+ *  consumes it once, spawns a fresh chat tab, drives the source, and opens the
+ *  panel. `title` labels the tab. The `source` discriminant says where the PRD
+ *  comes from:
+ *   - `ready`          — the caller already holds the PrdState (just show it)
+ *   - `generate`       — kick off brief-insight PRD generation (runPrdGeneration)
+ *   - `generateBacklog`— kick off backlog PRD generation (runPrdGenerationFromBacklog)
+ *   - `load`           — fetch an already-generated PRD by id (loadPrdById) */
+export type PrdTabRequest = {
+  title: string
+  source:
+    | { kind: "ready"; prd: PrdState; meta: PrdTabMeta | null }
+    | { kind: "generate"; meta: PrdTabMeta }
+    | { kind: "generateBacklog"; backlogItemId: string }
+    | { kind: "load"; prdId: number; meta: PrdTabMeta | null }
+}
 
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
 const AI_PANEL_C_KEY = "sprntly-ai-panel-collapsed"
@@ -95,6 +120,16 @@ interface NavigationContextType {
   pendingChatHandoff: PendingChatHandoff | null
   setPendingChatHandoff: (value: PendingChatHandoff | null) => void
 
+  /** Filled by any "view/generate PRD" affordance; consumed once by ChatScreen,
+   *  which opens a fresh chat tab and slides the content panel (Evidence / PRD /
+   *  Tickets) over it. */
+  pendingPrdTab: PrdTabRequest | null
+  setPendingPrdTab: (value: PrdTabRequest | null) => void
+  /** Open a PRD as a new chat tab (with the right-side content panel over it):
+   *  store the request and route to the chat surface (`/`) so ChatScreen mounts
+   *  and consumes it. The single entry point for "PRD opens in a new chat". */
+  openPrdTab: (request: PrdTabRequest) => void
+
   /** Narrow icon-only rail vs full labels */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
@@ -125,6 +160,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingSearchHandoff, setPendingSearchHandoff] = useState<PendingSearchHandoff | null>(null)
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
   const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
+  const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [aiPanelWidth, setAiPanelWidthState] = useState(AI_PANEL_WIDTH_DEFAULT)
   /** Default collapsed; expanded only if user saved `sprntly-ai-panel-collapsed=0`. */
@@ -277,6 +313,17 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [router])
 
+  const openPrdTab = useCallback((request: PrdTabRequest) => {
+    setPendingPrdTab(request)
+    // Route to the chat surface so ChatScreen mounts (from /brief, /backlog, …)
+    // and its pending-PRD-tab effect consumes the request — spawning the tab and
+    // opening the panel. Harmless when already on `/` (the state change alone
+    // drives consumption). ChatScreen defers the panel-open past the route
+    // change so the pathname-driven panel-close doesn't swallow it.
+    router.push("/")
+    window.scrollTo({ top: 0, behavior: "instant" })
+  }, [router])
+
   const openDrawer = useCallback((drawer: "claude" | "ticket" | "design-agent") => {
     setActiveDrawer(drawer)
   }, [])
@@ -342,6 +389,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         setPendingOndemandDraft,
         pendingChatHandoff,
         setPendingChatHandoff,
+        pendingPrdTab,
+        setPendingPrdTab,
+        openPrdTab,
         sidebarCollapsed,
         toggleSidebar,
         aiPanelWidth,

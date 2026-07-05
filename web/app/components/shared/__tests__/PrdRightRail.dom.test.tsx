@@ -27,6 +27,7 @@ vi.hoisted(() => {
 // ── Spyable navigation + content context ──────────────────────────────────
 const openContentPanel = vi.fn()
 const closeContentPanel = vi.fn()
+const openPrdTab = vi.fn()
 const showToast = vi.fn()
 const setContent = vi.fn()
 const goTo = vi.fn()
@@ -43,6 +44,7 @@ vi.mock("../../../context/NavigationContext", () => ({
     setAIBarValue,
     openContentPanel,
     closeContentPanel,
+    openPrdTab,
     showToast,
     goTo,
     contentPanelTab,
@@ -154,32 +156,30 @@ function setContentCalls() {
   return setContent.mock.calls.map((c) => c[0] as Record<string, unknown>)
 }
 
-describe("PRD always opens the right rail — composer command path", () => {
-  it("`generate PRD` in the composer opens the rail immediately with an in-progress state, then lands the PRD in the rail (not only a bottom turn)", async () => {
+describe("PRD opens as a new chat tab — composer command path", () => {
+  it("`generate PRD` in the composer resolves the top insight and hands the generation off to a new PRD chat tab (openPrdTab), not the brief surface", async () => {
     render(<BriefChat />)
     const composer = screen.getByPlaceholderText(/Ask anything/i)
     fireEvent.change(composer, { target: { value: "generate PRD" } })
     fireEvent.click(screen.getByLabelText("Send"))
 
-    // Rail opens up front (before generation resolves) — the user always sees
-    // the PRD on the right, not just a bottom message.
-    await waitFor(() => expect(openContentPanel).toHaveBeenCalledWith("prd"))
-
-    // The rail is driven by an in-progress flag at generation start…
-    const calls = setContentCalls()
-    expect(calls.some((c) => c.prdGenerating === true)).toBe(true)
-
-    // …and the final PRD lands in content (rail), with the flag cleared.
-    await waitFor(() => {
-      const done = setContentCalls().find((c) => c.prd && (c.prd as { prd_id?: number }).prd_id === 42)
-      expect(done).toBeTruthy()
-      expect(done?.prdGenerating).toBe(false)
+    // PRD generation is a command that now opens the PRD as its OWN chat tab
+    // (with the Evidence/PRD/Tickets panel over it) — BriefChat resolves the
+    // brief's top insight then hands off via openPrdTab. ChatScreen (not
+    // BriefChat) drives the generation and opens the panel.
+    await waitFor(() => expect(openPrdTab).toHaveBeenCalledTimes(1))
+    expect(openPrdTab).toHaveBeenCalledWith({
+      title: "PRD · Weekly brief",
+      source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
     })
-    expect(runPrdGeneration).toHaveBeenCalled()
 
-    // No chat turn: PRD generation is a command — the PRD lives in the rail, so
-    // the old "PRD draft ready" agent turn (and its action buttons) must NOT be
-    // appended to the chat.
+    // The rail is NOT opened and generation does NOT run on the brief surface.
+    expect(openContentPanel).not.toHaveBeenCalledWith("prd")
+    expect(runPrdGeneration).not.toHaveBeenCalled()
+    expect(setContentCalls().some((c) => c.prdGenerating === true)).toBe(false)
+
+    // No chat turn: PRD generation is a command — the old "PRD draft ready" agent
+    // turn (and its action buttons) must NOT be appended to the chat.
     expect(screen.queryByText(/PRD draft ready/i)).toBeNull()
     expect(screen.queryByText(/Drafted the PRD from/i)).toBeNull()
   })

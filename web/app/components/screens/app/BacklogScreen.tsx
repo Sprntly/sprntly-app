@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation"
 import { AppLayout } from "./AppLayout"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useCompany } from "../../../context/CompanyContext"
-import { useContent } from "../../../context/ContentContext"
 import { runPrdGenerationFromBacklog } from "../../../lib/runPrdGeneration"
 import { prototypePath } from "../../../lib/routes"
 import { backlogApi, type BacklogItem, type BacklogTag, type CompletedItem } from "../../../lib/api"
@@ -732,8 +731,7 @@ function SyncingOverlay() {
 // ── Main screen ───────────────────────────────────────────────────────────────
 
 export function BacklogScreen() {
-  const { showToast, openContentPanel }     = useNavigation()
-  const { setContent }                      = useContent()
+  const { showToast, openPrdTab }           = useNavigation()
   const router                              = useRouter()
   const [tab, setTab]                       = useState<BacklogTab>("proposed")
   const [proposedCount, setProposedCount]   = useState<number | null>(null)
@@ -765,37 +763,17 @@ export function BacklogScreen() {
     }, 800)
   }
 
-  // Generate PRD from a backlog item: kick off real generation and stream the
-  // result into the app's standard PRD content panel (same viewer the brief
-  // uses). AppShell renders <ContentPanel/> on every (app) route, so this works
-  // in-page. See runPrdGenerationFromBacklog.
-  const handleGeneratePrd = useCallback(async (idea: BacklogIdea) => {
-    setBusy("prd")
-    setContent({ prd: null, prdMeta: null, prdGenerating: true })
-    openContentPanel("prd")
-    try {
-      const result = await runPrdGenerationFromBacklog(idea.id)
-      if (!result.ok) {
-        setContent({ prdGenerating: false })
-        showToast("PRD generation failed", result.message)
-        return
-      }
-      setContent({
-        prd: result.prd,
-        // No brief-insight meta: a backlog PRD isn't at a brief insight_index, so
-        // the panel must NOT offer brief-based regenerate (that would target the
-        // wrong insight). The PRD renders from `prd` alone.
-        prdMeta: null,
-        prdGenerating: false,
-      })
-      openContentPanel("prd")
-    } catch (err) {
-      setContent({ prdGenerating: false })
-      showToast("PRD generation failed", err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(null)
-    }
-  }, [openContentPanel, setContent, showToast])
+  // Generate PRD from a backlog item: open it as a NEW CHAT TAB on the chat
+  // surface, with the Evidence / PRD / Tickets panel sliding over it. openPrdTab
+  // routes to `/` and ChatScreen drives runPrdGenerationFromBacklog in that tab.
+  // A backlog PRD isn't at a brief insight_index, so the tab carries no meta —
+  // it renders from the PRD payload alone.
+  const handleGeneratePrd = useCallback((idea: BacklogIdea) => {
+    openPrdTab({
+      title: `PRD · ${idea.title}`,
+      source: { kind: "generateBacklog", backlogItemId: idea.id },
+    })
+  }, [openPrdTab])
 
   // Generate a prototype from a backlog item: a prototype builds from a PRD, so
   // ensure the theme's PRD exists first (dedup returns it instantly if already

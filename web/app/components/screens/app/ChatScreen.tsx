@@ -16,7 +16,8 @@ import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-ic
 import { ApiError, askApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
-import { runPrdGeneration, resumePrdGeneration } from "../../../lib/runPrdGeneration"
+import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
+import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { runAskGeneration, resumeAskGeneration, getPendingAsk } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
@@ -112,6 +113,8 @@ export function ChatScreen() {
     setPendingOndemandDraft,
     pendingChatHandoff,
     setPendingChatHandoff,
+    pendingPrdTab,
+    setPendingPrdTab,
     showToast,
     openContentPanel,
     contentPanelTab,
@@ -162,6 +165,15 @@ export function ChatScreen() {
       return stored || null
     } catch { return BRIEF_TAB_ID }
   })
+  // Mirror of activeTabId for async closures — a background PRD generation/load
+  // only pushes its result into the shared content when its own tab is still
+  // active, so it never stomps a tab the user has since switched to.
+  const activeTabIdRef = useRef<string | null>(activeTabId)
+  activeTabIdRef.current = activeTabId
+  // When set, ChatScreen slides the content panel (Evidence / PRD / Tickets) open
+  // on the NEXT commit — deferred one commit so the route-change panel-close (a
+  // PRD opened from another surface routes to `/`) can't swallow it.
+  const [prdPanelPending, setPrdPanelPending] = useState(false)
 
   // When the active company changes (user switches workspace or logs in as
   // a different user), reload tabs from the new company-scoped storage so we
@@ -343,6 +355,69 @@ export function ChatScreen() {
       return next
     })
   }, [activeTabId])
+
+  // ── Open a PRD as a NEW CHAT TAB with the content panel over it ─────────────
+  // A "view/generate PRD" from another surface (brief cards, brief composer,
+  // backlog) routes here via NavigationContext.openPrdTab → pendingPrdTab. We
+  // spawn (or reuse, by title) a fresh chat tab, drive the requested source into
+  // its cached PRD + the shared ContentContext, and flag the content panel to
+  // slide open (deferred a commit so the route-change close can't swallow it).
+  // The PRD/Evidence/Tickets all render in that panel — the tab itself is a
+  // normal chat the user can keep talking in.
+  const openPrdInTab = useCallback((req: PrdTabRequest) => {
+    const { title, source } = req
+    const meta = source.kind === "generateBacklog" ? null : source.meta
+    const existing = tabsRef.current.find((t) => t.title === title)
+    const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    if (existing) {
+      setActiveTabId(existing.id)
+    } else {
+      setTabs((prev) => [...prev, {
+        id: tabId, title, thread: [], dbConvId: null, briefMeta: meta,
+        prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+      }])
+      setActiveTabId(tabId)
+    }
+    setDraft("")
+    setPrdPanelPending(true)
+
+    // Reuse a PRD already cached on this tab (unless the caller handed us a fresh
+    // one) — don't regenerate/re-fetch an already-open PRD.
+    if (existing?.prd && source.kind !== "ready") {
+      setContent({ prd: existing.prd, prdMeta: existing.briefMeta, prdGenerating: false })
+      return
+    }
+    // Caller already holds the PRD — show it immediately, no async work.
+    if (source.kind === "ready") {
+      setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: source.prd, briefMeta: source.meta } : t))
+      setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
+      return
+    }
+    // generate | generateBacklog | load — kick off, show the panel's spinner,
+    // then land the result on the tab (and shared content while it's active).
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, briefMeta: meta, prdGenerating: true } : t))
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true })
+    void (async () => {
+      try {
+        const result =
+          source.kind === "generate" ? await runPrdGeneration(source.meta)
+          : source.kind === "generateBacklog" ? await runPrdGenerationFromBacklog(source.backlogItemId)
+          : await loadPrdById(source.prdId)
+        if (result.ok) {
+          setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdGenerating: false } : t))
+          if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+        } else {
+          setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
+          if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })
+          showToast("PRD unavailable", result.message.slice(0, 200))
+        }
+      } catch (e) {
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
+        if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })
+        showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+      }
+    })()
+  }, [setContent, showToast])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
@@ -780,6 +855,28 @@ export function ChatScreen() {
     setPendingChatHandoff(null)
     void submitAsk(query)
   }, [pendingChatHandoff, setPendingChatHandoff, submitAsk])
+
+  // ── PRD → new chat tab hand-off ───────────────────────────────────────────
+  // A "view/generate PRD" from another surface (brief cards, brief composer,
+  // backlog) fills pendingPrdTab via openPrdTab and routes to `/`. Consume it
+  // once — openPrdInTab spawns the chat tab, drives the source, and flags the
+  // content panel to open over it.
+  useEffect(() => {
+    if (!pendingPrdTab) return
+    const req = pendingPrdTab
+    setPendingPrdTab(null)
+    openPrdInTab(req)
+  }, [pendingPrdTab, setPendingPrdTab, openPrdInTab])
+
+  // Slide the content panel open on the commit AFTER openPrdInTab flags it. The
+  // deferral matters when the PRD was opened from another surface: openPrdTab
+  // routes to `/`, and NavigationContext closes the panel on that route change —
+  // opening it here a commit later (route now settled) survives that close.
+  useEffect(() => {
+    if (!prdPanelPending) return
+    setPrdPanelPending(false)
+    openContentPanel("prd")
+  }, [prdPanelPending, openContentPanel])
 
   // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
   // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps
