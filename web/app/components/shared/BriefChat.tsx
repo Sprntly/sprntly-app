@@ -8,7 +8,7 @@ import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { useWorkspace } from "../../context/WorkspaceContext"
 import { briefApi, type AskResponse } from "../../lib/api"
-import { runPrdGeneration, loadPrdById, loadLatestPrd } from "../../lib/runPrdGeneration"
+import { loadLatestPrd } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
@@ -391,7 +391,7 @@ function BriefRefreshingBanner() {
 }
 
 export function BriefChat() {
-  const { aiBarValue, setAIBarValue, openContentPanel, showToast, setPendingChatHandoff } = useNavigation()
+  const { aiBarValue, setAIBarValue, openContentPanel, openPrdTab, showToast, setPendingChatHandoff } = useNavigation()
   const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
@@ -573,35 +573,25 @@ export function BriefChat() {
 
   // ── Composer agent flows (mirror the old AIBar command logic) ─────────────
   const prdFlow = useCallback(async () => {
-    // PRD generation is a COMMAND, not a conversation: the PRD (in-progress and
-    // final) lives in the right-rail panel, never as a bottom chat message. So
-    // this opens the rail with a generating spinner and surfaces failures as a
-    // toast — NO chat turn — exactly mirroring the finding-card "Generate PRD"
-    // path (cardGeneratePrd). (Previously this appended a "PRD draft ready" agent
-    // turn, which was redundant with the rail.)
-    setContent({ prd: null, prdMeta: null, prdGenerating: true })
-    openContentPanel("prd")
+    // PRD generation is a COMMAND, not a conversation. It opens the PRD as its
+    // OWN chat tab (with the Evidence / PRD / Tickets panel over it), never as a
+    // bottom chat message. Resolve the brief's top insight, then hand off via
+    // openPrdTab — ChatScreen drives the generation and opens the panel.
     try {
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
       if (!insights.length) {
-        setContent({ prdGenerating: false })
         showToast("No brief yet", "Run the pipeline to refresh this week's brief first.")
         return
       }
-      const result = await runPrdGeneration({ briefId: brief.id, insightIndex: 0 })
-      if (!result.ok) {
-        setContent({ prdGenerating: false })
-        showToast("PRD generation failed", result.message.slice(0, 200))
-        return
-      }
-      setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex: 0 }, prdGenerating: false })
-      openContentPanel("prd")
+      openPrdTab({
+        title: "PRD · Weekly brief",
+        source: { kind: "generate", meta: { briefId: brief.id, insightIndex: 0 } },
+      })
     } catch (e) {
-      setContent({ prdGenerating: false })
       showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     }
-  }, [activeCompany, openContentPanel, setContent, showToast])
+  }, [activeCompany, openPrdTab, showToast])
 
   const ticketsFlow = useCallback(() => {
     openContentPanel("tickets")
@@ -760,14 +750,16 @@ export function BriefChat() {
   const onAction = useCallback(
     (a: AgentAction) => {
       void runGate(() => {
-        if (a === "prd") return content.prd ? openContentPanel("prd") : prdFlow()
+        if (a === "prd") return content.prd
+          ? openPrdTab({ title: `PRD · ${content.prd.title}`, source: { kind: "ready", prd: content.prd, meta: content.prdMeta ?? null } })
+          : prdFlow()
         if (a === "evidence") return evidenceFlow()
         if (a === "tickets") return ticketsFlow()
         if (a === "prototype") return prototypeFlow()
         if (a === "multi-agent") return multiAgentFlow()
       })
     },
-    [content.prd, evidenceFlow, multiAgentFlow, openContentPanel, prdFlow, prototypeFlow, runGate, ticketsFlow],
+    [content.prd, content.prdMeta, evidenceFlow, multiAgentFlow, openPrdTab, prdFlow, prototypeFlow, runGate, ticketsFlow],
   )
 
   // ── Per-card actions (evidence/PRD wiring) ────────
@@ -785,7 +777,7 @@ export function BriefChat() {
   // scaffold used by the prototype-preview flow's "no PRD yet → make one first"
   // path, where the full 7-agent suite would be overkill.
   const cardGeneratePrd = useCallback(
-    async (finding: Finding) => {
+    (finding: Finding) => {
       const key = finding.detailKey
       const detail = key ? content.briefDetails?.[key] : null
       const meta = detail?.meta
@@ -793,8 +785,9 @@ export function BriefChat() {
         showToast("Can't generate PRD", "Open evidence from a finding with a linked brief first.")
         return
       }
-      // If a PRD is already loaded for the same insight, just show it
-      // instead of re-generating.
+      const title = `PRD · ${finding.title || "Brief finding"}`
+      // A PRD already loaded for this insight → open it in a chat tab from the
+      // in-memory doc (no re-generate). Otherwise generate into a fresh PRD tab.
       const currentPrdMeta = content.prdMeta
       if (
         content.prd &&
@@ -802,41 +795,12 @@ export function BriefChat() {
         currentPrdMeta.briefId === meta.briefId &&
         currentPrdMeta.insightIndex === meta.insightIndex
       ) {
-        openContentPanel("prd")
+        openPrdTab({ title, source: { kind: "ready", prd: content.prd, meta } })
         return
       }
-      // Share the single-flight gate with the composer / agent-button flows so a
-      // card PRD and a composer "generate PRD" can't race on content.prd, and a
-      // second card can't start while one is in flight.
-      if (busyRef.current) return
-      busyRef.current = true
-      setBusy(true)
-      setCardBusyKey(key ?? null)
-      // Open the right rail up front with a generating spinner so the PRD always
-      // surfaces on the right while it's being drafted — not just when it's ready.
-      setContent({ prd: null, prdMeta: null, prdGenerating: true })
-      openContentPanel("prd")
-      try {
-        const result = await runPrdGeneration(meta)
-        if (!result.ok) {
-          setContent({ prdGenerating: false })
-          showToast("PRD generation failed", result.message.slice(0, 200))
-          return
-        }
-        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
-        openContentPanel("prd")
-      } catch (e) {
-        setContent({ prdGenerating: false })
-        showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-      } finally {
-        busyRef.current = false
-        if (mountedRef.current) {
-          setBusy(false)
-          setCardBusyKey(null)
-        }
-      }
+      openPrdTab({ title, source: { kind: "generate", meta } })
     },
-    [content.briefDetails, content.prd, content.prdMeta, openContentPanel, setContent, showToast],
+    [content.briefDetails, content.prd, content.prdMeta, openPrdTab, showToast],
   )
 
   const cardGenerateAll = useCallback(
@@ -948,21 +912,20 @@ export function BriefChat() {
   // the generate flow if the prd id can't be resolved (the button only offers
   // "View PRD" when hasPrd && prdId, so this is belt-and-suspenders).
   const cardViewPrd = useCallback(
-    async (finding: Finding) => {
+    (finding: Finding) => {
       const key = finding.detailKey
       const meta = key ? content.briefDetails?.[key]?.meta : null
       const state =
         meta != null
           ? prototypeStateForInsight(entriesByInsight, meta.insightIndex)
           : null
-      // No PRD yet → generate one (cardGeneratePrd opens it in the rail too).
+      const title = `PRD · ${finding.title || "Brief finding"}`
+      // No PRD yet → generate one (cardGeneratePrd opens it in a PRD chat tab).
       if (state?.prdId == null) {
-        void runGate(() => cardGeneratePrd(finding))
+        cardGeneratePrd(finding)
         return
       }
-      // Existing PRD → open it in the right-rail content panel (the SAME card as
-      // Evidence), not a separate page. If it's already loaded for this insight,
-      // just re-open the panel.
+      // Already loaded for this insight → open the in-memory doc in a chat tab.
       if (
         content.prd &&
         content.prdMeta &&
@@ -970,35 +933,19 @@ export function BriefChat() {
         content.prdMeta.briefId === meta.briefId &&
         content.prdMeta.insightIndex === meta.insightIndex
       ) {
-        openContentPanel("prd")
+        openPrdTab({ title, source: { kind: "ready", prd: content.prd, meta } })
         return
       }
-      setContent({ prd: null, prdMeta: meta ?? null, prdGenerating: true })
-      openContentPanel("prd")
-      try {
-        const result = await loadPrdById(state.prdId)
-        if (!result.ok) {
-          setContent({ prdGenerating: false })
-          showToast("Couldn't open PRD", result.message.slice(0, 200))
-          return
-        }
-        setContent({ prd: result.prd, prdMeta: meta ?? null, prdGenerating: false })
-        openContentPanel("prd")
-      } catch (e) {
-        setContent({ prdGenerating: false })
-        showToast("Couldn't open PRD", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-      }
+      // Existing PRD by id → load it into a chat tab (ChatScreen drives the fetch).
+      openPrdTab({ title, source: { kind: "load", prdId: state.prdId, meta: meta ?? null } })
     },
     [
       content.briefDetails,
       content.prd,
       content.prdMeta,
       entriesByInsight,
-      openContentPanel,
-      runGate,
+      openPrdTab,
       cardGeneratePrd,
-      setContent,
-      showToast,
     ],
   )
 

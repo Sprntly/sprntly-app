@@ -25,6 +25,7 @@ const runFromBacklogMock = vi.fn()
 const pushMock = vi.fn()
 const setContentMock = vi.fn()
 const openContentPanelMock = vi.fn()
+const openPrdTabMock = vi.fn()
 
 vi.mock("../../../../lib/api", () => ({
   backlogApi: {
@@ -49,7 +50,7 @@ vi.mock("../AppLayout", () => ({
 }))
 
 vi.mock("../../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ showToast: vi.fn(), openContentPanel: openContentPanelMock }),
+  useNavigation: () => ({ showToast: vi.fn(), openContentPanel: openContentPanelMock, openPrdTab: openPrdTabMock }),
 }))
 
 vi.mock("../../../../context/CompanyContext", () => ({
@@ -92,26 +93,29 @@ beforeEach(() => {
   pushMock.mockReset()
   setContentMock.mockReset()
   openContentPanelMock.mockReset()
+  openPrdTabMock.mockReset()
 })
 
 afterEach(() => cleanup())
 
 describe("BacklogScreen — wired actions", () => {
-  it("Generate PRD kicks off backlog generation and streams into the PRD panel", async () => {
-    runFromBacklogMock.mockResolvedValue({
-      ok: true, prd: { prd_id: 42, briefId: 7, insightIndex: 0 },
-    })
+  it("Generate PRD opens the PRD as a new chat tab (openPrdTab handoff)", async () => {
     await renderWith([item({ id: "a", theme_id: "t4", title: "Bulk onboarding", rank: 4 })])
     await selectFirstIdea("Bulk onboarding")
 
     await act(async () => { fireEvent.click(screen.getByText("Generate PRD")) })
 
-    await waitFor(() => expect(runFromBacklogMock).toHaveBeenCalledWith("a"))
-    // Opens the PRD content panel and pushes the finished PRD into it.
-    expect(openContentPanelMock).toHaveBeenCalledWith("prd")
-    const lastSet = setContentMock.mock.calls.at(-1)?.[0]
-    expect(lastSet.prd).toEqual({ prd_id: 42, briefId: 7, insightIndex: 0 })
-    expect(lastSet.prdGenerating).toBe(false)
+    // A backlog PRD now opens as a NEW chat tab (with the Evidence/PRD/Tickets
+    // panel over it) — BacklogScreen hands the generation off via openPrdTab, and
+    // ChatScreen drives it — instead of streaming into an in-place panel here.
+    await waitFor(() => expect(openPrdTabMock).toHaveBeenCalledTimes(1))
+    expect(openPrdTabMock).toHaveBeenCalledWith({
+      title: "PRD · Bulk onboarding",
+      source: { kind: "generateBacklog", backlogItemId: "a" },
+    })
+    // Generation no longer runs on the backlog surface itself.
+    expect(runFromBacklogMock).not.toHaveBeenCalled()
+    expect(openContentPanelMock).not.toHaveBeenCalled()
   })
 
   it("Generate prototype ensures a PRD then navigates to the prototype route", async () => {
