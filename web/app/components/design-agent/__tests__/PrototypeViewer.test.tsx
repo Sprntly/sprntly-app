@@ -114,6 +114,16 @@ describe("chrome slot (AC4)", () => {
     expect(bare).toContain('data-testid="prototype-chrome"')
   })
 
+  it("test_chrome_slot_empty_when_no_chrome — the slot renders with no children (so :empty collapses it) yet keeps the testid mount point", () => {
+    // No `chrome` node passed → the always-mounted slot is empty, so the
+    // `.da-prototype-chrome:empty { padding: 0; border-bottom: none }` rule
+    // collapses the ~22px gap under the toolbar while the mount point survives.
+    const bare = renderViewer()
+    expect(bare).toMatch(
+      /<div class="da-prototype-chrome" data-testid="prototype-chrome"><\/div>/,
+    )
+  })
+
   it("test_chrome_slot_is_descendant_of_viewer — chrome nests inside the viewer; exactly one iframe", () => {
     const html = renderViewer({
       chrome: React.createElement("span", { "data-testid": "sentinel-chrome" }),

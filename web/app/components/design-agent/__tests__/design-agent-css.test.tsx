@@ -259,6 +259,19 @@ describe("share-menu collision override (AC4)", () => {
   })
 })
 
+// ── Empty chrome-slot collapse: no gap between the toolbar and the iframe ──
+describe("empty chrome-slot collapse", () => {
+  it("test_empty_chrome_collapse_rule_present — .da-prototype-chrome:empty zeroes padding + drops the border", () => {
+    const block = CSS.match(
+      /\.design-agent-surface\s+\.da-prototype-chrome:empty\s*\{([^}]*)\}/,
+    )
+    expect(block).not.toBeNull()
+    const body = block![1]
+    expect(body).toMatch(/padding:\s*0\b/)
+    expect(body).toMatch(/border-bottom:\s*none/)
+  })
+})
+
 // ── AC5: globals.css untouched by this ticket ─────────────────────────────
 describe("globals.css untouched (AC5)", () => {
   it("test_globals_untouched_by_ticket — working-tree globals.css carries no DA rule and no new :root", () => {
