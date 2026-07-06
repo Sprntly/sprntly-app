@@ -17101,3 +17101,48 @@
 .tkv2-pitem--sel { background: var(--green-s); color: var(--green-d); font-weight: 600; }
 .tkv2-ppath { font-size: 10px; color: var(--soft); font-weight: 400; margin-left: auto; padding-left: 10px; overflow: hidden; text-overflow: ellipsis; }
 .tkv2-pfoot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--line); font-size: 11px; color: var(--soft); }
+
+/* ── Story map (Jeff Patton board): backbone × release slices ── */
+.tkv2-vtabs { display: flex; gap: 6px; margin: 16px 0 4px; }
+.tkv2-vtab {
+  font-size: 13px; font-weight: 600; color: var(--soft); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 15px; cursor: pointer;
+  font-family: var(--font-body);
+}
+.tkv2-vtab--active { background: var(--green-s); color: var(--green-d); border-color: var(--green-b); }
+.tkv2-map {
+  border: 1px solid var(--line); border-radius: 14px; overflow-x: auto;
+  padding: 20px 22px; background: #fbfbfa; margin-top: 12px;
+}
+.tkv2-map-grid { display: grid; gap: 12px; min-width: min-content; }
+/* Backbone activity cards — the user's journey, left to right, with → between. */
+.tkv2-act {
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+  border-radius: 10px; padding: 11px 14px; position: relative;
+}
+.tkv2-act .n { font-family: var(--font-mono); font-size: 10px; color: var(--soft); display: block; margin-bottom: 2px; }
+.tkv2-act .t { font-size: 13px; font-weight: 700; line-height: 1.35; }
+.tkv2-act::after {
+  content: '→'; position: absolute; right: -13px; top: 50%; transform: translateY(-50%);
+  color: var(--soft); font-size: 14px;
+}
+.tkv2-act--last::after { content: ''; }
+.tkv2-map-band { display: block; }
+.tkv2-rel {
+  font-size: 12px; color: var(--soft); font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; margin: 22px 0 8px;
+}
+.tkv2-rel--skel { color: var(--green-d); }
+.tkv2-map-row { display: grid; gap: 12px; align-items: start; }
+.tkv2-map-cell { display: flex; flex-direction: column; gap: 10px; }
+.tkv2-map-card {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 13px; cursor: pointer; text-align: left; width: 100%;
+  transition: box-shadow .15s, border-color .15s; display: flex; flex-direction: column; gap: 8px;
+}
+.tkv2-map-card:hover { box-shadow: 0 2px 12px rgba(28, 30, 33, .06); border-color: #dcdcd9; }
+.tkv2-map-card--skel { border-color: var(--green-b); }
+.tkv2-map-card-title { font-size: 13.5px; font-weight: 700; color: var(--ink); line-height: 1.35; }
+.tkv2-map-card-row { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+.tkv2-map-card-row .tkv2-pill { font-size: 11px; padding: 3px 10px; }
+.tkv2-map-card-row .tkv2-acchip { font-size: 11px; padding: 3px 10px; }

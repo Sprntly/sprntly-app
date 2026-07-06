@@ -36,7 +36,7 @@ from app.graph.gateway import llm_call
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "user-stories-v2"
+PROMPT_VERSION = "user-stories-v3"
 
 # Output contract for the gateway — the skill's canonical ticket. `title`,
 # `body`, and `acceptance_criteria` stay required for backward compatibility
@@ -180,6 +180,25 @@ _SCHEMA: dict[str, Any] = {
                             "invented numbers."
                         ),
                     },
+                    # ── Story-map placement (Jeff Patton) ──
+                    "activity": {
+                        "type": "string",
+                        "description": (
+                            "Story-map backbone: the user activity/step this "
+                            "ticket serves (from Part A §4), phrased as the user's "
+                            "action. Tickets serving the same step share this "
+                            "verbatim. Empty for a flat/unsized set."
+                        ),
+                    },
+                    "release": {
+                        "type": "string",
+                        "description": (
+                            "Story-map slice: the release this ticket lands in "
+                            "(e.g. 'Release 1 — walking skeleton', 'Release 2'). "
+                            "Release 1 is the minimal end-to-end path. Empty for a "
+                            "flat/unsized set."
+                        ),
+                    },
                     "priority": {
                         "type": "string",
                         "enum": ["urgent", "high", "normal", "low"],
@@ -245,7 +264,16 @@ _SYSTEM = (
     "[ASSUMPTION → T0] into a SPIKE (ticket_type=spike, with timebox and "
     "exit_condition). Preserve [NEED] markers verbatim in data_gaps — never "
     "invent numbers, owners, or criteria. Also mirror the user story into "
-    "`body`. Return only the structured tickets."
+    "`body`.\n"
+    "STORY MAP (Jeff Patton): when the feature is large — more than one user "
+    "activity in Part A §4, OR more than ~12 requirements, OR more than one "
+    "release in the rollout — place every ticket on the map. Set `activity` to "
+    "the backbone step it serves (the user's narrative journey left-to-right, "
+    "NOT a feature list; tickets serving the same step share the wording) and "
+    "`release` to its slice, with 'Release 1' the minimal end-to-end walking "
+    "skeleton that crosses the whole journey. For a small/single-activity "
+    "feature, leave `activity`/`release` empty (a flat set). Never invent tickets "
+    "just to fill the map. Return only the structured tickets."
 )
 
 # ClickUp priority is an int 1-4 (1=urgent ... 4=low). Map the skill's
@@ -291,6 +319,9 @@ class Story:
     story_points: Optional[int] = None
     labels: list[str] = field(default_factory=list)
     data_gaps: list[str] = field(default_factory=list)
+    # Story-map placement (empty for a flat/unsized set)
+    activity: str = ""
+    release: str = ""
     # Decision-ticket fields
     decision: Optional[str] = None
     owner: Optional[str] = None
@@ -369,6 +400,8 @@ class Story:
             "story_points": self.story_points,
             "labels": list(self.labels),
             "data_gaps": list(self.data_gaps),
+            "activity": self.activity,
+            "release": self.release,
             "priority": self.priority,
             "route": self.route,
             "decision": self.decision,
@@ -403,6 +436,8 @@ class Story:
             story_points=int(sp) if isinstance(sp, (int, float)) else None,
             labels=_clean_str_list(d.get("labels")),
             data_gaps=_clean_str_list(d.get("data_gaps")),
+            activity=str(d.get("activity") or "").strip(),
+            release=str(d.get("release") or "").strip(),
             decision=(d.get("decision") or None),
             owner=(d.get("owner") or None),
             decide_by=(d.get("decide_by") or None),
