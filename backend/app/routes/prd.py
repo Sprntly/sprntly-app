@@ -41,7 +41,9 @@ from app.db.prds import (
     update_prd_content,
 )
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
-from app.prd_runner import PRD_VARIANT, ensure_impl_spec, generate_prd
+from app.prd_runner import (
+    PRD_VARIANT, ensure_impl_spec, generate_prd, generate_prd_and_warm,
+)
 from app.prompts import PRD_TEMPLATE_VERSION
 
 logger = logging.getLogger(__name__)
@@ -131,7 +133,7 @@ async def generate(
     _record_prd_action(company.company_id, insight)
 
     task = asyncio.create_task(
-        generate_prd(
+        generate_prd_and_warm(
             prd_id, body.brief_id, body.insight_index,
             author=company.user_name,
         )
@@ -224,7 +226,7 @@ async def generate_from_backlog(
     _record_prd_action(company.company_id, insight)
 
     task = asyncio.create_task(
-        generate_prd(
+        generate_prd_and_warm(
             prd_id, brief_id, _BACKLOG_INSIGHT_INDEX, insight_override=insight,
             author=company.user_name,
         )

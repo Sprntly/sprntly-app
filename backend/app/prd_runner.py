@@ -457,6 +457,36 @@ async def _generate_human_prd(
     )
 
 
+async def warm_impl_spec(prd_id: int) -> None:
+    """Generate + cache the Implementation Spec (Part B) for a PRD on the
+    background lane, so the Tickets tab can INHERIT acceptance criteria from it —
+    WITHOUT ever surfacing the machine spec to the user.
+
+    Best-effort: idempotent (cache hit is free) and error-isolated — pre-warming
+    is a latency optimization for ticket inheritance, never a correctness gate."""
+    try:
+        await asyncio.to_thread(ensure_impl_spec, prd_id, background=True)
+        logger.info("impl-spec pre-warm done prd_id=%s", prd_id)
+    except Exception:  # noqa: BLE001 — warming is best-effort
+        logger.exception("impl-spec pre-warm failed prd_id=%s", prd_id)
+
+
+async def generate_prd_and_warm(
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False,
+    insight_override: dict | None = None, author: str | None = None,
+) -> None:
+    """Generate the human PRD, THEN pre-warm the Implementation Spec (Part B).
+
+    This is the entry point the interactive/backlog PRD routes schedule (as one
+    long-lived background task on the app loop): the PRD is marked ready inside
+    `generate_prd` — the user's poll never waits on Part B — and Part B then warms
+    on the low-priority lane so tickets inherit AC with no added latency. Keeping
+    the warm OUT of `generate_prd` itself leaves that function (and the sync
+    `_run_sync`/test path) strictly human-PRD-only."""
+    await generate_prd(prd_id, brief_id, insight_index, background, insight_override, author)
+    await warm_impl_spec(prd_id)
+
+
 def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
     """Synchronous entry point (used by tests and any sync caller).
 
@@ -503,9 +533,14 @@ async def generate_prd(
 
 # ── on-demand Implementation Spec (Part B) ───────────────────────────────────
 
-def ensure_impl_spec(prd_id: int) -> dict:
+def ensure_impl_spec(prd_id: int, *, background: bool = False) -> dict:
     """Return the machine-readable Implementation Spec for a human PRD, generating
     it on demand and caching the result.
+
+    `background=True` routes the (cache-miss) generation through the LLM gate's
+    low-priority lane — used by the post-PRD pre-warm (`warm_impl_spec`) so the
+    spec is cached before the user ever opens the Tickets tab, without competing
+    with interactive calls.
 
     Called when a user sends the PRD to Claude Code. Idempotent + cached:
       - If a spec is already cached AND the human PRD is unchanged (its content
@@ -536,7 +571,7 @@ def ensure_impl_spec(prd_id: int) -> dict:
 
     logger.info("impl-spec cache MISS prd_id=%s — generating", prd_id)
     ctx = _build_context(row["brief_id"], row["insight_index"])
-    result_b = _call_impl_spec(ctx, human_prd)
+    result_b = _call_impl_spec(ctx, human_prd, background=background)
     llm_part = str(result_b.output).strip()
     set_prd_impl_spec(prd_id, llm_part=llm_part, source_hash=source_hash)
 

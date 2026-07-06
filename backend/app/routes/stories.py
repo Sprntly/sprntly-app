@@ -24,6 +24,7 @@ from app.stories.generate import (
     Story,
     generate_user_stories,
 )
+from app.prd_runner import warm_impl_spec
 from app.stories.push import ClickUpNotConnectedError, push_stories_to_clickup
 
 logger = logging.getLogger(__name__)
@@ -139,6 +140,17 @@ async def generate(
     )
     if existing is not None:
         return {"job_id": existing, "status": "generating"}
+
+    # Pre-warm the Implementation Spec (Part B) in the background so tickets can
+    # INHERIT acceptance criteria from it. New PRDs are already warmed at
+    # creation (a cache hit here); this covers PRDs that predate that — their
+    # spec generates in the background now so the NEXT regenerate inherits, while
+    # THIS ticket run stays a single fast call over the already-rendered PRD
+    # (never blocked on Part B, never regenerating the PRD).
+    if body.prd_id is not None:
+        warm = asyncio.create_task(warm_impl_spec(body.prd_id))
+        _inflight_tasks.add(warm)
+        warm.add_done_callback(_inflight_tasks.discard)
 
     job_id = next(_job_ids)
     _jobs[job_id] = {
