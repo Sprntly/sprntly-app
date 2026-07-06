@@ -11,6 +11,7 @@ import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvide
 import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { TicketDetail, priorityPill } from "./TicketDetail"
+import { StoryMap, storyMapSizing } from "./StoryMap"
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
 import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
 import type { PrdState } from "../../types/content"
@@ -424,6 +425,8 @@ export function TicketsTab() {
 
   // Which ticket (if any) is open in the in-panel editable detail view.
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
+  // List vs. Story-map view (the toggle only appears when the sizing gate fires).
+  const [view, setView] = useState<"list" | "map">("list")
 
   // ── ClickUp push ───────────────────────────────────────────────────────
   type PushState =
@@ -652,6 +655,13 @@ export function TicketsTab() {
   const builds = withIdx.filter((x) => (x.s.ticket_type ?? "build") === "build")
   const decisions = withIdx.filter((x) => x.s.ticket_type === "decision" || x.s.ticket_type === "spike")
 
+  // Story-map sizing gate (computed from the placed tickets). When it fires, a
+  // Tickets ⟷ Story map toggle appears and the intro states the call; otherwise
+  // the set is flat and only the list shows.
+  const sizing = storyMapSizing(stories)
+  const showMap = sizing.build
+  const activeView = showMap ? view : "list"
+
   return (
     <div className="tkv2 tkt-list-wrap">
       {/* Header block — serif title, subline, then a Regenerate + Push actions
@@ -710,23 +720,35 @@ export function TicketsTab() {
         <div>
           I&apos;ve broken <em>{prdTitle}</em> into{" "}
           <b>{stories.length} implementable ticket{stories.length !== 1 ? "s" : ""}</b> — scoped and
-          prioritized from the PRD. Review, then push to your tracker.
+          prioritized from the PRD. <b>Story map:</b> {sizing.reason}. Review, then push to your tracker.
         </div>
       </div>
 
-      <div className="tkt-list">
-        {builds.map(({ s, i }) => (
-          <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
-        ))}
-        {decisions.length > 0 && (
-          <>
-            <div className="tkv2-grouplbl">Decisions &amp; spikes</div>
-            {decisions.map(({ s, i }) => (
-              <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
-            ))}
-          </>
-        )}
-      </div>
+      {/* Tickets ⟷ Story map toggle — only when the feature is sized large. */}
+      {showMap && (
+        <div className="tkv2-vtabs">
+          <button type="button" className={`tkv2-vtab${activeView === "list" ? " tkv2-vtab--active" : ""}`} onClick={() => setView("list")}>Tickets</button>
+          <button type="button" className={`tkv2-vtab${activeView === "map" ? " tkv2-vtab--active" : ""}`} onClick={() => setView("map")}>Story map</button>
+        </div>
+      )}
+
+      {activeView === "map" ? (
+        <StoryMap stories={stories} onOpen={(i) => setSelectedIndex(i)} />
+      ) : (
+        <div className="tkt-list">
+          {builds.map(({ s, i }) => (
+            <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
+          ))}
+          {decisions.length > 0 && (
+            <>
+              <div className="tkv2-grouplbl">Decisions &amp; spikes</div>
+              {decisions.map(({ s, i }) => (
+                <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
+              ))}
+            </>
+          )}
+        </div>
+      )}
 
       <div className="tkv2-foot">
         Tickets are generated from the PRD.{!isClickUpConnected && " Connect ClickUp in Settings to push them."}

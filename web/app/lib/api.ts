@@ -1998,6 +1998,9 @@ export type GeneratedStory = {
   story_points?: number | null
   labels?: string[]
   data_gaps?: string[] // [NEED] markers, never filled
+  // ── Story-map placement (Jeff Patton); empty for a flat/unsized set ──
+  activity?: string // backbone step (Part A §4) this ticket serves
+  release?: string // release slice; "Release 1" = walking skeleton
   // ── Decision-ticket fields ──
   decision?: string | null
   owner?: string | null
