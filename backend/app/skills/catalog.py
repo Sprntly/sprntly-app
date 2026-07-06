@@ -84,7 +84,6 @@ SKILL_CATEGORY: dict[str, str] = {
     "retrospective": "Delivery & Operations",
     "scope-slicing": "Delivery & Operations",
     "status-report": "Delivery & Operations",
-    "story-mapping": "Delivery & Operations",
     "tech-discovery-docs": "Delivery & Operations",
     "working-backwards": "Delivery & Operations",
     "brief-nudge": "Stakeholder & Communication",

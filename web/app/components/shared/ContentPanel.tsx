@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { EvidenceSections } from "./EvidenceSections"
@@ -8,7 +8,7 @@ import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
-import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
+import { ApiError, storiesApi, type ClickUpList, type GeneratedStory, type StoryMap } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { TicketDetail } from "./TicketDetail"
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
@@ -424,6 +424,104 @@ function StoryRow({ story, index, onOpen }: { story: GeneratedStory; index: numb
   )
 }
 
+// Priority → the coloured dot class on a story-map card (mirrors StoryRow's pill).
+function storyMapDotClass(priority: string | null | undefined): string {
+  const up = (priority ?? "").toUpperCase()
+  if (up === "URGENT" || up === "P0") return "smap-dot--u"
+  if (up === "HIGH" || up === "P1") return "smap-dot--h"
+  return "smap-dot--n"
+}
+
+// The Jeff Patton story map: the activity backbone across the top, the SAME
+// generated tickets placed under the activity they serve, sliced into release
+// rows (Release 1 = the walking skeleton, green band). Cards deep-link to the
+// ticket detail. Built entirely from the generated stories' activity/release
+// placement + the story_map metadata — it never invents tickets. `gaps` are
+// edges/needs fed back to the PRD, rendered as dashed notes.
+function StoryMapBoard({
+  map, stories, onOpen,
+}: { map: StoryMap; stories: GeneratedStory[]; onOpen: (index: number) => void }) {
+  const activities = map.activities ?? []
+  const releases = map.releases ?? []
+  const indexed = stories.map((s, i) => ({ s, i }))
+  const inCell = (activity: string, release: string) =>
+    indexed.filter(({ s }) => (s.activity ?? "") === activity && (s.release ?? "") === release)
+  const gapsInCell = (activity: string, release: string) =>
+    (map.gaps ?? []).filter((g) => (g.activity ?? "") === activity && (g.release ?? "") === release)
+  const looseGaps = (map.gaps ?? []).filter((g) => {
+    const a = g.activity ?? "", r = g.release ?? ""
+    return !activities.includes(a) || !releases.some((rel) => rel.name === r)
+  })
+
+  const cells: ReactNode[] = []
+  cells.push(
+    <div key="lbl-bb" className="smap-rowlbl smap-rowlbl--bb">
+      Backbone<span className="smap-d">the user&rsquo;s journey</span>
+    </div>,
+  )
+  activities.forEach((a, i) => {
+    cells.push(
+      <div key={`act-${i}`} className={`smap-act${i === activities.length - 1 ? " smap-act--last" : ""}`}>
+        <span className="smap-n">A{i + 1}</span>
+        <span className="smap-t">{a}</span>
+      </div>,
+    )
+  })
+  releases.forEach((r, ri) => {
+    cells.push(
+      <div key={`lbl-${ri}`} className={`smap-rowlbl ${r.walking_skeleton ? "smap-rowlbl--r1" : "smap-rowlbl--r2"}`}>
+        {r.name}{r.note ? <span className="smap-d">{r.note}</span> : null}
+      </div>,
+    )
+    activities.forEach((a, ai) => {
+      const items = inCell(a, r.name)
+      const gaps = gapsInCell(a, r.name)
+      cells.push(
+        <div key={`cell-${ri}-${ai}`} className={`smap-cell${r.walking_skeleton ? " smap-cell--r1" : ""}`}>
+          {items.map(({ s, i }) => (
+            <div
+              key={i}
+              className={`smap-card${r.walking_skeleton ? " smap-card--skel" : ""}`}
+              role="button"
+              tabIndex={0}
+              onClick={() => onOpen(i)}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(i) } }}
+            >
+              <div className="smap-k">
+                <span>T-{i + 1}</span>
+                <span className={`smap-dot ${storyMapDotClass(s.priority)}`} aria-hidden />
+              </div>
+              <div className="smap-ct">{s.title}</div>
+              {s.acceptance_criteria.length > 0 ? (
+                <div className="smap-m"><span className="smap-ac">{s.acceptance_criteria.length} AC</span></div>
+              ) : null}
+            </div>
+          ))}
+          {gaps.map((g, gi) => (
+            <div key={`gap-${gi}`} className="smap-gap">{g.note}</div>
+          ))}
+        </div>,
+      )
+    })
+  })
+
+  return (
+    <div className="smap-wrap">
+      <div
+        className="smap-grid"
+        style={{ gridTemplateColumns: `120px repeat(${Math.max(activities.length, 1)}, minmax(180px, 1fr))` }}
+      >
+        {cells}
+      </div>
+      {looseGaps.length > 0 ? (
+        <div className="smap-loose">
+          {looseGaps.map((g, i) => <div key={i} className="smap-gap">{g.note}</div>)}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export function TicketsTab() {
   const { showToast } = useNavigation()
   const { content } = useContent()
@@ -436,10 +534,19 @@ export function TicketsTab() {
   type GenState =
     | { kind: "idle" }
     | { kind: "generating" }
-    | { kind: "ready"; stories: GeneratedStory[] }
+    | { kind: "ready"; stories: GeneratedStory[]; storyMap: StoryMap | null }
     | { kind: "error"; message: string }
   const [genState, setGenState] = useState<GenState>({ kind: "idle" })
   const stories = genState.kind === "ready" ? genState.stories : []
+  const storyMap = genState.kind === "ready" ? genState.storyMap : null
+  // The story map is only offered when the sizing gate built one (large PRD).
+  const hasMap = !!storyMap?.built && (storyMap.releases?.length ?? 0) > 0
+
+  // List vs Story-map view within the Tickets tab. A toggle (not a new tab) so
+  // the content-panel tab bar stays Evidence / PRD / Tickets. Resets to list
+  // when the map goes away (small PRD / regenerate).
+  const [view, setView] = useState<"list" | "map">("list")
+  useEffect(() => { if (!hasMap) setView("list") }, [hasMap])
 
   // Which ticket (if any) is open in the in-panel editable detail view.
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
@@ -501,7 +608,7 @@ export function TicketsTab() {
         .then((j) => {
           if (cancelled) return
           if (j.status === "ready") {
-            setGenState({ kind: "ready", stories: j.stories ?? [] })
+            setGenState({ kind: "ready", stories: j.stories ?? [], storyMap: j.story_map ?? null })
           } else if (j.status === "failed") {
             setGenState({ kind: "error", message: j.error || "Couldn't generate tickets" })
           } else {
@@ -549,7 +656,7 @@ export function TicketsTab() {
       .then((cache) => {
         if (cancelled) return
         if (cache.status === "ready" && cache.fresh) {
-          setGenState({ kind: "ready", stories: cache.stories })
+          setGenState({ kind: "ready", stories: cache.stories, storyMap: cache.story_map ?? null })
         } else {
           start()
         }
@@ -735,14 +842,44 @@ export function TicketsTab() {
           I&apos;ve broken <em>{prdTitle}</em> into{" "}
           <strong>{stories.length} implementable ticket{stories.length !== 1 ? "s" : ""}</strong> — scoped and
           prioritized from the PRD. Review, then push to ClickUp.
+          {storyMap?.summary ? <> <span className="tkt-intro-map">{storyMap.summary}.</span></> : null}
         </p>
       </div>
 
-      <div className="tkt-list">
-        {stories.map((s, i) => (
-          <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
-        ))}
-      </div>
+      {/* List ↔ Story-map toggle — only when the sizing gate built a map. Keeps
+          the content-panel tab bar (Evidence / PRD / Tickets) unchanged. */}
+      {hasMap ? (
+        <div className="tkt-viewtabs" role="tablist" aria-label="Ticket view">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "list"}
+            className={`tkt-vtab${view === "list" ? " tkt-vtab--active" : ""}`}
+            onClick={() => setView("list")}
+          >
+            Tickets
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={view === "map"}
+            className={`tkt-vtab${view === "map" ? " tkt-vtab--active" : ""}`}
+            onClick={() => setView("map")}
+          >
+            Story map
+          </button>
+        </div>
+      ) : null}
+
+      {hasMap && view === "map" && storyMap ? (
+        <StoryMapBoard map={storyMap} stories={stories} onOpen={(i) => setSelectedIndex(i)} />
+      ) : (
+        <div className="tkt-list">
+          {stories.map((s, i) => (
+            <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
+          ))}
+        </div>
+      )}
 
       <div className="tkt-list-foot">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>

@@ -1971,6 +1971,31 @@ export type GeneratedStory = {
   acceptance_criteria: string[]
   priority: string | null
   route: string | null
+  /** Story-map placement: the backbone activity this ticket serves and the
+   *  release slice it lands in. Set only when the map is built; absent for a
+   *  flat set. Lets the map be reconstructed per-ticket. */
+  activity?: string | null
+  release?: string | null
+}
+
+/** The Jeff Patton story map that organizes the SAME tickets, when the PRD is
+ *  large enough for the sizing gate to fire (`built`). The backbone is the
+ *  user's activities; each release slice groups tickets; Release 1 is the
+ *  walking skeleton. `gaps` are edges/needs fed back to the PRD, not tickets. */
+export type StoryMap = {
+  built: boolean
+  summary: string
+  signals?: {
+    activities: number
+    requirements: number
+    releases: number
+    phased_rollout: boolean
+    cross_team: boolean
+    count: number
+  }
+  activities?: string[]
+  releases?: { name: string; note?: string; walking_skeleton?: boolean }[]
+  gaps?: { activity?: string; release?: string; note: string }[]
 }
 
 export type StoryPushResult = {
@@ -1982,6 +2007,7 @@ export type StoryJob = {
   job_id: number
   status: "generating" | "ready" | "failed"
   stories?: GeneratedStory[]
+  story_map?: StoryMap | null
   error?: string
 }
 
@@ -1992,6 +2018,7 @@ export type StoryCache = {
   status: "none" | "ready" | "generating" | "failed"
   fresh: boolean
   stories: GeneratedStory[]
+  story_map?: StoryMap | null
   generated_at?: string
 }
 

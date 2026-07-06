@@ -266,4 +266,60 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     })
     expect(pushToClickUp).toHaveBeenCalledWith("list-1", stories)
   })
+
+  it("shows the Story map toggle and renders the backbone when the map is built", async () => {
+    content = { prd: { prd_id: 42, title: "Activation PRD" }, connectedConnectorIds: [] }
+    getForPrd.mockResolvedValue({
+      status: "ready",
+      fresh: true,
+      stories: [
+        { title: "Create workspace", body: "As an owner…", acceptance_criteria: ["G"], priority: "urgent", route: null, activity: "Set up workspace", release: "Release 1" },
+        { title: "Invite teammate", body: "As an owner…", acceptance_criteria: ["G"], priority: "high", route: null, activity: "Invite the team", release: "Release 2" },
+      ],
+      story_map: {
+        built: true,
+        summary: "Story map: built — 3 user activities · 8 requirements · 2 releases (sizing gate: 2 of 5 signals)",
+        activities: ["Set up workspace", "Invite the team"],
+        releases: [
+          { name: "Release 1", note: "walking skeleton", walking_skeleton: true },
+          { name: "Release 2", note: "richer journey", walking_skeleton: false },
+        ],
+        gaps: [{ activity: "Invite the team", release: "Release 2", note: "[edge] invite hits an existing seat" }],
+      },
+    })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+
+    await waitFor(() => expect(screen.getByText("Create workspace")).toBeTruthy())
+    // The sizing summary rides on the intro line.
+    expect(screen.getByText(/Story map: built/)).toBeTruthy()
+
+    // Switch to the map view via the toggle (a tab, not a new content-panel tab).
+    await act(async () => {
+      fireEvent.click(screen.getByRole("tab", { name: "Story map" }))
+    })
+    // Backbone activity + the gap note render on the board.
+    expect(screen.getByText("Set up workspace")).toBeTruthy()
+    expect(screen.getByText("Invite the team")).toBeTruthy()
+    expect(screen.getByText(/invite hits an existing seat/)).toBeTruthy()
+  })
+
+  it("offers no Story map toggle for a flat (unsized) ticket set", async () => {
+    content = { prd: { prd_id: 42, title: "Small PRD" }, connectedConnectorIds: [] }
+    getForPrd.mockResolvedValue({
+      status: "ready",
+      fresh: true,
+      stories: [{ title: "One ticket", body: "", acceptance_criteria: [], priority: null, route: null }],
+      story_map: { built: false, summary: "Story map: not needed — sized flat" },
+    })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+
+    await waitFor(() => expect(screen.getByText("One ticket")).toBeTruthy())
+    expect(screen.queryByRole("tab", { name: "Story map" })).toBeNull()
+  })
 })

@@ -11,7 +11,7 @@ import pytest
 
 from app.auth import CompanyContext
 from app.routes import stories
-from app.stories.generate import PRDNotFoundError, Story
+from app.stories.generate import GenerationResult, PRDNotFoundError, Story
 
 
 def _ctx(cid: str = "ent-A") -> CompanyContext:
@@ -28,11 +28,11 @@ async def _drain(job_id: int, tries: int = 100) -> None:
 
 def test_generate_returns_job_id_then_polls_ready(isolated_settings, monkeypatch):
     monkeypatch.setattr(
-        stories, "generate_user_stories",
-        lambda cid, prd_id=None, insight=None: [
+        stories, "generate_tickets",
+        lambda cid, prd_id=None, insight=None: GenerationResult(stories=[
             Story(title="Wire SSO", body="As a PM…"),
             Story(title="Add audit log", body="As an admin…"),
-        ],
+        ]),
     )
 
     async def _flow():
@@ -50,7 +50,7 @@ def test_generate_returns_job_id_then_polls_ready(isolated_settings, monkeypatch
 def test_poll_reports_failure_instead_of_hanging(isolated_settings, monkeypatch):
     def _boom(cid, prd_id=None, insight=None):
         raise PRDNotFoundError("prd 999 not found")
-    monkeypatch.setattr(stories, "generate_user_stories", _boom)
+    monkeypatch.setattr(stories, "generate_tickets", _boom)
 
     async def _flow():
         resp = await stories.generate(stories.GenerateIn(prd_id=999), _ctx())
@@ -65,8 +65,8 @@ def test_poll_reports_failure_instead_of_hanging(isolated_settings, monkeypatch)
 
 def test_get_job_is_tenant_scoped(isolated_settings, monkeypatch):
     monkeypatch.setattr(
-        stories, "generate_user_stories",
-        lambda cid, prd_id=None, insight=None: [Story(title="X", body="b")],
+        stories, "generate_tickets",
+        lambda cid, prd_id=None, insight=None: GenerationResult(stories=[Story(title="X", body="b")]),
     )
 
     async def _flow():
@@ -97,9 +97,9 @@ def test_inflight_generate_dedupes_by_prd(isolated_settings, monkeypatch):
     def _slow(cid, prd_id=None, insight=None):
         calls["n"] += 1
         release.wait(2)  # hold the job in "generating" across the second call
-        return [Story(title="T1", body="b")]
+        return GenerationResult(stories=[Story(title="T1", body="b")])
 
-    monkeypatch.setattr(stories, "generate_user_stories", _slow)
+    monkeypatch.setattr(stories, "generate_tickets", _slow)
 
     async def _flow():
         first = await stories.generate(stories.GenerateIn(prd_id=42), _ctx())
@@ -123,8 +123,8 @@ def test_generate_after_completion_starts_fresh_job(isolated_settings, monkeypat
     """Dedup is in-flight only: once a run finishes, a later /generate for the
     same PRD (e.g. the PRD changed → stale cache) starts a brand-new job."""
     monkeypatch.setattr(
-        stories, "generate_user_stories",
-        lambda cid, prd_id=None, insight=None: [Story(title="T", body="b")],
+        stories, "generate_tickets",
+        lambda cid, prd_id=None, insight=None: GenerationResult(stories=[Story(title="T", body="b")]),
     )
 
     async def _flow():
@@ -143,8 +143,8 @@ def test_inflight_dedupe_is_tenant_scoped(isolated_settings, monkeypatch):
     dedup keys on (company, prd_id), never collapses across tenants."""
     release = threading.Event()
     monkeypatch.setattr(
-        stories, "generate_user_stories",
-        lambda cid, prd_id=None, insight=None: (release.wait(2), [Story(title="T", body="b")])[1],
+        stories, "generate_tickets",
+        lambda cid, prd_id=None, insight=None: (release.wait(2), GenerationResult(stories=[Story(title="T", body="b")]))[1],
     )
 
     async def _flow():

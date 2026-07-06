@@ -4851,6 +4851,220 @@
     color: var(--ink-3);
   }
 
+  /* -------- Story map (list ↔ map toggle inside the Tickets tab) -------- */
+  /* The sizing-gate summary appended to the intro line ("Story map: built — …"). */
+  .tkt-intro-map {
+    font-weight: 600;
+    color: var(--accent-ink);
+  }
+
+  .tkt-viewtabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+
+  .tkt-vtab {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink-3);
+    background: var(--surface-2, var(--surface));
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 15px;
+    cursor: pointer;
+    transition: background .12s, color .12s, border-color .12s;
+  }
+
+  .tkt-vtab:hover { color: var(--ink); }
+
+  .tkt-vtab--active {
+    background: var(--accent-muted);
+    color: var(--accent-ink);
+    border-color: var(--accent-alpha-14);
+  }
+
+  .smap-wrap {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 18px;
+    overflow-x: auto;
+  }
+
+  .smap-grid {
+    display: grid;
+    gap: 10px;
+    min-width: 720px;
+    align-items: start;
+  }
+
+  .smap-rowlbl {
+    align-self: stretch;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 9px 10px;
+    border-radius: 9px;
+    font-size: 10.5px;
+    font-weight: 700;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+  }
+
+  .smap-rowlbl .smap-d {
+    font-size: 10px;
+    font-weight: 500;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--ink-4);
+  }
+
+  .smap-rowlbl--bb { color: var(--ink-4); }
+
+  .smap-rowlbl--r1 {
+    background: var(--accent-muted);
+    color: var(--accent-ink);
+  }
+
+  .smap-rowlbl--r2 {
+    background: var(--surface-2, var(--surface));
+    color: var(--ink-3);
+    border: 1px solid var(--line);
+  }
+
+  /* Backbone activity card (light — never a heavy dark block). */
+  .smap-act {
+    position: relative;
+    background: var(--surface-2, var(--surface));
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 10px 12px;
+  }
+
+  .smap-act .smap-n {
+    display: block;
+    font-family: var(--font-mono, monospace);
+    font-size: 9.5px;
+    color: var(--ink-4);
+    margin-bottom: 2px;
+  }
+
+  .smap-act .smap-t {
+    font-size: 12.5px;
+    font-weight: 700;
+    line-height: 1.35;
+    color: var(--ink);
+  }
+
+  .smap-act::after {
+    content: "→";
+    position: absolute;
+    right: -11px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--ink-4);
+    font-size: 13px;
+    z-index: 1;
+  }
+
+  .smap-act--last::after { content: ""; }
+
+  .smap-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    min-height: 8px;
+  }
+
+  .smap-cell--r1 {
+    background: var(--accent-muted);
+    border-radius: 9px;
+    padding: 7px;
+  }
+
+  .smap-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 9px 11px;
+    cursor: pointer;
+    transition: box-shadow .12s, border-color .12s;
+  }
+
+  .smap-card:hover {
+    border-color: var(--accent);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, .07);
+  }
+
+  .smap-card:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .smap-card--skel { border-color: var(--accent-alpha-14); }
+
+  .smap-k {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-family: var(--font-mono, monospace);
+    font-size: 10px;
+    color: var(--ink-4);
+    margin-bottom: 3px;
+  }
+
+  .smap-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+
+  .smap-dot--u { background: #c13838; }
+  .smap-dot--h { background: #d97706; }
+  .smap-dot--n { background: #2563eb; }
+
+  .smap-ct {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+    line-height: 1.4;
+  }
+
+  .smap-m {
+    margin-top: 5px;
+    font-size: 10px;
+  }
+
+  .smap-ac {
+    background: var(--surface-2, var(--surface));
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 1px 8px;
+    font-weight: 600;
+    color: var(--ink-3);
+  }
+
+  /* Gap / edge note — fed back to the PRD, never a silent ticket. */
+  .smap-gap {
+    border: 1px dashed #e0b877;
+    background: rgba(224, 184, 119, .12);
+    border-radius: 9px;
+    padding: 7px 10px;
+    font-size: 10.5px;
+    font-weight: 600;
+    color: #a9761e;
+    line-height: 1.4;
+  }
+
+  .smap-loose {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin-top: 12px;
+  }
+
   /* -------- Ticket detail -------- */
   .tkt-detail {
     display: flex;

@@ -133,6 +133,100 @@ def test_generate_requires_exactly_one_source(isolated_settings):
         generate_user_stories("ent-A", prd_id=1, insight="x")
 
 
+# ───────────────────────── story-map sizing gate ─────────────────────────────
+
+def _scored(sizing):
+    from app.stories.generate import _score_sizing
+    return _score_sizing(sizing)
+
+
+def test_sizing_gate_builds_map_at_two_signals(isolated_settings):
+    # 3 activities (>1) + 2 releases (>1) = 2 signals → built.
+    signals, built, summary = _scored(
+        {"activities_count": 3, "requirements_count": 8, "releases_count": 2}
+    )
+    assert built is True
+    assert signals["count"] == 2
+    assert "Story map: built" in summary
+
+
+def test_sizing_gate_stays_flat_below_threshold(isolated_settings):
+    # 1 activity, 8 requirements (<=12), single release, no phasing = 0 signals.
+    signals, built, summary = _scored(
+        {"activities_count": 1, "requirements_count": 8, "releases_count": 1}
+    )
+    assert built is False
+    assert signals["count"] == 0
+    assert "not needed" in summary
+
+
+def test_sizing_gate_counts_all_five_signals(isolated_settings):
+    signals, built, _ = _scored({
+        "activities_count": 5, "requirements_count": 13, "releases_count": 2,
+        "phased_rollout": True, "cross_team": True,
+    })
+    assert built is True
+    assert signals["count"] == 5
+
+
+_STORY_MAP_OUTPUT = {
+    "stories": [
+        {"title": "Create workspace", "body": "As an owner…",
+         "acceptance_criteria": ["Given…, Then…"], "priority": "urgent",
+         "activity": "Set up workspace", "release": "Release 1"},
+        {"title": "Invite teammate", "body": "As an owner…",
+         "acceptance_criteria": ["Given…, Then…"], "priority": "high",
+         "activity": "Invite the team", "release": "Release 2"},
+    ],
+    "story_map": {
+        "sizing": {"activities_count": 3, "requirements_count": 8,
+                   "releases_count": 2},
+        "activities": ["Set up workspace", "Invite the team", "See value"],
+        "releases": [
+            {"name": "Release 1", "note": "walking skeleton", "walking_skeleton": True},
+            {"name": "Release 2", "note": "richer journey", "walking_skeleton": False},
+        ],
+        "gaps": [{"activity": "Invite the team", "release": "Release 2",
+                  "note": "[edge] invite hits an existing seat"}],
+    },
+}
+
+
+def test_generate_tickets_returns_built_story_map(isolated_settings, monkeypatch):
+    import app.stories.generate as gen
+    from app.stories.generate import generate_tickets
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result(_STORY_MAP_OUTPUT))
+
+    res = generate_tickets("ent-A", insight="big multi-activity epic")
+    assert [s.title for s in res.stories] == ["Create workspace", "Invite teammate"]
+    # Per-ticket placement rides on each Story (so the map is reconstructable).
+    assert res.stories[0].activity == "Set up workspace"
+    assert res.stories[0].release == "Release 1"
+    # The map is built (2 signals) with backbone, slices, and a gap.
+    assert res.story_map is not None
+    assert res.story_map["built"] is True
+    assert res.story_map["activities"][0] == "Set up workspace"
+    assert res.story_map["releases"][0]["walking_skeleton"] is True
+    assert res.story_map["gaps"][0]["note"].startswith("[edge]")
+    # Placement survives the to_dict round-trip used for persistence + the job.
+    assert res.stories[0].to_dict()["release"] == "Release 1"
+
+
+def test_generate_tickets_flat_map_when_small(isolated_settings, monkeypatch):
+    import app.stories.generate as gen
+    from app.stories.generate import generate_tickets
+    small = {
+        "stories": _TWO_STORIES["stories"],
+        "story_map": {"sizing": {"activities_count": 1, "requirements_count": 6,
+                                 "releases_count": 1}},
+    }
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result(small))
+    res = generate_tickets("ent-A", insight="small feature")
+    assert res.story_map["built"] is False
+    # No backbone/slices offered for a flat set → the tab won't show the Map tab.
+    assert "releases" not in res.story_map
+
+
 def test_generate_passes_prd_part_b_to_model(isolated_settings, monkeypatch):
     """A PRD with Part B (llm_part) is fed into the model input (spec-aware)."""
     import app.stories.generate as gen
@@ -301,12 +395,13 @@ def test_route_generate_returns_a_job_not_a_hung_request(isolated_settings, monk
     # generate→poll→stories flow is covered in test_routes_stories_async.py.
     ctx = company_client(monkeypatch)
     import app.routes.stories as routes
+    from app.stories.generate import GenerationResult
     monkeypatch.setattr(
-        routes, "generate_user_stories",
-        lambda enterprise_id, **kw: [
+        routes, "generate_tickets",
+        lambda enterprise_id, **kw: GenerationResult(stories=[
             Story(title="S1", body="As a x, I want y, so that z.",
                   acceptance_criteria=["Given, When, Then."], priority="low"),
-        ],
+        ]),
     )
     r = ctx.client.post("/v1/stories/generate", json={"insight": "hello"})
     assert r.status_code == 200, r.text

@@ -62,19 +62,38 @@ def get_tickets(company_id: str, prd_id: int) -> dict | None:
 
 
 def save_tickets(
-    company_id: str, prd_id: int, content_hash: str, stories: list[dict]
+    company_id: str,
+    prd_id: int,
+    content_hash: str,
+    stories: list[dict],
+    story_map: dict | None = None,
 ) -> None:
-    """Upsert the generated stories for a PRD (one row per prd_id)."""
+    """Upsert the generated stories (+ optional story map) for a PRD.
+
+    One row per prd_id. `story_map` is the Jeff Patton map that organizes the same
+    tickets (see app.stories.generate); it lives in its own nullable column. If the
+    column isn't present yet (a deploy where the migration hasn't landed), the write
+    degrades to stories-only rather than failing — the flat Tickets tab keeps
+    working; only the Map toggle is unavailable until the column exists.
+    """
     c = require_client()
-    c.table("prd_tickets").upsert(
-        {
-            "company_id": company_id,
-            "prd_id": prd_id,
-            "content_hash": content_hash,
-            "stories": stories,
-            "status": "ready",
-            "error": None,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        },
-        on_conflict="prd_id",
-    ).execute()
+    row = {
+        "company_id": company_id,
+        "prd_id": prd_id,
+        "content_hash": content_hash,
+        "stories": stories,
+        "status": "ready",
+        "error": None,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        c.table("prd_tickets").upsert(
+            {**row, "story_map": story_map}, on_conflict="prd_id"
+        ).execute()
+    except Exception:  # noqa: BLE001 — most likely the story_map column is absent
+        logger.warning(
+            "prd_tickets upsert with story_map failed; retrying stories-only "
+            "(is the story_map column migrated?)",
+            exc_info=True,
+        )
+        c.table("prd_tickets").upsert(row, on_conflict="prd_id").execute()

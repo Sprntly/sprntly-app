@@ -22,7 +22,7 @@ from app.connectors import clickup_oauth
 from app.stories.generate import (
     PRDNotFoundError,
     Story,
-    generate_user_stories,
+    generate_tickets,
 )
 from app.stories.push import ClickUpNotConnectedError, push_stories_to_clickup
 
@@ -124,20 +124,22 @@ async def generate(
         "insight": body.insight,
         "status": "generating",
         "stories": None,
+        "story_map": None,
         "error": None,
     }
     _prune_jobs()
 
     async def _run() -> None:
         try:
-            stories = await asyncio.to_thread(
-                generate_user_stories,
+            gen = await asyncio.to_thread(
+                generate_tickets,
                 company.company_id, prd_id=body.prd_id, insight=body.insight,
             )
             job = _jobs.get(job_id)
             if job is not None:
                 job["status"] = "ready"
-                job["stories"] = [s.to_dict() for s in stories]
+                job["stories"] = [s.to_dict() for s in gen.stories]
+                job["story_map"] = gen.story_map
         except PRDNotFoundError as exc:
             job = _jobs.get(job_id)
             if job is not None:
@@ -168,6 +170,7 @@ def get_job(
     out: dict = {"job_id": job_id, "status": job["status"]}
     if job["status"] == "ready":
         out["stories"] = job["stories"] or []
+        out["story_map"] = job.get("story_map")
     elif job["status"] == "failed":
         out["error"] = job["error"]
     return out
@@ -189,7 +192,7 @@ def tickets_for_prd(
 
     row = get_tickets(company.company_id, prd_id)
     if row is None:
-        return {"status": "none", "fresh": False, "stories": []}
+        return {"status": "none", "fresh": False, "stories": [], "story_map": None}
     current = prd_content_hash(prd_id)
     fresh = (
         row.get("status") == "ready"
@@ -200,6 +203,7 @@ def tickets_for_prd(
         "status": row.get("status") or "ready",
         "fresh": fresh,
         "stories": row.get("stories") or [],
+        "story_map": row.get("story_map"),
         "generated_at": row.get("generated_at"),
     }
 

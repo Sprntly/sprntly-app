@@ -40,11 +40,15 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\b(re-?prioriti[sz]e|re-?rank|re-?sequence)\b", re.I),
      "prioritize", "Re-prioritize backlog", 0.90),
 
-    # User stories / tickets
+    # User stories / tickets (the user-stories skill absorbs story mapping too:
+    # it auto-sizes and builds the Jeff Patton map for large PRDs, so "story map"
+    # / "release slices" route here rather than to a separate skill).
     (re.compile(r"\b(create|generate|write)\b.{0,20}\b(ticket|story|stories|task)\b", re.I),
      "user-stories", "Generate user stories", 0.90),
     (re.compile(r"\b(user\s+stor|acceptance\s+criteria|ac\s+for)\b", re.I),
      "user-stories", "Generate user stories", 0.85),
+    (re.compile(r"\b(story\s*map(?:ping)?|release\s+slices?|walking\s+skeleton)\b", re.I),
+     "user-stories", "Build story map", 0.85),
 
     # Backlog triage
     (re.compile(r"\b(triage|clean\s*up|dedupe|duplicate).{0,20}\bbacklog\b", re.I),
