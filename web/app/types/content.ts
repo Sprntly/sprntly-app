@@ -123,25 +123,17 @@ export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
   {
     id: "home-goto-brief",
     icon: "sparkle",
-    title: "This week's brief",
+    title: "Give me this week's brief",
     desc: "Ranked findings, impact, and signals in one view.",
     target: "brief",
   },
   {
-    id: "home-prompt-revenue",
-    icon: "chart",
-    title: "What are the biggest revenue drivers",
+    id: "home-prompt-customer-feedback",
+    icon: "diamond",
+    title: "Give me feedback on last week's customer conversations",
     desc: "Fills Ask so you can edit or send.",
     target: "ondemand",
-    prompt: "What are the biggest revenue drivers",
-  },
-  {
-    id: "home-prompt-cost",
-    icon: "document",
-    title: "What are the biggest cost drivers",
-    desc: "Fills Ask so you can edit or send.",
-    target: "ondemand",
-    prompt: "What are the biggest cost drivers",
+    prompt: "Give me feedback on last week's customer conversations.",
   },
 ]
 
