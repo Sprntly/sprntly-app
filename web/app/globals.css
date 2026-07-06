@@ -17055,6 +17055,11 @@
 .tkv2-atab--active { background: var(--chip); color: var(--ink); }
 .tkv2-aisum { background: var(--green-s); border-radius: 12px; padding: 14px 16px; margin-bottom: 13px; font-size: 13.5px; color: var(--ink2); }
 .tkv2-aisum .ah { font-size: 13px; font-weight: 700; color: var(--green-d); margin-bottom: 6px; }
+.tkv2-propose {
+  margin-top: 10px; padding: 10px 12px; background: var(--paper);
+  border: 1px solid var(--green-b); border-radius: 9px; font-size: 13px; color: var(--ink2);
+}
+.tkv2-propose b { color: var(--green-d); }
 .tkv2-actions2 { display: flex; gap: 9px; margin-top: 11px; }
 .tkv2-btn2 { font-size: 12.5px; font-weight: 600; border-radius: 9px; padding: 7px 14px; cursor: pointer; border: 1px solid transparent; font-family: var(--font-body); }
 .tkv2-btn2--primary { background: var(--green); color: #fff; }

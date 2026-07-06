@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from app.auth import CompanyContext, require_company
 from app.connectors import clickup_oauth
 from app.db.client import require_client, utc_now
-from app.llm import call_md
+from app.llm import call_json
 from app.stories.push import ClickUpNotConnectedError, _clickup_access_token
 
 logger = logging.getLogger(__name__)
@@ -228,11 +228,26 @@ def remove_comment(
 
 
 _SUMMARY_SYSTEM = (
-    "You summarize a software ticket's comment thread for a product manager. "
-    "In 1-2 plain sentences, capture where the discussion landed: the decision "
-    "or consensus and any open question still being debated. No preamble, no "
-    "bullet points, no restating who said what verbatim."
+    "You summarize a software ticket's comment thread for a product manager and "
+    "detect whether the discussion proposes a concrete change to the ticket's "
+    "ACCEPTANCE CRITERIA (a new rule/test the ticket should enforce).\n"
+    "`summary`: 1-2 plain sentences capturing where the discussion landed — the "
+    "decision/consensus and any open question. No preamble, no bullets, no "
+    "restating who said what.\n"
+    "`proposed_criterion`: ONLY when the thread clearly proposes a new acceptance "
+    "criterion, write it as one 'Given… When… Then…' sentence (prefix '[failure]' "
+    "for an error path, '[edge]' for an edge case) — otherwise null. Never invent "
+    "a change the thread didn't actually ask for."
 )
+
+_SUMMARY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": ["string", "null"]},
+        "proposed_criterion": {"type": ["string", "null"]},
+    },
+    "required": ["summary"],
+}
 
 
 @router.get("/{ticket_key}/comments/summary")
@@ -240,9 +255,11 @@ def summarize_comments(
     ticket_key: str,
     company: CompanyContext = Depends(require_company),
 ):
-    """An AI summary of the ticket's comment thread. Returns {"summary": null}
-    when there's too little to summarize (< 2 comments) so the UI can hide the
-    block without an LLM call being meaningful."""
+    """An AI summary of the ticket's comment thread + an optional structured
+    proposal. Returns {"summary": null} when there's too little to summarize
+    (< 2 comments) so the UI can hide the block. When the thread proposes a
+    concrete acceptance-criteria change, `proposed_criterion` carries the exact
+    'Given/When/Then' rule the change loop's Accept & propagate will apply."""
     c = require_client()
     resp = (
         c.table("ticket_comments").select("*")
@@ -251,17 +268,19 @@ def summarize_comments(
     )
     comments = resp.data or []
     if len(comments) < 2:
-        return {"summary": None}
+        return {"summary": None, "proposed_criterion": None}
     thread = "\n".join(
         f"{r.get('author', 'user')}: {r.get('body', '')}".strip()
         for r in comments if str(r.get("body", "")).strip()
     )
     try:
-        summary = call_md(system=_SUMMARY_SYSTEM, user=thread, max_tokens=300).strip()
+        out = call_json(system=_SUMMARY_SYSTEM, user=thread, schema=_SUMMARY_SCHEMA, max_tokens=400)
     except Exception:  # noqa: BLE001 — a summary is best-effort, never blocks the tab
         logger.exception("comment summary failed for %s", ticket_key)
-        return {"summary": None}
-    return {"summary": summary or None}
+        return {"summary": None, "proposed_criterion": None}
+    summary = str(out.get("summary") or "").strip() or None
+    proposed = str(out.get("proposed_criterion") or "").strip() or None
+    return {"summary": summary, "proposed_criterion": proposed}
 
 
 # ── Priority mapping ────────────────────────────────────────────────────

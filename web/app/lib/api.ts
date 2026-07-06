@@ -1941,7 +1941,9 @@ export const ticketDataApi = {
   /** AI summary of the comment thread. `summary` is null when there's too little
    *  to summarize (< 2 comments) or the LLM call failed (best-effort). */
   summarizeComments: (ticketKey: string) =>
-    api.get<{ summary: string | null }>(`/v1/tickets/${encodeURIComponent(ticketKey)}/comments/summary`),
+    api.get<{ summary: string | null; proposed_criterion?: string | null }>(
+      `/v1/tickets/${encodeURIComponent(ticketKey)}/comments/summary`,
+    ),
 }
 
 export const ticketPushApi = {
