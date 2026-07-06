@@ -13,7 +13,7 @@
 //      container's center stage (container→view→leaf wiring intact).
 //   3. defaultFullscreen + a granted bundle renders the fullscreen overlay.
 import * as React from "react"
-import { render, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -62,6 +62,7 @@ beforeEach(() => {
   }
 })
 afterEach(() => {
+  cleanup()
   vi.clearAllMocks()
 })
 
@@ -118,6 +119,22 @@ describe("PostGenerationResult — authed view-grant gates the iframe (DOM)", ()
       expect(container.querySelector('[data-testid="da-grant-error"]')).not.toBeNull()
     })
     expect(container.querySelector("iframe.da-prototype-iframe")).toBeNull()
+  })
+})
+
+describe("PostGenerationResult — private share link wiring", () => {
+  it("uses the prototype record prd id for the private internal link", () => {
+    render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ id: 249, prd_id: 785, share_mode: "private" }),
+      }),
+    )
+
+    fireEvent.click(screen.getByTestId("da-share-toggle"))
+
+    const link = screen.getByTestId("share-link")
+    expect(link.textContent).toContain(`${window.location.origin}/prototype?prd=785`)
+    expect(link.textContent).not.toContain(`${window.location.origin}/prototype?prd=249`)
   })
 })
 
