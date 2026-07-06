@@ -1962,15 +1962,49 @@ export const ticketPushApi = {
 // Backend: app/routes/stories.py. Generation is LLM-backed (the vendored
 // user-stories skill) and writes nothing; push is the explicit ClickUp write.
 // This is the REAL path behind "Create ticket" (vs the mock ticket fixtures).
+// The canonical ticket the `ticket` skill emits. `title`/`body`/
+// `acceptance_criteria` are the legacy core; the rest is the structured
+// contract (five-section description, trace spine, delivery structure, and the
+// decision/spike variants). Structured fields are optional — a set cached
+// before the v2 contract, or a ticket the model left thin, omits them.
+export type TicketAC = string // "Given… When… Then…", may be prefixed "[failure]"/"[edge]"
+
 export type GeneratedStory = {
   /** Content-derived stable id (hash of title+body) stamped at generation.
    *  Keys per-ticket edit overrides. Optional for sets cached before it existed. */
   id?: string
+  /** build (deliverable) · decision ([ESCALATE]) · spike ([ASSUMPTION → T0]). */
+  ticket_type?: "build" | "decision" | "spike"
   title: string
   body: string
-  acceptance_criteria: string[]
+  acceptance_criteria: TicketAC[]
   priority: string | null
   route: string | null
+  // ── Five-section structured description ──
+  what?: string
+  why_now?: string
+  user_story?: string
+  scope?: string[]
+  out_of_scope?: string
+  // ── Provenance / trace spine ──
+  prd_section?: string // "Part A §5 R3"
+  ears_ids?: string[]
+  signals?: string[]
+  ac_inherited?: boolean
+  // ── Delivery structure ──
+  subtasks?: string[] // may be prefixed "[P]" for parallel-safe
+  blocked_by?: string[]
+  blocks?: string[]
+  story_points?: number | null
+  labels?: string[]
+  data_gaps?: string[] // [NEED] markers, never filled
+  // ── Decision-ticket fields ──
+  decision?: string | null
+  owner?: string | null
+  decide_by?: string | null
+  // ── Spike fields ──
+  timebox?: string | null
+  exit_condition?: string | null
 }
 
 export type StoryPushResult = {
