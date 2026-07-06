@@ -534,7 +534,7 @@ describe("passcode mint targets the app-origin /_da-bundle path (prod cookie cor
 // (jsdom does not apply the external stylesheet).
 describe("single-device badge — wiring + CSS invariants", () => {
   it("PublicTokenViewer derives the gate and threads showDesktop/showMobile/initialPlatform + gates the badge", () => {
-    // The gate mirrors the internal viewer (PostGenerationResult): single device
+    // The gate mirrors the signed-in single-device viewer: single device
     // ⇒ suppress the toggle.
     expect(publicViewerSrc).toContain('const showDesktop = targetPlatform !== "mobile"')
     expect(publicViewerSrc).toContain('const showMobile = targetPlatform !== "desktop"')

@@ -173,7 +173,7 @@ export function PublicTokenViewer() {
     )
   }
   if (state.kind === "passcode") return <PasscodeGate token={token as string} />
-  // Single-device gate — mirrors the internal viewer (PostGenerationResult ~:1551).
+  // Single-device gate — mirrors the signed-in single-device viewer's toggle gate.
   // A prototype targeting one device has nothing to toggle to, so we suppress the
   // Desktop/Mobile toggle (via showDesktop/showMobile → PrototypeViewer's showToggle)
   // and show a static DeviceBadge in its slot instead. "both"/legacy/null → both
@@ -199,7 +199,7 @@ export function PublicTokenViewer() {
             showMobile={showMobile}
             // Start the stage in the prototype's own form factor so a mobile-only
             // proto renders in the mobile bezel (not a desktop frame under a "Mobile"
-            // badge). Mirrors the internal viewer (PostGenerationResult ~:1553).
+            // badge). Mirrors the signed-in single-device viewer's stage default.
             initialPlatform={targetPlatform === "mobile" ? "mobile" : "desktop"}
             // Edge-to-edge: suppress the cosmetic browser-frame decoration (traffic
             // lights + URL bar) so the shared prototype renders flush. The Mark +

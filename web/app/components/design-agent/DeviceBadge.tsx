@@ -4,7 +4,7 @@ import { IconMonitor, IconPhone } from "../shared/app-icons"
  *  when a shared prototype targets a SINGLE device — it replaces the Desktop/Mobile
  *  toggle (there is nothing to toggle to) and tells the recipient which form factor
  *  the prototype was built for. Mirrors the internal single-device indicator
- *  (`.proto-fs-device` in PostGenerationResult), reusing the same shared
+ *  (`.proto-fs-device` in the signed-in viewer), reusing the same shared
  *  `IconPhone` / `IconMonitor` line icons for visual consistency.
  *
  *  Renders nothing for "both"/legacy/null — the caller shows the normal toggle in
