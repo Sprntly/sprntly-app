@@ -241,12 +241,13 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     expect(screen.getByText(/generate a PRD first/i)).toBeTruthy()
   })
 
-  it("pushing fetches ClickUp lists then creates the generated tickets", async () => {
+  it("pushing fetches ClickUp lists, opens the destination picker, then creates the tickets", async () => {
+    window.localStorage.clear()
     content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
     const stories = [{ title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
     generate.mockResolvedValue({ job_id: 12, status: "generating" })
     getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
-    listClickUpLists.mockResolvedValue({ lists: [{ id: "list-1", name: "Sprint", folder: null }] })
+    listClickUpLists.mockResolvedValue({ lists: [{ id: "list-1", name: "Sprint", space: "Product", folder: null }] })
     pushToClickUp.mockResolvedValue({ created: [{ story: "T1", task_id: "cu-1", url: "http://x" }], errors: [] })
 
     await act(async () => {
@@ -254,16 +255,42 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     })
     await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
 
-    // First push click (top-bar button) → fetch lists.
+    // First push click (top-bar button) → fetch lists and open the picker.
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /push to clickup/i }))
     })
     expect(listClickUpLists).toHaveBeenCalled()
+    await waitFor(() => expect(screen.getByText(/select a project/i)).toBeTruthy())
 
-    // Second click (list picked) → push the generated stories.
+    // The picker's "Push N tickets" action → push the reviewed stories.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /push to selected list/i }))
+      fireEvent.click(screen.getByRole("button", { name: /push 1 ticket/i }))
     })
+    expect(pushToClickUp).toHaveBeenCalledWith("list-1", stories)
+    // "Remember for this PRD" is on by default → the destination is persisted.
+    expect(window.localStorage.getItem("sprntly_ticket_dest_7")).toBe("list-1")
+  })
+
+  it("a remembered destination pushes straight through without re-opening the picker", async () => {
+    window.localStorage.clear()
+    window.localStorage.setItem("sprntly_ticket_dest_7", "list-1")
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
+    const stories = [{ title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
+    listClickUpLists.mockResolvedValue({ lists: [{ id: "list-1", name: "Sprint", space: "Product", folder: null }] })
+    pushToClickUp.mockResolvedValue({ created: [{ story: "T1", task_id: "cu-1", url: "http://x" }], errors: [] })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /push to clickup/i }))
+    })
+    // No picker — pushed directly to the remembered list.
+    expect(screen.queryByText(/select a project/i)).toBeNull()
     expect(pushToClickUp).toHaveBeenCalledWith("list-1", stories)
   })
 })
