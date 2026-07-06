@@ -419,10 +419,37 @@ export function ChatScreen() {
     if (!activeTabId) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
     if (!tab || tab.prdGenerating) return
-    // Already generated — sync to context and open panel
+    // Already generated (loaded on this tab) — sync to context and open panel.
     if (tab.prd) {
       setContent({ prd: tab.prd, prdMeta: tab.briefMeta })
       openContentPanel("prd")
+      return
+    }
+    // A PRD already exists in the DB for this insight but isn't on the tab —
+    // e.g. after a reload, where `prd` is stripped from the persisted tab. LOAD
+    // the existing PRD by id; do NOT regenerate (that would spawn a duplicate and
+    // burn a full generation). This is what makes the button "View PRD" open the
+    // real doc rather than kick off a new build.
+    if (chatInsightState?.hasPrd && chatInsightState.prdId != null) {
+      const prdId = chatInsightState.prdId
+      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
+      setContent({ prd: null, prdMeta: null, prdGenerating: true })
+      openContentPanel("prd")
+      try {
+        const result = await loadPrdById(prdId)
+        if (result.ok) {
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd } : t))
+          setContent({ prd: result.prd, prdMeta: tab.briefMeta, prdGenerating: false })
+        } else {
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+          setContent({ prdGenerating: false })
+          showToast("Couldn't load PRD", result.message)
+        }
+      } catch (e) {
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+        setContent({ prdGenerating: false })
+        showToast("Couldn't load PRD", e instanceof Error ? e.message : "Unknown error")
+      }
       return
     }
     const defaultKey = pickDefaultDetailKey(content.briefDetails)
@@ -453,7 +480,7 @@ export function ChatScreen() {
       setContent({ prdGenerating: false })
       showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
     }
-  }, [activeTabId, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
+  }, [activeTabId, chatInsightState, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
 
   const handleOpenEvidence = useCallback(async () => {
     if (!activeTabId) return
@@ -1069,6 +1096,12 @@ export function ChatScreen() {
   // The tab title is "PRD · <insight>"; the message shows the insight sentence on
   // its own (the "PRD" kind is already a chip), so strip the redundant prefix.
   const insightText = (activeTab?.prd?.title ?? activeTab?.title ?? "").replace(/^PRD · /, "")
+  // Whether a PRD exists for this tab's insight — either loaded on the tab OR
+  // saved in the DB (via the brief-prototype map). The tab's `prd` is dropped
+  // from localStorage on reload, so relying on it alone made the CTA say
+  // "Generate PRD" for an insight that already has one; the DB signal keeps the
+  // label ("View PRD") and the action (load, not regenerate) correct after reload.
+  const chatPrdExists = !!activeTab?.prd || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
   const displayChips = useMemo(() => {
     const chips = buildHomeChips(homeCards, starters)
     return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
@@ -1349,7 +1382,7 @@ export function ChatScreen() {
                           >
                             {activeTab?.prdGenerating
                               ? "Generating PRD…"
-                              : activeTab?.prd ? "View PRD" : "Generate PRD"}
+                              : chatPrdExists ? "View PRD" : "Generate PRD"}
                           </button>
                           <button
                             type="button"
@@ -1406,7 +1439,7 @@ export function ChatScreen() {
                               >
                                 {activeTab?.prdGenerating
                                   ? "Generating PRD…"
-                                  : activeTab?.prd ? "Open PRD" : "Generate PRD"}
+                                  : chatPrdExists ? "View PRD" : "Generate PRD"}
                               </button>
                               <button
                                 type="button"
