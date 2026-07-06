@@ -24,10 +24,10 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional
 
-from app.ask_runner import _ASK_RESPONSE_SCHEMA, compose_ask_answer
+from app.ask_runner import _ASK_RESPONSE_SCHEMA, _retrieve_kg_bundle, compose_ask_answer
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
-from app.prompts import ASK_SYSTEM
+from app.prompts import ASK_SYSTEM, ASK_SYSTEM_KG_ADDENDUM
 from app.skill_router import detect_intent, is_call_digest, is_voc_report_request
 from app.skills.catalog import COST_GATED, NON_ROUTABLE, routable_manifest
 from app.skills.loader import get_skill, list_skills
@@ -200,20 +200,45 @@ def _tag(payload: dict, decision: RouteDecision) -> dict:
     return payload
 
 
+def _kg_grounding(enterprise_id, question) -> tuple[str, bool]:
+    """Live-context block from the KG for a generic skill answer.
+
+    A skill call otherwise carries only its SKILL.md method + the raw question
+    — no signal. A generative/analytical skill (prd-author, competitive-
+    intelligence-review, …) handed an empty evidence context refuses per its
+    own "every requirement traces to a real signal" rule, so the user sees a
+    "no sources connected / not enough signal" answer even when their KG is
+    full. Ground the skill on the SAME budget-capped KG bundle the direct Ask
+    path uses. Best-effort: no tenant / empty KG / any read error → ('', False),
+    and the skill runs corpus-less exactly as before (the call/VoC and
+    deterministic SCRIPT_TOOLS skills keep their own dedicated grounding and
+    never reach here)."""
+    bundle = _retrieve_kg_bundle(enterprise_id, question)
+    if not bundle:
+        return "", False
+    from app.graph.retrieval import render_context_section
+
+    return f"{render_context_section(bundle)}\n\n---\n\n", True
+
+
 def _answer_single_shot(decision: RouteDecision, enterprise_id, question, history) -> dict:
-    """Skill answer via one gateway call (SKILL.md injected by the gateway)."""
+    """Skill answer via one gateway call (SKILL.md injected by the gateway),
+    grounded on the KG when the tenant's graph has relevant signal."""
     model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
+    kg_block, kg_used = _kg_grounding(enterprise_id, question)
+    system = (
+        ASK_SYSTEM
+        + (ASK_SYSTEM_KG_ADDENDUM if kg_used else "")
+        + f"\n\nThe user's question maps to the '{decision.skill_id}' skill. "
+        "Follow that skill's method to produce a structured, actionable answer."
+    )
     result = llm_call(
         enterprise_id=enterprise_id,
         agent="qa",
         purpose="skill_answer",
         model=model,
-        system=(
-            ASK_SYSTEM
-            + f"\n\nThe user's question maps to the '{decision.skill_id}' skill. "
-            "Follow that skill's method to produce a structured, actionable answer."
-        ),
-        input=_render_history(history) + f"Question: {question}",
+        system=system,
+        input=_render_history(history) + kg_block + f"Question: {question}",
         prompt_version="qa-skill-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=decision.skill_id,

@@ -207,6 +207,55 @@ def test_answer_history_folded_into_skill_input(monkeypatch):
     assert "here are 3 features" in captured["input"]
 
 
+# ── KG grounding of the single-shot skill answer ──────────────────────────────
+
+def test_single_shot_grounds_skill_on_kg_when_present(monkeypatch):
+    """A generic skill (prd-author) is handed the tenant's KG bundle so it has
+    real signal to work from — no more corpus-less "not enough signal" refusal."""
+    captured = {}
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: {"signals": [1], "themes": []})
+    import app.graph.retrieval as retrieval
+    monkeypatch.setattr(
+        retrieval, "render_context_section", lambda b: "LIVE CONTEXT FROM CONNECTED SOURCES\n- churn up 12%"
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+
+    out = qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme")
+
+    assert out["_skill"] == "prd-author"
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in captured["input"]  # KG folded in
+    assert "churn up 12%" in captured["input"]
+    assert qa.ASK_SYSTEM_KG_ADDENDUM in captured["system"]  # model told to treat it as evidence
+    assert captured["input"].rstrip().endswith("Question: write a PRD for billing")
+
+
+def test_single_shot_stays_corpus_less_when_kg_empty(monkeypatch):
+    """No tenant signal (empty KG / no company / read error) → the pre-fix path:
+    no KG block, no KG addendum. Preserves behaviour for signal-less tenants."""
+    captured = {}
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+
+    out = qa.answer(enterprise_id="ent", question="write a PRD for billing", dataset="acme")
+
+    assert out["_skill"] == "prd-author"
+    assert "LIVE CONTEXT" not in captured["input"]
+    assert qa.ASK_SYSTEM_KG_ADDENDUM not in captured["system"]
+    assert captured["input"] == "Question: write a PRD for billing"
+
+
+def test_kg_grounding_does_not_touch_wired_call_digest_path(monkeypatch):
+    """The dedicated call/VoC process owns its own grounding and must not be
+    re-routed through the generic KG-grounded single-shot path."""
+    import app.call_digest as cd
+    monkeypatch.setattr(cd, "answer", lambda **k: {"answer": "digest", "_skill_source": "call-digest"})
+    # If the single-shot path were taken, this would fire; it must NOT.
+    monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: (_ for _ in ()).throw(AssertionError("KG path taken")))
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    out = qa.answer(enterprise_id="ent", question="summarize the customer calls from last week", dataset="acme")
+    assert out["_skill_source"] == "call-digest"
+
+
 # ── script skills run via the tool loop (on our infra) ────────────────────────
 
 def test_script_skill_uses_tool_loop_not_single_shot(monkeypatch):
