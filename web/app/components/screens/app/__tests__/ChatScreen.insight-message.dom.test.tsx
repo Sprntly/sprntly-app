@@ -96,9 +96,9 @@ vi.mock("../../../../lib/auth", () => ({ useAuth: () => ({ kind: "anonymous" }) 
 // The brief→prototype map drives the prototype CTA's View/Generate label. A
 // hoisted mutable map lets a test seed a READY prototype for a given insight so
 // the "View prototype" flip is exercised end-to-end.
-const { protoMap } = vi.hoisted(() => ({ protoMap: new Map<number, unknown>() }))
+const { protoMap, mapState } = vi.hoisted(() => ({ protoMap: new Map<number, unknown>(), mapState: { loading: false } }))
 vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
-  useBriefPrototypeMap: () => ({ entriesByInsight: protoMap, loading: false, error: false, refetch: vi.fn() }),
+  useBriefPrototypeMap: () => ({ entriesByInsight: protoMap, loading: mapState.loading, error: false, refetch: vi.fn() }),
 }))
 
 import { NavigationProvider, useNavigation, type PrdTabRequest } from "../../../../context/NavigationContext"
@@ -133,6 +133,7 @@ async function clickOpenPrd() {
 beforeEach(() => {
   localStorage.clear()
   protoMap.clear()
+  mapState.loading = false
   runPrdGeneration.mockClear()
   loadPrdById.mockClear()
 })
@@ -239,5 +240,24 @@ describe("ChatScreen — insight PRD CTA survives a reload (DB-backed)", () => {
     await act(async () => { fireEvent.click(within(insightMsg()).getByRole("button", { name: "View PRD" })) })
     await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(796))
     expect(runPrdGeneration).not.toHaveBeenCalled()
+  })
+
+  it("shows a neutral 'Loading…' (not 'Generate PRD') while the map is still loading", async () => {
+    // Map still in flight → we don't yet know if a PRD exists. The CTA must not
+    // flash "Generate PRD" (it would flip to "View PRD" the instant the map lands).
+    mapState.loading = true
+    localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([
+      { id: "tab-reload", title: "PRD · Enterprise expansion is stalled", dbConvId: null, briefMeta: { briefId: 7, insightIndex: 0 } },
+    ]))
+    localStorage.setItem("sprntly_chat_active_tab_acme", "tab-reload")
+
+    await act(async () => { renderRestored() })
+
+    const btn = within(insightMsg()).getByRole("button", { name: "Loading…" })
+    expect(btn).toBeTruthy()
+    expect((btn as HTMLButtonElement).disabled).toBe(true)
+    // Never the premature "Generate PRD" (nor a wrong "View PRD") mid-load.
+    expect(within(insightMsg()).queryByRole("button", { name: "Generate PRD" })).toBeNull()
+    expect(within(insightMsg()).queryByRole("button", { name: "View PRD" })).toBeNull()
   })
 })
