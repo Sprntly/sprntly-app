@@ -96,6 +96,9 @@ export function TicketDetail({ story, index, prdId, onBack }: {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [comments, setComments] = useState<Comment[]>([])
   const [summary, setSummary] = useState<string | null>(null)
+  // A concrete acceptance-criteria change the thread proposed (from the summary
+  // endpoint) — drives the Accept & propagate action.
+  const [proposedCriterion, setProposedCriterion] = useState<string | null>(null)
 
   const [members, setMembers] = useState<TeamMemberRecord[] | null>(null)
   const [openMenu, setOpenMenu] = useState<null | "status" | "reassign">(null)
@@ -125,10 +128,14 @@ export function TicketDetail({ story, index, prdId, onBack }: {
 
   // AI summary of the comment thread — only once there's a real discussion.
   useEffect(() => {
-    if (comments.length < 2) { setSummary(null); return }
+    if (comments.length < 2) { setSummary(null); setProposedCriterion(null); return }
     let cancelled = false
     ticketDataApi.summarizeComments(key)
-      .then((r) => { if (!cancelled) setSummary(r.summary) })
+      .then((r) => {
+        if (cancelled) return
+        setSummary(r.summary)
+        setProposedCriterion(r.proposed_criterion ?? null)
+      })
       .catch(() => { /* best-effort — hide the block on failure */ })
     return () => { cancelled = true }
   }, [key, comments.length])
@@ -164,15 +171,22 @@ export function TicketDetail({ story, index, prdId, onBack }: {
     }).catch(() => showToast("Couldn't post comment", "Try again."))
   }
 
-  // The change loop's first step: record an accepted proposal as a system note.
-  // Full cross-artifact propagation (ticket AC + PRD row/test version bump +
-  // design agent) lands with the sync phase.
+  // Accept & propagate: apply the thread's proposed acceptance criterion to this
+  // ticket (appended + persisted), and record it as a system note. Propagation
+  // BEYOND the ticket (the PRD §5 row + its Part B test with a version bump, and
+  // the design agent) is the next step of the change loop.
   const acceptPropagate = () => {
-    ticketDataApi.addComment(key, "Sprntly", `✳ Accepted proposed change: ${summary ?? ""}`)
+    if (!proposedCriterion) return
+    const next = [...criteria, proposedCriterion]
+    setCriteria(next)
+    saveDescription(description, next)
+    ticketDataApi.addComment(key, "Sprntly", `✳ Accepted & propagated to acceptance criteria: ${proposedCriterion}`)
       .then((c) => setComments((xs) => [...xs, c]))
       .catch(() => { /* best-effort */ })
-    showToast("Change recorded", "Cross-artifact propagation ships with the sync phase.")
+    setProposedCriterion(null)
+    showToast("Change propagated", "Added to this ticket's acceptance criteria. PRD + design propagation is next.")
   }
+  const rejectPropagate = () => setProposedCriterion(null)
 
   const pill = priorityPill(story.priority)
   const assigneeName = assignee?.display_name || "Unassigned"
@@ -405,11 +419,17 @@ export function TicketDetail({ story, index, prdId, onBack }: {
               <div className="tkv2-aisum">
                 <div className="ah">✳ AI summary</div>
                 {summary}
-                <div className="tkv2-actions2">
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={acceptPropagate}>Accept &amp; propagate</button>
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--ghost">Edit</button>
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--ghost">Reject</button>
-                </div>
+                {proposedCriterion ? (
+                  <>
+                    <div className="tkv2-propose">
+                      <b>Proposed acceptance criterion:</b> {proposedCriterion}
+                    </div>
+                    <div className="tkv2-actions2">
+                      <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={acceptPropagate}>Accept &amp; propagate</button>
+                      <button type="button" className="tkv2-btn2 tkv2-btn2--ghost" onClick={rejectPropagate}>Reject</button>
+                    </div>
+                  </>
+                ) : null}
               </div>
             ) : null}
             {comments.length === 0 ? (

@@ -208,6 +208,36 @@ describe("TicketDetail", () => {
     await waitFor(() => expect(screen.getByText("Team aligned to ship behind a flag.")).toBeTruthy())
   })
 
+  it("Accept & propagate applies the proposed criterion to the ticket's AC", async () => {
+    api.getData.mockResolvedValue({
+      ...noEdits(),
+      comments: [
+        { id: 1, author: "Priya", body: "Competitor facts rot — add a freshness rule.", time: "t1" },
+        { id: 2, author: "Sam", body: "Agreed, 30-day staleness.", time: "t2" },
+      ],
+    })
+    api.summarizeComments.mockResolvedValue({
+      summary: "Agreed to add a 30-day staleness rule.",
+      proposed_criterion: "[failure] Given the card is older than 30 days, When opened, Then a staleness banner appears.",
+    })
+    api.addComment.mockResolvedValue({ id: 3, author: "Sprntly", body: "propagated", time: "t3" })
+    await renderDetail()
+    await waitFor(() => expect(screen.getByText(/Proposed acceptance criterion/)).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /accept & propagate/i }))
+    })
+    // The proposed criterion is appended to the ticket's AC and persisted.
+    expect(api.saveDescription).toHaveBeenCalledWith(
+      KEY,
+      "One-click guest-alert for Deal Alerts.",
+      [
+        "Admin can enable in one click",
+        "[failure] Given the card is older than 30 days, When opened, Then a staleness banner appears.",
+      ],
+    )
+  })
+
   it("does not summarize with fewer than 2 comments", async () => {
     api.getData.mockResolvedValue({
       ...noEdits(),
