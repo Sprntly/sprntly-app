@@ -9,12 +9,12 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, prototypeCtaLabel } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, prototypeCtaLabel } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
-import { ApiError, askApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -91,6 +91,7 @@ export function ChatScreen() {
     setPendingChatHandoff,
     pendingPrdTab,
     setPendingPrdTab,
+    openPrdTab,
     showToast,
     openContentPanel,
     contentPanelTab,
@@ -761,8 +762,40 @@ export function ChatScreen() {
     [setContent, persistence],
   )
 
+  // "Generate a PRD …" is a COMMAND, not a conversation: it opens the PRD as its
+  // OWN chat tab (with the Evidence/PRD/Tickets panel), never as a chat message.
+  // Without this the ask agent routes it to the prd-author skill and answers with
+  // a raw HTML document dumped into the chat bubble. Mirror BriefChat's prdFlow:
+  // resolve the current brief's top insight (index 0) and hand off via openPrdTab.
+  // openPrdTab's generate path is find-or-create (POST /v1/prd/generate reuses an
+  // existing DB PRD when one exists), so an already-generated PRD is served from
+  // the DB rather than regenerated.
+  const prdCommandFlow = useCallback(async () => {
+    try {
+      const brief = await briefApi.current(activeCompany)
+      const insights = brief.insights || []
+      if (!insights.length) {
+        showToast("No brief yet", "Run the pipeline to refresh this week's brief first.")
+        return
+      }
+      openPrdTab({
+        title: "PRD · Weekly brief",
+        source: { kind: "generate", meta: { briefId: brief.id, insightIndex: 0 } },
+      })
+    } catch (e) {
+      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+    }
+  }, [activeCompany, openPrdTab, showToast])
+
   const submitAsk = useCallback(
     async (rawQuery: string) => {
+      // A "generate a PRD" phrasing is a command — open the PRD tab from the
+      // brief's top insight instead of sending it to the ask agent (which would
+      // answer with a raw prd-author HTML dump). Intercept before any tab/ask work.
+      if (isPrdCommand(rawQuery.trim())) {
+        void prdCommandFlow()
+        return
+      }
       // Append attached file content as context
       let query = rawQuery.trim()
       if (attachments.length > 0) {
@@ -856,7 +889,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, finalizeConversationTurn, openTab, pushPendingConversation, showToast],
+    [activeCompany, activeTabId, attachments, finalizeConversationTurn, openTab, prdCommandFlow, pushPendingConversation, showToast],
   )
 
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
