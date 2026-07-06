@@ -176,7 +176,10 @@ function mountHarness() {
 }
 
 const GENERATE_PRD = /Generate PRD/
-const VIEW_PROTOTYPE = /View prototype/
+// The prototype CTA reads "Generate prototype" until one is built, then flips to
+// "View prototype"; match either so the gating assertions test presence/absence,
+// not the (state-dependent) label.
+const PROTOTYPE_CTA = /prototype/i
 const EMPTY_GREETING = "add and connect more sources"
 
 afterEach(() => {
@@ -198,7 +201,7 @@ describe("BriefChat — Generate-PRD / Generate-Prototype CTA gating", () => {
     // …with the Generate-PRD CTA and the View-prototype CTA (unchanged behavior).
     expect(document.querySelector(".fc-actions")).not.toBeNull()
     expect(screen.getByText(GENERATE_PRD)).not.toBeNull()
-    expect(screen.getByText(VIEW_PROTOTYPE)).not.toBeNull()
+    expect(screen.getByText(PROTOTYPE_CTA)).not.toBeNull()
   })
 
   it("test_insufficient_evidence_hides_generate_ctas: an insufficient-evidence empty brief renders NO Generate PRD / Generate Prototype CTA", () => {
@@ -211,7 +214,7 @@ describe("BriefChat — Generate-PRD / Generate-Prototype CTA gating", () => {
     expect(screen.getByText(/We've got your data/)).not.toBeNull()
     // …and NO generate affordance renders anywhere on the brief.
     expect(screen.queryByText(GENERATE_PRD)).toBeNull()
-    expect(screen.queryByText(VIEW_PROTOTYPE)).toBeNull()
+    expect(screen.queryByText(PROTOTYPE_CTA)).toBeNull()
     expect(document.querySelector(".fc-actions")).toBeNull()
   })
 
@@ -225,7 +228,7 @@ describe("BriefChat — Generate-PRD / Generate-Prototype CTA gating", () => {
     expect(screen.getByText(new RegExp(EMPTY_GREETING))).not.toBeNull()
     // …with no generate CTAs.
     expect(screen.queryByText(GENERATE_PRD)).toBeNull()
-    expect(screen.queryByText(VIEW_PROTOTYPE)).toBeNull()
+    expect(screen.queryByText(PROTOTYPE_CTA)).toBeNull()
     expect(document.querySelector(".fc-actions")).toBeNull()
   })
 })

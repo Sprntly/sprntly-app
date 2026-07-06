@@ -8,7 +8,7 @@ import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceCont
 import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard } from "../../../types/content"
 import { AppLayout } from "./AppLayout"
-import { BriefChat } from "../../shared/BriefChat"
+import { BriefChat, prototypeCtaLabel } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
@@ -1056,6 +1056,17 @@ export function ChatScreen() {
   }, [searchParams, startNewThread, router])
 
   const hasThread = thread.length > 0
+  // A tab bound to a PRD or brief insight opens with the insight itself as the
+  // conversation's first agent message (see the insight turn rendered at the top
+  // of the thread) — NOT as a pinned heading above the chat. That message is what
+  // anchors the chat to its insight and hosts the Generate/View PRD + prototype
+  // actions, so an insight-bound tab always shows the thread view (never the
+  // generic "Welcome back" landing) even before the user has sent anything.
+  const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta)
+  const showThreadView = hasThread || showInsightMsg
+  // The tab title is "PRD · <insight>"; the message shows the insight sentence on
+  // its own (the "PRD" kind is already a chip), so strip the redundant prefix.
+  const insightText = (activeTab?.prd?.title ?? activeTab?.title ?? "").replace(/^PRD · /, "")
   const displayChips = useMemo(() => {
     const chips = buildHomeChips(homeCards, starters)
     return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
@@ -1164,38 +1175,9 @@ export function ChatScreen() {
             // header + finding cards + composer + content-panel wiring).
             <BriefChat />
           ) : (
-          <main className={`od-center ${hasThread ? "od-center--thread" : "od-center--landing"}`}>
-            {/* Pinned PRD/insight context bar — anchors this chat to the insight
-                its PRD is about, and (once the content panel is closed) is the
-                only in-chat way to reopen the PRD. Shows for any tab bound to a
-                PRD or brief insight; hidden on plain chats and the brief tab. */}
-            {activeTab?.prd || activeTab?.briefMeta ? (
-              <div className="chat-insight-pin" data-testid="chat-insight-pin">
-                <span className="chat-insight-pin-mark" aria-hidden>
-                  <IconSparkle size={12} />
-                </span>
-                <span className="chat-insight-pin-kind">PRD</span>
-                <span className="chat-insight-pin-title" title={activeTab?.prd?.title ?? activeTab?.title}>
-                  {activeTab?.prd?.title ?? activeTab?.title}
-                </span>
-                {contentPanelTab === "prd" ? (
-                  <span className="chat-insight-pin-viewing">Viewing</span>
-                ) : (
-                  <button
-                    type="button"
-                    className="chat-insight-pin-btn"
-                    disabled={!!activeTab?.prdGenerating}
-                    onClick={handleOpenPrd}
-                  >
-                    {activeTab?.prdGenerating
-                      ? "Generating PRD…"
-                      : activeTab?.prd ? "Open PRD" : "Generate PRD"}
-                  </button>
-                )}
-              </div>
-            ) : null}
-            <div className={`od-center-scroll${!hasThread ? " od-center-scroll--home-landing" : ""}`}>
-              {!hasThread ? (
+          <main className={`od-center ${showThreadView ? "od-center--thread" : "od-center--landing"}`}>
+            <div className={`od-center-scroll${!showThreadView ? " od-center-scroll--home-landing" : ""}`}>
+              {!showThreadView ? (
                 <div className="home-landing-eyeline">
                   <div className="od-center-inner od-center-inner--home">
                     <div className="chat-greeting">
@@ -1332,6 +1314,51 @@ export function ChatScreen() {
               ) : (
                 <div className="bc-scroll">
                   <div className="bc-thread">
+                    {/* Insight message — the chat opens with its insight as the
+                        agent's first message (in the flow, not a pinned heading).
+                        Hosts the Generate/View PRD + Generate/View Prototype
+                        actions, which relabel to "View …" once the artifact is
+                        saved (PRD: loaded on the tab; prototype: ready in the DB
+                        via the brief-prototype map). */}
+                    {showInsightMsg ? (
+                      <div className="bc-turn bc-turn--insight" data-testid="chat-insight-msg">
+                        <div className="bc-agent-head">
+                          <span className="bc-agent-mark">
+                            <IconSparkle size={14} />
+                          </span>
+                          <span className="bc-agent-name">{AGENT_NAME}</span>
+                          <span className="bc-agent-badge">
+                            <IconSparkle size={10} />
+                            PM COWORKER
+                          </span>
+                        </div>
+                        <div className="bc-agent-body">
+                          <div className="bc-insight-msg">
+                            <span className="bc-insight-msg-kind">PRD</span>
+                            <span className="bc-insight-msg-text">{insightText}</span>
+                          </div>
+                        </div>
+                        <div className="bc-actions">
+                          <button
+                            type="button"
+                            className="bc-action-btn bc-action-btn--primary"
+                            disabled={!!activeTab?.prdGenerating}
+                            onClick={handleOpenPrd}
+                          >
+                            {activeTab?.prdGenerating
+                              ? "Generating PRD…"
+                              : activeTab?.prd ? "View PRD" : "Generate PRD"}
+                          </button>
+                          <button
+                            type="button"
+                            className="bc-action-btn"
+                            onClick={handleChatPrototype}
+                          >
+                            {prototypeCtaLabel(chatInsightState)}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                     {thread.map((turn, idx) => {
                       const isLast = idx === thread.length - 1
                       const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
@@ -1408,9 +1435,7 @@ export function ChatScreen() {
                                 className="bc-action-btn"
                                 onClick={handleChatPrototype}
                               >
-                                {chatInsightState?.hasPrd && chatInsightState.prototypeReady
-                                  ? "View prototype"
-                                  : "Generate prototype"}
+                                {prototypeCtaLabel(chatInsightState)}
                               </button>
                             </div>
                           ) : null}

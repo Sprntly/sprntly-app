@@ -115,7 +115,7 @@ import type {
   BriefV2InlineChart,
   BriefV2State,
 } from "../../../lib/brief-v2-adapter"
-import { BriefChat, prdCtaState } from "../BriefChat"
+import { BriefChat, prdCtaState, prototypeCtaLabel } from "../BriefChat"
 import { runMultiAgentGeneration } from "../../../lib/runMultiAgentGeneration"
 import { prototypePath } from "../../../lib/routes"
 import { AGENT_NAME } from "../../../lib/agent"
@@ -140,6 +140,21 @@ describe("prdCtaState — smart View/Generate PRD button", () => {
     expect(prdCtaState({ hasPrd: true, prdId: null }, false).isView).toBe(false)
     expect(prdCtaState(null, false)).toEqual({ label: "Generate PRD", isView: false })
     expect(prdCtaState(undefined, false).isView).toBe(false)
+  })
+})
+
+describe("prototypeCtaLabel — View/Generate prototype relabels on saved-in-DB state", () => {
+  it("offers 'View prototype' only once a prototype is built AND saved (prototypeReady)", () => {
+    expect(prototypeCtaLabel({ hasPrd: true, prototypeReady: true })).toBe("View prototype")
+  })
+  it("offers 'Generate prototype' before one is built — PRD exists but no prototype yet", () => {
+    expect(prototypeCtaLabel({ hasPrd: true, prototypeReady: false })).toBe("Generate prototype")
+  })
+  it("offers 'Generate prototype' when there's no PRD/state at all", () => {
+    // A dangling prototypeReady with no PRD can't be viewed → still "Generate".
+    expect(prototypeCtaLabel({ hasPrd: false, prototypeReady: true })).toBe("Generate prototype")
+    expect(prototypeCtaLabel(null)).toBe("Generate prototype")
+    expect(prototypeCtaLabel(undefined)).toBe("Generate prototype")
   })
 })
 
@@ -310,7 +325,9 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     // Full card shows the source row, the body copy, and the action buttons.
     expect(card.querySelector(".fc-from")).not.toBeNull()
     expect(within(card).queryByText(/Body copy for First-handoff/)).not.toBeNull()
-    expect(within(card).queryByText("View prototype")).not.toBeNull()
+    // No prototype built yet (empty map) → the prototype CTA reads "Generate
+    // prototype"; locate it by role so the presence check is label-agnostic.
+    expect(within(card).queryByRole("button", { name: /prototype/i })).not.toBeNull()
 
     // Click the per-card Dismiss control.
     fireEvent.click(within(card).getByLabelText("Dismiss finding"))
@@ -321,7 +338,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     expect(within(dismissed).getByText(HERO.title)).not.toBeNull()
     expect(dismissed.querySelector(".fc-from")).toBeNull()
     expect(within(dismissed).queryByText(/Body copy for First-handoff/)).toBeNull()
-    expect(within(dismissed).queryByText("View prototype")).toBeNull()
+    expect(within(dismissed).queryByRole("button", { name: /prototype/i })).toBeNull()
     // The restore affordance is shown.
     expect(within(dismissed).getByText(/click to restore/i)).not.toBeNull()
   })
@@ -341,7 +358,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     const restored = cardFor(HERO.title)
     expect(restored.className).not.toContain("fc--dismissed")
     expect(restored.querySelector(".fc-from")).not.toBeNull()
-    expect(within(restored).queryByText("View prototype")).not.toBeNull()
+    expect(within(restored).queryByRole("button", { name: /prototype/i })).not.toBeNull()
   })
 
   it("test_dismiss_is_per_card: dismissing one finding leaves the other untouched", async () => {
@@ -355,7 +372,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     // The supporting card is unaffected — still a full card.
     const other = cardFor(SUPPORTING.title)
     expect(other.className).not.toContain("fc--dismissed")
-    expect(within(other).queryByText("View prototype")).not.toBeNull()
+    expect(within(other).queryByRole("button", { name: /prototype/i })).not.toBeNull()
   })
 
   it("test_dismiss_persists_to_localstorage_across_remount: a dismissal survives a fresh mount", async () => {
@@ -439,9 +456,9 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
       renderBriefWith(brief)
     })
     // Non-visualizable finding → no prototype affordance.
-    expect(within(cardFor(HERO.title)).queryByText("View prototype")).toBeNull()
+    expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
     // A sibling visualizable finding still offers it.
-    expect(within(cardFor(SUPPORTING.title)).queryByText("View prototype")).not.toBeNull()
+    expect(within(cardFor(SUPPORTING.title)).queryByRole("button", { name: /prototype/i })).not.toBeNull()
   })
 })
 
@@ -621,7 +638,34 @@ describe("BriefChat finding card — no prototype preview thumbnail", () => {
     expect(card.querySelector(".fc-preview")).toBeNull()
     expect(card.querySelector(".fc-preview-img")).toBeNull()
     expect(within(card).queryByText("Prototype preview · open design")).toBeNull()
-    // …but the prototypeable finding still offers the "View prototype" button.
+    // …but the prototypeable finding still offers the "View prototype" button
+    // (insight 0 has a READY prototype in the seeded map).
     expect(within(card).queryByText("View prototype")).not.toBeNull()
+  })
+})
+
+// ── Prototype CTA relabels Generate → View once one is built + saved ───────────
+// The finding card's prototype button must reflect real DB state (the brief→
+// prototype map's prototypeReady), mirroring the chat surface: "Generate
+// prototype" until one is built, "View prototype" once it's saved. Previously the
+// label was a static adapter CTA string that never flipped.
+describe("BriefChat finding card — prototype CTA relabels on built prototype", () => {
+  it("reads 'Generate prototype' with no prototype, then 'View prototype' once ready in the DB", async () => {
+    // Empty map → no prototype built yet for this insight.
+    await act(async () => { renderBrief() })
+    expect(within(cardFor(HERO.title)).getByRole("button", { name: "Generate prototype" })).toBeTruthy()
+    expect(within(cardFor(HERO.title)).queryByRole("button", { name: "View prototype" })).toBeNull()
+
+    cleanup()
+    // Seed a READY prototype for insight 0 (HERO's insightIndex) → CTA flips.
+    mapEntries.set(0, {
+      insight_index: 0,
+      prd_id: 42,
+      prd_title: "Measurement Stack",
+      prototype: { ready: true, preview_image_url: null },
+    } as never)
+    await act(async () => { renderBrief() })
+    expect(within(cardFor(HERO.title)).getByRole("button", { name: "View prototype" })).toBeTruthy()
+    expect(within(cardFor(HERO.title)).queryByRole("button", { name: "Generate prototype" })).toBeNull()
   })
 })

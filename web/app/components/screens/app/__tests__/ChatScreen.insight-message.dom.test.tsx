@@ -1,0 +1,190 @@
+// @vitest-environment jsdom
+//
+// ChatScreen — the insight renders as the agent's FIRST CHAT MESSAGE, not as a
+// pinned heading above the chat.
+//
+// A tab bound to a PRD / brief insight (opened via openPrdTab) used to show a
+// pinned `.chat-insight-pin` bar above the thread. It now renders inside the
+// thread as an agent message (`[data-testid=chat-insight-msg]`) that hosts the
+// Generate/View PRD + Generate/View Prototype CTAs. Those CTAs relabel to
+// "View …" once the artifact is saved (PRD: loaded on the tab; prototype: ready
+// in the DB via the brief-prototype map).
+//
+// These tests mount the REAL ChatScreen inside the real Navigation + Content
+// providers and drive openPrdTab through the same tiny harness the PRD-tab test
+// uses, asserting the in-flow message (not the removed pin) and the CTA labels.
+import * as React from "react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+;(globalThis as typeof globalThis & { React?: typeof React }).React = React
+
+if (typeof window !== "undefined") window.scrollTo = () => {}
+
+if (typeof window !== "undefined" && !window.matchMedia) {
+  window.matchMedia = (query: string) =>
+    ({
+      matches: false, media: query, onchange: null,
+      addEventListener: () => {}, removeEventListener: () => {},
+      addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+    }) as unknown as MediaQueryList
+}
+
+// ── Boundary mocks (network / router / heavy contexts) ─────────────────────
+vi.mock("../../../../lib/api", () => {
+  class ApiError extends Error {
+    status = 0
+    body: unknown = null
+  }
+  return {
+    ApiError,
+    askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
+    briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
+    conversationsApi: {
+      create: vi.fn().mockResolvedValue({ id: 1 }),
+      addTurn: vi.fn().mockResolvedValue({}),
+    },
+  }
+})
+
+const runPrdGeneration = vi.fn().mockResolvedValue({
+  ok: true,
+  prd: { prd_id: 77, title: "Generated PRD", metaLine: "", sections: [] },
+})
+vi.mock("../../../../lib/runPrdGeneration", () => ({
+  runPrdGeneration: (...args: unknown[]) => runPrdGeneration(...args),
+  resumePrdGeneration: vi.fn(),
+  runPrdGenerationFromBacklog: vi.fn().mockResolvedValue({
+    ok: true, prd: { prd_id: 88, title: "Backlog PRD", metaLine: "", sections: [] },
+  }),
+  loadPrdById: vi.fn().mockResolvedValue({
+    ok: true, prd: { prd_id: 99, title: "Loaded PRD", metaLine: "", sections: [] },
+  }),
+}))
+
+const runAskGeneration = vi.fn().mockResolvedValue({
+  answer: "canned", sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+})
+vi.mock("../../../../lib/runAskGeneration", () => ({
+  runAskGeneration: (...args: unknown[]) => runAskGeneration(...args),
+  resumeAskGeneration: vi.fn(),
+  getPendingAsk: vi.fn().mockReturnValue(null),
+}))
+
+vi.mock("../../../../lib/usePipelineStatus", () => ({
+  usePipelineStatus: () => ({ runStatus: null, isTriggering: false, showCompleted: false, triggerRun: vi.fn() }),
+}))
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  usePathname: () => "/",
+  useSearchParams: () => new URLSearchParams(""),
+}))
+
+vi.mock("../../../../context/WorkspaceContext", () => ({
+  profileDisplayName: () => "Ada Lovelace",
+  useWorkspace: () => ({ loading: false, profile: null, workspace: null, refresh: async () => {} }),
+}))
+
+vi.mock("../../../../context/CompanyContext", () => ({
+  useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn() }),
+}))
+
+vi.mock("../../../../lib/auth", () => ({ useAuth: () => ({ kind: "anonymous" }) }))
+
+// The brief→prototype map drives the prototype CTA's View/Generate label. A
+// hoisted mutable map lets a test seed a READY prototype for a given insight so
+// the "View prototype" flip is exercised end-to-end.
+const { protoMap } = vi.hoisted(() => ({ protoMap: new Map<number, unknown>() }))
+vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
+  useBriefPrototypeMap: () => ({ entriesByInsight: protoMap, loading: false, error: false, refetch: vi.fn() }),
+}))
+
+import { NavigationProvider, useNavigation, type PrdTabRequest } from "../../../../context/NavigationContext"
+import { ContentProvider } from "../../../../context/ContentContext"
+import { ChatScreen } from "../ChatScreen"
+
+function Harness({ request }: { request: PrdTabRequest }) {
+  const { openPrdTab } = useNavigation()
+  return React.createElement(
+    React.Fragment,
+    null,
+    React.createElement("button", { onClick: () => openPrdTab(request) }, "open-prd"),
+    React.createElement(ChatScreen),
+  )
+}
+
+function renderWith(request: PrdTabRequest) {
+  return render(
+    React.createElement(
+      NavigationProvider,
+      null,
+      React.createElement(ContentProvider, null, React.createElement(Harness, { request })),
+    ),
+  )
+}
+
+const insightMsg = () => screen.getByTestId("chat-insight-msg")
+async function clickOpenPrd() {
+  await act(async () => { fireEvent.click(screen.getByText("open-prd")) })
+}
+
+beforeEach(() => {
+  localStorage.clear()
+  protoMap.clear()
+  runPrdGeneration.mockClear()
+})
+afterEach(() => {
+  cleanup()
+  localStorage.clear()
+  protoMap.clear()
+})
+
+describe("ChatScreen — insight renders as an in-chat message (not a pinned heading)", () => {
+  const READY: PrdTabRequest = {
+    title: "PRD · Enterprise expansion is stalled",
+    source: { kind: "ready", prd: { prd_id: 5, title: "Enterprise expansion is stalled", metaLine: "", sections: [] } as never, meta: null },
+  }
+
+  it("shows the insight as an agent message with View PRD + a prototype CTA, and NO pinned heading", async () => {
+    renderWith(READY)
+    await clickOpenPrd()
+
+    // The insight is a message in the thread — not the removed pinned bar.
+    await waitFor(() => expect(insightMsg()).toBeTruthy())
+    expect(screen.queryByTestId("chat-insight-pin")).toBeNull()
+    expect(document.querySelector(".chat-insight-pin")).toBeNull()
+
+    const msg = insightMsg()
+    // The insight sentence shows WITHOUT the redundant "PRD · " tab-title prefix.
+    expect(within(msg).getByText("Enterprise expansion is stalled")).toBeTruthy()
+    expect(msg.textContent).not.toContain("PRD · ")
+    // A saved PRD is loaded on the tab → the PRD CTA reads "View PRD" (not "Open").
+    expect(within(msg).getByRole("button", { name: "View PRD" })).toBeTruthy()
+    expect(within(msg).queryByRole("button", { name: /open prd/i })).toBeNull()
+    // The prototype CTA is present; no prototype built yet → "Generate prototype".
+    expect(within(msg).getByRole("button", { name: "Generate prototype" })).toBeTruthy()
+  })
+
+  it("relabels the prototype CTA to 'View prototype' once one is ready in the DB", async () => {
+    // Seed a READY prototype for the insight this tab is bound to (index 0).
+    protoMap.set(0, {
+      insight_index: 0,
+      prd_id: 77,
+      prd_title: "Generated PRD",
+      prototype: { ready: true, preview_image_url: null },
+    })
+
+    renderWith({
+      title: "PRD · Enterprise expansion is stalled",
+      source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
+    })
+    await clickOpenPrd()
+
+    // Generation resolves (mock) → PRD loads on the tab → "View PRD".
+    await waitFor(() => expect(within(insightMsg()).getByRole("button", { name: "View PRD" })).toBeTruthy())
+    // The seeded ready prototype flips the prototype CTA to "View prototype".
+    await waitFor(() => expect(within(insightMsg()).getByRole("button", { name: "View prototype" })).toBeTruthy())
+    expect(within(insightMsg()).queryByRole("button", { name: "Generate prototype" })).toBeNull()
+  })
+})
