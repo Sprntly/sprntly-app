@@ -168,10 +168,14 @@ describe("PRD opens as a new chat tab — composer command path", () => {
     // brief's top insight then hands off via openPrdTab. ChatScreen (not
     // BriefChat) drives the generation and opens the panel.
     await waitFor(() => expect(openPrdTab).toHaveBeenCalledTimes(1))
-    expect(openPrdTab).toHaveBeenCalledWith({
+    expect(openPrdTab).toHaveBeenCalledWith(expect.objectContaining({
       title: "PRD · Weekly brief",
       source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
-    })
+    }))
+    // The insight content is threaded through so the PRD tab can show it.
+    expect(openPrdTab.mock.calls[0][0].insight).toEqual(
+      expect.objectContaining({ title: "Day-30 retention dip" }),
+    )
 
     // The rail is NOT opened and generation does NOT run on the brief surface.
     expect(openContentPanel).not.toHaveBeenCalledWith("prd")

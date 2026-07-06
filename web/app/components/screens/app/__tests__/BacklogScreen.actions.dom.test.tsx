@@ -109,10 +109,14 @@ describe("BacklogScreen — wired actions", () => {
     // panel over it) — BacklogScreen hands the generation off via openPrdTab, and
     // ChatScreen drives it — instead of streaming into an in-place panel here.
     await waitFor(() => expect(openPrdTabMock).toHaveBeenCalledTimes(1))
-    expect(openPrdTabMock).toHaveBeenCalledWith({
+    expect(openPrdTabMock).toHaveBeenCalledWith(expect.objectContaining({
       title: "PRD · Bulk onboarding",
       source: { kind: "generateBacklog", backlogItemId: "a" },
-    })
+    }))
+    // The idea's content is threaded through as the PRD tab's insight.
+    expect(openPrdTabMock.mock.calls[0][0].insight).toEqual(
+      expect.objectContaining({ title: "Bulk onboarding" }),
+    )
     // Generation no longer runs on the backlog surface itself.
     expect(runFromBacklogMock).not.toHaveBeenCalled()
     expect(openContentPanelMock).not.toHaveBeenCalled()

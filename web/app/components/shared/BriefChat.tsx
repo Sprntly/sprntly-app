@@ -584,8 +584,10 @@ export function BriefChat() {
         showToast("No brief yet", "Run the pipeline to refresh this week's brief first.")
         return
       }
+      const top = insights[0] as { title?: string; summary?: string; description?: string }
       openPrdTab({
         title: "PRD · Weekly brief",
+        insight: { title: top?.title || "Top brief insight", summary: top?.summary || top?.description },
         source: { kind: "generate", meta: { briefId: brief.id, insightIndex: 0 } },
       })
     } catch (e) {
@@ -751,7 +753,7 @@ export function BriefChat() {
     (a: AgentAction) => {
       void runGate(() => {
         if (a === "prd") return content.prd
-          ? openPrdTab({ title: `PRD · ${content.prd.title}`, source: { kind: "ready", prd: content.prd, meta: content.prdMeta ?? null } })
+          ? openPrdTab({ title: `PRD · ${content.prd.title}`, insight: { title: content.prd.title }, source: { kind: "ready", prd: content.prd, meta: content.prdMeta ?? null } })
           : prdFlow()
         if (a === "evidence") return evidenceFlow()
         if (a === "tickets") return ticketsFlow()
@@ -786,6 +788,7 @@ export function BriefChat() {
         return
       }
       const title = `PRD · ${finding.title || "Brief finding"}`
+      const insight = { title: finding.title || detail?.title || "Brief finding", summary: detail?.summary }
       // A PRD already loaded for this insight → open it in a chat tab from the
       // in-memory doc (no re-generate). Otherwise generate into a fresh PRD tab.
       const currentPrdMeta = content.prdMeta
@@ -795,10 +798,10 @@ export function BriefChat() {
         currentPrdMeta.briefId === meta.briefId &&
         currentPrdMeta.insightIndex === meta.insightIndex
       ) {
-        openPrdTab({ title, source: { kind: "ready", prd: content.prd, meta } })
+        openPrdTab({ title, insight, source: { kind: "ready", prd: content.prd, meta } })
         return
       }
-      openPrdTab({ title, source: { kind: "generate", meta } })
+      openPrdTab({ title, insight, source: { kind: "generate", meta } })
     },
     [content.briefDetails, content.prd, content.prdMeta, openPrdTab, showToast],
   )
@@ -914,12 +917,14 @@ export function BriefChat() {
   const cardViewPrd = useCallback(
     (finding: Finding) => {
       const key = finding.detailKey
-      const meta = key ? content.briefDetails?.[key]?.meta : null
+      const detail = key ? content.briefDetails?.[key] : null
+      const meta = detail?.meta ?? null
       const state =
         meta != null
           ? prototypeStateForInsight(entriesByInsight, meta.insightIndex)
           : null
       const title = `PRD · ${finding.title || "Brief finding"}`
+      const insight = { title: finding.title || detail?.title || "Brief finding", summary: detail?.summary }
       // No PRD yet → generate one (cardGeneratePrd opens it in a PRD chat tab).
       if (state?.prdId == null) {
         cardGeneratePrd(finding)
@@ -933,11 +938,11 @@ export function BriefChat() {
         content.prdMeta.briefId === meta.briefId &&
         content.prdMeta.insightIndex === meta.insightIndex
       ) {
-        openPrdTab({ title, source: { kind: "ready", prd: content.prd, meta } })
+        openPrdTab({ title, insight, source: { kind: "ready", prd: content.prd, meta } })
         return
       }
       // Existing PRD by id → load it into a chat tab (ChatScreen drives the fetch).
-      openPrdTab({ title, source: { kind: "load", prdId: state.prdId, meta: meta ?? null } })
+      openPrdTab({ title, insight, source: { kind: "load", prdId: state.prdId, meta: meta ?? null } })
     },
     [
       content.briefDetails,

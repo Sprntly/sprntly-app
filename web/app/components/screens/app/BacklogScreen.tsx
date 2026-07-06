@@ -771,6 +771,7 @@ export function BacklogScreen() {
   const handleGeneratePrd = useCallback((idea: BacklogIdea) => {
     openPrdTab({
       title: `PRD · ${idea.title}`,
+      insight: { title: idea.title, summary: idea.sub },
       source: { kind: "generateBacklog", backlogItemId: idea.id },
     })
   }, [openPrdTab])

@@ -29,6 +29,11 @@ export type PendingChatHandoff = { query: string }
  *  backlog PRD (no insight_index) — it renders from the PRD payload alone. */
 export type PrdTabMeta = { briefId: number; insightIndex: number }
 
+/** The insight/finding a PRD addresses — shown in the PRD chat tab's message
+ *  area so the tab opens with context (not an empty chat), alongside the
+ *  View PRD / View-or-Generate Prototype actions. */
+export type PrdTabInsight = { title: string; summary?: string }
+
 /** A request to open a PRD as a NEW CHAT TAB on the chat surface, with the
  *  right-side content panel (Evidence / PRD / Tickets) sliding over it. Every
  *  "view PRD" / "generate PRD" affordance (brief finding cards, the brief
@@ -42,6 +47,9 @@ export type PrdTabMeta = { briefId: number; insightIndex: number }
  *   - `load`           — fetch an already-generated PRD by id (loadPrdById) */
 export type PrdTabRequest = {
   title: string
+  /** Insight/finding context rendered in the tab's message area (title +
+   *  summary). Optional — ChatScreen falls back to the matching brief detail. */
+  insight?: PrdTabInsight
   source:
     | { kind: "ready"; prd: PrdState; meta: PrdTabMeta | null }
     | { kind: "generate"; meta: PrdTabMeta }

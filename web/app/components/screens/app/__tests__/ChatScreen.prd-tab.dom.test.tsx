@@ -144,13 +144,14 @@ afterEach(() => {
   localStorage.clear()
 })
 
-describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
+describe("ChatScreen — PRD opens as a new chat tab with an insight intro", () => {
   const READY: PrdTabRequest = {
     title: "PRD · Ready doc",
+    insight: { title: "Checkout drop-off", summary: "Users abandon at payment step." },
     source: { kind: "ready", prd: { prd_id: 5, title: "Ready doc", metaLine: "", sections: [] } as never, meta: null },
   }
 
-  it("spawns a new, active chat tab and slides the content panel (PRD) over it", async () => {
+  it("spawns a chat tab whose message area shows the insight + View PRD button (panel NOT auto-opened)", async () => {
     renderWith(READY)
     await clickOpenPrd()
 
@@ -158,23 +159,36 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await waitFor(() => expect(tabBar().getByText("PRD · Ready doc")).toBeTruthy())
     expect(tabBar().getByText("Weekly brief")).toBeTruthy()
     expect(briefSection()).toBeNull()
-    // The right-side panel opened on the PRD tab.
+
+    // The insight content renders in the tab's message area, with the action buttons.
+    const intro = await screen.findByTestId("prd-tab-intro")
+    expect(within(intro).getByText("Checkout drop-off")).toBeTruthy()
+    expect(within(intro).getByText(/abandon at payment/i)).toBeTruthy()
+    expect(within(intro).getByText("View PRD")).toBeTruthy()
+    expect(within(intro).getByText(/Prototype/i)).toBeTruthy()
+
+    // The panel is NOT auto-opened…
+    expect(panelProbe()).toBe("none")
+    // …until "View PRD" is clicked.
+    await act(async () => { fireEvent.click(within(intro).getByText("View PRD")) })
     await waitFor(() => expect(panelProbe()).toBe("prd"))
     // A ready PRD needs no generation.
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 
-  it("drives generation for a `generate` source into its tab + opens the panel", async () => {
+  it("drives generation for a `generate` source and reflects it on the View PRD button", async () => {
     renderWith({
       title: "PRD · Retention",
+      insight: { title: "Retention dip", summary: "Day-30 retention fell 8%." },
       source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
     })
     await clickOpenPrd()
 
     await waitFor(() => expect(tabBar().getByText("PRD · Retention")).toBeTruthy())
+    const intro = await screen.findByTestId("prd-tab-intro")
+    expect(within(intro).getByText("Retention dip")).toBeTruthy()
     // ChatScreen (not the caller) runs the generation for the new PRD tab.
     await waitFor(() => expect(runPrdGeneration).toHaveBeenCalledWith({ briefId: 7, insightIndex: 0 }))
-    await waitFor(() => expect(panelProbe()).toBe("prd"))
   })
 
   it("reuses the same tab (by title) instead of stacking duplicates", async () => {

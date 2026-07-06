@@ -17,7 +17,7 @@ import { ApiError, askApi, type AskResponse, type SkillInfo } from "../../../lib
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
-import type { PrdTabRequest } from "../../../context/NavigationContext"
+import type { PrdTabRequest, PrdTabInsight } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { runAskGeneration, resumeAskGeneration, getPendingAsk } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
@@ -48,6 +48,10 @@ type ChatTab = {
   dbConvId: number | null
   /** Brief finding context — enables PRD/evidence generation for this tab. */
   briefMeta: BriefMeta | null
+  /** When set, this tab is a PRD tab: its message area opens with the insight
+   *  content + View PRD / View-or-Generate Prototype actions (persisted, so a
+   *  reload keeps the context). Null for ordinary chat tabs. */
+  prdInsight: PrdTabInsight | null
   /** Per-tab cached PRD (not persisted to localStorage — re-generate on reload). */
   prd: PrdState | null
   /** Per-tab cached evidence. */
@@ -142,6 +146,7 @@ export function ChatScreen() {
         thread: t.thread ?? [],
         dbConvId: t.dbConvId ?? null,
         briefMeta: t.briefMeta ?? null,
+        prdInsight: t.prdInsight ?? null,
         prd: null,
         evidence: null,
         prdGenerating: false,
@@ -170,10 +175,6 @@ export function ChatScreen() {
   // active, so it never stomps a tab the user has since switched to.
   const activeTabIdRef = useRef<string | null>(activeTabId)
   activeTabIdRef.current = activeTabId
-  // When set, ChatScreen slides the content panel (Evidence / PRD / Tickets) open
-  // on the NEXT commit — deferred one commit so the route-change panel-close (a
-  // PRD opened from another surface routes to `/`) can't swallow it.
-  const [prdPanelPending, setPrdPanelPending] = useState(false)
 
   // When the active company changes (user switches workspace or logs in as
   // a different user), reload tabs from the new company-scoped storage so we
@@ -188,6 +189,7 @@ export function ChatScreen() {
         setTabs((JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
           id: t.id ?? "", title: t.title ?? "", thread: t.thread ?? [],
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
+          prdInsight: t.prdInsight ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
         })))
       } else {
@@ -267,6 +269,32 @@ export function ChatScreen() {
     }
   }, [chatInsightState, router, goTo])
 
+  // ── PRD-tab actions (the buttons in a PRD tab's message area) ──────────────
+  // "View PRD" — open the Evidence/PRD/Tickets panel on THIS tab's PRD (or its
+  // generating spinner). This is the tab's re-open affordance: the panel isn't
+  // auto-slid on open, so this is how the PRD is surfaced (and re-surfaced).
+  const viewPrdPanel = useCallback(() => {
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab) return
+    setContent({ prd: tab.prd ?? null, prdMeta: tab.briefMeta, prdGenerating: tab.prdGenerating })
+    openContentPanel("prd")
+  }, [activeTabId, setContent, openContentPanel])
+
+  // "View/Generate Prototype" for a PRD tab. Brief-insight tabs use the prototype
+  // map (view when ready, else generate). Backlog tabs have no insight index, so
+  // once their PRD exists we generate from its id; before that, route to the
+  // prototype surface.
+  const handlePrdTabPrototype = useCallback(() => {
+    if (activeTab?.briefMeta) { handleChatPrototype(); return }
+    const prdId = activeTab?.prd?.prd_id
+    if (prdId != null) {
+      setChatGenPrdId(prdId)
+      setChatGenModalOpen(true)
+    } else {
+      goTo("prototype")
+    }
+  }, [activeTab?.briefMeta, activeTab?.prd?.prd_id, handleChatPrototype, goTo])
+
   const setThread = useCallback((updater: ThreadTurn[] | ((prev: ThreadTurn[]) => ThreadTurn[])) => {
     setTabs((prev) => prev.map((t) => {
       if (t.id !== activeTabId) return t
@@ -338,7 +366,7 @@ export function ChatScreen() {
     const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     setTabs((prev) => [...prev, {
       id, title, thread: initialThread ?? [], dbConvId: dbId ?? null,
-      briefMeta: briefMeta ?? null, prd: null, evidence: null,
+      briefMeta: briefMeta ?? null, prdInsight: null, prd: null, evidence: null,
       prdGenerating: false, evidenceGenerating: false,
     }])
     setActiveTabId(id)
@@ -365,21 +393,24 @@ export function ChatScreen() {
   // The PRD/Evidence/Tickets all render in that panel — the tab itself is a
   // normal chat the user can keep talking in.
   const openPrdInTab = useCallback((req: PrdTabRequest) => {
-    const { title, source } = req
+    const { title, source, insight } = req
     const meta = source.kind === "generateBacklog" ? null : source.meta
     const existing = tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    // The tab opens with the insight content in its message area; the PRD panel
+    // is opened on demand from the tab's "View PRD" button (not auto-slid).
     if (existing) {
       setActiveTabId(existing.id)
+      if (insight) setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdInsight: insight } : t))
     } else {
       setTabs((prev) => [...prev, {
         id: tabId, title, thread: [], dbConvId: null, briefMeta: meta,
-        prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+        prdInsight: insight ?? null, prd: null, evidence: null,
+        prdGenerating: false, evidenceGenerating: false,
       }])
       setActiveTabId(tabId)
     }
     setDraft("")
-    setPrdPanelPending(true)
 
     // Reuse a PRD already cached on this tab (unless the caller handed us a fresh
     // one) — don't regenerate/re-fetch an already-open PRD.
@@ -387,16 +418,15 @@ export function ChatScreen() {
       setContent({ prd: existing.prd, prdMeta: existing.briefMeta, prdGenerating: false })
       return
     }
-    // Caller already holds the PRD — show it immediately, no async work.
+    // Caller already holds the PRD — cache it immediately, no async work.
     if (source.kind === "ready") {
       setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: source.prd, briefMeta: source.meta } : t))
       setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
       return
     }
-    // generate | generateBacklog | load — kick off, show the panel's spinner,
-    // then land the result on the tab (and shared content while it's active).
+    // generate | generateBacklog | load — kick off; the tab's View PRD button
+    // reflects the generating state and opens the panel to the spinner on click.
     setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, briefMeta: meta, prdGenerating: true } : t))
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true })
     void (async () => {
       try {
         const result =
@@ -859,24 +889,15 @@ export function ChatScreen() {
   // ── PRD → new chat tab hand-off ───────────────────────────────────────────
   // A "view/generate PRD" from another surface (brief cards, brief composer,
   // backlog) fills pendingPrdTab via openPrdTab and routes to `/`. Consume it
-  // once — openPrdInTab spawns the chat tab, drives the source, and flags the
-  // content panel to open over it.
+  // once — openPrdInTab spawns the chat tab and drives the source. The tab opens
+  // with the insight content + a "View PRD" button (which opens the panel); the
+  // panel is not auto-slid, so there's no route-change race to defer around.
   useEffect(() => {
     if (!pendingPrdTab) return
     const req = pendingPrdTab
     setPendingPrdTab(null)
     openPrdInTab(req)
   }, [pendingPrdTab, setPendingPrdTab, openPrdInTab])
-
-  // Slide the content panel open on the commit AFTER openPrdInTab flags it. The
-  // deferral matters when the PRD was opened from another surface: openPrdTab
-  // routes to `/`, and NavigationContext closes the panel on that route change —
-  // opening it here a commit later (route now settled) survives that close.
-  useEffect(() => {
-    if (!prdPanelPending) return
-    setPrdPanelPending(false)
-    openContentPanel("prd")
-  }, [prdPanelPending, openContentPanel])
 
   // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
   // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps
@@ -1007,20 +1028,23 @@ export function ChatScreen() {
     // duplicates. We still prune OTHER empty tabs (keep the strip clean) but never
     // the one the user is about to sit on.
     let targetId: string | null = null
+    // A PRD tab carries no thread but is real content (its insight + PRD) — never
+    // prune it as "empty".
+    const isEmptyChat = (t: ChatTab) => t.thread.length === 0 && !t.prdInsight
     setTabs((prev) => {
-      const existingEmpty = prev.find((t) => t.thread.length === 0 && t.title === NEW_CHAT_TITLE)
+      const existingEmpty = prev.find((t) => isEmptyChat(t) && t.title === NEW_CHAT_TITLE)
       if (existingEmpty) {
         targetId = existingEmpty.id
-        // Drop any OTHER empty tabs, keep the one we're reusing.
-        return prev.filter((t) => t.thread.length > 0 || t.id === existingEmpty.id)
+        // Drop any OTHER empty chat tabs, keep the one we're reusing (+ PRD tabs).
+        return prev.filter((t) => !isEmptyChat(t) || t.id === existingEmpty.id)
       }
       const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
       targetId = id
-      // Prune other empty tabs, then append the fresh "New chat" tab.
-      const kept = prev.filter((t) => t.thread.length > 0)
+      // Prune other empty chat tabs, then append the fresh "New chat" tab.
+      const kept = prev.filter((t) => !isEmptyChat(t))
       return [...kept, {
         id, title: NEW_CHAT_TITLE, thread: [], dbConvId: null, briefMeta: null,
-        prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+        prdInsight: null, prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
       }]
     })
     setActiveTabId(targetId)
@@ -1056,6 +1080,12 @@ export function ChatScreen() {
   }, [searchParams, startNewThread, router])
 
   const hasThread = thread.length > 0
+  // A PRD tab opens with an insight intro + action buttons in its message area
+  // (never the empty "Welcome back" landing), and uses the thread layout so its
+  // composer/dock shows even before the user has typed anything.
+  const isPrdTab = !!activeTab?.prdInsight
+  const threadLayout = hasThread || isPrdTab
+  const prototypeReady = !!(activeTab?.briefMeta && chatInsightState?.hasPrd && chatInsightState.prototypeReady)
   const displayChips = useMemo(() => {
     const chips = buildHomeChips(homeCards, starters)
     return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
@@ -1164,9 +1194,9 @@ export function ChatScreen() {
             // header + finding cards + composer + content-panel wiring).
             <BriefChat />
           ) : (
-          <main className={`od-center ${hasThread ? "od-center--thread" : "od-center--landing"}`}>
-            <div className={`od-center-scroll${!hasThread ? " od-center-scroll--home-landing" : ""}`}>
-              {!hasThread ? (
+          <main className={`od-center ${threadLayout ? "od-center--thread" : "od-center--landing"}`}>
+            <div className={`od-center-scroll${!threadLayout ? " od-center-scroll--home-landing" : ""}`}>
+              {!threadLayout ? (
                 <div className="home-landing-eyeline">
                   <div className="od-center-inner od-center-inner--home">
                     <div className="chat-greeting">
@@ -1303,6 +1333,39 @@ export function ChatScreen() {
               ) : (
                 <div className="bc-scroll">
                   <div className="bc-thread">
+                    {isPrdTab && activeTab?.prdInsight ? (
+                      <div className="bc-turn" data-testid="prd-tab-intro">
+                        <div className="bc-agent-head">
+                          <span className="bc-agent-mark"><IconSparkle size={14} /></span>
+                          <span className="bc-agent-name">{AGENT_NAME}</span>
+                          <span className="bc-agent-badge"><IconSparkle size={10} />PM COWORKER</span>
+                        </div>
+                        <div className="bc-agent-body">
+                          <div style={{ fontWeight: 600, fontSize: 15, lineHeight: 1.35, marginBottom: activeTab.prdInsight.summary ? 6 : 0 }}>
+                            {activeTab.prdInsight.title}
+                          </div>
+                          {activeTab.prdInsight.summary ? (
+                            <div style={{ color: "var(--ink-2, #5A5853)", lineHeight: 1.55 }}>{activeTab.prdInsight.summary}</div>
+                          ) : null}
+                        </div>
+                        <div className="bc-actions">
+                          <button
+                            type="button"
+                            className="bc-action-btn bc-action-btn--primary"
+                            onClick={viewPrdPanel}
+                          >
+                            {activeTab.prdGenerating ? "Generating PRD…" : "View PRD"}
+                          </button>
+                          <button
+                            type="button"
+                            className="bc-action-btn"
+                            onClick={handlePrdTabPrototype}
+                          >
+                            {prototypeReady ? "View prototype" : "Generate prototype"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
                     {thread.map((turn, idx) => {
                       const isLast = idx === thread.length - 1
                       const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
@@ -1393,7 +1456,7 @@ export function ChatScreen() {
               )}
             </div>
 
-            {hasThread ? (
+            {threadLayout ? (
               <div className="bc-dock">
                 {/* Floating "Create ticket" chip — only when the PRD rail is open
                     (it generates tickets from that PRD), else it's a hanging button. */}
