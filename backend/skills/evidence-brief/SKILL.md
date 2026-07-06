@@ -26,8 +26,8 @@ Pipeline: **signals + business context → `evidence-brief` → `prd-author` →
 4. **Find the wedge** — the strongest single proof the opportunity is real (often a segment already behaving the desired way). State its strength honestly (correlational, small-n).
 5. **Pick the best chart per finding and sequence them as ONE story** (see chart guide). Every visual must advance the narrative; cut any chart that's decorative or duplicative. The reader should be able to follow the argument through the charts alone.
 6. **Voice of customer matters** — when real VoC exists and aligns, include actual quotes across channels (review / support / sales). Customer words turn a data point into a reason; they are not optional flavor when available.
-7. **Write the value-driven hypothesis.** Form: *"We believe that by introducing **[X]**, **[users]** will **[change in behavior]**, which will drive **[business value: retention / revenue / engagement / DAU / market share]**."* Behavior change and business value are named separately; value ties to step 1's goal.
-8. **Hand off to the PRD** — state this hypothesis is the input to `prd-author`.
+7. **Reason toward the value-driven hypothesis (internal — do not render it).** Form: *"We believe that by introducing **[X]**, **[users]** will **[change in behavior]**, which will drive **[business value: retention / revenue / engagement / DAU / market share]**."* Behavior change and business value are named separately; value ties to step 1's goal. This hypothesis is the brief's analytical conclusion; it is **not** painted as a section of the brief (no hypothesis card / "input to PRD" block).
+8. **Hand off to the PRD** — this hypothesis flows to `prd-author` through the pipeline (the shared KG hypothesis), not through a rendered card in the brief.
 9. **Honesty pass (mandatory).** Every figure traces to a provided input; every quote is real; correlation is never called causation; the strength of agreement is conveyed in prose (never as a "Confidence:" label or score); non-converging signals are not hidden. If nothing can be supported, say the evidence is insufficient rather than manufacture a story.
 
 ### Chart guide (variable — best fit, not a fixed set)
@@ -49,9 +49,8 @@ A single **visual brief (HTML), 1–3 pages**, audience = **product team**, body
 - **Opportunity** — one simple line.
 - **Context** — *after* TL;DR and Opportunity: 1–2 lines on what the product is and the behavior under investigation.
 - **The evidence** — findings, each with its best-fit visual, sequenced as a data story; VoC quotes if real and aligned; competitive as an extraction.
-- **Convergence** — the diagram/section of agreeing independent signals (or an honest note that they don't agree).
-- **Hypothesis** — value-driven, testable, with primary metric + guardrails.
-- **No footer, no methods boilerplate, no machinery** (never mention agents, the platform, or how it was produced).
+- **Convergence** — the diagram/section of agreeing independent signals (or an honest note that they don't agree). The brief ends here.
+- **No footer, no methods boilerplate, no machinery** (never mention agents, the platform, or how it was produced). **Do not render a hypothesis card or any "input to PRD" section** — the hypothesis is the brief's internal analytical conclusion (method steps 7–8) that hands off to `prd-author` through the pipeline, not a visible section of the brief.
 
 ## Output format — HTML rendering contract (mandatory)
 The brief **is** rendered HTML, not a description of one. Every brief uses the **same shared design system** so a team reads each one the same way; only the content and the charts flex. **Render, don't drift.**
@@ -75,7 +74,8 @@ The brief **is** rendered HTML, not a description of one. Every brief uses the *
 | VoC quotes | `<div class="voc">` of `<div class="q"><p class="ch rev|sup|sale">channel</p><p>quote</p></div>` |
 | Competitive extraction | `<table>` with `.yes`/`.no`/`.us` cells, then `<div class="extract"><b>What I extract:</b> …</div>` |
 | Convergence | `<section>` with an inline-SVG **convergence diagram** (signal nodes → one opportunity box), as in `01`/`05` |
-| Hypothesis | `<div class="hyp">` — `<h4>`, `<p class="stmt">` with `.b` (behavior) / `.v` (value) / `.x` (change) spans, `<p class="test">` (metric + guardrails) |
+
+**Do not render a hypothesis card.** Earlier versions ended the brief with a `<div class="hyp">` "input to PRD" card; that section is intentionally removed. The brief ends at convergence. The value-driven hypothesis (method step 7) is still reasoned internally and flows to `prd-author` via the pipeline — it is just not painted as a section of the brief.
 
 If a section's signal is absent (e.g. no VoC, single signal), **omit that component** — never render an empty shell or invented filler. The five `examples/` are the authoritative rendering reference: match their markup, not just their wording.
 
@@ -89,7 +89,7 @@ This skill is meant to be run the same way every time: the ordered method + fixe
 
 ## Quality checklist (the bar)
 - [ ] Title is a product-led strategic thesis, not a first-person/opinion line.
-- [ ] Order is TL;DR → Opportunity → Context → evidence → convergence → hypothesis.
+- [ ] Order is TL;DR → Opportunity → Context → evidence → convergence. **The brief ends at convergence — no rendered hypothesis card / "input to PRD" section.**
 - [ ] Anchored to a stated company goal; the opportunity ladders up to it.
 - [ ] **Every number traces to a provided input; nothing invented, estimated, or rounded into existence.**
 - [ ] **Every quote is real VoC**, across channels, aligned with the other signals (or VoC omitted).
@@ -97,7 +97,7 @@ This skill is meant to be run the same way every time: the ordered method + fixe
 - [ ] **Convergence** of ≥2 independent signals surfaced where real; divergence/single-signal stated with lower confidence.
 - [ ] Charts chosen per finding; collectively one sequenced story; none decorative/duplicate.
 - [ ] Correlation vs causation labeled; the wedge's strength stated plainly.
-- [ ] Hypothesis is value-driven (behavior change → business value) and testable, with metric + guardrails.
+- [ ] The value-driven hypothesis is reasoned internally (behavior change → business value, testable) and handed to `prd-author`, but is **not rendered as a card/section in the brief**.
 - [ ] ≤ 3 pages; data-scientist body voice; product-team audience; **no footer/methods/machinery.**
 - [ ] **Renders as one self-contained HTML file** (inline `<style>`, single `.wrap`, no external CSS/JS, no chart libs); opens by double-click.
 - [ ] **Canonical design system used verbatim** (tokens/fonts/core classes from `examples/01` unchanged); each section uses its required component class.
@@ -111,7 +111,7 @@ This skill is meant to be run the same way every time: the ordered method + fixe
 
 ## Worked example (abridged — Lyra, a language app)
 **Inputs:** DS retention analysis; VoC (reviews + support + sales notes); competitive teardown; market note on AI voice; goal = subscription retention/LTV.
-**Output:** Title "Unlock Retention by Letting Beginners Speak" → TL;DR → Opportunity → Context. Findings: retention cliff at the intermediate gate + the speaking-cohort wedge 2.3× labeled correlational (line + paired bars); VoC across three channels, "no way to speak" as the aligned theme (quotes + bar); competitive **extraction** (rivals invest where we leak). **Convergence:** data + VoC + sales + competitive + market all point to speaking practice at the plateau (diagram). **Hypothesis:** "By introducing adaptive conversation practice at the transition, learners will start speaking early and feel progress, which will drive week-4 retention and renewals (LTV)" → feeds the "Conversation Practice" PRD. No footer.
+**Output:** Title "Unlock Retention by Letting Beginners Speak" → TL;DR → Opportunity → Context. Findings: retention cliff at the intermediate gate + the speaking-cohort wedge 2.3× labeled correlational (line + paired bars); VoC across three channels, "no way to speak" as the aligned theme (quotes + bar); competitive **extraction** (rivals invest where we leak). **Convergence:** data + VoC + sales + competitive + market all point to speaking practice at the plateau (diagram) — the brief ends here. The internal hypothesis ("By introducing adaptive conversation practice at the transition, learners will start speaking early and feel progress, which will drive week-4 retention and renewals (LTV)") is what feeds the "Conversation Practice" PRD through the pipeline, but is not rendered as a card. No footer.
 
 ## Reference examples
 Five worked briefs ship in `examples/` (see `README.md` for the index). They hold the structure constant while varying business, charts, available signals, and convergence strength — including honest weak-convergence (`03`) and single-signal degradation (`04`). Read them to calibrate before generating.

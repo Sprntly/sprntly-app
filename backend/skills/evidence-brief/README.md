@@ -22,10 +22,9 @@ A self-contained **HTML document, 1–3 pages**, for a **product-team audience**
 3. **Opportunity** — one simple line.
 4. **Context** — what the product is + the behavior under investigation (placed *after* TL;DR and Opportunity).
 5. **Evidence** — the findings, each with the best-fit chart, sequenced as one story.
-6. **Convergence** — where independent signals agree (or an honest note that they don't).
-7. **Hypothesis** — value-driven (behavior change → business value), testable, with metric + guardrails.
+6. **Convergence** — where independent signals agree (or an honest note that they don't). **The brief ends here.**
 
-No footer, no methods boilerplate, no mention of how it was produced.
+The value-driven hypothesis (behavior change → business value, testable) is reasoned internally and flows to `prd-author` through the pipeline, but is **not** rendered as a card/section in the brief. No footer, no methods boilerplate, no mention of how it was produced.
 
 ## 3. What the output is used for
 The brief is the **upstream artifact in the product pipeline.** Its hypothesis is the input to
@@ -75,7 +74,7 @@ fabricate quotes. Missing numbers are omitted or named as a gap.
 4. Find the wedge (strongest single proof); label its strength (usually correlational).
 5. Pick the best chart per finding; sequence the charts so they tell one story.
 6. Include real VoC quotes across channels when available and aligned.
-7. Write the value-driven hypothesis (behavior change -> business value).
+7. Reason toward the value-driven hypothesis (behavior change -> business value) — internal only; do not render it as a section.
 8. Honesty pass: every figure traces to an input; every quote is real; correlation != causation; non-converging signals not hidden.
 
 ### Chart selection (variable — best fit, not a fixed set)
