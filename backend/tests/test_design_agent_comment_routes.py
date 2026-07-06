@@ -582,6 +582,162 @@ def test_post_comment_omitted_position_defaults_null(client):
     assert body.get("resolved_anchor_id") is None
 
 
+# ─── General (unpinned) comments — nullable anchor_id ─────────────────────
+#
+# A general comment is a plain prototype_comments row with anchor_id=None and
+# pin_x_pct/pin_y_pct=None. This needs a NULLABLE anchor_id column, so these
+# tests run against a SEPARATE DDL (below) rather than the NOT-NULL `_DDL`
+# above — the existing tests all insert non-null anchors and stay valid
+# against the original DDL untouched.
+
+_DDL_NULLABLE_ANCHOR = _DDL.replace(
+    "anchor_id     TEXT NOT NULL,",
+    "anchor_id     TEXT,",
+)
+assert _DDL_NULLABLE_ANCHOR != _DDL  # guard against a future rename silently no-op'ing the replace
+
+
+@pytest.fixture
+def env_general(isolated_settings, monkeypatch):
+    """Same reload dance as `env`, but against the NULLABLE-anchor_id DDL."""
+    from tests import _fake_supabase
+
+    _fake_supabase.get_fake_db().executescript(_DDL_NULLABLE_ANCHOR)
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+
+    import app.db.prototypes as proto_mod
+    importlib.reload(proto_mod)
+    import app.db.prototype_comments as comments_mod
+    importlib.reload(comments_mod)
+    import app.routes.design_agent as routes_mod
+    importlib.reload(routes_mod)
+    import app.main as main_mod
+    importlib.reload(main_mod)
+
+    return SimpleNamespace(proto=proto_mod, comments=comments_mod, routes=routes_mod, main=main_mod)
+
+
+@pytest.fixture
+def unauth_general(env_general) -> TestClient:
+    return TestClient(env_general.main.app)
+
+
+def test_public_create_accepts_null_anchor(unauth_general):
+    # A general comment POSTs with anchor_id explicitly null + no pin coords.
+    # Before the migration + CommentCreate widen this 422'd (min_length=1).
+    from tests import _fake_supabase
+
+    token = str(uuid.uuid4())
+    _fake_supabase.get_fake_db().execute(
+        "INSERT INTO prototypes "
+        "(prd_id, workspace_id, template_version, status, share_mode, share_token, "
+        " bundle_url, is_complete) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [1, "tenant-general", 1, "ready", "public", token,
+         "https://cdn.example/p/abc/index.html", 0],
+    )
+    resp = unauth_general.post(
+        f"/v1/design-agent/by-token/{token}/comments",
+        json={
+            "body": "Overall this feels smooth, nice palette.",
+            "anchor_id": None,
+            "pin_x_pct": None,
+            "pin_y_pct": None,
+            "viewer_name": "Sarah Chen",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["anchor_id"] is None
+    assert body["pin_x_pct"] is None
+    assert body["pin_y_pct"] is None
+    assert body["author"] == "Sarah Chen"
+    row = _fake_supabase.get_fake_db().execute(
+        "SELECT anchor_id FROM prototype_comments WHERE id = ?", [body["id"]]
+    ).fetchone()
+    assert row[0] is None  # persisted as a real null, not the string "None"
+
+
+def test_public_create_null_anchor_excluded_from_grounding(env_general):
+    # Insert a real null-anchor (general) row AND a sibling pinned row against
+    # the nullable DDL, then run them through the ACTUAL grounding projection
+    # (_project_open_comments_for_grounding) that the iterate background run
+    # feeds to the prompt renderer. The pinned row must be present; the
+    # null-anchor row must be ABSENT — proving this test would fail if the
+    # `c.get("anchor_id")` guard were ever removed from that projection.
+    from app.db.prototype_comments import insert_comment, list_comments
+    from app.routes.design_agent import _project_open_comments_for_grounding
+
+    insert_comment(
+        prototype_id=1, workspace_id="tenant-general",
+        anchor_id=None, body="General feedback, no element", author="Marcus K.",
+    )
+    insert_comment(
+        prototype_id=1, workspace_id="tenant-general",
+        anchor_id="deadbeef", body="This button needs more weight", author="Jane Doe",
+    )
+
+    all_comments = list_comments(prototype_id=1, workspace_id="tenant-general")
+    assert len(all_comments) == 2  # both rows really persisted
+
+    grounded = _project_open_comments_for_grounding(all_comments)
+
+    assert len(grounded) == 1  # the null-anchor row did not survive the projection
+    assert grounded[0]["anchor_id"] == "deadbeef"
+    assert grounded[0]["body"] == "This button needs more weight"
+    assert not any(g["anchor_id"] is None for g in grounded)
+
+
+def test_public_create_pinned_still_works(unauth_general):
+    # Regression: a normal anchored/pinned create against the now-nullable
+    # column behaves exactly as before (anchor_id required + non-empty).
+    from tests import _fake_supabase
+
+    token = str(uuid.uuid4())
+    _fake_supabase.get_fake_db().execute(
+        "INSERT INTO prototypes "
+        "(prd_id, workspace_id, template_version, status, share_mode, share_token, "
+        " bundle_url, is_complete) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [1, "tenant-general", 1, "ready", "public", token,
+         "https://cdn.example/p/abc/index.html", 0],
+    )
+    resp = unauth_general.post(
+        f"/v1/design-agent/by-token/{token}/comments",
+        json={"anchor_id": "deadbeef", "body": "love this", "pin_x_pct": 10.0, "pin_y_pct": 20.0},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["anchor_id"] == "deadbeef"
+    assert body["pin_x_pct"] == pytest.approx(10.0)
+
+    # An empty-string anchor_id is still rejected (422) -- distinct from the
+    # honest "no anchor" None case.
+    resp2 = unauth_general.post(
+        f"/v1/design-agent/by-token/{token}/comments",
+        json={"anchor_id": "", "body": "x"},
+    )
+    assert resp2.status_code == 422
+
+
+def test_comment_out_serializes_null_anchor(env_general):
+    # CommentOut / _comment_to_out project a null anchor_id cleanly (no
+    # KeyError, no validation error) via .get(), matching the pattern already
+    # used for pin_x_pct/pin_y_pct/resolved_anchor_id.
+    from app.routes.design_agent import _comment_to_out, CommentOut
+
+    projected = _comment_to_out({
+        "id": 9,
+        "anchor_id": None,
+        "body": "general feedback",
+        "author": "Anonymous",
+        "status": "open",
+        "created_at": "2026-01-01T00:00:00",
+        "resolved_at": None,
+    })
+    out = CommentOut(**projected)
+    assert out.anchor_id is None
+    assert out.body == "general feedback"
+
+
 def test_position_not_leaked_cross_workspace(client):
     # A comment with position written under workspace A is not returned when
     # GET /{id}/comments is queried under workspace B — the prototype lookup

@@ -48,7 +48,7 @@ def insert_comment(
     prototype_id: int,
     workspace_id: str,            # from the route (internal session.aud, or the
                                   # resolved prototype's workspace_id for public writes)
-    anchor_id: str,
+    anchor_id: str | None,        # None = a general (unpinned) comment, no element anchor
     body: str,
     author: str = "demo",
     user_id: str | None = None,             # Supabase auth UUID; stored for display-name resolution at read time
@@ -56,13 +56,15 @@ def insert_comment(
     pin_y_pct: float | None = None,        # viewport-relative y position (0..100), None for non-pin comments
     resolved_anchor_id: str | None = None,  # stable JSX anchor at the pin point, None if unresolved
 ) -> dict[str, Any]:
-    """Insert an open comment anchored to anchor_id. Returns the inserted row.
+    """Insert a comment. anchor_id=None is a general (unpinned) comment -- valid.
+    Returns the inserted row.
 
-    Raises ValueError on empty anchor_id or empty/whitespace body — both are
-    programming/validation bugs, not runtime conditions to swallow.
+    Raises ValueError on an empty-STRING anchor_id (a validation/programming
+    bug distinct from the honest "no anchor" None case) or empty/whitespace
+    body — both real bugs, not runtime conditions to swallow.
     """
-    if not anchor_id:
-        raise ValueError("insert_comment: anchor_id is empty")
+    if anchor_id == "":
+        raise ValueError("insert_comment: anchor_id is empty string (use None for no anchor)")
     if not body.strip():
         raise ValueError("insert_comment: body is empty")
     c = require_client()
@@ -201,6 +203,10 @@ def list_open_comment_anchor_ids(
     Returns a `list[str]` (not a set) for JSON-serialisability and to match the
     `list_comments` return convention; duplicates are collapsed, first-seen order
     preserved (created_at-ascending).
+
+    General (unpinned) comments have no anchor_id (None) — they carry no
+    element to preserve across a regeneration, so they are excluded here
+    rather than surfacing a literal `None` entry into the surviving-anchors set.
     """
     c = require_client()
     resp = (c.table(_TABLE).select("anchor_id")
@@ -211,7 +217,7 @@ def list_open_comment_anchor_ids(
     distinct: list[str] = []
     for row in resp.data or []:
         anchor = row["anchor_id"]
-        if anchor not in distinct:
+        if anchor is not None and anchor not in distinct:
             distinct.append(anchor)
     return distinct
 
@@ -229,13 +235,22 @@ def mark_comments_orphaned(
     NOTE: this is invoked from the regeneration path with an explicit
     prototype_id + workspace_id (the prototype being regenerated is known), so
     it IS workspace-filtered -- it is NOT a cross-workspace background sweep.
+
+    General (unpinned) comments (anchor_id is None) are never orphaned here --
+    "orphaned" means the anchored element no longer exists in the new bundle,
+    which is meaningless for a comment with no element to begin with. Without
+    this guard every general comment would be flipped to orphaned on the very
+    next regeneration (None is never a member of surviving_anchor_ids).
     """
     c = require_client()
     open_rows = (c.table(_TABLE).select("id, anchor_id")
                  .eq("prototype_id", prototype_id)
                  .eq("workspace_id", workspace_id)
                  .eq("status", "open").execute().data or [])
-    orphan_ids = [r["id"] for r in open_rows if r["anchor_id"] not in surviving_anchor_ids]
+    orphan_ids = [
+        r["id"] for r in open_rows
+        if r["anchor_id"] is not None and r["anchor_id"] not in surviving_anchor_ids
+    ]
     if orphan_ids:
         (c.table(_TABLE).update({"status": "orphaned"})
          .in_("id", orphan_ids).eq("workspace_id", workspace_id).execute())
@@ -259,6 +274,10 @@ def list_resolved_comments(
     by (anchor_id, id) rather than created_at for byte-determinism (created_at can
     collide at same-second resolution; id is the monotonic tiebreak), and so a thread's
     comments group visually under one anchor in the export.
+
+    A general (unpinned) comment's anchor_id is None; the sort key normalises
+    it to "" so a mix of general + anchored resolved comments never raises
+    (Python can't compare None to str) and general comments simply sort first.
     """
     c = require_client()
     resp = (c.table(_TABLE).select("*")
@@ -271,4 +290,4 @@ def list_resolved_comments(
     # the (anchor_id, id) contract byte-deterministic regardless of the backend's
     # multi-column-order or collation semantics. The `.order()` calls above let real
     # Postgres pre-sort; this guarantees the invariant the export serialiser relies on.
-    return sorted(rows, key=lambda r: (r["anchor_id"], r["id"]))
+    return sorted(rows, key=lambda r: (r["anchor_id"] or "", r["id"]))

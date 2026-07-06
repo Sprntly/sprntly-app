@@ -12,23 +12,54 @@
 // nextViewerState) so they are unit-testable in the node-env vitest run, which
 // has no DOM/router — the same split convention as DesignAgentDrawer's
 // runGenerateFlow. Relative imports (not `@/…`) match the codebase + vitest.
-import { useEffect, useState, type FormEvent } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react"
 import { notFound } from "next/navigation"
 import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
 import { DeviceBadge } from "../components/design-agent/DeviceBadge"
 import { ManualEditOverlay } from "../components/design-agent/ManualEditOverlay"
-import { CommentsPanel } from "../components/design-agent/CommentsPanel"
+// CommentAvatar + shortRelativeTime are reused (not redefined) for the new
+// General section's cards, matching the identity chrome pinned cards already
+// use elsewhere on this surface (one source of truth for author rendering).
+import { CommentsPanel, CommentAvatar, shortRelativeTime } from "../components/design-agent/CommentsPanel"
 // C2b: the public surface drives the SAME pin engine as the signed-in editor via
 // the shared usePinMarking hook + the extracted MarkOverlay / PinLayer /
 // PrototypeMarkLayer leaves. The only per-surface difference is the create-fn:
 // the public viewer routes via createCommentByToken (no prototypeId / auth).
 import { usePinMarking } from "../components/design-agent/usePinMarking"
 import { MarkOverlay, PinLayer, PrototypeMarkLayer } from "../components/design-agent/PrototypeMarkLayer"
-import { designAgentApi } from "../lib/api"
+import { designAgentApi, type CommentRecord } from "../lib/api"
 import { PasscodeGate } from "./PasscodeGate"
 import { resolveToken, type ResolvedView } from "./resolveToken"
 import { shareTokenFromLocation } from "./shareTokenFromPathname"
-import { IconClose, IconMessage, IconPin } from "../components/shared/app-icons"
+import { IconClose, IconMessage, IconPin, IconCheck } from "../components/shared/app-icons"
+
+// ── General-section line icons (inline SVG, stroke-only — no emoji) ─────────
+// Not added to the shared app-icons.tsx registry: these are specific to the
+// new General/Pinned sidebar split and used only here.
+function IconSpeechBubble({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 1h10a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-.5.5H4l-3 2V1.5A.5.5 0 0 1 1 1z" />
+    </svg>
+  )
+}
+function IconSpeechBubblePlus({ size = 14 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1.5 1.5h11a.5.5 0 0 1 .5.5v7a.5.5 0 0 1-.5.5H4l-2.5 2V2a.5.5 0 0 1 .5-.5z" />
+      <line x1="7" y1="4.5" x2="7" y2="8" />
+      <line x1="4.5" y1="6.25" x2="9.5" y2="6.25" />
+    </svg>
+  )
+}
+function IconPinMarker({ size = 11 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 11 11" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M5.5 1a3 3 0 1 1 0 6 3 3 0 0 1 0-6z" />
+      <line x1="5.5" y1="7" x2="5.5" y2="10.5" />
+    </svg>
+  )
+}
 
 export type { ResolvedView }
 
@@ -116,6 +147,92 @@ export function PublicTokenViewer() {
   useEffect(() => {
     setViewerName(readStoredViewerName())
   }, [])
+
+  // General (unpinned) comments: a separate read of the SAME by-token list
+  // CommentsPanel already fetches internally, kept independent here because
+  // CommentsPanel only surfaces ids via onCommentsLoaded (not full records) and
+  // is out of scope to modify on this ticket.
+  const [allComments, setAllComments] = useState<CommentRecord[]>([])
+  const refreshComments = useCallback(() => {
+    if (typeof token !== "string") return
+    designAgentApi
+      .listCommentsByToken(token)
+      .then((list) => setAllComments(list))
+      .catch(() => {
+        // Degrade silently, same posture as getByPrd/getActiveByPrd: the
+        // General section simply shows empty until the next successful load.
+      })
+  }, [token])
+  useEffect(() => {
+    refreshComments()
+  }, [refreshComments])
+
+  // A general comment has BOTH null pin coords AND no element anchor (per the
+  // data model: "a prototype_comments row with null pin coordinates AND null
+  // anchor"). Checking pin_x_pct alone would also sweep in the OLDER
+  // right-click-anywhere anchored comments (CommentsPanel's own composer path)
+  // into General — those carry a real anchor_id but, by design, no x/y
+  // position. `c.anchor_id == null` still narrows correctly at runtime even
+  // though CommentRecord's declared type stays `string` (unwidened, to avoid
+  // breaking CommentsPanel.tsx's `pinExtra?.[c.anchor_id]` Record index, which
+  // is out of scope to touch) — the loose-equality null check does not rely on
+  // that type being accurate.
+  const byNewestFirst = (a: CommentRecord, b: CommentRecord) =>
+    new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  const generalComments = useMemo(
+    () => allComments.filter((c) => c.pin_x_pct == null && c.anchor_id == null).sort(byNewestFirst),
+    [allComments],
+  )
+  const generalOpenCount = useMemo(
+    () => generalComments.filter((c) => c.status !== "resolved").length,
+    [generalComments],
+  )
+  const pinnedOpenCount = useMemo(
+    () => allComments.filter((c) => !(c.pin_x_pct == null && c.anchor_id == null) && c.status !== "resolved").length,
+    [allComments],
+  )
+
+  const [generalComposerOpen, setGeneralComposerOpen] = useState(false)
+  const [generalBody, setGeneralBody] = useState("")
+  const [generalPosting, setGeneralPosting] = useState(false)
+  const [generalError, setGeneralError] = useState<string | null>(null)
+  const generalTextareaRef = useRef<HTMLTextAreaElement>(null)
+  useEffect(() => {
+    if (generalComposerOpen) generalTextareaRef.current?.focus()
+  }, [generalComposerOpen])
+
+  function openGeneralComposer() {
+    setGeneralError(null)
+    setGeneralComposerOpen(true)
+  }
+  function cancelGeneralComposer() {
+    setGeneralComposerOpen(false)
+    setGeneralBody("")
+    setGeneralError(null)
+  }
+  async function submitGeneralComment() {
+    const trimmed = generalBody.trim()
+    if (!trimmed || generalPosting || typeof token !== "string") return
+    setGeneralPosting(true)
+    setGeneralError(null)
+    try {
+      const created = await designAgentApi.createCommentByToken(token, {
+        body: trimmed,
+        anchor_id: null,
+        pin_x_pct: null,
+        pin_y_pct: null,
+        viewer_name: viewerName,
+      })
+      // Prepend locally (newest-first) — avoids a second full-list round trip.
+      setAllComments((prev) => [created, ...prev])
+      setGeneralBody("")
+      setGeneralComposerOpen(false)
+    } catch {
+      setGeneralError("Failed to post comment. Please try again.")
+    } finally {
+      setGeneralPosting(false)
+    }
+  }
 
   // Capture form is shown when the writable comments surface is open but no name
   // is known yet. On submit we persist then proceed; the panel renders next.
@@ -373,7 +490,10 @@ export function PublicTokenViewer() {
               /* Phase 3: first-comment name capture. Shown when the writable comments
                  surface is open but no name is stored yet. On submit we persist the
                  name to localStorage and proceed; a returning viewer is not re-prompted.
-                 A short PII notice sets expectations about where the name + comment go. */
+                 A short PII notice sets expectations about where the name + comment go.
+                 Both the General and Pinned sections below are gated behind this same
+                 name-capture step (a general comment must carry a real viewer name,
+                 never "Anonymous", exactly like the pinned path). */
               <form
                 className="design-agent-surface da-viewer-name-form"
                 data-testid="viewer-name-form"
@@ -413,16 +533,149 @@ export function PublicTokenViewer() {
               </form>
             )}
             {!needsName && (
-              /* C2a writable-anon comments. No prototypeId on this surface (minimum-
-                 disclosure), so create routes via createCommentByToken(token);
-                 canComment enables create while resolve/apply/ignore/delete stay
-                 hidden (all gated on prototypeId). */
-              <CommentsPanel
-                token={token as string}
-                canComment
-                viewerName={viewerName}
-                onCommentsLoaded={setServerCommentIds}
-              />
+              <>
+                {/* General section — unpinned, prototype-level feedback. First in
+                    the sidebar: the lower-friction entry point (no element click,
+                    no mark mode required). */}
+                <section
+                  className="comments-section"
+                  aria-label="General comments"
+                  data-testid="general-comments-section"
+                >
+                  <h3 className="comments-section-title">
+                    <IconSpeechBubble />
+                    General
+                    {generalOpenCount > 0 && (
+                      <span
+                        className="comments-section-count"
+                        aria-label={`${generalOpenCount} open general comments`}
+                      >
+                        {generalOpenCount}
+                      </span>
+                    )}
+                  </h3>
+                  {generalComments.length > 0 ? (
+                    <ul className="comment-list" data-testid="general-comments-list">
+                      {generalComments.map((c) => (
+                        <li
+                          key={c.id}
+                          className="comment-thread comment-thread--general"
+                          data-testid={`general-comment-thread-${c.id}`}
+                        >
+                          <div className="comment-meta">
+                            <CommentAvatar author={c.author} />
+                            <span className="comment-author">{c.author}</span>
+                            <time
+                              className="comment-timestamp"
+                              dateTime={c.created_at}
+                              title={c.created_at}
+                            >
+                              {shortRelativeTime(c.created_at)}
+                            </time>
+                            <span
+                              className={`comment-resolve-btn comment-resolve-btn--static${c.status === "resolved" ? " resolved" : ""}`}
+                              title={c.status === "resolved" ? "Resolved" : undefined}
+                              aria-hidden="true"
+                            >
+                              <IconCheck size={13} />
+                            </span>
+                          </div>
+                          <p className="comment-body">{c.body}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <p className="comments-section-empty" data-testid="general-comments-empty">
+                      No general comments yet.
+                    </p>
+                  )}
+                  {!generalComposerOpen ? (
+                    <button
+                      type="button"
+                      className="general-comment-trigger"
+                      data-testid="general-comment-trigger"
+                      aria-label="Add a general comment"
+                      onClick={openGeneralComposer}
+                    >
+                      <IconSpeechBubblePlus />
+                      Add a general comment
+                    </button>
+                  ) : (
+                    <div className="general-comment-composer" role="form" aria-label="Add a general comment">
+                      <p className="general-comment-composer-label">General comment</p>
+                      <textarea
+                        ref={generalTextareaRef}
+                        className="general-comment-composer-input"
+                        data-testid="general-comment-input"
+                        placeholder="Share overall feedback about this prototype…"
+                        maxLength={2000}
+                        aria-label="General comment text"
+                        value={generalBody}
+                        onChange={(e) => setGeneralBody(e.target.value)}
+                      />
+                      {generalError && (
+                        <p className="comments-error error" data-testid="general-comment-error">
+                          {generalError}
+                        </p>
+                      )}
+                      <div className="general-comment-composer-actions">
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          data-testid="general-comment-cancel"
+                          onClick={cancelGeneralComposer}
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-accent btn-sm"
+                          data-testid="general-comment-send"
+                          disabled={!generalBody.trim() || generalPosting}
+                          onClick={() => void submitGeneralComment()}
+                        >
+                          Send
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </section>
+
+                {/* Pinned section — element-anchored comments. Unchanged rendering
+                    (CommentsPanel + its composer/resolve-dedup wiring, byte-for-byte
+                    the same mount as before this ticket); only the header + wrapping
+                    section + hideGeneralComments (to avoid double-rendering a general
+                    comment inside this section) are new. */}
+                <section
+                  className="comments-section"
+                  aria-label="Element-anchored comments"
+                  data-testid="pinned-comments-section"
+                >
+                  <h3 className="comments-section-title">
+                    <IconPinMarker />
+                    Pinned
+                    {pinnedOpenCount > 0 && (
+                      <span
+                        className="comments-section-count"
+                        aria-label={`${pinnedOpenCount} open pinned comments`}
+                      >
+                        {pinnedOpenCount}
+                      </span>
+                    )}
+                  </h3>
+                  {/* C2a writable-anon comments. No prototypeId on this surface (minimum-
+                      disclosure), so create routes via createCommentByToken(token);
+                      canComment enables create while resolve/apply/ignore/delete stay
+                      hidden (all gated on prototypeId). */}
+                  <CommentsPanel
+                    token={token as string}
+                    canComment
+                    viewerName={viewerName}
+                    onCommentsLoaded={setServerCommentIds}
+                    hideGeneralComments
+                  />
+                </section>
+              </>
             )}
           </div>
         </aside>

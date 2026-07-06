@@ -597,6 +597,15 @@ export type CommentsPanelProps = {
    *  local saved-pin CARD can be suppressed once its comment is in the canonical
    *  server list (the canvas dot stays). No-op when not provided. */
   onCommentsLoaded?: (ids: number[]) => void
+  /** General (unpinned, unanchored) comments now round-trip through the SAME
+   *  by-token list this panel fetches. The public `/p/<token>` viewer renders
+   *  those itself in a separate "General" section, so it sets this true to
+   *  keep this panel's own list scoped to anchored/pinned comments only (else
+   *  a general comment would render twice — once correctly, once here as a
+   *  bare pin-less card). Defaults to false, which reproduces every existing
+   *  mount's behaviour exactly (the signed-in editor keeps showing every
+   *  comment, general included — this prop is additive and opt-in). */
+  hideGeneralComments?: boolean
 }
 
 function toMessage(err: unknown, fallback: string): string {
@@ -616,6 +625,7 @@ export function CommentsPanel({
   canComment,
   viewerName,
   onCommentsLoaded,
+  hideGeneralComments = false,
 }: CommentsPanelProps) {
   // Writable-anon resolution: create is enabled when not read-only AND either a
   // prototypeId is present (signed-in mount) OR the host opted into anon create
@@ -825,7 +835,11 @@ export function CommentsPanel({
         </div>
       )}
       <CommentsPanelView
-        comments={comments}
+        comments={
+          hideGeneralComments
+            ? comments.filter((c) => c.pin_x_pct != null || c.anchor_id != null)
+            : comments
+        }
         composer={commentingEnabled ? composer : null}
         busy={busy || iterateBusy}
         error={error}

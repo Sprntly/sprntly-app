@@ -1596,8 +1596,10 @@ export const designAgentApi = {
    *  supplied display name; the backend maps it onto the comment author (falling
    *  back to "Anonymous"). Omitted on the signed-in surface. Additive field. */
   createCommentByToken: (token: string, body: {
-    anchor_id: string; body: string;
-    pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+    /** null = a general (unpinned) comment -- prototype-level feedback with no
+     *  element anchor. Pinned callers keep passing a non-empty string. */
+    anchor_id: string | null; body: string;
+    pin_x_pct?: number | null; pin_y_pct?: number | null; resolved_anchor_id?: string | null;
     viewer_name?: string;
   }) =>
     api.post<CommentRecord>(
