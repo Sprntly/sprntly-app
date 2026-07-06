@@ -164,6 +164,11 @@ describe("ChatScreen — insight renders as an in-chat message (not a pinned hea
     expect(within(msg).queryByRole("button", { name: /open prd/i })).toBeNull()
     // The prototype CTA is present; no prototype built yet → "Generate prototype".
     expect(within(msg).getByRole("button", { name: "Generate prototype" })).toBeTruthy()
+
+    // …and the chat composer is present even though the thread is empty — the
+    // user can immediately ask Sprntly about this PRD. (Regression: the dock
+    // composer was gated on a non-empty thread, so insight tabs had no input.)
+    expect(screen.getByPlaceholderText(/Ask Sprntly anything/i)).toBeTruthy()
   })
 
   it("relabels the prototype CTA to 'View prototype' once one is ready in the DB", async () => {
