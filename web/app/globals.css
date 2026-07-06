@@ -2087,41 +2087,6 @@
     font-weight: 600;
   }
 
-  .chat-welcome-suggestions {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: center;
-    gap: 8px;
-    margin: 14px auto 0;
-    max-width: 560px;
-  }
-
-  .chat-welcome-suggestion {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 7px 14px;
-    border: 1px solid #12201a17;
-    border-radius: 999px;
-    background: #fff;
-    color: #15201b;
-    font-size: 12.5px;
-    font-weight: 500;
-    line-height: 1.2;
-    cursor: pointer;
-    transition: all .14s;
-  }
-
-  .chat-welcome-suggestion:hover {
-    border-color: #9bdcc1;
-    background: #edf8f2;
-  }
-
-  .chat-welcome-suggestion-icon {
-    display: inline-flex;
-    color: var(--accent);
-  }
-
   .chat-home-composer {
     display: flex;
     flex-direction: column;
