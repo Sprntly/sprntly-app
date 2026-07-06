@@ -26,6 +26,7 @@ Pipeline:
 from __future__ import annotations
 
 import logging
+import re
 
 from app.business_context import load_business_context
 from app.db.backlog import prune_stale_backlog, upsert_backlog_item
@@ -102,6 +103,47 @@ Rules:
 - Return one entry per theme, copying each theme_id exactly.
 - duplicate_of, when set, must copy an EARLIER candidate's theme_id verbatim —
   never point to a later candidate or to the theme itself."""
+
+
+# Small words that stay lowercase mid-title (Title Case, not ALL Caps Each Word).
+_TITLE_MINOR = {"a", "an", "the", "and", "or", "of", "for", "to", "in", "on",
+                "with", "at", "by", "vs", "per", "from", "into", "as", "&"}
+
+
+def _title_case(label: str) -> str:
+    """Title-case a theme label for the backlog so headings read consistently,
+    WITHOUT mangling acronyms. Theme labels come straight from the KG's
+    canonical_label, which the extractor cases inconsistently ("brief delivery",
+    "onboarding", "PRD generation"), so the backlog looked sloppy.
+
+    A word that already contains an uppercase letter is left untouched — that
+    preserves acronyms and mixed-case product terms (PRD, VoC, SSO, OAuth, CI/CD,
+    HubSpot, UX). An all-lowercase minor word stays lowercase unless it's first or
+    last. Sub-words joined by ``/`` or ``-`` are cased individually so
+    "seat-free" → "Seat-Free" and "brief / report" → "Brief / Report".
+    """
+    def cap(w: str) -> str:
+        return w[:1].upper() + w[1:] if w else w
+
+    def one(w: str, first: bool, last: bool) -> str:
+        if not w or re.search(r"[A-Z]", w):   # empty, acronym, or mixed-case → keep
+            return w
+        if w in _TITLE_MINOR and not (first or last):
+            return w
+        return cap(w)
+
+    words = label.split(" ")
+    n = len(words)
+    out = []
+    for i, w in enumerate(words):
+        parts = re.split(r"([/\-])", w)      # keep the / and - delimiters
+        last_j = len(parts) - 1
+        out.append("".join(
+            p if p in ("/", "-")
+            else one(p, first=(i == 0 and j == 0), last=(i == n - 1 and j == last_j))
+            for j, p in enumerate(parts)
+        ))
+    return " ".join(out)
 
 
 def _candidates_payload(cands: list) -> str:
@@ -237,14 +279,14 @@ def sequence_backlog(
         upsert_backlog_item(
             enterprise_id,
             theme_id=c.theme_id,
-            title=c.theme_label[:200],
+            title=_title_case(c.theme_label)[:200],
             rank=rank,
             score=sf["goal_adjusted_score"],
             tag=t.get("tag"),
             reasoning=t.get("reasoning"),
         )
         rows.append({
-            "theme_id": c.theme_id, "title": c.theme_label, "rank": rank,
+            "theme_id": c.theme_id, "title": _title_case(c.theme_label), "rank": rank,
             "score": sf["goal_adjusted_score"], "tag": t.get("tag"),
             "reasoning": t.get("reasoning"),
         })

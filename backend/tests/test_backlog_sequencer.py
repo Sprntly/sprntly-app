@@ -115,7 +115,7 @@ def test_sequence_ranks_remaining_by_score(facade, isolated_settings):
                       return_value=_llm_result(_triage_for(broad.id, thin.id))):
         rows = bl.sequence_backlog(facade, "ent-A", exclude_theme_ids=[])
 
-    assert [r["title"] for r in rows] == ["broad", "thin"]
+    assert [r["title"] for r in rows] == ["Broad", "Thin"]   # titles are title-cased
     assert rows[0]["rank"] == 1 and rows[1]["rank"] == 2
     assert rows[0]["score"] >= rows[1]["score"]
 
@@ -164,6 +164,25 @@ def test_drop_duplicates_no_flags_keeps_everything():
     from app.synthesis.backlog import _drop_duplicates
     cands = [_Cand("a"), _Cand("b")]
     assert [c.theme_id for c in _drop_duplicates(cands, {})] == ["a", "b"]
+
+
+# ─────────────────────────────── title casing ───────────────────────────────
+
+def test_title_case_capitalizes_and_preserves_acronyms():
+    from app.synthesis.backlog import _title_case
+    cases = {
+        "brief delivery": "Brief Delivery",
+        "onboarding": "Onboarding",
+        "PRD generation": "PRD Generation",             # acronym untouched
+        "Voice of Customer (VoC) digest": "Voice of Customer (VoC) Digest",
+        "enterprise security & SSO": "Enterprise Security & SSO",
+        "seat limit / over-provisioning": "Seat Limit / Over-Provisioning",
+        "brief / report sharing": "Brief / Report Sharing",
+        "HubSpot OAuth integration": "HubSpot OAuth Integration",
+        "the brief": "The Brief",                        # minor word capped when first
+    }
+    for src, want in cases.items():
+        assert _title_case(src) == want, f"{src!r} → {_title_case(src)!r}"
 
 
 # ───────────────────────── dedup (sequence_backlog end-to-end) ───────────────────
@@ -275,9 +294,9 @@ def test_sequence_persists_all_themes_but_triages_only_top_cap(
     assert "two" not in captured["input"] and "one" not in captured["input"]
     # Tail items are persisted but carry no LLM tag/reasoning.
     by_title = {r["title"]: r for r in rows}
-    assert by_title["four"]["tag"] == "something_new"
-    assert by_title["two"]["tag"] is None
-    assert by_title["one"]["reasoning"] is None
+    assert by_title["Four"]["tag"] == "something_new"
+    assert by_title["Two"]["tag"] is None
+    assert by_title["One"]["reasoning"] is None
 
 
 def test_sequence_persists_items_with_rank_and_reasoning(facade, isolated_settings):
