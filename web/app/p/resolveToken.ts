@@ -14,6 +14,11 @@ export type ResolvedView = {
   // resolver returns it on the by-token response; default to "" defensively so
   // a missing field never crashes the redirect / canonicalize path.
   company_slug: string
+  // "desktop" | "mobile" | "both" — drives the public viewer's single-device
+  // toggle gate + device badge. Defaults to "both" when the backend omits it
+  // (pre-deploy backend or a malformed body) so the viewer degrades to showing
+  // the toggle rather than throwing.
+  target_platform: string
 }
 
 // Returns null for a 404 — the caller maps that to notFound(). A non-404 non-OK
@@ -38,5 +43,6 @@ export async function resolveToken(
     bundle_url: body.bundle_url ?? null,
     is_complete: body.is_complete as boolean,
     company_slug: body.company_slug ?? "",
+    target_platform: body.target_platform ?? "both",
   }
 }

@@ -382,7 +382,7 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
             body = res.json()
             assert set(body.keys()) == {
                 "share_mode", "requires_passcode", "bundle_url", "is_complete",
-                "company_slug",
+                "company_slug", "target_platform",
             }
             assert body["share_mode"] == "public"
             assert body["requires_passcode"] is False

@@ -118,6 +118,7 @@ def _seed(
     passcode_hash: str | None = None,
     is_complete: int = 0,
     workspace_id: str = "app",
+    target_platform: str = "both",
 ) -> str:
     """Insert one prototype row directly into the fake DB; return its share_token.
 
@@ -138,9 +139,10 @@ def _seed(
     db.execute(
         "INSERT INTO prototypes "
         "(prd_id, workspace_id, template_version, status, share_mode, share_token, "
-        " share_passcode_hash, bundle_url, is_complete) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [1, workspace_id, 1, status, share_mode, token, passcode_hash, bundle_url, is_complete],
+        " share_passcode_hash, bundle_url, is_complete, target_platform) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [1, workspace_id, 1, status, share_mode, token, passcode_hash, bundle_url,
+         is_complete, target_platform],
     )
     return token
 
@@ -174,6 +176,7 @@ def test_response_body_keys_are_minimum_disclosure(unauth):
     body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
     assert set(body.keys()) == {
         "share_mode", "requires_passcode", "bundle_url", "is_complete", "company_slug",
+        "target_platform",
     }
 
 
@@ -183,6 +186,23 @@ def test_get_by_token_returns_owning_company_slug(unauth):
     token = _seed(share_mode="public", workspace_id="acme")
     body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
     assert body["company_slug"] == "slug-acme"  # _seed creates company id=acme slug=slug-acme
+
+
+def test_public_view_includes_target_platform(unauth):
+    # The public resolver surfaces the prototype's target_platform so the viewer
+    # can gate the Desktop/Mobile toggle for a single-device prototype.
+    token = _seed(share_mode="public", target_platform="mobile")
+    body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
+    assert body["target_platform"] == "mobile"
+
+
+def test_public_view_null_platform_defaults_both(unauth):
+    # A legacy ("web") / empty value collapses to "both" — the response contract is
+    # exactly {"desktop", "mobile", "both"}, so an old row degrades to always-toggle.
+    legacy = _seed(share_mode="public", target_platform="web")
+    assert unauth.get(f"/v1/design-agent/by-token/{legacy}").json()["target_platform"] == "both"
+    empty = _seed(share_mode="public", target_platform="")
+    assert unauth.get(f"/v1/design-agent/by-token/{empty}").json()["target_platform"] == "both"
 
 
 def test_get_by_token_passcode_mode_withholds_bundle_url(unauth):
@@ -242,7 +262,20 @@ def test_verify_passcode_returns_bundle_url_on_correct_passcode(unauth, env):
     assert body["is_complete"] is True
     assert set(body.keys()) == {
         "share_mode", "requires_passcode", "bundle_url", "is_complete", "company_slug",
+        "target_platform",
     }
+
+
+def test_verify_passcode_includes_target_platform(unauth, env):
+    # A passcode-protected single-device prototype also gates its toggle: the
+    # verify response carries target_platform so the unlocked view can suppress it.
+    h = env.proto.hash_share_passcode("hunter2")
+    token = _seed(share_mode="passcode", passcode_hash=h, target_platform="desktop")
+    resp = unauth.post(
+        f"/v1/design-agent/by-token/{token}/passcode", json={"passcode": "hunter2"}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["target_platform"] == "desktop"
 
 
 def test_verify_passcode_returns_401_on_wrong_passcode(unauth, env):

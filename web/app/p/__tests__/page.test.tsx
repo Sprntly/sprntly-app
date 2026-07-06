@@ -48,6 +48,7 @@ describe("resolveToken", () => {
         bundle_url: "https://cdn.example/p/abc/index.html",
         is_complete: true,
         company_slug: "sprntly",
+        target_platform: "mobile",
       },
     })
     expect(await resolveToken("tok")).toEqual({
@@ -56,6 +57,7 @@ describe("resolveToken", () => {
       bundle_url: "https://cdn.example/p/abc/index.html",
       is_complete: true,
       company_slug: "sprntly",
+      target_platform: "mobile",
     })
   })
 
@@ -70,6 +72,20 @@ describe("resolveToken", () => {
       },
     })
     expect((await resolveToken("tok"))?.company_slug).toBe("")
+  })
+
+  it("defaults target_platform to 'both' when the backend omits it", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        share_mode: "public",
+        requires_passcode: false,
+        bundle_url: "https://cdn.example/p/abc/index.html",
+        is_complete: true,
+        company_slug: "sprntly",
+      },
+    })
+    expect((await resolveToken("tok"))?.target_platform).toBe("both")
   })
 
   it("returns null on a 404 (→ notFound upstream)", async () => {
@@ -91,11 +107,13 @@ describe("nextViewerState branch logic", () => {
       bundle_url: "https://cdn.example/p/abc/index.html",
       is_complete: true,
       company_slug: "sprntly",
+      target_platform: "both",
     })
     expect(state).toEqual({
       kind: "ready",
       bundleUrl: "https://cdn.example/p/abc/index.html",
       isComplete: true,
+      targetPlatform: "both",
     })
     // ...and a ready state renders the iframe sourced from the bundle_url.
     const html = renderToStaticMarkup(
@@ -122,6 +140,7 @@ describe("nextViewerState branch logic", () => {
         bundle_url: null,
         is_complete: false,
         company_slug: "sprntly",
+        target_platform: "both",
       }),
     ).toEqual({ kind: "passcode" })
   })
@@ -138,6 +157,7 @@ describe("nextViewerState branch logic", () => {
         bundle_url: null,
         is_complete: false,
         company_slug: "sprntly",
+        target_platform: "both",
       }),
     ).toEqual({ kind: "notfound" })
   })
@@ -229,6 +249,7 @@ describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
           bundle_url: "https://cdn.example/p/abc/index.html",
           is_complete: true,
           company_slug: "sprntly",
+          target_platform: "both",
         },
         "abc",
       ),

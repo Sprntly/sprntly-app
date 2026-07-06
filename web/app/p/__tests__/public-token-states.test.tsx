@@ -474,6 +474,7 @@ describe("P6-18 behaviour unchanged (AC5 — CSS-only fix, no logic drift)", () 
         bundle_url: null,
         is_complete: false,
         company_slug: "",
+        target_platform: "both",
       }),
     ).toEqual({ kind: "passcode" })
   })
@@ -522,5 +523,44 @@ describe("passcode mint targets the app-origin /_da-bundle path (prod cookie cor
     expect(calledUrl).toBe("/_da-bundle/v1/design-agent/by-token/tok-9/passcode")
     expect(init.method).toBe("POST")
     expect(init.credentials).toBe("include")
+  })
+})
+
+// ── Single-device toggle gate + device badge ─────────────────────────────────
+// Behaviour (toggle hidden / badge shown per target_platform, mobile stage
+// default) is proven end-to-end on the real container in PublicTokenViewer.dom.
+// test.tsx. Here we lock the two things a jsdom render can't see: the exact
+// prop-threading in the container source, and the token-only/scoped CSS rule
+// (jsdom does not apply the external stylesheet).
+describe("single-device badge — wiring + CSS invariants", () => {
+  it("PublicTokenViewer derives the gate and threads showDesktop/showMobile/initialPlatform + gates the badge", () => {
+    // The gate mirrors the signed-in single-device viewer: single device
+    // ⇒ suppress the toggle.
+    expect(publicViewerSrc).toContain('const showDesktop = targetPlatform !== "mobile"')
+    expect(publicViewerSrc).toContain('const showMobile = targetPlatform !== "desktop"')
+    // Props threaded to PrototypeViewer (a mid-tree drop fails the .dom test too).
+    expect(publicViewerSrc).toContain("showDesktop={showDesktop}")
+    expect(publicViewerSrc).toContain("showMobile={showMobile}")
+    expect(publicViewerSrc).toContain(
+      'initialPlatform={targetPlatform === "mobile" ? "mobile" : "desktop"}',
+    )
+    // The badge renders ONLY for a single-device prototype.
+    expect(publicViewerSrc).toContain("singleDevice && <DeviceBadge platform={targetPlatform} />")
+  })
+
+  it("design-agent.css defines a scoped, token-only .device-badge rule appended after .platform-toggle", () => {
+    const clean = stripCssComments(css)
+    const toggleIdx = clean.indexOf(".design-agent-surface .platform-toggle")
+    const badgeIdx = clean.indexOf(".design-agent-surface .device-badge")
+    expect(toggleIdx).toBeGreaterThan(-1)
+    expect(badgeIdx).toBeGreaterThan(toggleIdx) // appended AFTER the toggle block
+    // Exactly one base rule block for the badge (no duplicate/competing rule).
+    expect(baseRuleBlocksFor(css, "device-badge")).toBe(1)
+    // Token-only body — the three spec tokens, no color literal.
+    const body = clean.slice(badgeIdx, clean.indexOf("}", badgeIdx))
+    expect(body).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+    expect(body).toContain("var(--surface-3)")
+    expect(body).toContain("var(--line-strong)")
+    expect(body).toContain("var(--ink-3)")
   })
 })

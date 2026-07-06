@@ -906,6 +906,30 @@
   color: var(--ink);
   box-shadow: var(--shadow-sm);
 }
+/* Single-device badge — replaces the Desktop/Mobile toggle in the public viewer
+   header when a prototype targets one device (target_platform ≠ "both"). Occupies
+   the toggle's flex slot so the header height is unchanged between states. Static
+   and non-interactive: cursor:default, not focusable, no hover/focus state. */
+.design-agent-surface .device-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 11px;
+  background: var(--surface-3);
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-3);
+  cursor: default;
+  flex-shrink: 0;
+  white-space: nowrap;
+  user-select: none;
+}
+.design-agent-surface .device-badge svg {
+  flex-shrink: 0;
+  opacity: 0.65;
+}
 /* C2a: wrapper for the head control group (public viewer Mark + Comment). Sits
    to the right of the platform toggle in the frame head; the inner group reuses
    the `.platform-toggle` look. Icon-only buttons get a square-ish hit area. */

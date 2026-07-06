@@ -2596,12 +2596,28 @@ def _public_bundle_url(row: dict[str, Any]) -> str | None:
     return public_bundle_proxy_url(token)
 
 
+def _public_target_platform(row: dict[str, Any]) -> str:
+    """Normalise a row's target_platform to the public display enum. Only the two
+    single-device values pass through; everything else — "both", the legacy "web"
+    value, null, or any unexpected string — collapses to "both" so the public
+    viewer degrades to showing the toggle. Keeps the response contract to exactly
+    {"desktop", "mobile", "both"}."""
+    tp = (row.get("target_platform") or "").strip().lower()
+    return tp if tp in ("desktop", "mobile") else "both"
+
+
 class PublicPrototypeView(BaseModel):
     share_mode: Literal["public", "passcode"]  # "private" is never returned
     requires_passcode: bool                    # true iff share_mode == "passcode"
     bundle_url: str | None                     # null until a passcode is verified
     is_complete: bool
     company_slug: str                          # cosmetic segment of /p/<slug>/<token>
+    # Benign display enum ("desktop" | "mobile" | "both") — lets the public viewer
+    # hide the Desktop/Mobile toggle for a single-device prototype (there is
+    # nothing to toggle to) and show a static device badge instead. Reveals nothing
+    # about content or ownership, so it is safe on the minimum-disclosure public
+    # payload (analogous to the already-exposed is_complete / company_slug).
+    target_platform: str = Field("both")
 
 
 class PasscodeAttempt(BaseModel):
@@ -2657,6 +2673,9 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         is_complete=bool(row.get("is_complete")),
         # INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
         company_slug=slug_for_company_id(row["workspace_id"]) or "",
+        # Null/legacy ("web") rows collapse to "both", so an older row degrades to
+        # the always-toggle behaviour.
+        target_platform=_public_target_platform(row),
     )
 
 
@@ -2707,6 +2726,9 @@ def verify_passcode(
         bundle_url=_public_bundle_url(row),
         is_complete=bool(row.get("is_complete")),
         company_slug=slug_for_company_id(row["workspace_id"]) or "",
+        # Same normalisation as get_by_token so a passcode-unlocked single-device
+        # prototype also gates its toggle.
+        target_platform=_public_target_platform(row),
     )
 
 
