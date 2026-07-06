@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Story Map — New Team Activation (delivery-tickets, sized large)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,500;1,600&family=Inter:wght@400;450;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#1c1e21;--ink2:#4a4d52;--soft:#8a8d92;--line:#e8e8e6;--paper:#ffffff;--panel:#f7f7f5;
+    --green:#2e8a57;--green-d:#257147;--green-title:#2f7d52;--green-s:#e9f4ec;--green-b:#cfe6d8;
+    --urgent:#c63f35;--urgent-b:#fcebe8;--urgent-br:#f2cfc9;
+    --high:#b57a21;--high-b:#fbf1de;--high-br:#efdcb8;
+    --normal:#3f63a0;--normal-b:#e9eef7;--normal-br:#d3dced;
+    --chip:#f1f1ef;--chip-t:#6b7075;
+    --sans:'Inter',-apple-system,system-ui,sans-serif;--serif:'Spectral',Georgia,serif;--mono:'IBM Plex Mono',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased;padding:24px 26px 90px}
+  .wrap{max-width:1180px;margin:0 auto}
+  .sample-banner{background:var(--high-b);color:var(--high);border:1px solid var(--high-br);border-radius:10px;padding:9px 15px;font-size:12.5px;font-weight:500;margin-bottom:18px}
+  .topbar{background:var(--panel);border-radius:12px;padding:22px 26px}
+  .topbar h2{font-family:var(--serif);font-weight:500;font-size:24px;color:var(--ink);line-height:1.3}
+  .topbar h2 em{font-style:italic;font-weight:600;color:var(--green-title)}
+  .topbar .sub{font-size:14px;color:var(--soft);margin-top:4px}
+  .hactions{display:flex;gap:16px;align-items:center;margin-top:16px}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-size:15px;font-weight:600;border-radius:10px;padding:11px 20px;cursor:pointer;border:none;font-family:var(--sans)}
+  .btn.push{background:var(--green);color:#fff}
+  .btn.regen{background:transparent;color:var(--ink);padding-left:0}
+  .intro{display:flex;gap:12px;background:var(--green-s);border-radius:12px;padding:17px 20px;font-size:15.5px;color:var(--ink);line-height:1.6;margin:16px 0 22px}
+  .intro em{font-style:italic}.intro b{font-weight:700}
+  .spark{color:var(--green);flex-shrink:0;margin-top:2px;font-size:16px}
+  .viewtabs{display:flex;gap:8px;margin-bottom:16px}
+  .vtab{font-size:13px;font-weight:600;color:var(--ink2);background:var(--panel);border-radius:999px;padding:7px 16px;cursor:pointer}
+  .vtab.active{background:var(--green-s);color:var(--green-d)}
+  /* ===== map ===== */
+  .map{border:1px solid var(--line);border-radius:14px;overflow-x:auto;padding:20px 22px;background:#fbfbfa}
+  .grid{display:grid;grid-template-columns:120px repeat(5,minmax(190px,1fr));gap:12px;min-width:1080px}
+  .rowlbl{align-self:stretch;display:flex;flex-direction:column;justify-content:flex-start;gap:3px;padding:10px 10px;border-radius:10px;font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase}
+  .rowlbl .d{font-size:10.5px;font-weight:500;text-transform:none;letter-spacing:0;color:var(--soft)}
+  .rowlbl.bb{color:var(--soft)}
+  .rowlbl.r1{background:var(--green-s);color:var(--green-d)}
+  .rowlbl.r2{background:var(--panel);color:var(--ink2);border:1px solid var(--line)}
+  /* backbone */
+  .act{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:11px 14px;position:relative}
+  .act .n{font-family:var(--mono);font-size:10px;color:var(--soft);display:block;margin-bottom:2px}
+  .act .t{font-size:13px;font-weight:700;line-height:1.35}
+  .act::after{content:'→';position:absolute;right:-13px;top:50%;transform:translateY(-50%);color:var(--soft);font-size:14px}
+  .act.last::after{content:''}
+  /* cells */
+  .cell{display:flex;flex-direction:column;gap:8px}
+  .cell.r1{background:linear-gradient(180deg,var(--green-s) 0,rgba(233,244,236,.35) 100%);border-radius:10px;padding:8px}
+  .card{background:var(--paper);border:1px solid var(--line);border-radius:10px;padding:10px 12px;cursor:pointer;transition:box-shadow .12s,border-color .12s}
+  .card:hover{border-color:var(--green);box-shadow:0 2px 10px rgba(28,30,33,.07)}
+  .card .k{font-family:var(--mono);font-size:10.5px;color:var(--soft);margin-bottom:2px;display:flex;justify-content:space-between;align-items:center}
+  .card .t{font-size:12.5px;font-weight:600;color:var(--ink);line-height:1.4}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+  .dot.u{background:var(--urgent)} .dot.h{background:var(--high)} .dot.n{background:var(--normal)}
+  .card .m{font-size:10.5px;color:var(--chip-t);margin-top:5px;display:flex;gap:6px;align-items:center}
+  .card .ac2{background:var(--chip);border-radius:999px;padding:1px 8px;font-weight:600}
+  .card.skel{border-color:var(--green-b)}
+  .gap{border:1px dashed var(--high-br);background:var(--high-b);border-radius:10px;padding:8px 11px;font-size:11px;color:var(--high);font-weight:600;line-height:1.4}
+  .tcard{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-top:12px;display:flex;gap:20px;cursor:pointer}
+  .tcard:hover{box-shadow:0 2px 12px rgba(28,30,33,.06);border-color:#dcdcd9}
+  .tkey{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--ink2);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:5px 11px;height:fit-content;flex-shrink:0}
+  .tmain{flex:1;min-width:0}
+  .ttitle{font-size:16px;font-weight:700;margin-bottom:4px}
+  .tstory{font-size:14px;color:var(--soft);line-height:1.6;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .trow{display:flex;gap:10px;margin-top:11px;align-items:center}
+  .pill{font-size:12px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:4px 13px;border:1px solid transparent}
+  .pill.urgent{background:var(--urgent-b);color:var(--urgent);border-color:var(--urgent-br)}
+  .pill.high{background:var(--high-b);color:var(--high);border-color:var(--high-br)}
+  .pill.normal{background:var(--normal-b);color:var(--normal);border-color:var(--normal-br)}
+  .acchip{font-size:12.5px;font-weight:600;color:var(--chip-t);background:var(--chip);border-radius:999px;padding:4px 13px}
+  .rel{font-size:12px;color:var(--soft);font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin:22px 0 0}
+  #view-map{display:none}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin-top:14px;font-size:11.5px;color:var(--soft)}
+  .legend b{color:var(--ink2)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="sample-banner">⚠ SAMPLE — demo data. This shows the sizing gate's LARGE branch: the story map is built in addition to the tickets, organizing the same ticket set. Small PRDs (like Guided Setup) correctly get tickets only.</div>
+
+  <div class="topbar">
+    <h2>Tickets from <em>New Team Activation — From Signup to Shared Value</em></h2>
+    <div class="sub">13 tickets · generated from the PRD</div>
+    <div class="hactions">
+      <button class="btn regen">⟳ Regenerate</button>
+      <button class="btn push">✓ Push to ClickUp</button>
+    </div>
+  </div>
+
+  <div class="intro"><span class="spark">✳</span><div>I've broken <em>New Team Activation — From Signup to Shared Value</em> into <b>13 implementable tickets</b> — scoped and prioritized from the PRD. <b>Story map: built</b> — 5 user activities · 13 requirements · 2 releases (sizing gate: 3 of 5 signals). Release slices map to sprints on push.</div></div>
+
+  <div class="viewtabs"><span class="vtab active" id="tab-tickets" onclick="showV('tickets')">Tickets</span><span class="vtab" id="tab-map" onclick="showV('map')">Story map</span></div>
+
+  <div id="view-tickets">
+    <div class="rel">Release 1 — walking skeleton · sprint Platform S15</div>
+    <div class="tcard"><span class="tkey">NT-1</span><div class="tmain"><div class="ttitle">Create Workspace — Minimal Path</div><div class="tstory">As a new account owner, I want to create a workspace with just a name and sensible defaults, so that setup starts in seconds, not a form marathon. Context: Part A §5 R1.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">2 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-2</span><div class="tmain"><div class="ttitle">Guided Jira Connection with Persistent Progress States</div><div class="tstory">As a setting-up PM, I want a stepwise Jira connection that survives session breaks and OAuth cancellations, so that setup never restarts from zero. Context: Part A §5 R2.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">4 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-3</span><div class="tmain"><div class="ttitle">Starter Agent Run with Output Shown In-Flow</div><div class="tstory">As a setting-up PM, I want the flow to end with a starter agent run and its output visible, so that I see value before the excitement window closes. Context: Part A §5 R3.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">2 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-4</span><div class="tmain"><div class="ttitle">Invite One Teammate (Member Role)</div><div class="tstory">As an account owner, I want to invite a teammate with a basic member role in one step, so that the journey includes the team from release one. Context: Part A §5 R4.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">2 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-5</span><div class="tmain"><div class="ttitle">Share a Run Result via Link</div><div class="tstory">As a PM, I want to share any run result with a link, so that value reaches people who never log in. Context: Part A §5 R5.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">2 AC</span></div></div></div>
+    <div class="rel">Release 2 — richer journey · sprint Platform S16</div>
+    <div class="tcard"><span class="tkey">NT-6</span><div class="tmain"><div class="ttitle">Team Workspace Templates</div><div class="tstory">As an account owner, I want workspace templates for common team setups, so that new teams start structured instead of blank. Context: Part A §5 R6.</div><div class="trow"><span class="pill high">HIGH</span><span class="acchip">2 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-7</span><div class="tmain"><div class="ttitle">Failure Surfacing — Visible State, Plain Cause, Retry &amp; Notify-Me</div><div class="tstory">As a setting-up PM, I want every connection failure to say what happened with a retry — and notify-me when the tracker is down — so that no failure is silent. Context: Part A §5 R7.</div><div class="trow"><span class="pill high">HIGH</span><span class="acchip">2 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-8</span><div class="tmain"><div class="ttitle">Linear + Asana Connectors</div><div class="tstory">As a setting-up PM on a non-Jira stack, I want Linear and Asana connections with the same guided flow, so that tracker choice never blocks activation. Context: Part A §5 R8.</div><div class="trow"><span class="pill normal">NORMAL</span><span class="acchip">2 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-9</span><div class="tmain"><div class="ttitle">Agent Decision-Diff View (Inferred vs Stated)</div><div class="tstory">As a PM reviewing agent output, I want a diff of what the agent inferred versus what the spec stated, so that review is a scan, not a re-read. Context: Part A §5 R9.</div><div class="trow"><span class="pill high">HIGH</span><span class="acchip">3 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-10</span><div class="tmain"><div class="ttitle">Workspace-Scoped Agent Permissions</div><div class="tstory">As an admin, I want to fence what each agent can read and write per workspace, so that enabling one team never exposes the org. Context: Part A §5 R10.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">3 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-11</span><div class="tmain"><div class="ttitle">Admin Setup View — Member Stages with 48h Stall Flag</div><div class="tstory">As an account admin, I want to see each member's setup stage with a stall flag, so that the champion can intervene before momentum dies. Context: Part A §5 R11.</div><div class="trow"><span class="pill high">HIGH</span><span class="acchip">2 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-12</span><div class="tmain"><div class="ttitle">Leadership-Ready Export (Word/PDF, Traceability Preserved)</div><div class="tstory">As a PM, I want one-click export of results to Word or PDF with evidence links intact, so that value travels upward without screenshots. Context: Part A §5 R12.</div><div class="trow"><span class="pill high">HIGH</span><span class="acchip">3 AC</span></div></div></div>
+    <div class="tcard"><span class="tkey">NT-13</span><div class="tmain"><div class="ttitle">Journey Funnel Instrumentation</div><div class="tstory">As a PM, I want every journey step to emit events, so that activation finally has a baseline. Context: Part A §5 R13 — baseline is [NEED] today; this creates it.</div><div class="trow"><span class="pill normal">NORMAL</span><span class="acchip">2 AC</span></div></div></div>
+  </div>
+
+  <div class="map" id="view-map">
+    <div class="grid">
+
+      <!-- backbone -->
+      <div class="rowlbl bb">Backbone<span class="d">the user's journey</span></div>
+      <div class="act"><span class="n">A1</span><span class="t">Sign up &amp; set up workspace</span></div>
+      <div class="act"><span class="n">A2</span><span class="t">Connect the tracker</span></div>
+      <div class="act"><span class="n">A3</span><span class="t">Run the first agent</span></div>
+      <div class="act"><span class="n">A4</span><span class="t">Invite &amp; scope the team</span></div>
+      <div class="act last"><span class="n">A5</span><span class="t">Share results upward</span></div>
+
+      <!-- Release 1: walking skeleton -->
+      <div class="rowlbl r1">Release 1<span class="d">walking skeleton — end-to-end · → sprint Platform S15</span></div>
+      <div class="cell r1"><div class="card skel"><div class="k">NT-1 <span class="dot u"></span></div><div class="t">Create workspace — minimal path</div><div class="m"><span class="ac2">2 AC</span></div></div></div>
+      <div class="cell r1"><div class="card skel"><div class="k">NT-2 <span class="dot u"></span></div><div class="t">Guided Jira connection with persistent states</div><div class="m"><span class="ac2">4 AC</span></div></div></div>
+      <div class="cell r1"><div class="card skel"><div class="k">NT-3 <span class="dot u"></span></div><div class="t">Starter agent run + output in-flow</div><div class="m"><span class="ac2">2 AC</span></div></div></div>
+      <div class="cell r1"><div class="card skel"><div class="k">NT-4 <span class="dot u"></span></div><div class="t">Invite one teammate (member role)</div><div class="m"><span class="ac2">2 AC</span></div></div></div>
+      <div class="cell r1"><div class="card skel"><div class="k">NT-5 <span class="dot u"></span></div><div class="t">Share a run result via link</div><div class="m"><span class="ac2">2 AC</span></div></div></div>
+
+      <!-- Release 2 -->
+      <div class="rowlbl r2">Release 2<span class="d">richer journey · → sprint Platform S16</span></div>
+      <div class="cell">
+        <div class="card"><div class="k">NT-6 <span class="dot h"></span></div><div class="t">Team workspace templates</div><div class="m"><span class="ac2">2 AC</span></div></div>
+      </div>
+      <div class="cell">
+        <div class="card"><div class="k">NT-7 <span class="dot h"></span></div><div class="t">Failure surfacing — cause, retry, notify-me</div><div class="m"><span class="ac2">2 AC</span></div></div>
+        <div class="card"><div class="k">NT-8 <span class="dot n"></span></div><div class="t">Linear + Asana connectors</div><div class="m"><span class="ac2">2 AC</span></div></div>
+        <div class="gap">[edge] OAuth admin-consent path — feeds back to PRD R2, not a silent ticket</div>
+      </div>
+      <div class="cell">
+        <div class="card"><div class="k">NT-9 <span class="dot h"></span></div><div class="t">Agent decision-diff view (inferred vs stated)</div><div class="m"><span class="ac2">3 AC</span></div></div>
+        <div class="gap">[NEED] activation baseline — created by NT-13 instrumentation</div>
+      </div>
+      <div class="cell">
+        <div class="card"><div class="k">NT-10 <span class="dot u"></span></div><div class="t">Workspace-scoped agent permissions</div><div class="m"><span class="ac2">3 AC</span></div></div>
+        <div class="card"><div class="k">NT-11 <span class="dot h"></span></div><div class="t">Admin setup view — 48h stall flag</div><div class="m"><span class="ac2">2 AC</span></div></div>
+        <div class="gap">[edge] invite hits an existing paid seat — never silently downgrade</div>
+      </div>
+      <div class="cell">
+        <div class="card"><div class="k">NT-12 <span class="dot h"></span></div><div class="t">Leadership-ready export (Word/PDF, traceable)</div><div class="m"><span class="ac2">3 AC</span></div></div>
+        <div class="card"><div class="k">NT-13 <span class="dot n"></span></div><div class="t">Journey funnel instrumentation</div><div class="m"><span class="ac2">2 AC</span></div></div>
+      </div>
+
+    </div>
+
+    <div class="legend">
+      <span><b>Backbone</b> — Part A §4 activities, narrative order</span>
+      <span><span class="dot u"></span> URGENT&nbsp; <span class="dot h"></span> HIGH&nbsp; <span class="dot n"></span> NORMAL — from the §5 table</span>
+      <span><b>Green band</b> — walking skeleton: release 1 crosses the whole journey</span>
+      <span><b>Dashed notes</b> — gaps/edges fed back to the PRD, never silent tickets</span>
+      <span>Each card opens its full ticket · slices → sprints on push</span>
+    </div>
+  </div>
+
+</div>
+<script>
+function showV(v){
+  document.getElementById('view-tickets').style.display = v==='tickets' ? 'block' : 'none';
+  document.getElementById('view-map').style.display = v==='map' ? 'block' : 'none';
+  document.getElementById('tab-tickets').classList.toggle('active', v==='tickets');
+  document.getElementById('tab-map').classList.toggle('active', v==='map');
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tickets — Guided Setup (from prd-author → delivery-tickets)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,500;1,600&family=Inter:wght@400;450;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#1c1e21;--ink2:#4a4d52;--soft:#8a8d92;--line:#e8e8e6;--paper:#ffffff;--panel:#f7f7f5;
+    --green:#2e8a57;--green-d:#257147;--green-title:#2f7d52;--green-s:#e9f4ec;--green-b:#cfe6d8;
+    --urgent:#c63f35;--urgent-b:#fcebe8;--urgent-br:#f2cfc9;
+    --high:#b57a21;--high-b:#fbf1de;--high-br:#efdcb8;
+    --normal:#3f63a0;--normal-b:#e9eef7;--normal-br:#d3dced;
+    --chip:#f1f1ef;--chip-t:#6b7075;--tabring:#2b5fd9;
+    --sans:'Inter',-apple-system,system-ui,sans-serif;--serif:'Spectral',Georgia,serif;--mono:'IBM Plex Mono',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased;padding:24px 26px 90px}
+  .wrap{max-width:1060px;margin:0 auto}
+  .sample-banner{background:var(--high-b);color:var(--high);border:1px solid var(--high-br);border-radius:10px;padding:9px 15px;font-size:12.5px;font-weight:500;margin-bottom:18px}
+  .viewlabel{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--soft);margin:44px 0 14px;font-weight:600}
+  .tabbar{display:flex;align-items:center;gap:10px;padding:8px 0 16px;margin-bottom:14px;flex-wrap:wrap}
+  .tab svg{color:var(--soft)} .tab.active svg{color:var(--ink)}
+  .tab{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--ink2);background:var(--panel);border-radius:999px;padding:8px 17px;cursor:pointer;border:2px solid transparent}
+  .tab.active{background:var(--paper);border-color:var(--tabring);color:var(--ink)}
+  .tabtitle{font-size:16px;font-weight:600;color:var(--ink);margin-left:6px;flex:1;min-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tab-actions{display:flex;gap:10px;align-items:center}
+  .tbtn{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:8px 16px;cursor:pointer}
+  .tclose{font-size:16px;color:var(--soft);cursor:pointer;padding:4px 8px}
+  .topbar{background:var(--panel);border-radius:12px;padding:22px 26px}
+  .topbar h2{font-family:var(--serif);font-weight:500;font-size:24px;color:var(--ink);line-height:1.3}
+  .topbar h2 em{font-style:italic;font-weight:600;color:var(--green-title)}
+  .topbar .sub{font-size:14px;color:var(--soft);margin-top:4px}
+  .hactions{display:flex;gap:16px;align-items:center;margin-top:16px}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-size:15px;font-weight:600;border-radius:10px;padding:11px 20px;cursor:pointer;border:none;font-family:var(--sans)}
+  .btn.push{background:var(--green);color:#fff}
+  .btn.regen{background:transparent;color:var(--ink);padding-left:0}
+  .intro{display:flex;gap:12px;background:var(--green-s);border-radius:12px;padding:17px 20px;font-size:15.5px;color:var(--ink);line-height:1.6;margin-top:16px}
+  .intro em{font-style:italic}.intro b{font-weight:700}
+  .spark{color:var(--green);flex-shrink:0;margin-top:2px;font-size:16px}
+  .tcard{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-top:14px;display:flex;gap:22px;cursor:pointer;transition:box-shadow .15s,border-color .15s}
+  .tcard:hover{box-shadow:0 2px 12px rgba(28,30,33,.06);border-color:#dcdcd9}
+  .tkey{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--ink2);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:5px 11px;height:fit-content;flex-shrink:0}
+  .tmain{flex:1;min-width:0}
+  .ttitle{font-size:16.5px;font-weight:700;margin-bottom:5px}
+  .tstory{font-size:14.5px;color:var(--soft);line-height:1.6;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .trow{display:flex;gap:10px;margin-top:13px;align-items:center}
+  .pill{font-size:12px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:4px 13px;border:1px solid transparent}
+  .pill.urgent{background:var(--urgent-b);color:var(--urgent);border-color:var(--urgent-br)}
+  .pill.high{background:var(--high-b);color:var(--high);border-color:var(--high-br)}
+  .pill.normal{background:var(--normal-b);color:var(--normal);border-color:var(--normal-br)}
+  .acchip{font-size:12.5px;font-weight:600;color:var(--chip-t);background:var(--chip);border-radius:999px;padding:4px 13px}
+  .grouplbl{font-size:12px;color:var(--soft);font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin:26px 0 0}
+  /* detail */
+  .detail{border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .dtop{background:var(--panel);padding:18px 26px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .crumb{font-size:13px;color:var(--soft);width:100%}
+  .crumb em{color:var(--green-title);font-family:var(--serif);font-weight:600;font-style:italic}
+  .dtitle{font-family:var(--serif);font-weight:600;font-size:20px;color:var(--ink);flex:1;min-width:280px}
+  .qactions{display:flex;gap:8px;align-items:center;margin-left:auto}
+  .qbtn{font-size:13px;font-weight:600;color:var(--ink2);background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:7px 13px;cursor:pointer}
+  .cols{display:grid;grid-template-columns:1fr 300px;gap:0}
+  .main{padding:22px 26px;border-right:1px solid var(--line)}
+  .rail{padding:20px 20px;background:#fbfbfa}
+  .sec{margin-bottom:24px}
+  .sec h4{font-size:12px;color:var(--soft);font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+  .dlbl{font-size:11px;color:var(--soft);font-weight:700;text-transform:uppercase;letter-spacing:.07em;margin:12px 0 3px}
+  .dlbl:first-of-type{margin-top:0}
+  .dtx{font-size:14px;color:var(--ink2);line-height:1.6;margin:0}
+  .dtx .k{color:var(--green-d);font-weight:600}
+  .dlist{margin:2px 0 0 18px;font-size:14px;color:var(--ink2);line-height:1.7}
+  .need{font-family:var(--mono);font-size:12px;color:var(--high)}
+  .ac{border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .acitem{display:flex;gap:11px;align-items:flex-start;margin-bottom:9px}
+  .acitem:last-of-type{margin-bottom:4px}
+  .cb{width:17px;height:17px;border:1.5px solid #d6d6d3;border-radius:5px;background:var(--paper);flex-shrink:0;margin-top:2px}
+  .acitem .txt{font-size:13.5px;color:var(--ink2)}
+  .acitem .k{color:var(--green-d);font-weight:600}
+  .acitem .tagf{font-size:11px;color:var(--urgent);font-weight:700}
+  .acitem .tagn{font-size:11px;color:var(--high);font-weight:700}
+  .inherit{display:block;font-size:11.5px;color:var(--soft);margin-top:8px}
+  .sub-t{display:flex;gap:11px;align-items:center;padding:9px 14px;border:1px solid var(--line);border-radius:10px;margin-bottom:7px;font-size:13.5px;color:var(--ink2)}
+  .sub-t .cb{margin-top:0}
+  .sub-t .sk{font-size:11.5px;color:var(--soft);font-weight:600;margin-left:auto}
+  .dep{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:500;border-radius:10px;padding:7px 13px;margin:0 7px 7px 0;border:1px solid var(--line);background:var(--panel);color:var(--ink2)}
+  .dep.block{border-color:var(--urgent-br);background:var(--urgent-b);color:var(--urgent)}
+  .att{display:flex;gap:9px;flex-wrap:wrap}
+  a.attchip{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 14px;color:var(--ink2);text-decoration:none;transition:border-color .15s,color .15s}
+  a.attchip:hover{border-color:var(--green);color:var(--green-d)}
+  a.attchip .open{color:var(--green-d);font-size:11.5px;font-weight:700}
+  .acttabs{display:flex;gap:6px;margin-bottom:12px}
+  .atab{font-size:12.5px;font-weight:600;color:var(--soft);background:var(--panel);border-radius:7px;padding:5px 12px;cursor:pointer}
+  .atab.active{background:var(--chip);color:var(--ink)}
+  .aisum{background:var(--green-s);border-radius:12px;padding:14px 16px;margin-bottom:13px;font-size:13.5px;color:var(--ink2)}
+  .aisum .ah{font-size:13px;font-weight:700;color:var(--green-d);margin-bottom:6px}
+  .btn2{font-size:12.5px;font-weight:600;border-radius:9px;padding:7px 14px;cursor:pointer;border:1px solid transparent}
+  .btn2.primary{background:var(--green);color:#fff}
+  .ask{display:flex;gap:9px;margin-top:14px}
+  .ask input{flex:1;border:1px solid var(--line);border-radius:10px;padding:11px 15px;font-size:13.5px;font-family:var(--sans);background:var(--panel);color:var(--ink)}
+  .statusbtn{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;align-self:center;font-weight:700;background:var(--normal-b);color:var(--normal);border:1px solid var(--normal-br);border-radius:9px;padding:8px 16px;cursor:pointer}
+  .rail h4{font-size:12px;color:var(--soft);font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin:16px 0 10px}
+  .rrow{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+  
+  .rl{font-size:12px;color:var(--soft);font-weight:500;flex-shrink:0;padding-top:1px}
+  .rv{font-size:13px;font-weight:600;color:var(--ink)}
+  .rv.muted{color:var(--soft);font-weight:500}
+  .rv .pill{font-size:11px;padding:3px 10px}
+  .assg{display:flex;align-items:center;gap:7px}
+  .av{width:24px;height:24px;border-radius:50%;background:var(--green-s);color:var(--green-d);font-size:9.5px;font-weight:700;display:flex;align-items:center;justify-content:center;border:1.5px solid var(--green-b);flex-shrink:0}
+  .railfoot{font-size:11px;color:var(--soft);margin-top:12px;padding-top:9px;border-top:1px solid var(--line)}
+  .pickwrap{position:relative;display:inline-block}
+  .picker{margin-top:10px;background:var(--paper);border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 24px rgba(28,30,33,.10);padding:10px 12px;max-width:280px}
+  .picker .ph2{font-size:10.5px;font-weight:700;color:var(--soft);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
+  .pitem{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:7px;font-size:12px;font-weight:500;color:var(--ink2);cursor:pointer;white-space:nowrap;overflow:hidden}
+  .pitem:hover{background:var(--panel)}
+  .pitem.sel{background:var(--green-s);color:var(--green-d);font-weight:600}
+  .pitem .ppath{font-size:10px;color:var(--soft);font-weight:400;margin-left:auto;padding-left:10px;overflow:hidden;text-overflow:ellipsis}
+  .pfoot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:7px;padding-top:7px;border-top:1px solid var(--line);font-size:11px;color:var(--soft)}
+  .descwide{padding:22px 26px 6px;border-bottom:1px solid var(--line)}
+  [contenteditable="true"]:hover{outline:1.5px dashed var(--green-b);outline-offset:3px;border-radius:4px;cursor:text}
+  .edithint{font-size:11.5px;color:var(--soft);padding:8px 26px;background:#fbfbfa;border-bottom:1px solid var(--line)}
+  .note{font-size:12.5px;color:var(--soft);margin-top:28px;line-height:1.6}
+  @media(max-width:860px){.cols{grid-template-columns:1fr}.main{border-right:none;border-bottom:1px solid var(--line)}.tabtitle{display:none}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="sample-banner">⚠ SAMPLE — end-to-end demo: this ticket set was generated by delivery-tickets from the attached prd-author artifact (Guided Setup PRD v0.1, sample signals). Links open demo pages in a new tab.</div>
+
+  <div class="viewlabel" style="margin-top:0">View 1 · Ticket list</div>
+
+  <div class="topbar">
+    <h2>Tickets from <em>Guided Setup — Tracker Connection + First-Agent-Run Checkpoint</em></h2>
+    <div class="sub">9 tickets · generated from the PRD</div>
+    <div class="hactions">
+      <button class="btn regen">⟳ Regenerate</button>
+      <button class="btn push">✓ Push to ClickUp</button>
+    </div>
+    <div class="picker">
+      <div class="ph2">Push to ClickUp — select a project</div>
+      <div class="pitem sel">● Onboarding &amp; Activation <span class="ppath">Product / Growth</span></div>
+      <div class="pitem">○ Platform <span class="ppath">Product / Core</span></div>
+      <div class="pitem">○ Growth Experiments <span class="ppath">Growth</span></div>
+      <div class="pitem">＋ Create new project…</div>
+      <div class="pfoot"><span>☑ Remember for this PRD</span><span class="btn2 primary" style="padding:5px 11px;font-size:11.5px">Push 9 tickets</span></div>
+    </div>
+    <div style="font-size:11.5px;color:var(--soft);margin-top:8px">↑ shown on Push click — destination remembered per PRD; sync then runs on the backend</div>
+  </div>
+
+  <div class="intro"><span class="spark">✳</span><div>I've broken <em>Guided Setup — Tracker Connection + First-Agent-Run Checkpoint</em> into <b>9 implementable tickets</b> — scoped and prioritized from the PRD. Two decisions block build start. Review, then push to ClickUp.</div></div>
+
+  <div class="tcard"><span class="tkey">GS-0</span><div class="tmain"><div class="ttitle">Spike: Validate Tracker OAuth/API Contracts &amp; Event Schema</div><div class="tstory">As the build team, I want the Jira/Linear OAuth scopes, token lifetimes, rate limits, and the analytics event-schema fit validated before anything hardens on them, so that the flow isn't built on assumed contracts. Context: [ASSUMPTION → T0] from Part B Contracts. Timeboxed 2 days.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">2 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">GS-1</span><div class="tmain"><div class="ttitle">Setup Funnel Instrumentation &amp; Activation Baseline</div><div class="tstory">As a PM, I want every setup step to emit an event with step, outcome, and duration, so that the activation funnel finally has a baseline and every later phase is judged against data. Context: PRD § 5 R5 — the baseline is [NEED] today; this ticket creates it. Parallel-safe [P].</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">2 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">GS-2</span><div class="tmain"><div class="ttitle">Guided Tracker-Connection Flow with Persistent Progress States</div><div class="tstory">As a setting-up PM, I want a stepwise connection flow (not-started → authorizing → verifying → connected) that survives session breaks and OAuth cancellations, so that setup never restarts from zero. Context: PRD § 5 R1 — top VoC theme, 11/17 calls. Walking skeleton.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">4 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">GS-3</span><div class="tmain"><div class="ttitle">Failure Surfacing — Visible State, Plain Cause, Retry &amp; Notify-Me</div><div class="tstory">As a setting-up PM, I want every connection failure to show what happened in plain language with a retry — and a notify-me when the tracker itself is down — so that no failure is ever silent. Context: PRD § 5 R3, ticket #4 pattern ("gave up twice… silent").</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">2 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">GS-4</span><div class="tmain"><div class="ttitle">First-Agent-Run Checkpoint Inside the Setup Flow</div><div class="tstory">As a setting-up PM, I want the flow to end with a starter agent run on my connected data and show me its output, so that I see value before the excitement window closes. Context: PRD § 5 R2 — "nine days to see one agent do one thing." Blocked by DT-1 (dataset decision).</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">2 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">GS-5</span><div class="tmain"><div class="ttitle">Admin Setup View — Member Stages with 48h Stall Flag</div><div class="tstory">As an account admin, I want to see each member's setup stage and get a flag when anyone sits in one stage over 48 hours, so that the champion can intervene before momentum dies. Context: PRD § 5 R4 — 2 of 6 churn interviews. Parallel-safe [P] with GS-3.</div><div class="trow"><span class="pill high">HIGH</span><span class="acchip">2 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">GS-6</span><div class="tmain"><div class="ttitle">Second-Failure Help Handoff with Full Context Payload</div><div class="tstory">As a setting-up PM whose connection failed twice, I want a get-help action that sends support my account, tracker, step, and error automatically, so that I never re-explain what the product already knows. Context: PRD § 5 R6 — replaces the CSM hand-walking pattern.</div><div class="trow"><span class="pill normal">NORMAL</span><span class="acchip">2 AC</span></div></div></div>
+
+  <div class="grouplbl">Decision tickets — from [ESCALATE] · routed to owners, not the board</div>
+
+  <div class="tcard"><span class="tkey">DT-1</span><div class="tmain"><div class="ttitle">Decide: Starter-Run Dataset — Real Workspace Data or Sandbox</div><div class="tstory">Real data proves value instantly but reads workspace content before trust is established; sandbox is safe but generic. Privacy call the spec refuses to make. Owner: Kwame (product) · Blocks: GS-4 · Decide by: before Phase 2.</div><div class="trow"><span class="pill high">NEEDS-HUMAN</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">DT-2</span><div class="tmain"><div class="ttitle">Decide: Launch Tracker Set — Jira + Linear Only, or Include Asana</div><div class="tstory">Scope call that sizes GS-2 and the T0 spike. Owner: Kwame (product) · Blocks: GS-2 scope · Decide by: sprint start.</div><div class="trow"><span class="pill high">NEEDS-HUMAN</span></div></div></div>
+
+  <div class="viewlabel">View 2 · Ticket detail (GS-2 — the walking skeleton)</div>
+
+  <div class="detail">
+    <div class="dtop">
+      <div class="crumb">Guided Setup — Tracker Connection + First-Agent-Run Checkpoint&nbsp; /&nbsp; <span class="tkey" style="padding:3px 9px">GS-2</span></div>
+      <span class="dtitle" contenteditable="true">Guided Tracker-Connection Flow with Persistent Progress States</span>
+      <span class="qactions"><span class="qbtn">＋ Attach</span><span class="qbtn">⛓ Link</span><span class="qbtn">⋯</span></span>
+    </div>
+
+    <div class="edithint">✎ Everything below is editable in place — click any text or field; edits sync on push. Acceptance criteria are inherited from the spec: propose changes in comments instead of editing.</div>
+    <div class="descwide">
+        <div class="sec">
+          <h4>Description</h4>
+          <div class="dlbl">What</div>
+          <p class="dtx" contenteditable="true">Build the stepwise tracker-connection flow — not-started → authorizing → verifying → connected — with progress that persists across sessions and OAuth interruptions.</p>
+          <div class="dlbl">Why now</div>
+          <p class="dtx" contenteditable="true">Connection is where new accounts die: it's the top VoC theme (11 of 17 calls, 19 of 42 tickets), and 11 of 15 accounts stalled more than a week before their first agent run. This is the walking skeleton — everything else in the PRD builds on a connection that works.</p>
+          <div class="dlbl">User story</div>
+          <p class="dtx" contenteditable="true"><span class="k">As a</span> setting-up PM, <span class="k">I want</span> a guided connection flow that shows me where I am and never loses my progress, <span class="k">so that</span> setup is something I finish, not something I abandon.</p>
+          <div class="dlbl">The flow must cover</div>
+          <ul class="dlist" contenteditable="true">
+            <li>The four explicit states, always visible, in order</li>
+            <li>Progress persisted across session breaks</li>
+            <li>OAuth cancel/expiry returning to a resumable state — never a restart</li>
+            <li>Launch trackers per DT-2 (Jira + Linear confirmed; Asana pending)</li>
+          </ul>
+          <div class="dlbl">Out of scope</div>
+          <p class="dtx" contenteditable="true">Failure-state UX (GS-3) · the starter run (GS-4) · admin visibility (GS-5).</p>
+          <p class="dtx" contenteditable="true" style="color:var(--soft);font-size:12.5px">Grounding: <a href="https://app.sprntly.demo/prd/guided-setup#s5-r1" target="_blank" rel="noopener" style="color:var(--green-d);font-weight:600;text-decoration:none">PRD § 5 R1</a> · activation baseline <span class="need">[NEED — GS-1 creates it]</span></p>
+        </div>
+    </div>
+
+    <div class="cols">
+      <div class="main">
+
+        <div class="sec">
+          <h4>Acceptance criteria — 4</h4>
+          <div class="ac">
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="k">Given</span> a user initiating tracker connection, <span class="k">When</span> they proceed, <span class="k">Then</span> the flow presents not-started → authorizing → verifying → connected in order, every state visible.</span></div>
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="tagf">[failure]</span> <span class="k">Given</span> a session break mid-flow, <span class="k">When</span> the user returns, <span class="k">Then</span> progress is preserved — a skipped or lost state fails this ticket.</span></div>
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="tagn">[edge]</span> <span class="k">Given</span> an OAuth authorization cancelled or expired mid-flow, <span class="k">When</span> the user resumes, <span class="k">Then</span> they return to a resumable state with prior steps preserved.</span></div>
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="tagf">[failure]</span> <span class="k">Given</span> the same OAuth interruption, <span class="k">When</span> resume would restart the user from zero, <span class="k">Then</span> the test fails.</span></div>
+            <span class="inherit">Inherited verbatim from Part B spec-first tests for E1 + E2 · trace: GS-2 → PRD § 5 R1 → E1, E2 → tests → PRD goal "activation rate" · propose changes in comments — don't edit here</span>
+          </div>
+        </div>
+
+        <div class="sec">
+          <h4>Child issues</h4>
+          <div class="sub-t"><span class="cb"></span> Connection state machine + persistence layer <span class="sk">To do</span></div>
+          <div class="sub-t"><span class="cb"></span> OAuth handshake per launch tracker (scopes from GS-0) <span class="sk">To do</span></div>
+          <div class="sub-t"><span class="cb"></span> Verify step — permissions + test read against the tracker <span class="sk">To do</span></div>
+          <div class="sub-t"><span class="cb"></span> Resume path for cancelled/expired authorizations <span class="sk">To do</span></div>
+        </div>
+
+        <div class="sec">
+          <h4>Linked issues</h4>
+          <div style="font-size:12px;color:var(--soft);font-weight:600;margin-bottom:6px">is blocked by</div>
+          <span class="dep block">GS-0 — OAuth/API contract spike</span>
+          <span class="dep block">DT-2 — launch tracker set decision</span>
+          <div style="font-size:12px;color:var(--soft);font-weight:600;margin:8px 0 6px">blocks</div>
+          <span class="dep">GS-3 — failure surfacing</span>
+          <span class="dep">GS-4 — first-run checkpoint</span>
+        </div>
+
+        <div class="sec">
+          <h4>Attachments — 2</h4>
+          <div class="att">
+            <a class="attchip" href="https://app.sprntly.demo/prd/guided-setup#s5-r1" target="_blank" rel="noopener">📄 PRD § 5 R1 — Guided Setup v0.1 <span class="open">↗</span></a>
+            <a class="attchip" href="https://app.sprntly.demo/reports/voc-q2-2026#hard-to-get-connected" target="_blank" rel="noopener">📊 Evidence — VoC Q2 · "Hard to get connected" <span class="open">↗</span></a>
+          </div>
+        </div>
+
+        <div class="sec" style="margin-bottom:0">
+          <h4>Activity</h4>
+          <div class="acttabs"><span class="atab">All</span><span class="atab active">Comments</span><span class="atab">History</span></div>
+          <div class="aisum">
+            <div class="ah">✳ AI summary</div>
+            Fresh generation — no discussion yet. Two decisions gate this ticket's start: <b>DT-2</b> (launch tracker set) blocks its scope, and <b>GS-0</b> must validate the OAuth contracts it builds on. Both are queued; nothing here is waiting on you.
+          </div>
+          <div class="ask"><input placeholder="Add a comment…"><span class="btn2 primary">Send</span></div>
+        </div>
+
+      </div>
+      <div class="rail">
+        <div class="statusbtn">Ready <span style="font-size:10px">▾</span></div>
+        <h4>Details</h4>
+        <div class="rrow"><span class="rl">Assignee</span><span class="rv"><span class="assg"><span class="av">MO</span> Mateo O.</span></span></div>
+        <div class="rrow"><span class="rl">Reporter</span><span class="rv muted">Sprntly PM Agent</span></div>
+        <div class="rrow"><span class="rl">Priority</span><span class="rv"><span class="pill urgent">URGENT</span></span></div>
+        <div class="rrow"><span class="rl">Labels</span><span class="rv muted">onboarding · activation</span></div>
+        <div class="rrow"><span class="rl">Parent</span><span class="rv">Guided Setup</span></div>
+        <div class="rrow"><span class="rl">Sprint</span><span class="rv">Platform S15</span></div>
+        <div class="rrow"><span class="rl">Story points</span><span class="rv">5</span></div>
+        <div class="rrow"><span class="rl">Due date</span><span class="rv">Jul 24</span></div>
+        <div class="rrow"><span class="rl">Time tracking</span><span class="rv muted">4d estimated</span></div>
+        <div class="rrow"><span class="rl">Route</span><span class="rv" style="color:var(--green-d)">agent-ready → Claude Code</span></div>
+        <div class="rrow"><span class="rl">Watchers</span><span class="rv muted">Kwame · Priya R. · +2</span></div>
+        <div class="railfoot">Created Jul 3 · Updated just now</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
