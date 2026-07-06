@@ -23,6 +23,7 @@ export type ShareMode = "private" | "public" | "passcode"
 
 export type ShareMenuProps = {
   prototypeId: number
+  prdId?: number
   initialMode: ShareMode
   initialToken?: string | null
   /** P6-20 (#14): fired ONLY after a successful share-mode change, with the new
@@ -39,7 +40,9 @@ export type ShareMenuProps = {
 
 export type ShareMenuViewProps = {
   mode: ShareMode
+  prdId?: number
   shareUrl?: string | null
+  internalUrl?: string | null
   passcode: string
   busy?: boolean
   error?: string | null
@@ -150,21 +153,32 @@ export function buildShareUrl(token: string, origin: string, companySlug: string
   return `${origin}/p/${companySlug}/${token}`
 }
 
-/** Copy the public share URL to the clipboard. Resolves with the copied URL. */
+export function buildInternalLink(prdId: number, origin: string): string {
+  return `${origin}/prototype?prd=${prdId}`
+}
+
+/** Copy a share URL to the clipboard. Resolves with the copied URL. */
 export async function runCopyShareLink({
+  url,
   token,
   origin,
   companySlug,
   clipboard,
 }: {
-  token: string
-  origin: string
-  companySlug: string
+  url?: string
+  token?: string
+  origin?: string
+  companySlug?: string
   clipboard: Pick<Clipboard, "writeText">
 }): Promise<string> {
-  const url = buildShareUrl(token, origin, companySlug)
-  await clipboard.writeText(url)
-  return url
+  const copiedUrl =
+    url ??
+    (token && origin && companySlug ? buildShareUrl(token, origin, companySlug) : null)
+  if (!copiedUrl) {
+    throw new Error("Missing share URL")
+  }
+  await clipboard.writeText(copiedUrl)
+  return copiedUrl
 }
 
 // ---- pure view --------------------------------------------------------------
@@ -174,6 +188,7 @@ export async function runCopyShareLink({
 export function ShareMenuView({
   mode,
   shareUrl = null,
+  internalUrl = null,
   passcode,
   busy = false,
   error = null,
@@ -217,9 +232,26 @@ export function ShareMenuView({
             Public radios render. "passcode" stays a valid ShareMode (backend
             value + runApplyShareMode guard kept), simply never selectable here. */}
       </fieldset>
-      {shareUrl && (
+      {mode !== "private" && shareUrl && (
         <div className="share-link" data-testid="share-link">
           <code>{shareUrl}</code>
+          <button
+            type="button"
+            className="btn"
+            onClick={onCopyLink}
+            disabled={busy}
+            data-testid="copy-link-btn"
+          >
+            {copied ? "Copied!" : "Copy link"}
+          </button>
+        </div>
+      )}
+      {mode === "private" && internalUrl && (
+        <div className="share-link" data-testid="share-link">
+          <p className="share-link-caption">
+            Only signed-in workspace members can open this link.
+          </p>
+          <code>{internalUrl}</code>
           <button
             type="button"
             className="btn"
@@ -244,7 +276,14 @@ export function ShareMenuView({
 
 /** Public component. Wires React state to the orchestration helpers and the
  *  canonical `designAgentApi`, then delegates rendering to the pure view. */
-export function ShareMenu({ prototypeId, initialMode, initialToken, onShared, companySlug }: ShareMenuProps) {
+export function ShareMenu({
+  prototypeId,
+  prdId,
+  initialMode,
+  initialToken,
+  onShared,
+  companySlug,
+}: ShareMenuProps) {
   const [mode, setMode] = useState<ShareMode>(initialMode)
   const [token, setToken] = useState<string | null>(initialToken ?? null)
   const [passcode, setPasscode] = useState("")
@@ -272,14 +311,16 @@ export function ShareMenu({ prototypeId, initialMode, initialToken, onShared, co
   }
 
   async function handleCopyLink() {
-    if (!token || typeof window === "undefined") return
+    if (typeof window === "undefined") return
     try {
-      await runCopyShareLink({
-        token,
-        origin: window.location.origin,
-        companySlug: slug,
-        clipboard: navigator.clipboard,
-      })
+      const url =
+        mode === "private" && prdId != null
+          ? buildInternalLink(prdId, window.location.origin)
+          : token
+            ? buildShareUrl(token, window.location.origin, slug)
+            : null
+      if (!url) return
+      await runCopyShareLink({ url, clipboard: navigator.clipboard })
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
@@ -291,11 +332,16 @@ export function ShareMenu({ prototypeId, initialMode, initialToken, onShared, co
     mode !== "private" && token && typeof window !== "undefined"
       ? buildShareUrl(token, window.location.origin, slug)
       : null
+  const internalUrl =
+    mode === "private" && prdId != null && typeof window !== "undefined"
+      ? buildInternalLink(prdId, window.location.origin)
+      : null
 
   return (
     <ShareMenuView
       mode={mode}
       shareUrl={shareUrl}
+      internalUrl={internalUrl}
       passcode={passcode}
       busy={busy}
       error={error}

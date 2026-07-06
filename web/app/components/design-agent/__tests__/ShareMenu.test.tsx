@@ -17,6 +17,7 @@ import {
   runSelectMode,
   runCopyShareLink,
   buildShareUrl,
+  buildInternalLink,
 } from "../ShareMenu"
 
 afterEach(() => {
@@ -115,16 +116,42 @@ describe("ShareMenuView — share link", () => {
     const html = render({
       mode: "public",
       passcode: "",
-      shareUrl: "https://app.sprntly.ai/p/tok-abc",
+      shareUrl: "https://app.sprntly.ai/p/sprntly/tok-abc",
+      internalUrl: "https://app.sprntly.ai/prototype?prd=785",
     })
     expect(html).toContain('data-testid="share-link"')
     expect(html).toContain('data-testid="copy-link-btn"')
-    expect(html).toContain("https://app.sprntly.ai/p/tok-abc")
+    expect(html).toContain("https://app.sprntly.ai/p/sprntly/tok-abc")
+    expect(html).not.toContain("https://app.sprntly.ai/prototype?prd=785")
   })
 
-  it("does not render the share link when private (no URL)", () => {
+  it("renders the internal link and member caption when private", () => {
+    const html = render({
+      mode: "private",
+      passcode: "",
+      internalUrl: "https://app.sprntly.ai/prototype?prd=785",
+    })
+    expect(html).toContain('data-testid="share-link"')
+    expect(html).toContain('data-testid="copy-link-btn"')
+    expect(html).toContain("https://app.sprntly.ai/prototype?prd=785")
+    expect(html).toContain("Only signed-in workspace members can open this link.")
+  })
+
+  it("does not render the share link when private with no internal URL", () => {
     const html = render({ mode: "private", passcode: "", shareUrl: null })
     expect(html).not.toContain('data-testid="share-link"')
+    expect(html).not.toContain("prototype?prd=undefined")
+  })
+
+  it("keeps the passcode token link separate from the internal link", () => {
+    const html = render({
+      mode: "passcode",
+      passcode: "",
+      shareUrl: "https://app.sprntly.ai/p/sprntly/tok-pass",
+      internalUrl: "https://app.sprntly.ai/prototype?prd=785",
+    })
+    expect(html).toContain("https://app.sprntly.ai/p/sprntly/tok-pass")
+    expect(html).not.toContain("https://app.sprntly.ai/prototype?prd=785")
   })
 })
 
@@ -135,6 +162,12 @@ describe("share-link helpers", () => {
     // surface that renders companies.slug; sourced from useCompany().activeCompany).
     expect(buildShareUrl("tok-abc", "https://app.sprntly.ai", "sprntly")).toBe(
       "https://app.sprntly.ai/p/sprntly/tok-abc",
+    )
+  })
+
+  it("buildInternalLink composes origin and prototype query", () => {
+    expect(buildInternalLink(785, "https://app.sprntly.ai")).toBe(
+      "https://app.sprntly.ai/prototype?prd=785",
     )
   })
 
@@ -150,6 +183,16 @@ describe("share-link helpers", () => {
       "https://app.sprntly.ai/p/sprntly/tok-abc",
     )
     expect(url).toBe("https://app.sprntly.ai/p/sprntly/tok-abc")
+  })
+
+  it("runCopyShareLink writes a provided internal URL to the clipboard", async () => {
+    const writeText = vi.fn(async (_: string) => {})
+    const url = await runCopyShareLink({
+      url: "https://app.sprntly.ai/prototype?prd=785",
+      clipboard: { writeText },
+    })
+    expect(writeText).toHaveBeenCalledWith("https://app.sprntly.ai/prototype?prd=785")
+    expect(url).toBe("https://app.sprntly.ai/prototype?prd=785")
   })
 })
 
@@ -365,15 +408,15 @@ describe("ShareMenu — non-breakage with the optional onShared prop (P6-20 AC7/
   it("the container type-checks + SSR-renders when onShared is omitted (test_optional_props_typecheck)", () => {
     // The new prop is optional/defaulted — existing callers that omit it (incl.
     // the public-viewer composition) still compile and render.
-    const html = renderToStaticMarkup(
-      React.createElement(ShareMenu, { prototypeId: 7, initialMode: "private" }),
-    )
-    expect(html).toContain('data-testid="share-menu"')
+    for (const initialMode of ["private", "public", "passcode"] as const) {
+      const html = renderToStaticMarkup(
+        React.createElement(ShareMenu, { prototypeId: 7, initialMode }),
+      )
+      expect(html).toContain('data-testid="share-menu"')
+    }
   })
 
-  it("ShareMenuView SSR output is byte-stable — the new prop lives on the container, not the view (test_share_menu_render_unchanged)", () => {
-    // onShared is a ShareMenuProps/ShareMenu member only; ShareMenuViewProps is
-    // unchanged, so the rendered markup cannot shift.
+  it("ShareMenuView public SSR output stays byte-stable when internalUrl is omitted", () => {
     const a = render({ mode: "public", passcode: "", shareUrl: "https://app/p/t" })
     const b = render({ mode: "public", passcode: "", shareUrl: "https://app/p/t" })
     expect(a).toBe(b)

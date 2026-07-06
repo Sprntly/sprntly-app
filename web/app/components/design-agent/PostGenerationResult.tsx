@@ -254,6 +254,7 @@ export type PostGenerationResultProps = {
 
 export type PostGenerationResultViewProps = {
   prototypeId: number
+  prdId?: number
   isComplete: boolean
   shareMode: ShareMode
   shareToken: string | null
@@ -633,6 +634,7 @@ function InTabHandoffCluster({
 
 export function DaControlBar({
   prototypeId,
+  prdId,
   isComplete,
   onStateChange,
   shareMode,
@@ -655,6 +657,7 @@ export function DaControlBar({
   prdTitle,
 }: {
   prototypeId: number
+  prdId?: number
   isComplete: boolean
   onStateChange?: (state: { isComplete: boolean; staleHandoff: boolean }) => void
   shareMode: ShareMode
@@ -817,6 +820,7 @@ export function DaControlBar({
               `.da-popover-title` is dropped here to avoid a duplicate heading. */}
           <ShareMenu
             prototypeId={prototypeId}
+            prdId={prdId}
             initialMode={shareMode}
             initialToken={shareToken}
             onShared={onShared}
@@ -1041,6 +1045,7 @@ function ActivityPanel({
  *  handler into it. */
 export function PostGenerationResultView({
   prototypeId,
+  prdId,
   isComplete,
   shareMode,
   shareToken,
@@ -1192,6 +1197,7 @@ export function PostGenerationResultView({
   const controlBar = (
     <DaControlBar
       prototypeId={prototypeId}
+      prdId={prdId}
       isComplete={isComplete}
       onStateChange={onStateChange}
       shareMode={shareMode}
@@ -1619,6 +1625,7 @@ export function PostGenerationResult({
   return (
     <PostGenerationResultView
       prototypeId={prototype.id}
+      prdId={prototype.prd_id}
       isComplete={isComplete}
       shareMode={prototype.share_mode ?? "private"}
       shareToken={prototype.share_token ?? null}

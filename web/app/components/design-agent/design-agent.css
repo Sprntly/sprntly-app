@@ -440,6 +440,7 @@
 /* Primary action — the share URL field + Copy button (prominent, link-forward). */
 .design-agent-surface .share-link {
   display: flex;
+  flex-wrap: wrap;
   align-items: stretch;
   gap: 8px;
   padding: 8px;
@@ -460,6 +461,12 @@
 }
 .design-agent-surface .share-link .btn {
   flex-shrink: 0;
+}
+.design-agent-surface .share-link-caption {
+  flex: 0 0 100%;
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-3);
 }
 /* === share panel: dedupe + native-radio visual (end) ====================== */
 
