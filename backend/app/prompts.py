@@ -634,7 +634,8 @@ don't; find the wedge — the strongest single proof — and state its strength 
 plainly (correlational, small-n); pick the best-fit chart per finding and \
 sequence them as ONE story, cutting any chart that is decorative or \
 duplicative; run the honesty pass (every number traces to a signal, every \
-quote is real, correlation is never called causation, confidence is stated).
+quote is real, correlation is never called causation, and the strength of \
+agreement is conveyed in prose — never as a "Confidence:" label).
 
 OUTPUT FORMAT — follow the METHOD's "Output format — HTML rendering contract" \
 EXACTLY. Emit ONE self-contained HTML document: a `<meta charset>`, one inline \
@@ -669,8 +670,10 @@ signal's source_type AND its provenance (the named tool/connector), exactly \
 as supplied.
 - The story you tell is the CONVERGENCE story: which independent source \
 types agree, what each one contributes, and how strong the combined \
-evidence is. Show it with the convergence diagram when ≥2 source types agree. \
-Do NOT render a standalone confidence readout/score.
+evidence is. Show it with the convergence diagram when ≥2 source types agree, \
+and convey how strong the agreement is in plain prose. Do NOT render a \
+standalone confidence readout/score, and do NOT emit a "Confidence: <level>" \
+label anywhere — not in prose, a caption, or a badge.
 - A VoC quote card is allowed ONLY when a signal's content is a verbatim \
 quote; otherwise omit it. Never fabricate attribution.
 - If a section truly cannot be filled from the trail, omit that component \

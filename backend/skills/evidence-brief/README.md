@@ -111,7 +111,7 @@ fixed and what flexes. **Open them in a browser to view; read the source to copy
 ## 8. Guardrails (do not violate)
 - No fabricated numbers or quotes; provided data only.
 - Convergence must be genuine (independent sources); flag suspected shared causes.
-- Correlation != causation; state confidence.
+- Correlation != causation; convey the strength of agreement in prose (no "Confidence:" label or score).
 - Exactly one opportunity / one hypothesis per brief.
 - If evidence is insufficient, say so — do not manufacture a story.
 
