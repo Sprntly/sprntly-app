@@ -59,6 +59,15 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+function stubClipboard() {
+  const writeText = vi.fn(async (_: string) => {})
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  })
+  return writeText
+}
+
 describe("ShareMenuView — radio a11y association + click (AC1/AC2)", () => {
   it("each radio has an explicit id with a matching label[htmlFor] (AC2 — Regression)", () => {
     // Regression: the unfixed implicit-label markup gives the radios NO id, so
@@ -113,6 +122,74 @@ describe("ShareMenuView — passcode field is never surfaced", () => {
       React.createElement(ShareMenuView, { mode: "passcode", passcode: "" }),
     )
     expect(screen.queryByTestId("passcode-input")).toBeNull()
+  })
+})
+
+describe("ShareMenu — private internal link", () => {
+  it("renders the internal link and member caption in private mode", () => {
+    render(
+      React.createElement(ShareMenu, {
+        prototypeId: 785,
+        prdId: 785,
+        initialMode: "private",
+      }),
+    )
+    const link = screen.getByTestId("share-link")
+    expect(link.textContent).toContain(`${window.location.origin}/prototype?prd=785`)
+    expect(link.textContent).toContain(
+      "Only signed-in workspace members can open this link.",
+    )
+    expect(shareMock).not.toHaveBeenCalled()
+  })
+
+  it("copies exactly the private internal link", async () => {
+    const user = userEvent.setup()
+    const writeText = stubClipboard()
+    render(
+      React.createElement(ShareMenu, {
+        prototypeId: 785,
+        prdId: 785,
+        initialMode: "private",
+      }),
+    )
+    await user.click(screen.getByTestId("copy-link-btn"))
+    expect(writeText).toHaveBeenCalledWith(`${window.location.origin}/prototype?prd=785`)
+  })
+
+  it("renders no link when private mode has no prototype query id", () => {
+    render(React.createElement(ShareMenu, { prototypeId: 785, initialMode: "private" }))
+    expect(screen.queryByTestId("share-link")).toBeNull()
+    expect(document.body.textContent).not.toContain("prototype?prd=undefined")
+  })
+
+  it("keeps the public token link unchanged when a prototype query id is available", () => {
+    render(
+      React.createElement(ShareMenu, {
+        prototypeId: 785,
+        prdId: 785,
+        initialMode: "public",
+        initialToken: "tok-public",
+        companySlug: "sprntly",
+      }),
+    )
+    const link = screen.getByTestId("share-link")
+    expect(link.textContent).toContain(`${window.location.origin}/p/sprntly/tok-public`)
+    expect(link.textContent).not.toContain("/prototype?prd=")
+  })
+
+  it("keeps the passcode token link unchanged when a prototype query id is available", () => {
+    render(
+      React.createElement(ShareMenu, {
+        prototypeId: 785,
+        prdId: 785,
+        initialMode: "passcode",
+        initialToken: "tok-pass",
+        companySlug: "sprntly",
+      }),
+    )
+    const link = screen.getByTestId("share-link")
+    expect(link.textContent).toContain(`${window.location.origin}/p/sprntly/tok-pass`)
+    expect(link.textContent).not.toContain("/prototype?prd=")
   })
 })
 

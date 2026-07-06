@@ -6,18 +6,22 @@ import {
   useRef,
   useState,
 } from "react"
+import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
+import { useWorkspace } from "../../context/WorkspaceContext"
 import { PrdSections } from "./PrdSections"
 import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
 import { SendToClaudeCode } from "./SendToClaudeCode"
-import { DesignAgentLauncher } from "../design-agent/DesignAgentLauncher"
+import { GenerateModal } from "../design-agent/GenerateModal"
 import { EmptyPane } from "./EmptyPane"
-import { ApiError, designAgentApi, multiAgentApi, prdApi, type PrototypeRecord } from "../../lib/api"
+import { ApiError, designAgentApi, multiAgentApi, prdApi } from "../../lib/api"
+import { updateWorkspace } from "../../lib/onboarding/store"
+import type { DesignSourcePreference } from "../../lib/onboarding/types"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
-import { runDesignAgentGeneration } from "../../lib/runDesignAgentGeneration"
+import { prototypePath } from "../../lib/routes"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
 import {
   IconGrid,
@@ -27,6 +31,7 @@ import {
   IconUndo,
 } from "./app-icons"
 import type { PrdSection, PrdState } from "../../types/content"
+import footerStyles from "./design-agent-prd-footer.module.css"
 
 const PRD_DRAFT_KEY = (prdId: number) => `sprntly_prd_draft_${prdId}`
 function loadDraft(prdId: number): string | null {
@@ -89,54 +94,63 @@ function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; saveStatus:
   )
 }
 
-// Hidden for now: the prototype preview thumbnail is wrong — the design-agent
-// screenshot captures the staged bundle's raw index.html SOURCE (served as
-// text/plain) instead of the rendered page, so the card shows HTML markup. Flip
-// this back to true once the screenshot capture (design-agent screenshot.py) is
-// fixed. The component is kept intact so re-enabling is a one-line change.
-const SHOW_PROTOTYPE_SECTION = false
-
-function PrototypeSection({ prdId, figmaFileKey, externalGeneratingId }: { prdId: number; figmaFileKey?: string | null; externalGeneratingId?: number | null }) {
-  const [existing, setExisting] = useState<PrototypeRecord | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [polling, setPolling] = useState(false)
+function ViewPrototypeButton({ prdId, figmaFileKey }: { prdId: number; figmaFileKey?: string | null }) {
+  const router = useRouter()
+  const { workspace, refresh } = useWorkspace()
+  const [hasProto, setHasProto] = useState<boolean | null>(null)
+  const [genOpen, setGenOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
-    setLoading(true)
-    setExisting(null)
-    designAgentApi.getByPrd(prdId).then((proto) => {
-      if (cancelled) return
-      if (proto && proto.status === "ready") { setExisting(proto); setLoading(false) }
-      else if (proto && proto.status === "generating") {
-        setPolling(true); setLoading(false)
-        runDesignAgentGeneration({ prototypeId: proto.id }).then((result) => {
-          if (cancelled) return
-          setPolling(false)
-          if (result.ok) setExisting(result.prototype)
-        })
-      } else { setLoading(false) }
-    })
+    setHasProto(null)
+    designAgentApi
+      .getByPrd(prdId)
+      .then((proto) => {
+        if (!cancelled) setHasProto(proto != null)
+      })
+      .catch(() => {
+        if (!cancelled) setHasProto(false)
+      })
     return () => { cancelled = true }
   }, [prdId])
 
-  if (loading) return null
+  const handleSavePreference = useCallback(async (pref: DesignSourcePreference) => {
+    if (!workspace) return
+    await updateWorkspace(workspace.id, { design_source: pref })
+    await refresh()
+  }, [workspace, refresh])
+
+  const goToPrototype = useCallback(() => {
+    router.push(prototypePath(prdId))
+  }, [prdId, router])
+
   return (
-    <div style={{ marginTop: 24 }}>
-      {polling && !existing && (
-        <div style={{ display: "flex", alignItems: "center", gap: 12, padding: "12px 14px", borderRadius: 10, border: "1px solid var(--accent-alpha-14)", background: "var(--accent-muted)" }}>
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden style={{ flexShrink: 0, animation: "da-spin 0.9s linear infinite" }}>
-            <circle cx="8" cy="8" r="6" stroke="var(--accent-alpha-28)" strokeWidth="2" />
-            <path d="M8 2a6 6 0 0 1 6 6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
-          </svg>
-          <div>
-            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--accent-ink)" }}>Generating prototype…</div>
-            <div style={{ fontSize: 11.5, color: "var(--ink-3)", marginTop: 3 }}>This usually takes 1–2 minutes.</div>
-          </div>
-        </div>
-      )}
-      <DesignAgentLauncher prdId={prdId} figmaFileKey={figmaFileKey} externalGeneratingId={externalGeneratingId} />
-    </div>
+    <>
+      <button
+        type="button"
+        className="prd-send-claude-btn"
+        onClick={() => {
+          if (hasProto === true) goToPrototype()
+          else setGenOpen(true)
+        }}
+      >
+        View Prototype
+      </button>
+      <GenerateModal
+        open={genOpen}
+        onClose={() => setGenOpen(false)}
+        prdId={prdId}
+        figmaFileKey={figmaFileKey ?? null}
+        onGenStart={() => {}}
+        onKickoff={(prototypeId) => {
+          setGenOpen(false)
+          router.push(`${prototypePath(prdId)}&pid=${encodeURIComponent(String(prototypeId))}`)
+        }}
+        onGenDone={() => {}}
+        savedPreference={workspace?.design_source ?? null}
+        onSavePreference={handleSavePreference}
+      />
+    </>
   )
 }
 
@@ -145,11 +159,6 @@ export function PrdPanelContent() {
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const prd = content.prd
-
-  // Tracks an in-flight prototype id when "Notify me when ready" was clicked in
-  // the loading overlay — surfaces PrototypeGeneratingCard on the PRD without
-  // requiring PrototypeSection to remount.
-  const [notifyGenId, setNotifyGenId] = useState<number | null>(null)
 
   const [prdLoading, setPrdLoading] = useState(false)
 
@@ -229,20 +238,6 @@ export function PrdPanelContent() {
     const draft = loadDraft(prd.prd_id)
     if (draft) bodyRef.current.innerHTML = draft
   }, [prd?.prd_id])
-
-  useEffect(() => {
-    const onGenerating = (e: Event) => {
-      const id = (e as CustomEvent<{ prototypeId: number }>).detail?.prototypeId
-      if (typeof id === "number") setNotifyGenId(id)
-    }
-    const onDone = () => setNotifyGenId(null)
-    window.addEventListener("da:generating", onGenerating)
-    window.addEventListener("da:generating-done", onDone)
-    return () => {
-      window.removeEventListener("da:generating", onGenerating)
-      window.removeEventListener("da:generating-done", onDone)
-    }
-  }, [])
 
   const handleInput = useCallback(() => {
     setSaveStatus("unsaved")
@@ -361,8 +356,6 @@ export function PrdPanelContent() {
 
       </div>
 
-      {prd && SHOW_PROTOTYPE_SECTION && <PrototypeSection prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} externalGeneratingId={notifyGenId} />}
-
       {/* Bottom action row: autosave status (click = save now) + Version history
           toggle. Replaces the old mid-page footer; version history lives here at
           the very bottom and expands the panel below. */}
@@ -401,7 +394,8 @@ export function PrdPanelContent() {
           {/* Hand the PRD off to a coding agent: generate (and cache) the
               machine-readable Implementation Spec on demand and copy it to the
               clipboard. The machine PRD is no longer a viewable tab. */}
-          <div style={{ marginLeft: "auto" }}>
+          <div className={`prd-bottom-actions ${footerStyles.actions}`}>
+            <ViewPrototypeButton prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} />
             <SendToClaudeCode prdId={prd.prd_id} onToast={showToast} />
           </div>
         </div>
@@ -459,4 +453,3 @@ export function PrdPanelContent() {
     </div>
   )
 }
-
