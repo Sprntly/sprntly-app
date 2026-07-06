@@ -50,7 +50,7 @@ A single **visual brief (HTML), 1–3 pages**, audience = **product team**, body
 - **Context** — *after* TL;DR and Opportunity: 1–2 lines on what the product is and the behavior under investigation.
 - **The evidence** — findings, each with its best-fit visual, sequenced as a data story; VoC quotes if real and aligned; competitive as an extraction.
 - **Convergence** — the diagram/section of agreeing independent signals (or an honest note that they don't agree).
-- **Hypothesis** — value-driven, testable, with primary metric + guardrails, and a **→ feeds the PRD** handoff.
+- **Hypothesis** — value-driven, testable, with primary metric + guardrails.
 - **No footer, no methods boilerplate, no machinery** (never mention agents, the platform, or how it was produced).
 
 ## Output format — HTML rendering contract (mandatory)
@@ -58,7 +58,7 @@ The brief **is** rendered HTML, not a description of one. Every brief uses the *
 
 **Hard rules**
 - Output is **one self-contained `.html` file**: a `<meta charset="utf-8">`, one inline `<style>` block, then one `<div class="wrap">` holding the brief. **No external CSS/JS, no web fonts, no chart libraries, no build step, no `<img>` for charts.** It must open correctly by double-clicking the file.
-- **Use the canonical design system verbatim.** Copy the `<style>` block from `examples/01-lyra-language-app.html` (the most complete one) as your base and do not change the `:root` tokens, fonts, spacing, or any core component rule. You may *append* a small bespoke class (e.g. `.note` as in `02`/`05`) when a brief genuinely needs one — never edit or remove the shared rules. Two briefs placed side by side must look like the same template.
+- **Use the canonical design system verbatim.** Copy the `<style>` block from `examples/01-lyra-language-app.html` (the most complete one) as your base and do not change the `:root` tokens, fonts, spacing, or any core component rule. You may *append* a small bespoke class when a brief genuinely needs one — never edit or remove the shared rules. Two briefs placed side by side must look like the same template.
 - **Charts are hand-authored inline `<svg viewBox="…">`**, drawn directly from the provided numbers — never a JS chart, never a screenshot, never a placeholder. Use the chart-text classes (`.ax` axis labels, `.vlabel` value labels, `.blabel` bar/category labels) and the color tokens (`--problem` for the leak/problem, `--opp` for the opportunity/wedge, `--bar-neutral` for the comparison baseline, `--grid` for gridlines). Wrap each chart in `<figure>…<figcaption>` and keep `svg{width:100%}` so it scales.
 
 **Section → required HTML component** (use these classes; this is what makes every brief render identically)
@@ -75,7 +75,7 @@ The brief **is** rendered HTML, not a description of one. Every brief uses the *
 | VoC quotes | `<div class="voc">` of `<div class="q"><p class="ch rev|sup|sale">channel</p><p>quote</p></div>` |
 | Competitive extraction | `<table>` with `.yes`/`.no`/`.us` cells, then `<div class="extract"><b>What I extract:</b> …</div>` |
 | Convergence | `<section>` with an inline-SVG **convergence diagram** (signal nodes → one opportunity box), as in `01`/`05` |
-| Hypothesis | `<div class="hyp">` — `<h4>`, `<p class="stmt">` with `.b` (behavior) / `.v` (value) / `.x` (change) spans, `<p class="test">` (metric + guardrails), `<div class="handoff">→ FEEDS THE PRD …</div>` |
+| Hypothesis | `<div class="hyp">` — `<h4>`, `<p class="stmt">` with `.b` (behavior) / `.v` (value) / `.x` (change) spans, `<p class="test">` (metric + guardrails) |
 
 If a section's signal is absent (e.g. no VoC, single signal), **omit that component** — never render an empty shell or invented filler. The five `examples/` are the authoritative rendering reference: match their markup, not just their wording.
 
@@ -97,7 +97,7 @@ This skill is meant to be run the same way every time: the ordered method + fixe
 - [ ] **Convergence** of ≥2 independent signals surfaced where real; divergence/single-signal stated with lower confidence.
 - [ ] Charts chosen per finding; collectively one sequenced story; none decorative/duplicate.
 - [ ] Correlation vs causation labeled; the wedge's strength stated plainly.
-- [ ] Hypothesis is value-driven (behavior change → business value) and testable, with metric + guardrails, and feeds the PRD.
+- [ ] Hypothesis is value-driven (behavior change → business value) and testable, with metric + guardrails.
 - [ ] ≤ 3 pages; data-scientist body voice; product-team audience; **no footer/methods/machinery.**
 - [ ] **Renders as one self-contained HTML file** (inline `<style>`, single `.wrap`, no external CSS/JS, no chart libs); opens by double-click.
 - [ ] **Canonical design system used verbatim** (tokens/fonts/core classes from `examples/01` unchanged); each section uses its required component class.

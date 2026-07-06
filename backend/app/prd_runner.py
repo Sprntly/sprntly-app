@@ -112,8 +112,8 @@ rather than guessing.
 OUTPUT FORMAT — follow the METHOD's visual specification EXACTLY. Emit ONE \
 self-contained HTML document: a `<meta charset>`, one inline `<style>` block \
 (copy the canonical design system verbatim from the TEMPLATE below, keeping the \
-`:root` tokens unchanged), then the editable `contenteditable` document page \
-with the VoidAI brand mark. No external CSS/JS, no markdown, no `:::` blocks, no \
+`:root` tokens unchanged), then the editable `contenteditable` document page. \
+No external CSS/JS, no markdown, no `:::` blocks, no \
 Implementation Spec, no commentary outside the document. Output the raw HTML \
 document ONLY — do NOT wrap it in a Markdown code fence; the first characters of \
 your response must be the HTML itself (e.g. `<!DOCTYPE html>`).""" + VOICE_GUARD

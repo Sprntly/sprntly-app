@@ -61,7 +61,6 @@ Every Part A renders as a single-file HTML editable page using these tokens. All
 **Canvas — clean Word document, obviously editable:** the page is pure white (`#FFFFFF`) on a white desk (`#FFFFFF`), near-square corners (2px), document-margin padding (~72px), soft page shadow — it reads as a Word document, and prints/exports as one. No chrome or toolbar sits above the page; the document starts at the top of the canvas. Editability must be *obvious*, not hinted: (1) every block shows a dashed green outline on hover with a text cursor; (2) the caret is accent green and selection is green-tinted. The whole body is `contenteditable`; the print stylesheet strips all affordances so the export is a clean document.
 **Type:** Spectral 600 for the title (~33px); Inter for body (15px) and labels; IBM Plex Mono for IDs, formulas, tags, and the byline.
 **Color:** ink `#1F241F`; secondary `#5B615B`; accent green `#1A6B47`; tints — happy `#E7F1EA`/`#1A6B47`, edge `#FBF0DC`/`#8A5A12`, fail `#F9E7E4`/`#9C3223`.
-**Brand mark (required on externally shareable artifacts):** every Part A carries the VoidAI mark in the top-right corner of the document itself — a 15px glyph (ink outer ring, solid green center dot: a signal in the void) beside `by VoidAI` in small mono, the name in ink. It lives inside the page, not the chrome, so it survives print, PDF, and Word export. Non-editable (`contenteditable="false"`), quiet, and never larger than specified — identifiable, not distracting.
 
 **Components:**
 - *Byline:* mono, small, `AUTHOR` label in accent green, sits tight under the title.
@@ -95,7 +94,6 @@ Discovery ("should we build anything?") → `evidence-brief` / `continuous-disco
 - [ ] Part A only; no Implementation Spec content emitted (that is the `implementation-spec` skill).
 - [ ] Author byline present, sourced from the logged-in user (or `[NEED: author]`) — never invented.
 - [ ] Part A matches the visual specification exactly (tokens, components, blank-impact slot, pills, tags, appendix box).
-- [ ] The VoidAI brand mark is present top-right inside the document and survives print/export.
 - [ ] Section order: Context → Problem → Evidence → Users → Goal → Hypothesis → Requirements → User input needed → Appendix.
 - [ ] Context passes the cold-reader test: product + audience, today's workflow, terms of art defined.
 - [ ] Every evidence item carries a type label, source, and date; the Evidence header carries the single link to the PRD’s Sprntly evidence page — never fabricated; quotes verbatim; types varied where the signals allow.
