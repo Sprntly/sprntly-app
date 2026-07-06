@@ -59,7 +59,7 @@ export function useGenerationNotify(deps: GenerationNotifyDeps = {}) {
           if (proto.status === "failed") {
             showToast(
               "Generation failed",
-              reasonCopy(proto.error ?? "Generation failed"),
+              reasonCopy(proto.error ?? "Generation failed", proto.id),
               undefined,
               { persist: true },
             )

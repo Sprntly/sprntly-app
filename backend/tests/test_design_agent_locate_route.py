@@ -630,7 +630,9 @@ def test_locate_llm_failure_polls_error(client, env, monkeypatch):
     poll = resp.json()
     assert poll["status"] == "error"
     assert poll["result"] is None
-    assert "Anthropic API error" in (poll["error"] or "")
+    # Sanitized: the job record carries the safe class, never the raw provider text.
+    assert poll["error"] == "INTERNAL"
+    assert "Anthropic API error" not in (poll["error"] or "")
 
 
 # ── concurrency / observability ───────────────────────────────────────────────

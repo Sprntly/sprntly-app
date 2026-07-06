@@ -1182,9 +1182,27 @@ async def agent_loop(
         return _finish(usage, "max_iters", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated)
 
     except Exception as exc:
+        from app.design_agent.provider_errors import (
+            classify_provider_error,
+            is_alertable,
+            safe_error_message,
+        )
+
         result = _finish(usage, "error", iters, start, [], ctx.prototype_id, model_escalated=model_escalated)
-        result.error_class = type(exc).__name__
-        result.error_message = str(exc)
+        cls = classify_provider_error(exc)
+        # Record ONLY the safe class + a fixed generic message on the result —
+        # both fields are client-visible downstream (they flow into the failed
+        # prototype row / job record). The raw text goes to the log ONLY.
+        result.error_class = cls.value
+        result.error_message = safe_error_message(cls)
+        logger.warning(
+            "design_agent.run.failed prototype_id=%s error_class=%s raw=%s",
+            ctx.prototype_id, cls.value, str(exc),
+        )
+        if is_alertable(cls):
+            from app.design_agent.provider_alert import maybe_alert_provider_outage
+
+            maybe_alert_provider_outage(cls, context={"prototype_id": ctx.prototype_id})
         return result
 
 

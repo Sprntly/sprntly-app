@@ -251,6 +251,11 @@ class Settings(BaseSettings):
     # Both empty ⇒ storage still happens, email is a clean no-op (logged).
     feedback_alert_email: str = ""
 
+    # Where to email a Design Agent provider hard-stop alert (a billing / credit
+    # hard-stop the team must act on). Deduped per class + fail-open in
+    # app/design_agent/provider_alert.py. Empty ⇒ alert is a clean no-op (logged).
+    design_agent_alert_email: str = ""
+
     # Which engine produces the weekly brief.
     #   "synthesis" (default) — KG-driven: seed-if-empty → run_synthesis over the
     #                           knowledge graph (kg_signal/kg_entity) → save_brief.
