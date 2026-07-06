@@ -7,6 +7,7 @@ import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard } from "../../../types/content"
+import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
 import { BriefChat, prototypeCtaLabel } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
@@ -68,21 +69,6 @@ const BRIEF_TAB_ID = "brief"
 // can see they're on a new tab and switch back), and gets its real title from the
 // first message on send (see submitAsk's first-send rename).
 export const NEW_CHAT_TITLE = "New chat"
-
-type HomeChipItem = { kind: "home" | "starter"; card: ChatHomeCard }
-
-function buildHomeChips(home: ChatHomeCard[], starterList: ChatHomeCard[]): HomeChipItem[] {
-  const out: HomeChipItem[] = []
-  for (const card of home) {
-    if (out.length >= 4) break
-    out.push({ kind: "home", card })
-  }
-  for (const card of starterList) {
-    if (out.length >= 4) break
-    out.push({ kind: "starter", card })
-  }
-  return out
-}
 
 // Concrete "what can I do here?" suggestions for the chat landing/empty state.
 // These steer a user who opens a fresh chat (or would otherwise send a vague
