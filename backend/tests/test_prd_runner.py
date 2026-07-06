@@ -538,3 +538,102 @@ def test_template_lookup_failure_does_not_break_prd(isolated_settings, monkeypat
 
     assert db_mod.get_prd(prd_id)["status"] == "ready"
     assert "FORMAT/STYLE EXEMPLARS" not in captured[0]["input"]
+
+
+# ── byline: account owner is the author when no logged-in author is supplied ──
+
+def _seed_owner(sb, *, slug="asurion", company_id="co-asurion",
+                user_id="u-owner", full_name="Dana Owner", role="owner"):
+    """Seed a company owned by `full_name` so company_id_for_slug(slug) resolves
+    and owner_name_for_company(company_id) returns the owner's name."""
+    sb.table("companies").insert(
+        {"id": company_id, "slug": slug, "display_name": slug.title()}
+    ).execute()
+    sb.table("company_members").insert(
+        {"id": f"cm-{company_id}-{user_id}", "company_id": company_id,
+         "user_id": user_id, "role": role}
+    ).execute()
+    sb.table("profiles").insert({"id": user_id, "full_name": full_name}).execute()
+    return company_id
+
+
+def test_byline_falls_back_to_account_owner_when_no_author(isolated_settings, monkeypatch):
+    """A background/brief-generated PRD (author=None) puts the ACCOUNT OWNER's
+    name on the byline instead of the `[NEED: author]` placeholder."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    _seed_owner(isolated_settings["supabase"])  # "asurion" owned by Dana Owner
+    brief_id = _seed_brief(db_mod)              # dataset defaults to "asurion"
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)   # sync path passes author=None
+
+    # The byline slot (backtick-wrapped) carries the owner's name, not the
+    # placeholder. (The HTML template mentions "[NEED: author]" as instruction
+    # text, so assert on the backtick-wrapped byline to disambiguate.)
+    directive = captured[0]["input"]
+    assert "`Dana Owner`" in directive
+    assert "`[NEED: author]`" not in directive
+
+
+def test_explicit_author_overrides_the_owner_fallback(isolated_settings, monkeypatch):
+    """A logged-in user's name (passed by the /v1/prd/generate route) still wins
+    over the owner fallback."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    _seed_owner(isolated_settings["supabase"])
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    asyncio.run(prd_runner.generate_prd(prd_id, brief_id, 0, author="Logged In User"))
+
+    directive = captured[0]["input"]
+    assert "`Logged In User`" in directive
+    assert "Dana Owner" not in directive
+
+
+def test_byline_needs_author_when_no_owner_resolves(isolated_settings, monkeypatch):
+    """No company/owner on file → the byline keeps the `[NEED: author]`
+    placeholder (unchanged behaviour for ownerless/legacy datasets)."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)              # no company seeded for "asurion"
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    # The byline slot itself (backtick-wrapped) keeps the placeholder.
+    assert "`[NEED: author]`" in captured[0]["input"]
+
+
+def test_owner_name_for_company_prefers_owner_then_admin(isolated_settings):
+    """The lookup returns the owner's name; falls back to an admin's; None for an
+    unknown company."""
+    from app.db.companies import owner_name_for_company
+
+    sb = isolated_settings["supabase"]
+    _seed_owner(sb, slug="acme", company_id="co-acme", user_id="u-o",
+                full_name="Olivia Owner", role="owner")
+    # An admin on the same company must NOT shadow the owner.
+    sb.table("company_members").insert(
+        {"id": "cm-co-acme-u-a", "company_id": "co-acme", "user_id": "u-a", "role": "admin"}
+    ).execute()
+    sb.table("profiles").insert({"id": "u-a", "full_name": "Adam Admin"}).execute()
+    assert owner_name_for_company("co-acme") == "Olivia Owner"
+
+    # Admin-only company → the admin is used.
+    sb.table("companies").insert({"id": "co-noown", "slug": "noown", "display_name": "Noown"}).execute()
+    sb.table("company_members").insert(
+        {"id": "cm-co-noown-u-b", "company_id": "co-noown", "user_id": "u-b", "role": "admin"}
+    ).execute()
+    sb.table("profiles").insert({"id": "u-b", "first_name": "Amy", "last_name": "Admin"}).execute()
+    assert owner_name_for_company("co-noown") == "Amy Admin"
+
+    assert owner_name_for_company("co-missing") is None
+    assert owner_name_for_company(None) is None

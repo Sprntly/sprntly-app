@@ -114,6 +114,53 @@ def company_id_for_slug(slug: str) -> str | None:
 
 
 @retry_on_disconnect
+def owner_name_for_company(company_id: str | None) -> str | None:
+    """Resolve a company's account owner (or, failing that, an admin) → that
+    user's human name (profiles.full_name, else "first last"). None when there's
+    no company, no owner/admin member, or no name on file.
+
+    Used as the PRD byline fallback for background/brief-generated PRDs, which
+    carry no logged-in identity — the owner is the account's canonical author.
+    Best-effort: any read failure returns None so generation never wedges on it.
+    """
+    if not company_id:
+        return None
+    try:
+        client = require_client()
+        members = (
+            client.table("company_members")
+            .select("user_id, role")
+            .eq("company_id", company_id)
+            .in_("role", ["owner", "admin"])
+            .execute()
+            .data
+            or []
+        )
+        if not members:
+            return None
+        # Prefer the owner; fall back to any admin.
+        chosen = next((m for m in members if m.get("role") == "owner"), members[0])
+        user_id = chosen.get("user_id")
+        if not user_id:
+            return None
+        profiles = (
+            client.table("profiles")
+            .select("full_name, first_name, last_name")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not profiles:
+            return None
+        p = profiles[0]
+        return p.get("full_name") or f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip() or None
+    except Exception:  # noqa: BLE001 — byline fallback must never break generation
+        return None
+
+
+@retry_on_disconnect
 def display_name_for_slug(slug: str) -> str | None:
     """Resolve a company slug → its human-readable display name. None if no
     company owns the slug (e.g. legacy demo datasets)."""
