@@ -94,14 +94,15 @@ vi.mock("../../../context/WorkspaceContext", () => ({
 // "View PRD" in place after a generation completes.
 // `mapEntries` is a hoisted, mutable map so a test can seed a ready prototype
 // (with a preview_image_url) and assert the card renders NO preview thumbnail.
-const { refetchMapSpy, mapEntries } = vi.hoisted(() => ({
+const { refetchMapSpy, mapEntries, mapState } = vi.hoisted(() => ({
   refetchMapSpy: vi.fn(),
   mapEntries: new Map<number, unknown>(),
+  mapState: { loading: false },
 }))
 vi.mock("../../design-agent/useBriefPrototypeMap", () => ({
   useBriefPrototypeMap: () => ({
     entriesByInsight: mapEntries,
-    loading: false,
+    loading: mapState.loading,
     error: false,
     refetch: refetchMapSpy,
   }),
@@ -125,6 +126,7 @@ describe("prdCtaState — smart View/Generate PRD button", () => {
     expect(prdCtaState({ hasPrd: true, prdId: 12 }, false)).toEqual({
       label: "View PRD",
       isView: true,
+      waiting: false,
     })
     // still 'View PRD' even mid another job (view is a cheap read)
     expect(prdCtaState({ hasPrd: true, prdId: 12 }, true).isView).toBe(true)
@@ -133,13 +135,33 @@ describe("prdCtaState — smart View/Generate PRD button", () => {
     expect(prdCtaState({ hasPrd: false, prdId: null }, false)).toEqual({
       label: "Generate PRD",
       isView: false,
+      waiting: false,
     })
     expect(prdCtaState({ hasPrd: false, prdId: null }, true).label).toBe("Generating…")
   })
   it("does NOT offer view when hasPrd but the prd id is unknown, or no state", () => {
     expect(prdCtaState({ hasPrd: true, prdId: null }, false).isView).toBe(false)
-    expect(prdCtaState(null, false)).toEqual({ label: "Generate PRD", isView: false })
+    expect(prdCtaState(null, false)).toEqual({ label: "Generate PRD", isView: false, waiting: false })
     expect(prdCtaState(undefined, false).isView).toBe(false)
+  })
+  it("shows a neutral, waiting 'Loading…' while the map is loading and no PRD is known yet", () => {
+    // loading + not-yet-known → neutral, so the button doesn't flash "Generate
+    // PRD" then flip to "View PRD" once the map lands.
+    expect(prdCtaState({ hasPrd: false, prdId: null }, false, true)).toEqual({
+      label: "Loading…",
+      isView: false,
+      waiting: true,
+    })
+    expect(prdCtaState(null, false, true).waiting).toBe(true)
+    expect(prdCtaState(undefined, false, true).label).toBe("Loading…")
+  })
+  it("prefers 'View PRD' over the loading state once the PRD is known (no wait)", () => {
+    // A known PRD is authoritative even during a refetch — never re-hide it.
+    expect(prdCtaState({ hasPrd: true, prdId: 5 }, false, true)).toEqual({
+      label: "View PRD",
+      isView: true,
+      waiting: false,
+    })
   })
 })
 
@@ -276,6 +298,7 @@ afterEach(() => {
   localStorage.clear()
   vi.clearAllMocks()
   mapEntries.clear()
+  mapState.loading = false
 })
 
 describe("BriefChat finding card — single full-system PRD button", () => {
@@ -667,5 +690,32 @@ describe("BriefChat finding card — prototype CTA relabels on built prototype",
     await act(async () => { renderBrief() })
     expect(within(cardFor(HERO.title)).getByRole("button", { name: "View prototype" })).toBeTruthy()
     expect(within(cardFor(HERO.title)).queryByRole("button", { name: "Generate prototype" })).toBeNull()
+  })
+})
+
+// ── PRD CTA shows a neutral "Loading…" while the map is still loading ───────────
+// On brief load the brief-prototype map is in flight, so hasPrd is unknown. The
+// PRD CTA must not flash "Generate PRD" (it would flip to "View PRD" the moment
+// the map lands) — it shows a neutral, disabled "Loading…" until we know.
+describe("BriefChat finding card — PRD CTA neutral while map loads", () => {
+  it("reads a disabled 'Loading…' during the map fetch, not 'Generate PRD'", async () => {
+    mapState.loading = true
+    await act(async () => { renderBrief() })
+    const card = cardFor(HERO.title)
+    const btn = within(card).getByRole("button", { name: "Loading…" })
+    expect(btn).toBeTruthy()
+    expect((btn as HTMLButtonElement).disabled).toBe(true)
+    // Never the premature "Generate PRD" while we don't yet know if one exists.
+    expect(within(card).queryByRole("button", { name: /generate prd/i })).toBeNull()
+  })
+
+  it("flips 'Loading…' → 'View PRD' once the map lands with a PRD for the insight", async () => {
+    // Map done loading AND it already has a PRD for insight 0 → View, no wait.
+    mapState.loading = false
+    mapEntries.set(0, { insight_index: 0, prd_id: 42, prd_title: "X", prototype: null } as never)
+    await act(async () => { renderBrief() })
+    const card = cardFor(HERO.title)
+    expect(within(card).getByRole("button", { name: "View PRD" })).toBeTruthy()
+    expect(within(card).queryByRole("button", { name: "Loading…" })).toBeNull()
   })
 })

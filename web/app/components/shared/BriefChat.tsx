@@ -165,15 +165,23 @@ function IconTerminalPrompt({ size = 14 }: { size?: number }) {
 /** Pure: the primary finding-card CTA. When a PRD already exists for this
  *  insight the button becomes "View PRD" (opens the existing PRD); otherwise
  *  "Generate PRD" (runs the full system), reflecting in-flight as "Generating…".
- *  Extracted so the view-vs-generate decision is unit-testable. */
+ *  While the brief-prototype map is still loading we don't yet KNOW whether a PRD
+ *  exists, so `loading` yields a neutral, disabled "Loading…" (waiting=true) —
+ *  otherwise the button flashes "Generate PRD" then flips to "View PRD" the
+ *  instant the map lands. Extracted so the decision is unit-testable. */
 export function prdCtaState(
   insightState: { hasPrd: boolean; prdId: number | null } | null | undefined,
   generating: boolean,
-): { label: string; isView: boolean } {
-  if (insightState?.hasPrd && insightState.prdId != null) {
-    return { label: "View PRD", isView: true }
+  loading = false,
+): { label: string; isView: boolean; waiting: boolean } {
+  const hasPrd = !!(insightState?.hasPrd && insightState.prdId != null)
+  if (loading && !hasPrd) {
+    return { label: "Loading…", isView: false, waiting: true }
   }
-  return { label: generating ? "Generating…" : "Generate PRD", isView: false }
+  if (hasPrd) {
+    return { label: "View PRD", isView: true, waiting: false }
+  }
+  return { label: generating ? "Generating…" : "Generate PRD", isView: false, waiting: false }
 }
 
 /** Pure: the prototype CTA label. "View prototype" once a prototype is actually
@@ -202,11 +210,15 @@ function BriefFindingCard({
   onRestore,
   onPreview,
   insightState,
+  mapLoading,
 }: {
   finding: Finding
   busy: boolean
   generating: boolean
   dismissed: boolean
+  // True while the brief-prototype map is still fetching — the PRD CTA shows a
+  // neutral "Loading…" until we know whether this insight already has a PRD.
+  mapLoading: boolean
   // Whether to render the Generate/View PRD + prototype action CTAs. False when
   // the brief has no real data behind it (insufficient-evidence / empty case) —
   // those affordances make no sense without findings to act on.
@@ -323,15 +335,16 @@ function BriefFindingCard({
           {showActions ? (
           <div className="fc-actions">
             {(() => {
-              const cta = prdCtaState(insightState, generating)
+              const cta = prdCtaState(insightState, generating, mapLoading)
               return (
                 <button
                   type="button"
                   className="fc-btn-prd fc-btn-prd--skill"
                   onClick={cta.isView ? onViewPrd : onGenerateAll}
                   // View is a cheap read — allowed while another job is busy;
-                  // Generate is gated on `busy` as before.
-                  disabled={busy && !cta.isView}
+                  // Generate is gated on `busy` as before. While the map is still
+                  // loading (waiting) the label is unknown, so the button is inert.
+                  disabled={cta.waiting || (busy && !cta.isView)}
                   title={
                     cta.isView
                       ? "Open the existing PRD"
@@ -442,7 +455,7 @@ export function BriefChat() {
   // One fetch per brief — drives the per-card right-rail state + the
   // Generate/View PRD button. refetch() is called after a card generation so the
   // button flips from "Generate PRD" → "View PRD" in place (no reload).
-  const { entriesByInsight, refetch: refetchPrototypeMap } =
+  const { entriesByInsight, loading: prototypeMapLoading, refetch: refetchPrototypeMap } =
     useBriefPrototypeMap(briefId)
 
   // GenerateModal / LoadingScreen state — mounted once at BriefChat level
@@ -1078,6 +1091,7 @@ export function BriefChat() {
                           onRestore={() => cardRestore(f)}
                           onPreview={() => cardPreview(f)}
                           insightState={insightState}
+                          mapLoading={prototypeMapLoading}
                         />
                       )
                     })}
