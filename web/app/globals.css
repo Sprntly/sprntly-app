@@ -7783,28 +7783,18 @@
      of the flex-column .od-center), so it stays fixed at the top of the chat
      while turns scroll under it. Tells the chat which insight/PRD it's bound to
      and, when the content panel is closed, is the in-chat "Open PRD" affordance. */
-  .chat-insight-pin {
-    flex-shrink: 0;
+  /* Insight message — the insight rendered inline as the agent's opening chat
+     message (not a pinned heading). Lives inside .bc-agent-body, so it inherits
+     the thread's message alignment; the kind chip + full insight sentence read
+     as the assistant introducing the work. */
+  .bc-insight-msg {
     display: flex;
-    align-items: center;
+    align-items: baseline;
+    flex-wrap: wrap;
     gap: 8px;
-    width: 100%;
-    max-width: 1024px;
-    margin: 0 auto;
-    padding: 10px 40px;
-    border-bottom: 1px solid var(--line);
-    background: var(--surface);
   }
 
-  .chat-insight-pin-mark {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--accent);
-    flex-shrink: 0;
-  }
-
-  .chat-insight-pin-kind {
+  .bc-insight-msg-kind {
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.1em;
@@ -7814,55 +7804,16 @@
     padding: 3px 7px;
     border-radius: 5px;
     flex-shrink: 0;
+    position: relative;
+    top: -1px;
   }
 
-  .chat-insight-pin-title {
-    font-size: 13.5px;
+  .bc-insight-msg-text {
+    font-size: 14.5px;
     font-weight: 600;
+    line-height: 1.5;
     color: var(--ink);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
     min-width: 0;
-  }
-
-  .chat-insight-pin-viewing {
-    margin-left: auto;
-    flex-shrink: 0;
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    color: var(--muted);
-  }
-
-  .chat-insight-pin-btn {
-    margin-left: auto;
-    flex-shrink: 0;
-    font-size: 12px;
-    font-weight: 600;
-    padding: 6px 13px;
-    border-radius: 999px;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
-    cursor: pointer;
-    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
-  }
-
-  .chat-insight-pin-btn:hover:not(:disabled) {
-    background: var(--accent-hover);
-    border-color: var(--accent-hover);
-  }
-
-  .chat-insight-pin-btn:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  @media (max-width: 640px) {
-    .chat-insight-pin {
-      padding: 9px 16px;
-    }
   }
 
   .od-center--landing .od-center-inner {

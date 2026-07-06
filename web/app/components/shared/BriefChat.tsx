@@ -173,6 +173,18 @@ export function prdCtaState(
   return { label: generating ? "Generating…" : "Generate PRD", isView: false }
 }
 
+/** Pure: the prototype CTA label. "View prototype" once a prototype is actually
+ *  built and saved for this insight (prototypeReady — DB-backed via the
+ *  brief-prototype map), otherwise "Generate prototype". Shared by the brief
+ *  finding card and the chat surface so both relabel identically. The click
+ *  handler (cardPreview / handleChatPrototype) view-vs-generates on the SAME
+ *  state, keeping label and action in lockstep. */
+export function prototypeCtaLabel(
+  insightState: { hasPrd: boolean; prototypeReady: boolean } | null | undefined,
+): string {
+  return insightState?.hasPrd && insightState.prototypeReady ? "View prototype" : "Generate prototype"
+}
+
 // ── Finding card — matches reference layout ───────────────────────────────────
 function BriefFindingCard({
   finding,
@@ -334,7 +346,7 @@ function BriefFindingCard({
             {finding.prototypeable ? (
               <button type="button" className="fc-btn-secondary" onClick={onPreview}>
                 <IconTerminalPrompt size={13} />
-                {finding.ctas.find((c) => /prototype/i.test(c.label))?.label || "View prototype"}
+                {prototypeCtaLabel(insightState)}
               </button>
             ) : null}
           </div>
