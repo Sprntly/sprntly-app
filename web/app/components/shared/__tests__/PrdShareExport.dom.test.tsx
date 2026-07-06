@@ -56,6 +56,14 @@ vi.mock("../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "meridian", setActiveCompany: vi.fn() }),
 }))
 
+vi.mock("../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({ loading: false, profile: null, workspace: null, refresh: async () => {} }),
+}))
+
+vi.mock("../../../lib/onboarding/store", () => ({
+  updateWorkspace: vi.fn(async () => {}),
+}))
+
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
   usePathname: () => "/",
@@ -141,6 +149,15 @@ const EMPTY_CONTENT = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // ContentPanel's width-restore effect reads window.localStorage on panel open;
+  // provide a no-op stub so it doesn't throw in the test env (width persistence is
+  // not under test here).
+  vi.stubGlobal("localStorage", {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+    clear: () => {},
+  })
   content = { ...EMPTY_CONTENT, prd: FAKE_PRD }
   contentPanelTab = "prd"
 })
