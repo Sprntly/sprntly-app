@@ -75,7 +75,10 @@ function nowTime(): string {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
-const isPrdCommand = (q: string) => /\b(generate|create|write|draft|make)\b.*\bprd\b/i.test(q)
+// A "generate a PRD" phrasing is a COMMAND (open the PRD tab), not a question
+// for the ask agent. Exported so ChatScreen intercepts it with the SAME rule —
+// otherwise the ask agent answers it with a raw prd-author HTML dump.
+export const isPrdCommand = (q: string) => /\b(generate|create|write|draft|make)\b.*\bprd\b/i.test(q)
 const isPrototypeCommand = (q: string) =>
   /\b(generate|create|make|build|spin\s*up)\b.*\b(prototype|proto|mock\s*up|mockup)\b/i.test(q)
 const isTicketsCommand = (q: string) =>
