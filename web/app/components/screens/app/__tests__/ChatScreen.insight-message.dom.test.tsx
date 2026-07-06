@@ -51,15 +51,16 @@ const runPrdGeneration = vi.fn().mockResolvedValue({
   ok: true,
   prd: { prd_id: 77, title: "Generated PRD", metaLine: "", sections: [] },
 })
+const loadPrdById = vi.fn().mockResolvedValue({
+  ok: true, prd: { prd_id: 796, title: "Loaded PRD", metaLine: "", sections: [] },
+})
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (...args: unknown[]) => runPrdGeneration(...args),
   resumePrdGeneration: vi.fn(),
   runPrdGenerationFromBacklog: vi.fn().mockResolvedValue({
     ok: true, prd: { prd_id: 88, title: "Backlog PRD", metaLine: "", sections: [] },
   }),
-  loadPrdById: vi.fn().mockResolvedValue({
-    ok: true, prd: { prd_id: 99, title: "Loaded PRD", metaLine: "", sections: [] },
-  }),
+  loadPrdById: (...args: unknown[]) => loadPrdById(...args),
 }))
 
 const runAskGeneration = vi.fn().mockResolvedValue({
@@ -133,6 +134,7 @@ beforeEach(() => {
   localStorage.clear()
   protoMap.clear()
   runPrdGeneration.mockClear()
+  loadPrdById.mockClear()
 })
 afterEach(() => {
   cleanup()
@@ -191,5 +193,51 @@ describe("ChatScreen — insight renders as an in-chat message (not a pinned hea
     // The seeded ready prototype flips the prototype CTA to "View prototype".
     await waitFor(() => expect(within(insightMsg()).getByRole("button", { name: "View prototype" })).toBeTruthy())
     expect(within(insightMsg()).queryByRole("button", { name: "Generate prototype" })).toBeNull()
+  })
+})
+
+// ── After a reload, the PRD CTA is DB-backed (View PRD + load, not regenerate) ──
+// Tabs persist to localStorage with `prd` stripped, so on reload `activeTab.prd`
+// is null even when a PRD exists in the DB. The CTA must read the brief-prototype
+// map (hasPrd), show "View PRD", and LOAD the existing PRD by id — never spawn a
+// fresh generation. Regression: it showed "Generate PRD" and regenerated.
+describe("ChatScreen — insight PRD CTA survives a reload (DB-backed)", () => {
+  // Render ChatScreen alone; the active insight tab is restored from localStorage
+  // (the reload path) rather than opened via openPrdTab this session.
+  function renderRestored() {
+    return render(
+      React.createElement(
+        NavigationProvider,
+        null,
+        React.createElement(ContentProvider, null, React.createElement(ChatScreen)),
+      ),
+    )
+  }
+
+  it("shows 'View PRD' and loads the existing PRD (no regeneration) when the DB has one", async () => {
+    // Persisted tab (prd stripped, briefMeta kept) — exactly what a reload restores.
+    localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([
+      { id: "tab-reload", title: "PRD · Enterprise expansion is stalled", dbConvId: null, briefMeta: { briefId: 7, insightIndex: 0 } },
+    ]))
+    localStorage.setItem("sprntly_chat_active_tab_acme", "tab-reload")
+    // The DB map says insight 0 already has PRD #796 (no prototype yet).
+    protoMap.set(0, {
+      insight_index: 0,
+      prd_id: 796,
+      prd_title: "Enterprise expansion is stalled",
+      prototype: null,
+    })
+
+    await act(async () => { renderRestored() })
+
+    // The CTA reflects the DB PRD even though the tab carries no loaded prd.
+    const msg = insightMsg()
+    await waitFor(() => expect(within(msg).getByRole("button", { name: "View PRD" })).toBeTruthy())
+    expect(within(msg).queryByRole("button", { name: "Generate PRD" })).toBeNull()
+
+    // Clicking it LOADS the existing PRD by id — and never regenerates.
+    await act(async () => { fireEvent.click(within(insightMsg()).getByRole("button", { name: "View PRD" })) })
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(796))
+    expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 })
