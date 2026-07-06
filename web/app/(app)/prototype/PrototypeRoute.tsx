@@ -189,6 +189,15 @@ export function generateIntentFromSearch(raw: string | null): boolean {
   return raw === "1"
 }
 
+/** Pure: read the transient prototype loading hint from the URL's `pid` query
+ *  param. Only positive integers are accepted; malformed values are ignored so
+ *  the route falls back to resolving by PRD alone. */
+export function prototypeHintFromSearch(raw: string | null): number | null {
+  if (raw == null || raw === "" || !/^\d+$/.test(raw)) return null
+  const id = Number(raw)
+  return Number.isSafeInteger(id) && id > 0 ? id : null
+}
+
 /** Pure: derive the initial fullscreen state from the `fs` URL query param.
  *  Absent or any value other than "0" → fullscreen (default-open). Only "0"
  *  suppresses fullscreen. Extracted for unit-testability without a DOM.
@@ -487,6 +496,7 @@ export function PrototypeRoute() {
   const { workspace } = useWorkspace()
 
   const prdId = prdIdFromPrototypeSearch(search.get("prd"))
+  const handoffPrototypeId = prototypeHintFromSearch(search.get("pid"))
   const figmaFileKey = figmaKeyForPrototype(prdId, content.prd)
   const savedPreference = workspace?.design_source ?? null
 
@@ -540,6 +550,21 @@ export function PrototypeRoute() {
   // runs Locating → (crumb | picker) → Building. Null = Building / no locate phase.
   const [locatePhase, setLocatePhase] = useState<LocatePhaseState | null>(null)
 
+  // A valid `pid` is a transient handoff hint from a just-started generation.
+  // Seed the build loader immediately, before the PRD-level active lookup
+  // resolves. The lookup below remains authoritative and clears or replaces this
+  // hint when it discovers a ready, failed, generating, or absent row.
+  useEffect(() => {
+    if (handoffPrototypeId == null) return
+    setProto(null)
+    setGenError(null)
+    setGenFigmaKey(null)
+    setGenGithubRepo(null)
+    setGenProtoId(handoffPrototypeId)
+    genLoadingRef.current = true
+    setGenLoading(true)
+  }, [handoffPrototypeId])
+
   // Resolve the PRD's prototype read-only on prd change, and RE-ATTACH to an
   // in-flight generation. getActiveByPrd returns the newest ready-OR-generating
   // row (swallows 404→null), so a (re)load mid-generation no longer strands the
@@ -553,6 +578,8 @@ export function PrototypeRoute() {
   useEffect(() => {
     if (prdId == null) {
       setProto(null)
+      genLoadingRef.current = false
+      setGenLoading(false)
       setResolving(false)
       return
     }
@@ -565,6 +592,8 @@ export function PrototypeRoute() {
         const action = actionForActiveProto(found)
         if (action.kind === "reveal") {
           setProto(action.proto)
+          genLoadingRef.current = false
+          setGenLoading(false)
           return
         }
         setProto(null)
@@ -601,13 +630,21 @@ export function PrototypeRoute() {
               // to a curated line; the raw `error` never reaches the DOM.
               setGenError("Generation failed")
             }
+            genLoadingRef.current = false
+            setGenLoading(false)
           })
           .catch(() => {
+            genLoadingRef.current = false
+            setGenLoading(false)
             /* degrade — leave genError null → the existing empty state. */
           })
       })
       .catch(() => {
-        if (!cancelled) setProto(null)
+        if (!cancelled) {
+          setProto(null)
+          genLoadingRef.current = false
+          setGenLoading(false)
+        }
       })
       .finally(() => {
         if (!cancelled) setResolving(false)
@@ -822,6 +859,28 @@ export function PrototypeRoute() {
             onRetry={handleGenErrorRetry}
             onBack={() => goTo("brief")}
           />
+        </div>
+      </AppLayout>
+    )
+  }
+
+  // A generation is actively being handed off or resumed. Keep this above the
+  // resolving branch so a valid `pid` shows the build loader immediately instead
+  // of the generic route-loading state while the PRD-level lookup is in flight.
+  if (genLoading) {
+    return (
+      <AppLayout>
+        <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
+          <GenerateSurfaceErrorBoundary onReset={handleGenErrorRetry}>
+            <GenerationLoadingScreen
+              open={genLoading}
+              figmaFileKey={genFigmaKey}
+              githubRepo={genGithubRepo}
+              prototypeId={genProtoId}
+              onCancel={handleGenCancel}
+              locatePhase={locatePhase ?? undefined}
+            />
+          </GenerateSurfaceErrorBoundary>
         </div>
       </AppLayout>
     )

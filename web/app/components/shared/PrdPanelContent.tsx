@@ -105,8 +105,8 @@ function ViewPrototypeButton({ prdId, figmaFileKey }: { prdId: number; figmaFile
     setHasProto(null)
     designAgentApi
       .getByPrd(prdId)
-      .then(() => {
-        if (!cancelled) setHasProto(true)
+      .then((proto) => {
+        if (!cancelled) setHasProto(proto != null)
       })
       .catch(() => {
         if (!cancelled) setHasProto(false)
@@ -142,9 +142,9 @@ function ViewPrototypeButton({ prdId, figmaFileKey }: { prdId: number; figmaFile
         prdId={prdId}
         figmaFileKey={figmaFileKey ?? null}
         onGenStart={() => {}}
-        onKickoff={() => {
+        onKickoff={(prototypeId) => {
           setGenOpen(false)
-          goToPrototype()
+          router.push(`${prototypePath(prdId)}&pid=${encodeURIComponent(String(prototypeId))}`)
         }}
         onGenDone={() => {}}
         savedPreference={workspace?.design_source ?? null}
