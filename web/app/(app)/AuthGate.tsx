@@ -31,10 +31,11 @@ function AuthLoading() {
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
-        background: "#0a0a0c",
-        color: "#7a7a85",
+        background: "#FFFFFF",
+        color: "#000000",
         fontFamily: "Geist, system-ui, sans-serif",
-        fontSize: 14,
+        fontSize: 15,
+        fontWeight: 500,
       }}
     >
       Loading…
