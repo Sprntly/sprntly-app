@@ -28,7 +28,7 @@ Pipeline: **signals + business context → `evidence-brief` → `prd-author` →
 6. **Voice of customer matters** — when real VoC exists and aligns, include actual quotes across channels (review / support / sales). Customer words turn a data point into a reason; they are not optional flavor when available.
 7. **Write the value-driven hypothesis.** Form: *"We believe that by introducing **[X]**, **[users]** will **[change in behavior]**, which will drive **[business value: retention / revenue / engagement / DAU / market share]**."* Behavior change and business value are named separately; value ties to step 1's goal.
 8. **Hand off to the PRD** — state this hypothesis is the input to `prd-author`.
-9. **Honesty pass (mandatory).** Every figure traces to a provided input; every quote is real; correlation is never called causation; confidence is stated; non-converging signals are not hidden. If nothing can be supported, say the evidence is insufficient rather than manufacture a story.
+9. **Honesty pass (mandatory).** Every figure traces to a provided input; every quote is real; correlation is never called causation; the strength of agreement is conveyed in prose (never as a "Confidence:" label or score); non-converging signals are not hidden. If nothing can be supported, say the evidence is insufficient rather than manufacture a story.
 
 ### Chart guide (variable — best fit, not a fixed set)
 | The finding is about… | Use |
