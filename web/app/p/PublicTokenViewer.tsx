@@ -15,6 +15,7 @@
 import { useEffect, useState, type FormEvent } from "react"
 import { notFound } from "next/navigation"
 import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
+import { DeviceBadge } from "../components/design-agent/DeviceBadge"
 import { ManualEditOverlay } from "../components/design-agent/ManualEditOverlay"
 import { CommentsPanel } from "../components/design-agent/CommentsPanel"
 // C2b: the public surface drives the SAME pin engine as the signed-in editor via
@@ -36,7 +37,7 @@ export type ViewerState =
   | { kind: "notfound" }
   | { kind: "error" }
   | { kind: "passcode" }
-  | { kind: "ready"; bundleUrl: string; isComplete: boolean }
+  | { kind: "ready"; bundleUrl: string; isComplete: boolean; targetPlatform: string }
 
 // Pure reducer over a resolver outcome → the terminal viewer state. Passcode
 // mode arrives with bundle_url === null (the bundle is withheld until POST
@@ -48,7 +49,12 @@ export function nextViewerState(
   if (!view) return { kind: "notfound" }
   if (view.share_mode === "passcode" && !view.bundle_url) return { kind: "passcode" }
   if (!view.bundle_url) return { kind: "notfound" }
-  return { kind: "ready", bundleUrl: view.bundle_url, isComplete: view.is_complete }
+  return {
+    kind: "ready",
+    bundleUrl: view.bundle_url,
+    isComplete: view.is_complete,
+    targetPlatform: view.target_platform,
+  }
 }
 
 // localStorage key for the anon viewer's display name. Persisted once on first
@@ -167,6 +173,15 @@ export function PublicTokenViewer() {
     )
   }
   if (state.kind === "passcode") return <PasscodeGate token={token as string} />
+  // Single-device gate — mirrors the internal viewer (PostGenerationResult ~:1551).
+  // A prototype targeting one device has nothing to toggle to, so we suppress the
+  // Desktop/Mobile toggle (via showDesktop/showMobile → PrototypeViewer's showToggle)
+  // and show a static DeviceBadge in its slot instead. "both"/legacy/null → both
+  // true → the toggle renders as before (no regression).
+  const targetPlatform = state.targetPlatform
+  const showDesktop = targetPlatform !== "mobile"
+  const showMobile = targetPlatform !== "desktop"
+  const singleDevice = !showDesktop || !showMobile
   return (
     <div className="design-agent-surface">
       <div className="da-ready" data-testid="da-ready">
@@ -177,6 +192,15 @@ export function PublicTokenViewer() {
           <PrototypeViewer
             bundleUrl={state.bundleUrl}
             isComplete={state.isComplete}
+            // Single-device gate: suppress the in-frame Desktop/Mobile toggle when
+            // only one device applies (PrototypeViewer's showToggle = showDesktop &&
+            // showMobile). "both" leaves both true → toggle renders unchanged.
+            showDesktop={showDesktop}
+            showMobile={showMobile}
+            // Start the stage in the prototype's own form factor so a mobile-only
+            // proto renders in the mobile bezel (not a desktop frame under a "Mobile"
+            // badge). Mirrors the internal viewer (PostGenerationResult ~:1553).
+            initialPlatform={targetPlatform === "mobile" ? "mobile" : "desktop"}
             // Edge-to-edge: suppress the cosmetic browser-frame decoration (traffic
             // lights + URL bar) so the shared prototype renders flush. The Mark +
             // Comment headControls below are NOT gated by hideChrome and remain.
@@ -187,11 +211,16 @@ export function PublicTokenViewer() {
             // C2b: Mark drives the real pin/mark overlay via the shared hook
             // (pin.toggleMark / pin.markMode), mounted in the stageOverlay below.
             headControls={
-              <div
-                className="platform-toggle proto-head-controls-group"
-                role="group"
-                aria-label="Prototype tools"
-              >
+              <>
+                {/* Single-device: the static device pill fills the toggle's vacated
+                    slot, left of the Mark/Comment group (matches the toggle's former
+                    position). Renders nothing for "both"/legacy. */}
+                {singleDevice && <DeviceBadge platform={targetPlatform} />}
+                <div
+                  className="platform-toggle proto-head-controls-group"
+                  role="group"
+                  aria-label="Prototype tools"
+                >
                 <button
                   type="button"
                   className={pin.markMode ? "active" : ""}
@@ -212,7 +241,8 @@ export function PublicTokenViewer() {
                 >
                   <IconMessage size={14} />
                 </button>
-              </div>
+                </div>
+              </>
             }
             // C2b: the marking overlay renders INSIDE `.proto-stage`, layered over the
             // iframe. MarkOverlay is click-inert except in mark mode (where it
