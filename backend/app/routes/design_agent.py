@@ -1195,13 +1195,24 @@ async def _run_locate_bg(
             image_status=locate_result.image_status,
         ))
     except Exception as exc:  # noqa: BLE001 — terminal record, never let the task die unhandled
-        # error_class only in logs (no PII rule); the full message is locate
-        # metadata, not PRD content, so it is safe to surface in the job record.
-        logger.warning(
-            "design_agent.locate.failed repo=%s error_class=%s",
-            github_repo, type(exc).__name__,
+        from app.design_agent.provider_errors import (
+            classify_provider_error,
+            is_alertable,
         )
-        _store("error", error=str(exc))
+
+        # Store ONLY the safe class in the job record — a raw exception string can
+        # carry provider/account state and must stay out of any client-visible
+        # field. The raw text goes to the log ONLY.
+        cls = classify_provider_error(exc)
+        logger.warning(
+            "design_agent.locate.failed repo=%s error_class=%s classified=%s raw=%s",
+            github_repo, type(exc).__name__, cls.value, str(exc),
+        )
+        if is_alertable(cls):
+            from app.design_agent.provider_alert import maybe_alert_provider_outage
+
+            maybe_alert_provider_outage(cls, context={"prototype_id": "locate"})
+        _store("error", error=cls.value)
 
 
 @router.post(
@@ -1762,18 +1773,30 @@ async def _run_generation_bg(
         )
         raise
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
-        # error_class only in the structured log (no PII / no PRD /
-        # no instructions / no figma contents); the full message is stored in
-        # the row's `error` column (truncated to 500 chars by fail_prototype).
-        logger.warning(
-            "design_agent.generation_failed prototype_id=%s error_class=%s",
-            prototype_id, type(exc).__name__,
+        from app.design_agent.provider_errors import (
+            classify_provider_error,
+            is_alertable,
+            safe_error_message,
         )
-        _finalize_generation_failed(event_id, workspace_id, prototype_id, type(exc).__name__)
+
+        # A provider exception can land here directly (raised outside the runner's
+        # own terminal catch). Classify it and store ONLY the safe class + a fixed
+        # generic message in the client-visible `error` column — never the raw
+        # exception text. The raw text goes to the log ONLY.
+        cls = classify_provider_error(exc)
+        logger.warning(
+            "design_agent.generation_failed prototype_id=%s error_class=%s classified=%s raw=%s",
+            prototype_id, type(exc).__name__, cls.value, str(exc),
+        )
+        if is_alertable(cls):
+            from app.design_agent.provider_alert import maybe_alert_provider_outage
+
+            maybe_alert_provider_outage(cls, context={"prototype_id": prototype_id})
+        _finalize_generation_failed(event_id, workspace_id, prototype_id, cls.value)
         fail_prototype(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
-            error=f"{type(exc).__name__}: {exc}",
+            error=f"error_class={cls.value} | error_message={safe_error_message(cls)}",
         )
 
 
@@ -3766,22 +3789,34 @@ async def _run_iterate_bg(
                 getattr(result, "error_class", None) or f"status_{result.status}",
             )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
-        # error_class only in the structured log (no PRD / comment /
-        # Figma content); the full message goes to the row's error column.
-        logger.warning(
-            "design_agent.iterate_failed prototype_id=%s error_class=%s",
-            prototype_id, type(exc).__name__,
+        from app.design_agent.provider_errors import (
+            classify_provider_error,
+            is_alertable,
+            safe_error_message,
         )
+
+        # A provider exception can land here directly (raised outside the runner's
+        # own terminal catch). Store ONLY the safe class + a fixed generic message
+        # on the client-visible row — never the raw exception text. Raw text ⇒ log.
+        cls = classify_provider_error(exc)
+        logger.warning(
+            "design_agent.iterate_failed prototype_id=%s error_class=%s classified=%s raw=%s",
+            prototype_id, type(exc).__name__, cls.value, str(exc),
+        )
+        if is_alertable(cls):
+            from app.design_agent.provider_alert import maybe_alert_provider_outage
+
+            maybe_alert_provider_outage(cls, context={"prototype_id": prototype_id})
         # iter_event_id may be unbound if the failure preceded its assignment
         # (e.g. get_prototype raised); guard with locals() so the fail-open
         # finalize never itself raises a NameError.
         _finalize_iteration_failed(
-            locals().get("iter_event_id"), workspace_id, prototype_id, type(exc).__name__,
+            locals().get("iter_event_id"), workspace_id, prototype_id, cls.value,
         )
         fail_prototype(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
-            error=f"{type(exc).__name__}: {exc}",
+            error=f"error_class={cls.value} | error_message={safe_error_message(cls)}",
         )
 
 

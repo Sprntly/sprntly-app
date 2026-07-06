@@ -236,7 +236,9 @@ def test_error_path_poll_returns_error(client, env, monkeypatch):
     poll = client.get(f"/v1/design-agent/locate/jobs/{job_id}").json()
     assert poll["status"] == "error"
     assert poll["result"] is None
-    assert "Anthropic API error" in (poll["error"] or "")
+    # Sanitized: the job record carries the safe class, never the raw provider text.
+    assert poll["error"] == "INTERNAL"
+    assert "Anthropic API error" not in (poll["error"] or "")
 
 
 def test_map_failure_fails_open_done_with_telemetry(client, env, monkeypatch, caplog):

@@ -55,7 +55,7 @@ import {
   markCancelled,
   wasCancelled,
 } from "../../components/design-agent/notificationStore"
-import { GenerationErrorBanner, reasonCopy } from "../../components/design-agent/GenerationErrorBanner"
+import { GenerationErrorBanner, reasonCopy, isRetryableFailure } from "../../components/design-agent/GenerationErrorBanner"
 import { GenerateSurfaceErrorBoundary } from "../../components/design-agent/GenerateSurfaceErrorBoundary"
 import { GenerationLoadingScreen, type LocatePhaseState } from "../../components/design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../../components/design-agent/PostGenerationResult"
@@ -876,7 +876,8 @@ export function PrototypeRoute() {
           data-testid="prototype-route-gen-error"
         >
           <GenerationErrorBanner
-            reason={reasonCopy(genError)}
+            reason={reasonCopy(genError, genProtoId ?? undefined)}
+            retryable={isRetryableFailure(genError)}
             onRetry={handleGenErrorRetry}
             onBack={() => goTo("brief")}
           />

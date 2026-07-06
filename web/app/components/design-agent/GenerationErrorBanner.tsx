@@ -49,6 +49,10 @@ export type GenerationErrorBannerProps = {
   /** Optional deliberate exit (the route wires `goTo("brief")`). When omitted,
    *  the in-banner "Back to brief" affordance is not rendered. */
   onBack?: () => void
+  /** Whether re-running is likely to help. Defaults to `true` (retry shown). A
+   *  provider billing/auth hard-stop is NOT retryable — the retry button is
+   *  suppressed and "Back to brief" becomes the primary action. */
+  retryable?: boolean
 }
 
 /**
@@ -57,7 +61,16 @@ export type GenerationErrorBannerProps = {
  * only the returned copy ever reaches the DOM (Rule #24). Unknown strings fall
  * back to a generic "Generation failed" line.
  */
-export function reasonCopy(raw: string): string {
+export function reasonCopy(raw: string, refId?: number | string): string {
+  // Provider hard-stops come first (most specific). A billing/auth stop is on
+  // OUR side — surface a reassuring, non-blaming line + a support reference, and
+  // never leak that it's a credit/auth issue.
+  if (raw.includes("PROVIDER_BILLING") || raw.includes("PROVIDER_AUTH"))
+    return `Something went wrong on our end — we've been notified.${refId != null ? ` (Ref: ${refId})` : ""}`
+  if (raw.includes("PROVIDER_CAPACITY"))
+    return "High demand right now — try again in a few minutes."
+  if (raw.includes("PROVIDER_UNAVAILABLE"))
+    return "The prototype service is temporarily unavailable. Try again shortly."
   if (raw.includes("UnresolvedImportRepairExhausted"))
     return "A referenced screen couldn't be built. Try regenerating — describe the screens you want explicitly."
   if (raw.includes("ViteBuildError") || raw.includes("TypeCheckError"))
@@ -72,6 +85,15 @@ export function reasonCopy(raw: string): string {
 }
 
 /**
+ * A provider billing/auth hard-stop won't self-resolve on retry (someone has to
+ * top up credits / fix the key), so the caller suppresses the Retry affordance.
+ * Everything else stays retryable.
+ */
+export function isRetryableFailure(raw: string): boolean {
+  return !(raw.includes("PROVIDER_BILLING") || raw.includes("PROVIDER_AUTH"))
+}
+
+/**
  * Pure presentational banner — no hooks, no I/O → SSR-renderable in node-env
  * vitest. `role="alert"` so assistive tech announces the failure. Centered,
  * calm composition (art tile + serif title + curated body + actions +
@@ -83,6 +105,7 @@ export function GenerationErrorBanner({
   reason,
   onRetry,
   onBack,
+  retryable = true,
 }: GenerationErrorBannerProps) {
   return (
     <div
@@ -101,18 +124,21 @@ export function GenerationErrorBanner({
         {reason}
       </p>
       <div className="generation-error-actions">
-        <button
-          type="button"
-          className="btn btn-accent"
-          onClick={onRetry}
-          data-testid="generation-error-retry"
-        >
-          Retry generation
-        </button>
+        {retryable ? (
+          <button
+            type="button"
+            className="btn btn-accent"
+            onClick={onRetry}
+            data-testid="generation-error-retry"
+          >
+            Retry generation
+          </button>
+        ) : null}
         {onBack ? (
           <button
             type="button"
-            className="btn"
+            // When retry is suppressed, "Back to brief" is the primary action.
+            className={retryable ? "btn" : "btn btn-accent"}
             onClick={onBack}
             data-testid="prototype-route-gen-error-back"
           >

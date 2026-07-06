@@ -568,8 +568,12 @@ def test_anthropic_api_exception_returns_error_status(monkeypatch):
     ])
     result = _run(agent_loop(_system(), _user(), _ctx()))
     assert result.status == "error"
-    assert result.error_class == "RuntimeError"
-    assert result.error_message == "boom"
+    # Sanitized: an unrecognized exception classifies to the safe INTERNAL token
+    # with a fixed generic message — the raw text ("boom") never reaches these
+    # client-visible fields (it goes to the log only).
+    assert result.error_class == "INTERNAL"
+    assert result.error_message == "Something went wrong."
+    assert "boom" not in (result.error_message or "")
     assert result.usage.input_tokens == 50  # partial usage retained
 
 
@@ -707,7 +711,7 @@ def test_cost_summary_emitted_even_on_error(monkeypatch, caplog):
     assert result.status == "error"
     msg = next(r.getMessage() for r in caplog.records if r.name == TELEMETRY_LOGGER)
     assert "status=error" in msg
-    assert "error_class=RuntimeError" in msg
+    assert "error_class=INTERNAL" in msg
 
 
 # ─── P7-01 regression: lock the AD15 soft-cap envelope ──────────────────────

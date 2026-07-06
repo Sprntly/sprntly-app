@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it, vi } from "vitest"
 import {
   GenerationErrorBanner,
+  isRetryableFailure,
   reasonCopy,
 } from "../GenerationErrorBanner"
 
@@ -190,5 +191,69 @@ describe("GenerationErrorBanner — render + retry (AC1/AC3/AC6)", () => {
     expect(html).not.toContain("/srv/internal/secret/path")
     expect(html).not.toContain("stderr-tail")
     expect(html).not.toContain("exit=1")
+  })
+})
+
+describe("reasonCopy — provider error classes", () => {
+  it("maps each PROVIDER_* class to curated copy (test_reasoncopy_provider_classes)", () => {
+    // Billing/auth: reassuring, non-blaming, never leaks the credit/auth cause.
+    expect(reasonCopy("error_class=PROVIDER_BILLING | error_message=x")).toBe(
+      "Something went wrong on our end — we've been notified.",
+    )
+    expect(reasonCopy("error_class=PROVIDER_AUTH | error_message=x")).toBe(
+      "Something went wrong on our end — we've been notified.",
+    )
+    // Interpolates a support reference when a refId is given.
+    expect(reasonCopy("error_class=PROVIDER_BILLING", 252)).toBe(
+      "Something went wrong on our end — we've been notified. (Ref: 252)",
+    )
+    expect(reasonCopy("error_class=PROVIDER_CAPACITY | error_message=x")).toBe(
+      "High demand right now — try again in a few minutes.",
+    )
+    expect(reasonCopy("error_class=PROVIDER_UNAVAILABLE | error_message=x")).toBe(
+      "The prototype service is temporarily unavailable. Try again shortly.",
+    )
+  })
+
+  it("falls back to the generic line for an unknown class (test_reasoncopy_unknown_generic_fallback)", () => {
+    // Regression: the existing generic fallback is unchanged.
+    expect(reasonCopy("SomeUnclassifiedError: whatever")).toBe(
+      "Generation failed. Try regenerating.",
+    )
+  })
+
+  it("classifies retryability from the raw wire string (isRetryableFailure)", () => {
+    expect(isRetryableFailure("error_class=PROVIDER_BILLING")).toBe(false)
+    expect(isRetryableFailure("error_class=PROVIDER_AUTH")).toBe(false)
+    expect(isRetryableFailure("error_class=PROVIDER_CAPACITY")).toBe(true)
+    expect(isRetryableFailure("error_class=PROVIDER_UNAVAILABLE")).toBe(true)
+    expect(isRetryableFailure("ViteBuildError: exit=1")).toBe(true)
+  })
+})
+
+describe("GenerationErrorBanner — retry suppression on non-retryable failures", () => {
+  const noop = () => {}
+
+  it("suppresses the Retry control when retryable=false, keeps it when true (test_retry_cta_suppressed_for_billing_auth)", () => {
+    const suppressed = renderToStaticMarkup(
+      React.createElement(GenerationErrorBanner, {
+        reason: "Something went wrong on our end — we've been notified.",
+        onRetry: noop,
+        onBack: noop,
+        retryable: false,
+      }),
+    )
+    expect(suppressed).not.toContain('data-testid="generation-error-retry"')
+    // Back to brief becomes the primary action when retry is gone.
+    expect(suppressed).toContain('data-testid="prototype-route-gen-error-back"')
+
+    const retryable = renderToStaticMarkup(
+      React.createElement(GenerationErrorBanner, {
+        reason: "The prototype failed to build. Try regenerating.",
+        onRetry: noop,
+        retryable: true,
+      }),
+    )
+    expect(retryable).toContain('data-testid="generation-error-retry"')
   })
 })

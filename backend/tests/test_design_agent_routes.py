@@ -367,7 +367,10 @@ async def test_background_task_failure_marks_prototype_failed(env, monkeypatch):
     )
     row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
     assert row["status"] == "failed"
-    assert row["error"].startswith("ValueError: boom")
+    # Sanitized: the failed row carries the safe class + generic message, never
+    # the raw exception text ("boom").
+    assert row["error"] == "error_class=INTERNAL | error_message=Something went wrong."
+    assert "boom" not in row["error"]
 
 
 @pytest.mark.asyncio
