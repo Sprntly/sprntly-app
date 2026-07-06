@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>delivery-tickets — Sprntly ticket views (Sample v5)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,500;0,600;1,500;1,600&family=Inter:wght@400;450;500;600;700&family=IBM+Plex+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#1c1e21;--ink2:#4a4d52;--soft:#8a8d92;--line:#e8e8e6;--paper:#ffffff;--panel:#f7f7f5;
+    --green:#2e8a57;--green-d:#257147;--green-title:#2f7d52;--green-s:#e9f4ec;--green-b:#cfe6d8;
+    --urgent:#c63f35;--urgent-b:#fcebe8;--urgent-br:#f2cfc9;
+    --high:#b57a21;--high-b:#fbf1de;--high-br:#efdcb8;
+    --normal:#3f63a0;--normal-b:#e9eef7;--normal-br:#d3dced;
+    --chip:#f1f1ef;--chip-t:#6b7075;--tabring:#2b5fd9;
+    --sans:'Inter',-apple-system,system-ui,sans-serif;--serif:'Spectral',Georgia,serif;--mono:'IBM Plex Mono',monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased;padding:24px 26px 90px}
+  .wrap{max-width:1060px;margin:0 auto}
+  .sample-banner{background:var(--high-b);color:var(--high);border:1px solid var(--high-br);border-radius:10px;padding:9px 15px;font-size:12.5px;font-weight:500;margin-bottom:18px}
+  .viewlabel{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--soft);margin:44px 0 14px;font-weight:600}
+  /* artifact tab bar */
+  .tabbar{display:flex;align-items:center;gap:10px;padding:8px 0 16px;margin-bottom:14px;flex-wrap:wrap}
+  .tab svg{color:var(--soft)} .tab.active svg{color:var(--ink)} .tab{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--ink2);background:var(--panel);border-radius:999px;padding:8px 17px;cursor:pointer;border:2px solid transparent}
+  .tab.active{background:var(--paper);border-color:var(--tabring);color:var(--ink)}
+  .tabtitle{font-size:16px;font-weight:600;color:var(--ink);margin-left:6px;flex:1;min-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tab-actions{display:flex;gap:10px;align-items:center}
+  .tbtn{display:inline-flex;align-items:center;gap:8px;font-size:14px;font-weight:600;color:var(--ink);background:var(--paper);border:1px solid var(--line);border-radius:999px;padding:8px 16px;cursor:pointer}
+  .tclose{font-size:16px;color:var(--soft);cursor:pointer;padding:4px 8px}
+  /* header block — exactly per screenshot */
+  .topbar{background:var(--panel);border-radius:12px;padding:22px 26px}
+  .topbar h2{font-family:var(--serif);font-weight:500;font-size:24px;color:var(--ink);line-height:1.3}
+  .topbar h2 em{font-style:italic;font-weight:600;color:var(--green-title)}
+  .topbar .sub{font-size:14px;color:var(--soft);margin-top:4px}
+  .hactions{display:flex;gap:16px;align-items:center;margin-top:16px}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-size:15px;font-weight:600;border-radius:10px;padding:11px 20px;cursor:pointer;border:none;font-family:var(--sans)}
+  .btn.push{background:var(--green);color:#fff}
+  .btn.regen{background:transparent;color:var(--ink);padding-left:0}
+  .intro{display:flex;gap:12px;background:var(--green-s);border-radius:12px;padding:17px 20px;font-size:15.5px;color:var(--ink);line-height:1.6;margin-top:16px}
+  .intro em{font-style:italic}.intro b{font-weight:700}
+  .spark{color:var(--green);flex-shrink:0;margin-top:2px;font-size:16px}
+  /* cards */
+  .tcard{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-top:14px;display:flex;gap:22px;cursor:pointer;transition:box-shadow .15s,border-color .15s}
+  .tcard:hover{box-shadow:0 2px 12px rgba(28,30,33,.06);border-color:#dcdcd9}
+  .tkey{font-family:var(--mono);font-size:13px;font-weight:500;color:var(--ink2);background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:5px 11px;height:fit-content;flex-shrink:0}
+  .tmain{flex:1;min-width:0}
+  .ttitle{font-size:16.5px;font-weight:700;margin-bottom:5px}
+  .tstory{font-size:14.5px;color:var(--soft);line-height:1.6;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .trow{display:flex;gap:10px;margin-top:13px;align-items:center}
+  .pill{font-size:12px;font-weight:700;letter-spacing:.04em;border-radius:999px;padding:4px 13px;border:1px solid transparent}
+  .pill.urgent{background:var(--urgent-b);color:var(--urgent);border-color:var(--urgent-br)}
+  .pill.high{background:var(--high-b);color:var(--high);border-color:var(--high-br)}
+  .pill.normal{background:var(--normal-b);color:var(--normal);border-color:var(--normal-br)}
+  .acchip{font-size:12.5px;font-weight:600;color:var(--chip-t);background:var(--chip);border-radius:999px;padding:4px 13px}
+  .more{font-size:13.5px;color:var(--soft);text-align:center;padding:16px 0 0}
+  /* ===== detail: standard ticket anatomy ===== */
+  .detail{border:1px solid var(--line);border-radius:14px;overflow:hidden}
+  .dtop{background:var(--panel);padding:18px 26px;display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+  .crumb{font-size:13px;color:var(--soft);width:100%}
+  .crumb em{color:var(--green-title);font-family:var(--serif);font-weight:600;font-style:italic}
+  .dtitle{font-family:var(--serif);font-weight:600;font-size:20px;color:var(--ink);flex:1;min-width:280px}
+  .dtop .btn{padding:9px 16px;font-size:14px}
+  .cols{display:grid;grid-template-columns:1fr 300px;gap:0}
+  .main{padding:22px 26px;border-right:1px solid var(--line)}
+  .rail{padding:20px 20px;background:#fbfbfa}
+  .sec{margin-bottom:24px}
+  .sec h4{font-size:12px;color:var(--soft);font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+  .sec h4 .hint{font-weight:500;text-transform:none;letter-spacing:0;font-size:12px}
+  .dlbl{font-size:11px;color:var(--soft);font-weight:700;text-transform:uppercase;letter-spacing:.07em;margin:12px 0 3px}
+  .dlbl:first-of-type{margin-top:0}
+  .dtx{font-size:14px;color:var(--ink2);line-height:1.6;margin:0}
+  .dtx .k{color:var(--green-d);font-weight:600}
+  .dlist{margin:2px 0 0 18px;font-size:14px;color:var(--ink2);line-height:1.7}
+  .story{font-size:15px;color:var(--ink);line-height:1.65}
+  .story .k{color:var(--green-d);font-weight:600}
+  .ctx{font-size:14px;color:var(--ink2);line-height:1.65;margin-top:10px}
+  .ctx a{color:var(--green-d);font-weight:600;text-decoration:none}
+  .need{font-family:var(--mono);font-size:12px;color:var(--high)}
+  .ac{border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  .acitem{display:flex;gap:11px;align-items:flex-start;margin-bottom:9px}
+  .acitem:last-of-type{margin-bottom:4px}
+  .cb{width:17px;height:17px;border:1.5px solid #d6d6d3;border-radius:5px;background:var(--paper);flex-shrink:0;margin-top:2px}
+  .cb.done{background:var(--green);border-color:var(--green)}
+  .cb.done::after{content:'✓';color:#fff;font-size:11px;display:flex;align-items:center;justify-content:center;height:100%}
+  .acitem .txt{font-size:13.5px;color:var(--ink2)}
+  .acitem .k{color:var(--green-d);font-weight:600}
+  .acitem .tagf{font-size:11px;color:var(--urgent);font-weight:700}
+  .acitem .tagn{font-size:11px;color:var(--high);font-weight:700}
+  .inherit{display:block;font-size:11.5px;color:var(--soft);margin-top:8px}
+  .sub-t{display:flex;gap:11px;align-items:center;padding:9px 14px;border:1px solid var(--line);border-radius:10px;margin-bottom:7px;font-size:13.5px;color:var(--ink2)}
+  .sub-t .cb{margin-top:0}
+  .sub-t .sk{font-size:11.5px;color:var(--soft);font-weight:600;margin-left:auto}
+  .dep{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:500;border-radius:10px;padding:7px 13px;margin:0 7px 7px 0;border:1px solid var(--line);background:var(--panel);color:var(--ink2)}
+  .dep.block{border-color:var(--urgent-br);background:var(--urgent-b);color:var(--urgent)}
+  .att{display:flex;gap:9px;flex-wrap:wrap}
+  a.attchip{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 14px;color:var(--ink2);text-decoration:none;transition:border-color .15s,color .15s}
+  a.attchip:hover{border-color:var(--green);color:var(--green-d)}
+  a.attchip .open{color:var(--green-d);font-size:11.5px;font-weight:700}
+  /* comments — single example */
+  .aisum{background:var(--green-s);border-radius:12px;padding:14px 16px;margin-bottom:13px;font-size:13.5px;color:var(--ink2)}
+  .aisum .ah{font-size:13px;font-weight:700;color:var(--green-d);margin-bottom:6px}
+  .aisum .push2{font-size:12.5px;color:var(--soft);margin-top:8px}
+  .aisum .push2 b{color:var(--ink2)}
+  .aisum .actions2{display:flex;gap:9px;margin-top:11px}
+  .btn2{font-size:12.5px;font-weight:600;border-radius:9px;padding:7px 14px;cursor:pointer;border:1px solid transparent}
+  .btn2.primary{background:var(--green);color:#fff}
+  .btn2.ghost{background:var(--paper);border-color:var(--line);color:var(--ink2)}
+  .cmt{display:flex;gap:11px;margin-bottom:13px}
+  .av{width:30px;height:30px;border-radius:50%;background:var(--high-b);color:var(--high);font-size:11.5px;font-weight:700;display:flex;align-items:center;justify-content:center;border:1.5px solid var(--high-br);flex-shrink:0}
+  .cmt .body{flex:1}
+  .cmt .who2{font-size:13.5px;font-weight:600}
+  .cmt .when{font-size:12px;color:var(--soft);font-weight:400;margin-left:7px}
+  .cmt p{font-size:13.5px;color:var(--ink2)}
+  .ask{display:flex;gap:9px;margin-top:14px}
+  .ask input{flex:1;border:1px solid var(--line);border-radius:10px;padding:11px 15px;font-size:13.5px;font-family:var(--sans);background:var(--panel);color:var(--ink)}
+  /* right rail */
+  .rail h4{font-size:12px;color:var(--soft);font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin:16px 0 10px}
+  .rrow{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:8px 0;border-bottom:1px solid var(--line)}
+  
+  .rl{font-size:12px;color:var(--soft);font-weight:500;flex-shrink:0;padding-top:1px}
+  .rv{font-size:13px;font-weight:600;color:var(--ink)}
+  .rv .caret{color:var(--soft);font-size:10px;margin-left:4px}
+  .rv.muted{color:var(--soft);font-weight:500}
+  .rv .pill{font-size:11px;padding:3px 10px}
+  .assg{display:flex;align-items:center;gap:7px}
+  .assg .av{width:24px;height:24px;font-size:9.5px}
+  .synccard{margin-top:18px;background:var(--green-s);border-radius:10px;padding:11px 13px;font-size:12.5px;color:var(--green-d);font-weight:600}
+  .synccard .m{display:block;font-weight:400;color:var(--ink2);font-size:12px;margin-top:3px}
+  /* mapping strip */
+  .mapwrap{border-top:1px solid var(--line);padding:18px 26px;background:#fbfbfa}
+  .mapwrap h4{font-size:12px;color:var(--soft);font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px}
+  table.map{width:100%;border-collapse:collapse;font-size:12px}
+  table.map th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;color:var(--soft);padding:8px 12px;border-bottom:1px solid var(--line)}
+  table.map th.active,table.map td.active{background:var(--green-s)}
+  table.map td{padding:7px 12px;border-bottom:1px solid var(--line);color:var(--ink2);vertical-align:top}
+  table.map td:first-child{font-weight:600;color:var(--ink)}
+  table.map tr:last-child td{border-bottom:none}
+  .mapfoot{font-size:12px;color:var(--soft);margin-top:9px}
+  .qactions{display:flex;gap:8px;align-items:center;margin-left:auto}
+  .qbtn{font-size:13px;font-weight:600;color:var(--ink2);background:var(--paper);border:1px solid var(--line);border-radius:8px;padding:7px 13px;cursor:pointer}
+  .acttabs{display:flex;gap:6px;margin-bottom:12px}
+  .atab{font-size:12.5px;font-weight:600;color:var(--soft);background:var(--panel);border-radius:7px;padding:5px 12px;cursor:pointer}
+  .atab.active{background:var(--chip);color:var(--ink)}
+  .statusbtn{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;align-self:center;font-weight:700;background:var(--normal-b);color:var(--normal);border:1px solid var(--normal-br);border-radius:9px;padding:8px 16px;cursor:pointer}
+  .railfoot{font-size:11px;color:var(--soft);margin-top:12px;padding-top:9px;border-top:1px solid var(--line)}
+  .pickwrap{position:relative;display:inline-block}
+  .picker{margin-top:10px;background:var(--paper);border:1px solid var(--line);border-radius:10px;box-shadow:0 6px 24px rgba(28,30,33,.10);padding:10px 12px;max-width:280px}
+  .picker .ph2{font-size:10.5px;font-weight:700;color:var(--soft);text-transform:uppercase;letter-spacing:.07em;margin-bottom:6px}
+  .pitem{display:flex;align-items:center;gap:7px;padding:5px 8px;border-radius:7px;font-size:12px;font-weight:500;color:var(--ink2);cursor:pointer;white-space:nowrap;overflow:hidden}
+  .pitem:hover{background:var(--panel)}
+  .pitem.sel{background:var(--green-s);color:var(--green-d);font-weight:600}
+  .pitem .ppath{font-size:10px;color:var(--soft);font-weight:400;margin-left:auto;padding-left:10px;overflow:hidden;text-overflow:ellipsis}
+  .pfoot{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:7px;padding-top:7px;border-top:1px solid var(--line);font-size:11px;color:var(--soft)}
+  .descwide{padding:22px 26px 6px;border-bottom:1px solid var(--line)}
+  [contenteditable="true"]:hover{outline:1.5px dashed var(--green-b);outline-offset:3px;border-radius:4px;cursor:text}
+  .edithint{font-size:11.5px;color:var(--soft);padding:8px 26px;background:#fbfbfa;border-bottom:1px solid var(--line)}
+  .note{font-size:12.5px;color:var(--soft);margin-top:28px;line-height:1.6}
+  @media(max-width:860px){.cols{grid-template-columns:1fr}.main{border-right:none;border-bottom:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="sample-banner">⚠ SAMPLE — demo data. Consumes the prd-author artifact (Part A + Part B). Artifact links open demo pages in a new tab.</div>
+
+  <div class="viewlabel" style="margin-top:0">View 1 · Ticket list — top section per the shared design</div>
+
+  <div class="topbar">
+    <h2>Tickets from <em>Competitive Positioning — Reposition Team &amp; Intelligence+Build Tiers Against the Notion AI / Dovetail Pincer</em></h2>
+    <div class="sub">12 tickets · generated from the PRD</div>
+    <div class="hactions">
+      <button class="btn regen">⟳ Regenerate</button>
+      <button class="btn push">✓ Push to ClickUp</button>
+    </div>
+    <div class="picker">
+      <div class="ph2">Push to ClickUp — select a project</div>
+      <div class="pitem sel">● Onboarding &amp; Activation <span class="ppath">Product / Growth</span></div>
+      <div class="pitem">○ Platform <span class="ppath">Product / Core</span></div>
+      <div class="pitem">○ Growth Experiments <span class="ppath">Growth</span></div>
+      <div class="pitem">＋ Create new project…</div>
+      <div class="pfoot"><span>☑ Remember for this PRD</span><span class="btn2 primary" style="padding:5px 11px;font-size:11.5px">Push 9 tickets</span></div>
+    </div>
+    <div style="font-size:11.5px;color:var(--soft);margin-top:8px">↑ shown on Push click — destination remembered per PRD; sync then runs on the backend</div>
+  </div>
+
+  <div class="intro"><span class="spark">✳</span><div>I've broken <em>Competitive Positioning — Reposition Team &amp; Intelligence+Build Tiers Against the Notion AI / Dovetail Pincer</em> into <b>12 implementable tickets</b> — scoped and prioritized from the PRD. Review, then push to ClickUp.</div></div>
+
+  <div class="tcard"><span class="tkey">T-1</span><div class="tmain"><div class="ttitle">Competitive Positioning One-Pager (Internal + Customer-Facing)</div><div class="tstory">As a Director of Product or AE, I want a competitive positioning one-pager that articulates Sprntly's differentiation on bulk onboarding and brief distribution vs. Notion AI and Dovetail, so that I can answer 'why Sprntly?' clearly in a vendor review without resorting to price. Context: primary capability — PRD § 5 R1.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">6 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">T-2</span><div class="tmain"><div class="ttitle">Productboard Displacement Battle Card for Sales</div><div class="tstory">As an SDR or AE, I want a battle card for the Productboard displacement play that covers role-change handling post-layoffs and Productboard's Enterprise-only Salesforce lock-in as a pain hook, so that I can run the outbound play without improvising or escalating. Context: PRD § 5 R2.</div><div class="trow"><span class="pill urgent">URGENT</span><span class="acchip">6 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">T-3</span><div class="tmain"><div class="ttitle">Notion AI Per-Seat Objection-Handling Guide</div><div class="tstory">As an AE, I want a defensible, scripted objection-handling guide for the Notion AI per-seat price comparison, so that I can reframe the conversation on value and workflow consolidation without offering ad-hoc discounts or losing the deal on price optics. Context: PRD § 5 R3.</div><div class="trow"><span class="pill high">HIGH</span><span class="acchip">6 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">T-4</span><div class="tmain"><div class="ttitle">Website Pricing Page Update — Bulk Onboarding &amp; Brief Distribution Value Props</div><div class="tstory">As a prospect landing on Sprntly's pricing page, I want each tier description to lead with bulk-onboarding and brief-distribution differentiators, so that I can immediately understand what Sprntly offers that Notion AI and Dovetail don't in the $500–$2,000/mo band. Context: PRD § 5 R4.</div><div class="trow"><span class="pill high">HIGH</span><span class="acchip">6 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">T-5</span><div class="tmain"><div class="ttitle">Productboard Displacement Outbound Sequence — Launch &amp; Unsubscribe Monitoring</div><div class="tstory">As an SDR, I want the Productboard displacement outbound sequence live against prioritised SMB/mid-market accounts, with real-time unsubscribe monitoring, so that we can capture the post-layoff acquisition window before it closes without damaging brand reputation. Context: PRD § 5 R5.</div><div class="trow"><span class="pill high">HIGH</span><span class="acchip">6 AC</span></div></div></div>
+
+  <div class="tcard"><span class="tkey">T-6</span><div class="tmain"><div class="ttitle">Signed-Competitor CRM Auto-Suppression for Outbound Sequence</div><div class="tstory">As a Sales Ops manager, I want the outbound sequence to automatically terminate and re-queue any target account that has signed with a competitor during outreach, so that we don't waste SDR time or damage relationships with accounts already closed. Context: failure case — PRD § 5 R6.</div><div class="trow"><span class="pill normal">NORMAL</span><span class="acchip">6 AC</span></div></div></div>
+
+  <div class="viewlabel">View 2 · Ticket detail (T-2)</div>
+
+  <div class="detail">
+    <div class="dtop">
+      <div class="crumb">Competitive Positioning — Notion AI / Dovetail Pincer&nbsp; /&nbsp; <span class="tkey" style="padding:3px 9px">T-2</span></div>
+      <span class="dtitle" contenteditable="true">Productboard Displacement Battle Card for Sales</span>
+      <span class="qactions"><span class="qbtn">＋ Attach</span><span class="qbtn">⛓ Link</span><span class="qbtn">⋯</span></span>
+    </div>
+
+    <div class="edithint">✎ Everything below is editable in place — click any text or field; edits sync on push. Acceptance criteria are inherited from the spec: propose changes in comments instead of editing.</div>
+    <div class="descwide">
+        <div class="sec">
+          <h4>Description</h4>
+          <div class="dlbl">What</div>
+          <p class="dtx" contenteditable="true">Create a one-page battle card that gives any SDR or AE everything needed to run the Productboard displacement play without improvising.</p>
+          <div class="dlbl">Why now</div>
+          <p class="dtx" contenteditable="true">Productboard's June layoffs left many of its accounts without the champion who bought it, and its Salesforce integration is gated to the Enterprise tier — two openings our win/loss notes confirm. The window closes as those accounts re-commit at renewal.</p>
+          <div class="dlbl">User story</div>
+          <p class="dtx" contenteditable="true"><span class="k">As an</span> SDR or AE, <span class="k">I want</span> one card with the targeting rule, the pain hooks, and the price counter, <span class="k">so that</span> I can run the play confidently without escalating to product marketing.</p>
+          <div class="dlbl">The card must cover</div>
+          <ul class="dlist" contenteditable="true">
+            <li>Who to target — accounts with a recent champion role-change</li>
+            <li>The two pain hooks, each with sourced proof points</li>
+            <li>The price-counter script — never opens with a discount</li>
+            <li>Landmines — where Productboard honestly wins, and we disqualify</li>
+          </ul>
+          <div class="dlbl">Out of scope</div>
+          <p class="dtx" contenteditable="true">Pricing changes · outbound sequence copy (that's T-5).</p>
+          <p class="dtx" contenteditable="true" style="color:var(--soft);font-size:12.5px">Grounding: <a href="https://app.sprntly.demo/prd/competitive-positioning#s5-r2" target="_blank" rel="noopener" style="color:var(--green-d);font-weight:600;text-decoration:none">PRD § 5 R2</a> · displacement win-rate baseline <span class="need">[NEED: not yet tracked]</span></p>
+        </div>
+    </div>
+
+    <div class="cols">
+      <div class="main">
+
+        <div class="sec">
+          <h4>Acceptance criteria — 6</h4>
+          <div class="ac">
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="k">Given</span> a target account with a recent champion role-change, <span class="k">When</span> the SDR opens the card, <span class="k">Then</span> it provides the role-change talk track with at least two sourced proof points.</span></div>
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="k">Given</span> a mid-market account on Productboard, <span class="k">When</span> the Salesforce lock-in hook is used, <span class="k">Then</span> the card states the Enterprise-gating fact with its source and date — no unsourced claims.</span></div>
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="k">Given</span> a price objection, <span class="k">When</span> the AE follows the counter script, <span class="k">Then</span> the response reframes on value and consolidation and never opens with a discount.</span></div>
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="k">Given</span> a scenario where Productboard genuinely fits better, <span class="k">When</span> the SDR checks the landmines section, <span class="k">Then</span> the card names it and instructs disqualification.</span></div>
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="tagn">[edge]</span> <span class="k">Given</span> a claim whose evidence is missing, <span class="k">When</span> the card is generated, <span class="k">Then</span> the claim renders as [NEED: source] — never asserted without one.</span></div>
+            <div class="acitem"><span class="cb"></span><span class="txt"><span class="tagf">[failure]</span> <span class="k">Given</span> the card is older than 30 days or a cited fact changes, <span class="k">When</span> an SDR opens it, <span class="k">Then</span> a staleness banner appears and re-verification is requested.</span></div>
+            <span class="inherit">Inherited from the PRD's implementation spec · propose changes in comments — don't edit here</span>
+          </div>
+        </div>
+
+        <div class="sec">
+          <h4>Child issues</h4>
+          <div class="sub-t"><span class="cb done"></span> Pull win/loss notes + layoff coverage into a sourced fact sheet <span class="sk">Done</span></div>
+          <div class="sub-t"><span class="cb"></span> Draft card: hooks · proof points · counter script · landmines <span class="sk">To do</span></div>
+          <div class="sub-t"><span class="cb"></span> Objection table (top 6, scripted) <span class="sk">To do</span></div>
+          <div class="sub-t"><span class="cb"></span> Sales lead sign-off + publish to enablement hub <span class="sk">To do</span></div>
+        </div>
+
+        <div class="sec">
+          <h4>Linked issues</h4>
+          <div style="font-size:12px;color:var(--soft);font-weight:600;margin-bottom:6px">is blocked by</div>
+          <span class="dep block">T-1 — Competitive Positioning One-Pager</span>
+          <div style="font-size:12px;color:var(--soft);font-weight:600;margin:8px 0 6px">blocks</div>
+          <span class="dep">T-5 — Productboard Displacement Outbound Sequence</span>
+        </div>
+
+        <div class="sec">
+          <h4>Attachments — 3</h4>
+          <div class="att">
+            <a class="attchip" href="https://app.sprntly.demo/prd/competitive-positioning#s5-r2" target="_blank" rel="noopener">📄 PRD § 5 R2 <span class="open">↗</span></a>
+            <a class="attchip" href="https://app.sprntly.demo/briefs/market-event-productboard-layoffs" target="_blank" rel="noopener">📊 Evidence — Productboard layoffs brief <span class="open">↗</span></a>
+            <a class="attchip" href="https://app.sprntly.demo/prototypes/battle-card-template-v1" target="_blank" rel="noopener">🧩 Prototype — battle card template v1 <span class="open">↗</span></a>
+          </div>
+        </div>
+
+        <div class="sec" style="margin-bottom:0">
+          <h4>Activity</h4>
+          <div class="acttabs"><span class="atab">All</span><span class="atab active">Comments</span><span class="atab">History</span></div>
+          <div class="aisum">
+            <div class="ah">✳ AI summary</div>
+            Thread aligned on the card structure. One decision proposed: <b>a 30-day staleness rule</b> so outdated competitive claims can't circulate — accepting updates this ticket's criteria (adds the [failure] test), the PRD requirement and its spec test (v0.4 → v0.5), and the card template.
+            <div class="actions2"><span class="btn2 primary">Accept &amp; propagate</span><span class="btn2 ghost">Edit</span><span class="btn2 ghost">Reject</span></div>
+          </div>
+          <div class="cmt"><span class="av">PR</span><div class="body"><div class="who2">Priya R. <span class="when">2 hours ago</span></div><p>Competitor facts rot fast — the Salesforce-gating claim could change next quarter. The card should carry a freshness rule.</p></div></div>
+          <div class="ask"><input placeholder="Add a comment…"><span class="btn2 primary">Send</span></div>
+        </div>
+
+      </div>
+      <div class="rail">
+        <div class="statusbtn">Ready <span style="font-size:10px">▾</span></div>
+        <h4>Details</h4>
+        <div class="rrow"><span class="rl">Assignee</span><span class="rv"><span class="assg"><span class="av" style="background:var(--green-s);color:var(--green-d);border-color:var(--green-b)">NL</span> Nadia L.</span></span></div>
+        <div class="rrow"><span class="rl">Reporter</span><span class="rv muted">Sprntly PM Agent</span></div>
+        <div class="rrow"><span class="rl">Priority</span><span class="rv"><span class="pill urgent">URGENT</span></span></div>
+        <div class="rrow"><span class="rl">Labels</span><span class="rv muted">sales-enablement · competitive</span></div>
+        <div class="rrow"><span class="rl">Parent</span><span class="rv">Competitive Positioning</span></div>
+        <div class="rrow"><span class="rl">Sprint</span><span class="rv">Growth S9</span></div>
+        <div class="rrow"><span class="rl">Story points</span><span class="rv">3</span></div>
+        <div class="rrow"><span class="rl">Due date</span><span class="rv">Jul 10</span></div>
+        <div class="rrow"><span class="rl">Time tracking</span><span class="rv muted">2d estimated</span></div>
+        <div class="rrow"><span class="rl">Route</span><span class="rv" style="color:var(--green-d)">agent-ready · sign-off gated</span></div>
+        <div class="rrow"><span class="rl">Watchers</span><span class="rv muted">Kwame · Priya R. · +3</span></div>
+        <div class="railfoot">Created Jul 3 · Updated 40 minutes ago</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

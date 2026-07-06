@@ -1,4 +1,4 @@
-# Ticket field mapping — canonical → Jira / Linear / Asana / Monday
+# Ticket field mapping — canonical → ClickUp / Jira / Linear / Asana / Monday
 
 The skill builds one **canonical ticket** and maps it to each tool's real fields at sync time.
 Field schemas below are from each tool's current API/docs (researched 2026-06). Anything a tool
@@ -12,25 +12,26 @@ doesn't natively have is mapped to the closest field and flagged, never dropped 
 `route` (agent-ready / needs-human) · `traceability` (task → R# → test → PRD goal).
 
 ## Mapping table
-| Canonical | Jira | Linear | Asana | Monday.com |
-|---|---|---|---|---|
-| title | `summary` | `title` | `name` | item `name` |
-| description | `description` (ADF) | `description` (markdown) | `notes` / `html_notes` | Long Text column |
-| acceptance_criteria | description section or checklist add-on | description section | description / subtask checklist | Long Text or Checklist column |
-| type / category | `issuetype` (Story/Task/Bug/Sub-task) | `label` or team | `custom_field` (enum) or section | Status/Dropdown column |
-| priority (P0–P3) | `priority` | `priority` 1=Urgent 2=High 3=Med 4=Low | `custom_field` (enum) | Priority/Status column |
-| status | `status` (workflow) | `state` | section or enum custom field | Status column |
-| assignee | `assignee` | `assignee` | `assignee` | Person column |
-| points | **Story Points** (custom field) | `estimate` (XS1 S2 M3 L5 XL8) | Number `custom_field` | Numbers column |
-| labels / tags | `labels` | `labels` | `tags` | Dropdown column |
-| parent (epic/feature) | `parent` (Epic Link **deprecated** → use parent) | `parent` / `project` | `parent` / `projects` | Connect Boards / Subitems |
-| sprint / cycle | `sprint` (Agile) | `cycle` | *(no native — use section/project)* | *(no native — use group)* |
-| dependencies | issue links: **blocks / is blocked by** | issue relations | `dependencies` / `dependents` | Connect Boards or Dependency column |
-| provenance (PRD §, task) | link in description or Web-link | link in description | link in description / attachment | Link column |
-| attachments | attachment / remote link | attachment / link | attachment / link | File or Link column |
-| due date | `duedate` | `dueDate` | `due_on` / `due_at` | Date column |
+| Canonical | ClickUp | Jira | Linear | Asana | Monday.com |
+|---|---|---|---|---|---|
+| title | `name` | `summary` | `title` | `name` | item `name` |
+| description | `description` / `markdown_content` | `description` (ADF) | `description` (markdown) | `notes` / `html_notes` | Long Text column |
+| acceptance_criteria | **checklist** items | description section or checklist add-on | description section | description / subtask checklist | Long Text or Checklist column |
+| type / category | task type / list | `issuetype` (Story/Task/Bug/Sub-task) | `label` or team | `custom_field` (enum) or section | Status/Dropdown column |
+| priority (P0–P3) | `priority` **1–4** (1 urgent…4 low) | `priority` | `priority` 1=Urgent 2=High 3=Med 4=Low | `custom_field` (enum) | Priority/Status column |
+| status | list `status` | `status` (workflow) | `state` | section or enum custom field | Status column |
+| assignee | `assignees` | `assignee` | `assignee` | `assignee` | Person column |
+| points | **sprint points** (custom field) | **Story Points** (custom field) | `estimate` (XS1 S2 M3 L5 XL8) | Number `custom_field` | Numbers column |
+| labels / tags | `tags` | `labels` | `labels` | `tags` | Dropdown column |
+| parent (epic/feature) | `parent` task / list | `parent` (Epic Link **deprecated** → use parent) | `parent` / `project` | `parent` / `projects` | Connect Boards / Subitems |
+| sprint / cycle | **sprint list** | `sprint` (Agile) | `cycle` | *(no native — use section/project)* | *(no native — use group)* |
+| dependencies | **waiting-on / blocking** | issue links: **blocks / is blocked by** | issue relations | `dependencies` / `dependents` | Connect Boards or Dependency column |
+| provenance (PRD §, task) | link in description / attachment | link in description or Web-link | link in description | link in description / attachment | Link column |
+| attachments | attachment / link | attachment / remote link | attachment / link | attachment / link | File or Link column |
+| due date | `due_date` (ms epoch) | `duedate` | `dueDate` | `due_on` / `due_at` | Date column |
 
 ## Sync notes per tool (gotchas the skill must honor)
+- **ClickUp:** REST v2 `POST /list/{id}/task`. Priority is an **int 1–4** (1 urgent…4 low), not a label. Acceptance criteria map to a native **checklist** (`POST /task/{id}/checklist` + items). Points/sprint points and any team-specific values are **custom fields** — resolve their ids via `GET /list/{id}/field` first and set through `custom_fields`. Dependencies use the **waiting-on / blocking** links endpoint. Sprints are a **sprint list** inside a Sprint Folder. Due dates are **Unix ms epoch**.
 - **Jira:** description is **ADF (Atlassian Document Format)**, not markdown — convert. Story Points is a **custom field** whose id varies per site (resolve by name `Story Points` via `expand=names`). Epic Link is deprecating; set **parent**. Priority/issuetype/status names must match the project's scheme.
 - **Linear:** GraphQL `issueCreate`; priority is an **int 0–4** (0 none, 1 urgent…4 low); `estimate` is points; team UUID required; labels by id.
 - **Asana:** priority and points are **custom fields** (resolve their gids per project first); enum values are set by **option gid**, not text; section = `memberships`; dependencies set via the dependencies endpoint.

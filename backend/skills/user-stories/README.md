@@ -1,50 +1,120 @@
-# delivery-tickets — README (LLM front door)
+# ticket
 
-`SKILL.md` is the authoritative spec. This README orients an LLM/agent fast: what the skill is, where it sits, every moving part, and how to build to it. It **supersedes `user-stories` and `story-mapping`** — one skill does both.
+Turn a `prd-author` artifact (Part A human PRD + Part B Implementation Spec)
+into editable, tracker-ready tickets in the Sprntly UI, and push them
+accurately to ClickUp, Jira, Asana, Monday.com, Linear — or any tool via the
+generic adapter.
 
-## What it is
-The delivery step of the PM pipeline. It turns a decided **PRD (± Implementation Spec)** into **editable, tracker-ready tickets**, builds a **story map only when the feature is large enough**, runs **comment intelligence** with an in-thread change-approval loop, and **syncs to whatever tool the team uses** — adapting to that tool's real fields, with a **generic adapter** for any tool it hasn't seen.
+**Replaces:** `user-stories` and `story-mapping` (flat tickets + story map,
+one skill, auto-sizing heuristic).
+**Upstream:** built on `prd-author` v4.2 — this skill packages the spec; it
+never re-derives or rewrites what the spec states.
 
-## Where it sits (the chain)
-`evidence-brief → prd-author → implementation-spec → delivery-tickets → (Jira / Linear / Asana / Monday / any)`
-It does **not** decide *what* to build (that's `prd-author`) or author the spec (`prd-author` Part B / `implementation-spec`). It packages the *what* into delivery and keeps every artifact in sync. Skills don't auto-call each other — an orchestrator (Sprntly) sequences them.
+## When to call it
 
-## When to invoke
-"create tickets", "break this into stories/tickets", "turn this PRD into Jira/Linear/Asana/Monday", "story breakdown", "send all to Jira". Also when a ticket's **comments** need triage or a proposed change needs to be routed.
+Call `ticket` when the *what* is decided and a PRD exists:
+- "create tickets" · "break this into stories/tickets" · "story breakdown"
+- "turn this PRD into Jira / ClickUp / Asana / Monday" · "push to <tool>"
+- a ticket's comments need triage, or a proposed change needs routing
+
+Do **NOT** call it to decide what to build (`prd-author`), grade the PRD
+(`prd-critique`), or write deep technical design (`tech-spec`).
 
 ## Inputs → Outputs
-- **In:** PRD requirements (**table OR prose** — both parsed; inline `[edge case]`/`[failure]` tags become required scenarios); Implementation Spec (optional but strongly recommended — its EARS/tasks/tests/`[ESCALATE]`/autonomy-gate are **inherited, not rewritten**); existing comments; team's tool + field config; team members; design-agent handle.
-- **Out:** an editable ticket set (+ a story map if sized in); decision tickets for `[ESCALATE]`; comment summaries + approved-change propagation; a tool sync (idempotent, bidirectional).
 
-## The moving parts
-1. **Requirements parser** — reads the PRD requirements whether a table (`# + **Label:** detail`) or prose; aligns each to a spec EARS id + task when a spec exists.
-2. **Spec inheritance** — acceptance criteria come verbatim from the spec's Given/When/Then; tags become test branches; traceability `ticket → task → R# → test → PRD goal` rides on every ticket.
-3. **Auto story-map decision** — sizing heuristic: story map if ≥2 of {multiple user activities, >~12 requirements, >1 release, phased rollout, cross-team}; else flat tickets. Always states the call.
-4. **Editable tickets** — title/name, description + acceptance criteria, attachments (add/remove), person responsible (reassign or **add from team**), priority/status/sprint, points/labels/category — all editable before sync.
-5. **Comment intelligence + change loop** — posts an AI summary; when a comment proposes a spec change it drafts the update, posts it **in-thread for human approval** (Approve & propagate / Edit / Reject), and on approval propagates to the **ticket**, the **PRD** (if a requirement changes, with a version bump), and the **design agent** (if the prototype changes) — re-checking traceability.
-6. **Adaptive sync (backend, automatic)** — field discovery & mapping run **server-side by default**; the user never hand-maps. Detects the connected tool, pulls its **live schema** (types, statuses, priorities, custom fields, columns, members, sprints/cycles), maps canonical → **only fields that exist**, degrades the rest with a flag, and surfaces only genuinely low-confidence matches for a one-tap confirm. **Sprint detection runs by default:** reuse an existing sprint if the project is already in flight there, otherwise **create a new sprint and sync** (new is the safe default).
-7. **Generic adapter** — for any tool not pre-mapped: introspect fields → infer each field's role by name+type with confidence (P0/High select → priority, number "SP" → points, people field → assignee, workflow → status, rich-text → description, relation → parent/deps, date → due) → auto-resolve on the backend → persist per workspace → write through honoring value formats.
+**In (required):** the prd-author artifact — ideally both parts. Part A § 5 is
+the requirements table (`ID | Requirement | Priority | Signal/Source |
+Acceptance`); Part B carries EARS, contracts, the stakes gate, tasks, spec-
+first tests, [ESCALATE], [ASSUMPTION → T0], Done-when.
+**In (optional):** team roster (expertise matching) · connected tracker ·
+existing backlog (dedupe) · design-agent handle.
+**Out:** the editable ticket set (list + detail views) · decision tickets
+routed to owners · a spike per [ASSUMPTION → T0] · approved-change propagation
+· a backend field-mapped sync to the chosen destination.
 
-## Editable fields (what a user can change inline)
-Title · description + acceptance criteria · attachments (add/remove) · person responsible (reassign / add from team) · priority · status · **sprint (pick existing or create new + sync)** · points · labels · category. Local until sync; on sync mapped per `references/field-mapping.md`.
+## The inheritance contract (what maps to what)
 
-## Field mapping & sync
-Canonical ticket → Jira / Linear / Asana / Monday in `references/field-mapping.md`, with the gotchas (Jira ADF + Story-Points custom field + parent-over-Epic-Link; Linear int priority + estimate; Asana custom-field priority/points by option gid; Monday status-by-index + Connect Boards). Sync is **idempotent** (stores the tool id; never duplicates) and **bidirectional** (pulls status/assignee/comments back; conflicts flagged).
+| prd-author produces | becomes |
+|---|---|
+| Part A § 5 rows | tickets — priority from the table, provenance `PRD § 5 R#` |
+| Part B spec-first tests | acceptance criteria, **verbatim**; failure branches → `[failure]` items; the card's `N AC` chip equals the inherited test count |
+| Part B tasks + `[P]` | child issues, dependency order, parallel flags |
+| Stakes gate | route: `agent-ready → Claude Code` vs `needs-human` |
+| `[ESCALATE]` | decision tickets (owner · decide-by · blocked tickets) |
+| `[ASSUMPTION → T0]` | a timeboxed spike whose result writes back to Part B |
+| `[NEED]` markers | preserved on tickets — never filled with invented numbers |
+| Done-when | the epic-level completion check |
 
-## Design references (build to these)
-**`examples/sprntly-delivery-views.html`** is the canonical UI — four views: ticket **list**, editable ticket **detail** (rename pencil · editable description · add/remove attachments · team add-person picker · sprint read-or-create dropdown · in-thread proposed-change approval), the **sync / field-mapping** view (auto-adapt + generic adapter), and the **story map** (backbone → stories → release slices). **The story-map view renders only when the sizing heuristic triggers it** — small features skip it. An implementing agent should open it and align layout, affordances, and states to it.
+**Degradation:** Part A only → generate INVEST stories flagged
+`GENERATED ⚠ not inherited`, no routing, upgrade note to `prd-author`. No PRD →
+recommend `prd-author` first.
 
-## Guardrails (non-negotiable)
-- **No fabrication** — numbers, owners, criteria from the PRD/spec only; unknowns labeled.
-- **Inherit, don't rewrite** acceptance criteria; `[edge case]`/`[failure]` → required scenarios.
-- **Provenance on every ticket** (`From PRD § …` / spec task).
-- **Approval before change** — proposed spec changes are shown in-thread and applied only on approval, then propagated with traceability re-checked.
-- **Adapt, don't assume** — auto-map on the backend; set fields the tool has; degrade + flag the rest; never invent a field or silently drop one.
-- **Sprint by default** — detect automatically; reuse an in-flight sprint for the project, else create a new one and sync (new = safe default).
-- **Colors are fixed** — the locked palette in the Design reference never changes; only content varies.
-- **Idempotent sync** — update, never duplicate.
+## How to implement (for the building agent)
+
+1. **Open `examples/sprntly-ticket-views.html`** — the locked design
+   reference. Colors, type, spacing are fixed; the skill never restyles.
+2. **Scope boundary:** render from the "Tickets from …" header block down.
+   The page tab bar (Evidence / PRD / Tickets, Save/Share) is page chrome —
+   never render it.
+3. **List view:** header (serif ~24px title with the PRD name in italic
+   green, subline, ⟳ Regenerate + ✓ Push to <Tool>), green ✳ intro, ticket
+   cards (`T-#` chip · bold title · 2-line story preview ending in
+   provenance · URGENT/HIGH/NORMAL pill · `N AC` chip), then a Decision-
+   tickets group.
+4. **Detail view:** header strip → edit-hint line → **full-width Description**
+   (five labeled sections: What / Why now / User story / Scope bullets / Out
+   of scope, grounding footer with `[NEED]`s named) → a two-column zone: main
+   (Acceptance criteria → Child issues → Linked issues → Attachments with
+   deep links opening in a new tab → Activity with one AI summary and
+   Accept & propagate) beside the **Details rail** (Status + stacked fields).
+   Everything is editable in place except inherited AC (comment loop only).
+   Output artifacts carry no meta/contract footers.
+5. **Push flow:** ✓ Push opens the destination picker (compact: projects with
+   space paths, create-new, "remember for this PRD"); selection persists per
+   PRD/workspace; the field-mapped sync then runs **on the backend** —
+   mapping is logic (`references/field-mapping.md`), never UI. Sprint
+   detection runs by default (reuse the live sprint, else create).
+6. **Change loop:** comments are summarized; a proposed spec change renders
+   an Accept & propagate card — on accept, update the ticket's criteria, the
+   PRD row + Part B test (version bump), and the design artifact, then
+   re-check traceability. Never apply silently.
+
+## Story mapping (inside this skill)
+
+When the gate says LARGE, the map is rendered as a **"Story map" tab beside
+"Tickets"** — same output, same skill. Method (Jeff Patton, absorbed from the
+retired `story-mapping`): gray backbone cards from Part A §4 activities in
+narrative order → the same tickets placed under each activity → the
+**walking skeleton as Release 1** (green band, crosses the whole journey) →
+release slices aligned to §8 rollout phases (each slice end-to-end coherent;
+slices map to sprints on push) → gaps/edges as dashed notes feeding back to
+the PRD, never silent tickets. The map organizes the ticket set; it never
+invents tickets.
+
+## Visual references (agents: always open these first)
+
+| File | Shows |
+|---|---|
+| `examples/sprntly-ticket-views.html` | Locked design reference — list + full detail anatomy |
+| `examples/guided-setup-prd.md` → `examples/guided-setup-tickets.html` | End-to-end worked example, flat branch (gate: tickets only) |
+| `examples/story-map-sample.html` | Large branch — Tickets + Story map tabs, functional switching |
+
+If a render disagrees with these files, the files win.
 
 ## Files
-- `SKILL.md` — authoritative spec & workflow.
-- `references/field-mapping.md` — canonical → tool field map + generic adapter logic.
-- `examples/sprntly-delivery-views.html` — canonical delivery UI (list · editable detail · sync).
+
+- `SKILL.md` — the full spec (consumption contract, moving parts, delivery
+  format, quality bar)
+- `examples/sprntly-ticket-views.html` — locked design reference
+- `examples/guided-setup-prd.md` + `examples/guided-setup-tickets.html` —
+  end-to-end worked example: a real prd-author artifact and the ticket set
+  this skill generated from it
+
+## Version
+
+v4 — 2026-07-03. Renamed `delivery-tickets` → `ticket`; story-map method integrated with the MUST gate and gray backbone; visual-reference contract added.
+Previously v3 — Screenshot-locked UI (page-chrome boundary, ~24px header),
+Jira-anatomy detail with full-width content + horizontal Details bar,
+five-section description contract, single AI-summary comment pattern,
+push-time destination picker, backend-only field mapping, end-to-end worked
+example included.
