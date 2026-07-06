@@ -30,6 +30,15 @@ export function getPendingAsk(company: string, tabId: string): PendingJob | null
 
 class AskFailedError extends Error {}
 
+/**
+ * Thrown when the poll is cancelled mid-flight because the chat UI went away
+ * (ChatScreen unmounted — the user navigated to another screen). Unlike a
+ * failure, this is NOT surfaced as an error: the pending ask_id is deliberately
+ * LEFT in place so the mount-time resume effect re-attaches and populates the
+ * answer when the user returns. Callers must swallow it (no error state / toast).
+ */
+export class AskCancelledError extends Error {}
+
 function toAskResponse(status: AskStatusResponse): AskResponse {
   // Drop the job envelope (status/error); keep the answer body + any extra
   // qa_agent fields (e.g. _skill) the renderer reads.
@@ -43,6 +52,13 @@ function toAskResponse(status: AskStatusResponse): AskResponse {
  * (re-attaches to a persisted id on remount). Clears the persisted pending-job
  * marker on every terminal exit. Throws on backend error / timeout so the
  * caller's existing error UX (`runTabAsk.onError`) renders the failure.
+ *
+ * ONE exception to the "clear on exit" rule: if the poll was CANCELLED because
+ * the chat UI unmounted (`isCancelled` flipped mid-flight), the marker is left
+ * intact and `AskCancelledError` is thrown. That is what lets a background
+ * completion survive navigating away — the persisted id stays put so the
+ * mount-time resume effect re-fetches the (server-retained) answer on return
+ * instead of the answer being silently dropped by a no-op state write.
  */
 async function pollAskToResult(
   askId: number,
@@ -58,6 +74,8 @@ async function pollAskToResult(
     intervalMs: POLL_INTERVAL_MS,
     isCancelled,
   })
+  // Unmounted mid-poll → do NOT clear the marker; a remount re-attaches by id.
+  if (isCancelled?.()) throw new AskCancelledError("Ask poll cancelled (UI unmounted)")
   clearPendingJob("ask", company, scope)
   if (final.status === "ready") return toAskResponse(final)
   if (final.status === "error") {

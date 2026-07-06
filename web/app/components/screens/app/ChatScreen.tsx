@@ -19,7 +19,7 @@ import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
-import { runAskGeneration, resumeAskGeneration, getPendingAsk } from "../../../lib/runAskGeneration"
+import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { PrdState, PrdContent } from "../../../types/content"
@@ -170,6 +170,15 @@ export function ChatScreen() {
   // active, so it never stomps a tab the user has since switched to.
   const activeTabIdRef = useRef<string | null>(activeTabId)
   activeTabIdRef.current = activeTabId
+  // True while this ChatScreen is mounted. Detached Ask polls read it to stop
+  // (and LEAVE their persisted ask_id in place) when the user navigates to
+  // another screen — so a background completion isn't dropped by a no-op state
+  // write; the mount-time resume effect re-attaches and populates on return.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => { mountedRef.current = false }
+  }, [])
   // When set, ChatScreen slides the content panel (Evidence / PRD / Tickets) open
   // on the NEXT commit — deferred one commit so the route-change panel-close (a
   // PRD opened from another surface routes to `/`) can't swallow it.
@@ -803,7 +812,7 @@ export function ChatScreen() {
         // generating server-side, and the active ask_id is persisted per tab
         // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
         // resume effect instead of re-asking.
-        ask: () => runAskGeneration(query, activeCompany, targetTabId),
+        ask: () => runAskGeneration(query, activeCompany, targetTabId, { isCancelled: () => !mountedRef.current }),
         onResult: (tabId, res) => {
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
@@ -813,6 +822,10 @@ export function ChatScreen() {
           finalizeConversationTurn(id, { reply: res }, tabId)
         },
         onError: (tabId, e) => {
+          // Poll cancelled because the user left the chat screen mid-flight: the
+          // ask_id is still persisted, so the mount-time resume effect will
+          // re-attach and populate on return. Not a failure — no error UI/toast.
+          if (e instanceof AskCancelledError) return
           const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
             ? (e.body as { detail: unknown }).detail
             : null
@@ -907,7 +920,7 @@ export function ChatScreen() {
       setBusyTabs((prev) => addToSet(prev, targetTabId))
       void (async () => {
         try {
-          const res = await resumeAskGeneration(askId, activeCompany, targetTabId)
+          const res = await resumeAskGeneration(askId, activeCompany, targetTabId, () => !mountedRef.current)
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
               ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, reply: res } : turn),
@@ -915,6 +928,9 @@ export function ChatScreen() {
           ))
           finalizeConversationTurn(turnId, { reply: res }, targetTabId)
         } catch (e) {
+          // Unmounted again mid-resume: leave the marker so the NEXT mount
+          // re-attaches. Don't write an error into the thread.
+          if (e instanceof AskCancelledError) return
           const msg = e instanceof Error ? e.message : "Something went wrong"
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {

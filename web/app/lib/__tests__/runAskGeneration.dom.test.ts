@@ -13,6 +13,7 @@ import {
   resumeAskGeneration,
   getPendingAsk,
   askScope,
+  AskCancelledError,
 } from "../runAskGeneration"
 import { getPendingJob } from "../jobResume"
 
@@ -102,6 +103,57 @@ describe("runAskGeneration", () => {
     expect((err as Error).message).toMatch(/kaboom/)
     // Cleared even on error.
     expect(getPendingAsk("acme", "tab-err")).toBeNull()
+  })
+})
+
+describe("background completion survives navigating away (cancel-on-unmount)", () => {
+  it("leaves the pending marker in place and throws AskCancelledError when cancelled mid-poll", async () => {
+    vi.spyOn(askApi, "start").mockResolvedValue({ ask_id: 42, status: "generating" } as never)
+    // Stays 'generating' the whole time — the answer would land after the user
+    // has already left, which is exactly the race we protect.
+    vi.spyOn(askApi, "get").mockResolvedValue({ ...READY, status: "generating", answer: "" } as never)
+
+    let mounted = true
+    const p = runAskGeneration("Slow question?", "acme", "tab-nav", {
+      isCancelled: () => !mounted,
+    }).catch((e) => e)
+    // POST + persist + first poll fetch, then the loop parks on its interval.
+    await vi.advanceTimersByTimeAsync(0)
+    expect(getPendingAsk("acme", "tab-nav")).toEqual({ id: "42" })
+
+    // User navigates to another screen → ChatScreen unmounts.
+    mounted = false
+    // Next poll tick observes the cancel and bails.
+    await vi.advanceTimersByTimeAsync(2000)
+    const err = await p
+
+    expect(err).toBeInstanceOf(AskCancelledError)
+    // Crucially: the marker is NOT cleared, so a remount re-attaches by id
+    // instead of the answer being orphaned.
+    expect(getPendingAsk("acme", "tab-nav")).toEqual({ id: "42" })
+  })
+
+  it("a remount after the cancel re-fetches the now-ready answer and clears the marker", async () => {
+    // Simulate the state left by the cancel above: marker present, no re-POST.
+    vi.spyOn(askApi, "start").mockResolvedValue({ ask_id: 42, status: "generating" } as never)
+    const getSpy = vi
+      .spyOn(askApi, "get")
+      .mockResolvedValue({ ...READY, status: "generating", answer: "" } as never)
+    let mounted = true
+    void runAskGeneration("Slow question?", "acme", "tab-nav2", {
+      isCancelled: () => !mounted,
+    }).catch(() => undefined)
+    await vi.advanceTimersByTimeAsync(0)
+    mounted = false
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(getPendingAsk("acme", "tab-nav2")).toEqual({ id: "42" })
+
+    // Remount: the server job has since finished; resume reads it and populates.
+    getSpy.mockResolvedValue(READY as never)
+    const res = await resumeAskGeneration(42, "acme", "tab-nav2")
+    expect(res.answer).toBe("## The answer")
+    // Consumed while mounted → marker cleared for good.
+    expect(getPendingAsk("acme", "tab-nav2")).toBeNull()
   })
 })
 
