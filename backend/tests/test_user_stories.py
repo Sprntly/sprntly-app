@@ -267,7 +267,7 @@ def test_push_error_isolation_one_fails_rest_continue(isolated_settings, monkeyp
 
     from app.connectors import clickup_oauth
 
-    def _create_task(token, list_id, *, name, description=None, priority=None):
+    def _create_task(token, list_id, *, name, description=None, markdown_description=None, priority=None, extra=None):
         if name == "boom":
             raise RuntimeError("clickup 500")
         return {"id": f"id-{name}", "url": f"u-{name}"}
@@ -284,6 +284,37 @@ def test_push_error_isolation_one_fails_rest_continue(isolated_settings, monkeyp
     assert len(result["errors"]) == 1
     assert result["errors"][0]["story"] == "boom"
     assert "clickup 500" in result["errors"][0]["error"]
+
+
+def test_push_maps_canonical_fields_to_clickup(isolated_settings, monkeypatch):
+    """The canonical ticket's fields map onto the ClickUp task: a rich markdown
+    body, labels → tags, story points → points."""
+    ctx = company_client(monkeypatch)
+    _seed_clickup_token(monkeypatch, ctx.company_id)
+
+    from app.connectors import clickup_oauth
+
+    seen: dict = {}
+
+    def _create_task(token, list_id, *, name, description=None, markdown_description=None, priority=None, extra=None):
+        seen.update(name=name, markdown_description=markdown_description, priority=priority, extra=extra)
+        return {"id": "cu-1", "url": "u"}
+
+    monkeypatch.setattr(clickup_oauth, "create_task", _create_task)
+
+    story = Story(
+        title="Battle card", body="As an AE, I want a card, so that I can run the play.",
+        what="Create a one-page battle card.", user_story="As an AE, I want a card, so that I can run the play.",
+        acceptance_criteria=["Given X, When Y, Then Z."],
+        labels=["sales-enablement", "competitive"], story_points=3, priority="urgent",
+    )
+    push_stories_to_clickup(ctx.company_id, "list-1", [story])
+
+    # Rich body (markdown), not a plain description.
+    assert "**What**" in seen["markdown_description"]
+    assert seen["priority"] == 1  # urgent → 1
+    assert seen["extra"]["tags"] == ["sales-enablement", "competitive"]
+    assert seen["extra"]["points"] == 3
 
 
 def test_push_not_connected_raises(isolated_settings, monkeypatch):
@@ -331,7 +362,7 @@ def test_route_push_creates_tasks(isolated_settings, monkeypatch):
     from app.connectors import clickup_oauth
     posted = []
 
-    def _create_task(token, list_id, *, name, description=None, priority=None):
+    def _create_task(token, list_id, *, name, description=None, markdown_description=None, priority=None, extra=None):
         posted.append((list_id, name, priority))
         return {"id": "T1", "url": "https://app.clickup.com/t/T1"}
 

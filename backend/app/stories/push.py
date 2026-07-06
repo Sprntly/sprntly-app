@@ -30,6 +30,24 @@ class ClickUpNotConnectedError(LookupError):
     """Raised when the company has no active ClickUp connection."""
 
 
+def _clickup_fields(story: Story) -> dict[str, Any]:
+    """Map the canonical ticket's fields onto the ClickUp task-create body
+    (beyond name/description/priority, which the caller sets directly).
+
+    Only fields ClickUp accepts universally on task creation are mapped here —
+    `tags` (from labels) and `points` (story points, ClickUp's native Sprint
+    Points field). Fields that need list-specific config (custom statuses,
+    per-site custom fields) or extra API calls (checklists from subtasks,
+    dependency links) are intentionally left to the sync follow-up so a push
+    never fails on a workspace that lacks them."""
+    fields: dict[str, Any] = {}
+    if story.labels:
+        fields["tags"] = list(story.labels)
+    if story.story_points is not None:
+        fields["points"] = story.story_points
+    return fields
+
+
 def _clickup_access_token(company_id: str) -> str:
     """Decrypt the company's stored ClickUp access token. Raises
     ClickUpNotConnectedError if not connected or the token is unusable."""
@@ -68,8 +86,11 @@ def push_stories_to_clickup(
                 access_token,
                 list_id,
                 name=story.title,
-                description=story.to_description(),
+                # Rich body so the five-section description + acceptance criteria
+                # render as headings/bullets in ClickUp rather than raw markdown.
+                markdown_description=story.to_description(),
                 priority=story.clickup_priority(),
+                extra=_clickup_fields(story),
             )
             created.append({
                 "story": story.title,
