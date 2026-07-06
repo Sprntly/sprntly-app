@@ -10,7 +10,7 @@ import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
 import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
-import { TicketDetail } from "./TicketDetail"
+import { TicketDetail, priorityPill } from "./TicketDetail"
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
 import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
 import type { PrdState } from "../../types/content"
@@ -374,53 +374,34 @@ function EvidenceTab() {
   )
 }
 
-// ── Tickets: real PRD→tickets via the user-stories skill, then push to ClickUp ─
-// Priority comes back from the generator as P0–P3 or ClickUp's urgent/high/…;
-// map either to a colour, defaulting to neutral.
-const STORY_PRIORITY_COLOR: Record<string, string> = {
-  P0: "#C13838", P1: "#D97706", P2: "#2563EB", P3: "#6B7280",
-  URGENT: "#C13838", HIGH: "#D97706", NORMAL: "#2563EB", LOW: "#6B7280",
-}
-function storyPriorityColor(p: string | null): string {
-  return STORY_PRIORITY_COLOR[(p ?? "").toUpperCase()] ?? "#6B7280"
-}
-
-// One generated ticket row. Click to open the editable in-panel detail
-// (TicketDetail) — the generated story is the base, edits persist as overrides.
+// ── Tickets: real PRD→tickets via the `ticket` skill, then push to a tracker ──
+// One generated ticket card, styled to the locked design reference
+// (backend/skills/user-stories/examples/sprntly-ticket-views.html). Click to
+// open the editable in-panel detail (TicketDetail) — the generated story is the
+// base, edits persist as overrides.
 function StoryRow({ story, index, onOpen }: { story: GeneratedStory; index: number; onOpen: () => void }) {
-  const priority = (story.priority ?? "").toUpperCase()
-  const color = storyPriorityColor(story.priority)
+  const pill = priorityPill(story.priority)
+  const preview = story.user_story || story.body
+  const acCount = story.acceptance_criteria.length
+  const type = story.ticket_type ?? "build"
   return (
-    <div
-      className="tkt-row"
-      role="button"
-      tabIndex={0}
-      onClick={onOpen}
-      onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen() } }}
-    >
-      <div className="tkt-row-left">
-        <div className="tkt-row-id-wrap">
-          <span className="tkt-row-id">{`T-${index + 1}`}</span>
-        </div>
-        <div className="tkt-row-main">
-          <div className="tkt-row-title">{story.title}</div>
-          {story.body ? <div className="tkt-row-desc">{story.body}</div> : null}
-          <div className="tkt-row-tags">
-            {priority ? (
-              <span
-                className="tkt-tag tkt-tag--priority"
-                style={{ color, background: `${color}14`, borderColor: `${color}33` }}
-              >
-                {priority}
-              </span>
-            ) : null}
-            {story.acceptance_criteria.length > 0 ? (
-              <span className="tkt-tag">{story.acceptance_criteria.length} AC</span>
-            ) : null}
+    <button type="button" className="tkv2-card" onClick={onOpen}>
+      <span className="tkv2-key">{`T-${index + 1}`}</span>
+      <div className="tkv2-card-main">
+        <div className="tkv2-card-title">{story.title}</div>
+        {preview ? (
+          <div className="tkv2-story">
+            {preview}
+            {story.prd_section ? <span className="ctx"> Context: {story.prd_section}</span> : null}
           </div>
+        ) : null}
+        <div className="tkv2-row">
+          {type !== "build" ? <span className={`tkv2-typechip tkv2-typechip--${type}`}>{type}</span> : null}
+          <span className={`tkv2-pill tkv2-pill--${pill.variant}`}>{pill.label}</span>
+          {acCount > 0 ? <span className="tkv2-acchip">{acCount} AC</span> : null}
         </div>
       </div>
-    </div>
+    </button>
   )
 }
 
@@ -664,29 +645,27 @@ export function TicketsTab() {
     )
   }
 
+  // Split build tickets from decision/spike tickets so the latter render as a
+  // separate group, per the reference — while preserving each ticket's real
+  // index into `stories` (that's what opens the right detail).
+  const withIdx = stories.map((s, i) => ({ s, i }))
+  const builds = withIdx.filter((x) => (x.s.ticket_type ?? "build") === "build")
+  const decisions = withIdx.filter((x) => x.s.ticket_type === "decision" || x.s.ticket_type === "spike")
+
   return (
-    <div className="tkt-list-wrap">
-      {/* Top action bar: the ticket title + the Push-to-ClickUp button. Push is
-          explicit (only on click); when ClickUp isn't connected the handler
-          points the user to Settings rather than auto-pushing or erroring. */}
-      <div className="tkt-topbar">
-        <div className="tkt-topbar-titles">
-          <span className="tkt-list-title">Tickets from <em>{prdTitle}</em></span>
-          <span className="tkt-list-meta">{stories.length} ticket{stories.length !== 1 ? "s" : ""} · generated from the PRD</span>
+    <div className="tkv2 tkt-list-wrap">
+      {/* Header block — serif title, subline, then a Regenerate + Push actions
+          row. Push is explicit (only on click); when the tracker isn't
+          connected the handler points the user to Settings. */}
+      <div className="tkv2-topbar">
+        <h2>Tickets from <em>{prdTitle}</em></h2>
+        <div className="tkv2-sub">
+          {stories.length} ticket{stories.length !== 1 ? "s" : ""} · generated from the PRD
         </div>
         {stories.length > 0 && (
-          <div className="tkt-topbar-actions">
-            <button
-              type="button"
-              className="tkt-regen-btn"
-              onClick={regenerate}
-              title="Regenerate tickets from the current PRD"
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <polyline points="23 4 23 10 17 10" /><polyline points="1 20 1 14 7 14" />
-                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-              </svg>
-              Regenerate
+          <div className="tkv2-hactions">
+            <button type="button" className="tkv2-btn tkv2-btn--regen" onClick={regenerate} title="Regenerate tickets from the current PRD">
+              ⟳ Regenerate
             </button>
             {pushState.kind === "picking" && (
               <select
@@ -702,20 +681,17 @@ export function TicketsTab() {
             )}
             <button
               type="button"
-              className="tkt-push-btn"
+              className="tkv2-btn tkv2-btn--push"
               onClick={handleClickUpPush}
               disabled={pushState.kind === "fetching-lists" || pushState.kind === "pushing"}
             >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-              {pushState.kind === "picking" ? "Push to selected list" : pushLabel}
+              ✓ {pushState.kind === "picking" ? "Push to selected list" : pushLabel}
             </button>
           </div>
         )}
       </div>
 
-      {/* Push status line (under the top bar). */}
+      {/* Push status line (under the header). */}
       {pushState.kind === "pushing" && (
         <div className="tkt-push-status">Pushing to “{pushState.listName}”…</div>
       )}
@@ -729,26 +705,31 @@ export function TicketsTab() {
         </div>
       )}
 
-      <div className="tkt-intro-box">
-        <IconSparkle size={14} />
-        <p>
+      <div className="tkv2-intro">
+        <span className="tkv2-spark">✳</span>
+        <div>
           I&apos;ve broken <em>{prdTitle}</em> into{" "}
-          <strong>{stories.length} implementable ticket{stories.length !== 1 ? "s" : ""}</strong> — scoped and
-          prioritized from the PRD. Review, then push to ClickUp.
-        </p>
+          <b>{stories.length} implementable ticket{stories.length !== 1 ? "s" : ""}</b> — scoped and
+          prioritized from the PRD. Review, then push to your tracker.
+        </div>
       </div>
 
       <div className="tkt-list">
-        {stories.map((s, i) => (
+        {builds.map(({ s, i }) => (
           <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
         ))}
+        {decisions.length > 0 && (
+          <>
+            <div className="tkv2-grouplbl">Decisions &amp; spikes</div>
+            {decisions.map(({ s, i }) => (
+              <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
+            ))}
+          </>
+        )}
       </div>
 
-      <div className="tkt-list-foot">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-          <circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" />
-        </svg>
-        <span>Tickets are generated from the PRD.{!isClickUpConnected && " Connect ClickUp in Settings to push them."}</span>
+      <div className="tkv2-foot">
+        Tickets are generated from the PRD.{!isClickUpConnected && " Connect ClickUp in Settings to push them."}
       </div>
     </div>
   )

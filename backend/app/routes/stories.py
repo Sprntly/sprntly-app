@@ -66,11 +66,35 @@ class GenerateIn(BaseModel):
 
 
 class StoryIn(BaseModel):
+    # Legacy core (always present).
     title: str
     body: str = ""
     acceptance_criteria: list[str] = Field(default_factory=list)
     priority: str | None = None
     route: str | None = None
+    # Structured ticket fields (additive; the edited ticket carries these so the
+    # push renders the full five-section description). Unknown/absent → defaults.
+    ticket_type: str = "build"
+    what: str = ""
+    why_now: str = ""
+    user_story: str = ""
+    scope: list[str] = Field(default_factory=list)
+    out_of_scope: str = ""
+    prd_section: str = ""
+    ears_ids: list[str] = Field(default_factory=list)
+    signals: list[str] = Field(default_factory=list)
+    ac_inherited: bool = False
+    subtasks: list[str] = Field(default_factory=list)
+    blocked_by: list[str] = Field(default_factory=list)
+    blocks: list[str] = Field(default_factory=list)
+    story_points: int | None = None
+    labels: list[str] = Field(default_factory=list)
+    data_gaps: list[str] = Field(default_factory=list)
+    decision: str | None = None
+    owner: str | None = None
+    decide_by: str | None = None
+    timebox: str | None = None
+    exit_condition: str | None = None
 
 
 class PushIn(BaseModel):
@@ -229,16 +253,7 @@ def push(
     404 if ClickUp isn't connected. Per-story failures are isolated and
     reported in `errors` rather than failing the whole batch.
     """
-    stories = [
-        Story(
-            title=s.title,
-            body=s.body,
-            acceptance_criteria=s.acceptance_criteria,
-            priority=s.priority,
-            route=s.route,
-        )
-        for s in body.stories
-    ]
+    stories = [Story.from_dict(s.model_dump()) for s in body.stories]
     try:
         result = push_stories_to_clickup(company.company_id, body.list_id, stories)
     except ClickUpNotConnectedError as e:

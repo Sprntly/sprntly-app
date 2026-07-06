@@ -16841,3 +16841,263 @@
   font-family: var(--font-serif);
   font-weight: 600;
 }
+
+/* ============================================================================
+   Tickets v2 — the `ticket` skill's canonical views (list + Jira-anatomy
+   detail). Palette + spacing ported verbatim from the locked design reference
+   backend/skills/user-stories/examples/sprntly-ticket-views.html; type uses the
+   app's own font vars (Geist / Instrument Serif / Geist Mono) so tickets read as
+   part of Sprntly rather than a bolt-on. All classes scoped under `.tkv2`.
+   ========================================================================== */
+.tkv2 {
+  --ink: #1c1e21; --ink2: #4a4d52; --soft: #8a8d92; --line: #e8e8e6;
+  --paper: #ffffff; --panel: #f7f7f5;
+  --green: #2e8a57; --green-d: #257147; --green-title: #2f7d52;
+  --green-s: #e9f4ec; --green-b: #cfe6d8;
+  --urgent: #c63f35; --urgent-b: #fcebe8; --urgent-br: #f2cfc9;
+  --high: #b57a21; --high-b: #fbf1de; --high-br: #efdcb8;
+  --normal: #3f63a0; --normal-b: #e9eef7; --normal-br: #d3dced;
+  --chip: #f1f1ef; --chip-t: #6b7075;
+  color: var(--ink);
+  font-family: var(--font-body);
+  line-height: 1.55;
+}
+.tkv2 *, .tkv2 *::before, .tkv2 *::after { box-sizing: border-box; }
+
+/* ── list: header block ── */
+.tkv2-topbar { background: var(--panel); border-radius: 12px; padding: 22px 26px; }
+.tkv2-topbar h2 {
+  font-family: var(--font-serif); font-weight: 500; font-size: 24px;
+  color: var(--ink); line-height: 1.3; margin: 0;
+}
+.tkv2-topbar h2 em { font-style: italic; font-weight: 600; color: var(--green-title); }
+.tkv2-sub { font-size: 14px; color: var(--soft); margin-top: 4px; }
+.tkv2-hactions { display: flex; gap: 16px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+.tkv2-btn {
+  display: inline-flex; align-items: center; gap: 8px; font-size: 15px;
+  font-weight: 600; border-radius: 10px; padding: 11px 20px; cursor: pointer;
+  border: none; font-family: var(--font-body);
+}
+.tkv2-btn:disabled { opacity: .55; cursor: default; }
+.tkv2-btn--push { background: var(--green); color: #fff; }
+.tkv2-btn--regen { background: transparent; color: var(--ink); padding-left: 0; }
+.tkv2-intro {
+  display: flex; gap: 12px; background: var(--green-s); border-radius: 12px;
+  padding: 17px 20px; font-size: 15.5px; color: var(--ink); line-height: 1.6; margin-top: 16px;
+}
+.tkv2-intro em { font-style: italic; } .tkv2-intro b { font-weight: 700; }
+.tkv2-spark { color: var(--green); flex-shrink: 0; margin-top: 2px; font-size: 16px; }
+
+/* ── list: cards ── */
+.tkv2-grouplbl {
+  font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--soft); margin: 26px 0 2px; font-weight: 700;
+}
+.tkv2-card {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+  padding: 20px 22px; margin-top: 14px; display: flex; gap: 22px; cursor: pointer;
+  transition: box-shadow .15s, border-color .15s; text-align: left; width: 100%;
+}
+.tkv2-card:hover { box-shadow: 0 2px 12px rgba(28, 30, 33, .06); border-color: #dcdcd9; }
+.tkv2-key {
+  font-family: var(--font-mono); font-size: 13px; font-weight: 500; color: var(--ink2);
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 5px 11px; height: fit-content; flex-shrink: 0;
+}
+.tkv2-card-main { flex: 1; min-width: 0; }
+.tkv2-card-title { font-size: 16.5px; font-weight: 700; margin-bottom: 5px; color: var(--ink); }
+.tkv2-story {
+  font-size: 14.5px; color: var(--soft); line-height: 1.6; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.tkv2-story .ctx { color: var(--ink2); }
+.tkv2-row { display: flex; gap: 10px; margin-top: 13px; align-items: center; flex-wrap: wrap; }
+.tkv2-pill {
+  font-size: 12px; font-weight: 700; letter-spacing: .04em; border-radius: 999px;
+  padding: 4px 13px; border: 1px solid transparent;
+}
+.tkv2-pill--urgent { background: var(--urgent-b); color: var(--urgent); border-color: var(--urgent-br); }
+.tkv2-pill--high { background: var(--high-b); color: var(--high); border-color: var(--high-br); }
+.tkv2-pill--normal { background: var(--normal-b); color: var(--normal); border-color: var(--normal-br); }
+.tkv2-acchip {
+  font-size: 12.5px; font-weight: 600; color: var(--chip-t);
+  background: var(--chip); border-radius: 999px; padding: 4px 13px;
+}
+.tkv2-typechip {
+  font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  border-radius: 999px; padding: 4px 11px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink2);
+}
+.tkv2-typechip--decision { background: var(--high-b); color: var(--high); border-color: var(--high-br); }
+.tkv2-typechip--spike { background: var(--normal-b); color: var(--normal); border-color: var(--normal-br); }
+.tkv2-foot { font-size: 13.5px; color: var(--soft); text-align: center; padding: 16px 0 0; }
+
+/* ── detail: shell ── */
+.tkv2-detail { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--paper); }
+.tkv2-dtop {
+  background: var(--panel); padding: 18px 26px; display: flex; align-items: center;
+  gap: 14px; flex-wrap: wrap;
+}
+.tkv2-crumb { font-size: 13px; color: var(--soft); width: 100%; }
+.tkv2-crumb em { color: var(--green-title); font-family: var(--font-serif); font-weight: 600; font-style: italic; }
+.tkv2-back {
+  display: inline-flex; align-items: center; gap: 6px; background: none; border: none;
+  color: var(--soft); font-size: 13px; font-family: var(--font-body); cursor: pointer; padding: 0;
+}
+.tkv2-back:hover { color: var(--ink); }
+.tkv2-dtitle {
+  font-family: var(--font-serif); font-weight: 600; font-size: 20px; color: var(--ink);
+  flex: 1; min-width: 280px; border: none; outline: none; background: transparent; padding: 0;
+}
+.tkv2-qactions { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+.tkv2-qbtn {
+  font-size: 13px; font-weight: 600; color: var(--ink2); background: var(--paper);
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 13px; cursor: pointer;
+}
+.tkv2-edithint {
+  font-size: 11.5px; color: var(--soft); padding: 8px 26px; background: #fbfbfa;
+  border-bottom: 1px solid var(--line);
+}
+.tkv2-descwide { padding: 22px 26px 6px; border-bottom: 1px solid var(--line); }
+
+/* ── detail: sections + description ── */
+.tkv2-sec { margin-bottom: 24px; }
+.tkv2-sec:last-child { margin-bottom: 0; }
+.tkv2-sec h4 {
+  font-size: 12px; color: var(--soft); font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; margin-bottom: 10px;
+}
+.tkv2-dlbl {
+  font-size: 11px; color: var(--soft); font-weight: 700; text-transform: uppercase;
+  letter-spacing: .07em; margin: 12px 0 3px;
+}
+.tkv2-dlbl:first-of-type { margin-top: 0; }
+.tkv2-dtx { font-size: 14px; color: var(--ink2); line-height: 1.6; margin: 0; }
+.tkv2-dtx .k { color: var(--green-d); font-weight: 600; }
+.tkv2-dlist { margin: 2px 0 0 18px; font-size: 14px; color: var(--ink2); line-height: 1.7; }
+.tkv2-ground { color: var(--soft); font-size: 12.5px; }
+.tkv2-ground a { color: var(--green-d); font-weight: 600; text-decoration: none; }
+.tkv2-need { font-family: var(--font-mono); font-size: 12px; color: var(--high); }
+
+/* ── detail: two-column zone ── */
+.tkv2-cols { display: grid; grid-template-columns: 1fr 300px; gap: 0; }
+.tkv2-main { padding: 22px 26px; border-right: 1px solid var(--line); }
+.tkv2-rail { padding: 20px 20px; background: #fbfbfa; }
+@media (max-width: 860px) {
+  .tkv2-cols { grid-template-columns: 1fr; }
+  .tkv2-main { border-right: none; border-bottom: 1px solid var(--line); }
+}
+
+/* ── detail: acceptance criteria ── */
+.tkv2-ac { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.tkv2-acitem { display: flex; gap: 11px; align-items: flex-start; margin-bottom: 9px; }
+.tkv2-acitem:last-of-type { margin-bottom: 4px; }
+.tkv2-cb {
+  width: 17px; height: 17px; border: 1.5px solid #d6d6d3; border-radius: 5px;
+  background: var(--paper); flex-shrink: 0; margin-top: 2px;
+}
+.tkv2-cb--done { background: var(--green); border-color: var(--green); position: relative; }
+.tkv2-cb--done::after {
+  content: '✓'; color: #fff; font-size: 11px; display: flex; align-items: center;
+  justify-content: center; height: 100%;
+}
+.tkv2-actxt { font-size: 13.5px; color: var(--ink2); }
+.tkv2-actxt .k { color: var(--green-d); font-weight: 600; }
+.tkv2-tagf { font-size: 11px; color: var(--urgent); font-weight: 700; margin-right: 4px; }
+.tkv2-tagn { font-size: 11px; color: var(--high); font-weight: 700; margin-right: 4px; }
+.tkv2-inherit { display: block; font-size: 11.5px; color: var(--soft); margin-top: 8px; }
+.tkv2-gen { display: block; font-size: 11.5px; color: var(--high); margin-top: 8px; font-weight: 600; }
+
+/* ── detail: child + linked issues ── */
+.tkv2-subt {
+  display: flex; gap: 11px; align-items: center; padding: 9px 14px; border: 1px solid var(--line);
+  border-radius: 10px; margin-bottom: 7px; font-size: 13.5px; color: var(--ink2);
+}
+.tkv2-subt .tkv2-cb { margin-top: 0; }
+.tkv2-sk { font-size: 11.5px; color: var(--soft); font-weight: 600; margin-left: auto; }
+.tkv2-deplbl { font-size: 12px; color: var(--soft); font-weight: 600; margin: 8px 0 6px; }
+.tkv2-deplbl:first-child { margin-top: 0; }
+.tkv2-dep {
+  display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 500;
+  border-radius: 10px; padding: 7px 13px; margin: 0 7px 7px 0; border: 1px solid var(--line);
+  background: var(--panel); color: var(--ink2);
+}
+.tkv2-dep--block { border-color: var(--urgent-br); background: var(--urgent-b); color: var(--urgent); }
+
+/* ── detail: attachments (deep links, open new tab) ── */
+.tkv2-att { display: flex; gap: 9px; flex-wrap: wrap; }
+.tkv2-attchip {
+  display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 9px 14px;
+  color: var(--ink2); text-decoration: none; transition: border-color .15s, color .15s;
+}
+.tkv2-attchip:hover { border-color: var(--green); color: var(--green-d); }
+.tkv2-attchip .open { color: var(--green-d); font-size: 11.5px; font-weight: 700; }
+
+/* ── detail: activity + AI summary ── */
+.tkv2-acttabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.tkv2-atab {
+  font-size: 12.5px; font-weight: 600; color: var(--soft); background: var(--panel);
+  border-radius: 7px; padding: 5px 12px; cursor: pointer; border: none; font-family: var(--font-body);
+}
+.tkv2-atab--active { background: var(--chip); color: var(--ink); }
+.tkv2-aisum { background: var(--green-s); border-radius: 12px; padding: 14px 16px; margin-bottom: 13px; font-size: 13.5px; color: var(--ink2); }
+.tkv2-aisum .ah { font-size: 13px; font-weight: 700; color: var(--green-d); margin-bottom: 6px; }
+.tkv2-actions2 { display: flex; gap: 9px; margin-top: 11px; }
+.tkv2-btn2 { font-size: 12.5px; font-weight: 600; border-radius: 9px; padding: 7px 14px; cursor: pointer; border: 1px solid transparent; font-family: var(--font-body); }
+.tkv2-btn2--primary { background: var(--green); color: #fff; }
+.tkv2-btn2--ghost { background: var(--paper); border-color: var(--line); color: var(--ink2); }
+.tkv2-cmt { display: flex; gap: 11px; margin-bottom: 13px; }
+.tkv2-av {
+  width: 30px; height: 30px; border-radius: 50%; background: var(--high-b); color: var(--high);
+  font-size: 11.5px; font-weight: 700; display: flex; align-items: center; justify-content: center;
+  border: 1.5px solid var(--high-br); flex-shrink: 0;
+}
+.tkv2-cmt .who2 { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.tkv2-cmt .when { font-size: 12px; color: var(--soft); font-weight: 400; margin-left: 7px; }
+.tkv2-cmt p { font-size: 13.5px; color: var(--ink2); margin: 2px 0 0; }
+.tkv2-ask { display: flex; gap: 9px; margin-top: 14px; }
+.tkv2-ask input {
+  flex: 1; border: 1px solid var(--line); border-radius: 10px; padding: 11px 15px;
+  font-size: 13.5px; font-family: var(--font-body); background: var(--panel); color: var(--ink);
+}
+.tkv2-empty { font-size: 13px; color: var(--soft); }
+
+/* ── detail: right rail ── */
+.tkv2-statusbtn {
+  display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; font-weight: 700;
+  background: var(--normal-b); color: var(--normal); border: 1px solid var(--normal-br);
+  border-radius: 9px; padding: 8px 16px; cursor: pointer; font-family: var(--font-body);
+}
+.tkv2-rail h4 {
+  font-size: 12px; color: var(--soft); font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; margin: 16px 0 10px;
+}
+.tkv2-rrow {
+  display: flex; justify-content: space-between; align-items: flex-start; gap: 10px;
+  padding: 8px 0; border-bottom: 1px solid var(--line);
+}
+.tkv2-rl { font-size: 12px; color: var(--soft); font-weight: 500; flex-shrink: 0; padding-top: 1px; }
+.tkv2-rv { font-size: 13px; font-weight: 600; color: var(--ink); text-align: right; }
+.tkv2-rv--muted { color: var(--soft); font-weight: 500; }
+.tkv2-rv .tkv2-pill { font-size: 11px; padding: 3px 10px; }
+.tkv2-railfoot { font-size: 11px; color: var(--soft); margin-top: 12px; padding-top: 9px; border-top: 1px solid var(--line); }
+
+/* ── list: push destination picker ── */
+.tkv2-picker {
+  margin-top: 12px; background: var(--paper); border: 1px solid var(--line); border-radius: 10px;
+  box-shadow: 0 6px 24px rgba(28, 30, 33, .10); padding: 10px 12px; max-width: 320px;
+}
+.tkv2-picker .ph2 {
+  font-size: 10.5px; font-weight: 700; color: var(--soft); text-transform: uppercase;
+  letter-spacing: .07em; margin-bottom: 6px;
+}
+.tkv2-pitem {
+  display: flex; align-items: center; gap: 7px; padding: 6px 8px; border-radius: 7px;
+  font-size: 12.5px; font-weight: 500; color: var(--ink2); cursor: pointer; width: 100%;
+  border: none; background: none; font-family: var(--font-body); text-align: left;
+}
+.tkv2-pitem:hover { background: var(--panel); }
+.tkv2-pitem--sel { background: var(--green-s); color: var(--green-d); font-weight: 600; }
+.tkv2-ppath { font-size: 10px; color: var(--soft); font-weight: 400; margin-left: auto; padding-left: 10px; overflow: hidden; text-overflow: ellipsis; }
+.tkv2-pfoot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--line); font-size: 11px; color: var(--soft); }

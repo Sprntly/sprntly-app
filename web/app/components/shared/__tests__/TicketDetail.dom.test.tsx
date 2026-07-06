@@ -131,17 +131,18 @@ describe("TicketDetail", () => {
     await renderDetail()
     expect((screen.getByPlaceholderText("Add a description…") as HTMLTextAreaElement).value)
       .toBe("One-click guest-alert for Deal Alerts.")
-    expect((screen.getByDisplayValue("Admin can enable in one click")) as HTMLInputElement).toBeTruthy()
+    // AC is now inherited/read-only (rendered as a checklist item, not an input).
+    expect(screen.getByText(/Admin can enable in one click/)).toBeTruthy()
   })
 
-  it("shows a generated free-form priority as its canonical pill label", async () => {
-    // Regression: the user-stories skill emits "high"; the pill used to render
-    // that raw word (matching no P0–P3 option). It must show "P1 — High".
+  it("shows a generated free-form priority as a rail pill (URGENT/HIGH/NORMAL)", async () => {
+    // The skill emits "high"; the Details rail renders it as the reference's
+    // three-pill vocabulary — HIGH — not the raw word.
     await act(async () => {
       render(React.createElement(TicketDetail, { story: { ...STORY, priority: "high" }, index: 0, prdId: 7, onBack: vi.fn() }))
     })
     await waitFor(() => expect(api.getData).toHaveBeenCalled())
-    expect(screen.getByText("P1 — High")).toBeTruthy()
+    expect(screen.getByText("HIGH")).toBeTruthy()
     expect(screen.queryByText("high")).toBeNull()
   })
 
@@ -161,11 +162,12 @@ describe("TicketDetail", () => {
     expect(api.saveDescription).toHaveBeenCalledWith(KEY, "New description", ["Admin can enable in one click"])
   })
 
-  it("changing the priority picker persists via saveFields", async () => {
+  it("changing the status picker persists via saveFields", async () => {
     await renderDetail()
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "priority" })) })
-    await act(async () => { fireEvent.click(screen.getByText("P0 — Critical")) })
-    expect(api.saveFields).toHaveBeenCalledWith(KEY, { priority: "P0 — Critical" })
+    // The rail's status button opens the picker; picking a status persists it.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /Backlog/ })) })
+    await act(async () => { fireEvent.click(screen.getByText("Done")) })
+    expect(api.saveFields).toHaveBeenCalledWith(KEY, { status: "Done" })
   })
 
   it("reassigning persists the picked team member via saveFields", async () => {
@@ -184,10 +186,10 @@ describe("TicketDetail", () => {
   it("posting a comment persists via addComment", async () => {
     api.addComment.mockResolvedValue({ id: 1, author: "You", body: "Looks good", time: "now" })
     await renderDetail()
-    const ta = screen.getByPlaceholderText("Add a comment…")
+    const ta = screen.getByPlaceholderText("Ask about this ticket…")
     await act(async () => {
       fireEvent.change(ta, { target: { value: "Looks good" } })
-      fireEvent.click(screen.getByRole("button", { name: /post comment/i }))
+      fireEvent.click(screen.getByRole("button", { name: /send/i }))
     })
     expect(api.addComment).toHaveBeenCalledWith(KEY, "You", "Looks good")
   })
@@ -217,7 +219,83 @@ describe("TicketDetail", () => {
 
   it("Back invokes onBack", async () => {
     const onBack = await renderDetail()
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /all chunks/i })) })
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /all tickets/i })) })
     expect(onBack).toHaveBeenCalled()
+  })
+})
+
+// ── the ticket skill's canonical (structured) rendering ──────────────────────
+const STRUCTURED = {
+  id: "abc123",
+  ticket_type: "build" as const,
+  title: "Productboard Displacement Battle Card",
+  body: "As an AE, I want a battle card, so that I can run the play.",
+  what: "Create a one-page battle card for the displacement play.",
+  why_now: "Productboard's June layoffs opened a window that closes at renewal.",
+  user_story: "As an AE, I want one card with the pain hooks, so that I can run the play.",
+  scope: ["Who to target", "The two pain hooks", "The price-counter script"],
+  out_of_scope: "Pricing changes (that's T-5).",
+  prd_section: "Part A §5 R2",
+  ears_ids: ["E2"],
+  signals: ["win/loss notes"],
+  acceptance_criteria: [
+    "Given a role-change, When the SDR opens the card, Then it provides a talk track.",
+    "[failure] Given the card is older than 30 days, When opened, Then a staleness banner appears.",
+  ],
+  ac_inherited: true,
+  subtasks: ["Pull win/loss notes", "[P] Draft objection table"],
+  blocked_by: ["T-1 — Competitive Positioning One-Pager"],
+  blocks: ["T-5 — Outbound Sequence"],
+  story_points: 3,
+  labels: ["sales-enablement"],
+  data_gaps: [],
+  priority: "urgent",
+  route: "agent-ready",
+}
+
+describe("TicketDetail — structured (canonical) ticket", () => {
+  it("renders the five-section description, inherited AC with tags, and links", async () => {
+    await act(async () => {
+      render(React.createElement(TicketDetail, { story: STRUCTURED, index: 1, prdId: 42, onBack: vi.fn() }))
+    })
+    await waitFor(() => expect(api.getData).toHaveBeenCalledWith("prd-42-abc123"))
+    // Five-section description labels.
+    for (const label of ["What", "Why now", "User story", "Out of scope"]) {
+      expect(screen.getByText(label)).toBeTruthy()
+    }
+    // Inherited-AC note + failure tag, and a read-only count in the heading.
+    expect(screen.getByText(/Inherited from the PRD/)).toBeTruthy()
+    expect(screen.getByText("[failure]")).toBeTruthy()
+    expect(screen.getByText("Acceptance criteria — 2")).toBeTruthy()
+    // Child + linked issues + rail provenance.
+    expect(screen.getByText("Child issues")).toBeTruthy()
+    expect(screen.getByText(/is blocked by/)).toBeTruthy()
+    // Provenance shows in both the grounding footer and the rail.
+    expect(screen.getAllByText("Part A §5 R2").length).toBeGreaterThanOrEqual(1)
+  })
+
+  it("flags generated (non-inherited) criteria", async () => {
+    await act(async () => {
+      render(React.createElement(TicketDetail, {
+        story: { ...STRUCTURED, ac_inherited: false }, index: 1, prdId: 42, onBack: vi.fn(),
+      }))
+    })
+    await waitFor(() => expect(api.getData).toHaveBeenCalled())
+    expect(screen.getByText(/GENERATED/)).toBeTruthy()
+  })
+
+  it("renders a decision ticket's decision/owner instead of a user story", async () => {
+    await act(async () => {
+      render(React.createElement(TicketDetail, {
+        story: {
+          ...STRUCTURED, ticket_type: "decision" as const,
+          decision: "Adopt a 30-day staleness rule", owner: "Priya R.", decide_by: "Jul 10",
+        },
+        index: 1, prdId: 42, onBack: vi.fn(),
+      }))
+    })
+    await waitFor(() => expect(api.getData).toHaveBeenCalled())
+    expect(screen.getByText("Decision")).toBeTruthy()
+    expect(screen.getByText("Adopt a 30-day staleness rule")).toBeTruthy()
   })
 })

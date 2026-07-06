@@ -223,11 +223,11 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
       fireEvent.click(screen.getByText("Instrument wizard steps"))
     })
     await waitFor(() => expect(getData).toHaveBeenCalledWith("prd-42-instrument-wizard-steps"))
-    expect(screen.getByRole("button", { name: /all chunks/i })).toBeTruthy()
+    expect(screen.getByRole("button", { name: /all tickets/i })).toBeTruthy()
 
     // Back → list returns, regen button is visible again.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /all chunks/i }))
+      fireEvent.click(screen.getByRole("button", { name: /all tickets/i }))
     })
     await waitFor(() => expect(screen.getByRole("button", { name: /regenerate/i })).toBeTruthy())
   })
