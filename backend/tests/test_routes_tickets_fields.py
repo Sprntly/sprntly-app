@@ -94,21 +94,46 @@ def test_comment_summary_calls_llm(client: TestClient, monkeypatch):
     import app.routes.tickets as tickets_mod
     seen = {}
 
-    def fake_call_md(*, system, user, **kwargs):
+    def fake_call_json(*, system, user, **kwargs):
         seen["system"] = system
         seen["user"] = user
-        return "Team aligned to ship behind a flag; open question on step 3."
+        return {
+            "summary": "Team aligned to ship behind a flag; open question on step 3.",
+            "proposed_criterion": None,
+        }
 
-    monkeypatch.setattr(tickets_mod, "call_md", fake_call_md)
+    monkeypatch.setattr(tickets_mod, "call_json", fake_call_json)
 
     client.post(f"/v1/tickets/{KEY}/comments", json={"author": "Sam", "body": "Ship behind a flag?"})
     client.post(f"/v1/tickets/{KEY}/comments", json={"author": "Lee", "body": "Yes, flag it; step 3 still open."})
 
     out = client.get(f"/v1/tickets/{KEY}/comments/summary").json()
     assert out["summary"] == "Team aligned to ship behind a flag; open question on step 3."
+    assert out["proposed_criterion"] is None
     # The thread (author: body lines) was handed to the model.
     assert "Sam: Ship behind a flag?" in seen["user"]
     assert "Lee:" in seen["user"]
+
+
+def test_comment_summary_surfaces_proposed_criterion(client: TestClient, monkeypatch):
+    """When the thread proposes a concrete AC change, the endpoint returns the
+    exact Given/When/Then rule the change loop's Accept & propagate will apply."""
+    import app.routes.tickets as tickets_mod
+
+    def fake_call_json(*, system, user, **kwargs):
+        return {
+            "summary": "Agreed to add a 30-day staleness rule.",
+            "proposed_criterion": "[failure] Given the card is older than 30 days, When opened, Then a staleness banner appears.",
+        }
+
+    monkeypatch.setattr(tickets_mod, "call_json", fake_call_json)
+
+    client.post(f"/v1/tickets/{KEY}/comments", json={"author": "Priya", "body": "Competitor facts rot — add a freshness rule."})
+    client.post(f"/v1/tickets/{KEY}/comments", json={"author": "Sam", "body": "Agreed, 30-day staleness."})
+
+    out = client.get(f"/v1/tickets/{KEY}/comments/summary").json()
+    assert "staleness" in out["summary"]
+    assert out["proposed_criterion"].startswith("[failure]")
 
 
 def test_generated_story_has_stable_content_id():
