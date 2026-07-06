@@ -161,6 +161,13 @@ describe("PublicTokenViewer — single full-name field + mark-mode auto-enable",
     expect(input.getAttribute("placeholder")).toBe("Full name")
     expect(container.querySelector('[data-testid="viewer-first-name-input"]')).toBeNull()
     expect(container.querySelector('[data-testid="viewer-last-name-input"]')).toBeNull()
+    // Single-line control, not a tall multi-line box: a real <input type="text">,
+    // and it lives inside the row-flex `.da-viewer-name-fields` wrapper so its
+    // `flex: 1 1 120px` grows horizontally (full width) instead of stretching
+    // vertically as a direct child of the column form.
+    expect(input.tagName).toBe("INPUT")
+    expect(input.getAttribute("type")).toBe("text")
+    expect(input.closest(".da-viewer-name-fields")).not.toBeNull()
   })
 
   it("test_submit_disabled_when_fullname_empty: disabled on empty/whitespace, enabled with content", async () => {

@@ -145,10 +145,13 @@ export function PublicTokenViewer() {
     onPinDropped: () => setCommentsOpen(true),
     // A pin comment must carry a real viewer name — never post "Anonymous". Until
     // the viewer supplies one, the submit aborts and the name-capture form is
-    // surfaced (the comments sidebar holds the First/Last name form). Once the
+    // surfaced (the comments sidebar holds the single Full name form). Once the
     // name is set, requireName flips false and the pin posts attributed.
     requireName: viewerNeedsName,
     onRequireName: () => setCommentsOpen(true),
+    // Public viewer stays in mark mode across repeated comments so the next click
+    // starts a new pin without re-enabling the element selector each time.
+    stayInMarkMode: true,
   })
 
   useEffect(() => {
@@ -379,17 +382,23 @@ export function PublicTokenViewer() {
                 <label className="da-viewer-name-label" htmlFor="da-viewer-full-name">
                   Add your name to comment
                 </label>
-                <input
-                  id="da-viewer-full-name"
-                  className="da-viewer-name-input"
-                  data-testid="viewer-full-name-input"
-                  type="text"
-                  placeholder="Full name"
-                  value={fullName}
-                  onChange={(e) => setFullName(e.target.value)}
-                  maxLength={80}
-                  autoComplete="name"
-                />
+                {/* Wrapper gives the input a row-flex context so its
+                    `flex: 1 1 120px` grows horizontally (full-width single line)
+                    rather than stretching vertically as a direct child of the
+                    column form — otherwise it renders as a tall multi-line box. */}
+                <div className="da-viewer-name-fields">
+                  <input
+                    id="da-viewer-full-name"
+                    className="da-viewer-name-input"
+                    data-testid="viewer-full-name-input"
+                    type="text"
+                    placeholder="Full name"
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    maxLength={80}
+                    autoComplete="name"
+                  />
+                </div>
                 <button
                   type="submit"
                   className="btn btn-accent da-viewer-name-submit"
