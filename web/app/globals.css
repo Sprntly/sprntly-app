@@ -16979,14 +16979,26 @@
 .tkv2-ground a { color: var(--green-d); font-weight: 600; text-decoration: none; }
 .tkv2-need { font-family: var(--font-mono); font-size: 12px; color: var(--high); }
 
-/* ── detail: two-column zone ── */
-.tkv2-cols { display: grid; grid-template-columns: 1fr 300px; gap: 0; }
-.tkv2-main { padding: 22px 26px; border-right: 1px solid var(--line); }
-.tkv2-rail { padding: 20px 20px; background: #fbfbfa; }
-@media (max-width: 860px) {
-  .tkv2-cols { grid-template-columns: 1fr; }
-  .tkv2-main { border-right: none; border-bottom: 1px solid var(--line); }
+/* ── detail: horizontal Details bar + full-width body ──
+   The tickets detail lives in a narrow side panel, not the reference's wide
+   page, so a 300px side rail cramps and clips. Details render as a horizontal
+   field bar under the description; the story content flows full width below. */
+.tkv2-detailbar {
+  display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap;
+  padding: 16px 26px; background: #fbfbfa; border-bottom: 1px solid var(--line);
 }
+.tkv2-fields {
+  flex: 1; min-width: 0; display: grid; gap: 12px 20px;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+}
+.tkv2-field { min-width: 0; }
+.tkv2-fl {
+  font-size: 11px; color: var(--soft); font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; display: block; margin-bottom: 4px;
+}
+.tkv2-fv { font-size: 13px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.tkv2-fv--muted { color: var(--soft); font-weight: 500; }
+.tkv2-body { padding: 22px 26px; }
 
 /* ── detail: acceptance criteria ── */
 .tkv2-ac { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }

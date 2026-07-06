@@ -251,8 +251,69 @@ export function TicketDetail({ story, index, prdId, onBack }: {
       </div>
 
       {/* Two-column zone */}
-      <div className="tkv2-cols">
-        <div className="tkv2-main">
+      {/* Details bar — horizontal, sized for the narrow tickets panel. (Was a
+          300px side rail that cramped and clipped beside the tall criteria
+          column; a rail only works at the reference's full page width.) */}
+      <div className="tkv2-detailbar">
+        <div style={{ position: "relative" }}>
+          <button type="button" className="tkv2-statusbtn" onClick={() => setOpenMenu((m) => (m === "status" ? null : "status"))}>
+            {status} <IconChevronDown size={12} />
+          </button>
+          {openMenu === "status" ? (
+            <div className="tkv2-picker" style={{ position: "absolute", zIndex: 20 }}>
+              {STATUS_OPTIONS.map((o) => (
+                <button key={o} type="button" className={`tkv2-pitem${o === status ? " tkv2-pitem--sel" : ""}`} onClick={() => pickStatus(o)}>
+                  {o === status ? <IconCheck size={12} /> : <span style={{ width: 12 }} />}{o}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <div className="tkv2-fields">
+          <div className="tkv2-field" style={{ position: "relative" }}>
+            <span className="tkv2-fl">Assignee</span>
+            <button type="button" aria-label="Reassign" onClick={openReassign} className="tkv2-fv" style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+              <span className="tkv2-av" style={{ width: 22, height: 22, fontSize: 9, background: av.bg, color: av.color, borderColor: av.color }}>{initials(assigneeName)}</span>
+              {assigneeName}
+            </button>
+            {openMenu === "reassign" ? (
+              <div className="tkv2-picker" style={{ position: "absolute", left: 0, zIndex: 20 }}>
+                <div className="ph2">Reassign</div>
+                {members == null ? <div className="tkv2-pitem">Loading…</div>
+                  : members.length === 0 ? <div className="tkv2-pitem">No team members</div>
+                  : members.map((m) => {
+                    const nm = m.display_name || m.email || "Member"
+                    return (
+                      <button key={m.user_id} type="button" className={`tkv2-pitem${assignee?.user_id === m.user_id ? " tkv2-pitem--sel" : ""}`} onClick={() => pickAssignee(m)}>
+                        {nm}{m.role ? <span className="tkv2-ppath">{m.role}</span> : null}
+                      </button>
+                    )
+                  })}
+              </div>
+            ) : null}
+          </div>
+          <div className="tkv2-field"><span className="tkv2-fl">Reporter</span><span className="tkv2-fv tkv2-fv--muted">Sprntly PM Agent</span></div>
+          <div className="tkv2-field"><span className="tkv2-fl">Priority</span><span className="tkv2-fv"><span className={`tkv2-pill tkv2-pill--${pill.variant}`}>{pill.label}</span></span></div>
+          {story.labels && story.labels.length ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Labels</span><span className="tkv2-fv tkv2-fv--muted">{story.labels.join(" · ")}</span></div>
+          ) : null}
+          {story.prd_section ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Provenance</span><span className="tkv2-fv">{story.prd_section}</span></div>
+          ) : null}
+          {story.story_points != null ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Story points</span><span className="tkv2-fv">{story.story_points}</span></div>
+          ) : null}
+          {story.route ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Route</span><span className="tkv2-fv" style={{ color: routeAgentReady ? "var(--green-d)" : undefined }}>{story.route}</span></div>
+          ) : null}
+          {story.ears_ids && story.ears_ids.length ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Traces</span><span className="tkv2-fv tkv2-fv--muted">{story.ears_ids.join(" · ")}</span></div>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Main content — full width */}
+      <div className="tkv2-body">
           {/* Acceptance criteria */}
           <div className="tkv2-sec">
             <h4>Acceptance criteria — {acCount}</h4>
@@ -377,68 +438,6 @@ export function TicketDetail({ story, index, prdId, onBack }: {
               <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={addComment} disabled={!commentText.trim()}>Send</button>
             </div>
           </div>
-        </div>
-
-        {/* Details rail */}
-        <div className="tkv2-rail">
-          <div style={{ position: "relative", display: "inline-block" }}>
-            <button type="button" className="tkv2-statusbtn" onClick={() => setOpenMenu((m) => (m === "status" ? null : "status"))}>
-              {status} <IconChevronDown size={12} />
-            </button>
-            {openMenu === "status" ? (
-              <div className="tkv2-picker" style={{ position: "absolute", zIndex: 20 }}>
-                {STATUS_OPTIONS.map((o) => (
-                  <button key={o} type="button" className={`tkv2-pitem${o === status ? " tkv2-pitem--sel" : ""}`} onClick={() => pickStatus(o)}>
-                    {o === status ? <IconCheck size={12} /> : <span style={{ width: 12 }} />}{o}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
-          <h4>Details</h4>
-          <div className="tkv2-rrow">
-            <span className="tkv2-rl">Assignee</span>
-            <span className="tkv2-rv" style={{ position: "relative" }}>
-              <button type="button" aria-label="Reassign" onClick={openReassign} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: "none", border: "none", cursor: "pointer", font: "inherit", color: "inherit" }}>
-                <span className="tkv2-av" style={{ width: 24, height: 24, fontSize: 9.5, background: av.bg, color: av.color, borderColor: av.color }}>{initials(assigneeName)}</span>
-                {assigneeName}
-              </button>
-              {openMenu === "reassign" ? (
-                <div className="tkv2-picker" style={{ position: "absolute", right: 0, zIndex: 20 }}>
-                  <div className="ph2">Reassign</div>
-                  {members == null ? <div className="tkv2-pitem">Loading…</div>
-                    : members.length === 0 ? <div className="tkv2-pitem">No team members</div>
-                    : members.map((m) => {
-                      const nm = m.display_name || m.email || "Member"
-                      return (
-                        <button key={m.user_id} type="button" className={`tkv2-pitem${assignee?.user_id === m.user_id ? " tkv2-pitem--sel" : ""}`} onClick={() => pickAssignee(m)}>
-                          {nm}{m.role ? <span className="tkv2-ppath">{m.role}</span> : null}
-                        </button>
-                      )
-                    })}
-                </div>
-              ) : null}
-            </span>
-          </div>
-          <div className="tkv2-rrow"><span className="tkv2-rl">Reporter</span><span className="tkv2-rv tkv2-rv--muted">Sprntly PM Agent</span></div>
-          <div className="tkv2-rrow"><span className="tkv2-rl">Priority</span><span className="tkv2-rv"><span className={`tkv2-pill tkv2-pill--${pill.variant}`}>{pill.label}</span></span></div>
-          {story.labels && story.labels.length ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Labels</span><span className="tkv2-rv tkv2-rv--muted">{story.labels.join(" · ")}</span></div>
-          ) : null}
-          {story.prd_section ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Provenance</span><span className="tkv2-rv">{story.prd_section}</span></div>
-          ) : null}
-          {story.story_points != null ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Story points</span><span className="tkv2-rv">{story.story_points}</span></div>
-          ) : null}
-          {story.route ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Route</span><span className="tkv2-rv" style={{ color: routeAgentReady ? "var(--green-d)" : undefined }}>{story.route}</span></div>
-          ) : null}
-          {story.ears_ids && story.ears_ids.length ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Traces</span><span className="tkv2-rv tkv2-rv--muted">{story.ears_ids.join(" · ")}</span></div>
-          ) : null}
-        </div>
       </div>
     </div>
   )
