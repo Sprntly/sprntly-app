@@ -395,9 +395,10 @@ describe("Phase 3 name capture + viewer_name threading", () => {
     expect(publicViewerSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*viewerNeedsName/)
     expect(publicViewerSrc).toMatch(/commentsOpen\s*&&\s*needsName\s*&&/)
     expect(publicViewerSrc).toContain('data-testid="viewer-name-form"')
-    // first + last name inputs.
-    expect(publicViewerSrc).toContain('data-testid="viewer-first-name-input"')
-    expect(publicViewerSrc).toContain('data-testid="viewer-last-name-input"')
+    // single full-name input (first/last collapsed).
+    expect(publicViewerSrc).toContain('data-testid="viewer-full-name-input"')
+    expect(publicViewerSrc).not.toContain('data-testid="viewer-first-name-input"')
+    expect(publicViewerSrc).not.toContain('data-testid="viewer-last-name-input"')
   })
 
   it("test_viewer_name_persists_to_localstorage: name is read from + written to the da-viewer-name key", () => {
@@ -427,13 +428,12 @@ describe("Phase 3 name capture + viewer_name threading", () => {
     expect(mountMatch![0]).not.toContain("prototypeId")
   })
 
-  it("test_name_form_fragment_composes_with_inputs_and_notice: live-renders first/last inputs + PII notice", () => {
+  it("test_name_form_fragment_composes_with_input_and_notice: live-renders the single full-name input + PII notice", () => {
     const html = renderToStaticMarkup(
       React.createElement(
         "form",
         { className: "design-agent-surface da-viewer-name-form", "data-testid": "viewer-name-form" },
-        React.createElement("input", { "data-testid": "viewer-first-name-input", placeholder: "First name" }),
-        React.createElement("input", { "data-testid": "viewer-last-name-input", placeholder: "Last name" }),
+        React.createElement("input", { "data-testid": "viewer-full-name-input", placeholder: "Full name" }),
         React.createElement(
           "button",
           { type: "submit", "data-testid": "viewer-name-submit" },
@@ -446,8 +446,9 @@ describe("Phase 3 name capture + viewer_name threading", () => {
         ),
       ),
     )
-    expect(html).toContain('data-testid="viewer-first-name-input"')
-    expect(html).toContain('data-testid="viewer-last-name-input"')
+    expect(html).toContain('data-testid="viewer-full-name-input"')
+    expect(html).not.toContain('data-testid="viewer-first-name-input"')
+    expect(html).not.toContain('data-testid="viewer-last-name-input"')
     expect(html).toContain('data-testid="viewer-name-notice"')
     expect(html).toContain("design-agent-surface")
   })

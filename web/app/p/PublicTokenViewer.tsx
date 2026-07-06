@@ -79,6 +79,15 @@ function persistViewerName(name: string): void {
   }
 }
 
+// Up-to-two-letter initials for the identity-strip avatar. A single-word name
+// yields one letter; empty segments are dropped so a trailing space never
+// produces an empty/"undefined" chip (the single-field name has no first/last
+// concatenation artifact to begin with).
+function viewerInitials(name: string): string {
+  const words = name.trim().split(/\s+/).filter(Boolean)
+  return words.slice(0, 2).map((w) => w[0]!.toUpperCase()).join("")
+}
+
 export function PublicTokenViewer() {
   // The real share token comes from the live URL, not useParams() — under
   // output:"export" the route is prerendered under the "_" sentinel, so
@@ -98,8 +107,7 @@ export function PublicTokenViewer() {
   // stored name. Threaded onto BOTH create paths (the pin onCreate + the
   // CommentsPanel mount) so anon comments are attributed to a name.
   const [viewerName, setViewerName] = useState("")
-  const [firstName, setFirstName] = useState("")
-  const [lastName, setLastName] = useState("")
+  const [fullName, setFullName] = useState("")
   // dedup: canonical server comment ids from the mounted CommentsPanel,
   // forwarded to PrototypeMarkLayer so a saved pin whose comment is in the server
   // list has its local card suppressed (the canvas dot stays). Public pins stay
@@ -115,10 +123,15 @@ export function PublicTokenViewer() {
   const needsName = commentsOpen && viewerNeedsName
   function handleNameSubmit(e: FormEvent) {
     e.preventDefault()
-    const name = `${firstName.trim()} ${lastName.trim()}`.trim()
+    const name = fullName.trim()
     if (!name) return
     persistViewerName(name)
     setViewerName(name)
+    // Auto-enable the element selector so the viewer can immediately click an
+    // element to comment — no separate Mark-button click. Idempotent
+    // (setMarkMode, not toggleMark); the sidebar is already open so
+    // onEnterMarkMode is a no-op here.
+    pin.setMarkMode(true)
   }
   // C2b: real marking, driven by the shared usePinMarking hook. The create-fn is
   // the public createCommentByToken (no prototypeId / auth) — distinct from the
@@ -132,10 +145,13 @@ export function PublicTokenViewer() {
     onPinDropped: () => setCommentsOpen(true),
     // A pin comment must carry a real viewer name — never post "Anonymous". Until
     // the viewer supplies one, the submit aborts and the name-capture form is
-    // surfaced (the comments sidebar holds the First/Last name form). Once the
+    // surfaced (the comments sidebar holds the single Full name form). Once the
     // name is set, requireName flips false and the pin posts attributed.
     requireName: viewerNeedsName,
     onRequireName: () => setCommentsOpen(true),
+    // Public viewer stays in mark mode across repeated comments so the next click
+    // starts a new pin without re-enabling the element selector each time.
+    stayInMarkMode: true,
   })
 
   useEffect(() => {
@@ -223,7 +239,7 @@ export function PublicTokenViewer() {
                 >
                 <button
                   type="button"
-                  className={pin.markMode ? "active" : ""}
+                  className={pin.markMode ? "mark-active" : ""}
                   aria-pressed={pin.markMode}
                   data-testid="public-mark-toggle"
                   onClick={() => pin.toggleMark()}
@@ -288,6 +304,59 @@ export function PublicTokenViewer() {
             </button>
           </div>
           <div className="da-right-body">
+            {/* Post-submit identity strip — who the viewer is commenting as. Shown
+                once a name is set (initials avatar + full name). Cosmetic
+                orientation; the full name has no first/last concat artifact. */}
+            {viewerName && (
+              <div
+                className="viewer-identity-strip"
+                data-testid="viewer-identity-strip"
+              >
+                <div className="pc-av" aria-hidden>
+                  {viewerInitials(viewerName)}
+                </div>
+                <div>
+                  <div className="viewer-identity-name">{viewerName}</div>
+                  <div className="viewer-identity-sub">Commenting as</div>
+                </div>
+              </div>
+            )}
+            {/* Mark-mode notice — orients the viewer while the element selector is
+                on (auto-enabled on name submit). Belt-and-suspenders alongside the
+                canvas crosshair + inset ring. */}
+            {pin.markMode && (
+              <div
+                className="mark-mode-sidebar-notice"
+                role="status"
+                data-testid="mark-mode-notice"
+              >
+                <span className="mark-mode-notice-icon" aria-hidden>
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 14 14"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <circle cx="7" cy="7" r="4" />
+                    <line x1="7" y1="1" x2="7" y2="3" />
+                    <line x1="7" y1="11" x2="7" y2="13" />
+                    <line x1="1" y1="7" x2="3" y2="7" />
+                    <line x1="11" y1="7" x2="13" y2="7" />
+                  </svg>
+                </span>
+                <div className="mark-mode-notice-body">
+                  <p className="mark-mode-notice-title">Click any element to comment</p>
+                  <p className="mark-mode-notice-desc">
+                    The element selector is on. Click something in the prototype to
+                    attach a comment to it.
+                  </p>
+                </div>
+              </div>
+            )}
             {/* C2b: dropped-pin comment rows (draft composer + saved rows).
                 editorMode=false + canResolve=false → Apply / Ignore / resolve
                 stay hidden on the public surface. */}
@@ -310,38 +379,31 @@ export function PublicTokenViewer() {
                 data-testid="viewer-name-form"
                 onSubmit={handleNameSubmit}
               >
-                <label className="da-viewer-name-label" htmlFor="da-viewer-first-name">
+                <label className="da-viewer-name-label" htmlFor="da-viewer-full-name">
                   Add your name to comment
                 </label>
+                {/* Wrapper gives the input a row-flex context so its
+                    `flex: 1 1 120px` grows horizontally (full-width single line)
+                    rather than stretching vertically as a direct child of the
+                    column form — otherwise it renders as a tall multi-line box. */}
                 <div className="da-viewer-name-fields">
                   <input
-                    id="da-viewer-first-name"
+                    id="da-viewer-full-name"
                     className="da-viewer-name-input"
-                    data-testid="viewer-first-name-input"
+                    data-testid="viewer-full-name-input"
                     type="text"
-                    placeholder="First name"
-                    value={firstName}
-                    onChange={(e) => setFirstName(e.target.value)}
-                    maxLength={40}
-                    autoComplete="given-name"
-                  />
-                  <input
-                    id="da-viewer-last-name"
-                    className="da-viewer-name-input"
-                    data-testid="viewer-last-name-input"
-                    type="text"
-                    placeholder="Last name"
-                    value={lastName}
-                    onChange={(e) => setLastName(e.target.value)}
-                    maxLength={40}
-                    autoComplete="family-name"
+                    placeholder="Full name"
+                    value={fullName}
+                    onChange={(e) => setFullName(e.target.value)}
+                    maxLength={80}
+                    autoComplete="name"
                   />
                 </div>
                 <button
                   type="submit"
                   className="btn btn-accent da-viewer-name-submit"
                   data-testid="viewer-name-submit"
-                  disabled={!firstName.trim() && !lastName.trim()}
+                  disabled={!fullName.trim()}
                 >
                   Continue
                 </button>

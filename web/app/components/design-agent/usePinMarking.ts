@@ -68,6 +68,11 @@ export type UsePinMarkingParams = {
   /** Public only — called when a submit is blocked for a missing name, to force
    *  the comments/name surface open so the viewer can enter it. */
   onRequireName?: () => void
+  /** Public only — when true, mark mode is NOT auto-exited after a pin is dropped,
+   *  so the viewer stays in continuous mark→comment→mark cycles and only leaves
+   *  mark mode via the explicit off-affordance (Mark toggle / Esc). The signed-in
+   *  surface omits it (defaults false), preserving its drop-then-exit behaviour. */
+  stayInMarkMode?: boolean
   /** Surface-specific PERSISTED resolve (mirrors the `onCreate` injection seam).
    *  Signed-in injects withAuthRetry(() => resolveComment(prototype.id, id)) so a
    *  pin-resolve writes through the SAME authed PATCH the CommentsPanel card uses;
@@ -110,6 +115,7 @@ export function usePinMarking({
   requireName = false,
   onRequireName,
   onResolve,
+  stayInMarkMode = false,
 }: UsePinMarkingParams): UsePinMarkingReturn {
   // mark-and-comment pin flow state.
   // `markMode` toggles the crosshair overlay; `pins` holds the dropped pins +
@@ -384,7 +390,10 @@ export function usePinMarking({
       { n, xPct: finalXPct, yPct: finalYPct, xPctInEl, yPctInEl, anchor, elementFriendly, elementTechnical, draft: "", body: "", saved: false, busy: false, error: null },
     ])
     onPinDropped?.()
-    setMarkMode(false)
+    // Public viewer stays in mark mode for continuous mark→comment→mark cycles
+    // (exits only via the explicit Mark toggle / Esc); the signed-in editor keeps
+    // its drop-then-exit behaviour. The element highlight is cleared either way.
+    if (!stayInMarkMode) setMarkMode(false)
     clearElementHighlight()
   }
 
