@@ -50,6 +50,16 @@ def _triage_for(*theme_ids):
     ]}
 
 
+def _triage_with_dupes(theme_ids, duplicate_of):
+    """Triage payload where `duplicate_of` maps a theme_id → the earlier theme_id
+    it duplicates (same project, different wording)."""
+    return {"items": [
+        {"theme_id": tid, "tag": "something_new", "reasoning": f"rationale {i}",
+         "duplicate_of": duplicate_of.get(tid, "")}
+        for i, tid in enumerate(theme_ids)
+    ]}
+
+
 # ── seed companies for the FK + tenant tests ──
 
 def _seed_company(db, cid):
@@ -105,9 +115,147 @@ def test_sequence_ranks_remaining_by_score(facade, isolated_settings):
                       return_value=_llm_result(_triage_for(broad.id, thin.id))):
         rows = bl.sequence_backlog(facade, "ent-A", exclude_theme_ids=[])
 
-    assert [r["title"] for r in rows] == ["broad", "thin"]
+    assert [r["title"] for r in rows] == ["Broad", "Thin"]   # titles are title-cased
     assert rows[0]["rank"] == 1 and rows[1]["rank"] == 2
     assert rows[0]["score"] >= rows[1]["score"]
+
+
+# ─────────────────────────── dedup (_drop_duplicates unit) ───────────────────────
+
+class _Cand:
+    """Minimal stand-in for a ThemeConvergence — _drop_duplicates only reads
+    .theme_id."""
+    def __init__(self, theme_id):
+        self.theme_id = theme_id
+
+
+def _dupes(mapping):
+    return {tid: {"duplicate_of": tgt} for tid, tgt in mapping.items()}
+
+
+def test_drop_duplicates_keeps_highest_ranked_of_cluster():
+    from app.synthesis.backlog import _drop_duplicates
+    cands = [_Cand("a"), _Cand("b"), _Cand("c")]
+    # b is the same project as a (earlier); c is distinct.
+    survivors = _drop_duplicates(cands, _dupes({"b": "a"}))
+    assert [c.theme_id for c in survivors] == ["a", "c"]
+
+
+def test_drop_duplicates_ignores_forward_self_and_unknown_pointers():
+    from app.synthesis.backlog import _drop_duplicates
+    cands = [_Cand("a"), _Cand("b"), _Cand("c")]
+    # a→b points FORWARD (later), b→b is self, c→zzz is unknown: all ignored.
+    survivors = _drop_duplicates(
+        cands, _dupes({"a": "b", "b": "b", "c": "zzz"}))
+    assert [c.theme_id for c in survivors] == ["a", "b", "c"]
+
+
+def test_drop_duplicates_resolves_chain_to_surviving_root():
+    from app.synthesis.backlog import _drop_duplicates
+    cands = [_Cand("a"), _Cand("b"), _Cand("c")]
+    # b duplicates a (dropped); c points at b (already dropped) → c is KEPT,
+    # because its named canonical no longer stands. Prevents a dropped item from
+    # silently taking others down with it.
+    survivors = _drop_duplicates(cands, _dupes({"b": "a", "c": "b"}))
+    assert [c.theme_id for c in survivors] == ["a", "c"]
+
+
+def test_drop_duplicates_no_flags_keeps_everything():
+    from app.synthesis.backlog import _drop_duplicates
+    cands = [_Cand("a"), _Cand("b")]
+    assert [c.theme_id for c in _drop_duplicates(cands, {})] == ["a", "b"]
+
+
+# ─────────────────────────────── title casing ───────────────────────────────
+
+def test_title_case_capitalizes_and_preserves_acronyms():
+    from app.synthesis.backlog import _title_case
+    cases = {
+        "brief delivery": "Brief Delivery",
+        "onboarding": "Onboarding",
+        "PRD generation": "PRD Generation",             # acronym untouched
+        "Voice of Customer (VoC) digest": "Voice of Customer (VoC) Digest",
+        "enterprise security & SSO": "Enterprise Security & SSO",
+        "seat limit / over-provisioning": "Seat Limit / Over-Provisioning",
+        "brief / report sharing": "Brief / Report Sharing",
+        "HubSpot OAuth integration": "HubSpot OAuth Integration",
+        "the brief": "The Brief",                        # minor word capped when first
+    }
+    for src, want in cases.items():
+        assert _title_case(src) == want, f"{src!r} → {_title_case(src)!r}"
+
+
+# ───────────────────────── dedup (sequence_backlog end-to-end) ───────────────────
+
+def test_sequence_drops_reworded_duplicate(facade, isolated_settings):
+    """Two themes describing the same project in different wording collapse to a
+    single backlog row, ranked contiguously."""
+    from app.synthesis import backlog as bl
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "ent-A")
+    # "sso" converges broader → ranks first; "single sign-on" is the reworded twin.
+    sso = _seed_theme_with_signals(facade, "ent-A", "Add SSO login", [
+        ("revenue", "deal_blocker", {}, 0),
+        ("customer_voice", "feature_request", {}, 0),
+        ("project_mgmt", "bug", {}, 0),
+    ])
+    twin = _seed_theme_with_signals(facade, "ent-A", "Support single sign-on", [
+        ("customer_voice", "feature_request", {}, 5),
+    ])
+    other = _seed_theme_with_signals(facade, "ent-A", "Dark mode", [
+        ("revenue", "deal_blocker", {}, 0),
+        ("project_mgmt", "bug", {}, 0),
+    ])
+
+    triage = _triage_with_dupes(
+        [sso.id, other.id, twin.id], duplicate_of={twin.id: sso.id})
+    with patch.object(bl, "llm_call", return_value=_llm_result(triage)):
+        rows = bl.sequence_backlog(facade, "ent-A", exclude_theme_ids=[])
+
+    theme_ids = [r["theme_id"] for r in rows]
+    assert twin.id not in theme_ids                 # reworded duplicate dropped
+    assert sso.id in theme_ids and other.id in theme_ids
+    assert [r["rank"] for r in rows] == [1, 2]       # contiguous after the drop
+
+    # Nothing lingers in the store for the dropped twin.
+    stored = db.table("backlog_items").select("theme_id").eq(
+        "enterprise_id", "ent-A").execute().data
+    assert twin.id not in {r["theme_id"] for r in stored}
+
+
+def test_sequence_dedup_prunes_prior_duplicate_row(facade, isolated_settings):
+    """A twin that was persisted on an earlier run (before it was recognised as a
+    duplicate) is pruned on the next sequence, not left orphaned."""
+    from app.synthesis import backlog as bl
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "ent-A")
+    sso = _seed_theme_with_signals(facade, "ent-A", "Add SSO login", [
+        ("revenue", "deal_blocker", {}, 0),
+        ("customer_voice", "feature_request", {}, 0),
+        ("project_mgmt", "bug", {}, 0),
+    ])
+    twin = _seed_theme_with_signals(facade, "ent-A", "Support single sign-on", [
+        ("customer_voice", "feature_request", {}, 5),
+    ])
+
+    # Run 1: triage does NOT yet flag the twin → both persist.
+    with patch.object(bl, "llm_call",
+                      return_value=_llm_result(_triage_for(sso.id, twin.id))):
+        bl.sequence_backlog(facade, "ent-A", exclude_theme_ids=[])
+    assert db.table("backlog_items").select("id").eq(
+        "enterprise_id", "ent-A").execute().data.__len__() == 2
+
+    # Run 2: triage now flags the twin as a duplicate → the stale row is pruned.
+    triage = _triage_with_dupes(
+        [sso.id, twin.id], duplicate_of={twin.id: sso.id})
+    with patch.object(bl, "llm_call", return_value=_llm_result(triage)):
+        bl.sequence_backlog(facade, "ent-A", exclude_theme_ids=[])
+
+    stored = db.table("backlog_items").select("theme_id").eq(
+        "enterprise_id", "ent-A").execute().data
+    assert {r["theme_id"] for r in stored} == {sso.id}
 
 
 def test_sequence_persists_all_themes_but_triages_only_top_cap(
@@ -146,9 +294,9 @@ def test_sequence_persists_all_themes_but_triages_only_top_cap(
     assert "two" not in captured["input"] and "one" not in captured["input"]
     # Tail items are persisted but carry no LLM tag/reasoning.
     by_title = {r["title"]: r for r in rows}
-    assert by_title["four"]["tag"] == "something_new"
-    assert by_title["two"]["tag"] is None
-    assert by_title["one"]["reasoning"] is None
+    assert by_title["Four"]["tag"] == "something_new"
+    assert by_title["Two"]["tag"] is None
+    assert by_title["One"]["reasoning"] is None
 
 
 def test_sequence_persists_items_with_rank_and_reasoning(facade, isolated_settings):
