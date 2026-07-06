@@ -8,11 +8,13 @@ export const metadata: Metadata = {
   title: "Sprntly",
 }
 
-// Critical CSS inlined in <head> so the very first paint is a white Sprntly
+// Critical CSS inlined in <head> so the very first paint is a full white
 // loading screen — before globals.css or the client bundle load. This replaces
-// the brief black/dark flash the browser would otherwise show on cold load.
+// the brief black/dark flash the browser would otherwise show on cold load
+// (the html element also carries an inline white background + light color-scheme
+// so the viewport canvas is white from the very first frame, before this parses).
 const CRITICAL_CSS = `
-  html { background: #FFFFFF; color-scheme: light; }
+  html { background: #FFFFFF; }
   #app-splash {
     position: fixed;
     inset: 0;
@@ -27,13 +29,11 @@ const CRITICAL_CSS = `
   }
   #app-splash.is-hidden { opacity: 0; pointer-events: none; }
   #app-splash .app-splash__text {
-    color: #179463;
+    color: #000000;
     font-size: 15px;
     font-weight: 500;
     letter-spacing: 0.01em;
-    animation: app-splash-pulse 1.2s ease-in-out infinite;
   }
-  @keyframes app-splash-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
 `
 
 export default function RootLayout({
@@ -42,8 +42,9 @@ export default function RootLayout({
   children: React.ReactNode
 }) {
   return (
-    <html lang="en">
+    <html lang="en" style={{ colorScheme: "light", backgroundColor: "#FFFFFF" }}>
       <head>
+        <meta name="color-scheme" content="light" />
         <style dangerouslySetInnerHTML={{ __html: CRITICAL_CSS }} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
