@@ -1361,6 +1361,10 @@ export type PrototypeRecord = {
   //    existing literals keep typechecking and the viewer defaults to showing
   //    both device toggles for any absent/unrecognised value.
   target_platform?: "desktop" | "mobile" | "both" | string | null
+  // ── (append-only): the owning PRD id. GET /{id} / by-prd both `select("*")`,
+  //    so the column flows through at runtime; typed OPTIONAL so existing
+  //    `PrototypeRecord` literals keep typechecking.
+  prd_id?: number
 }
 
 /** 202 kickoff response from POST /v1/design-agent/generate. */
