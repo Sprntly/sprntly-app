@@ -105,8 +105,8 @@ function ViewPrototypeButton({ prdId, figmaFileKey }: { prdId: number; figmaFile
     setHasProto(null)
     designAgentApi
       .getByPrd(prdId)
-      .then(() => {
-        if (!cancelled) setHasProto(true)
+      .then((proto) => {
+        if (!cancelled) setHasProto(proto != null)
       })
       .catch(() => {
         if (!cancelled) setHasProto(false)

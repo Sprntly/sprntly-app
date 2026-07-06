@@ -118,7 +118,7 @@ function renderPanel() {
 }
 
 async function openGeneratePopup() {
-  mocks.getByPrd.mockRejectedValueOnce({ status: 404 })
+  mocks.getByPrd.mockResolvedValueOnce(null)
   renderPanel()
   fireEvent.click(screen.getByRole("button", { name: "View Prototype" }))
   await screen.findByRole("dialog", { name: "Generate prototype" })
@@ -179,9 +179,37 @@ describe("PrdPanelContent View Prototype footer action", () => {
     expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
   })
 
-  it("test_view_prototype_none_opens_generate_popup", async () => {
-    mocks.getByPrd.mockRejectedValueOnce({ status: 404 })
+  it("test_no_proto_null_resolve_opens_popup", async () => {
+    mocks.getByPrd.mockResolvedValueOnce(null)
     renderPanel()
+    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
+    await act(async () => {
+      await mocks.getByPrd.mock.results[0].value
+    })
+    fireEvent.click(screen.getByRole("button", { name: "View Prototype" }))
+    expect(await screen.findByRole("dialog", { name: "Generate prototype" })).toBeTruthy()
+    expect(mocks.pushSpy).not.toHaveBeenCalled()
+  })
+
+  it("test_proto_record_navigates", async () => {
+    mocks.getByPrd.mockResolvedValueOnce({ id: 88, status: "ready", bundle_url: "/bundle" })
+    renderPanel()
+    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
+    await act(async () => {
+      await mocks.getByPrd.mock.results[0].value
+    })
+    fireEvent.click(screen.getByRole("button", { name: "View Prototype" }))
+    expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42")
+    expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
+  })
+
+  it("test_getbyprd_reject_defensive_opens_popup", async () => {
+    mocks.getByPrd.mockRejectedValueOnce({ status: 500 })
+    renderPanel()
+    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
+    await act(async () => {
+      await mocks.getByPrd.mock.results[0].value.catch(() => undefined)
+    })
     fireEvent.click(screen.getByRole("button", { name: "View Prototype" }))
     expect(await screen.findByRole("dialog", { name: "Generate prototype" })).toBeTruthy()
     expect(mocks.pushSpy).not.toHaveBeenCalled()
