@@ -18,8 +18,10 @@ import { useAuth } from "../lib/auth"
 import { connectorsApi, teamApi, type TeamMemberRecord } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
+import { useGenerationNotify } from "./hooks/useGenerationNotify"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
+  useGenerationNotify()
   const auth = useAuth()
   const { activeCompany } = useCompany()
   const { profile, workspace } = useWorkspace()

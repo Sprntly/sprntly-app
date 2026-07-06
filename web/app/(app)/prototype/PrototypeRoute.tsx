@@ -491,7 +491,7 @@ function InTabCanvas({
 export function PrototypeRoute() {
   const router = useRouter()
   const search = useSearchParams()
-  const { goTo } = useNavigation()
+  const { goTo, showToast } = useNavigation()
   const { content } = useContent()
   const { workspace } = useWorkspace()
 
@@ -792,6 +792,27 @@ export function PrototypeRoute() {
     setGenerateRequested(true)
   }
 
+  // "Notify me when ready" — dismiss the full-screen loading overlay, show a
+  // processing toast, signal the shell's PrototypeGeneratingCard (da:generating),
+  // hand off the completion poll to the shell owner (da:notify-generation), and
+  // navigate away so the user can keep working. Guarded: no-op when no in-flight
+  // prototype id exists yet (the generate POST hasn't returned). On navigate, prefer
+  // history.back(); fall back to the bare prototype path when there is no history
+  // entry to return to (fresh tab / direct open).
+  const handleNotifyWhenReady = useCallback(() => {
+    if (genProtoId == null) return
+    showToast("Prototype is processing", "We'll let you know when it's ready.")
+    window.dispatchEvent(new CustomEvent("da:generating", { detail: { prototypeId: genProtoId } }))
+    if (prdId != null) {
+      window.dispatchEvent(new CustomEvent("da:notify-generation", { detail: { prototypeId: genProtoId, prdId } }))
+    }
+    if (window.history.length > 1) {
+      router.back()
+    } else {
+      router.push(prototypePath(prdId!))
+    }
+  }, [showToast, genProtoId, prdId, router])
+
   // No PRD context (bare /prototype): there is nothing to generate from. Send the
   // user to the weekly brief, where a PRD opens in the right-rail card and offers
   // "Generate Prototype".
@@ -878,6 +899,7 @@ export function PrototypeRoute() {
               githubRepo={genGithubRepo}
               prototypeId={genProtoId}
               onCancel={handleGenCancel}
+              onNotifyWhenReady={genProtoId != null ? handleNotifyWhenReady : undefined}
               locatePhase={locatePhase ?? undefined}
             />
           </GenerateSurfaceErrorBoundary>
@@ -1017,6 +1039,7 @@ export function PrototypeRoute() {
             githubRepo={genGithubRepo}
             prototypeId={genProtoId}
             onCancel={handleGenCancel}
+            onNotifyWhenReady={genProtoId != null ? handleNotifyWhenReady : undefined}
             locatePhase={locatePhase ?? undefined}
           />
         </GenerateSurfaceErrorBoundary>
