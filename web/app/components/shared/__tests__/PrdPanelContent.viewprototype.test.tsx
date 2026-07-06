@@ -198,7 +198,9 @@ describe("PrdPanelContent View Prototype footer action", () => {
   it("test_kickoff_closes_popup_and_navigates", async () => {
     await openGeneratePopup()
     fireEvent.click(screen.getByRole("button", { name: "Kick off" }))
-    await waitFor(() => expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42"))
+    await waitFor(() =>
+      expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42&pid=991"),
+    )
     expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
   })
 
