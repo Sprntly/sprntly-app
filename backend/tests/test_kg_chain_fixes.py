@@ -224,7 +224,6 @@ def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
     # Part A is now an HTML page built from the skill's HTML template; stub the
     # loader so the test stays hermetic (no skill-file read).
     monkeypatch.setattr(pr, "_load_part_a_template", lambda: "<!DOCTYPE html><html></html>")
-    monkeypatch.setattr(pr, "_resolve_evidence_page_url", lambda b, i: "")
     monkeypatch.setattr(pr, "log_agent_decision", lambda **kw: None)
 
     skills_seen = []

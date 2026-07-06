@@ -44,7 +44,6 @@ from app.config import settings
 from app.corpus import load_corpus
 from app.db import complete_prd, get_brief_by_id
 from app.db.companies import company_id_for_slug, owner_name_for_company
-from app.db.evidences import find_existing_evidence
 from app.db.prds import (
     fail_prd,
     find_existing_prd,
@@ -58,13 +57,13 @@ from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.retrieval import insight_evidence_trail, render_evidence_trail_section
 from app.llm import strip_code_fence
-from app.prompts import EVIDENCE_VARIANT, PRD_VARIANT, VOICE_GUARD
+from app.prompts import PRD_VARIANT, VOICE_GUARD
 from app.skills.loader import get_skill
 
 logger = logging.getLogger(__name__)
 
-# Part A is now an HTML page (prd-author v4.2), so the byline / evidence-page
-# link / visual system all live in the prompt below. Bumped v3 → v4.
+# Part A is now an HTML page (prd-author v4.2), so the byline / visual system all
+# live in the prompt below. Bumped v3 → v4.
 PROMPT_VERSION = "prd-author-v4"
 _SKILL = "prd-author"
 # The machine-readable Implementation Spec (Part B) is generated on demand by the
@@ -77,9 +76,6 @@ PROMPT_VERSION_B = "prd-impl-spec-v2"
 _AGENT = "prd"
 # PRD_VARIANT ("v3", the HTML PRD page) is imported from app.prompts above and
 # re-exported here so routes/prd.py and multi_agent keep importing it from here.
-# Base URL for the single per-PRD "View evidence page in Sprntly" link the
-# prd-author skill renders in the Evidence header.
-_EVIDENCE_PAGE_BASE = "https://app.sprntly.ai/evidence"
 # Byline fallback when the generating identity is unavailable (skill rule).
 _AUTHOR_FALLBACK = "[NEED: author]"
 
@@ -103,9 +99,8 @@ the supplied insight and the evidence it was derived from — falsifiable by a \
 reader who can pull the same data. The evidence is the company's \
 connected-source signals (the same trail that backs the brief insight) when \
 present, else the company's source data. Cite signals by source_type (and \
-provenance where present) with a type label per item, and render the single \
-`View evidence page in Sprntly ↗` link in the Evidence header. Never invent \
-numbers, users, sources, business rules, contracts, or the evidence-page URL; \
+provenance where present) with a type label per item. Never invent \
+numbers, users, sources, business rules, or contracts; \
 label unknowns per the METHOD (`[NEED: …]` / `[ASSUMPTION]` / `[ESCALATE]`) \
 rather than guessing.
 
@@ -118,10 +113,10 @@ Implementation Spec, no commentary outside the document. Output the raw HTML \
 document ONLY — do NOT wrap it in a Markdown code fence; the first characters of \
 your response must be the HTML itself (e.g. `<!DOCTYPE html>`).""" + VOICE_GUARD
 
-# The Part A directive. Carries the byline author, the evidence-page link, the
-# insight + evidence, and the HTML TEMPLATE, and steers the model to fill the
-# template's {{placeholders}} into a finished HTML page. The frontend renders
-# this HTML in a sandboxed iframe (variant v3).
+# The Part A directive. Carries the byline author, the insight + evidence, and
+# the HTML TEMPLATE, and steers the model to fill the template's {{placeholders}}
+# into a finished HTML page. The frontend renders this HTML in a sandboxed iframe
+# (variant v3).
 _PART_A_DIRECTIVE = """\
 PART DIRECTIVE: Produce ONLY Part A — the human PRD — as ONE self-contained HTML \
 page built from the TEMPLATE below (copy its `<style>` and skeleton verbatim, \
@@ -136,10 +131,10 @@ grounded content; never leave a {{placeholder}} or a bracketed example in place;
 flag a missing number `[NEED: …]` rather than inventing it.
 
 BYLINE: render the author byline directly under the title as `{author}` — do \
-NOT invent or substitute a name. EVIDENCE LINK: set the single Evidence-header \
-link's href to `{evidence_page}` exactly; if that is empty, keep the link text \
-but note that items appear on the evidence page when the signal lands. Do NOT \
-include an Implementation Spec. Start your output at `<!DOCTYPE html>`."""
+NOT invent or substitute a name. The Evidence section header is a plain label \
+with NO link — do not add an href or an evidence-page link in it; items not yet \
+in Sprntly still carry the "appears when the signal lands" note. \
+Do NOT include an Implementation Spec. Start your output at `<!DOCTYPE html>`."""
 
 _USER_TEMPLATE = """\
 {part_directive}
@@ -308,11 +303,6 @@ def _build_context(
     # Implementation Spec does NOT use this template.)
     template = _load_part_a_template()
     title = insight.get("title") or f"Insight #{insight_index + 1}"
-    # Single per-PRD evidence-page link the skill renders in the Evidence header:
-    # the evidence page for THIS (brief, insight), when one already exists.
-    # Best-effort — an empty URL tells the model to use the "appears when the
-    # signal lands" note instead of fabricating a link.
-    evidence_page_url = _resolve_evidence_page_url(brief_id, insight_index)
     # FORMAT/STYLE EXEMPLARS — the company's uploaded gold-standard PRD examples
     # ("what good looks like"). Additive context ONLY: folded into the prompt so
     # the model MATCHES the house structure & voice. No templates (or no company
@@ -336,7 +326,6 @@ def _build_context(
         "exemplars": exemplars,
         "insight": insight,
         "title": title,
-        "evidence_page_url": evidence_page_url,
     }
 
 
@@ -345,26 +334,6 @@ def _load_part_a_template() -> str:
     canonical inline `<style>`). Injected verbatim into the prompt so the model
     fills a copy of the exact visual system."""
     return get_skill(_SKILL).templates["prd-template.html"]
-
-
-def _resolve_evidence_page_url(brief_id: int, insight_index: int) -> str:
-    """Best-effort URL of the Sprntly evidence page for this (brief, insight).
-
-    Returns the app.sprntly.ai evidence link when an evidence row already exists
-    for this insight, else "" (the prompt then uses the "appears when the signal
-    lands" note rather than a fabricated URL). Never raises — a missing evidence
-    page must not fail PRD generation."""
-    try:
-        row = find_existing_evidence(brief_id, insight_index, variant=EVIDENCE_VARIANT)
-    except Exception:  # noqa: BLE001 — evidence-link lookup is best-effort
-        logger.exception(
-            "PRD evidence-page lookup failed brief_id=%s insight_index=%s",
-            brief_id, insight_index,
-        )
-        return ""
-    if not row:
-        return ""
-    return f"{_EVIDENCE_PAGE_BASE}/{row['id']}"
 
 
 def _exemplars_block(ctx: dict) -> str:
@@ -385,10 +354,7 @@ def _call_part_a(ctx: dict, author: str | None = None, background: bool = False)
     render `[NEED: author]` per the skill rule.
     """
     byline = author or owner_name_for_company(ctx.get("company_id")) or _AUTHOR_FALLBACK
-    directive = _PART_A_DIRECTIVE.format(
-        author=byline,
-        evidence_page=ctx.get("evidence_page_url") or "",
-    )
+    directive = _PART_A_DIRECTIVE.format(author=byline)
     user = _USER_TEMPLATE.format(
         part_directive=directive,
         insight_json=json.dumps(ctx["insight"], indent=2),

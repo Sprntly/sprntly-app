@@ -637,3 +637,43 @@ def test_owner_name_for_company_prefers_owner_then_admin(isolated_settings):
 
     assert owner_name_for_company("co-missing") is None
     assert owner_name_for_company(None) is None
+
+
+# ── Evidence header carries NO "View evidence page" link ──────────────────────
+
+def test_prd_template_has_no_evidence_link():
+    """The skill's HTML template renders the Evidence header as a plain label —
+    no `View evidence page` link, no evidence href, no leftover `.evhead` CSS."""
+    tpl = prd_runner._load_part_a_template()
+    assert "View evidence page" not in tpl
+    assert "app.sprntly.ai/evidence" not in tpl
+    assert "evhead" not in tpl
+    assert '<div class="eyebrow">Evidence</div>' in tpl
+
+
+def test_part_a_directive_has_no_evidence_link_placeholder():
+    """The directive no longer injects an evidence-page URL and instructs the
+    model to leave the Evidence header link-free."""
+    d = prd_runner._PART_A_DIRECTIVE
+    assert "{evidence_page}" not in d
+    assert "View evidence page" not in d
+    assert "NO link" in d
+
+
+def test_generated_prompt_carries_no_evidence_link(isolated_settings, monkeypatch):
+    """End-to-end: the prompt sent to the model (directive + REAL template)
+    contains no `View evidence page` link and no evidence URL."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    prompt = captured[0]["input"]
+    assert "View evidence page" not in prompt
+    assert "app.sprntly.ai/evidence" not in prompt
+    # The Evidence section itself is still present (just link-free).
+    assert "Evidence" in prompt
