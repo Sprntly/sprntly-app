@@ -1165,6 +1165,35 @@ export function ChatScreen() {
             <BriefChat />
           ) : (
           <main className={`od-center ${hasThread ? "od-center--thread" : "od-center--landing"}`}>
+            {/* Pinned PRD/insight context bar — anchors this chat to the insight
+                its PRD is about, and (once the content panel is closed) is the
+                only in-chat way to reopen the PRD. Shows for any tab bound to a
+                PRD or brief insight; hidden on plain chats and the brief tab. */}
+            {activeTab?.prd || activeTab?.briefMeta ? (
+              <div className="chat-insight-pin" data-testid="chat-insight-pin">
+                <span className="chat-insight-pin-mark" aria-hidden>
+                  <IconSparkle size={12} />
+                </span>
+                <span className="chat-insight-pin-kind">PRD</span>
+                <span className="chat-insight-pin-title" title={activeTab?.prd?.title ?? activeTab?.title}>
+                  {activeTab?.prd?.title ?? activeTab?.title}
+                </span>
+                {contentPanelTab === "prd" ? (
+                  <span className="chat-insight-pin-viewing">Viewing</span>
+                ) : (
+                  <button
+                    type="button"
+                    className="chat-insight-pin-btn"
+                    disabled={!!activeTab?.prdGenerating}
+                    onClick={handleOpenPrd}
+                  >
+                    {activeTab?.prdGenerating
+                      ? "Generating PRD…"
+                      : activeTab?.prd ? "Open PRD" : "Generate PRD"}
+                  </button>
+                )}
+              </div>
+            ) : null}
             <div className={`od-center-scroll${!hasThread ? " od-center-scroll--home-landing" : ""}`}>
               {!hasThread ? (
                 <div className="home-landing-eyeline">
