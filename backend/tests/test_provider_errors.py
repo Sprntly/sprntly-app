@@ -193,6 +193,124 @@ def test_alert_noop_for_non_alertable_class(monkeypatch):
     assert calls["n"] == 0
 
 
+def test_alert_multi_recipient_sends_per_address(monkeypatch):
+    calls: list[str] = []
+
+    def _fake_send(api_key, *, to, subject, html_body, text_body):
+        calls.append(to)
+
+    from app.synthesis import email_delivery
+    monkeypatch.setattr(email_delivery, "_send_via_resend", _fake_send)
+    monkeypatch.setattr(
+        config.settings, "design_agent_alert_email", "a@x.com,b@y.com", raising=False
+    )
+
+    provider_alert.maybe_alert_provider_outage(
+        ProviderErrorClass.PROVIDER_BILLING, context={"prototype_id": 1}
+    )
+    assert calls == ["a@x.com", "b@y.com"]  # one send per address, in order
+
+
+def test_alert_single_recipient_unchanged(monkeypatch):
+    calls: list[str] = []
+
+    def _fake_send(api_key, *, to, subject, html_body, text_body):
+        calls.append(to)
+
+    from app.synthesis import email_delivery
+    monkeypatch.setattr(email_delivery, "_send_via_resend", _fake_send)
+    # config.settings.design_agent_alert_email is already "ops@example.com"
+    # via the autouse fixture — a single address is the existing behavior.
+
+    provider_alert.maybe_alert_provider_outage(
+        ProviderErrorClass.PROVIDER_BILLING, context={"prototype_id": 1}
+    )
+    assert calls == ["ops@example.com"]  # regression: one address ⇒ one send
+
+
+def test_alert_parses_and_dedups_recipients(monkeypatch):
+    calls: list[str] = []
+
+    def _fake_send(api_key, *, to, subject, html_body, text_body):
+        calls.append(to)
+
+    from app.synthesis import email_delivery
+    monkeypatch.setattr(email_delivery, "_send_via_resend", _fake_send)
+    monkeypatch.setattr(
+        config.settings,
+        "design_agent_alert_email",
+        "a@x.com, , a@x.com, b@x.com,",
+        raising=False,
+    )
+
+    provider_alert.maybe_alert_provider_outage(
+        ProviderErrorClass.PROVIDER_BILLING, context={"prototype_id": 1}
+    )
+    assert calls == ["a@x.com", "b@x.com"]  # blanks dropped, duplicate collapsed
+
+
+def test_alert_one_bad_address_does_not_block_rest(monkeypatch):
+    calls: list[str] = []
+
+    def _flaky_send(api_key, *, to, subject, html_body, text_body):
+        calls.append(to)
+        if to == "a@x.com":
+            raise RuntimeError("resend rejected this address")
+
+    from app.synthesis import email_delivery
+    monkeypatch.setattr(email_delivery, "_send_via_resend", _flaky_send)
+    monkeypatch.setattr(
+        config.settings, "design_agent_alert_email", "a@x.com,b@y.com", raising=False
+    )
+
+    # Must return normally — the first address failing never stops the second
+    # or breaks the run.
+    provider_alert.maybe_alert_provider_outage(
+        ProviderErrorClass.PROVIDER_BILLING, context={"prototype_id": 1}
+    )
+    assert calls == ["a@x.com", "b@y.com"]
+
+
+def test_alert_empty_recipient_skips(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake_send(api_key, *, to, subject, html_body, text_body):
+        calls["n"] += 1
+
+    from app.synthesis import email_delivery
+    monkeypatch.setattr(email_delivery, "_send_via_resend", _fake_send)
+    monkeypatch.setattr(
+        config.settings, "design_agent_alert_email", " , ,  ", raising=False
+    )
+
+    provider_alert.maybe_alert_provider_outage(
+        ProviderErrorClass.PROVIDER_BILLING, context={"prototype_id": 1}
+    )
+    assert calls["n"] == 0  # nothing but blanks ⇒ clean no-op, no crash
+
+
+def test_alert_cooldown_covers_all_recipients(monkeypatch):
+    calls: list[str] = []
+
+    def _fake_send(api_key, *, to, subject, html_body, text_body):
+        calls.append(to)
+
+    from app.synthesis import email_delivery
+    monkeypatch.setattr(email_delivery, "_send_via_resend", _fake_send)
+    monkeypatch.setattr(
+        config.settings, "design_agent_alert_email", "a@x.com,b@y.com", raising=False
+    )
+
+    cls = ProviderErrorClass.PROVIDER_BILLING
+    provider_alert.maybe_alert_provider_outage(cls, context={"prototype_id": 1})
+    assert calls == ["a@x.com", "b@y.com"]  # first firing: both recipients sent
+
+    # Second firing lands inside the same cooldown window — the whole
+    # multi-recipient batch is deduped together, not per address.
+    provider_alert.maybe_alert_provider_outage(cls, context={"prototype_id": 1})
+    assert calls == ["a@x.com", "b@y.com"]  # unchanged: no new sends
+
+
 def test_runner_error_message_is_safe_not_raw():
     """Compose the runner's sanitization (classify → safe class + safe message)
     on a billing exception: error_message is generic, error_class is the safe

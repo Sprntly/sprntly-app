@@ -46,9 +46,20 @@ def maybe_alert_provider_outage(
     _last_sent[cls.value] = now
 
     settings = config.settings
-    to = (getattr(settings, "design_agent_alert_email", "") or "").strip()
+    raw_recipients = getattr(settings, "design_agent_alert_email", "") or ""
+    # Accept a comma-separated list: split, strip, drop empties, dedup
+    # case-insensitively while preserving the first-seen order.
+    seen: set[str] = set()
+    recipients: list[str] = []
+    for token in raw_recipients.split(","):
+        addr = token.strip()
+        if not addr or addr.lower() in seen:
+            continue
+        seen.add(addr.lower())
+        recipients.append(addr)
+
     api_key = settings.resend_api_key
-    if not to or not api_key:
+    if not recipients or not api_key:
         logger.warning(
             "provider alert skipped — no recipient/RESEND_API_KEY (class=%s)",
             cls.value,
@@ -80,9 +91,19 @@ def maybe_alert_provider_outage(
     try:
         from app.synthesis import email_delivery
 
-        email_delivery._send_via_resend(
-            api_key, to=to, subject=subject, html_body=html_body, text_body=text
+        # One send per recipient, isolated: a bad address for one recipient
+        # must never stop the alert from reaching the rest.
+        for addr in recipients:
+            try:
+                email_delivery._send_via_resend(
+                    api_key, to=addr, subject=subject, html_body=html_body,
+                    text_body=text,
+                )
+            except Exception:  # noqa: BLE001 — one bad address never blocks the rest
+                logger.exception("provider outage alert send failed for one recipient")
+        logger.info(
+            "provider outage alert sent to %d recipient(s) (class=%s)",
+            len(recipients), cls.value,
         )
-        logger.info("provider outage alert sent to %s (class=%s)", to, cls.value)
     except Exception:  # noqa: BLE001 — alert is best-effort; never break the run
         logger.exception("provider outage alert delivery failed (class=%s)", cls.value)
