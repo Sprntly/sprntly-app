@@ -1,20 +1,20 @@
 // @vitest-environment jsdom
 //
-// ChatScreen WELCOME-SUGGESTIONS DOM tests.
+// ChatScreen LANDING DOM tests.
 //
 // The chat LANDING (fresh-chat empty state, reached via `?new=1` / the "+" New
-// chat button) renders a lightweight "not sure where to start?" affordance: a
-// row of concrete suggestion chips that steer the user toward real PM actions
-// instead of leaving them to send a vague "hey". This is a pure UI nudge — it
-// does NOT change the agent's backend response logic. Clicking a suggestion
-// sends it as an ask.
+// chat button) shows a greeting + composer + a small row of curated suggestion
+// chips UNDER the composer (the home-chip row). The old "not sure where to
+// start? Try one of these:" welcome-suggestion chips ABOVE the composer were
+// removed — this file guards that they stay gone and that the remaining landing
+// still works.
 //
 // What is covered:
-//   1. The landing renders the welcome-suggestions affordance with the concrete
-//      suggestion labels (prioritize / analyze feedback / generate a PRD).
-//   2. The suggestions only appear on the empty landing — once a tab has a
-//      thread (the THREAD composer state), they're gone.
-//   3. Clicking a suggestion sends its prompt as an ask (the send path fires).
+//   1. The landing renders the greeting but NOT the removed welcome-suggestions
+//      affordance (nor its concrete labels).
+//   2. The curated home chips render under the composer on the empty landing,
+//      and are gone once a tab has a thread (the THREAD composer state).
+//   3. Clicking a curated home chip sends its prompt as an ask (send path fires).
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -104,6 +104,9 @@ import { NavigationProvider } from "../../../../context/NavigationContext"
 import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
+// The curated home chip (under the composer) that fires an ask when clicked.
+const FEEDBACK_CHIP = "Give me feedback on last week's customer conversations"
+
 function renderScreen() {
   return render(
     React.createElement(
@@ -151,42 +154,48 @@ afterEach(() => {
   localStorage.clear()
 })
 
-describe("ChatScreen welcome suggestions (empty landing)", () => {
-  it("renders the welcome-suggestions affordance with concrete suggestions on the landing", () => {
+describe("ChatScreen landing", () => {
+  it("renders the greeting but NOT the removed welcome-suggestions affordance", () => {
     searchString = "new=1"
     renderScreen()
     // We are on the chat landing, not the brief surface.
     expect(screen.getByText(/Welcome back/i)).toBeTruthy()
 
-    const container = screen.getByTestId("chat-welcome-suggestions")
-    expect(container).toBeTruthy()
-    // Concrete, action-oriented suggestions steering the user.
-    expect(screen.getByText("Help me prioritize projects")).toBeTruthy()
-    expect(screen.getByText("Analyze feedback")).toBeTruthy()
-    expect(screen.getByText("Generate a PRD")).toBeTruthy()
-    // They are real, clickable buttons (not inert text).
-    const items = container.querySelectorAll("button")
-    expect(items.length).toBe(3)
+    // The old "Try one of these:" chip row (and its concrete labels) is gone.
+    expect(screen.queryByTestId("chat-welcome-suggestions")).toBeNull()
+    expect(screen.queryByText("Help me prioritize projects")).toBeNull()
+    expect(screen.queryByText("Analyze feedback")).toBeNull()
+    expect(screen.queryByText("Generate a PRD")).toBeNull()
   })
 
-  it("does NOT render the welcome suggestions once a tab has a thread", () => {
+  it("renders the curated home chips under the composer on the landing", () => {
+    searchString = "new=1"
+    renderScreen()
+    expect(screen.getByText(FEEDBACK_CHIP)).toBeTruthy()
+  })
+
+  it("does NOT render the landing chips once a tab has a thread", () => {
     seedThreadTab()
     renderScreen()
     expect(screen.getByText("first question")).toBeTruthy()
-    expect(screen.queryByTestId("chat-welcome-suggestions")).toBeNull()
+    expect(screen.queryByText(FEEDBACK_CHIP)).toBeNull()
   })
 
-  it("sends the suggestion's prompt as an ask when clicked", async () => {
+  it("pre-fills the composer with the chip's prompt when a curated chip is clicked", async () => {
     searchString = "new=1"
     renderScreen()
-    const btn = screen.getByText("Generate a PRD")
+    const composer = screen.getByPlaceholderText(/Ask Sprntly anything/i) as HTMLTextAreaElement
+    expect(composer.value).toBe("")
+
+    const btn = screen.getByText(FEEDBACK_CHIP).closest("button") as HTMLButtonElement
+    expect(btn).toBeTruthy()
     await act(async () => {
       fireEvent.click(btn)
     })
+    // The curated "feedback" chip fills Ask (does not auto-send), so the
+    // composer draft is populated with the chip's prompt for the user to send.
     await waitFor(() => {
-      expect(askedQueries.length).toBeGreaterThan(0)
+      expect(composer.value).toContain("customer conversations")
     })
-    const sent = askedQueries[askedQueries.length - 1]
-    expect(sent).toContain("Generate a PRD")
   })
 })

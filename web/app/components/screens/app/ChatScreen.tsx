@@ -70,16 +70,6 @@ const BRIEF_TAB_ID = "brief"
 // first message on send (see submitAsk's first-send rename).
 export const NEW_CHAT_TITLE = "New chat"
 
-// Concrete "what can I do here?" suggestions for the chat landing/empty state.
-// These steer a user who opens a fresh chat (or would otherwise send a vague
-// "hey") toward real PM actions. Clicking one sends it as an ask — this is a
-// pure UI nudge; it does NOT change the agent's backend response logic.
-const WELCOME_SUGGESTIONS: { label: string; prompt: string }[] = [
-  { label: "Help me prioritize projects", prompt: "Help me prioritize our current projects." },
-  { label: "Analyze feedback", prompt: "Analyze our recent user feedback and surface the top themes." },
-  { label: "Generate a PRD", prompt: "Generate a PRD for our top product opportunity." },
-]
-
 const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
   { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View weekly brief", desc: "", target: "brief" } },
   { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
@@ -1187,29 +1177,8 @@ export function ChatScreen() {
                         Welcome back, <em>{name}</em>.
                       </h1>
                       <p className="chat-greeting-sub">
-                        Welcome to Sprntly — not sure where to start? Try one of these:
+                        Welcome to Sprntly — what would you like to work on?
                       </p>
-                      <div
-                        className="chat-welcome-suggestions"
-                        data-testid="chat-welcome-suggestions"
-                        role="list"
-                        aria-label="Suggested things to ask"
-                      >
-                        {WELCOME_SUGGESTIONS.map((s) => (
-                          <button
-                            key={s.label}
-                            type="button"
-                            className="chat-welcome-suggestion"
-                            role="listitem"
-                            onClick={() => handleStarterChip(s.prompt)}
-                          >
-                            <span className="chat-welcome-suggestion-icon" aria-hidden>
-                              <IconSparkle size={13} />
-                            </span>
-                            {s.label}
-                          </button>
-                        ))}
-                      </div>
                     </div>
 
                     <div className="home-landing-composer">
