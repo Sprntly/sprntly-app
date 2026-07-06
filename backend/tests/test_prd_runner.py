@@ -173,9 +173,12 @@ def test_run_sync_uses_fallback_title(isolated_settings, monkeypatch):
     assert db_mod.get_prd(prd_id)["title"] == "Insight #1"
 
 
-def test_generate_prd_async_makes_one_call_no_part_b(isolated_settings, monkeypatch):
-    """The async generate_prd entry point also produces ONLY the human PRD (one
-    call), completing ready with an empty llm_part — the spec is on demand."""
+def test_generate_prd_warms_part_b_in_background(isolated_settings, monkeypatch):
+    """The async generate_prd entry point produces the human PRD (Part A), then
+    PRE-WARMS the Implementation Spec (Part B) in the background so the Tickets
+    tab can inherit acceptance criteria from it — the spec is cached in llm_part
+    without ever being surfaced to the user. The synchronous _run_sync path does
+    NOT warm (Part B stays strictly on demand there)."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
@@ -183,14 +186,24 @@ def test_generate_prd_async_makes_one_call_no_part_b(isolated_settings, monkeypa
 
     call, captured = _part_a_mock()
     monkeypatch.setattr(prd_runner, "llm_call", call)
-    asyncio.run(prd_runner.generate_prd(prd_id, brief_id, 0))
 
-    assert len(captured) == 1
-    assert captured[0]["purpose"] == "generate_prd_part_a"
+    async def _run() -> None:
+        await prd_runner.generate_prd(prd_id, brief_id, 0)
+        # Drain the fire-and-forget Part B pre-warm task(s) so the assertion sees
+        # a settled state rather than racing the background warm.
+        pending = list(prd_runner._impl_spec_warm_tasks)
+        if pending:
+            await asyncio.gather(*pending)
+
+    asyncio.run(_run())
+
+    purposes = [c["purpose"] for c in captured]
+    assert "generate_prd_part_a" in purposes  # human PRD generated
+    assert "generate_prd_part_b" in purposes  # Implementation Spec pre-warmed
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
     assert "Users can't X." in row["payload_md"]
-    assert (row["llm_part"] or "") == ""
+    assert (row["llm_part"] or "") != ""  # spec cached in the background
 
 
 def test_run_sync_part_a_renders_as_before(isolated_settings, monkeypatch):
