@@ -195,12 +195,6 @@ export function EvidenceScreen() {
     goTo("detail")
   }
 
-  // Compute confidence from detail metrics if available
-  const confidenceMetric = detail?.metrics?.find(
-    (m) => m.label.toLowerCase().includes("confidence"),
-  )
-  const confidenceValue = confidenceMetric?.value ?? (evidence ? "0.82" : null)
-
   // v3 rows are the self-contained HTML visual brief; v1/v2 are legacy
   // `:::block` markdown. Branch on the variant, with a content sniff as a
   // fallback for any row whose variant didn't round-trip.
@@ -257,9 +251,6 @@ export function EvidenceScreen() {
                 )) ?? (
                   <>
                     <span style={badgeStyle}>WHAT&apos;S BROKEN</span>
-                    {confidenceValue && (
-                      <span style={badgeAccentStyle}>CONFIDENCE {confidenceValue}</span>
-                    )}
                     <span style={badgeStyle}>BRIEF INSIGHT</span>
                   </>
                 )}
@@ -304,12 +295,6 @@ export function EvidenceScreen() {
             padding: "16px 0",
             borderTop: "1px solid var(--line, #E8E6E0)",
           }}>
-            {confidenceValue && (
-              <div>
-                <div style={metaLabelStyle}>Confidence</div>
-                <div style={metaValueStyle}>{confidenceValue}</div>
-              </div>
-            )}
             {detail?.metrics?.filter((m) => !m.label.toLowerCase().includes("confidence")).map((m, i) => (
               <div key={i}>
                 <div style={metaLabelStyle}>{m.label}</div>

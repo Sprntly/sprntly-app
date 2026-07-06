@@ -23,7 +23,7 @@ A self-contained **HTML document, 1–3 pages**, for a **product-team audience**
 4. **Context** — what the product is + the behavior under investigation (placed *after* TL;DR and Opportunity).
 5. **Evidence** — the findings, each with the best-fit chart, sequenced as one story.
 6. **Convergence** — where independent signals agree (or an honest note that they don't).
-7. **Hypothesis** — value-driven (behavior change → business value), testable, with metric + guardrails, plus a "→ feeds the PRD" handoff.
+7. **Hypothesis** — value-driven (behavior change → business value), testable, with metric + guardrails.
 
 No footer, no methods boilerplate, no mention of how it was produced.
 
@@ -76,8 +76,7 @@ fabricate quotes. Missing numbers are omitted or named as a gap.
 5. Pick the best chart per finding; sequence the charts so they tell one story.
 6. Include real VoC quotes across channels when available and aligned.
 7. Write the value-driven hypothesis (behavior change -> business value).
-8. Mark the handoff to `prd-author`.
-9. Honesty pass: every figure traces to an input; every quote is real; correlation != causation; confidence stated; non-converging signals not hidden.
+8. Honesty pass: every figure traces to an input; every quote is real; correlation != causation; non-converging signals not hidden.
 
 ### Chart selection (variable — best fit, not a fixed set)
 | Finding is about... | Use |

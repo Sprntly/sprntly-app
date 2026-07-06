@@ -650,8 +650,7 @@ This brief is the PROVENANCE TRAIL behind a single weekly-brief finding: it \
 shows a product manager HOW the insight was surfaced — the converging signals \
 across the company's connected sources and the strength of their agreement — \
 so the PM can trust and act on it, and it lands on the value-driven hypothesis \
-the METHOD calls for, with the "→ feeds the PRD" handoff (prd-author consumes \
-the same KG hypothesis next).
+the METHOD calls for.
 
 You are given the brief insight and the EVIDENCE TRAIL: the exact \
 connected-source signals that support it. Each signal carries its source_type (e.g. \
@@ -670,8 +669,8 @@ signal's source_type AND its provenance (the named tool/connector), exactly \
 as supplied.
 - The story you tell is the CONVERGENCE story: which independent source \
 types agree, what each one contributes, and how strong the combined \
-evidence is. Breadth of agreement + evidence weight = confidence; render it \
-with the convergence diagram when ≥2 source types agree.
+evidence is. Show it with the convergence diagram when ≥2 source types agree. \
+Do NOT render a standalone confidence readout/score.
 - A VoC quote card is allowed ONLY when a signal's content is a verbatim \
 quote; otherwise omit it. Never fabricate attribution.
 - If a section truly cannot be filled from the trail, omit that component \
@@ -689,7 +688,7 @@ below. Follow the bound skill's rendering contract and section order exactly: \
 eyebrow → strategic-thesis title + italic deck → meta line → TL;DR → \
 Opportunity → Context → the evidence findings (each with its best-fit \
 hand-authored inline-SVG chart) → the convergence diagram (when ≥2 source \
-types agree) → the value-driven hypothesis with its "→ feeds the PRD" handoff. \
+types agree) → the value-driven hypothesis. \
 Copy the canonical `<style>` design system verbatim from the skill's examples; \
 hand-draw every chart from the trail's numbers. HTML only — no `:::` blocks, no \
 markdown fences, no commentary outside the document.
