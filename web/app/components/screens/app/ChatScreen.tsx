@@ -1463,7 +1463,14 @@ export function ChatScreen() {
               )}
             </div>
 
-            {hasThread ? (
+            {/* The composer renders whenever the thread view is shown — including
+                an insight-bound tab whose thread is still empty (opened from the
+                brief/backlog): the user must be able to talk to Sprntly about that
+                PRD right away. `hasThread` alone hid it there; `showThreadView`
+                (hasThread || an insight message) restores it. A plain empty chat
+                still uses the landing composer (showThreadView is false), so
+                there's never a double composer. */}
+            {showThreadView ? (
               <div className="bc-dock">
                 {/* Floating "Create ticket" chip — only when the PRD rail is open
                     (it generates tickets from that PRD), else it's a hanging button. */}
