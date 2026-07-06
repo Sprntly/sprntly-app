@@ -74,10 +74,6 @@ _SKILL = "prd-author"
 _SKILL_B = "implementation-spec"
 PROMPT_VERSION_B = "prd-impl-spec-v2"
 _AGENT = "prd"
-
-# Strong refs to in-flight background Part B pre-warm tasks so the event loop
-# doesn't garbage-collect them mid-run (asyncio only holds weak refs).
-_impl_spec_warm_tasks: set[asyncio.Task] = set()
 # PRD_VARIANT ("v3", the HTML PRD page) is imported from app.prompts above and
 # re-exported here so routes/prd.py and multi_agent keep importing it from here.
 # Byline fallback when the generating identity is unavailable (skill rule).
@@ -461,18 +457,10 @@ async def _generate_human_prd(
     )
 
 
-def _schedule_impl_spec_warm(prd_id: int) -> None:
-    """Kick off a background Part B (Implementation Spec) pre-warm for a finished
-    PRD, error-isolated. Scheduled from `generate_prd` (the interactive/warm
-    entry point) — NOT from `_generate_human_prd`, so the synchronous `_run_sync`
-    path keeps Part B strictly on demand."""
-    task = asyncio.create_task(warm_impl_spec(prd_id))
-    _impl_spec_warm_tasks.add(task)
-    task.add_done_callback(_impl_spec_warm_tasks.discard)
-
-
 async def warm_impl_spec(prd_id: int) -> None:
-    """Generate + cache the Implementation Spec for a PRD on the background lane.
+    """Generate + cache the Implementation Spec (Part B) for a PRD on the
+    background lane, so the Tickets tab can INHERIT acceptance criteria from it —
+    WITHOUT ever surfacing the machine spec to the user.
 
     Best-effort: idempotent (cache hit is free) and error-isolated — pre-warming
     is a latency optimization for ticket inheritance, never a correctness gate."""
@@ -481,6 +469,22 @@ async def warm_impl_spec(prd_id: int) -> None:
         logger.info("impl-spec pre-warm done prd_id=%s", prd_id)
     except Exception:  # noqa: BLE001 — warming is best-effort
         logger.exception("impl-spec pre-warm failed prd_id=%s", prd_id)
+
+
+async def generate_prd_and_warm(
+    prd_id: int, brief_id: int, insight_index: int, background: bool = False,
+    insight_override: dict | None = None, author: str | None = None,
+) -> None:
+    """Generate the human PRD, THEN pre-warm the Implementation Spec (Part B).
+
+    This is the entry point the interactive/backlog PRD routes schedule (as one
+    long-lived background task on the app loop): the PRD is marked ready inside
+    `generate_prd` — the user's poll never waits on Part B — and Part B then warms
+    on the low-priority lane so tickets inherit AC with no added latency. Keeping
+    the warm OUT of `generate_prd` itself leaves that function (and the sync
+    `_run_sync`/test path) strictly human-PRD-only."""
+    await generate_prd(prd_id, brief_id, insight_index, background, insight_override, author)
+    await warm_impl_spec(prd_id)
 
 
 def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
@@ -525,13 +529,6 @@ async def generate_prd(
         msg = f"{type(exc).__name__}: {exc}"
         logger.exception("PRD generation failed prd_id=%s", prd_id)
         fail_prd(prd_id, msg)
-        return
-
-    # Part A is done — pre-warm the Implementation Spec (Part B) in the
-    # background so the Tickets tab can INHERIT acceptance criteria from it with
-    # no extra wait, WITHOUT ever surfacing the machine spec to the user.
-    # Fire-and-forget on the low-priority lane; a failure never affects Part A.
-    _schedule_impl_spec_warm(prd_id)
 
 
 # ── on-demand Implementation Spec (Part B) ───────────────────────────────────

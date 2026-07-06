@@ -257,10 +257,12 @@ async def test_on_demand_prd_generate_runs_immediately_with_no_existing(
 
     started: list[tuple] = []
 
-    async def fake_generate_prd(prd_id, b_id, idx, **kwargs):
+    # The route dispatches generate_prd_and_warm (human PRD, then a background
+    # Part B pre-warm); spy on that entry point.
+    async def fake_generate_and_warm(prd_id, b_id, idx, **kwargs):
         started.append((prd_id, b_id, idx))
 
-    monkeypatch.setattr(prd_routes, "generate_prd", fake_generate_prd)
+    monkeypatch.setattr(prd_routes, "generate_prd_and_warm", fake_generate_and_warm)
     monkeypatch.setattr(prd_routes, "require_owned_brief", lambda bid, cid: brief)
 
     class _Ctx:

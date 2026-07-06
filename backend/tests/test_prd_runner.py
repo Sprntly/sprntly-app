@@ -173,12 +173,11 @@ def test_run_sync_uses_fallback_title(isolated_settings, monkeypatch):
     assert db_mod.get_prd(prd_id)["title"] == "Insight #1"
 
 
-def test_generate_prd_warms_part_b_in_background(isolated_settings, monkeypatch):
-    """The async generate_prd entry point produces the human PRD (Part A), then
-    PRE-WARMS the Implementation Spec (Part B) in the background so the Tickets
-    tab can inherit acceptance criteria from it — the spec is cached in llm_part
-    without ever being surfaced to the user. The synchronous _run_sync path does
-    NOT warm (Part B stays strictly on demand there)."""
+def test_generate_prd_async_makes_one_call_no_part_b(isolated_settings, monkeypatch):
+    """The async generate_prd entry point produces ONLY the human PRD (one call),
+    completing ready with an empty llm_part — the spec is on demand. Pre-warming
+    Part B is layered on top by generate_prd_and_warm (below), NOT baked into
+    generate_prd, so this and the sync path stay strictly human-PRD-only."""
     _seed_corpus(isolated_settings["data_dir"])
     db_mod = isolated_settings["db"]
     brief_id = _seed_brief(db_mod)
@@ -186,16 +185,28 @@ def test_generate_prd_warms_part_b_in_background(isolated_settings, monkeypatch)
 
     call, captured = _part_a_mock()
     monkeypatch.setattr(prd_runner, "llm_call", call)
+    asyncio.run(prd_runner.generate_prd(prd_id, brief_id, 0))
 
-    async def _run() -> None:
-        await prd_runner.generate_prd(prd_id, brief_id, 0)
-        # Drain the fire-and-forget Part B pre-warm task(s) so the assertion sees
-        # a settled state rather than racing the background warm.
-        pending = list(prd_runner._impl_spec_warm_tasks)
-        if pending:
-            await asyncio.gather(*pending)
+    assert len(captured) == 1
+    assert captured[0]["purpose"] == "generate_prd_part_a"
+    row = db_mod.get_prd(prd_id)
+    assert row["status"] == "ready"
+    assert "Users can't X." in row["payload_md"]
+    assert (row["llm_part"] or "") == ""
 
-    asyncio.run(_run())
+
+def test_generate_prd_and_warm_pre_warms_part_b(isolated_settings, monkeypatch):
+    """generate_prd_and_warm (the interactive/backlog entry point) generates the
+    human PRD, then pre-warms the Implementation Spec (Part B) so tickets inherit
+    AC — the spec is cached in llm_part without ever being shown to the user."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    asyncio.run(prd_runner.generate_prd_and_warm(prd_id, brief_id, 0))
 
     purposes = [c["purpose"] for c in captured]
     assert "generate_prd_part_a" in purposes  # human PRD generated
