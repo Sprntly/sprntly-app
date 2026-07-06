@@ -132,6 +132,14 @@ describe("OnboardingRequiredGuard", () => {
     expect(replace).not.toHaveBeenCalled()
   })
 
+  it("paints the loading shell white with black text (not a black screen)", () => {
+    ws = { loading: true, workspace: null }
+    const { getByText } = renderGuard()
+    const shell = getByText("Loading…")
+    expect(shell.style.background).toBe("rgb(255, 255, 255)")
+    expect(shell.style.color).toBe("rgb(0, 0, 0)")
+  })
+
   it("falls back to the onboarding entry if postLoginPath throws", async () => {
     ws = { loading: false, workspace: null }
     postLoginPath.mockRejectedValue(new Error("network"))
