@@ -276,20 +276,6 @@ export function BusinessContextSettingsView(props: BusinessContextSettingsViewPr
         }
       >
         <form onSubmit={onSave}>
-          <div className="bc-toolbar" style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 16 }}>
-            <span className="settings-row-sub">Version {doc.version}</span>
-            {canEdit && (
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={onRefresh}
-                disabled={refreshing || saving}
-              >
-                {refreshing ? "Regenerating…" : "Regenerate"}
-              </button>
-            )}
-          </div>
-
           {refreshError && <SettingsMessage kind="error">{refreshError}</SettingsMessage>}
 
           {layers.map((layer) => (

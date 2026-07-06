@@ -130,18 +130,14 @@ describe("BusinessContextSettingsView — loaded doc", () => {
     const html = render()
     expect(html).toContain("Evidence: Homepage hero")
   })
-
-  it("shows the doc version", () => {
-    const html = render()
-    expect(html).toContain("Version 3")
-  })
 })
 
 describe("BusinessContextSettingsView — admin vs read-only", () => {
-  it("admin sees Save + Regenerate", () => {
+  it("admin sees Save", () => {
     const html = render({ canEdit: true })
     expect(html).toContain("Save business context")
-    expect(html).toContain("Regenerate")
+    // The Version/Regenerate toolbar was removed; no Regenerate button is rendered.
+    expect(html).not.toContain(">Regenerate<")
   })
 
   it("non-admin gets a read-only view (no Save, no Regenerate)", () => {
