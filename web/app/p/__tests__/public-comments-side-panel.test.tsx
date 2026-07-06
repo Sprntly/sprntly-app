@@ -109,8 +109,9 @@ describe("Locked scope #5 — name capture form inside the da-right panel", () =
 
   it("name form data-testids present (source invariant)", () => {
     expect(publicViewerSrc).toContain('data-testid="viewer-name-form"')
-    expect(publicViewerSrc).toContain('data-testid="viewer-first-name-input"')
-    expect(publicViewerSrc).toContain('data-testid="viewer-last-name-input"')
+    expect(publicViewerSrc).toContain('data-testid="viewer-full-name-input"')
+    expect(publicViewerSrc).not.toContain('data-testid="viewer-first-name-input"')
+    expect(publicViewerSrc).not.toContain('data-testid="viewer-last-name-input"')
     expect(publicViewerSrc).toContain('data-testid="viewer-name-notice"')
   })
 

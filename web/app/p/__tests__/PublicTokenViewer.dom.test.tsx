@@ -17,7 +17,7 @@
 // not under test); the resolver + share-token source are mocked so no network or
 // real URL is needed.
 import * as React from "react"
-import { cleanup, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 vi.hoisted(() => {
@@ -134,5 +134,67 @@ describe("DeviceBadge leaf", () => {
       expect(container.firstChild).toBeNull()
       cleanup()
     }
+  })
+})
+
+describe("PublicTokenViewer — single full-name field + mark-mode auto-enable", () => {
+  async function openNameForm() {
+    const utils = await renderReady("both")
+    // Open the comments sidebar → with no stored name, the capture form appears.
+    fireEvent.click(screen.getByTestId("public-comments-toggle"))
+    await waitFor(() => expect(screen.getByTestId("viewer-name-form")).toBeTruthy())
+    return utils
+  }
+
+  it("test_public_name_form_single_full_name_field: exactly one 'Full name' input, no first/last", async () => {
+    const { container } = await openNameForm()
+    const input = screen.getByTestId("viewer-full-name-input")
+    expect(input.getAttribute("placeholder")).toBe("Full name")
+    expect(container.querySelector('[data-testid="viewer-first-name-input"]')).toBeNull()
+    expect(container.querySelector('[data-testid="viewer-last-name-input"]')).toBeNull()
+  })
+
+  it("test_submit_disabled_when_fullname_empty: disabled on empty/whitespace, enabled with content", async () => {
+    await openNameForm()
+    const submit = screen.getByTestId("viewer-name-submit") as HTMLButtonElement
+    const input = screen.getByTestId("viewer-full-name-input")
+    expect(submit.disabled).toBe(true)
+    fireEvent.change(input, { target: { value: "   " } })
+    expect(submit.disabled).toBe(true)
+    fireEvent.change(input, { target: { value: "Ada Lovelace" } })
+    expect(submit.disabled).toBe(false)
+  })
+
+  it("test_name_submit_sets_viewer_name_and_auto_enables_mark_mode", async () => {
+    const { container } = await openNameForm()
+    fireEvent.change(screen.getByTestId("viewer-full-name-input"), {
+      target: { value: "Ada Lovelace" },
+    })
+    fireEvent.submit(screen.getByTestId("viewer-name-form"))
+    // Name gate clears → identity strip shows the full name, no undefined artifact.
+    await waitFor(() => expect(screen.getByTestId("viewer-identity-strip")).toBeTruthy())
+    const strip = screen.getByTestId("viewer-identity-strip")
+    expect(strip.textContent).toContain("Ada Lovelace")
+    expect(strip.textContent).not.toContain("undefined")
+    // The capture form is gone.
+    expect(container.querySelector('[data-testid="viewer-name-form"]')).toBeNull()
+    // Mark mode auto-enabled (setMarkMode(true), not toggle): the Mark button is
+    // pressed + distinctly styled, the canvas is in marking mode, the notice shows.
+    const markBtn = screen.getByTestId("public-mark-toggle")
+    expect(markBtn.getAttribute("aria-pressed")).toBe("true")
+    expect(markBtn.className).toContain("mark-active")
+    expect(screen.getByTestId("da-canvas-center").className).toContain("marking")
+    expect(screen.getByTestId("mark-mode-notice")).toBeTruthy()
+  })
+
+  it("test_avatar_initials_from_full_name: up-to-two initials, no empty segment", async () => {
+    await openNameForm()
+    fireEvent.change(screen.getByTestId("viewer-full-name-input"), {
+      target: { value: "Ada Lovelace" },
+    })
+    fireEvent.submit(screen.getByTestId("viewer-name-form"))
+    await waitFor(() => expect(screen.getByTestId("viewer-identity-strip")).toBeTruthy())
+    const av = screen.getByTestId("viewer-identity-strip").querySelector(".pc-av")
+    expect(av?.textContent).toBe("AL")
   })
 })
