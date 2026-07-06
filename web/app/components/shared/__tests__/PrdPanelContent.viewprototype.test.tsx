@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import * as React from "react"
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
@@ -120,7 +120,10 @@ function renderPanel() {
 async function openGeneratePopup() {
   mocks.getByPrd.mockResolvedValueOnce(null)
   renderPanel()
-  fireEvent.click(screen.getByRole("button", { name: "View Prototype" }))
+  // No ready prototype → the CTA settles on "Generate Prototype"; clicking it
+  // opens the generate popup.
+  const btn = await screen.findByRole("button", { name: "Generate Prototype" })
+  fireEvent.click(btn)
   await screen.findByRole("dialog", { name: "Generate prototype" })
 }
 
@@ -140,77 +143,74 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe("PrdPanelContent View Prototype footer action", () => {
-  it("test_view_prototype_button_renders_on_every_prd", () => {
+  it("test_prototype_cta_renders_on_every_prd", async () => {
     const { container } = renderPanel()
     const actions = container.querySelector(".prd-bottom-actions")
     expect(actions).toBeTruthy()
     const buttons = within(actions as HTMLElement).getAllByRole("button")
-    expect(buttons[0].textContent).toBe("View Prototype")
+    // First button is the prototype CTA (its label resolves async from getByPrd);
+    // second is Send to Claude Code.
     expect(buttons[0].className).toContain("prd-send-claude-btn")
     expect(buttons[1].textContent).toContain("Send to Claude Code")
+    // Default mock resolves a READY prototype → the CTA settles on "View Prototype".
+    await waitFor(() =>
+      expect(within(actions as HTMLElement).getAllByRole("button")[0].textContent).toBe("View Prototype"),
+    )
   })
 
-  it("test_view_prototype_button_label_is_static", async () => {
-    const { rerender } = renderPanel()
-    expect(screen.getByRole("button", { name: "View Prototype" })).toBeTruthy()
-    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
-
-    mocks.getByPrd.mockRejectedValueOnce({ status: 404 })
-    rerender(<PrdPanelContent />)
-    expect(screen.getByRole("button", { name: "View Prototype" })).toBeTruthy()
+  it("shows a disabled 'Loading…' while checking, then 'View Prototype' when one is ready", async () => {
+    renderPanel()
+    // Existence unknown on first render → neutral, disabled (no premature label).
+    const loading = screen.getByRole("button", { name: "Loading…" })
+    expect((loading as HTMLButtonElement).disabled).toBe(true)
+    // Default mock → ready prototype → flips to an enabled "View Prototype".
+    const view = await screen.findByRole("button", { name: "View Prototype" })
+    expect((view as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByRole("button", { name: "Generate Prototype" })).toBeNull()
   })
 
-  it("test_view_prototype_button_visible_when_no_prototype_404", async () => {
+  it("shows 'Generate Prototype' when no ready prototype exists (404 → null)", async () => {
+    mocks.getByPrd.mockReset()
     mocks.getByPrd.mockRejectedValueOnce({ status: 404 })
     renderPanel()
-    expect(screen.getByRole("button", { name: "View Prototype" })).toBeTruthy()
-    await waitFor(() => expect(latestGenerateProps?.open).toBe(false))
-    expect(screen.getByRole("button", { name: "View Prototype" })).toBeTruthy()
+    expect(await screen.findByRole("button", { name: "Generate Prototype" })).toBeTruthy()
+    expect(screen.queryByRole("button", { name: "View Prototype" })).toBeNull()
   })
 
   it("test_view_prototype_existing_navigates_direct", async () => {
     renderPanel()
     await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
-    await act(async () => {
-      await mocks.getByPrd.mock.results[0].value
-    })
-    fireEvent.click(screen.getByRole("button", { name: "View Prototype" }))
+    // Ready prototype → label resolves to "View Prototype"; clicking navigates.
+    fireEvent.click(await screen.findByRole("button", { name: "View Prototype" }))
     expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42")
     expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
   })
 
   it("test_no_proto_null_resolve_opens_popup", async () => {
+    mocks.getByPrd.mockReset()
     mocks.getByPrd.mockResolvedValueOnce(null)
     renderPanel()
-    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
-    await act(async () => {
-      await mocks.getByPrd.mock.results[0].value
-    })
-    fireEvent.click(screen.getByRole("button", { name: "View Prototype" }))
+    // No prototype → label resolves to "Generate Prototype"; clicking opens popup.
+    fireEvent.click(await screen.findByRole("button", { name: "Generate Prototype" }))
     expect(await screen.findByRole("dialog", { name: "Generate prototype" })).toBeTruthy()
     expect(mocks.pushSpy).not.toHaveBeenCalled()
   })
 
   it("test_proto_record_navigates", async () => {
+    mocks.getByPrd.mockReset()
     mocks.getByPrd.mockResolvedValueOnce({ id: 88, status: "ready", bundle_url: "/bundle" })
     renderPanel()
-    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
-    await act(async () => {
-      await mocks.getByPrd.mock.results[0].value
-    })
-    fireEvent.click(screen.getByRole("button", { name: "View Prototype" }))
+    fireEvent.click(await screen.findByRole("button", { name: "View Prototype" }))
     expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42")
     expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
   })
 
   it("test_getbyprd_reject_defensive_opens_popup", async () => {
+    mocks.getByPrd.mockReset()
     mocks.getByPrd.mockRejectedValueOnce({ status: 500 })
     renderPanel()
-    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
-    await act(async () => {
-      await mocks.getByPrd.mock.results[0].value.catch(() => undefined)
-    })
-    fireEvent.click(screen.getByRole("button", { name: "View Prototype" }))
+    // A defensive reject degrades to "no ready prototype" → "Generate Prototype".
+    fireEvent.click(await screen.findByRole("button", { name: "Generate Prototype" }))
     expect(await screen.findByRole("dialog", { name: "Generate prototype" })).toBeTruthy()
     expect(mocks.pushSpy).not.toHaveBeenCalled()
   })

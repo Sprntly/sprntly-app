@@ -124,17 +124,25 @@ function ViewPrototypeButton({ prdId, figmaFileKey }: { prdId: number; figmaFile
     router.push(prototypePath(prdId))
   }, [prdId, router])
 
+  // Label reflects real DB state (getByPrd returns non-null only for a READY
+  // prototype): "View Prototype" once one exists, "Generate Prototype" before.
+  // While the existence check is in flight (hasProto === null) show a neutral,
+  // disabled "Loading…" so the label never flashes the wrong action first.
+  const label =
+    hasProto === null ? "Loading…" : hasProto ? "View Prototype" : "Generate Prototype"
+
   return (
     <>
       <button
         type="button"
         className="prd-send-claude-btn"
+        disabled={hasProto === null}
         onClick={() => {
           if (hasProto === true) goToPrototype()
           else setGenOpen(true)
         }}
       >
-        View Prototype
+        {label}
       </button>
       <GenerateModal
         open={genOpen}
