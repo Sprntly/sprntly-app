@@ -208,7 +208,7 @@ export function ChatScreen() {
 
   // ── Prototype map for the active tab's brief (one fetch per briefId) ───────
   const chatBriefId = activeTab?.briefMeta?.briefId ?? null
-  const { entriesByInsight: chatEntriesByInsight } = useBriefPrototypeMap(chatBriefId)
+  const { entriesByInsight: chatEntriesByInsight, loading: chatMapLoading } = useBriefPrototypeMap(chatBriefId)
 
   const chatInsightState = useMemo(() => {
     if (!activeTab?.briefMeta) return null
@@ -1092,6 +1092,12 @@ export function ChatScreen() {
   // "Generate PRD" for an insight that already has one; the DB signal keeps the
   // label ("View PRD") and the action (load, not regenerate) correct after reload.
   const chatPrdExists = !!activeTab?.prd || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
+  // While the brief-prototype map is still loading we don't yet KNOW whether a
+  // PRD exists, so committing to "Generate PRD" would flash the wrong label then
+  // flip to "View PRD" once the map lands. Show a neutral "Loading…" until we
+  // know — but only for an insight-bound tab that has no PRD loaded on it yet
+  // (a tab already carrying its prd is authoritative, no wait needed).
+  const chatPrdCtaWaiting = !chatPrdExists && !!activeTab?.briefMeta && chatMapLoading
   const displayChips = useMemo(() => {
     const chips = buildHomeChips(homeCards, starters)
     return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
@@ -1346,11 +1352,12 @@ export function ChatScreen() {
                           <button
                             type="button"
                             className="bc-action-btn bc-action-btn--primary"
-                            disabled={!!activeTab?.prdGenerating}
+                            disabled={!!activeTab?.prdGenerating || chatPrdCtaWaiting}
                             onClick={handleOpenPrd}
                           >
                             {activeTab?.prdGenerating
                               ? "Generating PRD…"
+                              : chatPrdCtaWaiting ? "Loading…"
                               : chatPrdExists ? "View PRD" : "Generate PRD"}
                           </button>
                           <button
@@ -1403,11 +1410,12 @@ export function ChatScreen() {
                               <button
                                 type="button"
                                 className="bc-action-btn bc-action-btn--primary"
-                                disabled={!!activeTab?.prdGenerating}
+                                disabled={!!activeTab?.prdGenerating || chatPrdCtaWaiting}
                                 onClick={handleOpenPrd}
                               >
                                 {activeTab?.prdGenerating
                                   ? "Generating PRD…"
+                                  : chatPrdCtaWaiting ? "Loading…"
                                   : chatPrdExists ? "View PRD" : "Generate PRD"}
                               </button>
                               <button
