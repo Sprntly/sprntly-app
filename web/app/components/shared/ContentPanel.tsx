@@ -12,6 +12,28 @@ import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../
 import { PrdPanelContent } from "./PrdPanelContent"
 import { TicketDetail, priorityPill } from "./TicketDetail"
 import { StoryMap, storyMapSizing } from "./StoryMap"
+import { DestinationPicker } from "./DestinationPicker"
+
+// Per-PRD push destination ("remember for this PRD"). Persisted client-side so a
+// second push for the same PRD goes straight to the remembered list without
+// re-opening the picker. Keyed by PRD id; scoped to this browser for now
+// (server-side per-workspace persistence is a follow-up).
+function rememberedDest(prdId: number | null): string | null {
+  if (prdId == null || typeof window === "undefined") return null
+  try {
+    return window.localStorage.getItem(`sprntly_ticket_dest_${prdId}`)
+  } catch {
+    return null
+  }
+}
+function saveRememberedDest(prdId: number | null, listId: string): void {
+  if (prdId == null || typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(`sprntly_ticket_dest_${prdId}`, listId)
+  } catch {
+    /* storage unavailable — the choice just won't persist */
+  }
+}
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
 import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
 import type { PrdState } from "../../types/content"
@@ -438,6 +460,8 @@ export function TicketsTab() {
     | { kind: "error"; message: string }
   const [pushState, setPushState] = useState<PushState>({ kind: "idle" })
   const [selectedListId, setSelectedListId] = useState<string>("")
+  // "Remember for this PRD" toggle in the destination picker.
+  const [rememberDest, setRememberDest] = useState<boolean>(true)
 
   // Manual regenerate: tickets are cached per PRD and only auto-regenerate when
   // the PRD changes, so give the user an explicit way to force a fresh set. A
@@ -564,26 +588,8 @@ export function TicketsTab() {
       showToast("ClickUp not connected", "Connect ClickUp in Settings to push these tickets.")
       return
     }
-    // List already chosen → push the generated tickets directly.
-    if (pushState.kind === "picking" && selectedListId) {
-      const list = pushState.lists.find((l) => l.id === selectedListId)
-      setPushState({ kind: "pushing", listName: list?.name ?? selectedListId })
-      try {
-        const result = await storiesApi.pushToClickUp(selectedListId, stories)
-        setPushState({ kind: "done", created: result.created.length, errors: result.errors.length })
-        if (result.errors.length > 0) {
-          showToast("ClickUp sync partial", `${result.created.length} created, ${result.errors.length} failed.`)
-        } else {
-          showToast("Synced to ClickUp", `${result.created.length} tickets created successfully.`)
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : "Unknown error"
-        setPushState({ kind: "error", message: msg })
-        showToast("ClickUp sync failed", msg.slice(0, 120))
-      }
-      return
-    }
-    // First click → fetch the lists to pick a target.
+    // First click → fetch the lists. If this PRD already has a remembered
+    // destination, push straight to it; otherwise open the picker.
     setPushState({ kind: "fetching-lists" })
     try {
       const r = await storiesApi.listClickUpLists()
@@ -591,11 +597,37 @@ export function TicketsTab() {
         setPushState({ kind: "error", message: "No ClickUp lists found. Create a list in ClickUp first." })
         return
       }
+      const remembered = rememberedDest(prdId)
+      if (remembered && r.lists.some((l) => l.id === remembered)) {
+        const list = r.lists.find((l) => l.id === remembered)
+        await pushToList(remembered, list?.name ?? remembered)
+        return
+      }
       setSelectedListId(r.lists[0].id)
       setPushState({ kind: "picking", lists: r.lists })
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error"
       setPushState({ kind: "error", message: msg })
+    }
+  }
+
+  // Push the reviewed tickets to a chosen list (the field-mapped sync runs on the
+  // backend). Persists the destination when "remember for this PRD" is on.
+  const pushToList = async (listId: string, listName: string) => {
+    if (rememberDest) saveRememberedDest(prdId, listId)
+    setPushState({ kind: "pushing", listName })
+    try {
+      const result = await storiesApi.pushToClickUp(listId, stories)
+      setPushState({ kind: "done", created: result.created.length, errors: result.errors.length })
+      if (result.errors.length > 0) {
+        showToast("ClickUp sync partial", `${result.created.length} created, ${result.errors.length} failed.`)
+      } else {
+        showToast("Synced to ClickUp", `${result.created.length} tickets created successfully.`)
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error"
+      setPushState({ kind: "error", message: msg })
+      showToast("ClickUp sync failed", msg.slice(0, 120))
     }
   }
 
@@ -677,26 +709,32 @@ export function TicketsTab() {
             <button type="button" className="tkv2-btn tkv2-btn--regen" onClick={regenerate} title="Regenerate tickets from the current PRD">
               ⟳ Regenerate
             </button>
-            {pushState.kind === "picking" && (
-              <select
-                value={selectedListId}
-                onChange={(e) => setSelectedListId(e.target.value)}
-                className="tkt-list-select"
-                aria-label="ClickUp list"
+            <div style={{ position: "relative", display: "inline-flex" }}>
+              <button
+                type="button"
+                className="tkv2-btn tkv2-btn--push"
+                onClick={handleClickUpPush}
+                disabled={pushState.kind === "fetching-lists" || pushState.kind === "pushing"}
               >
-                {(pushState as { kind: "picking"; lists: ClickUpList[] }).lists.map((l) => (
-                  <option key={l.id} value={l.id}>{l.folder ? `${l.folder} / ` : ""}{l.name}</option>
-                ))}
-              </select>
-            )}
-            <button
-              type="button"
-              className="tkv2-btn tkv2-btn--push"
-              onClick={handleClickUpPush}
-              disabled={pushState.kind === "fetching-lists" || pushState.kind === "pushing"}
-            >
-              ✓ {pushState.kind === "picking" ? "Push to selected list" : pushLabel}
-            </button>
+                ✓ {pushLabel}
+              </button>
+              {pushState.kind === "picking" && (
+                <DestinationPicker
+                  tool="ClickUp"
+                  lists={pushState.lists}
+                  selectedId={selectedListId}
+                  onSelect={setSelectedListId}
+                  remember={rememberDest}
+                  onToggleRemember={setRememberDest}
+                  count={stories.length}
+                  onPush={() => {
+                    const list = (pushState as { kind: "picking"; lists: ClickUpList[] }).lists.find((l) => l.id === selectedListId)
+                    if (list) void pushToList(list.id, list.name)
+                  }}
+                  onCancel={() => setPushState({ kind: "idle" })}
+                />
+              )}
+            </div>
           </div>
         )}
       </div>
