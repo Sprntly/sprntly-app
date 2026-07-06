@@ -598,18 +598,14 @@ export function PrototypeRoute() {
         }
         setProto(null)
         if (action.kind === "resume") {
-          // Re-attach to the running generation: overlay + resume poll.
-          setGenFigmaKey(null)
-          setGenGithubRepo(null)
+          // A generation is still running in the background for this PRD. Show
+          // the lightweight "generating in the background" card — NOT the old
+          // full-screen loader, and NO client poll-to-reveal. The build finishes
+          // server-side and the backend notifies the user (Slack/email per comms
+          // settings); revealing happens when they open the notification's link.
           setGenProtoId(action.prototypeId)
           genLoadingRef.current = true
           setGenLoading(true)
-          void runDesignAgentGeneration({
-            prototypeId: action.prototypeId,
-          }).then((result) => {
-            if (cancelled) return
-            handleGenDone(result)
-          })
           return
         }
         // action.kind === "none": no ready/generating row. getActiveByPrd
@@ -864,24 +860,37 @@ export function PrototypeRoute() {
     )
   }
 
-  // A generation is actively being handed off or resumed. Keep this above the
-  // resolving branch so a valid `pid` shows the build loader immediately instead
-  // of the generic route-loading state while the PRD-level lookup is in flight.
+  // A generation is running in the BACKGROUND for this PRD (a cold load / revisit
+  // onto a still-generating row). Instead of the old full-screen "Building your
+  // prototype" loader that pinned the user in place and polled, show a lightweight,
+  // non-blocking card: the build finishes server-side and the backend delivers the
+  // ready notification (Slack/email per comms settings). A Back affordance keeps it
+  // from being a dead-end; a Cancel aborts the run server-side.
   if (genLoading) {
     return (
       <AppLayout>
-        <div className="design-agent-surface da-prototype-page" data-testid="prototype-route">
-          <GenerateSurfaceErrorBoundary onReset={handleGenErrorRetry}>
-            <GenerationLoadingScreen
-              open={genLoading}
-              figmaFileKey={genFigmaKey}
-              githubRepo={genGithubRepo}
-              prototypeId={genProtoId}
-              onCancel={handleGenCancel}
-              locatePhase={locatePhase ?? undefined}
-            />
-          </GenerateSurfaceErrorBoundary>
-        </div>
+        <PrototypeEmptyState
+          variant="hero"
+          testid="prototype-route-generating"
+          art={
+            <svg width="44" height="44" viewBox="0 0 16 16" fill="none" aria-hidden="true" className="da-spinner">
+              <circle cx="8" cy="8" r="6" stroke="var(--accent-alpha-28)" strokeWidth="2" />
+              <path d="M8 2a6 6 0 0 1 6 6" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          }
+          title="Generating your prototype"
+          sub="This runs in the background and can take a few minutes. We'll notify you on Slack or email (per your comms settings) as soon as it's ready — you can leave this page."
+          action={
+            <div style={{ display: "flex", gap: 8 }}>
+              <button type="button" className="btn btn-accent" onClick={() => goTo("brief")}>
+                Back to brief
+              </button>
+              <button type="button" className="btn" onClick={handleGenCancel}>
+                Cancel generation
+              </button>
+            </div>
+          }
+        />
       </AppLayout>
     )
   }
@@ -997,6 +1006,12 @@ export function PrototypeRoute() {
             re-arms the panel so a recovered throw lands on a fresh generate panel,
             not a stale one. Scoped to THIS surface only — the app shell survives. */}
         <GenerateSurfaceErrorBoundary onReset={handleGenErrorRetry}>
+          {/* Background generation: the GenerateModal drives locate/config, then
+              kicks off the build server-side and closes with a "generating in the
+              background" toast (no full-screen loading screen). The backend delivers
+              the ready notification (Slack/email per comms). onGenStart is retained
+              on the prop surface but the modal no longer calls it, so nothing mounts
+              a build overlay here. */}
           <GenerateModal
             open={generateRequested && !genLoading}
             onClose={buildGatedOnClose(
@@ -1010,14 +1025,6 @@ export function PrototypeRoute() {
             onGenDone={handleGenDone}
             savedPreference={savedPreference}
             onLocatePhase={setLocatePhase}
-          />
-          <GenerationLoadingScreen
-            open={genLoading}
-            figmaFileKey={genFigmaKey}
-            githubRepo={genGithubRepo}
-            prototypeId={genProtoId}
-            onCancel={handleGenCancel}
-            locatePhase={locatePhase ?? undefined}
           />
         </GenerateSurfaceErrorBoundary>
       </div>

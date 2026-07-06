@@ -243,13 +243,15 @@ describe("loading UI is immediate (decoupled from the resolve call)", () => {
         ?.textContent,
     ).toContain("/team")
     // Generation is grounded on the located screen.
-    const params = (vi.mocked(runGenerateFlow).mock.calls[0]![0] as {
+    const call = vi.mocked(runGenerateFlow).mock.calls[0]![0] as {
       params: Record<string, unknown>
-    }).params
-    expect(params["chosen_screen_route"]).toBe("/team")
-    expect(onGenStart).toHaveBeenCalledWith(
-      expect.objectContaining({ chosenScreenRoute: "/team" }),
-    )
+      backgroundMode?: boolean
+    }
+    expect(call.params["chosen_screen_route"]).toBe("/team")
+    // Background generation: the build runs server-side (backgroundMode) and the
+    // full-screen overlay handoff is gone — onGenStart is no longer called.
+    expect(call.backgroundMode).toBe(true)
+    expect(onGenStart).not.toHaveBeenCalled()
   })
 })
 
@@ -290,9 +292,14 @@ describe("ambiguous match surfaces the inline picker", () => {
     await waitFor(() =>
       expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
     )
-    expect(onGenStart).toHaveBeenCalledWith(
-      expect.objectContaining({ chosenScreenRoute: "/dashboard" }),
-    )
+    const call = vi.mocked(runGenerateFlow).mock.calls[0]![0] as {
+      params: Record<string, unknown>
+      backgroundMode?: boolean
+    }
+    expect(call.params["chosen_screen_route"]).toBe("/dashboard")
+    // Background generation: no overlay handoff (onGenStart not called).
+    expect(call.backgroundMode).toBe(true)
+    expect(onGenStart).not.toHaveBeenCalled()
   })
 })
 
@@ -355,9 +362,12 @@ describe("unmapped match surfaces the inline resolve", () => {
     await waitFor(() =>
       expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
     )
-    expect(onGenStart).toHaveBeenCalledWith(
-      expect.objectContaining({ chosenScreenRoute: "/team" }),
-    )
+    // Background generation: no overlay handoff (onGenStart not called).
+    expect(onGenStart).not.toHaveBeenCalled()
+    expect(
+      (vi.mocked(runGenerateFlow).mock.calls[0]![0] as { backgroundMode?: boolean })
+        .backgroundMode,
+    ).toBe(true)
     // unmapped omits the snapshot SHA (no snapshot to pin against).
     const params = (vi.mocked(runGenerateFlow).mock.calls[0]![0] as {
       params: Record<string, unknown>

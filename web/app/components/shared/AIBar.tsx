@@ -1,11 +1,13 @@
 "use client"
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
-import { ApiError, briefApi, prdApi, type AskResponse } from "../../lib/api"
+import { ApiError, briefApi, designAgentApi, prdApi, type AskResponse } from "../../lib/api"
+import { prototypePath } from "../../lib/routes"
 import { runAskGeneration } from "../../lib/runAskGeneration"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { runPrdGeneration } from "../../lib/runPrdGeneration"
@@ -41,6 +43,44 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
   } = useNavigation()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
+  const router = useRouter()
+  // Whether the loaded PRD already has a ready prototype. Drives the prototype
+  // CTA: it reads "View prototype" (→ open it) once one exists, and "Generate
+  // prototype" otherwise — mirroring the brief/chat/approve surfaces so the label
+  // is consistent everywhere. Keyed on prd_id so it refetches only on PRD change.
+  const [protoReady, setProtoReady] = useState(false)
+  const contentPrdId = content.prd?.prd_id ?? null
+  useEffect(() => {
+    if (contentPrdId == null) {
+      setProtoReady(false)
+      return
+    }
+    let cancelled = false
+    designAgentApi
+      .getByPrd(contentPrdId)
+      .then((p) => {
+        if (!cancelled) setProtoReady(!!p)
+      })
+      .catch(() => {
+        /* degrade to "Generate" on any lookup failure (getByPrd swallows 404→null) */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [contentPrdId])
+
+  // The prototype CTA target: open the existing prototype in-tab when one is
+  // ready, else start generation for this PRD. Both route to the /prototype
+  // surface for the loaded PRD (the generate path carries ?generate=1, exactly
+  // like the other entry points). No-op when there is no loaded PRD.
+  const openPrototypeCta = useCallback(() => {
+    if (contentPrdId == null) return
+    router.push(
+      protoReady
+        ? prototypePath(contentPrdId)
+        : prototypePath(contentPrdId, { generate: true }),
+    )
+  }, [contentPrdId, protoReady, router])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const wasPanelCollapsed = useRef(aiPanelCollapsed)
   const [submitting, setSubmitting] = useState(false)
@@ -482,10 +522,8 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                     <button type="button" className="ai-bar-agent-btn" onClick={() => openContentPanel("tickets")}>
                       Create tickets
                     </button>
-                    <button type="button" className="ai-bar-agent-btn" onClick={() => {
-                      if (content.prd) goTo("prototype")
-                    }}>
-                      Generate prototype
+                    <button type="button" className="ai-bar-agent-btn" onClick={openPrototypeCta}>
+                      {protoReady ? "View prototype" : "Generate prototype"}
                     </button>
                   </div>
                 </div>
@@ -658,10 +696,8 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                         <button type="button" className="ai-bar-agent-btn" onClick={() => goTo("tickets")}>
                           Create tickets
                         </button>
-                        <button type="button" className="ai-bar-agent-btn" onClick={() => {
-                          if (content.prd) goTo("prototype")
-                        }}>
-                          Generate prototype
+                        <button type="button" className="ai-bar-agent-btn" onClick={openPrototypeCta}>
+                          {protoReady ? "View prototype" : "Generate prototype"}
                         </button>
                       </div>
                     </div>

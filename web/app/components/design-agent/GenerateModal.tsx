@@ -674,13 +674,10 @@ export function GenerateModal({
       return
     }
 
-    // Figma + Website auto-skip: unchanged — no locate, generate directly.
+    // Figma + Website auto-skip: no locate, generate directly — in background
+    // mode (no full-screen loading screen; the backend notifies on ready).
     onClose()
     setTimeout(() => {
-      onGenStart?.({
-        figmaFileKey: src === "figma" ? savedPreference.figma_file_key ?? null : null,
-        githubRepo: null,
-      })
       const baseParams = buildGenerateParams({
         prdId,
         platform,
@@ -702,6 +699,7 @@ export function GenerateModal({
         setSubmitting,
         notifyOnReady: false,
         notifyOnKickoff: false,
+        backgroundMode: true,
         onKickoff,
         onGenerated: (result) => onGenDone?.(result),
       }).catch(() => { onGenDone?.() })
@@ -844,11 +842,12 @@ export function GenerateModal({
       (codebaseGenerate
         ? (overrideSha ?? locateResult?.commit_sha)
         : null) || null
-    onGenStart?.({
-      figmaFileKey: effectiveSource === "figma" ? (figmaUrlKey || figmaFileKey) : null,
-      githubRepo: codebaseGenerate ? effectiveRepo : null,
-      chosenScreenRoute: chosenRoute,
-    })
+    // Background generation: the build runs server-side and the backend delivers
+    // the ready notification (Slack/email per comms settings), so we intentionally
+    // do NOT call onGenStart — nothing should mount the full-screen "Building your
+    // prototype" loading screen. onGenStart is retained on the prop surface for
+    // back-compat but is deliberately unused on the generate path now.
+    void onGenStart
     const baseParams = buildGenerateParams({
       prdId,
       platform,
@@ -899,28 +898,23 @@ export function GenerateModal({
       },
       showToast,
       setSubmitting,
-      // The full-screen loading screen (shown via ApproveModal's genLoading,
-      // driven by onGenStart/onGenDone) provides all generation feedback for this
-      // path, so the success toasts are redundant: notifyOnReady=false suppresses
-      // the "Prototype ready" success toast, notifyOnKickoff=false suppresses the
-      // "Design Agent generating" kickoff toast. Failure surfacing is unchanged —
-      // runGenerateFlow still toasts "Generation failed" / "Generate failed".
+      // Background mode: after the kickoff POST returns, runGenerateFlow shows the
+      // "generating in the background" toast and stops — no client poll, no ready
+      // toast, no OS ping. The backend delivers the ready notification over the
+      // same channels as the weekly brief. notifyOnReady/notifyOnKickoff are moot
+      // in background mode (it drives its own single kickoff toast); failure
+      // surfacing on the kickoff itself is unchanged (runGenerateFlow catches +
+      // toasts "Generate failed").
       notifyOnReady: false,
       notifyOnKickoff: false,
+      backgroundMode: true,
       onKickoff,
-      // runGenerateFlow fires onGenerated on the terminal poll outcome (ready OR
-      // failed/timeout) — that's the dismissal signal for the loading overlay.
-      // Separate from the toasts above: suppressing the toasts does not touch
-      // this callback. The flow's own 6-min timeout bounds it, so the overlay can
-      // never hang forever. If the kickoff itself throws, onGenerated never fires;
-      // the catch in runGenerateFlow toasts "Generate failed" but won't dismiss —
-      // covered below by a kickoff-failure fallback. The terminal RESULT is
-      // threaded through to onGenDone so ApproveModal can reveal the full-screen
-      // canvas on success and skip it on failure.
+      // onGenerated does NOT fire in background mode (no poll), so no in-tab
+      // reveal happens — the user is reached via the backend notification and
+      // opens the prototype from its link. Wiring retained for back-compat.
       onGenerated: (result) => onGenDone?.(result),
     }).catch(() => {
-      // Defensive — if the whole flow rejects (shouldn't, runGenerateFlow
-      // swallows kickoff errors), still dismiss the overlay.
+      // Defensive — a rejected kickoff is already toasted by runGenerateFlow.
       onGenDone?.()
     })
   }

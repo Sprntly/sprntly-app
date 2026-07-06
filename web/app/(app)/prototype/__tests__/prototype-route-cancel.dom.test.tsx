@@ -149,30 +149,34 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-/** Mount, settle the resolve, then kick off a generation → the overlay is up. */
+/** Mount, settle the resolve, then kick off a generation → the lightweight
+ *  "generating in the background" card is up (genLoading true, in-flight id set
+ *  via onKickoff). Background generation replaced the full-screen overlay, so the
+ *  cancel affordance is now the card's "Cancel generation" button. */
 async function mountAndStartGeneration() {
   render(React.createElement(PrototypeRoute))
   const start = await screen.findByTestId("stub-start-gen")
   await act(async () => {
     fireEvent.click(start)
   })
-  return screen.findByTestId("stub-cancel")
+  await screen.findByTestId("prototype-route-generating")
+  return screen.getByText("Cancel generation")
 }
 
-describe("PrototypeRoute — cancel the generating overlay", () => {
+describe("PrototypeRoute — cancel the background-generating card", () => {
   it("cancels with the in-flight id and returns to the PRD screen", async () => {
     const cancelBtn = await mountAndStartGeneration()
-    expect(cancelBtn.getAttribute("data-proto-id")).toBe(String(IN_FLIGHT_ID))
 
     await act(async () => {
       fireEvent.click(cancelBtn)
     })
 
+    // handleGenCancel cancels with the id captured via onKickoff.
     expect(cancelApi).toHaveBeenCalledWith(IN_FLIGHT_ID)
     expect(goTo).toHaveBeenCalledWith("brief")
-    // Overlay cleared (loading state reset).
+    // Card cleared (loading state reset).
     await waitFor(() =>
-      expect(screen.queryByTestId("stub-cancel")).toBeNull(),
+      expect(screen.queryByTestId("prototype-route-generating")).toBeNull(),
     )
   })
 
@@ -188,7 +192,7 @@ describe("PrototypeRoute — cancel the generating overlay", () => {
     expect(cancelApi).toHaveBeenCalledWith(IN_FLIGHT_ID)
     expect(goTo).toHaveBeenCalledWith("brief")
     await waitFor(() =>
-      expect(screen.queryByTestId("stub-cancel")).toBeNull(),
+      expect(screen.queryByTestId("prototype-route-generating")).toBeNull(),
     )
   })
 })

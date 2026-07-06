@@ -515,10 +515,11 @@ describe("PrototypeRoute — savedPreference + onLocatePhase wired to GenerateMo
     expect(src).toContain("onLocatePhase={setLocatePhase}")
   })
 
-  it("threads locatePhase into GenerationLoadingScreen", () => {
-    // The locate phase emitted by GenerateModal must reach the loading screen
-    // so the Locating / crumb / picker phases render on this surface too.
-    expect(src).toContain("locatePhase={locatePhase")
+  it("no longer renders the full-screen GenerationLoadingScreen build overlay", () => {
+    // Background generation: the "Building your prototype" full-screen loader is
+    // gone. The route shows a lightweight, non-blocking generating card instead
+    // and the backend delivers the ready notification (Slack/email per comms).
+    expect(src).not.toContain("<GenerationLoadingScreen")
   })
 
   it("declares locatePhase state with the LocatePhaseState type", () => {
@@ -648,10 +649,13 @@ describe("PrototypeRoute — transition polish: modal yields to build loader", (
     expect(bareGate).toBe(false)
   })
 
-  it("still keeps the GenerationLoadingScreen open driven by genLoading (unchanged)", () => {
-    // The full-screen build loader's visibility is unchanged — it is the surface the
-    // modal yields TO.
-    expect(src).toContain("open={genLoading}")
+  it("renders the lightweight background-generating card on the genLoading branch", () => {
+    // The genLoading branch no longer mounts a full-screen loader; it renders the
+    // non-blocking "Generating your prototype" card (its own testid + copy telling
+    // the user they'll be notified on Slack/email).
+    expect(src).toContain('testid="prototype-route-generating"')
+    expect(src).toContain("Generating your prototype")
+    expect(src).toContain("notify you")
   })
 })
 

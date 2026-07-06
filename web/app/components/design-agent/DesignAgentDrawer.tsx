@@ -40,6 +40,14 @@ import { IconClose, IconSparkle } from "../shared/app-icons"
 const READY_TOAST_TITLE = "Prototype ready"
 const READY_TOAST_SUB = "Your prototype finished generating."
 
+/** Background-mode kickoff toast. The prototype build runs on the server (it can
+ *  take minutes), so instead of pinning the user to a full-screen loading page we
+ *  confirm the run started and tell them we'll reach them the same way the weekly
+ *  brief does — Slack or email, per their comms settings. */
+export const BG_KICKOFF_TOAST_TITLE = "Generating your prototype"
+export const BG_KICKOFF_TOAST_SUB =
+  "This runs in the background — we'll notify you on Slack or email when it's ready."
+
 export type TargetPlatform = "desktop" | "mobile" | "both"
 
 export type DesignAgentDrawerProps = {
@@ -122,6 +130,13 @@ type GenerateFlowDeps = {
   /** Fires immediately after the generate POST returns with the new prototype_id.
    *  Lets the loading screen subscribe to the SSE stream as soon as the agent starts. */
   onKickoff?: (prototypeId: number) => void
+  /** Background mode: once the kickoff POST returns, show the "generating in the
+   *  background" toast and STOP — no client-side poll, no ready toast, no OS
+   *  notification, no onGenerated. The backend delivers the ready notification
+   *  (Slack/email per comms settings), so the client does not need to babysit the
+   *  long-running build or trap the user on a loading screen. When absent/false the
+   *  legacy poll-to-completion flow runs unchanged. */
+  backgroundMode?: boolean
 }
 
 /**
@@ -211,20 +226,27 @@ export async function runGenerateFlow({
   notifyOnKickoff = true,
   onGenerated,
   onKickoff,
+  backgroundMode = false,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
-  // Ask for OS-notification permission inside the Generate user-gesture (where
-  // browsers allow the prompt) so a ready notification can reach the user if
-  // they navigate away / background the tab during the minutes-long build.
-  // Unawaited + best-effort: never blocks or fails the kickoff.
-  void ensureNotifyPermission()
+  // OS-notification permission is only useful for the client-side ready ping,
+  // which background mode does not fire (the backend notifies over Slack/email).
+  // Skip the permission prompt there; keep it for the legacy poll flow.
+  if (!backgroundMode) void ensureNotifyPermission()
   try {
     const kickoff = await generate(params)
-    // P5-09: persist a `pending` entry so a reload mid-generation that then
-    // completes still captures the ready notification.
-    markPending(kickoff.prototype_id)
     onKickoff?.(kickoff.prototype_id)
     onOpenChange(false)
+    // Background mode: confirm the run started and hand completion off to the
+    // backend notification (Slack/email per comms settings). No client poll, no
+    // ready toast, no OS ping — the user is free to navigate away.
+    if (backgroundMode) {
+      showToast(BG_KICKOFF_TOAST_TITLE, BG_KICKOFF_TOAST_SUB)
+      return
+    }
+    // P5-09: persist a `pending` entry so a reload mid-generation that then
+    // completes still captures the ready notification (legacy poll flow only).
+    markPending(kickoff.prototype_id)
     // UX-EXPLORE (throwaway — REVERT): the kickoff "Design Agent generating"
     // toast is gated on `notifyOnKickoff` (default true → legacy drawer
     // unchanged). The GenerateModal path passes false because the full-screen

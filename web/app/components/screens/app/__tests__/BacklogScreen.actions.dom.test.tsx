@@ -94,6 +94,7 @@ beforeEach(() => {
   setContentMock.mockReset()
   openContentPanelMock.mockReset()
   openPrdTabMock.mockReset()
+  window.localStorage.clear()
 })
 
 afterEach(() => cleanup())
@@ -132,6 +133,29 @@ describe("BacklogScreen — wired actions", () => {
     const dest = pushMock.mock.calls.at(-1)?.[0] as string
     expect(dest).toContain("prd=99")
     expect(dest).toContain("generate=1")
+    // The theme → prd mapping is persisted so the CTA flips to "View prototype".
+    expect(
+      JSON.parse(window.localStorage.getItem("backlog:prototypes") || "{}"),
+    ).toEqual({ t4: 99 })
+  })
+
+  it("flips the CTA to 'View prototype' once a prototype exists for the idea's theme", async () => {
+    // Pre-seed the round-trip: the user already generated a prototype for theme t4.
+    window.localStorage.setItem("backlog:prototypes", JSON.stringify({ t4: 99 }))
+    await renderWith([item({ id: "a", theme_id: "t4", title: "Bulk onboarding", rank: 4 })])
+    await selectFirstIdea("Bulk onboarding")
+
+    // The CTA reads "View prototype", NOT "Generate prototype".
+    expect(screen.queryByText("Generate prototype")).toBeNull()
+    const viewBtn = screen.getByText("View prototype")
+
+    await act(async () => { fireEvent.click(viewBtn) })
+    // View opens the existing prototype — prd in the URL, and NO generate kick-off.
+    const dest = pushMock.mock.calls.at(-1)?.[0] as string
+    expect(dest).toContain("prd=99")
+    expect(dest).not.toContain("generate=1")
+    // Viewing must never re-run generation.
+    expect(runFromBacklogMock).not.toHaveBeenCalled()
   })
 
   it("+ Add idea persists via backlogApi.create", async () => {

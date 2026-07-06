@@ -375,7 +375,7 @@ describe("ambiguous match shows picker", () => {
 // ─── pick carries chosen route into genstart ────────────────────────────
 
 describe("pick carries chosen route into genstart", () => {
-  it("confirming the suggested candidate calls onGenStart with chosenScreenRoute", () => {
+  it("confirming the suggested candidate fires background generation on that route", () => {
     const onGenStart = vi.fn()
     const buttons = captureButtons({
       ...baseCodebaseProps(),
@@ -388,9 +388,15 @@ describe("pick carries chosen route into genstart", () => {
     const useBtn = buttons.find((b) => b["data-testid"] === "locate-confirm-use")
     expect(useBtn).toBeDefined()
     ;(useBtn!["onClick"] as () => void)()
-    expect(onGenStart).toHaveBeenCalledWith(
-      expect.objectContaining({ chosenScreenRoute: "/team" }),
-    )
+    // Background generation: no overlay handoff (onGenStart is not called); the
+    // build runs server-side grounded on the chosen route.
+    expect(onGenStart).not.toHaveBeenCalled()
+    const call = vi.mocked(runGenerateFlow).mock.calls[0]![0] as {
+      params: Record<string, unknown>
+      backgroundMode?: boolean
+    }
+    expect(call.params["chosen_screen_route"]).toBe("/team")
+    expect(call.backgroundMode).toBe(true)
   })
 })
 

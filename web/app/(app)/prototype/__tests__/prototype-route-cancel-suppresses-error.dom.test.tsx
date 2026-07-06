@@ -169,15 +169,16 @@ describe("PrototypeRoute — cancel suppresses the false generation-error", () =
     nextGenResult = { ok: false, message: "Not found" }
     render(React.createElement(PrototypeRoute))
 
-    // Kick off → genProtoId := 99, loading overlay up (GenerateModal closes).
+    // Kick off → genProtoId := 99, background-generating card up (modal closes).
     const start = await screen.findByTestId("stub-start-gen")
     await act(async () => {
       fireEvent.click(start)
     })
 
-    // Cancel the in-flight run → handleGenCancel marks id 99 cancelled + navigates.
-    const cancelBtn = await screen.findByTestId("stub-cancel")
-    expect(cancelBtn.getAttribute("data-proto-id")).toBe(String(IN_FLIGHT_ID))
+    // Cancel the in-flight run via the card's "Cancel generation" button →
+    // handleGenCancel marks id 99 cancelled + navigates.
+    await screen.findByTestId("prototype-route-generating")
+    const cancelBtn = screen.getByText("Cancel generation")
     await act(async () => {
       fireEvent.click(cancelBtn)
     })
