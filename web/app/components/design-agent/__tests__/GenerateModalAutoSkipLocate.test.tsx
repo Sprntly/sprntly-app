@@ -250,7 +250,7 @@ describe("saved-github auto-skip routes through locate (recreate fidelity)", () 
     expect(params["figma_file_key"]).toBeNull()
   })
 
-  it("fires onGenStart with the chosen route + repo before generation", async () => {
+  it("fires background generation on the chosen route + repo (no overlay handoff)", async () => {
     mockLocateResolves(makeLocate())
     const onGenStart = vi.fn()
 
@@ -267,14 +267,20 @@ describe("saved-github auto-skip routes through locate (recreate fidelity)", () 
       }),
     )
 
+    // Background generation: the build runs server-side (backgroundMode) grounded
+    // on the located screen/repo. onGenStart is no longer called — the full-screen
+    // overlay handoff was replaced by a toast + backend notification.
     await waitFor(() =>
-      expect(onGenStart).toHaveBeenCalledWith(
-        expect.objectContaining({
-          githubRepo: SEL_REPO,
-          chosenScreenRoute: "/team",
-        }),
-      ),
+      expect(vi.mocked(runGenerateFlow)).toHaveBeenCalledTimes(1),
     )
+    const call = vi.mocked(runGenerateFlow).mock.calls[0]![0] as {
+      params: Record<string, unknown>
+      backgroundMode?: boolean
+    }
+    expect(call.params["chosen_screen_route"]).toBe("/team")
+    expect(call.params["github_repo"]).toBe(SEL_REPO)
+    expect(call.backgroundMode).toBe(true)
+    expect(onGenStart).not.toHaveBeenCalled()
   })
 
   it("at ranked_confirm does NOT auto-generate (re-opens the picker, no generate call)", async () => {

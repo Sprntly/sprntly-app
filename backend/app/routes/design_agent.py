@@ -1462,6 +1462,43 @@ def _finalize_iteration_failed(
         )
 
 
+async def _notify_prototype_ready(
+    workspace_id: str, prd_id: int, prototype_id: int
+) -> None:
+    """Notify the company that this background generation finished — over the
+    SAME channels as the weekly brief (per-user Slack + company email, each
+    self-gated by the comms settings). Best-effort: a notification failure must
+    NEVER fail or block the generation, so every error is swallowed + logged.
+
+    Fired only on the READY terminal (after a successful stage), so a failed /
+    cancelled run never sends a "your prototype is ready" message. The generation
+    already runs in the background (POST /generate returns in <200ms), so this is
+    how the user is reached once the build completes."""
+    try:
+        # Reuse the canonical PRD read (patches folded) for the human title.
+        prd = get_prd_rendered(prd_id)
+        prd_title = (prd or {}).get("title") or "your PRD"
+        from app.synthesis.prototype_delivery import deliver_prototype_ready
+
+        result = await asyncio.to_thread(
+            deliver_prototype_ready,
+            workspace_id,
+            prd_id=prd_id,
+            prd_title=prd_title,
+        )
+        logger.info(
+            "design_agent.prototype_ready_notified prototype_id=%s slack=%s email=%s",
+            prototype_id,
+            (result.get("slack") or {}).get("delivered"),
+            (result.get("email") or {}).get("delivered"),
+        )
+    except Exception:  # noqa: BLE001 — notification never breaks generation.
+        logger.warning(
+            "design_agent.prototype_ready_notify_failed prototype_id=%s",
+            prototype_id,
+        )
+
+
 async def _run_generation_bg(
     *,
     prototype_id: int,
@@ -1713,6 +1750,13 @@ async def _run_generation_bg(
                             "usage_event_finalize_failed event_id=%s prototype_id=%s kind=full_generation",
                             event_id, prototype_id,
                         )
+                # The prototype reached 'ready' — reach the user over the same
+                # channels as the weekly brief (Slack/email per comms settings).
+                # Gated on staged_ok so a build/stage failure (which routed the
+                # row to fail_prototype) never sends a ready notification. Fully
+                # best-effort inside the helper; never blocks or fails the run.
+                if staged_ok:
+                    await _notify_prototype_ready(workspace_id, prd_id, prototype_id)
             elif result.status == "complete" and not virtual_fs:
                 fail_prototype(
                     prototype_id=prototype_id,

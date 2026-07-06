@@ -188,6 +188,46 @@ describe("runGenerateFlow (AC1, AC5)", () => {
     expect(showToast).toHaveBeenCalledWith("Generation failed", "timed out")
   })
 
+  it("backgroundMode: after kickoff, toasts 'generating in background' and does NOT poll", async () => {
+    const generate = vi
+      .fn()
+      .mockResolvedValue({ prototype_id: 7, status: "generating" })
+    const runGeneration = vi.fn()
+    const onOpenChange = vi.fn()
+    const showToast = vi.fn()
+    const setSubmitting = vi.fn()
+    const onKickoff = vi.fn()
+    const onGenerated = vi.fn()
+
+    await runGenerateFlow({
+      params,
+      generate,
+      runGeneration,
+      onOpenChange,
+      showToast,
+      setSubmitting,
+      notifyOnReady: true,
+      backgroundMode: true,
+      onKickoff,
+      onGenerated,
+    })
+
+    expect(generate).toHaveBeenCalledWith(params)
+    expect(onKickoff).toHaveBeenCalledWith(7)
+    expect(onOpenChange).toHaveBeenCalledWith(false)
+    // Background handoff: a single "generating in the background" toast, and the
+    // client NEVER polls (the backend delivers the ready notification) — so no
+    // ready toast and no onGenerated reveal.
+    expect(showToast).toHaveBeenCalledWith(
+      "Generating your prototype",
+      expect.stringContaining("Slack or email"),
+    )
+    expect(runGeneration).not.toHaveBeenCalled()
+    expect(onGenerated).not.toHaveBeenCalled()
+    expect(showToast).not.toHaveBeenCalledWith("Prototype ready", expect.any(String))
+    expect(setSubmitting).toHaveBeenLastCalledWith(false)
+  })
+
   it("on kickoff error: toasts 'Generate failed', keeps the drawer open, no poll (AC5)", async () => {
     const generate = vi.fn().mockRejectedValue(new Error("server 500"))
     const runGeneration = vi.fn()

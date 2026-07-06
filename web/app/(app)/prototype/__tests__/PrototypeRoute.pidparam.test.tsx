@@ -128,8 +128,9 @@ describe("PrototypeRoute pid handoff", () => {
 
     render(React.createElement(PrototypeRoute))
 
-    const loading = await screen.findByTestId("pid-loading")
-    expect(loading.getAttribute("data-prototype-id")).toBe("250")
+    // Background generation: the pid handoff now shows the lightweight
+    // "generating in the background" card, not the old full-screen loader.
+    await screen.findByTestId("prototype-route-generating")
     expect(screen.queryByTestId("prototype-route-empty")).toBeNull()
     expect(apiMocks.getActiveByPrd).toHaveBeenCalledWith(1)
   })
