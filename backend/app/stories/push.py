@@ -19,6 +19,7 @@ from typing import Any, Iterable
 from app import db
 from app.connectors import clickup_oauth
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
+from app.db.clickup_sync import get_clickup_task_id, save_clickup_task_id
 from app.stories.generate import Story
 
 logger = logging.getLogger(__name__)
@@ -82,9 +83,9 @@ def push_stories_to_clickup(
     errors: list[dict[str, Any]] = []
     for story in stories:
         try:
-            task = clickup_oauth.create_task(
-                access_token,
-                list_id,
+            ticket_id = story.stable_id()
+            existing = get_clickup_task_id(company_id, list_id, ticket_id)
+            common = dict(
                 name=story.title,
                 # Rich body so the five-section description + acceptance criteria
                 # render as headings/bullets in ClickUp rather than raw markdown.
@@ -92,10 +93,21 @@ def push_stories_to_clickup(
                 priority=story.clickup_priority(),
                 extra=_clickup_fields(story),
             )
+            if existing:
+                # Idempotent re-push: update the task we created before rather
+                # than creating a duplicate.
+                task = clickup_oauth.update_task(access_token, existing, **common)
+                task_id = task.get("id") or existing
+            else:
+                task = clickup_oauth.create_task(access_token, list_id, **common)
+                task_id = task.get("id")
+                if task_id:
+                    save_clickup_task_id(company_id, list_id, ticket_id, task_id)
             created.append({
                 "story": story.title,
-                "task_id": task.get("id"),
+                "task_id": task_id,
                 "url": task.get("url"),
+                "updated": bool(existing),
             })
         except Exception as e:  # noqa: BLE001 — isolate per-story failures
             logger.warning("ClickUp push failed for story %r: %s", story.title, e)

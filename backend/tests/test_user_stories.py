@@ -24,6 +24,15 @@ from app.stories.push import (
 from tests._company_helpers import company_client, seed_connection
 
 
+@pytest.fixture(autouse=True)
+def _stub_clickup_task_map(monkeypatch):
+    """Default the ticket→ClickUp-task map to empty (create path) + no-op save,
+    so push tests don't hit Supabase. The idempotency test overrides the getter."""
+    import app.stories.push as push_mod
+    monkeypatch.setattr(push_mod, "get_clickup_task_id", lambda *a, **k: None)
+    monkeypatch.setattr(push_mod, "save_clickup_task_id", lambda *a, **k: None)
+
+
 def _llm_result(output):
     return LLMResult(
         output=output, model="claude-sonnet-4-6",
@@ -315,6 +324,39 @@ def test_push_maps_canonical_fields_to_clickup(isolated_settings, monkeypatch):
     assert seen["priority"] == 1  # urgent → 1
     assert seen["extra"]["tags"] == ["sales-enablement", "competitive"]
     assert seen["extra"]["points"] == 3
+
+
+def test_push_is_idempotent_updates_existing_task(isolated_settings, monkeypatch):
+    """A re-push of a ticket already synced to this list UPDATEs the existing
+    ClickUp task instead of creating a duplicate."""
+    ctx = company_client(monkeypatch)
+    _seed_clickup_token(monkeypatch, ctx.company_id)
+
+    import app.stories.push as push_mod
+    from app.connectors import clickup_oauth
+
+    story = Story(title="Battle card", body="As an AE, I want a card, so that I can run the play.")
+    # This ticket was pushed before → its ClickUp task id is on file.
+    monkeypatch.setattr(push_mod, "get_clickup_task_id", lambda c, l, t: "cu-existing")
+
+    created_calls, updated_calls = [], []
+
+    def _create_task(token, list_id, *, name, **kw):
+        created_calls.append(name)
+        return {"id": "cu-new", "url": "u"}
+
+    def _update_task(token, task_id, *, name=None, **kw):
+        updated_calls.append(task_id)
+        return {"id": task_id, "url": "u"}
+
+    monkeypatch.setattr(clickup_oauth, "create_task", _create_task)
+    monkeypatch.setattr(clickup_oauth, "update_task", _update_task)
+
+    result = push_stories_to_clickup(ctx.company_id, "list-1", [story])
+    assert created_calls == []              # no duplicate created
+    assert updated_calls == ["cu-existing"]  # existing task updated
+    assert result["created"][0]["updated"] is True
+    assert result["created"][0]["task_id"] == "cu-existing"
 
 
 def test_push_not_connected_raises(isolated_settings, monkeypatch):

@@ -274,6 +274,51 @@ def create_task(
     return {"id": data.get("id"), "url": data.get("url")}
 
 
+def update_task(
+    access_token: str,
+    task_id: str,
+    *,
+    name: str | None = None,
+    markdown_description: str | None = None,
+    priority: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Update an existing ClickUp task (idempotent re-push). Returns `{id, url}`.
+
+    PUT https://api.clickup.com/api/v2/task/{task_id}. Only the given fields are
+    sent. `tags` cannot be set via the task PUT — ClickUp exposes tags through a
+    separate add/remove-tag endpoint — so they are dropped from `extra` here
+    (create still sets them); a full tag reconcile is part of the sync follow-up.
+    Auth/error handling mirrors create_task (401/403 → reconnect; else 502)."""
+    body: dict[str, Any] = {}
+    if name is not None:
+        body["name"] = name
+    if markdown_description is not None:
+        body["markdown_content"] = markdown_description
+    if priority is not None:
+        body["priority"] = priority
+    if extra:
+        body.update({k: v for k, v in extra.items() if k != "tags"})
+    resp = requests.put(
+        f"{CLICKUP_API}/task/{task_id}",
+        json=body,
+        headers={"Authorization": access_token},
+        timeout=_WRITE_TIMEOUT,
+    )
+    if resp.status_code in (401, 403):
+        logger.warning("ClickUp update_task auth rejected: %s", resp.status_code)
+        raise ClickUpAuthExpiredError(
+            "ClickUp rejected the stored token — reconnect ClickUp to continue"
+        )
+    if not resp.ok:
+        logger.warning(
+            "ClickUp update_task failed: %s %s", resp.status_code, resp.text[:300]
+        )
+        raise HTTPException(502, "ClickUp task update failed")
+    data = resp.json() or {}
+    return {"id": data.get("id") or task_id, "url": data.get("url")}
+
+
 def _get(token: str, path: str, params: dict | None = None) -> dict[str, Any]:
     """Authenticated GET against the ClickUp v2 API (raw-token auth quirk)."""
     r = requests.get(
