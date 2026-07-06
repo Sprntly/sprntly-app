@@ -43,7 +43,7 @@ from app.company_template import render_templates_for_prompt
 from app.config import settings
 from app.corpus import load_corpus
 from app.db import complete_prd, get_brief_by_id
-from app.db.companies import company_id_for_slug
+from app.db.companies import company_id_for_slug, owner_name_for_company
 from app.db.evidences import find_existing_evidence
 from app.db.prds import (
     fail_prd,
@@ -379,11 +379,14 @@ def _call_part_a(ctx: dict, author: str | None = None, background: bool = False)
 
     Steers the model to the HTML visual-system page via _PART_A_DIRECTIVE and
     keeps `skill=_SKILL` so the METHOD + its `+prd-author@<hash>` version pin are
-    preserved. `author` fills the byline (the logged-in user's name); when
-    unavailable it renders `[NEED: author]` per the skill rule.
+    preserved. `author` fills the byline. When no logged-in author is supplied
+    (background / weekly-brief / warm / multi-agent generation) it falls back to
+    the account OWNER's name (then an admin's); only if none resolves does it
+    render `[NEED: author]` per the skill rule.
     """
+    byline = author or owner_name_for_company(ctx.get("company_id")) or _AUTHOR_FALLBACK
     directive = _PART_A_DIRECTIVE.format(
-        author=author or _AUTHOR_FALLBACK,
+        author=byline,
         evidence_page=ctx.get("evidence_page_url") or "",
     )
     user = _USER_TEMPLATE.format(
