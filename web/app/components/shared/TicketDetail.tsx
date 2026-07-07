@@ -203,11 +203,6 @@ export function TicketDetail({ story, index, prdId, onBack }: {
             <IconArrowLeft size={13} /> All tickets
           </button>
           &nbsp; /&nbsp; <span className="tkv2-key" style={{ padding: "3px 9px" }}>{`T-${index + 1}`}</span>
-          {story.ticket_type && story.ticket_type !== "build" ? (
-            <span className={`tkv2-typechip tkv2-typechip--${story.ticket_type}`} style={{ marginLeft: 8 }}>
-              {story.ticket_type}
-            </span>
-          ) : null}
         </div>
         <input
           className="tkv2-dtitle"
@@ -229,11 +224,7 @@ export function TicketDetail({ story, index, prdId, onBack }: {
       <div className="tkv2-descwide">
         <div className="tkv2-sec">
           <h4>Description</h4>
-          {story.ticket_type === "decision" ? (
-            <DecisionBlock story={story} />
-          ) : story.ticket_type === "spike" ? (
-            <SpikeBlock story={story} />
-          ) : structured ? (
+          {structured ? (
             <>
               {story.what ? (<><div className="tkv2-dlbl">What</div><p className="tkv2-dtx">{story.what}</p></>) : null}
               {story.why_now ? (<><div className="tkv2-dlbl">Why now</div><p className="tkv2-dtx">{story.why_now}</p></>) : null}
@@ -462,30 +453,5 @@ export function TicketDetail({ story, index, prdId, onBack }: {
           </div>
       </div>
     </div>
-  )
-}
-
-/** Decision-ticket description ([ESCALATE] → decision / owner / decide-by). */
-function DecisionBlock({ story }: { story: GeneratedStory }) {
-  return (
-    <>
-      {story.decision ? (<><div className="tkv2-dlbl">Decision</div><p className="tkv2-dtx">{story.decision}</p></>) : null}
-      {story.owner ? (<><div className="tkv2-dlbl">Owner</div><p className="tkv2-dtx">{story.owner}</p></>) : null}
-      {story.decide_by ? (<><div className="tkv2-dlbl">Decide by</div><p className="tkv2-dtx">{story.decide_by}</p></>) : null}
-      {story.blocks && story.blocks.length ? (
-        <><div className="tkv2-dlbl">Blocks</div><ul className="tkv2-dlist">{story.blocks.map((b, i) => <li key={i}>{b}</li>)}</ul></>
-      ) : null}
-    </>
-  )
-}
-
-/** Spike-ticket description ([ASSUMPTION → T0] → timebox / exit condition). */
-function SpikeBlock({ story }: { story: GeneratedStory }) {
-  return (
-    <>
-      {story.what ? (<><div className="tkv2-dlbl">What to validate</div><p className="tkv2-dtx">{story.what}</p></>) : null}
-      {story.timebox ? (<><div className="tkv2-dlbl">Timebox</div><p className="tkv2-dtx">{story.timebox}</p></>) : null}
-      {story.exit_condition ? (<><div className="tkv2-dlbl">Exit condition</div><p className="tkv2-dtx">{story.exit_condition}</p></>) : null}
-    </>
   )
 }

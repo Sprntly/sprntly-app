@@ -36,7 +36,7 @@ from app.graph.gateway import llm_call
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "user-stories-v3"
+PROMPT_VERSION = "user-stories-v4"
 
 # Output contract for the gateway — the skill's canonical ticket. `title`,
 # `body`, and `acceptance_criteria` stay required for backward compatibility
@@ -60,12 +60,8 @@ _SCHEMA: dict[str, Any] = {
                 "properties": {
                     "ticket_type": {
                         "type": "string",
-                        "enum": ["build", "decision", "spike"],
-                        "description": (
-                            "build = a deliverable; decision = a [ESCALATE] "
-                            "choice with an owner; spike = a timeboxed "
-                            "[ASSUMPTION → T0] validation. Default build."
-                        ),
+                        "enum": ["build"],
+                        "description": "Always 'build' — a deliverable ticket.",
                     },
                     "title": {
                         "type": "string",
@@ -180,25 +176,6 @@ _SCHEMA: dict[str, Any] = {
                             "invented numbers."
                         ),
                     },
-                    # ── Story-map placement (Jeff Patton) ──
-                    "activity": {
-                        "type": "string",
-                        "description": (
-                            "Story-map backbone: the user activity/step this "
-                            "ticket serves (from Part A §4), phrased as the user's "
-                            "action. Tickets serving the same step share this "
-                            "verbatim. Empty for a flat/unsized set."
-                        ),
-                    },
-                    "release": {
-                        "type": "string",
-                        "description": (
-                            "Story-map slice: the release this ticket lands in "
-                            "(e.g. 'Release 1 — walking skeleton', 'Release 2'). "
-                            "Release 1 is the minimal end-to-end path. Empty for a "
-                            "flat/unsized set."
-                        ),
-                    },
                     "priority": {
                         "type": "string",
                         "enum": ["urgent", "high", "normal", "low"],
@@ -210,31 +187,6 @@ _SCHEMA: dict[str, Any] = {
                         "description": (
                             "Stakes gate: agent-ready (reversible, fully "
                             "specified → Claude Code) vs needs-human."
-                        ),
-                    },
-                    # ── Decision-ticket fields (ticket_type == 'decision') ──
-                    "decision": {
-                        "type": ["string", "null"],
-                        "description": "The decision to make (decision tickets).",
-                    },
-                    "owner": {
-                        "type": ["string", "null"],
-                        "description": "Who decides (decision tickets).",
-                    },
-                    "decide_by": {
-                        "type": ["string", "null"],
-                        "description": "Decide-by date/marker (decision tickets).",
-                    },
-                    # ── Spike fields (ticket_type == 'spike') ──
-                    "timebox": {
-                        "type": ["string", "null"],
-                        "description": "Timebox for a spike (e.g. '2 days').",
-                    },
-                    "exit_condition": {
-                        "type": ["string", "null"],
-                        "description": (
-                            "What validates the [ASSUMPTION → T0] contract "
-                            "(spike tickets)."
                         ),
                     },
                 },
@@ -259,21 +211,10 @@ _SYSTEM = (
     "failure branches prefixed '[failure]' and edge cases '[edge]'. With prose "
     "only, GENERATE Given/When/Then criteria (>=1 edge/negative case) and set "
     "ac_inherited=false.\n"
-    "Turn each Part B [ESCALATE] into a DECISION ticket (ticket_type=decision, "
-    "with decision/owner/decide_by and the build tickets it blocks) and each "
-    "[ASSUMPTION → T0] into a SPIKE (ticket_type=spike, with timebox and "
-    "exit_condition). Preserve [NEED] markers verbatim in data_gaps — never "
-    "invent numbers, owners, or criteria. Also mirror the user story into "
-    "`body`.\n"
-    "STORY MAP (Jeff Patton): when the feature is large — more than one user "
-    "activity in Part A §4, OR more than ~12 requirements, OR more than one "
-    "release in the rollout — place every ticket on the map. Set `activity` to "
-    "the backbone step it serves (the user's narrative journey left-to-right, "
-    "NOT a feature list; tickets serving the same step share the wording) and "
-    "`release` to its slice, with 'Release 1' the minimal end-to-end walking "
-    "skeleton that crosses the whole journey. For a small/single-activity "
-    "feature, leave `activity`/`release` empty (a flat set). Never invent tickets "
-    "just to fill the map. Return only the structured tickets."
+    "Every ticket is a BUILD ticket (a deliverable) — do NOT emit decision or "
+    "spike tickets. Preserve [NEED] markers verbatim in data_gaps — never invent "
+    "numbers, owners, or criteria. Also mirror the user story into `body`. Return "
+    "only the structured tickets."
 )
 
 # ClickUp priority is an int 1-4 (1=urgent ... 4=low). Map the skill's

@@ -313,19 +313,4 @@ describe("TicketDetail — structured (canonical) ticket", () => {
     await waitFor(() => expect(api.getData).toHaveBeenCalled())
     expect(screen.getByText(/GENERATED/)).toBeTruthy()
   })
-
-  it("renders a decision ticket's decision/owner instead of a user story", async () => {
-    await act(async () => {
-      render(React.createElement(TicketDetail, {
-        story: {
-          ...STRUCTURED, ticket_type: "decision" as const,
-          decision: "Adopt a 30-day staleness rule", owner: "Priya R.", decide_by: "Jul 10",
-        },
-        index: 1, prdId: 42, onBack: vi.fn(),
-      }))
-    })
-    await waitFor(() => expect(api.getData).toHaveBeenCalled())
-    expect(screen.getByText("Decision")).toBeTruthy()
-    expect(screen.getByText("Adopt a 30-day staleness rule")).toBeTruthy()
-  })
 })
