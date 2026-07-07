@@ -326,6 +326,40 @@ def test_push_maps_canonical_fields_to_clickup(isolated_settings, monkeypatch):
     assert seen["extra"]["points"] == 3
 
 
+def test_push_syncs_subtasks_and_dependencies(isolated_settings, monkeypatch):
+    """A newly-created task gets a Child-issues checklist (one item per subtask,
+    [P] stripped), and in-batch blocked_by links become ClickUp dependencies."""
+    ctx = company_client(monkeypatch)
+    _seed_clickup_token(monkeypatch, ctx.company_id)
+
+    from app.connectors import clickup_oauth
+
+    ids = iter(["cu-A", "cu-B"])
+    monkeypatch.setattr(clickup_oauth, "create_task",
+                        lambda *a, **k: {"id": next(ids), "url": "u"})
+
+    checklist_items: list[str] = []
+    deps: list[tuple[str, str]] = []
+    monkeypatch.setattr(clickup_oauth, "create_checklist", lambda tok, tid, name: "cl-1")
+    monkeypatch.setattr(clickup_oauth, "create_checklist_item",
+                        lambda tok, cid, name, resolved=False: checklist_items.append(name))
+    monkeypatch.setattr(clickup_oauth, "add_dependency",
+                        lambda tok, tid, *, depends_on: deps.append((tid, depends_on)))
+
+    one_pager = Story(title="One-Pager", body="b")
+    battle_card = Story(
+        title="Battle Card", body="b",
+        subtasks=["Pull win/loss notes", "[P] Draft objection table"],
+        blocked_by=["T-1 — One-Pager"],  # references One-Pager by title
+    )
+    push_stories_to_clickup(ctx.company_id, "list-1", [one_pager, battle_card])
+
+    # Subtasks became checklist items with the [P] marker stripped.
+    assert checklist_items == ["Pull win/loss notes", "Draft objection table"]
+    # Battle Card (cu-B) waits on One-Pager (cu-A).
+    assert deps == [("cu-B", "cu-A")]
+
+
 def test_push_is_idempotent_updates_existing_task(isolated_settings, monkeypatch):
     """A re-push of a ticket already synced to this list UPDATEs the existing
     ClickUp task instead of creating a duplicate."""
