@@ -32,7 +32,6 @@ Part A renders the **author's name directly under the title**, labeled `Author`.
 - **Mine artifacts before asking.** Read everything provided and extract facts first.
 - **Ask at most 5 clarifying questions**, ranked by leverage. Anything unresolved goes to **User input needed**, not into a guess.
 - **Company template adaptation:** if a company PRD template is present, map content into *their* section structure — but keep the v4 visual system unless the company supplies its own brand tokens. Template adaptation copies structure, not judgment.
-- **Scope assumption up front:** state the scope interpretation at the top of the Problem section.
 
 ## Groundedness (internal — never printed)
 - **Zero invented numbers.** Every figure traces to a provided source; missing data gets `[NEED: …]`.
@@ -46,7 +45,7 @@ The spine reads: what world is this (Context) → what's wrong (Problem) → how
 1. **Title** — descriptive only.
 2. **Author byline** — logged-in user's name, directly under the title.
 3. **Context — must pass the cold-reader test.** A reader with zero prior knowledge of the company must come away able to judge the rest of the document. Cover, in one tight paragraph: what the product is and who it serves; how the affected workflow works TODAY, step by step; and a definition of any term of art the document relies on (rendered with a dotted underline). Still no padding — enrichment means the missing facts a stranger needs, not more words.
-4. **Problem** — business + user pain; scope assumption stated first; no smuggled solution.
+4. **Problem** — business + user pain; no smuggled solution.
 5. **Evidence — rich, linked, and source-agnostic.** Any signal type qualifies: data analysis, user quotes, customer complaints/support tickets, competitive analysis, churn/exit interviews, session recordings, workflow analysis, surveys, sales-call notes, experiment results — the list is open. Each item carries a **type label** on its meta line naming what kind of evidence it is, and a strong Evidence section mixes types rather than leaning on one. **User quotes are verbatim** — word for word, rendered in italic serif with quotation marks; never paraphrase something into a quote. Beyond the type label, each signal carries: the claim with its magnitude in bold, the source, and the date/period. The Evidence section header is a plain label — it carries **no link** (no "View evidence page" link, no per-item links). `[NEED]` entries note that the item appears on the evidence page when the signal lands.
 6. **Users** — two maximum (one is allowed). Users come BEFORE Goal: the reader should know who this happens to before being told what we'll measure about it.
 7. **Goal** — ONE primary metric with formula + baseline + **projected impact** (assumption chain + confidence, or a visibly blank slot — the blank is a designed element, see visual spec). Guardrails listed separately, never collapsed into the primary.
@@ -97,7 +96,7 @@ Discovery ("should we build anything?") → `evidence-brief` / `continuous-disco
 - [ ] Section order: Context → Problem → Evidence → Users → Goal → Hypothesis → Requirements → User input needed → Appendix.
 - [ ] Context passes the cold-reader test: product + audience, today's workflow, terms of art defined.
 - [ ] Every evidence item carries a type label, source, and date; the Evidence header carries the single link to the PRD’s Sprntly evidence page — never fabricated; quotes verbatim; types varied where the signals allow.
-- [ ] Problem frames business + user; scope assumption up front; no smuggled solution.
+- [ ] Problem frames business + user; no smuggled solution.
 - [ ] Goal: one primary metric w/ formula + baseline; projected impact filled with chain + confidence, or rendered as the designed blank; guardrails separate.
 - [ ] Requirements table default with Happy path / Edge case / Failure types (so `implementation-spec` inherits the branches); ≤5 user inputs, tagged, owned.
 - [ ] Appendix renders with Part A; exactly one riskiest assumption + 3-line pre-mortem.

@@ -175,6 +175,25 @@ def test_prd_skill_part_a_template_is_html_visual_system(repo_root):
     assert positions == sorted(positions), "sections out of v4.1 order"
 
 
+def test_prd_skill_has_no_scope_assumption_boilerplate(repo_root):
+    """The Problem section must NOT carry a canned 'Scope assumption:' lead-in.
+    It was removed from the template, the three few-shot examples, and SKILL.md
+    so the model stops emitting boilerplate scope caveats. Guard every source so
+    it can't regress — the examples matter most, since the model imitates them."""
+    prd_dir = repo_root / "skills" / "prd-author"
+    sources = [
+        prd_dir / "templates" / "prd-template.html",
+        prd_dir / "SKILL.md",
+        prd_dir / "examples" / "01-perch.html",
+        prd_dir / "examples" / "02-tandem.html",
+        prd_dir / "examples" / "03-copperline.html",
+    ]
+    for path in sources:
+        text = path.read_text(encoding="utf-8").lower()
+        assert "scope assumption" not in text, f"scope-assumption boilerplate in {path.name}"
+        assert 'class="scope"' not in text, f"leftover .scope markup in {path.name}"
+
+
 def test_prd_skill_part_b_template_is_derived_impl_spec(repo_root):
     """Part B is the machine-readable Implementation Spec, derived ONLY from a
     Part A: a B0 derivation header plus EARS requirements traced to Part A IDs."""
