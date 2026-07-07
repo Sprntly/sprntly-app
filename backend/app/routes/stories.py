@@ -229,6 +229,7 @@ def tickets_for_prd(
     current = prd_content_hash(prd_id)
     fresh = (
         row.get("status") == "ready"
+        and bool(row.get("stories"))  # an empty cached set is a failed run → retry
         and current is not None
         and current == row.get("content_hash")
     )
