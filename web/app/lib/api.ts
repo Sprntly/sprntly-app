@@ -2301,3 +2301,31 @@ export const artifactsApi = {
       )
       .then((r) => r.artifacts),
 }
+
+// ── MCP tokens (customer-facing Model Context Protocol access) ──
+
+export type McpToken = {
+  id: string
+  name: string
+  token_prefix: string
+  created_at: string
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
+export type McpTokenCreated = {
+  id: string
+  name: string
+  /** Raw bearer token — present ONLY in the create response, never again. */
+  token: string
+  token_prefix: string
+  created_at: string
+}
+
+export const mcpTokensApi = {
+  list: () => api.get<{ tokens: McpToken[] }>("/v1/mcp-tokens"),
+  create: (name: string) =>
+    api.post<McpTokenCreated>("/v1/mcp-tokens", { name }),
+  revoke: (id: string) =>
+    api.delete<{ ok: true }>(`/v1/mcp-tokens/${encodeURIComponent(id)}`),
+}

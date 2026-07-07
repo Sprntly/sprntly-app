@@ -20,6 +20,7 @@ export type SettingsSectionId =
   | "business-context"
   | "team"
   | "connectors"
+  | "mcp"
   | "billing"
   | "security"
   // Dormant (kept for component-file compatibility, not linked)
@@ -62,6 +63,7 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     groupLabel: "Data & Integrations",
     items: [
       { id: "connectors", label: "Connectors", available: true },
+      { id: "mcp", label: "MCP Access", available: true },
     ],
   },
   {

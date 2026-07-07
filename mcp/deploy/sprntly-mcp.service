@@ -1,0 +1,15 @@
+[Unit]
+Description=Sprntly MCP server (customer-facing Model Context Protocol tools)
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/Sprntly/mcp
+EnvironmentFile=/home/ec2-user/Sprntly/mcp/.env
+ExecStart=/home/ec2-user/Sprntly/mcp/.venv/bin/uvicorn mcp_server.__main__:app --host 127.0.0.1 --port 8003
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

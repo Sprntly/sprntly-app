@@ -1,0 +1,60 @@
+name: Deploy mcp to api.sprntly.ai/mcp
+
+# Deploys the customer-facing MCP server to its own systemd unit on EC2
+# (port 8003, nginx serves it at api.sprntly.ai/mcp). Lives in sprntly-app
+# only — sprntly-demo does not deploy it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mcp/**'
+      - '.github/workflows/deploy-mcp.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-mcp
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd ~/Sprntly
+            git fetch --quiet origin main
+            git reset --hard origin/main
+            cd mcp
+            if [ ! -d .venv ]; then
+              python3.11 -m venv .venv
+            fi
+            .venv/bin/pip install -q -e .
+            # Keep nginx config in sync — the /mcp location lives in the
+            # same nginx file as the main backend, so we re-apply it here
+            # too in case it changed alongside an mcp-only PR.
+            sudo cp ~/Sprntly/backend/deploy/nginx.conf /etc/nginx/conf.d/sprintly.conf
+            sudo nginx -t
+            sudo systemctl reload nginx
+            # systemd unit may have changed
+            sudo cp deploy/sprntly-mcp.service /etc/systemd/system/sprntly-mcp.service
+            sudo systemctl daemon-reload
+            sudo systemctl restart sprntly-mcp.service
+            # Wait up to 15s for the service to bind. Avoids races when the
+            # backend deploy restarts concurrently.
+            for i in $(seq 1 15); do
+              if curl -fsS http://127.0.0.1:8003/health >/dev/null 2>&1; then
+                echo "sprntly-mcp.service healthy after ${i}s"
+                break
+              fi
+              sleep 1
+            done
+            curl -fsS http://127.0.0.1:8003/health
+            echo "MCP deploy OK: $(git -C ~/Sprntly rev-parse --short HEAD)"

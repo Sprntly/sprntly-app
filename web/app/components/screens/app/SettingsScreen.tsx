@@ -12,6 +12,7 @@ import { NotificationsSettings } from "./settings/NotificationsSettings"
 import { BillingSettings } from "./settings/BillingSettings"
 import { SecuritySettings } from "./settings/SecuritySettings"
 import { ConnectorsSettings } from "./settings/ConnectorsSettings"
+import { McpSettings } from "./settings/McpSettings"
 import { TeamSettings } from "./settings/TeamSettings"
 import {
   SETTINGS_NAV,
@@ -46,6 +47,8 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
       return <TeamSettings />
     case "connectors":
       return <ConnectorsSettings />
+    case "mcp":
+      return <McpSettings />
     default:
       return <ProfileSettings />
   }

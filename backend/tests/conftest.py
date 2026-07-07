@@ -107,6 +107,10 @@ _RELOAD_ORDER = [
     "app.connectors.figma_oauth",
     "app.connectors.github_app",
     "app.routes.connectors",
+    "app.routes.internal",
+    "app.db.mcp_tokens",
+    "app.routes.mcp_tokens",
+    "app.routes.internal_mcp",
     "app.main",
 ]
 
@@ -740,6 +744,23 @@ CREATE TABLE drip_email_sends (
 );
 CREATE INDEX drip_email_sends_company_user_idx
     ON drip_email_sends (company_id, user_id);
+
+-- Customer-issued MCP API tokens (mirrors 20260707120000_mcp_tokens.sql,
+-- SQLite-ized). uuid / timestamptz are TEXT here, matching the other
+-- seeded tables.
+CREATE TABLE mcp_tokens (
+    id           TEXT PRIMARY KEY,
+    company_id   TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT 'MCP token',
+    token_hash   TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    scopes       TEXT NOT NULL DEFAULT 'read',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    revoked_at   TEXT
+);
+CREATE INDEX mcp_tokens_company_idx ON mcp_tokens (company_id);
 """
 
 
