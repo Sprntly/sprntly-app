@@ -1,6 +1,8 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
@@ -49,6 +51,10 @@ type ChatTab = {
   dbConvId: number | null
   /** Brief finding context — enables PRD/evidence generation for this tab. */
   briefMeta: BriefMeta | null
+  /** The originating insight's body/description text, shown under the title in
+   *  the opening insight message. Null for tabs not opened from a brief finding
+   *  (backlog / plain chat) or when the finding had no body. */
+  insightBody: string | null
   /** Per-tab cached PRD (not persisted to localStorage — re-generate on reload). */
   prd: PrdState | null
   /** Per-tab cached evidence. */
@@ -119,6 +125,7 @@ export function ChatScreen() {
         thread: t.thread ?? [],
         dbConvId: t.dbConvId ?? null,
         briefMeta: t.briefMeta ?? null,
+        insightBody: t.insightBody ?? null,
         prd: null,
         evidence: null,
         prdGenerating: false,
@@ -174,6 +181,7 @@ export function ChatScreen() {
         setTabs((JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
           id: t.id ?? "", title: t.title ?? "", thread: t.thread ?? [],
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
+          insightBody: t.insightBody ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
         })))
       } else {
@@ -324,7 +332,7 @@ export function ChatScreen() {
     const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     setTabs((prev) => [...prev, {
       id, title, thread: initialThread ?? [], dbConvId: dbId ?? null,
-      briefMeta: briefMeta ?? null, prd: null, evidence: null,
+      briefMeta: briefMeta ?? null, insightBody: null, prd: null, evidence: null,
       prdGenerating: false, evidenceGenerating: false,
     }])
     setActiveTabId(id)
@@ -360,6 +368,7 @@ export function ChatScreen() {
     } else {
       setTabs((prev) => [...prev, {
         id: tabId, title, thread: [], dbConvId: null, briefMeta: meta,
+        insightBody: req.insightBody ?? null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
       }])
       setActiveTabId(tabId)
@@ -1072,6 +1081,7 @@ export function ChatScreen() {
       const kept = prev.filter((t) => t.thread.length > 0)
       return [...kept, {
         id, title: NEW_CHAT_TITLE, thread: [], dbConvId: null, briefMeta: null,
+        insightBody: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
       }]
     })
@@ -1119,6 +1129,10 @@ export function ChatScreen() {
   // The tab title is "PRD · <insight>"; the message shows the insight sentence on
   // its own (the "PRD" kind is already a chip), so strip the redundant prefix.
   const insightText = (activeTab?.prd?.title ?? activeTab?.title ?? "").replace(/^PRD · /, "")
+  // The insight's body/description (from the originating brief finding), shown
+  // under the title so the opening card carries the finding's content, not just
+  // its heading. Null for tabs not opened from a finding (backlog / plain chat).
+  const insightBody = activeTab?.insightBody ?? null
   // Whether a PRD exists for this tab's insight — either loaded on the tab OR
   // saved in the DB (via the brief-prototype map). The tab's `prd` is dropped
   // from localStorage on reload, so relying on it alone made the CTA say
@@ -1380,6 +1394,13 @@ export function ChatScreen() {
                             <span className="bc-insight-msg-kind">PRD</span>
                             <span className="bc-insight-msg-text">{insightText}</span>
                           </div>
+                          {/* Insight body — the finding's content under the heading.
+                              Rendered as markdown so LLM-supplied **bold** shows. */}
+                          {insightBody ? (
+                            <div className="bc-insight-msg-body fc-body--md">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>{insightBody}</ReactMarkdown>
+                            </div>
+                          ) : null}
                         </div>
                         <div className="bc-actions">
                           <button

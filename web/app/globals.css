@@ -7781,6 +7781,30 @@
     min-width: 0;
   }
 
+  /* Insight body — the finding's content shown under the heading in the opening
+     insight message. Lighter/smaller than the title so the heading still leads. */
+  .bc-insight-msg-body {
+    margin-top: 6px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    overflow-wrap: anywhere;
+  }
+
+  .bc-insight-msg-body p {
+    margin: 0 0 6px;
+  }
+
+  .bc-insight-msg-body p:last-child {
+    margin-bottom: 0;
+  }
+
+  .bc-insight-msg-body strong,
+  .bc-insight-msg-body b {
+    font-weight: 700;
+    color: var(--ink);
+  }
+
   .od-center--landing .od-center-inner {
     max-width: 700px;
     width: 100%;
