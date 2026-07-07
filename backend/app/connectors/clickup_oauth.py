@@ -355,6 +355,28 @@ def add_dependency(access_token: str, task_id: str, *, depends_on: str) -> None:
     _write("POST", f"/task/{task_id}/dependency", access_token, {"depends_on": depends_on})
 
 
+def get_task(access_token: str, task_id: str) -> dict[str, Any]:
+    """Fetch a task's current state from ClickUp and normalize the fields we
+    reconcile back into Sprntly: status name, first assignee's display name, and
+    the task url. Returns {} on a 4xx/5xx so a single stale/deleted task never
+    breaks the whole pull."""
+    try:
+        data = _get(access_token, f"/task/{task_id}")
+    except Exception:  # noqa: BLE001 — a per-task fetch failure is non-fatal
+        logger.warning("ClickUp get_task failed for %s", task_id)
+        return {}
+    assignees = data.get("assignees") or []
+    assignee = None
+    if assignees:
+        a = assignees[0] or {}
+        assignee = a.get("username") or a.get("email")
+    return {
+        "status": (data.get("status") or {}).get("status"),
+        "assignee": assignee,
+        "url": data.get("url"),
+    }
+
+
 def _get(token: str, path: str, params: dict | None = None) -> dict[str, Any]:
     """Authenticated GET against the ClickUp v2 API (raw-token auth quirk)."""
     r = requests.get(

@@ -360,6 +360,27 @@ def test_push_syncs_subtasks_and_dependencies(isolated_settings, monkeypatch):
     assert deps == [("cu-B", "cu-A")]
 
 
+def test_pull_clickup_status_reconciles_synced_tickets(isolated_settings, monkeypatch):
+    """pull_clickup_status returns the current ClickUp state for tickets that
+    have a mapping row, keyed by ticket id; unsynced tickets are absent."""
+    ctx = company_client(monkeypatch)
+    _seed_clickup_token(monkeypatch, ctx.company_id)
+
+    import app.stories.push as push_mod
+    from app.connectors import clickup_oauth
+
+    # T-A is synced (→ cu-A); T-B was never pushed (no mapping).
+    monkeypatch.setattr(push_mod, "get_clickup_task_id",
+                        lambda c, l, t: "cu-A" if t == "T-A" else None)
+    monkeypatch.setattr(clickup_oauth, "get_task",
+                        lambda tok, tid: {"status": "in progress", "assignee": "nadia", "url": "u"})
+
+    out = push_mod.pull_clickup_status(ctx.company_id, "list-1", ["T-A", "T-B"])
+    assert set(out) == {"T-A"}
+    assert out["T-A"]["status"] == "in progress"
+    assert out["T-A"]["assignee"] == "nadia"
+
+
 def test_push_is_idempotent_updates_existing_task(isolated_settings, monkeypatch):
     """A re-push of a ticket already synced to this list UPDATEs the existing
     ClickUp task instead of creating a duplicate."""

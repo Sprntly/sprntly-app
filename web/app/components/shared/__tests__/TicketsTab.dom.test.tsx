@@ -22,12 +22,13 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }))
 
-const { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, getData, teamList } = vi.hoisted(() => ({
+const { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus, getData, teamList } = vi.hoisted(() => ({
   getForPrd: vi.fn(),
   generate: vi.fn(),
   getJob: vi.fn(),
   listClickUpLists: vi.fn(),
   pushToClickUp: vi.fn(),
+  pullClickUpStatus: vi.fn(),
   getData: vi.fn(),
   teamList: vi.fn(),
 }))
@@ -35,7 +36,7 @@ vi.mock("../../../lib/api", async (orig) => {
   const actual = await orig<typeof import("../../../lib/api")>()
   return {
     ...actual,
-    storiesApi: { getForPrd, generate, getJob, listClickUpLists, pushToClickUp },
+    storiesApi: { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus },
     ticketDataApi: { ...actual.ticketDataApi, getData },
     teamApi: { list: teamList },
   }
@@ -292,5 +293,26 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     // No picker — pushed directly to the remembered list.
     expect(screen.queryByText(/select a project/i)).toBeNull()
     expect(pushToClickUp).toHaveBeenCalledWith("list-1", stories)
+  })
+
+  it("Sync from ClickUp pulls status back and shows it on the ticket card", async () => {
+    window.localStorage.clear()
+    window.localStorage.setItem("sprntly_ticket_dest_7", "list-1")  // already pushed
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
+    const stories = [{ id: "tk-1", title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
+    pullClickUpStatus.mockResolvedValue({ statuses: { "tk-1": { status: "in progress", assignee: "nadia", url: "u" } } })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /sync from clickup/i }))
+    })
+    expect(pullClickUpStatus).toHaveBeenCalledWith("list-1", ["tk-1"])
+    await waitFor(() => expect(screen.getByText(/ClickUp: in progress/i)).toBeTruthy())
   })
 })

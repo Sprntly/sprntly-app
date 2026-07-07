@@ -271,3 +271,24 @@ def push(
     except ClickUpNotConnectedError as e:
         raise HTTPException(404, str(e)) from e
     return result
+
+
+class PullStatusIn(BaseModel):
+    list_id: str = Field(..., min_length=1)
+    ticket_ids: list[str] = Field(..., min_length=1)
+
+
+@router.post("/pull-status")
+def pull_status(
+    body: PullStatusIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Bidirectional read: return the current ClickUp state (status, assignee,
+    url) for the given tickets already synced to `list_id`, keyed by ticket id.
+    Tickets never pushed are simply absent. 404 if ClickUp isn't connected."""
+    from app.stories.push import pull_clickup_status
+
+    try:
+        return {"statuses": pull_clickup_status(company.company_id, body.list_id, body.ticket_ids)}
+    except ClickUpNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e

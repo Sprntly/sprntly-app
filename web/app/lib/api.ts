@@ -2053,7 +2053,15 @@ export const storiesApi = {
   /** Create the reviewed stories as tasks in a ClickUp list (explicit write). */
   pushToClickUp: (listId: string, stories: GeneratedStory[]) =>
     api.post<StoryPushResult>("/v1/stories/push", { list_id: listId, stories }),
+  /** Bidirectional read: current ClickUp state (status/assignee/url) for tickets
+   *  already synced to a list, keyed by ticket id. Unsynced tickets are absent. */
+  pullClickUpStatus: (listId: string, ticketIds: string[]) =>
+    api.post<{ statuses: Record<string, ClickUpTicketState> }>(
+      "/v1/stories/pull-status", { list_id: listId, ticket_ids: ticketIds },
+    ),
 }
+
+export type ClickUpTicketState = { status: string | null; assignee: string | null; url: string | null }
 
 // ── Team members ──────────────────────────────────────────────────────────
 
