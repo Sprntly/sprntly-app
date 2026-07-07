@@ -29,6 +29,37 @@ export function looksLikeHtmlBrief(payload: string | null | undefined): boolean 
 }
 
 /**
+ * Strip the terminal hypothesis section from an evidence brief's HTML at render
+ * time — it is hidden in the UI but NOT removed from generation.
+ *
+ * The brief still generates the hypothesis on purpose: its stored `payload_md`
+ * is fed as context to the downstream QA / technical-design / risk agents (see
+ * multi_agent_orchestrator), so the bet + metric + guardrails stay useful there.
+ * We just don't surface a hypothesis/"bet to test" on the evidence *page* — that
+ * framing belongs to the PRD. So the removal lives here, at presentation, not in
+ * the skill/prompt: hide it in both the full-page EvidenceScreen and the
+ * artifact-panel Evidence tab (both go through EvidenceHtmlBrief) while the
+ * payload keeps it for the agents.
+ *
+ * In generated briefs the block is a `<section>` wrapping `<div class="hyp">…`,
+ * preceded by a kicker (e.g. "HYPOTHESIS → INPUT TO PRD" / "MY RECOMMENDATION").
+ * We drop the whole enclosing section; a bare (un-sectioned) `.hyp` div is the
+ * defensive fallback. Returns the HTML unchanged when no hypothesis is present.
+ */
+export function stripHypothesisSection(html: string): string {
+  return html
+    // The common case: the <section> that directly contains the hypothesis div.
+    // The lazy body stops at the first </section> so we only match the section
+    // that actually holds `class="hyp"`, not an earlier one.
+    .replace(
+      /\s*(?:<!--[^>]*?-->\s*)?<section\b[^>]*>(?:(?!<\/section>)[\s\S])*?class="hyp"[\s\S]*?<\/section>/i,
+      "",
+    )
+    // Defensive fallback: a hypothesis div not wrapped in its own <section>.
+    .replace(/\s*<div\b[^>]*class="hyp"[\s\S]*?<\/div>/i, "")
+}
+
+/**
  * Extract readable plain text from an HTML document (the v3 PRD/brief page):
  * drop <style>/<script>/<head> and the editing chrome, keep visible text, and
  * insert line breaks at block boundaries. Used by non-rendering consumers
