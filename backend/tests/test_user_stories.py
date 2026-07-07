@@ -163,6 +163,41 @@ def test_generate_passes_prd_part_b_to_model(isolated_settings, monkeypatch):
     assert seen["agent"] == "user_stories"
 
 
+def test_generate_gives_the_ticket_call_a_large_token_budget(isolated_settings, monkeypatch):
+    """The canonical ticket is big; the call must raise max_tokens well above the
+    16k default so a real PRD's full set doesn't truncate to an empty parse."""
+    import app.stories.generate as gen
+    seen: dict = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result(_TWO_STORIES)
+
+    monkeypatch.setattr(gen, "llm_call", _capture)
+    generate_user_stories("ent-A", insight="x")
+    assert seen.get("max_tokens", 0) >= 32000
+
+
+def test_generate_empty_result_is_not_cached(isolated_settings, monkeypatch):
+    """A 0-ticket result (a truncated/transient run) must NOT be persisted — else
+    the Tickets tab sticks on '0 tickets'. Skipping the write lets the next open
+    retry."""
+    import app.stories.generate as gen
+    import app.db.prd_tickets as pt
+
+    monkeypatch.setattr(
+        gen, "get_prd_rendered",
+        lambda pid: {"title": "T", "payload_md": "Part A prose", "llm_part": ""},
+    )
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result({"stories": []}))
+    saved: list = []
+    monkeypatch.setattr(pt, "save_tickets", lambda *a, **k: saved.append(a))
+
+    out = generate_user_stories("ent-A", prd_id=7)
+    assert out == []
+    assert saved == []  # nothing cached for an empty run
+
+
 def test_generate_unknown_prd_raises(isolated_settings, monkeypatch):
     import app.stories.generate as gen
     from app.stories.generate import PRDNotFoundError

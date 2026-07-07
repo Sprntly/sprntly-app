@@ -697,6 +697,22 @@ export function TicketsTab() {
     )
   }
 
+  // A ready-but-empty result means generation didn't return any tickets (a
+  // transient/truncated run — a real PRD always yields some). Don't show the
+  // "0 tickets" success chrome; offer a retry instead. The empty set was not
+  // cached (backend), so Regenerate re-runs cleanly.
+  if (genState.kind === "ready" && stories.length === 0) {
+    return (
+      <div className="cpanel-empty" data-testid="tickets-empty">
+        <IconSparkle size={20} />
+        <p>No tickets came back from that run. This is usually transient — try again.</p>
+        <button type="button" className="tkv2-btn tkv2-btn--push" style={{ marginTop: 12 }} onClick={regenerate}>
+          ⟳ Regenerate
+        </button>
+      </div>
+    )
+  }
+
   const pushLabel =
     pushState.kind === "fetching-lists" ? "Loading…"
       : pushState.kind === "pushing" ? "Pushing…"

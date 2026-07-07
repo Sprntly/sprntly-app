@@ -510,7 +510,12 @@ def generate_user_stories(
         skill="user-stories",
         model=model,
         # Large structured output — stream on the long read timeout (was tripping
-        # httpx.ReadTimeout on the default 120s non-streamed path).
+        # httpx.ReadTimeout on the default 120s non-streamed path). The canonical
+        # ticket is big (five-section description, provenance, inherited AC,
+        # subtasks, deps, story-map placement), so a real PRD's full set easily
+        # exceeds the gateway's 16k default and the tool-call gets TRUNCATED —
+        # which surfaces as an empty parse (0 tickets). Give it a generous budget.
+        max_tokens=32000,
         long_output=True,
     )
     raw = (result.output or {}).get("stories", []) if result.output else []
@@ -520,7 +525,12 @@ def generate_user_stories(
     # re-running this multi-minute call until the PRD content actually changes.
     # Keyed by a content hash of the rendered PRD (see app.db.prd_tickets). Never
     # let a persistence write break generation — the stories are still returned.
-    if prd_id is not None and prd is not None:
+    #
+    # NEVER cache an EMPTY result: a real PRD always yields tickets, so 0 means a
+    # transient failure (a truncated/empty tool-call). Persisting it as `ready`
+    # would stick the tab on "0 tickets" forever; skipping the write leaves the
+    # cache absent so the next open retries.
+    if prd_id is not None and prd is not None and stories:
         try:
             from app.db.prd_tickets import hash_prd_row, save_tickets
 
@@ -532,6 +542,11 @@ def generate_user_stories(
             )
         except Exception:  # noqa: BLE001
             logger.exception("persisting prd_tickets failed (continuing)")
+    elif prd_id is not None and not stories:
+        logger.warning(
+            "ticket generation returned 0 tickets for prd_id=%s — not caching so "
+            "the next open retries", prd_id,
+        )
 
     # Record the semantic decision (what was produced) alongside the gateway's
     # own llm_call telemetry row. Never let an audit-write break generation.
