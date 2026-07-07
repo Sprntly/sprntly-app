@@ -219,8 +219,10 @@ export function TicketDetail({ story, index, prdId, onBack }: {
       </div>
 
       <div className="tkv2-edithint">
-        ✎ Title, fields and comments are editable in place; edits sync on push.
-        Acceptance criteria are inherited from the spec — propose changes in comments instead of editing.
+        ✎ Title, status, assignee, and comments can be changed here. The
+        description and acceptance criteria come from the PRD — acceptance
+        criteria are inherited from the spec, so propose changes in the comments
+        and use Accept &amp; propagate to apply them.
       </div>
 
       {/* Full-width description */}
