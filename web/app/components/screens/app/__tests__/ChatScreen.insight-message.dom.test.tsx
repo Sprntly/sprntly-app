@@ -199,6 +199,30 @@ describe("ChatScreen — insight renders as an in-chat message (not a pinned hea
     expect(document.querySelector(".bc-insight-msg-body")).toBeNull()
   })
 
+  it("backfills the body onto an already-open tab that was opened without one", async () => {
+    // First open (no body) → tab exists, no body block.
+    const { rerender } = renderWith(READY)
+    await clickOpenPrd()
+    await waitFor(() => expect(insightMsg()).toBeTruthy())
+    expect(document.querySelector(".bc-insight-msg-body")).toBeNull()
+
+    // Reopen the SAME tab (same title) now carrying a body — it must backfill.
+    rerender(
+      React.createElement(
+        NavigationProvider,
+        null,
+        React.createElement(
+          ContentProvider,
+          null,
+          React.createElement(Harness, { request: { ...READY, insightBody: "Body added on reopen." } }),
+        ),
+      ),
+    )
+    await clickOpenPrd()
+    await waitFor(() => expect(document.querySelector(".bc-insight-msg-body")).toBeTruthy())
+    expect(document.querySelector(".bc-insight-msg-body")!.textContent).toContain("Body added on reopen.")
+  })
+
   it("relabels the prototype CTA to 'View prototype' once one is ready in the DB", async () => {
     // Seed a READY prototype for the insight this tab is bound to (index 0).
     protoMap.set(0, {

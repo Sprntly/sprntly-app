@@ -365,6 +365,12 @@ export function ChatScreen() {
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     if (existing) {
       setActiveTabId(existing.id)
+      // Backfill the insight body onto an already-open tab that lacks one (e.g. a
+      // tab created before this field existed, or opened via a path that didn't
+      // carry it) so reopening the insight surfaces its content, not just a title.
+      if (req.insightBody && !existing.insightBody) {
+        setTabs((prev) => prev.map((t) => t.id === existing.id ? { ...t, insightBody: req.insightBody ?? null } : t))
+      }
     } else {
       setTabs((prev) => [...prev, {
         id: tabId, title, thread: [], dbConvId: null, briefMeta: meta,
