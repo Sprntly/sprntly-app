@@ -161,7 +161,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
   const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
   const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  // Default to the collapsed icon rail; a saved "0" preference (see the init
+  // effect) expands it on load. Users toggle via the sidebar chevron.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
   const [aiPanelWidth, setAiPanelWidthState] = useState(AI_PANEL_WIDTH_DEFAULT)
   /** Default collapsed; expanded only if user saved `sprntly-ai-panel-collapsed=0`. */
   const [aiPanelCollapsed, setAiPanelCollapsed] = useState(true)
@@ -180,7 +182,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     try {
-      if (localStorage.getItem("sprntly-sidebar-collapsed") === "1") {
+      const savedCollapsed = localStorage.getItem("sprntly-sidebar-collapsed")
+      if (savedCollapsed === "0") {
+        setSidebarCollapsed(false)
+      } else if (savedCollapsed === "1") {
         setSidebarCollapsed(true)
       }
       const w = localStorage.getItem(AI_PANEL_W_KEY)
