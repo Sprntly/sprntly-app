@@ -319,6 +319,42 @@ def update_task(
     return {"id": data.get("id") or task_id, "url": data.get("url")}
 
 
+def _write(method: str, path: str, access_token: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Shared writer for the ClickUp v2 API (raw-token auth). 401/403 →
+    reconnect; any other non-OK → 502 so per-item failures stay isolated."""
+    resp = requests.request(
+        method, f"{CLICKUP_API}{path}", json=body or {},
+        headers={"Authorization": access_token}, timeout=_WRITE_TIMEOUT,
+    )
+    if resp.status_code in (401, 403):
+        raise ClickUpAuthExpiredError(
+            "ClickUp rejected the stored token — reconnect ClickUp to continue"
+        )
+    if not resp.ok:
+        logger.warning("ClickUp %s %s failed: %s %s", method, path, resp.status_code, resp.text[:200])
+        raise HTTPException(502, "ClickUp write failed")
+    return resp.json() or {}
+
+
+def create_checklist(access_token: str, task_id: str, name: str) -> str | None:
+    """Create a checklist on a task (used for a ticket's child issues). Returns
+    the checklist id."""
+    data = _write("POST", f"/task/{task_id}/checklist", access_token, {"name": name})
+    return (data.get("checklist") or {}).get("id")
+
+
+def create_checklist_item(access_token: str, checklist_id: str, name: str, resolved: bool = False) -> None:
+    """Add one item to a checklist."""
+    _write("POST", f"/checklist/{checklist_id}/checklist_item", access_token,
+           {"name": name, "resolved": resolved})
+
+
+def add_dependency(access_token: str, task_id: str, *, depends_on: str) -> None:
+    """Record that `task_id` waits on `depends_on` (blocked-by). ClickUp models
+    both directions from one call: depends_on = the task that must finish first."""
+    _write("POST", f"/task/{task_id}/dependency", access_token, {"depends_on": depends_on})
+
+
 def _get(token: str, path: str, params: dict | None = None) -> dict[str, Any]:
     """Authenticated GET against the ClickUp v2 API (raw-token auth quirk)."""
     r = requests.get(
