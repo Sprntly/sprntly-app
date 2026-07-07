@@ -32,11 +32,11 @@ export type McpSettingsViewProps = {
   revokingId: string | null
 }
 
-const MCP_URL =
-  (process.env.NEXT_PUBLIC_API_URL || "https://api.sprntly.ai").replace(
+const getMcpUrl = (token: string) =>
+  (process.env.NEXT_PUBLIC_MCP_URL || "https://mcp.sprntly.ai").replace(
     /\/$/,
     "",
-  ) + "/mcp"
+  ) + `/mcp?token=${token}`
 
 export function McpSettingsView({
   tokens,
@@ -74,7 +74,7 @@ export function McpSettingsView({
             onFocus={(e) => e.currentTarget.select()}
           />
           <br />
-          Server URL: <code>{MCP_URL}</code>
+          Server URL: <code>{getMcpUrl(justCreated.token)}</code>
           <br />
           <label>
             <input
