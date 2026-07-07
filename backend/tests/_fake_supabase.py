@@ -78,6 +78,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "agent_decision_log": {"factors", "output", "kg_refs"},
     "enterprise_config": {"overrides"},
     "ticket_edits":      {"acceptance_criteria", "assignee"},
+    "prd_tickets":       {"stories"},
     "design_agent_map_cache": {"payload"},
     "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
 }

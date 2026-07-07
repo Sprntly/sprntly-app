@@ -669,6 +669,23 @@ CREATE TABLE ticket_comments (
 );
 CREATE INDEX idx_ticket_comments_key ON ticket_comments (company_id, ticket_key);
 
+-- Persisted PRD-generated tickets (mirrors 20260627120000_prd_tickets.sql).
+-- One row per PRD; the individual tickets are elements of the `stories` JSON
+-- array (each has a stable `id` = ticket_key). Source of ticket EXISTENCE
+-- (the ticket_edits/comments/attachments tables above only layer overrides on
+-- top). bigint identity / jsonb / timestamptz are INTEGER / TEXT here.
+CREATE TABLE prd_tickets (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id    TEXT NOT NULL,
+    prd_id        INTEGER NOT NULL UNIQUE,
+    content_hash  TEXT NOT NULL DEFAULT '',
+    stories       TEXT NOT NULL DEFAULT '[]',
+    status        TEXT NOT NULL DEFAULT 'ready',
+    error         TEXT,
+    generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_prd_tickets_company ON prd_tickets (company_id);
+
 -- Roadmap doc storage (mirrors 20260623120000_roadmap_doc.sql, SQLite-ized).
 -- One row per company (UNIQUE company_id) so a re-upload upserts in place. Holds
 -- the original file (base64) + extracted text the weekly brief reads + the

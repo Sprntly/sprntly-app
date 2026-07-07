@@ -161,6 +161,39 @@ def owner_name_for_company(company_id: str | None) -> str | None:
 
 
 @retry_on_disconnect
+def display_name_for_user(user_id: str | None) -> str | None:
+    """Best human label for a specific user: profiles.full_name → "first last"
+    → email → None. Unlike owner_name_for_company (which resolves the account
+    owner), this is scoped to the exact user — used to attribute MCP ticket
+    comments to the token owner instead of a generic "mcp". Best-effort: any
+    read failure returns None so the comment write never wedges on it."""
+    if not user_id:
+        return None
+    try:
+        profiles = (
+            require_client()
+            .table("profiles")
+            .select("full_name, first_name, last_name, email")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        if not profiles:
+            return None
+        p = profiles[0]
+        return (
+            p.get("full_name")
+            or f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip()
+            or p.get("email")
+            or None
+        )
+    except Exception:  # noqa: BLE001 — attribution must never break the write
+        return None
+
+
+@retry_on_disconnect
 def display_name_for_slug(slug: str) -> str | None:
     """Resolve a company slug → its human-readable display name. None if no
     company owns the slug (e.g. legacy demo datasets)."""

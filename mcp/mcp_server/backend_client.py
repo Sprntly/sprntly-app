@@ -63,3 +63,25 @@ async def get_json(path: str, **params: str) -> dict | None:
     if resp.status_code != 200:
         raise BackendError(resp.status_code, resp.text)
     return resp.json()
+
+
+async def request_json(
+    method: str, path: str, json: dict | None = None, **params: str
+) -> dict | None:
+    """{method} /internal/mcp{path} with a JSON body -> parsed JSON (or None
+    on 404). For the ticket write routes (PUT/POST); company_id rides as a
+    query param, same as the reads. Raises BackendError on other non-2xx.
+    """
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.request(
+            method,
+            f"{_BACKEND_URL}/internal/mcp{path}",
+            params=params,
+            json=json,
+            headers=_headers(),
+        )
+    if resp.status_code == 404:
+        return None
+    if resp.status_code >= 300:
+        raise BackendError(resp.status_code, resp.text)
+    return resp.json()

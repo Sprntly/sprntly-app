@@ -78,8 +78,22 @@ sudo bash deploy/setup.sh
 | `BACKEND_URL`           | server — required; base URL of the Sprntly backend      |
 | `BACKEND_INTERNAL_KEY`  | server — required; must match the backend's `INTERNAL_API_KEY` |
 
-## v1 scope
+## Tools
 
-5 read-only tools: `list_datasets`, `get_current_brief`, `get_backlog`, `get_latest_prd`, `get_ticket(ticket_key)`.
+**Read:** `list_datasets`, `get_current_brief`, `get_backlog`, `get_latest_prd`, `get_prd(prd_id)`, `list_tickets(status?, ticket_type?)`, `get_ticket(ticket_key)`.
 
-**Explicitly out of scope for v1** (see the plan this was built from for the reasoning): write tools, async-job tools (PRD/brief/evidence generation — these need internal polling to stay synchronous from the client's view), OAuth-based MCP auth (static bearer token is simpler and matches the existing API-key UX bar), and rate limiting (no rate limiting exists anywhere in this codebase yet — a leaked token has no request-volume ceiling; track this as a follow-up).
+**Write (tickets):** `update_ticket_fields` (status/priority/title/sprint/assignee), `update_ticket_description` (description + acceptance criteria), `add_ticket_comment`, `add_ticket_attachment` (link a PR/branch).
+
+The ticket tools let a developer work a ticket from their coding editor:
+- `list_tickets` discovers tickets with their current status (optionally filtered by `status`/`ticket_type`).
+- `get_ticket` returns the full ticket — the generated title, description, acceptance criteria, scope and context (what/why) **merged with any edits**, plus comments and attachments — i.e. everything needed to implement it.
+- `get_prd` pulls the parent PRD for full product context (a ticket's `prd_id` comes from `list_tickets`/`get_ticket`).
+- `update_ticket_fields` / `update_ticket_description` / `add_ticket_comment` / `add_ticket_attachment` update status, edit content, note progress, or link a PR.
+
+All tools are company-scoped from the token — no `dataset`/`company` parameter. The server also sends FastMCP `instructions` on connect to orient the model on this flow.
+
+Comments are attributed to the **token owner** (resolved server-side from the token's `user_id` → their profile name, else email, else `mcp`) — the client can't post as someone else.
+
+Any token can read **and** write (no separate read-only vs read-write scopes in this version).
+
+**Still out of scope:** async-job tools (PRD/brief/evidence generation — these need internal polling to stay synchronous from the client's view), OAuth-based MCP auth (static bearer token is simpler and matches the existing API-key UX bar), per-token read/write scopes, and rate limiting (none exists anywhere in this codebase yet — a leaked token has no request-volume ceiling; track this as a follow-up).

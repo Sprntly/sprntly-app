@@ -61,6 +61,33 @@ def get_tickets(company_id: str, prd_id: int) -> dict | None:
     return resp.data[0] if resp.data else None
 
 
+@retry_on_disconnect
+def find_ticket_story(
+    company_id: str, ticket_key: str
+) -> tuple[dict | None, int | None]:
+    """Locate one generated ticket (a `stories` element) by its stable id
+    across ALL of a company's PRDs. Returns (story, prd_id) or (None, None).
+
+    Tickets have no standalone rows — they're elements of each PRD's
+    `prd_tickets.stories` array. `get_ticket` uses this to merge the generated
+    base content (title, body, acceptance criteria, scope, …) with the
+    per-ticket overrides so a developer sees the full ticket, not just edits."""
+    c = require_client()
+    rows = (
+        c.table("prd_tickets")
+        .select("prd_id, stories")
+        .eq("company_id", company_id)
+        .execute()
+        .data
+        or []
+    )
+    for row in rows:
+        for story in row.get("stories") or []:
+            if isinstance(story, dict) and story.get("id") == ticket_key:
+                return story, row.get("prd_id")
+    return None, None
+
+
 def save_tickets(
     company_id: str, prd_id: int, content_hash: str, stories: list[dict]
 ) -> None:
