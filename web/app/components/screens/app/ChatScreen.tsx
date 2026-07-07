@@ -100,6 +100,7 @@ export function ChatScreen() {
     openPrdTab,
     showToast,
     openContentPanel,
+    closeContentPanel,
     contentPanelTab,
   } = useNavigation()
   const router = useRouter()
@@ -941,6 +942,21 @@ export function ChatScreen() {
     setPrdPanelPending(false)
     openContentPanel("prd")
   }, [prdPanelPending, openContentPanel])
+
+  // Keep the content panel scoped to real chat tabs. The panel is a single global
+  // overlay; "View PRD" on a brief finding spawns a PRD chat tab and slides the
+  // panel open over it (wanted). But because the panel is global, switching back
+  // to the pinned brief tab would leave it hanging over the weekly brief (not
+  // wanted). When the user SWITCHES to the brief tab, close any panel a PRD tab
+  // left open. Guarded on an actual tab switch, so the brief's own inline actions
+  // (Tickets / Evidence / multi-agent — which open the panel WITHOUT a tab
+  // switch) are untouched and stay visible.
+  const prevTabForPanelRef = useRef(activeTabId)
+  useEffect(() => {
+    const switchedTab = prevTabForPanelRef.current !== activeTabId
+    prevTabForPanelRef.current = activeTabId
+    if (switchedTab && isBriefTab && contentPanelTab) closeContentPanel()
+  }, [activeTabId, isBriefTab, contentPanelTab, closeContentPanel])
 
   // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
   // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps
