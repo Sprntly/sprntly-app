@@ -8,7 +8,7 @@ import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
-import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
+import { ApiError, storiesApi, type ClickUpList, type ClickUpTicketState, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { TicketDetail, priorityPill } from "./TicketDetail"
 import { StoryMap, storyMapSizing } from "./StoryMap"
@@ -402,7 +402,9 @@ function EvidenceTab() {
 // (backend/skills/user-stories/examples/sprntly-ticket-views.html). Click to
 // open the editable in-panel detail (TicketDetail) — the generated story is the
 // base, edits persist as overrides.
-function StoryRow({ story, index, onOpen }: { story: GeneratedStory; index: number; onOpen: () => void }) {
+function StoryRow({ story, index, onOpen, synced }: {
+  story: GeneratedStory; index: number; onOpen: () => void; synced?: ClickUpTicketState
+}) {
   const pill = priorityPill(story.priority)
   const preview = story.user_story || story.body
   const acCount = story.acceptance_criteria.length
@@ -422,6 +424,11 @@ function StoryRow({ story, index, onOpen }: { story: GeneratedStory; index: numb
           {type !== "build" ? <span className={`tkv2-typechip tkv2-typechip--${type}`}>{type}</span> : null}
           <span className={`tkv2-pill tkv2-pill--${pill.variant}`}>{pill.label}</span>
           {acCount > 0 ? <span className="tkv2-acchip">{acCount} AC</span> : null}
+          {synced?.status ? (
+            <span className="tkv2-synced" title={synced.assignee ? `Assignee: ${synced.assignee}` : undefined}>
+              ⟳ ClickUp: {synced.status}
+            </span>
+          ) : null}
         </div>
       </div>
     </button>
@@ -462,6 +469,9 @@ export function TicketsTab() {
   const [selectedListId, setSelectedListId] = useState<string>("")
   // "Remember for this PRD" toggle in the destination picker.
   const [rememberDest, setRememberDest] = useState<boolean>(true)
+  // Current ClickUp state pulled back per ticket id (bidirectional sync).
+  const [syncedStatuses, setSyncedStatuses] = useState<Record<string, ClickUpTicketState>>({})
+  const [syncing, setSyncing] = useState(false)
 
   // Manual regenerate: tickets are cached per PRD and only auto-regenerate when
   // the PRD changes, so give the user an explicit way to force a fresh set. A
@@ -631,6 +641,35 @@ export function TicketsTab() {
     }
   }
 
+  // Bidirectional read: pull the current ClickUp state for tickets already
+  // synced to this PRD's remembered list, and surface it on the cards.
+  const handleSyncFromClickUp = async () => {
+    if (syncing) return
+    if (!isClickUpConnected) {
+      showToast("ClickUp not connected", "Connect ClickUp in Settings first.")
+      return
+    }
+    const listId = rememberedDest(prdId)
+    if (!listId) {
+      showToast("Nothing to sync yet", "Push these tickets to ClickUp first, then sync brings their status back.")
+      return
+    }
+    const ticketIds = stories.map((s) => s.id).filter((x): x is string => Boolean(x))
+    if (ticketIds.length === 0) return
+    setSyncing(true)
+    try {
+      const { statuses } = await storiesApi.pullClickUpStatus(listId, ticketIds)
+      setSyncedStatuses(statuses)
+      const n = Object.keys(statuses).length
+      showToast(n ? "Synced from ClickUp" : "No synced tickets found",
+        n ? `Updated status for ${n} ticket${n !== 1 ? "s" : ""}.` : "None of these tickets are in ClickUp yet.")
+    } catch (e) {
+      showToast("Couldn't sync from ClickUp", e instanceof Error ? e.message.slice(0, 120) : "Try again.")
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   if (prdId == null) {
     return (
       <div className="cpanel-empty">
@@ -709,6 +748,11 @@ export function TicketsTab() {
             <button type="button" className="tkv2-btn tkv2-btn--regen" onClick={regenerate} title="Regenerate tickets from the current PRD">
               ⟳ Regenerate
             </button>
+            {isClickUpConnected && (
+              <button type="button" className="tkv2-btn tkv2-btn--regen" onClick={handleSyncFromClickUp} disabled={syncing} title="Pull current status back from ClickUp">
+                {syncing ? "Syncing…" : "⟳ Sync from ClickUp"}
+              </button>
+            )}
             <div style={{ position: "relative", display: "inline-flex" }}>
               <button
                 type="button"
@@ -775,13 +819,13 @@ export function TicketsTab() {
       ) : (
         <div className="tkt-list">
           {builds.map(({ s, i }) => (
-            <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
+            <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} synced={s.id ? syncedStatuses[s.id] : undefined} />
           ))}
           {decisions.length > 0 && (
             <>
               <div className="tkv2-grouplbl">Decisions &amp; spikes</div>
               {decisions.map(({ s, i }) => (
-                <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
+                <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} synced={s.id ? syncedStatuses[s.id] : undefined} />
               ))}
             </>
           )}

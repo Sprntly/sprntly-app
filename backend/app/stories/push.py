@@ -170,3 +170,22 @@ def _resolve_dep(dep: str, title_to_task: dict[str, str]) -> str | None:
         if title and title.lower() in d:
             return task_id
     return None
+
+
+def pull_clickup_status(
+    company_id: str, list_id: str, ticket_ids: Iterable[str]
+) -> dict[str, dict[str, Any]]:
+    """Bidirectional read: for each ticket already synced to `list_id`, fetch its
+    current ClickUp state (status, assignee, url) so Sprntly reflects work done
+    in the tracker. Keyed by the ticket's stable_id; tickets never pushed (no
+    mapping row) are simply absent from the result. Best-effort per ticket."""
+    access_token = _clickup_access_token(company_id)
+    out: dict[str, dict[str, Any]] = {}
+    for ticket_id in ticket_ids:
+        task_id = get_clickup_task_id(company_id, list_id, ticket_id)
+        if not task_id:
+            continue
+        state = clickup_oauth.get_task(access_token, task_id)
+        if state.get("status") or state.get("assignee"):
+            out[ticket_id] = state
+    return out

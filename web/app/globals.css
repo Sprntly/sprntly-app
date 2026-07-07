@@ -16947,6 +16947,12 @@
   font-size: 12.5px; font-weight: 600; color: var(--chip-t);
   background: var(--chip); border-radius: 999px; padding: 4px 13px;
 }
+/* ClickUp status pulled back onto a card (bidirectional sync). */
+.tkv2-synced {
+  font-size: 11.5px; font-weight: 600; color: var(--green-d);
+  background: var(--green-s); border: 1px solid var(--green-b);
+  border-radius: 999px; padding: 3px 11px; text-transform: capitalize;
+}
 .tkv2-typechip {
   font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   border-radius: 999px; padding: 4px 11px; border: 1px solid var(--line);
