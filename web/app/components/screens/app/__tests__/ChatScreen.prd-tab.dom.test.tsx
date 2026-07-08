@@ -205,4 +205,16 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     // Brief surface is showing, panel is gone.
     expect(briefSection()).toBeTruthy()
   })
+
+  it("closes the panel when starting a NEW chat after opening a PRD", async () => {
+    renderWith(READY)
+    await clickOpenPrd()
+    // Panel is open over the new PRD tab.
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    // Hit the "+" (New chat) affordance → a fresh plain chat tab with no PRD.
+    // The global panel must not carry the previous tab's PRD onto it.
+    await act(async () => { fireEvent.click(tabBar().getByLabelText("New chat")) })
+    await waitFor(() => expect(tabBar().getByText("New chat")).toBeTruthy())
+    await waitFor(() => expect(panelProbe()).toBe("none"))
+  })
 })
