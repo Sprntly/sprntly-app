@@ -77,6 +77,15 @@ afterEach(() => {
   cleanup()
   vi.clearAllMocks()
   listCommentsByTokenMock.mockResolvedValue([])
+  // The name-capture flow persists the viewer's name to localStorage; without
+  // clearing it a submitting test leaks a stored name into the next test, so the
+  // name form never re-renders (a returning viewer is not re-prompted). jsdom
+  // reuses one window across a file's tests, so isolate explicitly here.
+  try {
+    window.localStorage.clear()
+  } catch {
+    /* storage disabled (private mode) — nothing to clear */
+  }
 })
 
 describe("PublicPrototypeChrome — creation", () => {
