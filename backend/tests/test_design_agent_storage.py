@@ -1180,6 +1180,54 @@ async def test_stage_complete_run_emits_observability_logs(env, monkeypatch, cap
     assert "secret-stderr-blob" not in failed[0]  # stderr never in the log line
 
 
+async def test_stage_complete_run_dist_failure_still_calls_fail_prototype_and_returns_false(env, monkeypatch):
+    # Regression: a dist-stage failure on the complete path must route to
+    # fail_prototype with the identical error string and return False — the
+    # caller-side contract is preserved after the shared sequence was extracted.
+    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    monkeypatch.setattr(
+        env.routes, "vite_build_with_repair",
+        _async_return(({"index.html": "<x/>"}, {"a": "b"})),
+    )
+    monkeypatch.setattr(env.routes, "stage_bundle", _async_raise(RuntimeError("boom")))
+    result = await env.routes._stage_complete_run(
+        prototype_id=pid, workspace_id="app", virtual_fs={"a": "b"},
+    )
+    assert result is False
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    assert row["error"].startswith("RuntimeError: boom")
+
+
+async def test_stage_complete_run_source_stage_log_prefix_is_empty(env, monkeypatch, caplog):
+    # Regression: a source-stage failure on the complete path logs the exact
+    # `source_stage_failed` key with NO prefix / NO leading underscore (the
+    # log_prefix="" contract) and the run still completes ready.
+    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    monkeypatch.setattr(
+        env.routes, "vite_build_with_repair",
+        _async_return(({"index.html": "<x/>"}, {"a": "b"})),
+    )
+
+    async def _stage(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        if sub_prefix == "_source":
+            raise RuntimeError("no source")
+        return "file:///x/index.html"
+
+    monkeypatch.setattr(env.routes, "stage_bundle", _stage)
+    monkeypatch.setattr(env.routes, "reconcile_comments_on_checkpoint", lambda **k: None)
+    with caplog.at_level(logging.WARNING):
+        result = await env.routes._stage_complete_run(
+            prototype_id=pid, workspace_id="app", virtual_fs={"a": "b"},
+        )
+    assert result is True
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("source_stage_failed prototype_id=") for m in msgs)
+    # Guard the off-by-one-character risk: no leading underscore, no iterate prefix.
+    assert not any(m.startswith("_source_stage_failed") for m in msgs)
+    assert not any(m.startswith("iterate_source_stage_failed") for m in msgs)
+
+
 # ─── Type-check gate routing — B3 + iterate seam (P3-15 AC #1a) ──────────────
 
 

@@ -1976,6 +1976,101 @@ async def _build_repair_loop(
         ) from exc
 
 
+async def _stage_checkpoint_and_bundle(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    dist_files: dict[str, str],
+    virtual_fs: dict[str, str],
+    prompt_history: list[dict],
+    log_prefix: str,
+) -> tuple[int, str]:
+    """Shared checkpoint + dual-stage + comment-reconcile sequence used by BOTH
+    the first-completion staging path and the iterate staging path.
+
+    Does NOT touch `prototypes.status` / `completed_at` / `current_checkpoint_id`
+    — the caller owns the terminal write (`complete_prototype` vs
+    `advance_current_checkpoint`), because that is the one genuine difference
+    between a first completion and a checkpoint advance (an iterate must never
+    re-stamp `completed_at`).
+
+    Steps, each keeping its pre-existing fail-open / fail-closed posture:
+
+    1. `create_checkpoint` — the returned id seeds the bundle prefix.
+    2. `stage_bundle(dist_files)` — the BUILT dist/. Raises on failure; the
+       caller's own `except` wraps this call and routes to `fail_prototype`, so
+       the caller-side error contract is unchanged. This function does NOT call
+       `fail_prototype` itself.
+    3. `stage_bundle(virtual_fs, sub_prefix="_source")` — best-effort raw source
+       for the next iterate / manual edit. A failure logs
+       ``{log_prefix}source_stage_failed`` and proceeds.
+    4. `reconcile_comments_on_checkpoint` — best-effort orphan/re-attach of
+       comments whose anchor vanished from this build. A failure logs
+       ``comments_reconcile_failed`` (same key on both paths) and proceeds.
+
+    Returns ``(checkpoint_id, bundle_url)`` where `bundle_url` is the STABLE
+    app-origin proxy base from `authed_bundle_url(prototype_id)` — never the
+    server-side signed object URL `stage_bundle` returns.
+    """
+    # Step: checkpoint row (id seeds the bundle prefix). prd/figma hashes +
+    # comment_state land later; for now the checkpoint records the bundle only.
+    checkpoint_id = create_checkpoint(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        bundle_url=None,            # populated on the prototype row after staging
+        prd_revision_hash=None,     # PRD-hash + figma-hash wired later
+        figma_frame_hash=None,
+        prompt_history=prompt_history,
+        comment_state=[],
+    )
+
+    # Step: stage the BUILT dist/ (never raw virtual_fs). Raises on failure —
+    # the caller's except wraps this exactly as it did pre-extraction. The signed
+    # URL returned here is server-side only and never browser-facing (NO-BYPASS).
+    await stage_bundle(
+        prototype_id=prototype_id,
+        checkpoint_id=checkpoint_id,
+        files=dist_files,
+    )
+
+    # Step: stage the RAW virtual_fs under _source/ so the export serialiser and
+    # the NEXT iterate can read real TSX, not minified bundles. Best-effort: a
+    # source-stage failure logs and proceeds — the load-bearing artefact (dist/)
+    # is already staged.
+    try:
+        await stage_bundle(
+            prototype_id=prototype_id,
+            checkpoint_id=checkpoint_id,
+            files=virtual_fs,
+            sub_prefix="_source",
+        )
+    except Exception as exc:  # noqa: BLE001 — source-stage is best-effort.
+        logger.warning(
+            "%ssource_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            log_prefix, prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
+    # Step: orphan/re-attach every OPEN comment whose anchor vanished from THIS
+    # build's bundle. Path-agnostic (keys on prototype_id, not checkpoint_id).
+    # Best-effort: the bundle is already staged, so a reconcile failure must NOT
+    # fail the build — it logs and the run still proceeds.
+    try:
+        reconcile_comments_on_checkpoint(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            dist_files=dist_files,
+        )
+    except Exception as exc:  # noqa: BLE001 — reconcile is best-effort housekeeping.
+        logger.warning(
+            "comments_reconcile_failed prototype_id=%s error_class=%s",
+            prototype_id, type(exc).__name__,
+        )
+
+    # NO-BYPASS migration: the persisted bundle_url is the STABLE app-origin PROXY
+    # base, not the 24h signed object URL. Computed here so neither caller repeats it.
+    return checkpoint_id, authed_bundle_url(prototype_id)
+
+
 async def _stage_complete_run(
     *,
     prototype_id: int,
@@ -2258,24 +2353,19 @@ async def _stage_complete_run(
         prototype_id, len(dist_files),
     )
 
-    # Step 2 — checkpoint row (id seeds the bundle prefix). prd/figma hashes +
-    # comment_state land later; for now the checkpoint records the bundle only.
-    checkpoint_id = create_checkpoint(
-        prototype_id=prototype_id,
-        workspace_id=workspace_id,
-        bundle_url=None,            # populated on the prototype row after staging
-        prd_revision_hash=None,     # PRD-hash + figma-hash wired later
-        figma_frame_hash=None,
-        prompt_history=[],
-        comment_state=[],
-    )
-
-    # Step 3 — stage the BUILT dist/ (not raw virtual_fs).
+    # Step 2 — checkpoint the build, stage the dist/ bundle, stage the raw source,
+    # and reconcile comments (shared with the iterate path). Fail-closed on the
+    # dist stage (routed to THIS function's fail_prototype below); best-effort on
+    # source-stage + reconcile. log_prefix="" reproduces the exact
+    # "source_stage_failed" key (no leading underscore, no prefix).
     try:
-        bundle_url = await stage_bundle(
+        checkpoint_id, bundle_url = await _stage_checkpoint_and_bundle(
             prototype_id=prototype_id,
-            checkpoint_id=checkpoint_id,
-            files=dist_files,
+            workspace_id=workspace_id,
+            dist_files=dist_files,
+            virtual_fs=virtual_fs,
+            prompt_history=[],
+            log_prefix="",
         )
     except Exception as exc:  # noqa: BLE001 — surface staging failure on the row.
         fail_prototype(
@@ -2284,40 +2374,6 @@ async def _stage_complete_run(
             error=f"{type(exc).__name__}: {exc}",
         )
         return False
-
-    # Step 3.5 — Stage the RAW virtual_fs alongside dist/ under _source/ so the
-    # export serialiser can read raw TSX, not minified bundles.
-    # Best-effort: a source-stage failure logs and proceeds — the prototype is
-    # still ready (the load-bearing artefact is the dist/ bundle). The serialiser
-    # gracefully falls back to its "no source staged" message if this step failed.
-    try:
-        await stage_bundle(
-            prototype_id=prototype_id,
-            checkpoint_id=checkpoint_id,
-            files=virtual_fs,
-            sub_prefix="_source",
-        )
-    except Exception as exc:  # noqa: BLE001 — source-stage is best-effort.
-        logger.warning(
-            "source_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
-            prototype_id, checkpoint_id, type(exc).__name__,
-        )
-
-    # Step 3.6 — orphan/re-attach. Orphan every OPEN comment whose anchor
-    # vanished from THIS build's bundle. Best-effort: the bundle is already
-    # staged, so a reconcile failure must NOT fail the build — it logs and the
-    # prototype still completes ready (orphaning is housekeeping, not a gate).
-    try:
-        reconcile_comments_on_checkpoint(
-            prototype_id=prototype_id,
-            workspace_id=workspace_id,
-            dist_files=dist_files,
-        )
-    except Exception as exc:  # noqa: BLE001 — reconcile is best-effort housekeeping.
-        logger.warning(
-            "comments_reconcile_failed prototype_id=%s error_class=%s",
-            prototype_id, type(exc).__name__,
-        )
 
     # Step 3.7 — best-effort preview screenshot of the staged bundle. HONEST-DEGRADE:
     # a capture that returns no image (no browser runtime / nav error / timeout), or
@@ -2359,16 +2415,17 @@ async def _stage_complete_run(
 
     # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
     # NO-BYPASS migration (plan §8-A/B): the persisted bundle_url is the STABLE
-    # app-origin PROXY base, NOT the 24h Supabase signed URL `stage_bundle`
-    # returned (that signed URL was used above only for the server-side screenshot
-    # capture and is never browser-facing). The authed surface serves this proxy
-    # base via the da_view_grant cookie; the public surface re-derives a by-token
-    # proxy URL on read (_public_bundle_url). Signing now happens inside the proxy
-    # handler, sign-on-read, so a browser never receives a direct/signed object URL.
+    # app-origin PROXY base returned by `_stage_checkpoint_and_bundle`, NOT the
+    # 24h Supabase signed object URL (that signed URL was used only for the
+    # server-side screenshot capture and is never browser-facing). The authed
+    # surface serves this proxy base via the da_view_grant cookie; the public
+    # surface re-derives a by-token proxy URL on read (_public_bundle_url). Signing
+    # happens inside the proxy handler, sign-on-read, so a browser never receives a
+    # direct/signed object URL.
     complete_prototype(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
-        bundle_url=authed_bundle_url(prototype_id),
+        bundle_url=bundle_url,
         current_checkpoint_id=checkpoint_id,
         preview_image_url=preview_image_url,
     )
@@ -3993,23 +4050,20 @@ async def _stage_iterate_run(
         prototype_id, len(dist_files),
     )
 
-    # Step 2 — new checkpoint; thread the iterate prompt into prompt_history.
-    checkpoint_id = create_checkpoint(
-        prototype_id=prototype_id,
-        workspace_id=workspace_id,
-        bundle_url=None,
-        prd_revision_hash=None,    # PRD-hash + figma-hash wired later on this path
-        figma_frame_hash=None,
-        prompt_history=[{"kind": "iterate", "prompt": iterate_prompt}],
-        comment_state=[],
-    )
-
-    # Step 3 — stage the BUILT dist/ (never raw virtual_fs).
+    # Step 2 — checkpoint the build (threading the iterate prompt into
+    # prompt_history), stage the dist/ bundle + raw source, and reconcile comments
+    # (shared with the first-completion path). Fail-closed on the dist stage
+    # (routed to THIS function's fail_prototype below); best-effort on source-stage
+    # + reconcile. log_prefix="iterate_" reproduces the exact
+    # "iterate_source_stage_failed" key.
     try:
-        bundle_url = await stage_bundle(
+        checkpoint_id, bundle_url = await _stage_checkpoint_and_bundle(
             prototype_id=prototype_id,
-            checkpoint_id=checkpoint_id,
-            files=dist_files,
+            workspace_id=workspace_id,
+            dist_files=dist_files,
+            virtual_fs=virtual_fs,
+            prompt_history=[{"kind": "iterate", "prompt": iterate_prompt}],
+            log_prefix="iterate_",
         )
     except Exception as exc:  # noqa: BLE001 — surface staging failure on the row.
         fail_prototype(
@@ -4019,51 +4073,18 @@ async def _stage_iterate_run(
         )
         return False
 
-    # Step 3.5 — stage the RAW virtual_fs under _source/ so the NEXT iterate's
-    # read_source_files_for_checkpoint returns real TSX. Best-effort (mirrors
-    # _stage_complete_run): a source-stage failure logs and proceeds.
-    try:
-        await stage_bundle(
-            prototype_id=prototype_id,
-            checkpoint_id=checkpoint_id,
-            files=virtual_fs,
-            sub_prefix="_source",
-        )
-    except Exception as exc:  # noqa: BLE001 — source-stage is best-effort.
-        logger.warning(
-            "iterate_source_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
-            prototype_id, checkpoint_id, type(exc).__name__,
-        )
-
-    # Step 3.6 — orphan/re-attach on the ITERATE path. An iterate is a new
-    # checkpoint build, so it MUST reconcile comments too (the iterate path shipped
-    # before this helper existed; wired here so generate AND iterate both orphan
-    # vanished anchors). Same path-agnostic helper as _stage_complete_run — it
-    # keys on prototype_id, not checkpoint_id. Best-effort: a reconcile failure
-    # must NOT fail the iterate (the bundle is already staged).
-    try:
-        reconcile_comments_on_checkpoint(
-            prototype_id=prototype_id,
-            workspace_id=workspace_id,
-            dist_files=dist_files,
-        )
-    except Exception as exc:  # noqa: BLE001 — reconcile is best-effort housekeeping.
-        logger.warning(
-            "comments_reconcile_failed prototype_id=%s error_class=%s",
-            prototype_id, type(exc).__name__,
-        )
-
     # Step 4 — Advance current_checkpoint_id + bundle_url WITHOUT a
     # completed_at re-stamp (NOT complete_prototype). This does not
     # rotate share_token / share_mode, so the public /p/<token> URL is unchanged
-    # and now resolves to the new checkpoint's bundle. NO-BYPASS (plan §8): store
-    # the STABLE app-origin proxy base (not the staged signed URL `bundle_url`,
-    # which is server-side only); the proxy signs-on-read per checkpoint.
+    # and now resolves to the new checkpoint's bundle. NO-BYPASS (plan §8): the
+    # bundle_url returned by `_stage_checkpoint_and_bundle` is the STABLE app-origin
+    # proxy base (not the staged signed object URL, which is server-side only); the
+    # proxy signs-on-read per checkpoint.
     advance_current_checkpoint(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
         checkpoint_id=checkpoint_id,
-        bundle_url=authed_bundle_url(prototype_id),
+        bundle_url=bundle_url,
     )
     return True
 
