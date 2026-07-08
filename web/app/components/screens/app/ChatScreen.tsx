@@ -15,6 +15,7 @@ import { BriefChat, isPrdCommand, prototypeCtaLabel } from "../../shared/BriefCh
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
+import { PrdInputQuestions } from "../../shared/PrdInputQuestions"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
 import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
@@ -269,6 +270,13 @@ export function ChatScreen() {
       return { ...t, thread: next }
     }))
   }, [activeTabId])
+
+  // A "User input needed" answer patched the PRD (scoped edit). Refresh the
+  // active tab's cached PRD + the shared content panel so the change shows live.
+  const handleInputPrdUpdated = useCallback((prd: PrdState) => {
+    setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prd } : t))
+    setContent({ prd })
+  }, [activeTabId, setContent])
   const [draft, setDraft] = useState("")
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
@@ -1445,6 +1453,15 @@ export function ChatScreen() {
                           </button>
                         </div>
                       </div>
+                    ) : null}
+                    {/* "User input needed" items from the PRD, surfaced as chat
+                        messages with answer buttons. Answering patches only the
+                        affected PRD sections and refreshes the panel live. */}
+                    {activeTab?.prd ? (
+                      <PrdInputQuestions
+                        prdId={activeTab.prd.prd_id}
+                        onPrdUpdated={handleInputPrdUpdated}
+                      />
                     ) : null}
                     {thread.map((turn, idx) => {
                       const isLast = idx === thread.length - 1

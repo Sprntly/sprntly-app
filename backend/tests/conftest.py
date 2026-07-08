@@ -79,6 +79,7 @@ _RELOAD_ORDER = [
     "app.db.schema",
     "app.db.briefs",
     "app.db.prds",
+    "app.db.prd_input_questions",
     "app.db.evidences",
     "app.db.asks",
     "app.db.datasets",
@@ -95,6 +96,7 @@ _RELOAD_ORDER = [
     "app.ask_job_runner",
     "app.evidence_runner",
     "app.prd_runner",
+    "app.prd_questions",
     "app.brief_runner",
     "app.routes.health",
     "app.routes.datasets",
@@ -195,6 +197,39 @@ CREATE TABLE prd_patches (
                   CHECK (status IN ('pending', 'applied', 'rejected')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
+);
+
+-- PRD version snapshots (mirrors 20260607100000_prd_versions.sql). Seeded so the
+-- save-a-version-before-overwrite path (PUT /{id} + the input-answer edit) works
+-- under the harness instead of silently no-opping.
+CREATE TABLE prd_versions (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    prd_id         INTEGER NOT NULL,
+    version_number INTEGER NOT NULL DEFAULT 1,
+    title          TEXT NOT NULL DEFAULT '',
+    payload_md     TEXT NOT NULL DEFAULT '',
+    saved_by       TEXT NOT NULL DEFAULT 'user',
+    saved_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Structured "User input needed" questions (mirrors
+-- 20260708000000_prd_input_questions.sql). Seeded in the base schema so the PRD
+-- input-question routes + extraction resolve under the base harness.
+CREATE TABLE prd_input_questions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    prd_id       INTEGER NOT NULL,
+    ordinal      INTEGER NOT NULL DEFAULT 0,
+    tag          TEXT NOT NULL DEFAULT 'need'
+                 CHECK (tag IN ('escalate', 'need')),
+    prompt       TEXT NOT NULL,
+    owner        TEXT,
+    options      TEXT NOT NULL DEFAULT '[]',
+    status       TEXT NOT NULL DEFAULT 'pending'
+                 CHECK (status IN ('pending', 'answered', 'dismissed')),
+    answer       TEXT,
+    answered_by  TEXT,
+    answered_at  TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE ask_log (

@@ -1297,6 +1297,48 @@ export const prdApi = {
         `/v1/prd/${id}/generations`,
       )
       .then((r) => r.generations),
+  /** The PRD's structured "User input needed" questions (extracted at generation
+   *  time). Rendered in the PRD's chat as messages with answer buttons. Returns
+   *  every question; the client shows pending ones as actionable. */
+  listInputQuestions: (id: number) =>
+    api
+      .get<{ questions: PrdInputQuestion[] }>(`/v1/prd/${id}/input-questions`)
+      .then((r) => r.questions),
+  /** Answer one "User input needed" question. The backend folds the answer into
+   *  only the affected PRD sections (a scoped edit — NOT a full regeneration),
+   *  saves an undoable version, and returns the updated PRD + which sections
+   *  changed so the panel can refresh live and the chat can confirm. */
+  answerInputQuestion: (prdId: number, questionId: number, answer: string) =>
+    api.post<PrdInputAnswerResponse>(
+      `/v1/prd/${prdId}/input-questions/${questionId}/answer`,
+      { answer },
+    ),
+}
+
+/** One structured "User input needed" item lifted out of the PRD document.
+ *  `tag` is 'escalate' (a product decision → answered by picking an `options`
+ *  button) or 'need' (missing data → answered as free text, `options` empty).
+ *  `status` walks pending → answered (or dismissed). */
+export type PrdInputQuestion = {
+  id: number
+  prd_id: number
+  ordinal: number
+  tag: "escalate" | "need"
+  prompt: string
+  owner?: string | null
+  options: PendingQuestionChoice[]
+  status: "pending" | "answered" | "dismissed"
+  answer?: string | null
+}
+
+/** Response from POST /v1/prd/{id}/input-questions/{qid}/answer — the updated PRD
+ *  (with the scoped edit folded in), the now-answered question, and the
+ *  human-readable section names the edit touched (for the chat confirmation). */
+export type PrdInputAnswerResponse = {
+  prd: PrdRecord
+  question: PrdInputQuestion
+  sections_changed: string[]
+  summary: string
 }
 
 // ---- Design Agent ---------------------------------------------------

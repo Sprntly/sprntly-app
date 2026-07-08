@@ -44,6 +44,12 @@ vi.mock("../../../../lib/api", () => {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
     },
+    // A PRD tab mounts PrdInputQuestions, which loads its questions from prdApi;
+    // stub it to an empty set so the panel behaviour under test is unaffected.
+    prdApi: {
+      listInputQuestions: vi.fn().mockResolvedValue([]),
+      answerInputQuestion: vi.fn(),
+    },
   }
 })
 
