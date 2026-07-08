@@ -301,7 +301,7 @@ describe("BriefChat finding card — batch-map isolation (listenForCrossSurfaceG
   })
 })
 
-describe("BriefChat finding card — generation overlay Cancel (soft dismiss, AC6)", () => {
+describe("BriefChat finding card — generation overlay Cancel (soft dismiss)", () => {
   it("test_brief_chat_generation_overlay_has_cancel", async () => {
     await openAndArmCardGeneration()
     expect(typeof latestLoadingProps?.onCancel).toBe("function")
@@ -324,7 +324,7 @@ describe("BriefChat finding card — generation overlay Cancel (soft dismiss, AC
   })
 })
 
-describe("BriefChat finding card — generation overlay Notify (AC7)", () => {
+describe("BriefChat finding card — generation overlay Notify", () => {
   it("test_brief_chat_generation_overlay_has_notify", async () => {
     await openAndArmCardGeneration()
     expect(typeof latestLoadingProps?.onNotifyWhenReady).toBe("function")
@@ -359,7 +359,7 @@ describe("BriefChat finding card — generation overlay Notify (AC7)", () => {
   })
 })
 
-describe("BriefChat finding card — notify-then-completion (AC7, corrected)", () => {
+describe("BriefChat finding card — notify-then-completion", () => {
   it("test_brief_chat_notify_then_completion_shows_actionable_toast", async () => {
     await openAndArmCardGeneration()
 

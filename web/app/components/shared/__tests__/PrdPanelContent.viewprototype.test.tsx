@@ -186,7 +186,7 @@ describe("PrdPanelContent View Prototype footer action", () => {
     )
   })
 
-  // Regression — AC3: unchanged label contract from before the migration.
+  // Regression: unchanged label contract from before the migration.
   it("test_prd_panel_button_shows_loading_then_generate_label", async () => {
     mocks.getByPrd.mockReset()
     mocks.getByPrd.mockResolvedValueOnce(null)
@@ -200,7 +200,7 @@ describe("PrdPanelContent View Prototype footer action", () => {
     expect(screen.queryByRole("button", { name: "View Prototype" })).toBeNull()
   })
 
-  // Regression — AC3: unchanged label contract from before the migration.
+  // Regression: unchanged label contract from before the migration.
   it("test_prd_panel_button_shows_view_label_when_ready", async () => {
     renderPanel()
     const loading = screen.getByRole("button", { name: "Loading…" })
@@ -223,7 +223,7 @@ describe("PrdPanelContent View Prototype footer action", () => {
     expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
   })
 
-  // Creation / edge case — AC1 (the sanctioned kill): the user stays on the
+  // Creation / edge case (the sanctioned kill): the user stays on the
   // PRD screen while a generation is in flight — no router.push until the
   // outcome is terminal — and the shared loading overlay (previously entirely
   // absent on this surface) is now visible.
@@ -243,7 +243,7 @@ describe("PrdPanelContent View Prototype footer action", () => {
     expect(mocks.pushSpy).not.toHaveBeenCalled()
   })
 
-  // Creation / edge case — AC2/AC9 (the sanctioned kill): on success,
+  // Creation / edge case (the sanctioned kill): on success,
   // router.push is called exactly once with the bare prototypePath(prdId) —
   // an exact string-equality assertion (not `toContain`), proving no `&pid=`
   // handoff param is ever appended.
@@ -343,7 +343,7 @@ describe("PrdPanelContent View Prototype footer action", () => {
     expect(src).not.toContain("function PrototypeSection")
   })
 
-  // AC9 — the `&pid=` handoff construction is gone entirely from this file.
+  // The `&pid=` handoff construction is gone entirely from this file.
   it("test_no_pid_handoff_construction_in_source", () => {
     const src = readFileSync(
       resolve(process.cwd(), "app/components/shared/PrdPanelContent.tsx"),
