@@ -6505,6 +6505,85 @@
     border-color: var(--accent-hover);
   }
 
+  /* PRD "User input needed" questions rendered as chat messages (PrdInputQuestions).
+     Reuses the .bc-* agent chrome + .bc-action-btn buttons; these add the
+     question-specific bits. */
+  .piq-list {
+    display: flex;
+    flex-direction: column;
+    gap: 26px;
+  }
+
+  .piq-prompt {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink);
+  }
+
+  .piq-owner {
+    margin-top: 3px;
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+
+  .piq-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .piq-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .piq-input {
+    width: 100%;
+    min-height: 64px;
+    resize: vertical;
+    padding: 9px 11px;
+    border-radius: 10px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13.5px;
+  }
+
+  .piq-form .bc-action-btn--primary {
+    align-self: flex-start;
+  }
+
+  .piq-resolved {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--ink-2);
+  }
+
+  .piq-resolved-check {
+    color: var(--accent);
+    font-weight: 700;
+    margin-right: 6px;
+  }
+
+  .piq-resolved-answer {
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .piq-resolved-line {
+    color: var(--ink-3);
+  }
+
+  .piq-error {
+    margin-top: 8px;
+    font-size: 12.5px;
+    color: var(--danger);
+  }
+
   /* Composer dock — transparent so the composer + suggestions float over the
      thread rather than sitting on a grey footer panel. */
   .bc-dock {

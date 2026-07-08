@@ -471,19 +471,39 @@ async def warm_impl_spec(prd_id: int) -> None:
         logger.exception("impl-spec pre-warm failed prd_id=%s", prd_id)
 
 
+async def extract_input_questions_task(prd_id: int) -> None:
+    """Lift the PRD's "User input needed" section into structured, answerable
+    questions (so the PRD's chat can surface each as a message with answer
+    buttons). Best-effort + error-isolated: the PRD is already generated and
+    stored, so a failed extraction just means no chat questions — never a failed
+    PRD. Runs off the app loop via a worker thread (the extraction call is sync)."""
+    try:
+        from app.prd_questions import extract_input_questions
+
+        rows = await asyncio.to_thread(extract_input_questions, prd_id)
+        logger.info("prd input-question extraction done prd_id=%s count=%s", prd_id, len(rows))
+    except Exception:  # noqa: BLE001 — extraction is best-effort
+        logger.exception("prd input-question extraction failed prd_id=%s", prd_id)
+
+
 async def generate_prd_and_warm(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
     insight_override: dict | None = None, author: str | None = None,
 ) -> None:
-    """Generate the human PRD, THEN pre-warm the Implementation Spec (Part B).
+    """Generate the human PRD, extract its input questions, THEN pre-warm the
+    Implementation Spec (Part B).
 
     This is the entry point the interactive/backlog PRD routes schedule (as one
     long-lived background task on the app loop): the PRD is marked ready inside
     `generate_prd` — the user's poll never waits on Part B — and Part B then warms
     on the low-priority lane so tickets inherit AC with no added latency. Keeping
     the warm OUT of `generate_prd` itself leaves that function (and the sync
-    `_run_sync`/test path) strictly human-PRD-only."""
+    `_run_sync`/test path) strictly human-PRD-only.
+
+    The input-question extraction runs BETWEEN the two: it needs the finished PRD,
+    and it is cheap + best-effort so it never blocks or fails the flow."""
     await generate_prd(prd_id, brief_id, insight_index, background, insight_override, author)
+    await extract_input_questions_task(prd_id)
     await warm_impl_spec(prd_id)
 
 
