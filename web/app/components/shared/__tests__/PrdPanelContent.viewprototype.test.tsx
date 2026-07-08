@@ -211,9 +211,9 @@ describe("PrdPanelContent View Prototype footer action", () => {
     expect(screen.queryByRole("button", { name: "Generate Prototype" })).toBeNull()
   })
 
-  // Regression — AC4: clicking with cta === "view" re-verifies (a SECOND
+  // Regression: clicking with cta === "view" re-verifies (a SECOND
   // getByPrd call) before navigating — matches the shared hook's
-  // handleCtaClick "view" contract (CR-02), not a stale-navigation shortcut.
+  // handleCtaClick "view" contract, not a stale-navigation shortcut.
   it("test_prd_panel_view_click_navigates_after_reverify", async () => {
     renderPanel()
     await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
