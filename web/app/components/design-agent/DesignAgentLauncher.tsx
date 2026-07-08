@@ -380,6 +380,7 @@ export function DesignAgentLauncherView({
                 prototypeId={result.id}
                 onApply={(comment) => setApplyTarget?.(comment)}
                 onCommentsLoaded={setServerCommentIds}
+                showGeneralSection
               />
             ) : null
           }

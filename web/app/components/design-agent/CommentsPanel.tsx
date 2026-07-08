@@ -38,6 +38,18 @@ import { CommentClarifyDialog } from "./CommentClarifyDialog"
 import { findByAnchor, parseStoredAnchor, getElementDescription } from "./pinAnchorBridge"
 import { IconMessage, IconClose, IconCheck, IconSendUp } from "../shared/app-icons"
 
+// ── General-section line icons (inline SVG, stroke-only — no emoji) ─────────
+// Mirrors the public token viewer's own General-section icons (not centralised
+// in the shared app-icons.tsx registry there either — kept local to whichever
+// surface owns the General/Pinned split, same precedent this file follows).
+function IconSpeechBubble({ size = 12 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M1 1h10a.5.5 0 0 1 .5.5v6a.5.5 0 0 1-.5.5H4l-3 2V1.5A.5.5 0 0 1 1 1z" />
+    </svg>
+  )
+}
+
 // ---- Author identity helpers -------------------------------------------------
 // Comment rows show author label + avatar chip + relative timestamp. The backend
 // CommentRecord carries `author` (server-attributed) + `created_at` (ISO). These
@@ -253,11 +265,31 @@ export type CommentsPanelViewProps = {
   /** When supplied, the header renders a close (X) affordance (David's panel-top
    *  `ti-x`). The parent owns the actual collapse — absent → no X rendered. */
   onClose?: () => void
+  /** Authed-only: renders a dedicated "General" section ABOVE the anchored
+   *  composer/open list, mirroring the public viewer's General/Pinned split
+   *  (PublicTokenViewer). `comments` here is scoped to null-anchor/null-pin
+   *  general comments ONLY — the caller (CommentsPanel container) computes that
+   *  slice; this view does not re-derive it. Absent/null (default) renders
+   *  nothing new — every existing call site (SSR tests included) is
+   *  byte-identical to before this ticket. Apply/Ignore/Resolve on a general
+   *  card reuse the SAME onApply/onIgnore/onResolve handlers passed above —
+   *  applying a general routes through the identical Apply → ClarifyDialog →
+   *  iterate pipeline as a pinned comment; only the null anchor_id (handled
+   *  backend-side) makes it a whole-prototype steer instead of an
+   *  element-targeted one. */
+  generalSection?: {
+    comments: CommentRecord[]
+    composerValue: string
+    composerBusy: boolean
+    onComposerChange: (value: string) => void
+    onComposerSubmit: () => void
+  } | null
 }
 
 function CommentThread({
   comment,
   withPin,
+  variant,
   canResolve,
   pinExtra,
   busy = false,
@@ -268,6 +300,11 @@ function CommentThread({
 }: {
   comment: CommentRecord
   withPin: boolean
+  /** "general" adds the DA-21 `.comment-thread--general` treatment (quiet left
+   *  border — the public viewer's general-card discriminator) for the authed
+   *  General section. Omitted everywhere else (pinned/resolved/orphaned render
+   *  paths) → identical className to before this ticket. */
+  variant?: "general"
   canResolve?: boolean
   pinExtra?: string | null
   /** Disables Apply/Ignore while an iterate is in flight to prevent overlapping runs. */
@@ -284,7 +321,7 @@ function CommentThread({
   const resolved = comment.status === "resolved"
   return (
     <li
-      className={`comment-thread${resolved ? " comment--resolved resolved" : ""}`}
+      className={`comment-thread${variant === "general" ? " comment-thread--general" : ""}${resolved ? " comment--resolved resolved" : ""}`}
       data-testid={`comment-thread-${comment.id}`}
       data-status={comment.status}
       onClick={() => {
@@ -394,6 +431,7 @@ export function CommentsPanelView({
   error = null,
   canResolve = false,
   pinExtra,
+  generalSection = null,
   onBodyChange,
   onSubmit,
   onCancelComposer,
@@ -411,6 +449,10 @@ export function CommentsPanelView({
   // Header badge counts OPEN (unresolved) comments only — anything not yet
   // resolved (open + orphaned). A resolved comment must not keep the badge lit.
   const openCount = comments.filter((c) => c.status !== "resolved").length
+
+  const generalOpen = generalSection
+    ? generalSection.comments.filter((c) => c.status === "open").sort(byNewestFirst)
+    : []
 
   return (
     <aside className="comments-panel" data-testid="comments-panel">
@@ -442,6 +484,80 @@ export function CommentsPanelView({
           </button>
         )}
       </header>
+
+      {/* Authed General section (parity with PublicTokenViewer's General/Pinned
+          split). Prototype-level feedback, no element anchor — rendered ABOVE
+          the anchored composer + open/resolved/orphaned lists below, which stay
+          exactly as they render today (the container hands this view an
+          already-pinned-only `comments` array whenever generalSection is set,
+          the same filtering `hideGeneralComments` has always done). */}
+      {generalSection && (
+        <section
+          className="comments-section"
+          aria-label="General comments"
+          data-testid="general-comments-section"
+        >
+          <h3 className="comments-section-title">
+            <IconSpeechBubble />
+            General
+            {generalOpen.length > 0 && (
+              <span
+                className="comments-section-count"
+                aria-label={`${generalOpen.length} open general comments`}
+              >
+                {generalOpen.length}
+              </span>
+            )}
+          </h3>
+          {generalOpen.length > 0 ? (
+            <ul className="comment-list" data-testid="general-comments-list">
+              {generalOpen.map((c) => (
+                <CommentThread
+                  key={c.id}
+                  comment={c}
+                  withPin={false}
+                  variant="general"
+                  canResolve={canResolve}
+                  busy={busy}
+                  onResolve={onResolve}
+                  onApply={onApply}
+                  onIgnore={onIgnore}
+                  onDelete={onDelete}
+                />
+              ))}
+            </ul>
+          ) : (
+            <p className="comments-section-empty" data-testid="general-comments-empty">
+              No general comments yet.
+            </p>
+          )}
+          {/* The authed General composer — identity is already known (no name
+              gate, unlike the public viewer's anon composer). */}
+          <div className="general-comment-composer" role="form" aria-label="Add a general comment">
+            <p className="general-comment-composer-label">General comment</p>
+            <textarea
+              className="general-comment-composer-input"
+              data-testid="general-comment-input"
+              placeholder="Share overall feedback about this prototype…"
+              maxLength={2000}
+              aria-label="General comment text"
+              value={generalSection.composerValue}
+              onChange={(e) => generalSection.onComposerChange(e.target.value)}
+            />
+            <div className="general-comment-composer-actions">
+              <button
+                type="button"
+                className="btn btn-accent btn-sm"
+                data-testid="general-comment-send"
+                disabled={!generalSection.composerValue.trim() || generalSection.composerBusy}
+                onClick={() => generalSection.onComposerSubmit()}
+              >
+                Send
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
 
       {composer && (
         <form
@@ -597,10 +713,37 @@ export type CommentsPanelProps = {
    *  local saved-pin CARD can be suppressed once its comment is in the canonical
    *  server list (the canvas dot stays). No-op when not provided. */
   onCommentsLoaded?: (ids: number[]) => void
+  /** General (unpinned, unanchored) comments now round-trip through the SAME
+   *  by-token list this panel fetches. The public `/p/<token>` viewer renders
+   *  those itself in a separate "General" section, so it sets this true to
+   *  keep this panel's own list scoped to anchored/pinned comments only (else
+   *  a general comment would render twice — once correctly, once here as a
+   *  bare pin-less card). Defaults to false, which reproduces every existing
+   *  mount's behaviour exactly (the signed-in editor keeps showing every
+   *  comment, general included — this prop is additive and opt-in). */
+  hideGeneralComments?: boolean
+  /** Authed mounts only (PrototypeRoute / DesignAgentLauncher): renders a
+   *  dedicated "General" section — mirroring the public viewer's split — ABOVE
+   *  the anchored/pinned list, and moves the freeform composer into it (it now
+   *  posts a null-anchor general comment; see handleFreeformSubmit). Implies
+   *  `hideGeneralComments` (the anchored list below stops showing generals —
+   *  they only render in the new section) so a general never renders twice.
+   *  Defaults to false, reproducing every pre-existing mount's behaviour
+   *  exactly (generals stay mixed into the flat open list — the additive/
+   *  opt-in convention this file already uses for hideGeneralComments). */
+  showGeneralSection?: boolean
 }
 
 function toMessage(err: unknown, fallback: string): string {
   return err instanceof Error ? err.message : fallback
+}
+
+/** A comment carries no element anchor and no pin position — i.e. it is
+ *  prototype-level ("general") feedback rather than anchored to one element.
+ *  Single source of truth for the general/pinned split, shared by the
+ *  hideGeneralComments filter and the showGeneralSection split below. */
+function isGeneralComment(c: Pick<CommentRecord, "anchor_id" | "pin_x_pct">): boolean {
+  return c.pin_x_pct == null && c.anchor_id == null
 }
 
 /** Public component. Loads comments on mount, listens for right-clicks to open
@@ -616,6 +759,8 @@ export function CommentsPanel({
   canComment,
   viewerName,
   onCommentsLoaded,
+  hideGeneralComments = false,
+  showGeneralSection = false,
 }: CommentsPanelProps) {
   // Writable-anon resolution: create is enabled when not read-only AND either a
   // prototypeId is present (signed-in mount) OR the host opted into anon create
@@ -769,12 +914,18 @@ export function CommentsPanel({
     setComments((prev) => prev.filter((c) => c.id !== commentId))
   }
 
+  // The authed General composer (relocated into the General section when
+  // showGeneralSection is set; otherwise still the always-visible top compose
+  // box). Posts anchor_id: null — a real "no anchor" general comment, unified
+  // with the public viewer's representation (was the truthy 'general' sentinel
+  // string, which the auto-grounding exclusion and the public general/pinned
+  // split both had to special-case around; null needs no special-casing).
   async function handleFreeformSubmit() {
     if (!freeformDraft.trim() || freeformBusy || !prototypeId) return
     setFreeformBusy(true)
     try {
       await designAgentApi.createComment(prototypeId, {
-        anchor_id: 'general',
+        anchor_id: null,
         body: freeformDraft.trim(),
       })
       setFreeformDraft('')
@@ -788,9 +939,21 @@ export function CommentsPanel({
   // mount). Public viewer → neither.
   const canApply = (onApply != null || onIterateComment != null) && prototypeId != null
 
+  // Once a dedicated General section renders (showGeneralSection), the
+  // anchored/open list below it must never ALSO show generals — that would
+  // render every general comment twice. This reuses the exact same filter
+  // hideGeneralComments already applies (proven on the public mount), just
+  // always-on in this mode regardless of what the caller passed for
+  // hideGeneralComments.
+  const effectiveHideGeneral = hideGeneralComments || showGeneralSection
+
   return (
     <div ref={panelRef} className="comments-panel-mount">
-      {!readOnly && prototypeId != null && (
+      {/* The always-visible top compose box is the pre-existing authed
+          freeform composer. It moves INTO the new General section (rendered
+          by CommentsPanelView below) when showGeneralSection is set, so it no
+          longer also floats above the merged list — one composer, one home. */}
+      {!readOnly && prototypeId != null && !showGeneralSection && (
         <div className="da-comment-compose" data-testid="da-comment-compose">
           {/* Change 5 — restyled composer: input + green circular send button */}
           <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
@@ -825,7 +988,22 @@ export function CommentsPanel({
         </div>
       )}
       <CommentsPanelView
-        comments={comments}
+        comments={
+          effectiveHideGeneral
+            ? comments.filter((c) => !isGeneralComment(c))
+            : comments
+        }
+        generalSection={
+          showGeneralSection
+            ? {
+                comments: comments.filter(isGeneralComment),
+                composerValue: freeformDraft,
+                composerBusy: freeformBusy,
+                onComposerChange: setFreeformDraft,
+                onComposerSubmit: () => void handleFreeformSubmit(),
+              }
+            : null
+        }
         composer={commentingEnabled ? composer : null}
         busy={busy || iterateBusy}
         error={error}

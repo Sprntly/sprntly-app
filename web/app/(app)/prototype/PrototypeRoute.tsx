@@ -462,6 +462,7 @@ function InTabCanvas({
             prototypeId={proto.id}
             onIterateComment={runCommentIterate}
             iterateBusy={iterateRun.running}
+            showGeneralSection
           />
         ) : null
       }
