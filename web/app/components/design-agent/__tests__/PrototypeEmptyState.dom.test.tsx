@@ -86,7 +86,7 @@ describe("PrototypeEmptyState — rich (hero) configuration", () => {
         action={
           <button
             type="button"
-            className="btn btn-accent da-empty-hero-cta"
+            className="fc-btn-secondary"
             onClick={onGenerate}
           >
             Generate prototype

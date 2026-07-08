@@ -3893,11 +3893,6 @@
   max-width: 440px;
   margin: 0 0 22px;
 }
-.design-agent-surface .da-empty-hero-cta {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
 .design-agent-surface .da-empty-hero-meta {
   display: flex;
   align-items: center;
