@@ -501,14 +501,17 @@ describe("figma mode runs without locate call", () => {
 // ─── approve modal mount unchanged, optional context ─────────────────────
 
 describe("approve modal mount unchanged, optional context", () => {
-  it("ApproveModal still imports and mounts GenerateModal with onGenStart", () => {
+  it("ApproveModal still imports and mounts GenerateModal with onGenStart wired", () => {
     const src = readFileSync(
       join(process.cwd(), "app", "components", "shared", "ApproveModal.tsx"),
       "utf8",
     )
     expect(src).toContain("import { GenerateModal }")
     expect(src).toContain("<GenerateModal")
-    expect(src).toContain("onGenStart={handleGenStart}")
+    // ApproveModal now delegates onGenStart (and the rest of the generate/view
+    // state machine) to the shared useGeneratePrototype() hook via its wired
+    // props object, rather than binding a local handleGenStart directly.
+    expect(src).toContain("{...gen.generateModalProps}")
   })
 
   it("renders without error when onGenStart omits chosenScreenRoute (existing callers unchanged)", () => {
