@@ -12715,6 +12715,26 @@
     box-shadow: var(--shadow-sm);
   }
 
+  /* MCP Access pane: the new-token form stacks — label + description on
+     top, then name / role / submit controls in a wrapping row beneath
+     (the default .settings-row flex squeezed them beside the text). */
+  .sp-mcp .mcp-token-form-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+
+  .sp-mcp .mcp-token-form-controls .input {
+    flex: 1 1 220px;
+    width: auto;
+  }
+
+  .sp-mcp .mcp-token-form-controls select.input {
+    flex: 0 1 auto;
+  }
+
   .set-block-h {
     display: flex;
     align-items: center;

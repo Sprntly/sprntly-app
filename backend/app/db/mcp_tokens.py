@@ -23,24 +23,36 @@ logger = logging.getLogger(__name__)
 
 TOKEN_PREFIX = "sprn_mcp_"
 
+# What a token is FOR, chosen at creation time and immutable after:
+#   developer -> the mcp/ service exposes ticket + PRD tools only
+#   pm        -> the full tool set (adds datasets / backlog / brief)
+# Distinct from the company-membership role (owner/admin/member) that
+# resolve_mcp_token also returns — this one scopes MCP tools, not the app.
+TOKEN_ROLES = ("developer", "pm")
+
 
 def _hash(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
 
 
 @retry_on_disconnect
-def create_mcp_token(*, company_id: str, user_id: str, name: str) -> dict:
+def create_mcp_token(
+    *, company_id: str, user_id: str, name: str, token_role: str = "pm"
+) -> dict:
     """Mint a token and return the row PLUS the one-time raw token under 'token'.
 
     The raw token is never persisted or logged; callers must hand it to the
     user immediately and never surface it again after this call returns.
     """
+    if token_role not in TOKEN_ROLES:
+        raise ValueError(f"token_role must be one of {TOKEN_ROLES}, got {token_role!r}")
     raw_token = TOKEN_PREFIX + secrets.token_urlsafe(32)
     row = {
         "id": str(uuid.uuid4()),
         "company_id": company_id,
         "user_id": user_id,
         "name": (name or "MCP token").strip() or "MCP token",
+        "token_role": token_role,
         "token_hash": _hash(raw_token),
         "token_prefix": raw_token[:20],
         "created_at": utc_now(),
@@ -57,7 +69,7 @@ def list_mcp_tokens(company_id: str) -> list[dict]:
     client = require_client()
     resp = (
         client.table("mcp_tokens")
-        .select("id, name, token_prefix, created_at, last_used_at, revoked_at")
+        .select("id, name, token_role, token_prefix, created_at, last_used_at, revoked_at")
         .eq("company_id", company_id)
         .order("created_at", desc=True)
         .execute()
@@ -126,5 +138,9 @@ def resolve_mcp_token(raw_token: str) -> dict | None:
         "company_id": row["company_id"],
         "user_id": row["user_id"],
         "role": match["role"],
+        # Rows minted before the token_role column existed have no value in
+        # test fakes / unmigrated environments — treat them as 'pm' (the
+        # migration default) so they keep the full tool set.
+        "token_role": row.get("token_role") or "pm",
         "token_id": row["id"],
     }

@@ -1,7 +1,12 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { mcpTokensApi, type McpToken, type McpTokenCreated } from "../../../../lib/api"
+import {
+  mcpTokensApi,
+  type McpToken,
+  type McpTokenCreated,
+  type McpTokenRole,
+} from "../../../../lib/api"
 import { SettingsRow } from "./SettingsLayout"
 
 /**
@@ -21,10 +26,12 @@ export type McpSettingsViewProps = {
   loading: boolean
   error: string | null
   newName: string
+  newRole: McpTokenRole
   creating: boolean
   justCreated: McpTokenCreated | null
   copiedAck: boolean
   onNewNameChange: (v: string) => void
+  onNewRoleChange: (v: McpTokenRole) => void
   onCreate: (e: React.FormEvent) => void
   onDismissCreated: () => void
   onCopiedAckChange: (v: boolean) => void
@@ -38,15 +45,23 @@ const getMcpUrl = (token: string) =>
     "",
   ) + `/mcp?token=${token}`
 
+/** Human labels for a token's role, used in the picker and the token list. */
+const ROLE_LABELS: Record<McpTokenRole, string> = {
+  developer: "Developer (tickets & PRDs)",
+  pm: "PM (full access)",
+}
+
 export function McpSettingsView({
   tokens,
   loading,
   error,
   newName,
+  newRole,
   creating,
   justCreated,
   copiedAck,
   onNewNameChange,
+  onNewRoleChange,
   onCreate,
   onDismissCreated,
   onCopiedAckChange,
@@ -96,11 +111,15 @@ export function McpSettingsView({
       )}
 
       <div className="set-block">
-        <form onSubmit={onCreate}>
-          <SettingsRow
-            label="New token"
-            sub="Give it a name so you can recognize it later (e.g. &quot;Claude Desktop&quot;)."
-          >
+        <form onSubmit={onCreate} className="mcp-token-form">
+          <div className="settings-row-label">New token</div>
+          <div className="settings-row-sub">
+            Give it a name so you can recognize it later (e.g. &quot;Claude
+            Desktop&quot;), and pick who it&apos;s for: Developer tokens get
+            ticket &amp; PRD tools only; PM tokens also get datasets, the
+            backlog, and the weekly brief.
+          </div>
+          <div className="mcp-token-form-controls">
             <input
               type="text"
               className="input"
@@ -109,10 +128,19 @@ export function McpSettingsView({
               placeholder="e.g. Claude Desktop"
               maxLength={100}
             />
+            <select
+              className="input"
+              value={newRole}
+              onChange={(e) => onNewRoleChange(e.target.value as McpTokenRole)}
+              aria-label="Token role"
+            >
+              <option value="developer">{ROLE_LABELS.developer}</option>
+              <option value="pm">{ROLE_LABELS.pm}</option>
+            </select>
             <button type="submit" className="btn btn-primary" disabled={creating}>
               {creating ? "Creating…" : "Create token"}
             </button>
-          </SettingsRow>
+          </div>
         </form>
         {error && (
           <p className="settings-msg settings-msg-error" role="alert">
@@ -131,7 +159,7 @@ export function McpSettingsView({
             <SettingsRow
               key={t.id}
               label={t.name}
-              sub={`${t.token_prefix}… · created ${new Date(
+              sub={`${ROLE_LABELS[t.token_role] ?? t.token_role ?? ROLE_LABELS.pm} · ${t.token_prefix}… · created ${new Date(
                 t.created_at,
               ).toLocaleDateString()} · last used ${
                 t.last_used_at
@@ -162,6 +190,9 @@ export function McpSettings() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [newName, setNewName] = useState("")
+  // Default to the least-privileged role — handing out full workspace access
+  // should be a deliberate choice, not the path of least resistance.
+  const [newRole, setNewRole] = useState<McpTokenRole>("developer")
   const [creating, setCreating] = useState(false)
   const [justCreated, setJustCreated] = useState<McpTokenCreated | null>(null)
   const [copiedAck, setCopiedAck] = useState(false)
@@ -189,7 +220,7 @@ export function McpSettings() {
       setError(null)
       setCreating(true)
       try {
-        const created = await mcpTokensApi.create(newName || "MCP token")
+        const created = await mcpTokensApi.create(newName || "MCP token", newRole)
         setJustCreated(created)
         setCopiedAck(false)
         setNewName("")
@@ -200,7 +231,7 @@ export function McpSettings() {
         setCreating(false)
       }
     },
-    [newName, refresh],
+    [newName, newRole, refresh],
   )
 
   const onRevoke = useCallback(async (id: string) => {
@@ -225,10 +256,12 @@ export function McpSettings() {
       loading={loading}
       error={error}
       newName={newName}
+      newRole={newRole}
       creating={creating}
       justCreated={justCreated}
       copiedAck={copiedAck}
       onNewNameChange={setNewName}
+      onNewRoleChange={setNewRole}
       onCreate={onCreate}
       onDismissCreated={() => setJustCreated(null)}
       onCopiedAckChange={setCopiedAck}

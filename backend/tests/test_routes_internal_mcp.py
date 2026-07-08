@@ -57,7 +57,7 @@ def test_resolve_returns_company_context_for_valid_token(isolated_settings, monk
     client = _client(isolated_settings, monkeypatch)
     cid, uid = uuid.uuid4().hex, "user-1"
     _seed_company_and_member(isolated_settings["supabase"], company_id=cid, slug="acme", user_id=uid)
-    created = create_mcp_token(company_id=cid, user_id=uid, name="t")
+    created = create_mcp_token(company_id=cid, user_id=uid, name="t", token_role="developer")
 
     r = client.post(
         "/internal/mcp-tokens/resolve", json={"token": created["token"]}, headers=_headers()
@@ -67,6 +67,8 @@ def test_resolve_returns_company_context_for_valid_token(isolated_settings, monk
     assert body["company_id"] == cid
     assert body["user_id"] == uid
     assert body["role"] == "owner"
+    # The minted token_role rides along so mcp/ can gate tools per token.
+    assert body["token_role"] == "developer"
 
 
 def test_resolve_401s_on_unknown_token(isolated_settings, monkeypatch):
@@ -186,12 +188,93 @@ def test_get_ticket_edit_overrides_base_story(isolated_settings, monkeypatch):
     assert body["status"] == "In progress"       # status only comes from edits
 
 
+def test_get_ticket_web_format_key_reads_web_rows(isolated_settings, monkeypatch):
+    """The web-format key ("prd-{prd_id}-{story_id}") resolves the base story
+    via the embedded story id AND reads the edit/comment rows the web app
+    stored under the full composed key — the two surfaces share one silo."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_tickets(db, company_id=cid, prd_id=42, stories=[
+        {"id": "a1b2c3d4e5f6", "title": "Base title", "body": "base desc"},
+    ])
+    # Rows as the WEB APP writes them: keyed by the composed key.
+    db.table("ticket_edits").insert(
+        {"company_id": cid, "ticket_key": "prd-42-a1b2c3d4e5f6", "status": "In review"}
+    ).execute()
+    db.table("ticket_comments").insert(
+        {"company_id": cid, "ticket_key": "prd-42-a1b2c3d4e5f6", "author": "Ada", "body": "web comment"}
+    ).execute()
+
+    r = client.get(
+        "/internal/mcp/tickets/prd-42-a1b2c3d4e5f6/data",
+        params={"company_id": cid},
+        headers=_headers(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["id"] == "prd-42-a1b2c3d4e5f6"
+    assert body["prd_id"] == 42
+    assert body["title"] == "Base title"          # base story located via embedded id
+    assert body["status"] == "In review"           # web-written edit visible
+    assert [c_["body"] for c_ in body["comments"]] == ["web comment"]
+
+
+def test_get_ticket_slug_fallback_key_for_idless_story(isolated_settings, monkeypatch):
+    """Legacy stories generated before ids existed: the web key embeds a title
+    slug ("prd-{prd_id}-{slug}") — the route resolves the base story by
+    re-deriving that slug."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_tickets(db, company_id=cid, prd_id=9, stories=[
+        {"title": "Fix Login Flow!", "body": "legacy story"},  # no id
+    ])
+
+    r = client.get(
+        "/internal/mcp/tickets/prd-9-fix-login-flow/data",
+        params={"company_id": cid},
+        headers=_headers(),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["prd_id"] == 9
+    assert body["title"] == "Fix Login Flow!"
+    assert body["description"] == "legacy story"
+
+
+def test_get_ticket_bare_legacy_key_still_resolves_story(isolated_settings, monkeypatch):
+    """Keys written by older MCP clients (the bare story id) keep resolving the
+    base story — no migration, graceful coexistence."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_tickets(db, company_id=cid, prd_id=3, stories=[
+        {"id": "deadbeef0001", "title": "Old style", "body": "still readable"},
+    ])
+
+    r = client.get(
+        "/internal/mcp/tickets/deadbeef0001/data",
+        params={"company_id": cid},
+        headers=_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["title"] == "Old style"
+    assert r.json()["prd_id"] == 3
+
+
 def test_get_ticket_404_when_no_trace(isolated_settings, monkeypatch):
     client = _client(isolated_settings, monkeypatch)
     cid = uuid.uuid4().hex
     _seed_company_and_member(isolated_settings["supabase"], company_id=cid, slug="acme", user_id="u-a")
     r = client.get("/internal/mcp/tickets/ghost/data", params={"company_id": cid}, headers=_headers())
     assert r.status_code == 404
+    # Web-format key with no matching story/rows → same 404.
+    r2 = client.get("/internal/mcp/tickets/prd-1-ghost/data", params={"company_id": cid}, headers=_headers())
+    assert r2.status_code == 404
 
 
 # ── ticket list + writes (developer read/edit surface) ──
@@ -227,9 +310,11 @@ def test_list_tickets_flattens_stories_company_scoped(isolated_settings, monkeyp
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["count"] == 3
+    # ids are the WEB-FORMAT keys ("prd-{prd_id}-{story_id}") — the same key
+    # the web app composes, so edits/comments land in shared rows.
     ids = sorted(t["id"] for t in body["tickets"])
-    assert ids == ["tkt-1", "tkt-2", "tkt-3"]
-    assert "other" not in ids
+    assert ids == ["prd-1-tkt-1", "prd-1-tkt-2", "prd-2-tkt-3"]
+    assert not any("other" in i for i in ids)
     # prd_id carried through for each flattened ticket.
     assert {t["prd_id"] for t in body["tickets"]} == {1, 2}
 
@@ -254,33 +339,117 @@ def test_list_tickets_includes_status_and_filters(isolated_settings, monkeypatch
         {"id": "a", "title": "A", "ticket_type": "feature"},
         {"id": "b", "title": "B", "ticket_type": "bug"},
     ])
+    # Edits are stored under the web-format key (what the web app writes).
     db.table("ticket_edits").insert(
-        {"company_id": cid, "ticket_key": "a", "status": "In progress"}
+        {"company_id": cid, "ticket_key": "prd-1-a", "status": "In progress"}
     ).execute()
 
     all_ = client.get("/internal/mcp/tickets", params={"company_id": cid}, headers=_headers()).json()
     by_id = {t["id"]: t for t in all_["tickets"]}
-    assert by_id["a"]["status"] == "In progress"
+    assert by_id["prd-1-a"]["status"] == "In progress"
     # Unedited ticket defaults to the canonical "Backlog", not null.
-    assert by_id["b"]["status"] == "Backlog"
+    assert by_id["prd-1-b"]["status"] == "Backlog"
 
     # Filter by status (case-insensitive).
     only_ip = client.get(
         "/internal/mcp/tickets", params={"company_id": cid, "status": "in progress"}, headers=_headers()
     ).json()
-    assert [t["id"] for t in only_ip["tickets"]] == ["a"]
+    assert [t["id"] for t in only_ip["tickets"]] == ["prd-1-a"]
 
     # The recommended `status=Backlog` filter finds the unedited backlog ticket.
     only_backlog = client.get(
         "/internal/mcp/tickets", params={"company_id": cid, "status": "Backlog"}, headers=_headers()
     ).json()
-    assert [t["id"] for t in only_backlog["tickets"]] == ["b"]
+    assert [t["id"] for t in only_backlog["tickets"]] == ["prd-1-b"]
 
     # Filter by ticket_type.
     only_bug = client.get(
         "/internal/mcp/tickets", params={"company_id": cid, "ticket_type": "bug"}, headers=_headers()
     ).json()
-    assert [t["id"] for t in only_bug["tickets"]] == ["b"]
+    assert [t["id"] for t in only_bug["tickets"]] == ["prd-1-b"]
+
+
+def test_list_tickets_prd_id_narrows_to_one_prd(isolated_settings, monkeypatch):
+    """`prd_id` returns only that PRD's tickets (the MCP list_prd_tickets
+    tool); a foreign company's prd_id matches nothing because the query is
+    company-scoped before the filter."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid_a, cid_b = uuid.uuid4().hex, uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid_a, slug="acme", user_id="u-a")
+    _seed_company_and_member(db, company_id=cid_b, slug="globex", user_id="u-b")
+    _seed_prd_tickets(db, company_id=cid_a, prd_id=1, stories=[
+        {"id": "a1", "title": "A1", "ticket_type": "feature"},
+        {"id": "a2", "title": "A2", "ticket_type": "bug"},
+    ])
+    _seed_prd_tickets(db, company_id=cid_a, prd_id=2, stories=[
+        {"id": "b1", "title": "B1", "ticket_type": "feature"},
+    ])
+    _seed_prd_tickets(db, company_id=cid_b, prd_id=9, stories=[
+        {"id": "x1", "title": "Not yours", "ticket_type": "feature"},
+    ])
+
+    r = client.get(
+        "/internal/mcp/tickets",
+        params={"company_id": cid_a, "prd_id": 1},
+        headers=_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert sorted(t["id"] for t in r.json()["tickets"]) == ["prd-1-a1", "prd-1-a2"]
+
+    # prd_id composes with the other filters.
+    only_bug = client.get(
+        "/internal/mcp/tickets",
+        params={"company_id": cid_a, "prd_id": 1, "ticket_type": "bug"},
+        headers=_headers(),
+    ).json()
+    assert [t["id"] for t in only_bug["tickets"]] == ["prd-1-a2"]
+
+    # Another tenant's PRD id yields an empty list, never their tickets.
+    foreign = client.get(
+        "/internal/mcp/tickets",
+        params={"company_id": cid_a, "prd_id": 9},
+        headers=_headers(),
+    ).json()
+    assert foreign == {"tickets": [], "count": 0}
+
+
+def test_list_tickets_assignee_user_id_scopes_to_owner(isolated_settings, monkeypatch):
+    """`assignee_user_id` returns ONLY tickets whose edit assigns that user —
+    a teammate's tickets and unassigned tickets are both excluded. This is the
+    filter the MCP server drives with the token owner's user_id, so an AI
+    client sees just the caller's own work queue."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_tickets(db, company_id=cid, prd_id=1, stories=[
+        {"id": "mine", "title": "Mine", "ticket_type": "feature"},
+        {"id": "theirs", "title": "Theirs", "ticket_type": "feature"},
+        {"id": "nobody", "title": "Unassigned", "ticket_type": "feature"},
+    ])
+    db.table("ticket_edits").insert(
+        {"company_id": cid, "ticket_key": "prd-1-mine",
+         "assignee": {"user_id": "u-a", "display_name": "Ada"}}
+    ).execute()
+    db.table("ticket_edits").insert(
+        {"company_id": cid, "ticket_key": "prd-1-theirs",
+         "assignee": {"user_id": "u-b", "display_name": "Bob"}}
+    ).execute()
+
+    r = client.get(
+        "/internal/mcp/tickets",
+        params={"company_id": cid, "assignee_user_id": "u-a"},
+        headers=_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert [t["id"] for t in r.json()["tickets"]] == ["prd-1-mine"]
+
+    # Without the filter, all three tickets are still there (unchanged shape).
+    all_ = client.get(
+        "/internal/mcp/tickets", params={"company_id": cid}, headers=_headers()
+    ).json()
+    assert all_["count"] == 3
 
 
 def _seed_prd_chain(db, *, company_id: str, slug: str, prd_id: int) -> None:

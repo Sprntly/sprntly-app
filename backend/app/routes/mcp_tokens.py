@@ -13,6 +13,7 @@ another tenant's data.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -27,6 +28,10 @@ router = APIRouter(prefix="/v1/mcp-tokens", tags=["mcp-tokens"])
 
 class CreateTokenIn(BaseModel):
     name: str = Field(default="MCP token", max_length=100)
+    # Chosen at creation, immutable after. developer = ticket + PRD tools only;
+    # pm = the full tool set. Defaults to 'pm' (full access) to match tokens
+    # minted before roles existed; the settings UI always sends it explicitly.
+    token_role: Literal["developer", "pm"] = "pm"
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -37,12 +42,16 @@ def create_token(
     """Mint a new token. The raw token is returned ONCE, here, and never
     again — the frontend must show it in a copy-once banner."""
     row = create_mcp_token(
-        company_id=company.company_id, user_id=company.user_id, name=body.name
+        company_id=company.company_id,
+        user_id=company.user_id,
+        name=body.name,
+        token_role=body.token_role,
     )
     return {
         "id": row["id"],
         "name": row["name"],
         "token": row["token"],
+        "token_role": row["token_role"],
         "token_prefix": row["token_prefix"],
         "created_at": row["created_at"],
     }

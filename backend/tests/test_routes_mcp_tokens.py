@@ -21,6 +21,30 @@ def test_create_mcp_token_returns_raw_token_once(isolated_settings, monkeypatch)
     assert body["name"] == "Claude Desktop"
     assert body["token"].startswith("sprn_mcp_")
     assert body["token_prefix"] == body["token"][:20]
+    # No role sent -> 'pm' (full access), matching pre-role tokens.
+    assert body["token_role"] == "pm"
+
+
+def test_create_mcp_token_with_developer_role(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/mcp-tokens", json={"name": "Claude Code", "token_role": "developer"}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["token_role"] == "developer"
+
+    tokens = ctx.client.get("/v1/mcp-tokens").json()["tokens"]
+    assert tokens[0]["token_role"] == "developer"
+
+
+def test_create_mcp_token_rejects_unknown_role(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/mcp-tokens", json={"name": "t", "token_role": "root"}
+    )
+    assert r.status_code == 422
 
 
 def test_list_mcp_tokens_never_includes_raw_token(isolated_settings, monkeypatch):

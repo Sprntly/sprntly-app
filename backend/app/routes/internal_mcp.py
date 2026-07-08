@@ -32,6 +32,69 @@ from app.routes.internal import _require_internal_key
 
 logger = logging.getLogger(__name__)
 
+# ── Ticket keys ──
+#
+# The web app composes each ticket's key CLIENT-SIDE (`ticketKeyFor` in
+# web/app/components/shared/TicketDetail.tsx): "prd-{prd_id}-{story.id}", with
+# a title-slug fallback for legacy stories generated before ids existed. Every
+# ticket_edits / ticket_comments / ticket_attachments row the web writes is
+# keyed by that composed string, while prd_tickets.stories only stores the bare
+# content-hash id. These helpers make the MCP surface speak the SAME composed
+# format so both surfaces read and write the same rows; bare keys written by
+# older MCP clients still resolve their base story (their orphaned override
+# rows stay under the bare key — accepted, no migration).
+
+_TICKET_KEY_RX = re.compile(r"^prd-(\d+)-(.+)$")
+
+
+def _title_slug(title: str | None) -> str:
+    """Mirror of the web's legacy slug fallback: lowercase, non-alphanumeric
+    runs → '-', strip leading/trailing '-', first 60 chars, default 'ticket'."""
+    slug = re.sub(r"[^a-z0-9]+", "-", (title or "ticket").lower()).strip("-")[:60]
+    return slug or "ticket"
+
+
+def _ticket_key_for(prd_id: int | None, story: dict) -> str:
+    """The web-format ticket key for a generated story (`ticketKeyFor` mirror)."""
+    sid = story.get("id")
+    if sid:
+        return f"prd-{prd_id}-{sid}"
+    return f"prd-{prd_id}-{_title_slug(story.get('title'))}"
+
+
+def _parse_ticket_key(ticket_key: str) -> tuple[int | None, str]:
+    """Split a web-format key into (prd_id, story_ref). A key without the
+    prd- prefix passes through as (None, key) so legacy bare story ids keep
+    resolving."""
+    m = _TICKET_KEY_RX.match(ticket_key)
+    if not m:
+        return None, ticket_key
+    return int(m.group(1)), m.group(2)
+
+
+def _find_story_by_slug(
+    c, company_id: str, prd_id: int, slug: str
+) -> tuple[dict | None, int | None]:
+    """Locate a legacy id-less story by the title slug its web key embeds."""
+    rows = (
+        c.table("prd_tickets")
+        .select("prd_id, stories")
+        .eq("company_id", company_id)
+        .eq("prd_id", prd_id)
+        .execute()
+        .data
+        or []
+    )
+    for row in rows:
+        for story in row.get("stories") or []:
+            if (
+                isinstance(story, dict)
+                and not story.get("id")
+                and _title_slug(story.get("title")) == slug
+            ):
+                return story, row.get("prd_id")
+    return None, None
+
 resolve_router = APIRouter(prefix="/internal/mcp-tokens", tags=["internal-mcp"])
 data_router = APIRouter(prefix="/internal/mcp", tags=["internal-mcp"])
 
@@ -120,12 +183,23 @@ def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
     scope to implement the ticket; those live in the base story, so returning
     only the overrides (as this route once did) left an unedited ticket looking
     empty. Overrides win where set; base-story context fields (what/why/scope/
-    subtasks/labels) are always included."""
+    subtasks/labels) are always included.
+
+    `ticket_key` is the web-format key ("prd-{prd_id}-{story_id}") so the
+    override rows this route reads are the SAME rows the web app writes; the
+    embedded story id locates the generated base story. Bare legacy keys (the
+    raw story id) still resolve the base story."""
     from app.db.client import require_client
     from app.db.prd_tickets import find_ticket_story
 
     c = require_client()
-    story, prd_id = find_ticket_story(company_id, ticket_key)
+    prd_hint, story_ref = _parse_ticket_key(ticket_key)
+    story, prd_id = find_ticket_story(company_id, story_ref)
+    if story is None and prd_hint is not None:
+        # Legacy id-less story: the web key embeds a title slug, not a story id.
+        story, prd_id = _find_story_by_slug(c, company_id, prd_hint, story_ref)
+    if prd_id is None:
+        prd_id = prd_hint
 
     edit_resp = (
         c.table("ticket_edits")
@@ -216,15 +290,31 @@ def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
 
 @data_router.get("/tickets", dependencies=[Depends(_require_internal_key)])
 def list_tickets(
-    company_id: str, status: str | None = None, ticket_type: str | None = None
+    company_id: str,
+    status: str | None = None,
+    ticket_type: str | None = None,
+    assignee_user_id: str | None = None,
+    prd_id: int | None = None,
 ) -> dict[str, Any]:
     """Every ticket for a company, flattened across PRDs, with each ticket's
     CURRENT status merged in (from ticket_edits) so a developer sees state at a
     glance. Optional `status` / `ticket_type` filters (case-insensitive).
 
-    Tickets are elements of each PRD's `prd_tickets.stories` array (keyed by the
-    story's stable `id` = `ticket_key`). Full per-ticket detail (description,
-    acceptance criteria, comments, attachments) comes from GET /tickets/{key}/data.
+    `assignee_user_id` narrows to tickets whose ticket_edits.assignee has that
+    user_id — the MCP server passes the TOKEN OWNER's id so an AI client only
+    sees the caller's own tickets. Assignment exists only as an edit (base
+    stories carry none), so unassigned tickets never match this filter.
+
+    `prd_id` narrows to one PRD's tickets (the MCP list_prd_tickets tool).
+    The query is company-scoped BEFORE this filter, so a foreign prd_id can
+    only ever match nothing — it returns an empty list, never another
+    tenant's tickets.
+
+    Tickets are elements of each PRD's `prd_tickets.stories` array. Each is
+    returned under its WEB-FORMAT key ("prd-{prd_id}-{story_id}", the same key
+    the web app composes and stores edits/comments under), so the status merge
+    below sees web edits and the key round-trips into every /tickets/{key}
+    route. Full per-ticket detail comes from GET /tickets/{key}/data.
     """
     from app.db.client import require_client
 
@@ -241,7 +331,7 @@ def list_tickets(
     # so the list reflects edited status/priority/title without N round-trips.
     edits = (
         c.table("ticket_edits")
-        .select("ticket_key, status, priority, title")
+        .select("ticket_key, status, priority, title, assignee")
         .eq("company_id", company_id)
         .execute()
         .data
@@ -254,10 +344,13 @@ def list_tickets(
 
     tickets: list[dict[str, Any]] = []
     for row in rows:
+        if prd_id is not None and row.get("prd_id") != prd_id:
+            continue
         for story in row.get("stories") or []:
             if not isinstance(story, dict):
                 continue
-            e = edit_by_key.get(story.get("id"), {})
+            key = _ticket_key_for(row.get("prd_id"), story)
+            e = edit_by_key.get(key, {})
             # Unedited status defaults to "Backlog" (as in get_ticket / the web
             # UI) so the recommended `status=Backlog` filter actually finds the
             # generated-but-unedited backlog. title/priority use is-not-None
@@ -269,9 +362,16 @@ def list_tickets(
                 continue
             if want_type and (cur_type or "").lower() != want_type:
                 continue
+            if assignee_user_id:
+                assignee = e.get("assignee")
+                if (
+                    not isinstance(assignee, dict)
+                    or assignee.get("user_id") != assignee_user_id
+                ):
+                    continue
             tickets.append(
                 {
-                    "id": story.get("id"),
+                    "id": key,
                     "title": e["title"] if e.get("title") is not None else story.get("title"),
                     "ticket_type": cur_type,
                     "status": cur_status,
@@ -294,13 +394,15 @@ class TicketDescriptionIn(BaseModel):
 class TicketFieldsIn(BaseModel):
     """All optional — only the fields actually sent are written (exclude_unset),
     so a partial update never clobbers the description or the untouched fields
-    on the same ticket_edits row. Mirrors routes/tickets.py:FieldsIn."""
+    on the same ticket_edits row. Mirrors routes/tickets.py:FieldsIn EXCEPT
+    `assignee`: assignment is web-only by product decision — an AI client must
+    not (re)assign people, so the field doesn't exist on this model and any
+    assignee sent by an older MCP client is silently dropped."""
 
     title: str | None = None
     priority: str | None = None
     status: str | None = None
     sprint: str | None = None
-    assignee: dict[str, Any] | None = None
 
 
 class TicketCommentIn(BaseModel):

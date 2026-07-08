@@ -119,9 +119,33 @@ async def test_valid_token_runs_inner_with_context(monkeypatch):
     assert _status(sent) == 200
     assert inner.called == 1
     assert inner.seen[0].company_id == "co-a"
+    # A backend that predates token roles omits token_role -> full access.
+    assert inner.seen[0].token_role == "pm"
 
     # Context is reset after the request — it must not leak past the call.
     assert _current_company.get() is None
+
+
+@pytest.mark.asyncio
+async def test_token_role_from_resolve_lands_in_context(monkeypatch):
+    """The backend's token_role rides into CompanyContext, where tools.py
+    gates the PM-only tools and app.py filters tools/list."""
+    inner = _Recorder()
+    _patch_resolve(
+        monkeypatch,
+        {
+            "tok-dev": {
+                "company_id": "co-a",
+                "user_id": "u-a",
+                "role": "member",
+                "token_role": "developer",
+            }
+        },
+    )
+    app = middleware.BearerAuthMiddleware(inner)
+
+    await _drive(app, _http_scope(auth_header=b"Bearer tok-dev"))
+    assert inner.seen[0].token_role == "developer"
 
 
 @pytest.mark.asyncio

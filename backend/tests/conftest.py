@@ -797,9 +797,9 @@ CREATE TABLE drip_email_sends (
 CREATE INDEX drip_email_sends_company_user_idx
     ON drip_email_sends (company_id, user_id);
 
--- Customer-issued MCP API tokens (mirrors 20260707120000_mcp_tokens.sql,
--- SQLite-ized). uuid / timestamptz are TEXT here, matching the other
--- seeded tables.
+-- Customer-issued MCP API tokens (mirrors 20260707120000_mcp_tokens.sql +
+-- 20260708120000_mcp_token_role.sql, SQLite-ized). uuid / timestamptz are
+-- TEXT here, matching the other seeded tables.
 CREATE TABLE mcp_tokens (
     id           TEXT PRIMARY KEY,
     company_id   TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
@@ -808,6 +808,8 @@ CREATE TABLE mcp_tokens (
     token_hash   TEXT NOT NULL UNIQUE,
     token_prefix TEXT NOT NULL,
     scopes       TEXT NOT NULL DEFAULT 'read',
+    token_role   TEXT NOT NULL DEFAULT 'pm'
+        CHECK (token_role IN ('developer', 'pm')),
     created_at   TEXT NOT NULL DEFAULT (datetime('now')),
     last_used_at TEXT,
     revoked_at   TEXT

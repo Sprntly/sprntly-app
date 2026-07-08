@@ -82,7 +82,7 @@ sudo bash deploy/setup.sh
 
 **Read:** `list_datasets`, `get_current_brief`, `get_backlog`, `get_latest_prd`, `get_prd(prd_id)`, `list_tickets(status?, ticket_type?)`, `get_ticket(ticket_key)`.
 
-**Write (tickets):** `update_ticket_fields` (status/priority/title/sprint/assignee), `update_ticket_description` (description + acceptance criteria), `add_ticket_comment`, `add_ticket_attachment` (link a PR/branch).
+**Write (tickets):** `update_ticket_fields` (status/priority/title/sprint — assignment is deliberately web-only), `update_ticket_description` (description + acceptance criteria), `add_ticket_comment`, `add_ticket_attachment` (link a PR/branch).
 
 The ticket tools let a developer work a ticket from their coding editor:
 - `list_tickets` discovers tickets with their current status (optionally filtered by `status`/`ticket_type`).

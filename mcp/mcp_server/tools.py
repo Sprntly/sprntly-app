@@ -20,14 +20,46 @@ from mcp.server.fastmcp import FastMCP
 from .auth import require_current_company
 from .backend_client import get_json, request_json
 
+# ── Token-role gating ──
+#
+# A token is minted in Settings as 'developer' or 'pm' (see backend
+# app/db/mcp_tokens.py). Developer tokens get ONLY the ticket tools plus
+# get_prd/list_prd_tickets for the specific PRDs behind their tickets; the
+# workspace-level product surfaces (datasets, backlog, weekly brief, the
+# latest-PRD browse) are PM-only. Enforced twice: each PM-only impl checks
+# the caller's token_role before touching the backend (the hard gate — a
+# client can call a tool it was never shown), and RoleScopedFastMCP (app.py)
+# hides these tools from tools/list for developer tokens so their client
+# never offers them.
+PM_ONLY_TOOLS = frozenset(
+    {"list_datasets", "get_current_brief", "get_backlog", "get_latest_prd"}
+)
+
+_PM_ONLY_MESSAGE = (
+    "This tool is only available to PM tokens. Your token was created with "
+    "the developer role, which covers your tickets and their PRDs only — "
+    "create a PM token in Sprntly Settings if you need this."
+)
+
+
+def _pm_only_denial(ctx) -> dict | None:
+    """The friendly refusal for a developer token, or None when allowed."""
+    if ctx.token_role != "pm":
+        return {"message": _PM_ONLY_MESSAGE}
+    return None
+
 
 async def _list_datasets_impl() -> dict:
     ctx = require_current_company()
+    if denied := _pm_only_denial(ctx):
+        return denied
     return await get_json("/datasets", company_id=ctx.company_id)
 
 
 async def _get_current_brief_impl() -> dict:
     ctx = require_current_company()
+    if denied := _pm_only_denial(ctx):
+        return denied
     result = await get_json("/brief/current", company_id=ctx.company_id)
     if result is None:
         return {"message": "No brief has been generated yet for this workspace."}
@@ -36,11 +68,15 @@ async def _get_current_brief_impl() -> dict:
 
 async def _get_backlog_impl() -> dict:
     ctx = require_current_company()
+    if denied := _pm_only_denial(ctx):
+        return denied
     return await get_json("/backlog", company_id=ctx.company_id)
 
 
 async def _get_latest_prd_impl() -> dict:
     ctx = require_current_company()
+    if denied := _pm_only_denial(ctx):
+        return denied
     result = await get_json("/prd/latest", company_id=ctx.company_id)
     if result is None:
         return {"message": "No PRD has been generated yet for this workspace."}
@@ -59,7 +95,31 @@ async def _list_tickets_impl(
     status: str | None = None, ticket_type: str | None = None
 ) -> dict:
     ctx = require_current_company()
-    params: dict[str, str] = {"company_id": ctx.company_id}
+    # Always scoped to the TOKEN OWNER's assigned tickets: the backend matches
+    # ticket_edits.assignee.user_id against the resolved user_id, so an AI
+    # client only ever sees the caller's own work queue — never a teammate's,
+    # and never the unassigned pool. Like company_id, this is derived from the
+    # token, not accepted as a tool parameter.
+    params: dict[str, str] = {
+        "company_id": ctx.company_id,
+        "assignee_user_id": ctx.user_id,
+    }
+    if status:
+        params["status"] = status
+    if ticket_type:
+        params["ticket_type"] = ticket_type
+    return await get_json("/tickets", **params)
+
+
+async def _list_prd_tickets_impl(
+    prd_id: int, status: str | None = None, ticket_type: str | None = None
+) -> dict:
+    # Deliberately NOT assignee-scoped (unlike _list_tickets_impl): the point
+    # of this tool is the FULL scope of one PRD — teammates' and unassigned
+    # tickets included — which a developer token may already read anyway via
+    # get_prd/get_ticket. Company scoping still comes from the token.
+    ctx = require_current_company()
+    params: dict[str, Any] = {"company_id": ctx.company_id, "prd_id": prd_id}
     if status:
         params["status"] = status
     if ticket_type:
@@ -81,12 +141,12 @@ async def _update_ticket_fields_impl(
     priority: str | None = None,
     title: str | None = None,
     sprint: str | None = None,
-    assignee: dict[str, Any] | None = None,
 ) -> dict:
     ctx = require_current_company()
     # Only include the fields the caller actually set, so a partial update
     # never blanks the untouched fields on the ticket (the backend upserts
-    # exactly what it receives).
+    # exactly what it receives). Assignment is deliberately NOT exposed here:
+    # who works a ticket is decided in the web app, not by an AI client.
     payload: dict[str, Any] = {}
     if status is not None:
         payload["status"] = status
@@ -96,11 +156,9 @@ async def _update_ticket_fields_impl(
         payload["title"] = title
     if sprint is not None:
         payload["sprint"] = sprint
-    if assignee is not None:
-        payload["assignee"] = assignee
     if not payload:
         return {"message": "No fields to update — pass at least one of status, "
-                "priority, title, sprint, or assignee."}
+                "priority, title, or sprint."}
     await request_json(
         "PUT", f"/tickets/{ticket_key}/fields", json=payload, company_id=ctx.company_id
     )
@@ -188,18 +246,39 @@ def register_tools(mcp: FastMCP) -> None:
         """Get full detail for one ticket by its key: the generated title,
         description, acceptance criteria, scope, and context (what/why),
         merged with any edits, plus its comments and attachments. This is what
-        you read to implement a ticket."""
+        you read to implement a ticket. `ticket_key` is the exact `id`
+        returned by list_tickets (it looks like "prd-42-a1b2c3d4e5f6") —
+        treat it as an opaque string and pass it back unchanged."""
         return await _get_ticket_impl(ticket_key)
 
     @mcp.tool()
     async def list_tickets(
         status: str | None = None, ticket_type: str | None = None
     ) -> dict:
-        """List tickets in your workspace with each ticket's current status
-        (id, title, type, status, priority, prd_id). Optionally filter by
-        `status` (e.g. "In progress") or `ticket_type`. Use a ticket's id as
-        the ticket_key for get_ticket and the update tools."""
+        """List the tickets ASSIGNED TO YOU (the token owner) with each
+        ticket's current status (id, title, type, status, priority, prd_id).
+        Tickets assigned to teammates or not yet assigned to anyone are never
+        returned — assignment happens in the Sprntly app. Optionally filter by
+        `status` (e.g. "In progress") or `ticket_type`. Each ticket's `id`
+        (an opaque key like "prd-42-a1b2c3d4e5f6") is the ticket_key for
+        get_ticket and every update tool — pass it back exactly as returned,
+        never shorten or re-derive it."""
         return await _list_tickets_impl(status=status, ticket_type=ticket_type)
+
+    @mcp.tool()
+    async def list_prd_tickets(
+        prd_id: int, status: str | None = None, ticket_type: str | None = None
+    ) -> dict:
+        """List ALL tickets belonging to one PRD — the PRD's full scope,
+        including teammates' and unassigned tickets (unlike list_tickets,
+        which shows only the tickets assigned to you). `prd_id` comes from a
+        ticket's `prd_id` field (list_tickets / get_ticket) or from
+        get_prd / get_latest_prd. Optionally filter by `status` or
+        `ticket_type`. Each returned `id` is the ticket_key for get_ticket
+        and the update tools — pass it back exactly as returned."""
+        return await _list_prd_tickets_impl(
+            prd_id, status=status, ticket_type=ticket_type
+        )
 
     @mcp.tool()
     async def update_ticket_fields(
@@ -208,19 +287,19 @@ def register_tools(mcp: FastMCP) -> None:
         priority: str | None = None,
         title: str | None = None,
         sprint: str | None = None,
-        assignee: dict[str, Any] | None = None,
     ) -> dict:
         """Update one or more fields on a ticket. Only the fields you pass are
         changed; the rest are left as-is. `status` is free-text — the common
         values are "Backlog", "In progress", "In review", and "Done"; use
-        those for consistency."""
+        those for consistency. Assigning a ticket to a person is not possible
+        from here — that happens in the Sprntly app. `ticket_key` is the exact
+        `id` from list_tickets — pass it back unchanged."""
         return await _update_ticket_fields_impl(
             ticket_key,
             status=status,
             priority=priority,
             title=title,
             sprint=sprint,
-            assignee=assignee,
         )
 
     @mcp.tool()
@@ -231,7 +310,9 @@ def register_tools(mcp: FastMCP) -> None:
     ) -> dict:
         """Update a ticket's description. Optionally also replace its
         acceptance criteria — omit `acceptance_criteria` to leave the existing
-        (or generated) criteria unchanged; pass a list to replace them."""
+        (or generated) criteria unchanged; pass a list to replace them.
+        `ticket_key` is the exact `id` from list_tickets — pass it back
+        unchanged."""
         return await _update_ticket_description_impl(
             ticket_key, description, acceptance_criteria
         )
@@ -239,7 +320,8 @@ def register_tools(mcp: FastMCP) -> None:
     @mcp.tool()
     async def add_ticket_comment(ticket_key: str, body: str) -> dict:
         """Add a comment to a ticket. The comment is attributed to you (the
-        token owner) — you can't post as someone else."""
+        token owner) — you can't post as someone else. `ticket_key` is the
+        exact `id` from list_tickets — pass it back unchanged."""
         return await _add_ticket_comment_impl(ticket_key, body)
 
     @mcp.tool()
@@ -248,5 +330,6 @@ def register_tools(mcp: FastMCP) -> None:
     ) -> dict:
         """Attach a link/reference to a ticket — e.g. link the PR or branch
         you're implementing it in. `label` is the display text (or URL); `sub`
-        is an optional secondary line (a note or the URL)."""
+        is an optional secondary line (a note or the URL). `ticket_key` is the
+        exact `id` from list_tickets — pass it back unchanged."""
         return await _add_ticket_attachment_impl(ticket_key, label, sub)

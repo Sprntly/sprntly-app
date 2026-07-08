@@ -17,8 +17,22 @@ from mcp_server import auth, tools
 @pytest.fixture
 def company_ctx(monkeypatch):
     """Set a resolved CompanyContext for the duration of a test, the way
-    BearerAuthMiddleware would before a tool call runs."""
+    BearerAuthMiddleware would before a tool call runs. token_role defaults
+    to 'pm' (full tool set) — the pre-roles behavior every passthrough test
+    below assumes."""
     ctx = auth.CompanyContext(company_id="co-1", user_id="u-1", role="owner")
+    token = auth._current_company.set(ctx)
+    yield ctx
+    auth._current_company.reset(token)
+
+
+@pytest.fixture
+def developer_ctx(monkeypatch):
+    """A context resolved from a developer-role token: ticket + PRD tools
+    only; datasets/backlog/brief must refuse."""
+    ctx = auth.CompanyContext(
+        company_id="co-1", user_id="u-1", role="owner", token_role="developer"
+    )
     token = auth._current_company.set(ctx)
     yield ctx
     auth._current_company.reset(token)
@@ -117,11 +131,13 @@ def _stub_writes(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_list_tickets_passthrough(company_ctx, monkeypatch):
+async def test_list_tickets_scopes_to_token_owner(company_ctx, monkeypatch):
+    """list_tickets always sends the token owner's user_id as the assignee
+    filter — 'my tickets' is derived from the token, never a tool param."""
     calls = _stub_backend(monkeypatch, {"/tickets": {"tickets": [{"id": "t1"}], "count": 1}})
     result = await tools._list_tickets_impl()
     assert result["count"] == 1
-    assert calls == [("/tickets", {"company_id": "co-1"})]
+    assert calls == [("/tickets", {"company_id": "co-1", "assignee_user_id": "u-1"})]
 
 
 @pytest.mark.asyncio
@@ -130,7 +146,30 @@ async def test_list_tickets_forwards_filters(company_ctx, monkeypatch):
     await tools._list_tickets_impl(status="In progress", ticket_type="bug")
     assert calls == [(
         "/tickets",
-        {"company_id": "co-1", "status": "In progress", "ticket_type": "bug"},
+        {
+            "company_id": "co-1",
+            "assignee_user_id": "u-1",
+            "status": "In progress",
+            "ticket_type": "bug",
+        },
+    )]
+
+
+@pytest.mark.asyncio
+async def test_list_prd_tickets_passthrough_not_assignee_scoped(company_ctx, monkeypatch):
+    """list_prd_tickets sends the prd_id and company scope but NO assignee
+    filter — it deliberately shows the PRD's full ticket set, and forwards
+    the optional status/ticket_type filters."""
+    calls = _stub_backend(monkeypatch, {"/tickets": {"tickets": [{"id": "t1"}], "count": 1}})
+    result = await tools._list_prd_tickets_impl(42)
+    assert result["count"] == 1
+    assert calls == [("/tickets", {"company_id": "co-1", "prd_id": 42})]
+
+    calls = _stub_backend(monkeypatch, {"/tickets": {"tickets": [], "count": 0}})
+    await tools._list_prd_tickets_impl(42, status="Done", ticket_type="bug")
+    assert calls == [(
+        "/tickets",
+        {"company_id": "co-1", "prd_id": 42, "status": "Done", "ticket_type": "bug"},
     )]
 
 
@@ -217,3 +256,74 @@ async def test_write_tools_raise_without_company_context(monkeypatch):
     _stub_writes(monkeypatch)
     with pytest.raises(auth.McpAuthError):
         await tools._add_ticket_comment_impl("t1", "x")
+
+
+# ── token-role gating ──
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "impl",
+    [
+        tools._list_datasets_impl,
+        tools._get_current_brief_impl,
+        tools._get_backlog_impl,
+        tools._get_latest_prd_impl,
+    ],
+)
+async def test_pm_only_tools_refuse_developer_token(developer_ctx, monkeypatch, impl):
+    """A developer token gets the friendly refusal AND the backend is never
+    called — the impl-level check is the hard gate, not just list filtering."""
+    calls = _stub_backend(monkeypatch, {})
+    result = await impl()
+    assert "PM tokens" in result["message"]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_ticket_and_prd_tools_allowed_for_developer_token(developer_ctx, monkeypatch):
+    calls = _stub_backend(
+        monkeypatch,
+        {
+            "/tickets": {"tickets": [], "count": 0},
+            "/prd/5": {"title": "My PRD"},
+        },
+    )
+    assert (await tools._list_tickets_impl())["count"] == 0
+    assert (await tools._get_prd_impl(5))["title"] == "My PRD"
+    assert (await tools._list_prd_tickets_impl(5))["count"] == 0
+    assert len(calls) == 3
+
+    write_calls = _stub_writes(monkeypatch)
+    await tools._add_ticket_comment_impl("t1", "hello")
+    assert write_calls[0]["path"] == "/tickets/t1/comments"
+
+
+@pytest.mark.asyncio
+async def test_pm_only_tools_pass_for_pm_token(company_ctx, monkeypatch):
+    """The default 'pm' context (as every pre-roles token resolves) still
+    reaches the backend for all the PM-only tools."""
+    calls = _stub_backend(
+        monkeypatch,
+        {
+            "/datasets": {"datasets": []},
+            "/brief/current": {"week_label": "Wk 1"},
+            "/backlog": {"items": [], "count": 0},
+            "/prd/latest": {"title": "PRD"},
+        },
+    )
+    await tools._list_datasets_impl()
+    await tools._get_current_brief_impl()
+    await tools._get_backlog_impl()
+    await tools._get_latest_prd_impl()
+    assert [path for path, _ in calls] == [
+        "/datasets", "/brief/current", "/backlog", "/prd/latest",
+    ]
+
+
+def test_pm_only_tools_constant_matches_registered_names():
+    """PM_ONLY_TOOLS drives list filtering in app.py — a typo'd name there
+    would silently filter nothing, so pin the exact set."""
+    assert tools.PM_ONLY_TOOLS == {
+        "list_datasets", "get_current_brief", "get_backlog", "get_latest_prd",
+    }

@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 import app.auth  # noqa: F401 — ensure app.config/app.auth in sys.modules
 
 from app.db.mcp_tokens import (
@@ -91,6 +93,42 @@ def test_resolve_mcp_token_round_trips(isolated_settings):
     assert resolved["company_id"] == cid
     assert resolved["user_id"] == uid
     assert resolved["role"] == "admin"
+
+
+def test_create_mcp_token_defaults_to_pm_role(isolated_settings):
+    """Unspecified role -> 'pm' (full tool set), matching the column default
+    that grandfathers pre-role tokens."""
+    client = isolated_settings["supabase"]
+    cid, uid = uuid.uuid4().hex, "user-1"
+    _seed_company_and_member(client, company_id=cid, user_id=uid)
+
+    created = create_mcp_token(company_id=cid, user_id=uid, name="t")
+
+    assert created["token_role"] == "pm"
+    assert resolve_mcp_token(created["token"])["token_role"] == "pm"
+
+
+def test_create_mcp_token_persists_developer_role_through_resolve(isolated_settings):
+    client = isolated_settings["supabase"]
+    cid, uid = uuid.uuid4().hex, "user-1"
+    _seed_company_and_member(client, company_id=cid, user_id=uid)
+
+    created = create_mcp_token(
+        company_id=cid, user_id=uid, name="t", token_role="developer"
+    )
+
+    assert created["token_role"] == "developer"
+    resolved = resolve_mcp_token(created["token"])
+    assert resolved["token_role"] == "developer"
+
+
+def test_create_mcp_token_rejects_unknown_role(isolated_settings):
+    client = isolated_settings["supabase"]
+    cid, uid = uuid.uuid4().hex, "user-1"
+    _seed_company_and_member(client, company_id=cid, user_id=uid)
+
+    with pytest.raises(ValueError):
+        create_mcp_token(company_id=cid, user_id=uid, name="t", token_role="root")
 
 
 def test_resolve_mcp_token_rejects_unknown_token(isolated_settings):

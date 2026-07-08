@@ -19,22 +19,55 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import PlainTextResponse
 
+from .auth import current_company_or_none
 from .middleware import BearerAuthMiddleware
-from .tools import register_tools
+from .tools import PM_ONLY_TOOLS, register_tools
 
 # Shown to the MCP client/model on connect (FastMCP `instructions`) to orient
 # it on the intended workflow. Everything is already scoped to the one Sprntly
 # workspace the token belongs to — the model never needs to pass a company id.
 _INSTRUCTIONS = (
     "This server connects your Sprntly workspace: product briefs, PRDs, and "
-    "tickets. Typical developer flow: call list_tickets to find work (optionally "
-    "filter by status), get_ticket for the full detail you need to implement it "
-    "(description, acceptance criteria, scope, comments), and get_prd for the "
-    "parent product context. As you work, update_ticket_fields to move status "
+    "tickets. Typical developer flow: call list_tickets to see the tickets "
+    "assigned to you — it only ever returns the token owner's own tickets "
+    "(optionally filter by status), get_ticket for the full detail you need to "
+    "implement it "
+    "(description, acceptance criteria, scope, comments), get_prd for the "
+    "parent product context, and list_prd_tickets for every ticket in that "
+    "PRD (the full scope, not just yours). As you work, update_ticket_fields "
+    "to move status "
     "(e.g. 'In progress' -> 'In review' -> 'Done'), add_ticket_comment to note "
-    "progress, and add_ticket_attachment to link your PR or branch. All data is "
-    "scoped to this one workspace; you never pass a company or dataset id."
+    "progress, and add_ticket_attachment to link your PR or branch. Ticket ids "
+    "are opaque keys like 'prd-42-a1b2c3d4e5f6' — always pass them back exactly "
+    "as returned by list_tickets/get_ticket, never shortened or re-derived. All "
+    "data is scoped to this one workspace; you never pass a company or dataset id. "
+    "The tools you see match your token's role: developer tokens cover tickets "
+    "and PRDs; workspace tools (datasets, backlog, weekly brief) need a PM token."
 )
+
+
+class RoleScopedFastMCP(FastMCP):
+    """FastMCP that filters tools/list by the caller's token role.
+
+    FastMCP._setup_handlers registers the BOUND `self.list_tools`, so this
+    override IS the handler the low-level server calls for every tools/list
+    request. BearerAuthMiddleware has already resolved the bearer token into
+    a CompanyContext contextvar by then, so the listing is per-request even
+    though the tool registry itself is process-global.
+
+    Listing is UX, not the security boundary — a client can still call a
+    tool it wasn't shown, which is why every PM-only tool impl re-checks the
+    role itself (see tools.py). Fail closed: no resolved context (can't
+    happen on the authed /mcp path, but cheap to be safe) lists the
+    developer subset, never the full set.
+    """
+
+    async def list_tools(self):
+        tools = await super().list_tools()
+        ctx = current_company_or_none()
+        if ctx is None or ctx.token_role != "pm":
+            tools = [t for t in tools if t.name not in PM_ONLY_TOOLS]
+        return tools
 
 
 def _transport_security() -> TransportSecuritySettings | None:
@@ -96,7 +129,7 @@ def _stateless_http() -> bool:
 
 
 def create_app():
-    mcp = FastMCP(
+    mcp = RoleScopedFastMCP(
         "sprntly",
         instructions=_INSTRUCTIONS,
         stateless_http=_stateless_http(),

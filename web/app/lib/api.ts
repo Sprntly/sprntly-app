@@ -2363,9 +2363,17 @@ export const artifactsApi = {
 
 // ── MCP tokens (customer-facing Model Context Protocol access) ──
 
+/**
+ * What the token was minted for — picked at creation, immutable after.
+ * developer = ticket + PRD tools only; pm = the full MCP tool set
+ * (adds datasets, backlog, weekly brief).
+ */
+export type McpTokenRole = "developer" | "pm"
+
 export type McpToken = {
   id: string
   name: string
+  token_role: McpTokenRole
   token_prefix: string
   created_at: string
   last_used_at: string | null
@@ -2377,14 +2385,15 @@ export type McpTokenCreated = {
   name: string
   /** Raw bearer token — present ONLY in the create response, never again. */
   token: string
+  token_role: McpTokenRole
   token_prefix: string
   created_at: string
 }
 
 export const mcpTokensApi = {
   list: () => api.get<{ tokens: McpToken[] }>("/v1/mcp-tokens"),
-  create: (name: string) =>
-    api.post<McpTokenCreated>("/v1/mcp-tokens", { name }),
+  create: (name: string, token_role: McpTokenRole) =>
+    api.post<McpTokenCreated>("/v1/mcp-tokens", { name, token_role }),
   revoke: (id: string) =>
     api.delete<{ ok: true }>(`/v1/mcp-tokens/${encodeURIComponent(id)}`),
 }

@@ -20,7 +20,12 @@ from dataclasses import dataclass
 class CompanyContext:
     company_id: str
     user_id: str
+    # Company-membership role (owner/admin/member) — NOT the tool gate.
     role: str
+    # What the TOKEN was minted for: 'developer' (ticket + PRD tools only)
+    # or 'pm' (full tool set). Defaults to 'pm' so a backend that predates
+    # token roles keeps resolving to the full set it always granted.
+    token_role: str = "pm"
 
 
 class McpAuthError(Exception):
@@ -37,3 +42,9 @@ def require_current_company() -> CompanyContext:
     if ctx is None:
         raise McpAuthError("no authenticated company in context")
     return ctx
+
+
+def current_company_or_none() -> CompanyContext | None:
+    """The resolved caller if any — for read paths (tool listing) that must
+    degrade rather than raise when no request context is set."""
+    return _current_company.get()

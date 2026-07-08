@@ -109,6 +109,9 @@ class BearerAuthMiddleware:
             company_id=resolved["company_id"],
             user_id=resolved["user_id"],
             role=resolved["role"],
+            # Absent when the backend predates token roles -> 'pm' (the full
+            # tool set every token had before roles existed).
+            token_role=resolved.get("token_role") or "pm",
         )
         reset_token = _current_company.set(ctx)
         try:
