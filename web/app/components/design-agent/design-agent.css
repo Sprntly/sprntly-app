@@ -4021,3 +4021,123 @@
     animation: none;
   }
 }
+
+/* ── Public viewer: General / Pinned comment sections (PublicTokenViewer) ───
+   Two always-rendered <section> children of .da-right-body — General
+   (unpinned, prototype-level feedback) first, Pinned (element-anchored)
+   second, separated by a hairline. Cards reuse .comment-thread /
+   .comment-list / .comment-meta / .pc-av / .comment-resolve-btn--static
+   verbatim; only the discriminator + trigger/composer below are new. */
+.design-agent-surface .comments-section {
+  display: flex;
+  flex-direction: column;
+}
+.design-agent-surface .comments-section + .comments-section {
+  border-top: 1px solid var(--line);
+}
+/* Icon + count badge support for the existing .comments-section-title rule
+   (defined above) — additive, does not change its font/color/spacing. */
+.design-agent-surface .comments-section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.design-agent-surface .comments-section-title svg {
+  flex-shrink: 0;
+  color: var(--accent);
+}
+.design-agent-surface .comments-section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--surface-3);
+  color: var(--ink-3);
+  margin-left: 2px;
+}
+.design-agent-surface .comments-section-empty {
+  padding: 4px 13px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  margin: 0;
+}
+/* General card discriminator — no pin number badge, just a quiet left border
+   so a general card reads distinctly from a pinned one at a glance. */
+.design-agent-surface .comment-thread--general {
+  border-left: 2px solid var(--line-strong);
+}
+/* "Add a general comment" trigger — a quiet, full-width invitation, not a
+   floating action button. */
+.design-agent-surface .general-comment-trigger {
+  margin: 0 13px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+  font-family: inherit;
+  text-align: left;
+  width: calc(100% - 26px);
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+.design-agent-surface .general-comment-trigger:hover {
+  border-color: var(--line-strong);
+  background: var(--surface-3);
+  color: var(--ink-2);
+}
+.design-agent-surface .general-comment-trigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.design-agent-surface .general-comment-trigger svg {
+  flex-shrink: 0;
+}
+/* Inline general-comment composer — replaces the trigger in place, matching
+   the .da-viewer-name-form idiom (label + input + actions, no modal). */
+.design-agent-surface .general-comment-composer {
+  margin: 0 13px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.design-agent-surface .general-comment-composer-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin: 0;
+}
+.design-agent-surface .general-comment-composer-input {
+  width: 100%;
+  border: 1px solid var(--line-strong);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 12.5px;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: inherit;
+  resize: vertical;
+  min-height: 72px;
+}
+.design-agent-surface .general-comment-composer-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.design-agent-surface .general-comment-composer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}

@@ -42,6 +42,12 @@ export type PrdTabMeta = { briefId: number; insightIndex: number }
  *   - `load`           — fetch an already-generated PRD by id (loadPrdById) */
 export type PrdTabRequest = {
   title: string
+  /** The insight's body/description text (from the originating brief finding),
+   *  shown under the title in the chat insight message so the opening card
+   *  carries the finding's content, not just its heading. Optional — only the
+   *  brief-card paths (view/generate PRD) carry it; backlog / ready-from-content
+   *  paths omit it and the body simply isn't rendered. */
+  insightBody?: string
   source:
     | { kind: "ready"; prd: PrdState; meta: PrdTabMeta | null }
     | { kind: "generate"; meta: PrdTabMeta }

@@ -24,6 +24,15 @@ from app.stories.push import (
 from tests._company_helpers import company_client, seed_connection
 
 
+@pytest.fixture(autouse=True)
+def _stub_clickup_task_map(monkeypatch):
+    """Default the ticket→ClickUp-task map to empty (create path) + no-op save,
+    so push tests don't hit Supabase. The idempotency test overrides the getter."""
+    import app.stories.push as push_mod
+    monkeypatch.setattr(push_mod, "get_clickup_task_id", lambda *a, **k: None)
+    monkeypatch.setattr(push_mod, "save_clickup_task_id", lambda *a, **k: None)
+
+
 def _llm_result(output):
     return LLMResult(
         output=output, model="claude-sonnet-4-6",
@@ -154,6 +163,41 @@ def test_generate_passes_prd_part_b_to_model(isolated_settings, monkeypatch):
     assert seen["agent"] == "user_stories"
 
 
+def test_generate_gives_the_ticket_call_a_large_token_budget(isolated_settings, monkeypatch):
+    """The canonical ticket is big; the call must raise max_tokens well above the
+    16k default so a real PRD's full set doesn't truncate to an empty parse."""
+    import app.stories.generate as gen
+    seen: dict = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result(_TWO_STORIES)
+
+    monkeypatch.setattr(gen, "llm_call", _capture)
+    generate_user_stories("ent-A", insight="x")
+    assert seen.get("max_tokens", 0) >= 32000
+
+
+def test_generate_empty_result_is_not_cached(isolated_settings, monkeypatch):
+    """A 0-ticket result (a truncated/transient run) must NOT be persisted — else
+    the Tickets tab sticks on '0 tickets'. Skipping the write lets the next open
+    retry."""
+    import app.stories.generate as gen
+    import app.db.prd_tickets as pt
+
+    monkeypatch.setattr(
+        gen, "get_prd_rendered",
+        lambda pid: {"title": "T", "payload_md": "Part A prose", "llm_part": ""},
+    )
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result({"stories": []}))
+    saved: list = []
+    monkeypatch.setattr(pt, "save_tickets", lambda *a, **k: saved.append(a))
+
+    out = generate_user_stories("ent-A", prd_id=7)
+    assert out == []
+    assert saved == []  # nothing cached for an empty run
+
+
 def test_generate_unknown_prd_raises(isolated_settings, monkeypatch):
     import app.stories.generate as gen
     from app.stories.generate import PRDNotFoundError
@@ -267,7 +311,7 @@ def test_push_error_isolation_one_fails_rest_continue(isolated_settings, monkeyp
 
     from app.connectors import clickup_oauth
 
-    def _create_task(token, list_id, *, name, description=None, priority=None):
+    def _create_task(token, list_id, *, name, description=None, markdown_description=None, priority=None, extra=None):
         if name == "boom":
             raise RuntimeError("clickup 500")
         return {"id": f"id-{name}", "url": f"u-{name}"}
@@ -284,6 +328,125 @@ def test_push_error_isolation_one_fails_rest_continue(isolated_settings, monkeyp
     assert len(result["errors"]) == 1
     assert result["errors"][0]["story"] == "boom"
     assert "clickup 500" in result["errors"][0]["error"]
+
+
+def test_push_maps_canonical_fields_to_clickup(isolated_settings, monkeypatch):
+    """The canonical ticket's fields map onto the ClickUp task: a rich markdown
+    body, labels → tags, story points → points."""
+    ctx = company_client(monkeypatch)
+    _seed_clickup_token(monkeypatch, ctx.company_id)
+
+    from app.connectors import clickup_oauth
+
+    seen: dict = {}
+
+    def _create_task(token, list_id, *, name, description=None, markdown_description=None, priority=None, extra=None):
+        seen.update(name=name, markdown_description=markdown_description, priority=priority, extra=extra)
+        return {"id": "cu-1", "url": "u"}
+
+    monkeypatch.setattr(clickup_oauth, "create_task", _create_task)
+
+    story = Story(
+        title="Battle card", body="As an AE, I want a card, so that I can run the play.",
+        what="Create a one-page battle card.", user_story="As an AE, I want a card, so that I can run the play.",
+        acceptance_criteria=["Given X, When Y, Then Z."],
+        labels=["sales-enablement", "competitive"], story_points=3, priority="urgent",
+    )
+    push_stories_to_clickup(ctx.company_id, "list-1", [story])
+
+    # Rich body (markdown), not a plain description.
+    assert "**What**" in seen["markdown_description"]
+    assert seen["priority"] == 1  # urgent → 1
+    assert seen["extra"]["tags"] == ["sales-enablement", "competitive"]
+    assert seen["extra"]["points"] == 3
+
+
+def test_push_syncs_subtasks_and_dependencies(isolated_settings, monkeypatch):
+    """A newly-created task gets a Child-issues checklist (one item per subtask,
+    [P] stripped), and in-batch blocked_by links become ClickUp dependencies."""
+    ctx = company_client(monkeypatch)
+    _seed_clickup_token(monkeypatch, ctx.company_id)
+
+    from app.connectors import clickup_oauth
+
+    ids = iter(["cu-A", "cu-B"])
+    monkeypatch.setattr(clickup_oauth, "create_task",
+                        lambda *a, **k: {"id": next(ids), "url": "u"})
+
+    checklist_items: list[str] = []
+    deps: list[tuple[str, str]] = []
+    monkeypatch.setattr(clickup_oauth, "create_checklist", lambda tok, tid, name: "cl-1")
+    monkeypatch.setattr(clickup_oauth, "create_checklist_item",
+                        lambda tok, cid, name, resolved=False: checklist_items.append(name))
+    monkeypatch.setattr(clickup_oauth, "add_dependency",
+                        lambda tok, tid, *, depends_on: deps.append((tid, depends_on)))
+
+    one_pager = Story(title="One-Pager", body="b")
+    battle_card = Story(
+        title="Battle Card", body="b",
+        subtasks=["Pull win/loss notes", "[P] Draft objection table"],
+        blocked_by=["T-1 — One-Pager"],  # references One-Pager by title
+    )
+    push_stories_to_clickup(ctx.company_id, "list-1", [one_pager, battle_card])
+
+    # Subtasks became checklist items with the [P] marker stripped.
+    assert checklist_items == ["Pull win/loss notes", "Draft objection table"]
+    # Battle Card (cu-B) waits on One-Pager (cu-A).
+    assert deps == [("cu-B", "cu-A")]
+
+
+def test_pull_clickup_status_reconciles_synced_tickets(isolated_settings, monkeypatch):
+    """pull_clickup_status returns the current ClickUp state for tickets that
+    have a mapping row, keyed by ticket id; unsynced tickets are absent."""
+    ctx = company_client(monkeypatch)
+    _seed_clickup_token(monkeypatch, ctx.company_id)
+
+    import app.stories.push as push_mod
+    from app.connectors import clickup_oauth
+
+    # T-A is synced (→ cu-A); T-B was never pushed (no mapping).
+    monkeypatch.setattr(push_mod, "get_clickup_task_id",
+                        lambda c, l, t: "cu-A" if t == "T-A" else None)
+    monkeypatch.setattr(clickup_oauth, "get_task",
+                        lambda tok, tid: {"status": "in progress", "assignee": "nadia", "url": "u"})
+
+    out = push_mod.pull_clickup_status(ctx.company_id, "list-1", ["T-A", "T-B"])
+    assert set(out) == {"T-A"}
+    assert out["T-A"]["status"] == "in progress"
+    assert out["T-A"]["assignee"] == "nadia"
+
+
+def test_push_is_idempotent_updates_existing_task(isolated_settings, monkeypatch):
+    """A re-push of a ticket already synced to this list UPDATEs the existing
+    ClickUp task instead of creating a duplicate."""
+    ctx = company_client(monkeypatch)
+    _seed_clickup_token(monkeypatch, ctx.company_id)
+
+    import app.stories.push as push_mod
+    from app.connectors import clickup_oauth
+
+    story = Story(title="Battle card", body="As an AE, I want a card, so that I can run the play.")
+    # This ticket was pushed before → its ClickUp task id is on file.
+    monkeypatch.setattr(push_mod, "get_clickup_task_id", lambda c, l, t: "cu-existing")
+
+    created_calls, updated_calls = [], []
+
+    def _create_task(token, list_id, *, name, **kw):
+        created_calls.append(name)
+        return {"id": "cu-new", "url": "u"}
+
+    def _update_task(token, task_id, *, name=None, **kw):
+        updated_calls.append(task_id)
+        return {"id": task_id, "url": "u"}
+
+    monkeypatch.setattr(clickup_oauth, "create_task", _create_task)
+    monkeypatch.setattr(clickup_oauth, "update_task", _update_task)
+
+    result = push_stories_to_clickup(ctx.company_id, "list-1", [story])
+    assert created_calls == []              # no duplicate created
+    assert updated_calls == ["cu-existing"]  # existing task updated
+    assert result["created"][0]["updated"] is True
+    assert result["created"][0]["task_id"] == "cu-existing"
 
 
 def test_push_not_connected_raises(isolated_settings, monkeypatch):
@@ -331,7 +494,7 @@ def test_route_push_creates_tasks(isolated_settings, monkeypatch):
     from app.connectors import clickup_oauth
     posted = []
 
-    def _create_task(token, list_id, *, name, description=None, priority=None):
+    def _create_task(token, list_id, *, name, description=None, markdown_description=None, priority=None, extra=None):
         posted.append((list_id, name, priority))
         return {"id": "T1", "url": "https://app.clickup.com/t/T1"}
 

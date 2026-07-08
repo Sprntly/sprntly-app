@@ -1,7 +1,7 @@
 "use client"
 
 import { useRef, useState } from "react"
-import { stripHtmlCodeFence } from "../../lib/htmlBrief"
+import { stripHtmlCodeFence, stripHypothesisSection } from "../../lib/htmlBrief"
 
 // Re-exported for back-compat with existing import sites.
 export { looksLikeHtmlBrief } from "../../lib/htmlBrief"
@@ -25,7 +25,7 @@ export { looksLikeHtmlBrief } from "../../lib/htmlBrief"
 export function EvidenceHtmlBrief({ html }: { html: string }) {
   const ref = useRef<HTMLIFrameElement>(null)
   const [height, setHeight] = useState(640)
-  const doc = stripHtmlCodeFence(html)
+  const doc = stripHypothesisSection(stripHtmlCodeFence(html))
 
   const resize = () => {
     const cdoc = ref.current?.contentDocument

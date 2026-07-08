@@ -44,6 +44,12 @@ vi.mock("../../../../lib/api", () => {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
     },
+    // A PRD tab mounts PrdInputQuestions, which loads its questions from prdApi;
+    // stub it to an empty set so the panel behaviour under test is unaffected.
+    prdApi: {
+      listInputQuestions: vi.fn().mockResolvedValue([]),
+      answerInputQuestion: vi.fn(),
+    },
   }
 })
 
@@ -186,5 +192,17 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await clickOpenPrd()
 
     expect(tabBar().getAllByText("PRD · Ready doc")).toHaveLength(1)
+  })
+
+  it("closes the panel when switching back to the brief tab (no bleed over the brief)", async () => {
+    renderWith(READY)
+    await clickOpenPrd()
+    // Panel is open over the new PRD tab.
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    // Switch back to the pinned brief tab → the global panel must not linger.
+    await act(async () => { fireEvent.click(tabBar().getByText("Weekly brief")) })
+    await waitFor(() => expect(panelProbe()).toBe("none"))
+    // Brief surface is showing, panel is gone.
+    expect(briefSection()).toBeTruthy()
   })
 })

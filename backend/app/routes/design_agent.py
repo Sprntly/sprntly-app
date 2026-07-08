@@ -46,7 +46,7 @@ from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.auth import CompanyContext, require_company, require_company_from_query  # company-scoped auth dep
 from app.config import settings
@@ -3020,8 +3020,18 @@ from app.db.prototype_comments import insert_comment, list_comments, resolve_com
 
 
 class CommentCreate(BaseModel):
-    anchor_id: str = Field(..., min_length=1, max_length=64)
+    # None = a general (unpinned) comment -- prototype-level feedback with no
+    # element anchor. A pinned/anchored comment always sends a non-empty string;
+    # an empty STRING is rejected below (distinct invalid input, not "no anchor").
+    anchor_id: str | None = Field(default=None, max_length=64)
     body: str = Field(..., min_length=1, max_length=4000)
+
+    @field_validator("anchor_id")
+    @classmethod
+    def _anchor_id_not_empty_string(cls, v: str | None) -> str | None:
+        if v == "":
+            raise ValueError("anchor_id must be omitted/null (general comment) or a non-empty string")
+        return v
     pin_x_pct: float | None = Field(default=None, ge=0, le=100)
     pin_y_pct: float | None = Field(default=None, ge=0, le=100)
     resolved_anchor_id: str | None = Field(default=None, max_length=64)
@@ -3034,7 +3044,7 @@ class CommentCreate(BaseModel):
 
 class CommentOut(BaseModel):
     id: int
-    anchor_id: str
+    anchor_id: str | None = None
     body: str
     author: str
     status: str           # 'open' | 'resolved' | 'orphaned'
@@ -3053,7 +3063,7 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
     ISO string CommentOut expects without leaking driver-specific types."""
     return {
         "id": row["id"],
-        "anchor_id": row["anchor_id"],
+        "anchor_id": row.get("anchor_id"),
         "body": row["body"],
         "author": row["author"],
         "status": row["status"],
@@ -3550,6 +3560,25 @@ async def post_confirm_plan(
     )
 
 
+def _project_open_comments_for_grounding(
+    all_comments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project OPEN, ANCHORED comments to the {anchor_id, body, author} shape the
+    iterate prompt renderer expects ("apply this comment to element X").
+
+    General (unpinned) comments have no anchor_id -- they carry prototype-level
+    feedback, not a "go change this element" instruction -- so they are
+    excluded entirely rather than surfacing a bogus `data-anchor-id="None"`
+    reference in the prompt. Extracted to a standalone function (rather than
+    inlined in `_run_iterate_bg`) so the null-exclusion is independently
+    testable without invoking the full background iterate run.
+    """
+    return [
+        {"anchor_id": c["anchor_id"], "body": c["body"], "author": c["author"]}
+        for c in all_comments if c.get("status") == "open" and c.get("anchor_id")
+    ]
+
+
 async def _run_iterate_bg(
     *,
     prototype_id: int,
@@ -3590,22 +3619,19 @@ async def _run_iterate_bg(
         )
 
         # Open comment threads — the stable cacheable signal (list_comments,
-        # filtered to open). Project to the {anchor_id, body, author} shape the
-        # prompt renderer expects.
+        # filtered to open, anchored-only). See _project_open_comments_for_grounding.
         all_comments = list_comments(prototype_id=prototype_id, workspace_id=workspace_id)
-        open_comments = [
-            {"anchor_id": c["anchor_id"], "body": c["body"], "author": c["author"]}
-            for c in all_comments if c.get("status") == "open"
-        ]
+        open_comments = _project_open_comments_for_grounding(all_comments)
 
         # Applied-comment: workspace-filtered (it came from the same
         # list_comments read, which filters by workspace) lookup by id, projected
         # to {anchor_id, body}. None when no applied_comment_id or no match.
+        # `.get` (not `[...]`) — a general comment's anchor_id key can be null.
         applied_comment = None
         if body.applied_comment_id is not None:
             applied_comment = next(
                 (
-                    {"anchor_id": c["anchor_id"], "body": c["body"]}
+                    {"anchor_id": c.get("anchor_id"), "body": c["body"]}
                     for c in all_comments if c["id"] == body.applied_comment_id
                 ),
                 None,

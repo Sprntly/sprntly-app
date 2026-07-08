@@ -113,6 +113,38 @@ def test_render_iterate_user_applied_comment_threads_anchor_and_body():
     assert "and make it bigger" in volatile["text"]
 
 
+def test_apply_general_renders_prototype_level_prompt():
+    # Applying a general (null-anchor) comment must steer the agent as
+    # whole-prototype feedback, never a bogus element reference. Before this
+    # branch existed, a null anchor_id rendered the literal
+    # data-anchor-id="None" here.
+    _cacheable, volatile = render_iterate_user(
+        current_source={},
+        open_comments=[],
+        iterate_prompt="ship it",
+        applied_comment={"anchor_id": None, "body": "GENERAL_FEEDBACK_456"},
+    )
+    assert "GENERAL_FEEDBACK_456" in volatile["text"]
+    assert "entire prototype" in volatile["text"]
+    assert "data-anchor-id" not in volatile["text"]
+    assert "None" not in volatile["text"]
+
+
+def test_apply_pinned_still_element_targeted():
+    # Regression: a real-anchor applied comment keeps the exact prior
+    # element-anchored wording -- applying a pinned comment must not regress
+    # toward the new whole-prototype branch.
+    _cacheable, volatile = render_iterate_user(
+        current_source={},
+        open_comments=[],
+        iterate_prompt="tweak spacing",
+        applied_comment={"anchor_id": "fb3007b5", "body": "PINNED_FEEDBACK_789"},
+    )
+    assert 'data-anchor-id="fb3007b5"' in volatile["text"]
+    assert "PINNED_FEEDBACK_789" in volatile["text"]
+    assert "entire prototype" not in volatile["text"]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 2 — iterate_prototype runner entry (recording fake client)
 # ═══════════════════════════════════════════════════════════════════════════

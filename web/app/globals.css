@@ -6505,6 +6505,85 @@
     border-color: var(--accent-hover);
   }
 
+  /* PRD "User input needed" questions rendered as chat messages (PrdInputQuestions).
+     Reuses the .bc-* agent chrome + .bc-action-btn buttons; these add the
+     question-specific bits. */
+  .piq-list {
+    display: flex;
+    flex-direction: column;
+    gap: 26px;
+  }
+
+  .piq-prompt {
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--ink);
+  }
+
+  .piq-owner {
+    margin-top: 3px;
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+
+  .piq-choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .piq-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 10px;
+  }
+
+  .piq-input {
+    width: 100%;
+    min-height: 64px;
+    resize: vertical;
+    padding: 9px 11px;
+    border-radius: 10px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13.5px;
+  }
+
+  .piq-form .bc-action-btn--primary {
+    align-self: flex-start;
+  }
+
+  .piq-resolved {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--ink-2);
+  }
+
+  .piq-resolved-check {
+    color: var(--accent);
+    font-weight: 700;
+    margin-right: 6px;
+  }
+
+  .piq-resolved-answer {
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .piq-resolved-line {
+    color: var(--ink-3);
+  }
+
+  .piq-error {
+    margin-top: 8px;
+    font-size: 12.5px;
+    color: var(--danger);
+  }
+
   /* Composer dock — transparent so the composer + suggestions float over the
      thread rather than sitting on a grey footer panel. */
   .bc-dock {
@@ -7779,6 +7858,30 @@
     line-height: 1.5;
     color: var(--ink);
     min-width: 0;
+  }
+
+  /* Insight body — the finding's content shown under the heading in the opening
+     insight message. Lighter/smaller than the title so the heading still leads. */
+  .bc-insight-msg-body {
+    margin-top: 6px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    overflow-wrap: anywhere;
+  }
+
+  .bc-insight-msg-body p {
+    margin: 0 0 6px;
+  }
+
+  .bc-insight-msg-body p:last-child {
+    margin-bottom: 0;
+  }
+
+  .bc-insight-msg-body strong,
+  .bc-insight-msg-body b {
+    font-weight: 700;
+    color: var(--ink);
   }
 
   .od-center--landing .od-center-inner {
@@ -16923,6 +17026,12 @@
   font-size: 12.5px; font-weight: 600; color: var(--chip-t);
   background: var(--chip); border-radius: 999px; padding: 4px 13px;
 }
+/* ClickUp status pulled back onto a card (bidirectional sync). */
+.tkv2-synced {
+  font-size: 11.5px; font-weight: 600; color: var(--green-d);
+  background: var(--green-s); border: 1px solid var(--green-b);
+  border-radius: 999px; padding: 3px 11px; text-transform: capitalize;
+}
 .tkv2-typechip {
   font-size: 11.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   border-radius: 999px; padding: 4px 11px; border: 1px solid var(--line);
@@ -16979,14 +17088,26 @@
 .tkv2-ground a { color: var(--green-d); font-weight: 600; text-decoration: none; }
 .tkv2-need { font-family: var(--font-mono); font-size: 12px; color: var(--high); }
 
-/* ── detail: two-column zone ── */
-.tkv2-cols { display: grid; grid-template-columns: 1fr 300px; gap: 0; }
-.tkv2-main { padding: 22px 26px; border-right: 1px solid var(--line); }
-.tkv2-rail { padding: 20px 20px; background: #fbfbfa; }
-@media (max-width: 860px) {
-  .tkv2-cols { grid-template-columns: 1fr; }
-  .tkv2-main { border-right: none; border-bottom: 1px solid var(--line); }
+/* ── detail: horizontal Details bar + full-width body ──
+   The tickets detail lives in a narrow side panel, not the reference's wide
+   page, so a 300px side rail cramps and clips. Details render as a horizontal
+   field bar under the description; the story content flows full width below. */
+.tkv2-detailbar {
+  display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap;
+  padding: 16px 26px; background: #fbfbfa; border-bottom: 1px solid var(--line);
 }
+.tkv2-fields {
+  flex: 1; min-width: 0; display: grid; gap: 12px 20px;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+}
+.tkv2-field { min-width: 0; }
+.tkv2-fl {
+  font-size: 11px; color: var(--soft); font-weight: 700; text-transform: uppercase;
+  letter-spacing: .06em; display: block; margin-bottom: 4px;
+}
+.tkv2-fv { font-size: 13px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere; }
+.tkv2-fv--muted { color: var(--soft); font-weight: 500; }
+.tkv2-body { padding: 22px 26px; }
 
 /* ── detail: acceptance criteria ── */
 .tkv2-ac { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
@@ -17043,6 +17164,11 @@
 .tkv2-atab--active { background: var(--chip); color: var(--ink); }
 .tkv2-aisum { background: var(--green-s); border-radius: 12px; padding: 14px 16px; margin-bottom: 13px; font-size: 13.5px; color: var(--ink2); }
 .tkv2-aisum .ah { font-size: 13px; font-weight: 700; color: var(--green-d); margin-bottom: 6px; }
+.tkv2-propose {
+  margin-top: 10px; padding: 10px 12px; background: var(--paper);
+  border: 1px solid var(--green-b); border-radius: 9px; font-size: 13px; color: var(--ink2);
+}
+.tkv2-propose b { color: var(--green-d); }
 .tkv2-actions2 { display: flex; gap: 9px; margin-top: 11px; }
 .tkv2-btn2 { font-size: 12.5px; font-weight: 600; border-radius: 9px; padding: 7px 14px; cursor: pointer; border: 1px solid transparent; font-family: var(--font-body); }
 .tkv2-btn2--primary { background: var(--green); color: #fff; }
@@ -17101,3 +17227,4 @@
 .tkv2-pitem--sel { background: var(--green-s); color: var(--green-d); font-weight: 600; }
 .tkv2-ppath { font-size: 10px; color: var(--soft); font-weight: 400; margin-left: auto; padding-left: 10px; overflow: hidden; text-overflow: ellipsis; }
 .tkv2-pfoot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--line); font-size: 11px; color: var(--soft); }
+

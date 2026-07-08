@@ -24,6 +24,7 @@ from app.stories.generate import (
     Story,
     generate_user_stories,
 )
+from app.prd_runner import warm_impl_spec
 from app.stories.push import ClickUpNotConnectedError, push_stories_to_clickup
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,17 @@ async def generate(
     if existing is not None:
         return {"job_id": existing, "status": "generating"}
 
+    # Pre-warm the Implementation Spec (Part B) in the background so tickets can
+    # INHERIT acceptance criteria from it. New PRDs are already warmed at
+    # creation (a cache hit here); this covers PRDs that predate that — their
+    # spec generates in the background now so the NEXT regenerate inherits, while
+    # THIS ticket run stays a single fast call over the already-rendered PRD
+    # (never blocked on Part B, never regenerating the PRD).
+    if body.prd_id is not None:
+        warm = asyncio.create_task(warm_impl_spec(body.prd_id))
+        _inflight_tasks.add(warm)
+        warm.add_done_callback(_inflight_tasks.discard)
+
     job_id = next(_job_ids)
     _jobs[job_id] = {
         "id": job_id,
@@ -217,6 +229,7 @@ def tickets_for_prd(
     current = prd_content_hash(prd_id)
     fresh = (
         row.get("status") == "ready"
+        and bool(row.get("stories"))  # an empty cached set is a failed run → retry
         and current is not None
         and current == row.get("content_hash")
     )
@@ -259,3 +272,24 @@ def push(
     except ClickUpNotConnectedError as e:
         raise HTTPException(404, str(e)) from e
     return result
+
+
+class PullStatusIn(BaseModel):
+    list_id: str = Field(..., min_length=1)
+    ticket_ids: list[str] = Field(..., min_length=1)
+
+
+@router.post("/pull-status")
+def pull_status(
+    body: PullStatusIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Bidirectional read: return the current ClickUp state (status, assignee,
+    url) for the given tickets already synced to `list_id`, keyed by ticket id.
+    Tickets never pushed are simply absent. 404 if ClickUp isn't connected."""
+    from app.stories.push import pull_clickup_status
+
+    try:
+        return {"statuses": pull_clickup_status(company.company_id, body.list_id, body.ticket_ids)}
+    except ClickUpNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e

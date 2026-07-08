@@ -24,7 +24,11 @@ vi.hoisted(() => {
   ;(globalThis as Record<string, unknown>).React = require("react")
 })
 
-const { resolveTokenMock } = vi.hoisted(() => ({ resolveTokenMock: vi.fn() }))
+const { resolveTokenMock, listCommentsByTokenMock, createCommentByTokenMock } = vi.hoisted(() => ({
+  resolveTokenMock: vi.fn(),
+  listCommentsByTokenMock: vi.fn(),
+  createCommentByTokenMock: vi.fn(),
+}))
 
 // The real token comes from the live URL; feed a fixed token so the resolver
 // effect fires deterministically.
@@ -38,13 +42,46 @@ vi.mock("next/navigation", () => ({
     throw new Error("notFound() must not fire for a ready view")
   },
 }))
-// CommentsPanel fetches its list on mount — stub it out; it is not under test.
-vi.mock("../../components/design-agent/CommentsPanel", () => ({
-  CommentsPanel: () => null,
-}))
+// CommentsPanel (the Pinned-section body) fetches its own list on mount and is
+// not under test here — stub the CONTAINER only. importActual keeps
+// CommentAvatar/shortRelativeTime real: PublicTokenViewer's new General
+// section imports them from this same module for its own card rendering, and
+// a bare `() => ({ CommentsPanel: ... })` factory would silently undefine them.
+vi.mock("../../components/design-agent/CommentsPanel", async () => {
+  const actual = await vi.importActual<typeof import("../../components/design-agent/CommentsPanel")>(
+    "../../components/design-agent/CommentsPanel",
+  )
+  return { ...actual, CommentsPanel: () => null }
+})
+// designAgentApi.listCommentsByToken/createCommentByToken back the new General
+// section's own fetch/post (independent of CommentsPanel's internal fetch,
+// which is stubbed away above). importActual keeps every other export (types,
+// other methods) real.
+vi.mock("../../lib/api", async () => {
+  const actual = await vi.importActual<typeof import("../../lib/api")>("../../lib/api")
+  return {
+    ...actual,
+    designAgentApi: {
+      ...actual.designAgentApi,
+      listCommentsByToken: listCommentsByTokenMock,
+      createCommentByToken: createCommentByTokenMock,
+    },
+  }
+})
 
 import { PublicTokenViewer } from "../PublicTokenViewer"
 import { DeviceBadge } from "../../components/design-agent/DeviceBadge"
+
+// Safe default so every test that doesn't care about comments (single-device,
+// name-capture) still renders cleanly — the General section's own fetch fires
+// unconditionally on mount. `clearAllMocks()` in afterEach clears call history
+// only, not this implementation, so it holds across the whole file unless a
+// test overrides it with mockResolvedValueOnce/mockResolvedValue.
+listCommentsByTokenMock.mockResolvedValue([])
+createCommentByTokenMock.mockResolvedValue({
+  id: 999, anchor_id: null, body: "", author: "Anonymous",
+  status: "open", created_at: "2026-01-01T00:00:00Z", resolved_at: null,
+})
 
 function readyView(target_platform: string) {
   return {
@@ -212,5 +249,140 @@ describe("PublicTokenViewer — single full-name field + mark-mode auto-enable",
     await waitFor(() => expect(screen.getByTestId("viewer-identity-strip")).toBeTruthy())
     const av = screen.getByTestId("viewer-identity-strip").querySelector(".pc-av")
     expect(av?.textContent).toBe("AL")
+  })
+})
+
+describe("PublicTokenViewer — General / Pinned comment sections", () => {
+  // Drive the REAL name-capture flow (not a raw localStorage.setItem — this
+  // repo's jsdom env throws on localStorage writes; the app's own persist call
+  // guards with try/catch, but bypassing the flow from the test would not) to
+  // clear the name gate, then open the sidebar onto the General/Pinned sections.
+  async function openSectionsWithName() {
+    const utils = await renderReady("both")
+    fireEvent.click(screen.getByTestId("public-comments-toggle"))
+    await waitFor(() => expect(screen.getByTestId("viewer-name-form")).toBeTruthy())
+    fireEvent.change(screen.getByTestId("viewer-full-name-input"), { target: { value: "Ada Lovelace" } })
+    fireEvent.submit(screen.getByTestId("viewer-name-form"))
+    await waitFor(() => expect(screen.getByTestId("general-comments-section")).toBeTruthy())
+    return utils
+  }
+
+  const GENERAL = {
+    id: 1, anchor_id: null, body: "Overall the flow feels smooth", author: "Sarah Chen",
+    status: "open" as const, created_at: "2026-01-01T00:00:05Z", resolved_at: null,
+    pin_x_pct: null, pin_y_pct: null,
+  }
+  const PINNED = {
+    id: 2, anchor_id: "deadbeef", body: "This button needs more weight", author: "Jane Doe",
+    status: "open" as const, created_at: "2026-01-01T00:00:01Z", resolved_at: null,
+    pin_x_pct: 10, pin_y_pct: 20,
+  }
+
+  it("renders both sections with headers + open counts when mixed general/pinned data exists", async () => {
+    listCommentsByTokenMock.mockResolvedValue([PINNED, GENERAL])
+    await openSectionsWithName()
+    expect(screen.getByTestId("pinned-comments-section")).toBeTruthy()
+    expect(screen.getByTestId("general-comments-section").textContent).toContain("General")
+    expect(screen.getByTestId("pinned-comments-section").textContent).toContain("Pinned")
+
+    await waitFor(() => expect(screen.getByTestId(`general-comment-thread-${GENERAL.id}`)).toBeTruthy())
+    // split by pin_x_pct (+ anchor_id, see the dedicated test below): the null-pin
+    // row renders in General, the positioned row does NOT appear there.
+    expect(screen.queryByTestId(`general-comment-thread-${PINNED.id}`)).toBeNull()
+    const generalSection = screen.getByTestId("general-comments-section")
+    expect(generalSection.querySelector(".comments-section-count")?.textContent).toBe("1")
+    const pinnedSection = screen.getByTestId("pinned-comments-section")
+    expect(pinnedSection.querySelector(".comments-section-count")?.textContent).toBe("1")
+  })
+
+  it("general card uses .comment-thread--general and never carries a .proto-comment-pin badge", async () => {
+    listCommentsByTokenMock.mockResolvedValue([GENERAL])
+    await openSectionsWithName()
+    await waitFor(() => expect(screen.getByTestId(`general-comment-thread-${GENERAL.id}`)).toBeTruthy())
+    const card = screen.getByTestId(`general-comment-thread-${GENERAL.id}`)
+    expect(card.className).toContain("comment-thread")
+    expect(card.className).toContain("comment-thread--general")
+    expect(card.querySelector(".proto-comment-pin")).toBeNull()
+    expect(card.textContent).toContain("Sarah Chen")
+    expect(card.textContent).toContain("Overall the flow feels smooth")
+  })
+
+  it("an anchor-only comment (no pin position, e.g. right-click composer) is NOT miscategorized as General", async () => {
+    // Data-model nuance: general = null pin_x_pct AND null anchor_id. A comment
+    // with an anchor but no x/y position (the existing right-click-anywhere
+    // composer path) must stay out of General.
+    const anchorOnlyNoPin = {
+      id: 3, anchor_id: "rightclick-anchor", body: "Right-click anchored feedback",
+      author: "Tom R.", status: "open" as const, created_at: "2026-01-01T00:00:02Z",
+      resolved_at: null, pin_x_pct: null, pin_y_pct: null,
+    }
+    listCommentsByTokenMock.mockResolvedValue([anchorOnlyNoPin])
+    await openSectionsWithName()
+    await waitFor(() => expect(screen.getByTestId("general-comments-empty")).toBeTruthy())
+    expect(screen.queryByTestId(`general-comment-thread-${anchorOnlyNoPin.id}`)).toBeNull()
+    expect(screen.getByTestId("pinned-comments-section").querySelector(".comments-section-count")?.textContent).toBe("1")
+  })
+
+  it("empty state: both section headers still render; General shows the trigger + empty copy", async () => {
+    listCommentsByTokenMock.mockResolvedValue([])
+    await openSectionsWithName()
+    expect(screen.getByTestId("pinned-comments-section")).toBeTruthy()
+    expect(screen.getByTestId("general-comment-trigger")).toBeTruthy()
+    expect(screen.getByTestId("general-comments-empty")).toBeTruthy()
+    // No count badge when nothing is open in a section.
+    expect(screen.getByTestId("general-comments-section").querySelector(".comments-section-count")).toBeNull()
+  })
+
+  it("trigger opens an inline composer; Send posts a null-anchor comment and prepends it to General", async () => {
+    listCommentsByTokenMock.mockResolvedValue([])
+    const created = {
+      id: 42, anchor_id: null, body: "Nice palette overall", author: "Ada Lovelace",
+      status: "open" as const, created_at: "2026-01-01T00:10:00Z", resolved_at: null,
+      pin_x_pct: null, pin_y_pct: null,
+    }
+    createCommentByTokenMock.mockResolvedValue(created)
+    await openSectionsWithName()
+
+    fireEvent.click(screen.getByTestId("general-comment-trigger"))
+    expect(screen.queryByTestId("general-comment-trigger")).toBeNull() // trigger unmounts while composing
+    const textarea = screen.getByTestId("general-comment-input")
+    fireEvent.change(textarea, { target: { value: "Nice palette overall" } })
+    fireEvent.click(screen.getByTestId("general-comment-send"))
+
+    await waitFor(() => expect(createCommentByTokenMock).toHaveBeenCalled())
+    expect(createCommentByTokenMock).toHaveBeenCalledWith("tok", {
+      body: "Nice palette overall",
+      anchor_id: null,
+      pin_x_pct: null,
+      pin_y_pct: null,
+      viewer_name: "Ada Lovelace",
+    })
+    // Prepended, composer closed, trigger reappears.
+    await waitFor(() => expect(screen.getByTestId(`general-comment-thread-${created.id}`)).toBeTruthy())
+    expect(screen.queryByTestId("general-comment-input")).toBeNull()
+    expect(screen.getByTestId("general-comment-trigger")).toBeTruthy()
+  })
+
+  it("Cancel closes the composer without posting", async () => {
+    listCommentsByTokenMock.mockResolvedValue([])
+    await openSectionsWithName()
+    fireEvent.click(screen.getByTestId("general-comment-trigger"))
+    fireEvent.change(screen.getByTestId("general-comment-input"), { target: { value: "abandoned draft" } })
+    fireEvent.click(screen.getByTestId("general-comment-cancel"))
+    expect(createCommentByTokenMock).not.toHaveBeenCalled()
+    expect(screen.queryByTestId("general-comment-input")).toBeNull()
+    expect(screen.getByTestId("general-comment-trigger")).toBeTruthy()
+  })
+
+  it("Send is disabled when the textarea is empty or whitespace-only", async () => {
+    listCommentsByTokenMock.mockResolvedValue([])
+    await openSectionsWithName()
+    fireEvent.click(screen.getByTestId("general-comment-trigger"))
+    const send = screen.getByTestId("general-comment-send") as HTMLButtonElement
+    expect(send.disabled).toBe(true)
+    fireEvent.change(screen.getByTestId("general-comment-input"), { target: { value: "   " } })
+    expect(send.disabled).toBe(true)
+    fireEvent.change(screen.getByTestId("general-comment-input"), { target: { value: "Real feedback" } })
+    expect(send.disabled).toBe(false)
   })
 })

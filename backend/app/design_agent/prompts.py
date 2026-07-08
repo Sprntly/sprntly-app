@@ -587,12 +587,25 @@ def render_iterate_user(
 
     volatile_parts: list[str] = []
     if applied_comment:
-        anchor = applied_comment.get("anchor_id", "")
+        # `.get(...) or ""` (not `.get(..., "")`) so a real None value (a general,
+        # unanchored comment) collapses to the empty string the same as a missing
+        # key -- `.get("anchor_id", "")` alone would still return None when the
+        # key IS present but null, which previously rendered the literal
+        # data-anchor-id="None" below. A null/empty anchor means the feedback is
+        # about the whole prototype, not one element, so it gets its own
+        # instruction rather than a bogus element reference.
+        anchor = applied_comment.get("anchor_id") or ""
         body = (applied_comment.get("body") or "").strip()
-        volatile_parts.append(
-            "The user is applying a comment anchored to the element with "
-            f"data-anchor-id=\"{anchor}\". The comment says: {body}"
-        )
+        if anchor:
+            volatile_parts.append(
+                "The user is applying a comment anchored to the element with "
+                f"data-anchor-id=\"{anchor}\". The comment says: {body}"
+            )
+        else:
+            volatile_parts.append(
+                "The user is applying general feedback to the entire prototype "
+                f"(not a specific element). The feedback says: {body}"
+            )
     volatile_parts.append(f"ITERATE REQUEST:\n{iterate_prompt.strip()}")
     volatile_parts.append(
         "Apply this change with the smallest possible diff, then end your turn "

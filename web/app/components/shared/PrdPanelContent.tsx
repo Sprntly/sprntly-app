@@ -310,7 +310,12 @@ export function PrdPanelContent() {
         {!isHtmlPrd && <PrdToolbar hasDoc={!!prd} saveStatus={saveStatus} exec={exec} />}
         {prd && isHtmlPrd ? (
           <>
+            {/* Key on the HTML so a scoped edit (e.g. answering a "User input
+                needed" question — same prd_id, new document) forces a remount:
+                PrdHtmlView resolves its initial doc once per key, so without this
+                a same-prd HTML change would not re-render inside the iframe. */}
             <PrdHtmlView
+              key={`${prd.prd_id}:${prd.html?.length ?? 0}`}
               ref={htmlViewRef}
               html={prd.html ?? ""}
               prdId={prd.prd_id}

@@ -96,6 +96,9 @@ export function TicketDetail({ story, index, prdId, onBack }: {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [comments, setComments] = useState<Comment[]>([])
   const [summary, setSummary] = useState<string | null>(null)
+  // A concrete acceptance-criteria change the thread proposed (from the summary
+  // endpoint) — drives the Accept & propagate action.
+  const [proposedCriterion, setProposedCriterion] = useState<string | null>(null)
 
   const [members, setMembers] = useState<TeamMemberRecord[] | null>(null)
   const [openMenu, setOpenMenu] = useState<null | "status" | "reassign">(null)
@@ -125,10 +128,14 @@ export function TicketDetail({ story, index, prdId, onBack }: {
 
   // AI summary of the comment thread — only once there's a real discussion.
   useEffect(() => {
-    if (comments.length < 2) { setSummary(null); return }
+    if (comments.length < 2) { setSummary(null); setProposedCriterion(null); return }
     let cancelled = false
     ticketDataApi.summarizeComments(key)
-      .then((r) => { if (!cancelled) setSummary(r.summary) })
+      .then((r) => {
+        if (cancelled) return
+        setSummary(r.summary)
+        setProposedCriterion(r.proposed_criterion ?? null)
+      })
       .catch(() => { /* best-effort — hide the block on failure */ })
     return () => { cancelled = true }
   }, [key, comments.length])
@@ -164,15 +171,22 @@ export function TicketDetail({ story, index, prdId, onBack }: {
     }).catch(() => showToast("Couldn't post comment", "Try again."))
   }
 
-  // The change loop's first step: record an accepted proposal as a system note.
-  // Full cross-artifact propagation (ticket AC + PRD row/test version bump +
-  // design agent) lands with the sync phase.
+  // Accept & propagate: apply the thread's proposed acceptance criterion to this
+  // ticket (appended + persisted), and record it as a system note. Propagation
+  // BEYOND the ticket (the PRD §5 row + its Part B test with a version bump, and
+  // the design agent) is the next step of the change loop.
   const acceptPropagate = () => {
-    ticketDataApi.addComment(key, "Sprntly", `✳ Accepted proposed change: ${summary ?? ""}`)
+    if (!proposedCriterion) return
+    const next = [...criteria, proposedCriterion]
+    setCriteria(next)
+    saveDescription(description, next)
+    ticketDataApi.addComment(key, "Sprntly", `✳ Accepted & propagated to acceptance criteria: ${proposedCriterion}`)
       .then((c) => setComments((xs) => [...xs, c]))
       .catch(() => { /* best-effort */ })
-    showToast("Change recorded", "Cross-artifact propagation ships with the sync phase.")
+    setProposedCriterion(null)
+    showToast("Change propagated", "Added to this ticket's acceptance criteria. PRD + design propagation is next.")
   }
+  const rejectPropagate = () => setProposedCriterion(null)
 
   const pill = priorityPill(story.priority)
   const assigneeName = assignee?.display_name || "Unassigned"
@@ -189,11 +203,6 @@ export function TicketDetail({ story, index, prdId, onBack }: {
             <IconArrowLeft size={13} /> All tickets
           </button>
           &nbsp; /&nbsp; <span className="tkv2-key" style={{ padding: "3px 9px" }}>{`T-${index + 1}`}</span>
-          {story.ticket_type && story.ticket_type !== "build" ? (
-            <span className={`tkv2-typechip tkv2-typechip--${story.ticket_type}`} style={{ marginLeft: 8 }}>
-              {story.ticket_type}
-            </span>
-          ) : null}
         </div>
         <input
           className="tkv2-dtitle"
@@ -205,19 +214,17 @@ export function TicketDetail({ story, index, prdId, onBack }: {
       </div>
 
       <div className="tkv2-edithint">
-        ✎ Title, fields and comments are editable in place; edits sync on push.
-        Acceptance criteria are inherited from the spec — propose changes in comments instead of editing.
+        ✎ Title, status, assignee, and comments can be changed here. The
+        description and acceptance criteria come from the PRD — acceptance
+        criteria are inherited from the spec, so propose changes in the comments
+        and use Accept &amp; propagate to apply them.
       </div>
 
       {/* Full-width description */}
       <div className="tkv2-descwide">
         <div className="tkv2-sec">
           <h4>Description</h4>
-          {story.ticket_type === "decision" ? (
-            <DecisionBlock story={story} />
-          ) : story.ticket_type === "spike" ? (
-            <SpikeBlock story={story} />
-          ) : structured ? (
+          {structured ? (
             <>
               {story.what ? (<><div className="tkv2-dlbl">What</div><p className="tkv2-dtx">{story.what}</p></>) : null}
               {story.why_now ? (<><div className="tkv2-dlbl">Why now</div><p className="tkv2-dtx">{story.why_now}</p></>) : null}
@@ -251,8 +258,69 @@ export function TicketDetail({ story, index, prdId, onBack }: {
       </div>
 
       {/* Two-column zone */}
-      <div className="tkv2-cols">
-        <div className="tkv2-main">
+      {/* Details bar — horizontal, sized for the narrow tickets panel. (Was a
+          300px side rail that cramped and clipped beside the tall criteria
+          column; a rail only works at the reference's full page width.) */}
+      <div className="tkv2-detailbar">
+        <div style={{ position: "relative" }}>
+          <button type="button" className="tkv2-statusbtn" onClick={() => setOpenMenu((m) => (m === "status" ? null : "status"))}>
+            {status} <IconChevronDown size={12} />
+          </button>
+          {openMenu === "status" ? (
+            <div className="tkv2-picker" style={{ position: "absolute", zIndex: 20 }}>
+              {STATUS_OPTIONS.map((o) => (
+                <button key={o} type="button" className={`tkv2-pitem${o === status ? " tkv2-pitem--sel" : ""}`} onClick={() => pickStatus(o)}>
+                  {o === status ? <IconCheck size={12} /> : <span style={{ width: 12 }} />}{o}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <div className="tkv2-fields">
+          <div className="tkv2-field" style={{ position: "relative" }}>
+            <span className="tkv2-fl">Assignee</span>
+            <button type="button" aria-label="Reassign" onClick={openReassign} className="tkv2-fv" style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "none", border: "none", cursor: "pointer", padding: 0 }}>
+              <span className="tkv2-av" style={{ width: 22, height: 22, fontSize: 9, background: av.bg, color: av.color, borderColor: av.color }}>{initials(assigneeName)}</span>
+              {assigneeName}
+            </button>
+            {openMenu === "reassign" ? (
+              <div className="tkv2-picker" style={{ position: "absolute", left: 0, zIndex: 20 }}>
+                <div className="ph2">Reassign</div>
+                {members == null ? <div className="tkv2-pitem">Loading…</div>
+                  : members.length === 0 ? <div className="tkv2-pitem">No team members</div>
+                  : members.map((m) => {
+                    const nm = m.display_name || m.email || "Member"
+                    return (
+                      <button key={m.user_id} type="button" className={`tkv2-pitem${assignee?.user_id === m.user_id ? " tkv2-pitem--sel" : ""}`} onClick={() => pickAssignee(m)}>
+                        {nm}{m.role ? <span className="tkv2-ppath">{m.role}</span> : null}
+                      </button>
+                    )
+                  })}
+              </div>
+            ) : null}
+          </div>
+          <div className="tkv2-field"><span className="tkv2-fl">Reporter</span><span className="tkv2-fv tkv2-fv--muted">Sprntly PM Agent</span></div>
+          <div className="tkv2-field"><span className="tkv2-fl">Priority</span><span className="tkv2-fv"><span className={`tkv2-pill tkv2-pill--${pill.variant}`}>{pill.label}</span></span></div>
+          {story.labels && story.labels.length ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Labels</span><span className="tkv2-fv tkv2-fv--muted">{story.labels.join(" · ")}</span></div>
+          ) : null}
+          {story.prd_section ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Provenance</span><span className="tkv2-fv">{story.prd_section}</span></div>
+          ) : null}
+          {story.story_points != null ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Story points</span><span className="tkv2-fv">{story.story_points}</span></div>
+          ) : null}
+          {story.route ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Route</span><span className="tkv2-fv" style={{ color: routeAgentReady ? "var(--green-d)" : undefined }}>{story.route}</span></div>
+          ) : null}
+          {story.ears_ids && story.ears_ids.length ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Traces</span><span className="tkv2-fv tkv2-fv--muted">{story.ears_ids.join(" · ")}</span></div>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Main content — full width */}
+      <div className="tkv2-body">
           {/* Acceptance criteria */}
           <div className="tkv2-sec">
             <h4>Acceptance criteria — {acCount}</h4>
@@ -344,11 +412,17 @@ export function TicketDetail({ story, index, prdId, onBack }: {
               <div className="tkv2-aisum">
                 <div className="ah">✳ AI summary</div>
                 {summary}
-                <div className="tkv2-actions2">
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={acceptPropagate}>Accept &amp; propagate</button>
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--ghost">Edit</button>
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--ghost">Reject</button>
-                </div>
+                {proposedCriterion ? (
+                  <>
+                    <div className="tkv2-propose">
+                      <b>Proposed acceptance criterion:</b> {proposedCriterion}
+                    </div>
+                    <div className="tkv2-actions2">
+                      <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={acceptPropagate}>Accept &amp; propagate</button>
+                      <button type="button" className="tkv2-btn2 tkv2-btn2--ghost" onClick={rejectPropagate}>Reject</button>
+                    </div>
+                  </>
+                ) : null}
               </div>
             ) : null}
             {comments.length === 0 ? (
@@ -377,94 +451,7 @@ export function TicketDetail({ story, index, prdId, onBack }: {
               <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={addComment} disabled={!commentText.trim()}>Send</button>
             </div>
           </div>
-        </div>
-
-        {/* Details rail */}
-        <div className="tkv2-rail">
-          <div style={{ position: "relative", display: "inline-block" }}>
-            <button type="button" className="tkv2-statusbtn" onClick={() => setOpenMenu((m) => (m === "status" ? null : "status"))}>
-              {status} <IconChevronDown size={12} />
-            </button>
-            {openMenu === "status" ? (
-              <div className="tkv2-picker" style={{ position: "absolute", zIndex: 20 }}>
-                {STATUS_OPTIONS.map((o) => (
-                  <button key={o} type="button" className={`tkv2-pitem${o === status ? " tkv2-pitem--sel" : ""}`} onClick={() => pickStatus(o)}>
-                    {o === status ? <IconCheck size={12} /> : <span style={{ width: 12 }} />}{o}
-                  </button>
-                ))}
-              </div>
-            ) : null}
-          </div>
-
-          <h4>Details</h4>
-          <div className="tkv2-rrow">
-            <span className="tkv2-rl">Assignee</span>
-            <span className="tkv2-rv" style={{ position: "relative" }}>
-              <button type="button" aria-label="Reassign" onClick={openReassign} style={{ display: "inline-flex", alignItems: "center", gap: 7, background: "none", border: "none", cursor: "pointer", font: "inherit", color: "inherit" }}>
-                <span className="tkv2-av" style={{ width: 24, height: 24, fontSize: 9.5, background: av.bg, color: av.color, borderColor: av.color }}>{initials(assigneeName)}</span>
-                {assigneeName}
-              </button>
-              {openMenu === "reassign" ? (
-                <div className="tkv2-picker" style={{ position: "absolute", right: 0, zIndex: 20 }}>
-                  <div className="ph2">Reassign</div>
-                  {members == null ? <div className="tkv2-pitem">Loading…</div>
-                    : members.length === 0 ? <div className="tkv2-pitem">No team members</div>
-                    : members.map((m) => {
-                      const nm = m.display_name || m.email || "Member"
-                      return (
-                        <button key={m.user_id} type="button" className={`tkv2-pitem${assignee?.user_id === m.user_id ? " tkv2-pitem--sel" : ""}`} onClick={() => pickAssignee(m)}>
-                          {nm}{m.role ? <span className="tkv2-ppath">{m.role}</span> : null}
-                        </button>
-                      )
-                    })}
-                </div>
-              ) : null}
-            </span>
-          </div>
-          <div className="tkv2-rrow"><span className="tkv2-rl">Reporter</span><span className="tkv2-rv tkv2-rv--muted">Sprntly PM Agent</span></div>
-          <div className="tkv2-rrow"><span className="tkv2-rl">Priority</span><span className="tkv2-rv"><span className={`tkv2-pill tkv2-pill--${pill.variant}`}>{pill.label}</span></span></div>
-          {story.labels && story.labels.length ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Labels</span><span className="tkv2-rv tkv2-rv--muted">{story.labels.join(" · ")}</span></div>
-          ) : null}
-          {story.prd_section ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Provenance</span><span className="tkv2-rv">{story.prd_section}</span></div>
-          ) : null}
-          {story.story_points != null ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Story points</span><span className="tkv2-rv">{story.story_points}</span></div>
-          ) : null}
-          {story.route ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Route</span><span className="tkv2-rv" style={{ color: routeAgentReady ? "var(--green-d)" : undefined }}>{story.route}</span></div>
-          ) : null}
-          {story.ears_ids && story.ears_ids.length ? (
-            <div className="tkv2-rrow"><span className="tkv2-rl">Traces</span><span className="tkv2-rv tkv2-rv--muted">{story.ears_ids.join(" · ")}</span></div>
-          ) : null}
-        </div>
       </div>
     </div>
-  )
-}
-
-/** Decision-ticket description ([ESCALATE] → decision / owner / decide-by). */
-function DecisionBlock({ story }: { story: GeneratedStory }) {
-  return (
-    <>
-      {story.decision ? (<><div className="tkv2-dlbl">Decision</div><p className="tkv2-dtx">{story.decision}</p></>) : null}
-      {story.owner ? (<><div className="tkv2-dlbl">Owner</div><p className="tkv2-dtx">{story.owner}</p></>) : null}
-      {story.decide_by ? (<><div className="tkv2-dlbl">Decide by</div><p className="tkv2-dtx">{story.decide_by}</p></>) : null}
-      {story.blocks && story.blocks.length ? (
-        <><div className="tkv2-dlbl">Blocks</div><ul className="tkv2-dlist">{story.blocks.map((b, i) => <li key={i}>{b}</li>)}</ul></>
-      ) : null}
-    </>
-  )
-}
-
-/** Spike-ticket description ([ASSUMPTION → T0] → timebox / exit condition). */
-function SpikeBlock({ story }: { story: GeneratedStory }) {
-  return (
-    <>
-      {story.what ? (<><div className="tkv2-dlbl">What to validate</div><p className="tkv2-dtx">{story.what}</p></>) : null}
-      {story.timebox ? (<><div className="tkv2-dlbl">Timebox</div><p className="tkv2-dtx">{story.timebox}</p></>) : null}
-      {story.exit_condition ? (<><div className="tkv2-dlbl">Exit condition</div><p className="tkv2-dtx">{story.exit_condition}</p></>) : null}
-    </>
   )
 }

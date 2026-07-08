@@ -36,7 +36,7 @@ from app.graph.gateway import llm_call
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "user-stories-v2"
+PROMPT_VERSION = "user-stories-v4"
 
 # Output contract for the gateway — the skill's canonical ticket. `title`,
 # `body`, and `acceptance_criteria` stay required for backward compatibility
@@ -60,12 +60,8 @@ _SCHEMA: dict[str, Any] = {
                 "properties": {
                     "ticket_type": {
                         "type": "string",
-                        "enum": ["build", "decision", "spike"],
-                        "description": (
-                            "build = a deliverable; decision = a [ESCALATE] "
-                            "choice with an owner; spike = a timeboxed "
-                            "[ASSUMPTION → T0] validation. Default build."
-                        ),
+                        "enum": ["build"],
+                        "description": "Always 'build' — a deliverable ticket.",
                     },
                     "title": {
                         "type": "string",
@@ -193,31 +189,6 @@ _SCHEMA: dict[str, Any] = {
                             "specified → Claude Code) vs needs-human."
                         ),
                     },
-                    # ── Decision-ticket fields (ticket_type == 'decision') ──
-                    "decision": {
-                        "type": ["string", "null"],
-                        "description": "The decision to make (decision tickets).",
-                    },
-                    "owner": {
-                        "type": ["string", "null"],
-                        "description": "Who decides (decision tickets).",
-                    },
-                    "decide_by": {
-                        "type": ["string", "null"],
-                        "description": "Decide-by date/marker (decision tickets).",
-                    },
-                    # ── Spike fields (ticket_type == 'spike') ──
-                    "timebox": {
-                        "type": ["string", "null"],
-                        "description": "Timebox for a spike (e.g. '2 days').",
-                    },
-                    "exit_condition": {
-                        "type": ["string", "null"],
-                        "description": (
-                            "What validates the [ASSUMPTION → T0] contract "
-                            "(spike tickets)."
-                        ),
-                    },
                 },
                 "required": ["title", "body", "acceptance_criteria"],
             },
@@ -240,12 +211,10 @@ _SYSTEM = (
     "failure branches prefixed '[failure]' and edge cases '[edge]'. With prose "
     "only, GENERATE Given/When/Then criteria (>=1 edge/negative case) and set "
     "ac_inherited=false.\n"
-    "Turn each Part B [ESCALATE] into a DECISION ticket (ticket_type=decision, "
-    "with decision/owner/decide_by and the build tickets it blocks) and each "
-    "[ASSUMPTION → T0] into a SPIKE (ticket_type=spike, with timebox and "
-    "exit_condition). Preserve [NEED] markers verbatim in data_gaps — never "
-    "invent numbers, owners, or criteria. Also mirror the user story into "
-    "`body`. Return only the structured tickets."
+    "Every ticket is a BUILD ticket (a deliverable) — do NOT emit decision or "
+    "spike tickets. Preserve [NEED] markers verbatim in data_gaps — never invent "
+    "numbers, owners, or criteria. Also mirror the user story into `body`. Return "
+    "only the structured tickets."
 )
 
 # ClickUp priority is an int 1-4 (1=urgent ... 4=low). Map the skill's
@@ -291,6 +260,9 @@ class Story:
     story_points: Optional[int] = None
     labels: list[str] = field(default_factory=list)
     data_gaps: list[str] = field(default_factory=list)
+    # Story-map placement (empty for a flat/unsized set)
+    activity: str = ""
+    release: str = ""
     # Decision-ticket fields
     decision: Optional[str] = None
     owner: Optional[str] = None
@@ -369,6 +341,8 @@ class Story:
             "story_points": self.story_points,
             "labels": list(self.labels),
             "data_gaps": list(self.data_gaps),
+            "activity": self.activity,
+            "release": self.release,
             "priority": self.priority,
             "route": self.route,
             "decision": self.decision,
@@ -403,6 +377,8 @@ class Story:
             story_points=int(sp) if isinstance(sp, (int, float)) else None,
             labels=_clean_str_list(d.get("labels")),
             data_gaps=_clean_str_list(d.get("data_gaps")),
+            activity=str(d.get("activity") or "").strip(),
+            release=str(d.get("release") or "").strip(),
             decision=(d.get("decision") or None),
             owner=(d.get("owner") or None),
             decide_by=(d.get("decide_by") or None),
@@ -475,7 +451,12 @@ def generate_user_stories(
         skill="user-stories",
         model=model,
         # Large structured output — stream on the long read timeout (was tripping
-        # httpx.ReadTimeout on the default 120s non-streamed path).
+        # httpx.ReadTimeout on the default 120s non-streamed path). The canonical
+        # ticket is big (five-section description, provenance, inherited AC,
+        # subtasks, deps, story-map placement), so a real PRD's full set easily
+        # exceeds the gateway's 16k default and the tool-call gets TRUNCATED —
+        # which surfaces as an empty parse (0 tickets). Give it a generous budget.
+        max_tokens=32000,
         long_output=True,
     )
     raw = (result.output or {}).get("stories", []) if result.output else []
@@ -485,7 +466,12 @@ def generate_user_stories(
     # re-running this multi-minute call until the PRD content actually changes.
     # Keyed by a content hash of the rendered PRD (see app.db.prd_tickets). Never
     # let a persistence write break generation — the stories are still returned.
-    if prd_id is not None and prd is not None:
+    #
+    # NEVER cache an EMPTY result: a real PRD always yields tickets, so 0 means a
+    # transient failure (a truncated/empty tool-call). Persisting it as `ready`
+    # would stick the tab on "0 tickets" forever; skipping the write leaves the
+    # cache absent so the next open retries.
+    if prd_id is not None and prd is not None and stories:
         try:
             from app.db.prd_tickets import hash_prd_row, save_tickets
 
@@ -497,6 +483,11 @@ def generate_user_stories(
             )
         except Exception:  # noqa: BLE001
             logger.exception("persisting prd_tickets failed (continuing)")
+    elif prd_id is not None and not stories:
+        logger.warning(
+            "ticket generation returned 0 tickets for prd_id=%s — not caching so "
+            "the next open retries", prd_id,
+        )
 
     # Record the semantic decision (what was produced) alongside the gateway's
     # own llm_call telemetry row. Never let an audit-write break generation.

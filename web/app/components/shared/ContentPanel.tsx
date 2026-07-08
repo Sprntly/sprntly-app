@@ -8,9 +8,31 @@ import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
-import { ApiError, storiesApi, type ClickUpList, type GeneratedStory } from "../../lib/api"
+import { ApiError, storiesApi, type ClickUpList, type ClickUpTicketState, type GeneratedStory } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { TicketDetail, priorityPill } from "./TicketDetail"
+import { DestinationPicker } from "./DestinationPicker"
+
+// Per-PRD push destination ("remember for this PRD"). Persisted client-side so a
+// second push for the same PRD goes straight to the remembered list without
+// re-opening the picker. Keyed by PRD id; scoped to this browser for now
+// (server-side per-workspace persistence is a follow-up).
+function rememberedDest(prdId: number | null): string | null {
+  if (prdId == null || typeof window === "undefined") return null
+  try {
+    return window.localStorage.getItem(`sprntly_ticket_dest_${prdId}`)
+  } catch {
+    return null
+  }
+}
+function saveRememberedDest(prdId: number | null, listId: string): void {
+  if (prdId == null || typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(`sprntly_ticket_dest_${prdId}`, listId)
+  } catch {
+    /* storage unavailable — the choice just won't persist */
+  }
+}
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
 import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
 import type { PrdState } from "../../types/content"
@@ -379,11 +401,12 @@ function EvidenceTab() {
 // (backend/skills/user-stories/examples/sprntly-ticket-views.html). Click to
 // open the editable in-panel detail (TicketDetail) — the generated story is the
 // base, edits persist as overrides.
-function StoryRow({ story, index, onOpen }: { story: GeneratedStory; index: number; onOpen: () => void }) {
+function StoryRow({ story, index, onOpen, synced }: {
+  story: GeneratedStory; index: number; onOpen: () => void; synced?: ClickUpTicketState
+}) {
   const pill = priorityPill(story.priority)
   const preview = story.user_story || story.body
   const acCount = story.acceptance_criteria.length
-  const type = story.ticket_type ?? "build"
   return (
     <button type="button" className="tkv2-card" onClick={onOpen}>
       <span className="tkv2-key">{`T-${index + 1}`}</span>
@@ -396,9 +419,13 @@ function StoryRow({ story, index, onOpen }: { story: GeneratedStory; index: numb
           </div>
         ) : null}
         <div className="tkv2-row">
-          {type !== "build" ? <span className={`tkv2-typechip tkv2-typechip--${type}`}>{type}</span> : null}
           <span className={`tkv2-pill tkv2-pill--${pill.variant}`}>{pill.label}</span>
           {acCount > 0 ? <span className="tkv2-acchip">{acCount} AC</span> : null}
+          {synced?.status ? (
+            <span className="tkv2-synced" title={synced.assignee ? `Assignee: ${synced.assignee}` : undefined}>
+              ⟳ ClickUp: {synced.status}
+            </span>
+          ) : null}
         </div>
       </div>
     </button>
@@ -435,6 +462,11 @@ export function TicketsTab() {
     | { kind: "error"; message: string }
   const [pushState, setPushState] = useState<PushState>({ kind: "idle" })
   const [selectedListId, setSelectedListId] = useState<string>("")
+  // "Remember for this PRD" toggle in the destination picker.
+  const [rememberDest, setRememberDest] = useState<boolean>(true)
+  // Current ClickUp state pulled back per ticket id (bidirectional sync).
+  const [syncedStatuses, setSyncedStatuses] = useState<Record<string, ClickUpTicketState>>({})
+  const [syncing, setSyncing] = useState(false)
 
   // Manual regenerate: tickets are cached per PRD and only auto-regenerate when
   // the PRD changes, so give the user an explicit way to force a fresh set. A
@@ -561,26 +593,8 @@ export function TicketsTab() {
       showToast("ClickUp not connected", "Connect ClickUp in Settings to push these tickets.")
       return
     }
-    // List already chosen → push the generated tickets directly.
-    if (pushState.kind === "picking" && selectedListId) {
-      const list = pushState.lists.find((l) => l.id === selectedListId)
-      setPushState({ kind: "pushing", listName: list?.name ?? selectedListId })
-      try {
-        const result = await storiesApi.pushToClickUp(selectedListId, stories)
-        setPushState({ kind: "done", created: result.created.length, errors: result.errors.length })
-        if (result.errors.length > 0) {
-          showToast("ClickUp sync partial", `${result.created.length} created, ${result.errors.length} failed.`)
-        } else {
-          showToast("Synced to ClickUp", `${result.created.length} tickets created successfully.`)
-        }
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : "Unknown error"
-        setPushState({ kind: "error", message: msg })
-        showToast("ClickUp sync failed", msg.slice(0, 120))
-      }
-      return
-    }
-    // First click → fetch the lists to pick a target.
+    // First click → fetch the lists. If this PRD already has a remembered
+    // destination, push straight to it; otherwise open the picker.
     setPushState({ kind: "fetching-lists" })
     try {
       const r = await storiesApi.listClickUpLists()
@@ -588,11 +602,66 @@ export function TicketsTab() {
         setPushState({ kind: "error", message: "No ClickUp lists found. Create a list in ClickUp first." })
         return
       }
+      const remembered = rememberedDest(prdId)
+      if (remembered && r.lists.some((l) => l.id === remembered)) {
+        const list = r.lists.find((l) => l.id === remembered)
+        await pushToList(remembered, list?.name ?? remembered)
+        return
+      }
       setSelectedListId(r.lists[0].id)
       setPushState({ kind: "picking", lists: r.lists })
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error"
       setPushState({ kind: "error", message: msg })
+    }
+  }
+
+  // Push the reviewed tickets to a chosen list (the field-mapped sync runs on the
+  // backend). Persists the destination when "remember for this PRD" is on.
+  const pushToList = async (listId: string, listName: string) => {
+    if (rememberDest) saveRememberedDest(prdId, listId)
+    setPushState({ kind: "pushing", listName })
+    try {
+      const result = await storiesApi.pushToClickUp(listId, stories)
+      setPushState({ kind: "done", created: result.created.length, errors: result.errors.length })
+      if (result.errors.length > 0) {
+        showToast("ClickUp sync partial", `${result.created.length} created, ${result.errors.length} failed.`)
+      } else {
+        showToast("Synced to ClickUp", `${result.created.length} tickets created successfully.`)
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error"
+      setPushState({ kind: "error", message: msg })
+      showToast("ClickUp sync failed", msg.slice(0, 120))
+    }
+  }
+
+  // Bidirectional read: pull the current ClickUp state for tickets already
+  // synced to this PRD's remembered list, and surface it on the cards.
+  const handleSyncFromClickUp = async () => {
+    if (syncing) return
+    if (!isClickUpConnected) {
+      showToast("ClickUp not connected", "Connect ClickUp in Settings first.")
+      return
+    }
+    const listId = rememberedDest(prdId)
+    if (!listId) {
+      showToast("Nothing to sync yet", "Push these tickets to ClickUp first, then sync brings their status back.")
+      return
+    }
+    const ticketIds = stories.map((s) => s.id).filter((x): x is string => Boolean(x))
+    if (ticketIds.length === 0) return
+    setSyncing(true)
+    try {
+      const { statuses } = await storiesApi.pullClickUpStatus(listId, ticketIds)
+      setSyncedStatuses(statuses)
+      const n = Object.keys(statuses).length
+      showToast(n ? "Synced from ClickUp" : "No synced tickets found",
+        n ? `Updated status for ${n} ticket${n !== 1 ? "s" : ""}.` : "None of these tickets are in ClickUp yet.")
+    } catch (e) {
+      showToast("Couldn't sync from ClickUp", e instanceof Error ? e.message.slice(0, 120) : "Try again.")
+    } finally {
+      setSyncing(false)
     }
   }
 
@@ -623,6 +692,22 @@ export function TicketsTab() {
     )
   }
 
+  // A ready-but-empty result means generation didn't return any tickets (a
+  // transient/truncated run — a real PRD always yields some). Don't show the
+  // "0 tickets" success chrome; offer a retry instead. The empty set was not
+  // cached (backend), so Regenerate re-runs cleanly.
+  if (genState.kind === "ready" && stories.length === 0) {
+    return (
+      <div className="cpanel-empty" data-testid="tickets-empty">
+        <IconSparkle size={20} />
+        <p>No tickets came back from that run. This is usually transient — try again.</p>
+        <button type="button" className="tkv2-btn tkv2-btn--push" style={{ marginTop: 12 }} onClick={regenerate}>
+          ⟳ Regenerate
+        </button>
+      </div>
+    )
+  }
+
   const pushLabel =
     pushState.kind === "fetching-lists" ? "Loading…"
       : pushState.kind === "pushing" ? "Pushing…"
@@ -645,13 +730,6 @@ export function TicketsTab() {
     )
   }
 
-  // Split build tickets from decision/spike tickets so the latter render as a
-  // separate group, per the reference — while preserving each ticket's real
-  // index into `stories` (that's what opens the right detail).
-  const withIdx = stories.map((s, i) => ({ s, i }))
-  const builds = withIdx.filter((x) => (x.s.ticket_type ?? "build") === "build")
-  const decisions = withIdx.filter((x) => x.s.ticket_type === "decision" || x.s.ticket_type === "spike")
-
   return (
     <div className="tkv2 tkt-list-wrap">
       {/* Header block — serif title, subline, then a Regenerate + Push actions
@@ -667,26 +745,37 @@ export function TicketsTab() {
             <button type="button" className="tkv2-btn tkv2-btn--regen" onClick={regenerate} title="Regenerate tickets from the current PRD">
               ⟳ Regenerate
             </button>
-            {pushState.kind === "picking" && (
-              <select
-                value={selectedListId}
-                onChange={(e) => setSelectedListId(e.target.value)}
-                className="tkt-list-select"
-                aria-label="ClickUp list"
-              >
-                {(pushState as { kind: "picking"; lists: ClickUpList[] }).lists.map((l) => (
-                  <option key={l.id} value={l.id}>{l.folder ? `${l.folder} / ` : ""}{l.name}</option>
-                ))}
-              </select>
+            {isClickUpConnected && (
+              <button type="button" className="tkv2-btn tkv2-btn--regen" onClick={handleSyncFromClickUp} disabled={syncing} title="Pull current status back from ClickUp">
+                {syncing ? "Syncing…" : "⟳ Sync from ClickUp"}
+              </button>
             )}
-            <button
-              type="button"
-              className="tkv2-btn tkv2-btn--push"
-              onClick={handleClickUpPush}
-              disabled={pushState.kind === "fetching-lists" || pushState.kind === "pushing"}
-            >
-              ✓ {pushState.kind === "picking" ? "Push to selected list" : pushLabel}
-            </button>
+            <div style={{ position: "relative", display: "inline-flex" }}>
+              <button
+                type="button"
+                className="tkv2-btn tkv2-btn--push"
+                onClick={handleClickUpPush}
+                disabled={pushState.kind === "fetching-lists" || pushState.kind === "pushing"}
+              >
+                ✓ {pushLabel}
+              </button>
+              {pushState.kind === "picking" && (
+                <DestinationPicker
+                  tool="ClickUp"
+                  lists={pushState.lists}
+                  selectedId={selectedListId}
+                  onSelect={setSelectedListId}
+                  remember={rememberDest}
+                  onToggleRemember={setRememberDest}
+                  count={stories.length}
+                  onPush={() => {
+                    const list = (pushState as { kind: "picking"; lists: ClickUpList[] }).lists.find((l) => l.id === selectedListId)
+                    if (list) void pushToList(list.id, list.name)
+                  }}
+                  onCancel={() => setPushState({ kind: "idle" })}
+                />
+              )}
+            </div>
           </div>
         )}
       </div>
@@ -715,17 +804,9 @@ export function TicketsTab() {
       </div>
 
       <div className="tkt-list">
-        {builds.map(({ s, i }) => (
-          <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
+        {stories.map((s, i) => (
+          <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} synced={s.id ? syncedStatuses[s.id] : undefined} />
         ))}
-        {decisions.length > 0 && (
-          <>
-            <div className="tkv2-grouplbl">Decisions &amp; spikes</div>
-            {decisions.map(({ s, i }) => (
-              <StoryRow key={i} story={s} index={i} onOpen={() => setSelectedIndex(i)} />
-            ))}
-          </>
-        )}
       </div>
 
       <div className="tkv2-foot">

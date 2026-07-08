@@ -1,6 +1,8 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import ReactMarkdown from "react-markdown"
+import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
@@ -13,6 +15,7 @@ import { BriefChat, isPrdCommand, prototypeCtaLabel } from "../../shared/BriefCh
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
+import { PrdInputQuestions } from "../../shared/PrdInputQuestions"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
 import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
@@ -49,6 +52,10 @@ type ChatTab = {
   dbConvId: number | null
   /** Brief finding context — enables PRD/evidence generation for this tab. */
   briefMeta: BriefMeta | null
+  /** The originating insight's body/description text, shown under the title in
+   *  the opening insight message. Null for tabs not opened from a brief finding
+   *  (backlog / plain chat) or when the finding had no body. */
+  insightBody: string | null
   /** Per-tab cached PRD (not persisted to localStorage — re-generate on reload). */
   prd: PrdState | null
   /** Per-tab cached evidence. */
@@ -94,6 +101,7 @@ export function ChatScreen() {
     openPrdTab,
     showToast,
     openContentPanel,
+    closeContentPanel,
     contentPanelTab,
   } = useNavigation()
   const router = useRouter()
@@ -119,6 +127,7 @@ export function ChatScreen() {
         thread: t.thread ?? [],
         dbConvId: t.dbConvId ?? null,
         briefMeta: t.briefMeta ?? null,
+        insightBody: t.insightBody ?? null,
         prd: null,
         evidence: null,
         prdGenerating: false,
@@ -174,6 +183,7 @@ export function ChatScreen() {
         setTabs((JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
           id: t.id ?? "", title: t.title ?? "", thread: t.thread ?? [],
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
+          insightBody: t.insightBody ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
         })))
       } else {
@@ -260,6 +270,13 @@ export function ChatScreen() {
       return { ...t, thread: next }
     }))
   }, [activeTabId])
+
+  // A "User input needed" answer patched the PRD (scoped edit). Refresh the
+  // active tab's cached PRD + the shared content panel so the change shows live.
+  const handleInputPrdUpdated = useCallback((prd: PrdState) => {
+    setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prd } : t))
+    setContent({ prd })
+  }, [activeTabId, setContent])
   const [draft, setDraft] = useState("")
   // Per-tab busy tracking — a tab is "busy" while its own ask is in flight. The
   // composer's busy/disabled state is derived from the ACTIVE tab only (see the
@@ -324,7 +341,7 @@ export function ChatScreen() {
     const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     setTabs((prev) => [...prev, {
       id, title, thread: initialThread ?? [], dbConvId: dbId ?? null,
-      briefMeta: briefMeta ?? null, prd: null, evidence: null,
+      briefMeta: briefMeta ?? null, insightBody: null, prd: null, evidence: null,
       prdGenerating: false, evidenceGenerating: false,
     }])
     setActiveTabId(id)
@@ -357,9 +374,16 @@ export function ChatScreen() {
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     if (existing) {
       setActiveTabId(existing.id)
+      // Backfill the insight body onto an already-open tab that lacks one (e.g. a
+      // tab created before this field existed, or opened via a path that didn't
+      // carry it) so reopening the insight surfaces its content, not just a title.
+      if (req.insightBody && !existing.insightBody) {
+        setTabs((prev) => prev.map((t) => t.id === existing.id ? { ...t, insightBody: req.insightBody ?? null } : t))
+      }
     } else {
       setTabs((prev) => [...prev, {
         id: tabId, title, thread: [], dbConvId: null, briefMeta: meta,
+        insightBody: req.insightBody ?? null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
       }])
       setActiveTabId(tabId)
@@ -927,6 +951,21 @@ export function ChatScreen() {
     openContentPanel("prd")
   }, [prdPanelPending, openContentPanel])
 
+  // Keep the content panel scoped to real chat tabs. The panel is a single global
+  // overlay; "View PRD" on a brief finding spawns a PRD chat tab and slides the
+  // panel open over it (wanted). But because the panel is global, switching back
+  // to the pinned brief tab would leave it hanging over the weekly brief (not
+  // wanted). When the user SWITCHES to the brief tab, close any panel a PRD tab
+  // left open. Guarded on an actual tab switch, so the brief's own inline actions
+  // (Tickets / Evidence / multi-agent — which open the panel WITHOUT a tab
+  // switch) are untouched and stay visible.
+  const prevTabForPanelRef = useRef(activeTabId)
+  useEffect(() => {
+    const switchedTab = prevTabForPanelRef.current !== activeTabId
+    prevTabForPanelRef.current = activeTabId
+    if (switchedTab && isBriefTab && contentPanelTab) closeContentPanel()
+  }, [activeTabId, isBriefTab, contentPanelTab, closeContentPanel])
+
   // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
   // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps
   // generating server-side. The pending USER turn lives in the persisted
@@ -1072,6 +1111,7 @@ export function ChatScreen() {
       const kept = prev.filter((t) => t.thread.length > 0)
       return [...kept, {
         id, title: NEW_CHAT_TITLE, thread: [], dbConvId: null, briefMeta: null,
+        insightBody: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
       }]
     })
@@ -1119,6 +1159,10 @@ export function ChatScreen() {
   // The tab title is "PRD · <insight>"; the message shows the insight sentence on
   // its own (the "PRD" kind is already a chip), so strip the redundant prefix.
   const insightText = (activeTab?.prd?.title ?? activeTab?.title ?? "").replace(/^PRD · /, "")
+  // The insight's body/description (from the originating brief finding), shown
+  // under the title so the opening card carries the finding's content, not just
+  // its heading. Null for tabs not opened from a finding (backlog / plain chat).
+  const insightBody = activeTab?.insightBody ?? null
   // Whether a PRD exists for this tab's insight — either loaded on the tab OR
   // saved in the DB (via the brief-prototype map). The tab's `prd` is dropped
   // from localStorage on reload, so relying on it alone made the CTA say
@@ -1380,6 +1424,13 @@ export function ChatScreen() {
                             <span className="bc-insight-msg-kind">PRD</span>
                             <span className="bc-insight-msg-text">{insightText}</span>
                           </div>
+                          {/* Insight body — the finding's content under the heading.
+                              Rendered as markdown so LLM-supplied **bold** shows. */}
+                          {insightBody ? (
+                            <div className="bc-insight-msg-body fc-body--md">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>{insightBody}</ReactMarkdown>
+                            </div>
+                          ) : null}
                         </div>
                         <div className="bc-actions">
                           <button
@@ -1402,6 +1453,15 @@ export function ChatScreen() {
                           </button>
                         </div>
                       </div>
+                    ) : null}
+                    {/* "User input needed" items from the PRD, surfaced as chat
+                        messages with answer buttons. Answering patches only the
+                        affected PRD sections and refreshes the panel live. */}
+                    {activeTab?.prd ? (
+                      <PrdInputQuestions
+                        prdId={activeTab.prd.prd_id}
+                        onPrdUpdated={handleInputPrdUpdated}
+                      />
                     ) : null}
                     {thread.map((turn, idx) => {
                       const isLast = idx === thread.length - 1

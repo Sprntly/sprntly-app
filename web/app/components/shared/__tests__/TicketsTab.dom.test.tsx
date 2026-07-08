@@ -22,12 +22,13 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }))
 
-const { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, getData, teamList } = vi.hoisted(() => ({
+const { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus, getData, teamList } = vi.hoisted(() => ({
   getForPrd: vi.fn(),
   generate: vi.fn(),
   getJob: vi.fn(),
   listClickUpLists: vi.fn(),
   pushToClickUp: vi.fn(),
+  pullClickUpStatus: vi.fn(),
   getData: vi.fn(),
   teamList: vi.fn(),
 }))
@@ -35,7 +36,7 @@ vi.mock("../../../lib/api", async (orig) => {
   const actual = await orig<typeof import("../../../lib/api")>()
   return {
     ...actual,
-    storiesApi: { getForPrd, generate, getJob, listClickUpLists, pushToClickUp },
+    storiesApi: { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus },
     ticketDataApi: { ...actual.ticketDataApi, getData },
     teamApi: { list: teamList },
   }
@@ -241,12 +242,13 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     expect(screen.getByText(/generate a PRD first/i)).toBeTruthy()
   })
 
-  it("pushing fetches ClickUp lists then creates the generated tickets", async () => {
+  it("pushing fetches ClickUp lists, opens the destination picker, then creates the tickets", async () => {
+    window.localStorage.clear()
     content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
     const stories = [{ title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
     generate.mockResolvedValue({ job_id: 12, status: "generating" })
     getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
-    listClickUpLists.mockResolvedValue({ lists: [{ id: "list-1", name: "Sprint", folder: null }] })
+    listClickUpLists.mockResolvedValue({ lists: [{ id: "list-1", name: "Sprint", space: "Product", folder: null }] })
     pushToClickUp.mockResolvedValue({ created: [{ story: "T1", task_id: "cu-1", url: "http://x" }], errors: [] })
 
     await act(async () => {
@@ -254,16 +256,63 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     })
     await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
 
-    // First push click (top-bar button) → fetch lists.
+    // First push click (top-bar button) → fetch lists and open the picker.
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /push to clickup/i }))
     })
     expect(listClickUpLists).toHaveBeenCalled()
+    await waitFor(() => expect(screen.getByText(/select a project/i)).toBeTruthy())
 
-    // Second click (list picked) → push the generated stories.
+    // The picker's "Push N tickets" action → push the reviewed stories.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /push to selected list/i }))
+      fireEvent.click(screen.getByRole("button", { name: /push 1 ticket/i }))
     })
     expect(pushToClickUp).toHaveBeenCalledWith("list-1", stories)
+    // "Remember for this PRD" is on by default → the destination is persisted.
+    expect(window.localStorage.getItem("sprntly_ticket_dest_7")).toBe("list-1")
+  })
+
+  it("a remembered destination pushes straight through without re-opening the picker", async () => {
+    window.localStorage.clear()
+    window.localStorage.setItem("sprntly_ticket_dest_7", "list-1")
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
+    const stories = [{ title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
+    listClickUpLists.mockResolvedValue({ lists: [{ id: "list-1", name: "Sprint", space: "Product", folder: null }] })
+    pushToClickUp.mockResolvedValue({ created: [{ story: "T1", task_id: "cu-1", url: "http://x" }], errors: [] })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /push to clickup/i }))
+    })
+    // No picker — pushed directly to the remembered list.
+    expect(screen.queryByText(/select a project/i)).toBeNull()
+    expect(pushToClickUp).toHaveBeenCalledWith("list-1", stories)
+  })
+
+  it("Sync from ClickUp pulls status back and shows it on the ticket card", async () => {
+    window.localStorage.clear()
+    window.localStorage.setItem("sprntly_ticket_dest_7", "list-1")  // already pushed
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
+    const stories = [{ id: "tk-1", title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
+    pullClickUpStatus.mockResolvedValue({ statuses: { "tk-1": { status: "in progress", assignee: "nadia", url: "u" } } })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /sync from clickup/i }))
+    })
+    expect(pullClickUpStatus).toHaveBeenCalledWith("list-1", ["tk-1"])
+    await waitFor(() => expect(screen.getByText(/ClickUp: in progress/i)).toBeTruthy())
   })
 })

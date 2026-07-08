@@ -823,10 +823,10 @@ export function BriefChat() {
         currentPrdMeta.briefId === meta.briefId &&
         currentPrdMeta.insightIndex === meta.insightIndex
       ) {
-        openPrdTab({ title, source: { kind: "ready", prd: content.prd, meta } })
+        openPrdTab({ title, insightBody: finding.body, source: { kind: "ready", prd: content.prd, meta } })
         return
       }
-      openPrdTab({ title, source: { kind: "generate", meta } })
+      openPrdTab({ title, insightBody: finding.body, source: { kind: "generate", meta } })
     },
     [content.briefDetails, content.prd, content.prdMeta, openPrdTab, showToast],
   )
@@ -961,11 +961,11 @@ export function BriefChat() {
         content.prdMeta.briefId === meta.briefId &&
         content.prdMeta.insightIndex === meta.insightIndex
       ) {
-        openPrdTab({ title, source: { kind: "ready", prd: content.prd, meta } })
+        openPrdTab({ title, insightBody: finding.body, source: { kind: "ready", prd: content.prd, meta } })
         return
       }
       // Existing PRD by id → load it into a chat tab (ChatScreen drives the fetch).
-      openPrdTab({ title, source: { kind: "load", prdId: state.prdId, meta: meta ?? null } })
+      openPrdTab({ title, insightBody: finding.body, source: { kind: "load", prdId: state.prdId, meta: meta ?? null } })
     },
     [
       content.briefDetails,

@@ -274,6 +274,109 @@ def create_task(
     return {"id": data.get("id"), "url": data.get("url")}
 
 
+def update_task(
+    access_token: str,
+    task_id: str,
+    *,
+    name: str | None = None,
+    markdown_description: str | None = None,
+    priority: int | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Update an existing ClickUp task (idempotent re-push). Returns `{id, url}`.
+
+    PUT https://api.clickup.com/api/v2/task/{task_id}. Only the given fields are
+    sent. `tags` cannot be set via the task PUT — ClickUp exposes tags through a
+    separate add/remove-tag endpoint — so they are dropped from `extra` here
+    (create still sets them); a full tag reconcile is part of the sync follow-up.
+    Auth/error handling mirrors create_task (401/403 → reconnect; else 502)."""
+    body: dict[str, Any] = {}
+    if name is not None:
+        body["name"] = name
+    if markdown_description is not None:
+        body["markdown_content"] = markdown_description
+    if priority is not None:
+        body["priority"] = priority
+    if extra:
+        body.update({k: v for k, v in extra.items() if k != "tags"})
+    resp = requests.put(
+        f"{CLICKUP_API}/task/{task_id}",
+        json=body,
+        headers={"Authorization": access_token},
+        timeout=_WRITE_TIMEOUT,
+    )
+    if resp.status_code in (401, 403):
+        logger.warning("ClickUp update_task auth rejected: %s", resp.status_code)
+        raise ClickUpAuthExpiredError(
+            "ClickUp rejected the stored token — reconnect ClickUp to continue"
+        )
+    if not resp.ok:
+        logger.warning(
+            "ClickUp update_task failed: %s %s", resp.status_code, resp.text[:300]
+        )
+        raise HTTPException(502, "ClickUp task update failed")
+    data = resp.json() or {}
+    return {"id": data.get("id") or task_id, "url": data.get("url")}
+
+
+def _write(method: str, path: str, access_token: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Shared writer for the ClickUp v2 API (raw-token auth). 401/403 →
+    reconnect; any other non-OK → 502 so per-item failures stay isolated."""
+    resp = requests.request(
+        method, f"{CLICKUP_API}{path}", json=body or {},
+        headers={"Authorization": access_token}, timeout=_WRITE_TIMEOUT,
+    )
+    if resp.status_code in (401, 403):
+        raise ClickUpAuthExpiredError(
+            "ClickUp rejected the stored token — reconnect ClickUp to continue"
+        )
+    if not resp.ok:
+        logger.warning("ClickUp %s %s failed: %s %s", method, path, resp.status_code, resp.text[:200])
+        raise HTTPException(502, "ClickUp write failed")
+    return resp.json() or {}
+
+
+def create_checklist(access_token: str, task_id: str, name: str) -> str | None:
+    """Create a checklist on a task (used for a ticket's child issues). Returns
+    the checklist id."""
+    data = _write("POST", f"/task/{task_id}/checklist", access_token, {"name": name})
+    return (data.get("checklist") or {}).get("id")
+
+
+def create_checklist_item(access_token: str, checklist_id: str, name: str, resolved: bool = False) -> None:
+    """Add one item to a checklist."""
+    _write("POST", f"/checklist/{checklist_id}/checklist_item", access_token,
+           {"name": name, "resolved": resolved})
+
+
+def add_dependency(access_token: str, task_id: str, *, depends_on: str) -> None:
+    """Record that `task_id` waits on `depends_on` (blocked-by). ClickUp models
+    both directions from one call: depends_on = the task that must finish first."""
+    _write("POST", f"/task/{task_id}/dependency", access_token, {"depends_on": depends_on})
+
+
+def get_task(access_token: str, task_id: str) -> dict[str, Any]:
+    """Fetch a task's current state from ClickUp and normalize the fields we
+    reconcile back into Sprntly: status name, first assignee's display name, and
+    the task url. Returns {} on a 4xx/5xx so a single stale/deleted task never
+    breaks the whole pull."""
+    try:
+        data = _get(access_token, f"/task/{task_id}")
+    except Exception:  # noqa: BLE001 — a per-task fetch failure is non-fatal
+        logger.warning("ClickUp get_task failed for %s", task_id)
+        return {}
+    assignees = data.get("assignees") or []
+    assignee = None
+    if assignees:
+        a = assignees[0] or {}
+        assignee = a.get("username") or a.get("email")
+    return {
+        "status": (data.get("status") or {}).get("status"),
+        "assignee": assignee,
+        "url": data.get("url"),
+    }
+
+
 def _get(token: str, path: str, params: dict | None = None) -> dict[str, Any]:
     """Authenticated GET against the ClickUp v2 API (raw-token auth quirk)."""
     r = requests.get(

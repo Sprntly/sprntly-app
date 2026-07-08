@@ -1297,6 +1297,48 @@ export const prdApi = {
         `/v1/prd/${id}/generations`,
       )
       .then((r) => r.generations),
+  /** The PRD's structured "User input needed" questions (extracted at generation
+   *  time). Rendered in the PRD's chat as messages with answer buttons. Returns
+   *  every question; the client shows pending ones as actionable. */
+  listInputQuestions: (id: number) =>
+    api
+      .get<{ questions: PrdInputQuestion[] }>(`/v1/prd/${id}/input-questions`)
+      .then((r) => r.questions),
+  /** Answer one "User input needed" question. The backend folds the answer into
+   *  only the affected PRD sections (a scoped edit — NOT a full regeneration),
+   *  saves an undoable version, and returns the updated PRD + which sections
+   *  changed so the panel can refresh live and the chat can confirm. */
+  answerInputQuestion: (prdId: number, questionId: number, answer: string) =>
+    api.post<PrdInputAnswerResponse>(
+      `/v1/prd/${prdId}/input-questions/${questionId}/answer`,
+      { answer },
+    ),
+}
+
+/** One structured "User input needed" item lifted out of the PRD document.
+ *  `tag` is 'escalate' (a product decision → answered by picking an `options`
+ *  button) or 'need' (missing data → answered as free text, `options` empty).
+ *  `status` walks pending → answered (or dismissed). */
+export type PrdInputQuestion = {
+  id: number
+  prd_id: number
+  ordinal: number
+  tag: "escalate" | "need"
+  prompt: string
+  owner?: string | null
+  options: PendingQuestionChoice[]
+  status: "pending" | "answered" | "dismissed"
+  answer?: string | null
+}
+
+/** Response from POST /v1/prd/{id}/input-questions/{qid}/answer — the updated PRD
+ *  (with the scoped edit folded in), the now-answered question, and the
+ *  human-readable section names the edit touched (for the chat confirmation). */
+export type PrdInputAnswerResponse = {
+  prd: PrdRecord
+  question: PrdInputQuestion
+  sections_changed: string[]
+  summary: string
 }
 
 // ---- Design Agent ---------------------------------------------------
@@ -1596,8 +1638,10 @@ export const designAgentApi = {
    *  supplied display name; the backend maps it onto the comment author (falling
    *  back to "Anonymous"). Omitted on the signed-in surface. Additive field. */
   createCommentByToken: (token: string, body: {
-    anchor_id: string; body: string;
-    pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
+    /** null = a general (unpinned) comment -- prototype-level feedback with no
+     *  element anchor. Pinned callers keep passing a non-empty string. */
+    anchor_id: string | null; body: string;
+    pin_x_pct?: number | null; pin_y_pct?: number | null; resolved_anchor_id?: string | null;
     viewer_name?: string;
   }) =>
     api.post<CommentRecord>(
@@ -1607,9 +1651,11 @@ export const designAgentApi = {
   /** Authed comment create for the signed-in canvas (mark-and-comment pin flow).
    *  Hits the authed route `POST /v1/design-agent/{id}/comments` (same-origin/CSRF
    *  gated). Position fields are optional — pin comments include x/y and the
-   *  resolved anchor; right-click anchor comments omit them. */
+   *  resolved anchor; right-click anchor comments omit them. `anchor_id: null`
+   *  is the authed General composer's general (unpinned, prototype-level)
+   *  comment — same null representation as createCommentByToken's general case. */
   createComment: (prototypeId: number, body: {
-    anchor_id: string; body: string;
+    anchor_id: string | null; body: string;
     pin_x_pct?: number; pin_y_pct?: number; resolved_anchor_id?: string | null;
   }) =>
     api.post<CommentRecord>(`/v1/design-agent/${prototypeId}/comments`, body),
@@ -1941,7 +1987,9 @@ export const ticketDataApi = {
   /** AI summary of the comment thread. `summary` is null when there's too little
    *  to summarize (< 2 comments) or the LLM call failed (best-effort). */
   summarizeComments: (ticketKey: string) =>
-    api.get<{ summary: string | null }>(`/v1/tickets/${encodeURIComponent(ticketKey)}/comments/summary`),
+    api.get<{ summary: string | null; proposed_criterion?: string | null }>(
+      `/v1/tickets/${encodeURIComponent(ticketKey)}/comments/summary`,
+    ),
 }
 
 export const ticketPushApi = {
@@ -1998,6 +2046,9 @@ export type GeneratedStory = {
   story_points?: number | null
   labels?: string[]
   data_gaps?: string[] // [NEED] markers, never filled
+  // ── Story-map placement (Jeff Patton); empty for a flat/unsized set ──
+  activity?: string // backbone step (Part A §4) this ticket serves
+  release?: string // release slice; "Release 1" = walking skeleton
   // ── Decision-ticket fields ──
   decision?: string | null
   owner?: string | null
@@ -2048,7 +2099,15 @@ export const storiesApi = {
   /** Create the reviewed stories as tasks in a ClickUp list (explicit write). */
   pushToClickUp: (listId: string, stories: GeneratedStory[]) =>
     api.post<StoryPushResult>("/v1/stories/push", { list_id: listId, stories }),
+  /** Bidirectional read: current ClickUp state (status/assignee/url) for tickets
+   *  already synced to a list, keyed by ticket id. Unsynced tickets are absent. */
+  pullClickUpStatus: (listId: string, ticketIds: string[]) =>
+    api.post<{ statuses: Record<string, ClickUpTicketState> }>(
+      "/v1/stories/pull-status", { list_id: listId, ticket_ids: ticketIds },
+    ),
 }
+
+export type ClickUpTicketState = { status: string | null; assignee: string | null; url: string | null }
 
 // ── Team members ──────────────────────────────────────────────────────────
 
