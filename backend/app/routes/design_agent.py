@@ -71,10 +71,8 @@ from app.db.prototypes import (
     delete_prototype,
     fail_prototype,
     find_existing_prototype,
+    find_prototype_by_prd,
     find_prototype_by_share_token,
-    find_active_prototype_by_prd,
-    find_latest_prototype_by_prd,
-    find_ready_prototype_by_prd,
     flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
@@ -711,8 +709,8 @@ def get_by_prd(
     pattern only ever matches one-segment paths.
     """
     _require_feature_enabled()
-    row = find_ready_prototype_by_prd(
-        prd_id=prd_id, workspace_id=company.company_id
+    row = find_prototype_by_prd(
+        prd_id=prd_id, workspace_id=company.company_id, statuses=["ready"]
     )
     if not row:
         raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
@@ -737,8 +735,8 @@ def get_active_by_prd(
     path, so it can never be shadowed by the single-segment `GET /{prototype_id}`.
     """
     _require_feature_enabled()
-    row = find_active_prototype_by_prd(
-        prd_id=prd_id, workspace_id=company.company_id
+    row = find_prototype_by_prd(
+        prd_id=prd_id, workspace_id=company.company_id, statuses=["ready", "generating"]
     )
     if not row:
         raise HTTPException(status_code=404, detail="No active prototype for this PRD")
@@ -764,7 +762,7 @@ def get_latest_by_prd(
     `GET /{prototype_id}`.
     """
     _require_feature_enabled()
-    row = find_latest_prototype_by_prd(
+    row = find_prototype_by_prd(
         prd_id=prd_id, workspace_id=company.company_id
     )
     if not row:
@@ -831,12 +829,12 @@ def get_brief_prototype_map(
     Feature-flag-gated and workspace-isolated identically to GET /by-prd/{prd_id}:
       - 404 when DESIGN_AGENT_ENABLED is off (feature invisible).
       - workspace_id resolved from the caller's company membership (require_company).
-      - prototype lookup is workspace-scoped via find_ready_prototype_by_prd.
+      - prototype lookup is workspace-scoped via find_prototype_by_prd.
 
     Brief ownership check: this endpoint does NOT explicitly verify that brief_id
     belongs to the caller's workspace. Sibling read routes (e.g. GET /by-prd/{prd_id})
     follow the same approach — cross-workspace containment is enforced at the
-    prototype layer (find_ready_prototype_by_prd filters by workspace_id), and a
+    prototype layer (find_prototype_by_prd filters by workspace_id), and a
     foreign-workspace brief simply yields no PRD rows. The caller therefore learns
     nothing about a brief they don't own — the entries list is empty. FLAG: if an
     explicit brief→company ownership check is added to sibling routes, add the same
@@ -850,8 +848,8 @@ def get_brief_prototype_map(
 
     entries: list[BriefPrototypeMapEntry] = []
     for prd in prds:
-        proto_row = find_ready_prototype_by_prd(
-            prd_id=prd["id"], workspace_id=workspace_id
+        proto_row = find_prototype_by_prd(
+            prd_id=prd["id"], workspace_id=workspace_id, statuses=["ready"]
         )
         prototype = (
             PrototypeReadiness(preview_image_url=proto_row.get("preview_image_url"))
