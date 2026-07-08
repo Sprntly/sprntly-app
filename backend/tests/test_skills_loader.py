@@ -275,11 +275,13 @@ def test_gateway_no_skill_is_unchanged(isolated_settings, monkeypatch):
     assert captured["messages"][0]["content"] == "u"
 
 
-def test_gateway_md_path_folds_method_into_system(isolated_settings, monkeypatch):
-    """call_md has no cacheable-prefix path → method goes into the system prompt."""
+def test_gateway_md_path_routes_method_to_cacheable_prefix(isolated_settings, monkeypatch):
+    """call_md now shares the cacheable-prefix path → the skill METHOD rides the
+    user prefix block (a cache read on repeat calls), NOT the system prompt."""
     from app import llm
     from app.graph.gateway import llm_call
 
+    spec = get_skill("decision-memo")
     captured: dict = {}
     monkeypatch.setattr(llm, "get_client", lambda: _capture_client(captured))
     llm_call(
@@ -287,10 +289,17 @@ def test_gateway_md_path_folds_method_into_system(isolated_settings, monkeypatch
         prompt_version="v1", system="AGENT LAYER", input="u",
         skill="decision-memo",  # no json_schema → call_md
     )
+    # Method rides the cacheable user prefix (first content block), cache-marked.
+    user_content = captured["messages"][0]["content"]
+    assert isinstance(user_content, list)
+    prefix_text = user_content[0]["text"]
+    assert prefix_text.startswith(f"## METHOD (skill: decision-memo @{spec.content_hash})")
+    assert "cache_control" in user_content[0]
+    # The agent layer is the system prompt and no longer carries the METHOD.
     system_sent = captured["system"]
-    assert "## METHOD (skill: decision-memo" in system_sent
-    # method first, agent layer after.
-    assert system_sent.index("## METHOD") < system_sent.index("AGENT LAYER")
+    system_text = system_sent if isinstance(system_sent, str) else system_sent[0]["text"]
+    assert "AGENT LAYER" in system_text
+    assert "## METHOD" not in system_text
 
 
 # ---------- agent bindings ----------
