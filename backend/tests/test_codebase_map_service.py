@@ -327,6 +327,43 @@ def test_clear_map_cache_scoped_and_all():
         assert probe_mock.call_count == 5
 
 
+def test_clear_map_cache_scoped_calls_l2_delete(monkeypatch):
+    """A scoped clear also invalidates the durable tier: it calls the L2
+    delete-by-installation helper with the same installation_id."""
+    fake_l2 = MagicMock()
+    monkeypatch.setattr(service, "_l2", lambda: fake_l2)
+    clear_map_cache(123)
+    fake_l2.delete_cached_maps_for_installation.assert_called_once_with(123)
+
+
+def test_clear_map_cache_unscoped_does_not_call_l2_delete(monkeypatch):
+    """The bare (unscoped) clear used for test isolation touches L1 only — it
+    must NOT reach the durable tier, preserving every existing bare-call site."""
+    fake_l2 = MagicMock()
+    monkeypatch.setattr(service, "_l2", lambda: fake_l2)
+    clear_map_cache()
+    fake_l2.delete_cached_maps_for_installation.assert_not_called()
+
+
+def test_clear_map_cache_l2_unavailable_still_clears_l1(monkeypatch):
+    """When the durable tier is unavailable (_l2() returns None), a scoped clear
+    still drops the in-process entry and does not raise — mirrors the module's
+    existing degrade-to-L1-only contract."""
+    monkeypatch.setattr(service, "_l2", lambda: None)
+    snap = _snapshot(commit_sha="sha-noL2clear")
+    patches = _patch_pipeline(snap)
+    for p in patches:
+        p.start()
+    try:
+        build_map(123, "org/repo", "org/repo@main")
+    finally:
+        for p in patches:
+            p.stop()
+    assert service._CACHE.get((123, "org/repo", "sha-noL2clear")) is not None
+    clear_map_cache(123)  # must not raise even though L2 is unavailable
+    assert service._CACHE.get((123, "org/repo", "sha-noL2clear")) is None
+
+
 def test_cross_installation_no_key_collision():
     snap = _snapshot(commit_sha="sha-shared")
     read_mock = MagicMock(return_value=snap)

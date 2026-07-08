@@ -155,8 +155,26 @@ def _l2() -> ModuleType | None:
 
 
 def clear_map_cache(installation_id: int | None = None) -> None:
-    """Drop one installation's cached maps or every entry."""
+    """Drop one installation's cached maps (BOTH tiers) or every L1 entry.
+
+    Scoped calls (installation_id given) ALSO delete matching L2 rows — this
+    is the seam the uninstall webhook hooks into, so a torn-down installation
+    can never serve a stale cached map if its id is later reissued. The
+    unscoped call (installation_id=None — used by tests to reset L1 between
+    cases) deliberately does NOT touch L2: L2 is durable-by-design, and a
+    blanket wipe is not the scoped-teardown use case this exists for.
+    """
     _CACHE.clear(installation_id)
+    if installation_id is not None:
+        l2 = _l2()
+        if l2 is not None:
+            try:
+                l2.delete_cached_maps_for_installation(installation_id)
+            except Exception:
+                logger.warning(
+                    "codebase_map.l2_invalidate_failed installation_id=%s",
+                    installation_id, exc_info=True,
+                )
 
 
 def _safe(func: Callable[[], _T], default: _T, label: str) -> _T:
