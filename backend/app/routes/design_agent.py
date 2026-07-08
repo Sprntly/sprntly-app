@@ -1416,18 +1416,26 @@ def cancel_prototype_route(
 # ─── Background generation ────────────────────────────────────────────────
 
 
-def _finalize_generation_failed(
+def _finalize_usage_event_failed(
+    *,
     event_id: int | None,
     workspace_id: str,
     prototype_id: int,
     error_class: str,
+    kind: Literal["full_generation", "iteration"],
 ) -> None:
-    """Fail-open finalize of a generation usage-ledger row to 'failed'.
+    """Fail-open finalize of a usage-ledger row to 'failed'.
 
-    A ledger-write failure must never change generation control flow, so every
-    finalize at a failure terminal is wrapped here: identifiers-only WARNING on
-    error, never propagated. No tokens are required on a failure (the run did not
-    bill a complete generation), so only the status + error_class are recorded.
+    Shared by both the generation and iteration failure terminals — a
+    ledger-write failure must never change control flow at either terminal, so
+    every finalize call here is wrapped: identifiers-only WARNING on error,
+    never propagated. No tokens are required on a failure (the run did not
+    bill a complete generation/iteration), so only status + error_class are
+    recorded. `kind` distinguishes the two call sites in the log line only —
+    it carries no other behavior difference (both terminals are otherwise
+    identical: same DB call, same fail-open guard, same no-op on a None
+    event_id, which covers PLAN mode or a failure before the ledger row
+    opened).
     """
     if event_id is None:
         return
@@ -1440,37 +1448,8 @@ def _finalize_generation_failed(
         )
     except Exception:  # noqa: BLE001 — ledger is fail-open; identifiers only.
         logger.warning(
-            "usage_event_finalize_failed event_id=%s prototype_id=%s kind=full_generation",
-            event_id, prototype_id,
-        )
-
-
-def _finalize_iteration_failed(
-    event_id: int | None,
-    workspace_id: str,
-    prototype_id: int,
-    error_class: str,
-) -> None:
-    """Fail-open finalize of an iteration usage-ledger row to 'failed'.
-
-    Iteration counterpart of `_finalize_generation_failed`: identifiers-only
-    WARNING on error, never propagated, so a ledger-write failure can never
-    change iteration control flow. A None event_id (PLAN mode, or a failure
-    before the row opened) is a no-op.
-    """
-    if event_id is None:
-        return
-    try:
-        finalize_usage_event(
-            event_id=event_id,
-            workspace_id=workspace_id,
-            status="failed",
-            error_class=error_class,
-        )
-    except Exception:  # noqa: BLE001 — ledger is fail-open; identifiers only.
-        logger.warning(
-            "usage_event_finalize_failed event_id=%s prototype_id=%s kind=iteration",
-            event_id, prototype_id,
+            "usage_event_finalize_failed event_id=%s prototype_id=%s kind=%s",
+            event_id, prototype_id, kind,
         )
 
 
@@ -1769,7 +1748,13 @@ async def _run_generation_bg(
                     workspace_id=workspace_id,
                     error="agent_loop completed but emitted no files",
                 )
-                _finalize_generation_failed(event_id, workspace_id, prototype_id, "no_files")
+                _finalize_usage_event_failed(
+                    event_id=event_id,
+                    workspace_id=workspace_id,
+                    prototype_id=prototype_id,
+                    error_class="no_files",
+                    kind="full_generation",
+                )
             else:
                 # Include the structured error_message / error_class from
                 # RunResult so the underlying failure (e.g. an Anthropic
@@ -1790,9 +1775,13 @@ async def _run_generation_bg(
                     workspace_id=workspace_id,
                     error=" | ".join(error_parts),
                 )
-                _finalize_generation_failed(
-                    event_id, workspace_id, prototype_id,
-                    getattr(result, "error_class", None) or f"status_{result.status}",
+                _finalize_usage_event_failed(
+                    event_id=event_id,
+                    workspace_id=workspace_id,
+                    prototype_id=prototype_id,
+                    error_class=getattr(result, "error_class", None)
+                    or f"status_{result.status}",
+                    kind="full_generation",
                 )
     except asyncio.CancelledError:
         # The cancel endpoint called task.cancel() (the user aborted from the
@@ -1831,7 +1820,13 @@ async def _run_generation_bg(
             from app.design_agent.provider_alert import maybe_alert_provider_outage
 
             maybe_alert_provider_outage(cls, context={"prototype_id": prototype_id})
-        _finalize_generation_failed(event_id, workspace_id, prototype_id, cls.value)
+        _finalize_usage_event_failed(
+            event_id=event_id,
+            workspace_id=workspace_id,
+            prototype_id=prototype_id,
+            error_class=cls.value,
+            kind="full_generation",
+        )
         fail_prototype(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
@@ -3810,7 +3805,13 @@ async def _run_iterate_bg(
                 workspace_id=workspace_id,
                 error="iterate agent_loop completed but emitted no files",
             )
-            _finalize_iteration_failed(iter_event_id, workspace_id, prototype_id, "no_files")
+            _finalize_usage_event_failed(
+                event_id=iter_event_id,
+                workspace_id=workspace_id,
+                prototype_id=prototype_id,
+                error_class="no_files",
+                kind="iteration",
+            )
         elif result.status == "awaiting_clarification":
             # A clarifying_question terminal-PAUSE is NOT a failure.
             # The runner already persisted the question on `pending_question`;
@@ -3849,9 +3850,13 @@ async def _run_iterate_bg(
                 workspace_id=workspace_id,
                 error=" | ".join(error_parts),
             )
-            _finalize_iteration_failed(
-                iter_event_id, workspace_id, prototype_id,
-                getattr(result, "error_class", None) or f"status_{result.status}",
+            _finalize_usage_event_failed(
+                event_id=iter_event_id,
+                workspace_id=workspace_id,
+                prototype_id=prototype_id,
+                error_class=getattr(result, "error_class", None)
+                or f"status_{result.status}",
+                kind="iteration",
             )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
         from app.design_agent.provider_errors import (
@@ -3875,8 +3880,12 @@ async def _run_iterate_bg(
         # iter_event_id may be unbound if the failure preceded its assignment
         # (e.g. get_prototype raised); guard with locals() so the fail-open
         # finalize never itself raises a NameError.
-        _finalize_iteration_failed(
-            locals().get("iter_event_id"), workspace_id, prototype_id, cls.value,
+        _finalize_usage_event_failed(
+            event_id=locals().get("iter_event_id"),
+            workspace_id=workspace_id,
+            prototype_id=prototype_id,
+            error_class=cls.value,
+            kind="iteration",
         )
         fail_prototype(
             prototype_id=prototype_id,
