@@ -8,7 +8,14 @@
 //   - a DIFFERENT card's label (driven entirely by useBriefPrototypeMap's
 //     batch result, never by the hook's own `cta`) is unaffected by another
 //     card's in-flight generation — proving `listenForCrossSurfaceGenerating`
-//     was correctly left off for this host.
+//     was correctly left off for this host,
+//   - the loading overlay's Cancel affordance dismisses immediately with no
+//     toast/navigation at that moment (the hook's "soft dismiss" contract —
+//     no true-abort call exists at this layer),
+//   - the "Notify me when ready" affordance dismisses the overlay, shows the
+//     processing toast, and — once the background generation later resolves
+//     — surfaces the hook's persistent, actionable completion toast (not a
+//     silent auto-navigate).
 //
 // Mirrors the mocking convention of the adjacent BriefChat.test.tsx (api /
 // generation-runner / pipeline / workspace / useBriefPrototypeMap stubbed so
@@ -16,7 +23,10 @@
 // GenerationLoadingScreen so the hook's callback props can be driven directly
 // (same pattern PrdPanelContent.viewprototype.test.tsx and
 // useGeneratePrototype.test.tsx use), without needing a real backend or SSE
-// stream.
+// stream. NavigationContext is mocked directly (rather than mounting the real
+// provider) so `showToast` calls — including the ones the hook itself makes
+// internally — can be asserted on precisely; nothing in this tree renders a
+// real toast UI to query against.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -64,6 +74,21 @@ vi.mock("../../../context/WorkspaceContext", () => ({
   }),
 }))
 
+// Mocked directly (not the real provider) so `showToast` — called by BOTH
+// BriefChat itself and the shared hook internally — can be spied on
+// precisely. Nothing in this render tree mounts a real toast UI to query.
+const { showToast } = vi.hoisted(() => ({ showToast: vi.fn() }))
+vi.mock("../../../context/NavigationContext", () => ({
+  useNavigation: () => ({
+    aiBarValue: "",
+    setAIBarValue: vi.fn(),
+    openContentPanel: vi.fn(),
+    openPrdTab: vi.fn(),
+    showToast,
+    setPendingChatHandoff: vi.fn(),
+  }),
+}))
+
 // mapEntries seeds useBriefPrototypeMap's batch result — the SAME source of
 // truth cardPreview and each card's label both read from. hasPrd true +
 // prototype null = case 2 (PRD exists, no prototype yet) → "Generate
@@ -108,8 +133,8 @@ vi.mock("../../design-agent/GenerationLoadingScreen", () => ({
 }))
 
 import { ContentProvider, useContent } from "../../../context/ContentContext"
-import { NavigationProvider } from "../../../context/NavigationContext"
 import type { BriefV2CompactFinding, BriefV2HeroFinding, BriefV2State } from "../../../lib/brief-v2-adapter"
+import { prototypePath } from "../../../lib/routes"
 import { BriefChat } from "../BriefChat"
 
 function baseFinding(detailKey: string, title: string) {
@@ -185,12 +210,10 @@ function InjectBrief() {
 
 function renderBrief() {
   return render(
-    <NavigationProvider>
-      <ContentProvider>
-        <InjectBrief />
-        <BriefChat />
-      </ContentProvider>
-    </NavigationProvider>,
+    <ContentProvider>
+      <InjectBrief />
+      <BriefChat />
+    </ContentProvider>,
   )
 }
 
@@ -199,6 +222,29 @@ function cardFor(title: string): HTMLElement {
   const card = heading.closest("article.fc") as HTMLElement | null
   if (!card) throw new Error(`No card article found for "${title}"`)
   return card
+}
+
+// Seeds both cards' map entries (case 2 — PRD exists, no prototype), renders,
+// clicks card 0's ("HERO", prdId 42) "Generate prototype" action, then arms a
+// live in-flight generation via the real onGenStart/onKickoff wiring (mirrors
+// the real GenerateModal's own kickoff sequence — see GenerateModal.tsx line
+// 678, which calls onClose() then onGenStart() in one handler). Leaves the
+// loading overlay open with prototypeId 991 armed, ready for a test to invoke
+// onCancel/onNotifyWhenReady/onGenDone directly on the captured mock props.
+async function openAndArmCardGeneration() {
+  mapEntries.set(0, { insight_index: 0, prd_id: 42, prd_title: "Retention PRD", prototype: null })
+  mapEntries.set(1, { insight_index: 1, prd_id: 43, prd_title: "Onboarding PRD", prototype: null })
+  await act(async () => { renderBrief() })
+
+  fireEvent.click(within(cardFor(HERO.title)).getByRole("button", { name: "Generate prototype" }))
+  await screen.findByRole("dialog", { name: "Generate prototype" })
+
+  await act(async () => {
+    ;(latestGenerateProps!.onClose as () => void)()
+    ;(latestGenerateProps!.onGenStart as (ctx?: unknown) => void)()
+    ;(latestGenerateProps!.onKickoff as (id: number) => void)(991)
+  })
+  expect(await screen.findByTestId("loading-overlay")).toBeTruthy()
 }
 
 afterEach(() => {
@@ -252,5 +298,108 @@ describe("BriefChat finding card — batch-map isolation (listenForCrossSurfaceG
     const supportingCard = cardFor(SUPPORTING.title)
     expect(within(supportingCard).getByRole("button", { name: "Generate prototype" })).toBeTruthy()
     expect(within(supportingCard).queryByRole("button", { name: /generating/i })).toBeNull()
+  })
+})
+
+describe("BriefChat finding card — generation overlay Cancel (soft dismiss, AC6)", () => {
+  it("test_brief_chat_generation_overlay_has_cancel", async () => {
+    await openAndArmCardGeneration()
+    expect(typeof latestLoadingProps?.onCancel).toBe("function")
+
+    await act(async () => {
+      ;(latestLoadingProps!.onCancel as () => void)()
+    })
+
+    // The overlay is dismissed immediately…
+    expect(screen.queryByTestId("loading-overlay")).toBeNull()
+    // …with NO toast and NO navigation at the moment of clicking Cancel. There
+    // is no true-abort endpoint at this layer (only PrototypeRoute's own,
+    // out-of-scope state machine calls designAgentApi.cancel) — Cancel is a
+    // soft, local dismiss, not an abort call. (If the background generation
+    // later resolves, the SAME persistent completion toast the notify path
+    // uses will fire — that convergent behavior is exercised by the hook's
+    // own test suite, not re-asserted here.)
+    expect(showToast).not.toHaveBeenCalled()
+    expect(pushSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe("BriefChat finding card — generation overlay Notify (AC7)", () => {
+  it("test_brief_chat_generation_overlay_has_notify", async () => {
+    await openAndArmCardGeneration()
+    expect(typeof latestLoadingProps?.onNotifyWhenReady).toBe("function")
+
+    const generatingEvents: CustomEvent[] = []
+    const notifyGenerationEvents: CustomEvent[] = []
+    const onGenerating = (e: Event) => generatingEvents.push(e as CustomEvent)
+    const onNotifyGeneration = (e: Event) => notifyGenerationEvents.push(e as CustomEvent)
+    window.addEventListener("da:generating", onGenerating)
+    window.addEventListener("da:notify-generation", onNotifyGeneration)
+
+    await act(async () => {
+      ;(latestLoadingProps!.onNotifyWhenReady as () => void)()
+    })
+
+    // Overlay dismissed…
+    expect(screen.queryByTestId("loading-overlay")).toBeNull()
+    // …the processing toast shown…
+    expect(showToast).toHaveBeenCalledWith(
+      "Prototype is processing",
+      "We'll let you know when it's ready.",
+    )
+    // …da:generating dispatched (armed prototypeId 991, from openAndArmCardGeneration)…
+    expect(generatingEvents.length).toBe(1)
+    expect(generatingEvents[0].detail).toEqual({ prototypeId: 991 })
+    // …and NOT the hand-off event — BriefChat stays mounted, it never unmounts
+    // on notify, so it never needs useGenerationNotify's resume-on-remount path.
+    expect(notifyGenerationEvents.length).toBe(0)
+
+    window.removeEventListener("da:generating", onGenerating)
+    window.removeEventListener("da:notify-generation", onNotifyGeneration)
+  })
+})
+
+describe("BriefChat finding card — notify-then-completion (AC7, corrected)", () => {
+  it("test_brief_chat_notify_then_completion_shows_actionable_toast", async () => {
+    await openAndArmCardGeneration()
+
+    const doneEvents: Event[] = []
+    const onDone = (e: Event) => doneEvents.push(e)
+    window.addEventListener("da:generating-done", onDone)
+
+    await act(async () => {
+      ;(latestLoadingProps!.onNotifyWhenReady as () => void)()
+    })
+    // Isolate the completion toast from the processing toast asserted above.
+    showToast.mockClear()
+    expect(pushSpy).not.toHaveBeenCalled()
+
+    const proto = { id: 991, status: "ready", bundle_url: "/bundle" }
+    await act(async () => {
+      ;(latestGenerateProps!.onGenDone as (result?: unknown) => void)({ ok: true, prototype: proto })
+    })
+
+    // The mounted GenerateModal's onGenDone still fires on the background
+    // generation's real completion (BriefChat never unmounted) — it does NOT
+    // silently auto-navigate…
+    expect(pushSpy).not.toHaveBeenCalled()
+    // …instead a persistent, actionable toast appears…
+    expect(showToast).toHaveBeenCalledTimes(1)
+    const [title, sub, action, opts] = showToast.mock.calls[0]
+    expect(title).toBe("Prototype ready")
+    expect(sub).toBe("Your prototype finished generating.")
+    expect(action).toBe("Open")
+    expect(opts).toMatchObject({ persist: true })
+    expect(typeof opts.onAction).toBe("function")
+    // …and da:generating-done dispatches so any cross-surface listener stops
+    // tracking this run.
+    expect(doneEvents.length).toBe(1)
+
+    // Only NOW — on the user clicking "Open" in the toast — does it navigate,
+    // to card 0's prdId (42), matching the hook's default onSuccess-less path.
+    opts.onAction()
+    expect(pushSpy).toHaveBeenCalledWith(prototypePath(42))
+
+    window.removeEventListener("da:generating-done", onDone)
   })
 })
