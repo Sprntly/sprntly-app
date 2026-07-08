@@ -951,20 +951,25 @@ export function ChatScreen() {
     openContentPanel("prd")
   }, [prdPanelPending, openContentPanel])
 
-  // Keep the content panel scoped to real chat tabs. The panel is a single global
-  // overlay; "View PRD" on a brief finding spawns a PRD chat tab and slides the
-  // panel open over it (wanted). But because the panel is global, switching back
-  // to the pinned brief tab would leave it hanging over the weekly brief (not
-  // wanted). When the user SWITCHES to the brief tab, close any panel a PRD tab
-  // left open. Guarded on an actual tab switch, so the brief's own inline actions
-  // (Tickets / Evidence / multi-agent — which open the panel WITHOUT a tab
-  // switch) are untouched and stay visible.
+  // Keep the content panel scoped to the tab that owns it. The panel is a single
+  // global overlay; "View PRD" on a brief finding spawns a PRD chat tab and slides
+  // the panel open over it (wanted). But because the panel is global, switching to
+  // ANOTHER tab that has no PRD of its own — the pinned brief tab, or a fresh "New
+  // chat" — would leave it hanging there (not wanted). So on an actual tab switch,
+  // close a lingering panel unless the tab we land on owns a PRD (already loaded
+  // or mid-generation) or a PRD open is imminent (prdPanelPending, set by
+  // openPrdInTab a commit before it opens the panel). Guarded on the switch, so
+  // the brief's own inline actions (Tickets / Evidence / multi-agent — which open
+  // the panel WITHOUT a tab switch) are untouched and stay visible.
   const prevTabForPanelRef = useRef(activeTabId)
   useEffect(() => {
     const switchedTab = prevTabForPanelRef.current !== activeTabId
     prevTabForPanelRef.current = activeTabId
-    if (switchedTab && isBriefTab && contentPanelTab) closeContentPanel()
-  }, [activeTabId, isBriefTab, contentPanelTab, closeContentPanel])
+    if (!switchedTab || !contentPanelTab || prdPanelPending) return
+    if (isBriefTab) { closeContentPanel(); return }
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab?.prd && !tab?.prdGenerating) closeContentPanel()
+  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, closeContentPanel])
 
   // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
   // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps
