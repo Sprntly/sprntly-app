@@ -19,7 +19,7 @@ import type {
 } from "../../lib/brief-v2-adapter"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
-import { IconClose, IconSendUp, IconSparkle, IconUndo } from "./app-icons"
+import { IconClose, IconSendUp, IconSparkle, IconTerminalPrompt, IconUndo } from "./app-icons"
 import { useBriefPrototypeMap } from "../design-agent/useBriefPrototypeMap"
 import { prototypeStateForInsight } from "../design-agent/briefPrototypeMap.helpers"
 import { GenerateModal } from "../design-agent/GenerateModal"
@@ -152,15 +152,6 @@ function IconChevronRight({ size = 12 }: { size?: number }) {
     </svg>
   )
 }
-function IconTerminalPrompt({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <polyline points="4 17 10 11 4 5" />
-      <line x1="12" y1="19" x2="20" y2="19" />
-    </svg>
-  )
-}
-
 /** Pure: the primary finding-card CTA. When a PRD already exists for this
  *  insight the button becomes "View PRD" (opens the existing PRD); otherwise
  *  "Generate PRD" (runs the full system), reflecting in-flight as "Generating…".
