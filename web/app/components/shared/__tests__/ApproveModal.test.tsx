@@ -343,7 +343,7 @@ describe("ApproveModal — cross-instance generating signal (highest-risk wiring
   })
 })
 
-describe("ApproveModal — notify-when-ready then completion (AC5, corrected)", () => {
+describe("ApproveModal — notify-when-ready then completion", () => {
   it("test_approve_modal_notify_then_completion_shows_actionable_toast: notify closes the overlay + dispatches da:generating; completion shows a persistent actionable toast, never auto-navigates", async () => {
     getByPrd.mockResolvedValue(null)
     const doneEvents: Event[] = []
@@ -415,7 +415,7 @@ describe("ApproveModal — notify-when-ready then completion (AC5, corrected)", 
   })
 })
 
-describe("ApproveModal — reopen mid-generation reseeds (AC6)", () => {
+describe("ApproveModal — reopen mid-generation reseeds", () => {
   it("test_approve_modal_reopen_mid_generation_reseeds_generating: reopening after a status flip re-seeds gen.cta === generating from a fresh getByPrd read", async () => {
     getByPrd.mockResolvedValueOnce(null) // first open: no prototype yet
     render(React.createElement(TestApp, { prd: fakePrd(9) }))
@@ -463,7 +463,7 @@ describe("ApproveModal — pathname-driven close (addition beyond the ticket's o
   })
 })
 
-describe("ApproveModal — dead bookkeeping removed (AC9)", () => {
+describe("ApproveModal — dead bookkeeping removed", () => {
   it("test_approve_modal_dead_bookkeeping_removed: none of the deleted timer/reveal identifiers appear in the source", () => {
     const src = readFileSync(
       resolve(process.cwd(), "app/components/shared/ApproveModal.tsx"),
@@ -485,7 +485,7 @@ describe("ApproveModal — dead bookkeeping removed (AC9)", () => {
   })
 })
 
-describe("ApproveModal — navigation modal union wiring (non-breakage, AC8/AC10)", () => {
+describe("ApproveModal — navigation modal union wiring (non-breakage)", () => {
   it("test_approve_modal_wires_generate_via_controlled_open: the hook's controlled open/onOpenChange pair drives the union, not local state", () => {
     const src = readFileSync(
       resolve(process.cwd(), "app/components/shared/ApproveModal.tsx"),

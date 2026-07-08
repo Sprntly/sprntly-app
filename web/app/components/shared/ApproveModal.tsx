@@ -29,7 +29,7 @@ export function ApproveModal() {
   const gen = useGeneratePrototype(prd?.prd_id ?? null, {
     figmaFileKey: prd?.figma_file_key ?? null,
     // ApproveModal is a singleton tied to the single ContentContext-active PRD,
-    // never a per-item list — the ONLY site in Theme A where this flag is safe
+    // never a per-item list — the only place this flag is safe to enable
     // (see useGeneratePrototype's doc comment on listenForCrossSurfaceGenerating).
     listenForCrossSurfaceGenerating: true,
     open: activeModal === "generate",
