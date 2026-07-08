@@ -1,5 +1,19 @@
 "use client"
 
+// Status note (2026-07-08): DesignAgentDrawerView / DesignAgentDrawer /
+// DrawerFooter (below) have zero production mounts — confirmed dead by a prior
+// cleanup pass and re-confirmed here. They are INTENTIONALLY NOT deleted as
+// part of this change (a follow-up dead-code removal is recommended once the
+// full grounding — re-verifying design-agent-drawer-source.test.tsx, the
+// scoped design-agent.css block, and every block in DesignAgentDrawer.test.tsx
+// — is done at the same rigor as the prior cleanup pass). The exports
+// genuinely still in production use — runGenerateFlow, buildGenerateParams,
+// sourceDetectedLabel, DEFAULT_PLATFORM, redirectToConnect,
+// replayCompletedNotifications, TargetPlatform — are consumed by
+// GenerateModal.tsx, SourceConnectHint.tsx, and DesignAgentNotificationReplay.tsx
+// and must keep working. The shared useGeneratePrototype() hook does NOT reuse
+// anything from this file — it wraps <GenerateModal> directly.
+
 /**
  * F2 — "Generate Prototype" popup. A NEW SIBLING of ClaudeDrawer (which is on
  * the no-modify hot-file blocklist due to its stub-toast antipattern); this
