@@ -21,6 +21,7 @@ internal identifiers appear.
 from __future__ import annotations
 
 import importlib
+import logging
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -529,3 +530,145 @@ async def test_iterate_failure_marks_failed(env, monkeypatch):
     row = _rows()[0]
     assert row["status"] == "failed"
     assert row["error_class"] == "Boom"
+
+
+# ─── Shared failure-terminal finalizer ───────────────────────────────────────
+#
+# The generation and iteration failure terminals share one fail-open finalizer.
+# These cover the helper directly (no-op guard, success path, fail-open log with
+# the caller-supplied kind) and then prove — end-to-end — that each terminal
+# passes the correct kind through.
+_FINALIZER_LOGGER = "app.routes.design_agent"
+
+
+def _boom_ledger(**kwargs):
+    raise RuntimeError("ledger down")
+
+
+def test_finalize_usage_event_failed_noop_on_none_event_id(env, monkeypatch):
+    # A None event_id (PLAN mode, or a failure before the ledger row opened) is a
+    # no-op: finalize_usage_event is never called and nothing raises.
+    calls = []
+    monkeypatch.setattr(
+        env.routes, "finalize_usage_event", lambda **kw: calls.append(kw)
+    )
+    env.routes._finalize_usage_event_failed(
+        event_id=None,
+        workspace_id="app",
+        prototype_id=1,
+        error_class="BadRequestError",
+        kind="full_generation",
+    )
+    assert calls == []
+
+
+def test_finalize_usage_event_failed_calls_finalize_with_failed_status(env, monkeypatch):
+    # A real event_id → finalize_usage_event called once with status='failed',
+    # the given error_class, and the given workspace_id.
+    calls = []
+    monkeypatch.setattr(
+        env.routes, "finalize_usage_event", lambda **kw: calls.append(kw)
+    )
+    env.routes._finalize_usage_event_failed(
+        event_id=99,
+        workspace_id="ws-1",
+        prototype_id=5,
+        error_class="BadRequestError",
+        kind="iteration",
+    )
+    assert len(calls) == 1
+    assert calls[0]["status"] == "failed"
+    assert calls[0]["error_class"] == "BadRequestError"
+    assert calls[0]["workspace_id"] == "ws-1"
+    assert calls[0]["event_id"] == 99
+
+
+def test_finalize_usage_event_failed_generation_kind_logs_on_ledger_error(
+    env, monkeypatch, caplog
+):
+    # finalize_usage_event raises → the exception is swallowed and a WARNING is
+    # logged with kind=full_generation. The exception does not propagate.
+    monkeypatch.setattr(env.routes, "finalize_usage_event", _boom_ledger)
+    with caplog.at_level(logging.WARNING, logger=_FINALIZER_LOGGER):
+        env.routes._finalize_usage_event_failed(
+            event_id=7,
+            workspace_id="app",
+            prototype_id=3,
+            error_class="BadRequestError",
+            kind="full_generation",
+        )
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("usage_event_finalize_failed" in m for m in msgs)
+    assert any("kind=full_generation" in m for m in msgs)
+
+
+def test_finalize_usage_event_failed_iteration_kind_logs_on_ledger_error(
+    env, monkeypatch, caplog
+):
+    # Same fail-open path, kind=iteration.
+    monkeypatch.setattr(env.routes, "finalize_usage_event", _boom_ledger)
+    with caplog.at_level(logging.WARNING, logger=_FINALIZER_LOGGER):
+        env.routes._finalize_usage_event_failed(
+            event_id=7,
+            workspace_id="app",
+            prototype_id=3,
+            error_class="Boom",
+            kind="iteration",
+        )
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any("usage_event_finalize_failed" in m for m in msgs)
+    assert any("kind=iteration" in m for m in msgs)
+
+
+async def test_generation_failure_terminal_calls_shared_finalizer_full_generation_kind(
+    env, monkeypatch, caplog
+):
+    # Driving _run_generation_bg to a failure terminal with a raising ledger
+    # proves the generation terminal passes kind='full_generation' to the shared
+    # finalizer (the fail-open WARNING carries it).
+    result = _fake_result(status="error", error_class="BadRequestError", usage=_usage())
+    monkeypatch.setattr(env.routes, "_load_prd_body", lambda prd_id: "# PRD")
+    monkeypatch.setattr(env.routes, "_extract_website_sample", _async_return(None))
+    monkeypatch.setattr(env.routes, "generate_prototype", _async_return((result, {})))
+    monkeypatch.setattr(env.routes, "finalize_usage_event", _boom_ledger)
+
+    pid = env.proto.start_prototype(prd_id=1, workspace_id="app", template_version=1)
+    eid = env.ue.start_usage_event(
+        workspace_id="app", kind="full_generation", prd_id=1, prototype_id=pid,
+    )
+    with caplog.at_level(logging.WARNING, logger=_FINALIZER_LOGGER):
+        await env.routes._run_generation_bg(
+            prototype_id=pid, workspace_id="app", prd_id=1,
+            target_platform="both", instructions="", figma_file_key=None,
+            event_id=eid,
+        )
+    finalize_logs = [
+        r.getMessage() for r in caplog.records
+        if "usage_event_finalize_failed" in r.getMessage()
+    ]
+    assert finalize_logs, "expected the shared finalizer WARNING to fire"
+    assert all("kind=full_generation" in m for m in finalize_logs)
+    assert not any("kind=iteration" in m for m in finalize_logs)
+
+
+async def test_iteration_failure_terminal_calls_shared_finalizer_iteration_kind(
+    env, monkeypatch, caplog
+):
+    # Same, for _run_iterate_bg: the iteration terminal passes kind='iteration'.
+    result = _fake_result(status="error", error_class="Boom", usage=_usage())
+    _stub_iterate_seams(env, monkeypatch, result=result, virtual_fs={})
+    monkeypatch.setattr(env.routes, "finalize_usage_event", _boom_ledger)
+
+    pid = _seed_ready_prototype(env)
+    with caplog.at_level(logging.WARNING, logger=_FINALIZER_LOGGER):
+        await env.routes._run_iterate_bg(
+            prototype_id=pid, workspace_id="app",
+            body=_iterate_body(env, mode="execute"),
+        )
+    finalize_logs = [
+        r.getMessage() for r in caplog.records
+        if "usage_event_finalize_failed" in r.getMessage()
+    ]
+    assert finalize_logs, "expected the shared finalizer WARNING to fire"
+    assert all("kind=iteration" in m for m in finalize_logs)
+    assert not any("kind=full_generation" in m for m in finalize_logs)
