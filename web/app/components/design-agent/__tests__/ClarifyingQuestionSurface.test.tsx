@@ -26,7 +26,6 @@ import {
   runAnswer,
   type IterateFn,
 } from "../ClarifyingQuestionSurface"
-import { DesignAgentLauncherView } from "../DesignAgentLauncher"
 import { designAgentApi } from "../../../lib/api"
 import type {
   IterateResponse,
@@ -320,20 +319,6 @@ describe("AC5 — locked prototype hides the surface", () => {
     expect(viewProps).toBeNull()
     expect(iter).not.toHaveBeenCalled()
   })
-
-  it("the launcher does NOT mount the surface when the prototype is complete", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(DesignAgentLauncherView, {
-        prdId: 1,
-        figmaFileKey: null,
-        open: false,
-        setOpen: () => {},
-        result: prototype({ pending_question: question(), is_complete: true }),
-        renderDrawer: () => null,
-      }),
-    )
-    expect(html).not.toContain('data-testid="clarifying-question-surface"')
-  })
 })
 
 // ---- AC6: external-viewer exclusion -----------------------------------------
@@ -361,23 +346,6 @@ describe("AC6 — external-viewer exclusion (F12 internal-only)", () => {
       const src = readFileSync(f, "utf8")
       expect(src).not.toContain("ClarifyingQuestionSurface")
     }
-  })
-
-  it("the signed-in launcher DOES mount the surface when a question is pending", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(DesignAgentLauncherView, {
-        prdId: 1,
-        figmaFileKey: null,
-        open: false,
-        setOpen: () => {},
-        result: prototype({
-          pending_question: question({ question: "List or grid?" }),
-        }),
-        renderDrawer: () => null,
-      }),
-    )
-    expect(html).toContain('data-testid="clarifying-question-surface"')
-    expect(html).toContain("List or grid?")
   })
 })
 

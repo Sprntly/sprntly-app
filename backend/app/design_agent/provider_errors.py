@@ -145,11 +145,3 @@ def safe_error_message(cls: ProviderErrorClass) -> str:
 def is_alertable(cls: ProviderErrorClass) -> bool:
     """A billing hard-stop needs a human to top up credits — worth an alert."""
     return cls is ProviderErrorClass.PROVIDER_BILLING
-
-
-def is_retryable(cls: ProviderErrorClass) -> bool:
-    """Billing/auth won't self-resolve on retry; capacity/unavailable might."""
-    return cls in (
-        ProviderErrorClass.PROVIDER_CAPACITY,
-        ProviderErrorClass.PROVIDER_UNAVAILABLE,
-    )

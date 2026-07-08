@@ -16,7 +16,6 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { notFound } from "next/navigation"
 import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
 import { DeviceBadge } from "../components/design-agent/DeviceBadge"
-import { ManualEditOverlay } from "../components/design-agent/ManualEditOverlay"
 // CommentAvatar + shortRelativeTime are reused (not redefined) for the new
 // General section's cards, matching the identity chrome pinned cards already
 // use elsewhere on this surface (one source of truth for author rendering).
@@ -386,13 +385,13 @@ export function PublicTokenViewer() {
                 <PinLayer pins={pin.pins} computedPinPositions={pin.computedPinPositions} occludedPins={pin.occludedPins} />
               </>
             }
-            chrome={
-              /* The manual-edit overlay renders its toggle only when a prototypeId
-                 is supplied. The public token view is minimum-disclosure and exposes
-                 no prototypeId on this surface, so the overlay mounts with prototypeId
-                 undefined and renders nothing here (non-breaking). */
-              <ManualEditOverlay isComplete={state.isComplete} />
-            }
+            // The manual-edit overlay's trigger never rendered here (it requires a
+            // prototypeId, which this minimum-disclosure public surface withholds).
+            // `chrome` stays an explicit no-op rather than an omitted prop:
+            // PrototypeViewer's chrome slot is always rendered (per its own
+            // contract) whether the prop is present-and-null or absent, so this
+            // is behaviorally identical.
+            chrome={null}
           />
         </div>
         {/* C2a + C2b: collapsible right-side comments panel — same da-right layout
