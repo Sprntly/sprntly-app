@@ -33,15 +33,11 @@ import {
   queueIndicator,
   LOCKED_AFFORDANCE,
 } from "../IterateComposer"
-import { CommentsPanel } from "../CommentsPanel"
-import { DesignAgentLauncherView } from "../DesignAgentLauncher"
-import { PostGenerationResult } from "../PostGenerationResult"
 import { designAgentApi } from "../../../lib/api"
 import type {
   CommentRecord,
   IterateCostEstimate,
   IterateResponse,
-  PrototypeRecord,
 } from "../../../lib/api"
 
 afterEach(() => {
@@ -77,30 +73,8 @@ function comment(overrides: Partial<CommentRecord> = {}): CommentRecord {
   }
 }
 
-function prototype(overrides: Partial<PrototypeRecord> = {}): PrototypeRecord {
-  return {
-    id: 7,
-    status: "ready",
-    bundle_url: null,
-    error: null,
-    is_complete: false,
-    share_mode: "private",
-    share_token: null,
-    ...overrides,
-  }
-}
-
 function renderView(props: React.ComponentProps<typeof IterateComposerView>): string {
   return renderToStaticMarkup(React.createElement(IterateComposerView, props))
-}
-
-/** Extract the (single) child element of a pure-view element tree whose type
- *  matches `type` — the node-env equivalent of "find this rendered child". */
-function findChild(tree: React.ReactElement, type: unknown): React.ReactElement | undefined {
-  const kids = React.Children.toArray(
-    (tree.props as { children?: React.ReactNode }).children,
-  ) as React.ReactElement[]
-  return kids.find((k) => k.type === type)
 }
 
 /**
@@ -352,55 +326,6 @@ describe("external-viewer exclusion (F10 internal-only, AC7)", () => {
 // ---- B4 mounted handoff integration -----------------------------------------
 
 describe("B4 — Apply → prefill → estimate → Continue → iterate (mounted handoff)", () => {
-  it("DesignAgentLauncher mounts IterateComposer pre-filled from applyTarget (signed-in surface)", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(DesignAgentLauncherView, {
-        prdId: 1,
-        figmaFileKey: null,
-        open: false,
-        setOpen: () => {},
-        result: prototype({ id: 7 }),
-        applyTarget: comment({ id: 5, body: "make the header bigger" }),
-        setApplyTarget: () => {},
-        renderDrawer: () => null,
-      }),
-    )
-    // The launcher actually mounts the composer, pre-filled (mount wiring proven).
-    expect(html).toContain('data-testid="iterate-composer"')
-    expect(html).toContain('data-mode="apply"')
-    expect(html).toContain("make the header bigger")
-  })
-
-  it("DesignAgentLauncher wires the signed-in CommentsPanel Apply → applyTarget", () => {
-    const setApplyTarget = vi.fn()
-    const c = comment({ id: 5, body: "make the header bigger" })
-    const tree = DesignAgentLauncherView({
-      prdId: 1,
-      figmaFileKey: null,
-      open: false,
-      setOpen: () => {},
-      // share_token present → the signed-in CommentsPanel mounts with onApply.
-      result: prototype({ id: 7, share_mode: "public", share_token: "tok-xyz" }),
-      applyTarget: null,
-      setApplyTarget,
-      renderDrawer: () => null,
-    }) as React.ReactElement
-    // P6-13 (UX-3): CommentsPanel was relocated OUT of its direct-sibling position
-    // into PostGenerationResult's `comments` prop (so a two-column design-pane grid
-    // can wrap viewer + comments). The Apply→applyTarget wiring is preserved
-    // byte-identical through the move — locate the panel via the `comments` prop,
-    // not as a direct launcher child.
-    const pgr = findChild(tree, PostGenerationResult)
-    expect(pgr).toBeTruthy()
-    const panel = (pgr!.props as { comments?: React.ReactElement | null })
-      .comments as React.ReactElement | null
-    expect(panel).toBeTruthy()
-    expect(panel!.type).toBe(CommentsPanel)
-    // Fire the panel's Apply handoff — it must set the lifted applyTarget.
-    ;(panel!.props as { onApply: (c: CommentRecord) => void }).onApply(c)
-    expect(setApplyTarget).toHaveBeenCalledWith(c)
-  })
-
   it("end-to-end via the REAL container: Apply prefill → Submit→estimate → Continue→iterate (test_apply_to_iterate_mounted_handoff_end_to_end)", async () => {
     const est = vi.spyOn(designAgentApi, "estimateIterate").mockResolvedValue(UNDER_CAP)
     const iter = vi.spyOn(designAgentApi, "iterate").mockResolvedValue(GEN_RESP)

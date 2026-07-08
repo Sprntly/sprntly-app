@@ -71,18 +71,30 @@ describe("Locked scope #1+#3 — da-right collapsible sidebar layout", () => {
 
 // 2. Old top-chrome CommentsPanel mount removed
 describe("Locked scope #2 — CommentsPanel no longer in PrototypeViewer chrome slot", () => {
-  it("chrome= prop of PrototypeViewer contains only ManualEditOverlay, not CommentsPanel", () => {
+  it("chrome= prop of PrototypeViewer no longer references CommentsPanel", () => {
     // The old layout had CommentsPanel nested inside chrome={<>...</>}; the new
     // layout puts it in the da-right sidebar which is a sibling of PrototypeViewer.
-    // Extract the chrome= prop block and confirm it only contains ManualEditOverlay.
+    // The manual-edit overlay's mount here was permanently inert (no prototypeId)
+    // and was removed — chrome is now an explicit no-op. Bound the slice to the
+    // <PrototypeViewer> element's own closing tag (the next "/>" after chrome=),
+    // NOT a fixed char count — a fixed window would overrun into unrelated
+    // sibling JSX/comments once the chrome value shrank to `null`.
     const chromeStart = publicViewerSrc.indexOf("chrome={")
     expect(chromeStart).toBeGreaterThan(-1)
-    // Find the chrome={...} block up to its closing /> or /> end of PrototypeViewer.
-    // We know the chrome block is only ManualEditOverlay (one element, no fragment).
-    // Grab a bounded slice from chrome={ to the next />
-    const chromePropSlice = publicViewerSrc.slice(chromeStart, chromeStart + 500)
-    expect(chromePropSlice).toContain("ManualEditOverlay")
+    const closeTagIdx = publicViewerSrc.indexOf("/>", chromeStart)
+    expect(closeTagIdx).toBeGreaterThan(-1)
+    const chromePropSlice = publicViewerSrc.slice(chromeStart, closeTagIdx)
     expect(chromePropSlice).not.toContain("CommentsPanel")
+  })
+
+  it("PublicTokenViewer.tsx source no longer references ManualEditOverlay anywhere (test_public_token_viewer_chrome_omits_manual_edit_overlay)", () => {
+    // The manual-edit overlay's trigger only renders with a prototypeId, which
+    // this minimum-disclosure public surface never supplies — the mount was a
+    // permanently-inert placeholder and has been removed (import + chrome prop
+    // reference). Source-invariant check: PublicTokenViewer.tsx is hook-driven
+    // (useParams/useEffect) and not SSR-renderable in this node-env run — see
+    // the sibling design-agent-css.test.tsx convention for the same file.
+    expect(publicViewerSrc).not.toContain("ManualEditOverlay")
   })
 
   it("CommentsPanel appears in da-right-body context (sibling aside, not chrome slot)", () => {
