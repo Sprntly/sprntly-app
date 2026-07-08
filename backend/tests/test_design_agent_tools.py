@@ -18,7 +18,7 @@ from app.design_agent.tools import (
     ToolContext,
     all_tools,
     dispatch,
-    tool_definitions_for_api,
+    tool_definitions_for_mode,
 )
 
 AD17_ACTION_NAMES = {"view", "write", "line_replace", "search", "fetch_figma", "read_console"}
@@ -112,13 +112,22 @@ def test_view_tool_description_warns_against_blind_writes():
 # ─── Serialization for the Anthropic Messages API ─────────────────────────
 
 
-def test_tool_definitions_for_api_shape():
-    defs = tool_definitions_for_api()
+def test_tool_definitions_for_mode_execute_shape():
+    defs = tool_definitions_for_mode("execute")
     assert len(defs) == len(all_tools())
     for d in defs:
         assert set(d.keys()) == {"name", "description", "input_schema"}
         assert "category" not in d
         assert "execute" not in d
+
+
+def test_tools_module_has_no_dead_alias():
+    # `tool_definitions_for_api` was a back-compat alias for
+    # `tool_definitions_for_mode("execute")` with zero production callers —
+    # confirms the alias itself is gone, not just unused.
+    import app.design_agent.tools as tools_mod
+
+    assert not hasattr(tools_mod, "tool_definitions_for_api")
 
 
 # ─── Dispatch: view ───────────────────────────────────────────────────────

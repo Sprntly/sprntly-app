@@ -20,10 +20,7 @@ import { describe, expect, it } from "vitest"
 // the classic runtime, so expose React globally (repo test convention).
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import {
-  DesignAgentLauncher,
-  type LauncherDrawerProps,
-} from "../DesignAgentLauncher"
+import { DesignAgentLauncher } from "../DesignAgentLauncher"
 import {
   PostGenerationResultView,
   type PostGenerationResultViewProps,
@@ -89,11 +86,6 @@ function selectorLines(css: string): string[] {
     .filter((l) => l.endsWith("{") || l.endsWith(","))
 }
 
-function makeDrawerSpy() {
-  const renderDrawer = (_props: LauncherDrawerProps) => null
-  return { renderDrawer }
-}
-
 function renderResultView(
   over: Partial<PostGenerationResultViewProps> = {},
 ): string {
@@ -156,12 +148,10 @@ describe("scoping invariant", () => {
 // ── AC2: wrapper class present on all three roots ─────────────────────────
 describe("wrapper class on the three DA roots (AC2)", () => {
   it("test_launcher_root_has_surface_class — prd-design-launcher root carries design-agent-surface", () => {
-    const { renderDrawer } = makeDrawerSpy()
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncher, {
         prdId: 1,
         figmaFileKey: null,
-        renderDrawer,
       }),
     )
     expect(html).toMatch(

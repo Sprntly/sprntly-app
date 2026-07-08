@@ -172,6 +172,44 @@ def test_get_client_raises_without_api_key(monkeypatch, isolated_settings):
     assert excinfo.value.status_code == 500
 
 
+# ---- _is_retryable: transport-layer retry classification --------------------
+
+def test_llm_is_retryable_unaffected():
+    """`app.design_agent.provider_errors.is_retryable` (a safe-taxonomy alias
+    with zero production callers) was removed as dead code. This module's own
+    `_is_retryable` is a separate function — different signature, different
+    layer — and must classify transient failures exactly as before."""
+    import httpx
+    import anthropic
+
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+
+    assert llm._is_retryable(anthropic.APIConnectionError(request=request)) is True
+    assert llm._is_retryable(anthropic.APITimeoutError(request=request)) is True
+
+    rate_limited = anthropic.APIStatusError(
+        "rate limited",
+        response=httpx.Response(status_code=429, request=request),
+        body=None,
+    )
+    assert llm._is_retryable(rate_limited) is True
+
+    server_error = anthropic.APIStatusError(
+        "service unavailable",
+        response=httpx.Response(status_code=503, request=request),
+        body=None,
+    )
+    assert llm._is_retryable(server_error) is True
+
+    bad_request = anthropic.APIStatusError(
+        "bad request",
+        response=httpx.Response(status_code=400, request=request),
+        body=None,
+    )
+    assert llm._is_retryable(bad_request) is False
+    assert llm._is_retryable(ValueError("not a provider error")) is False
+
+
 # ── strip_code_fence: unwrap a Markdown code fence from model output ──────────
 
 class TestStripCodeFence:

@@ -332,17 +332,6 @@ def all_tools() -> list[ToolDef]:
     return [*ACTION_TOOLS, *SENTINEL_TOOLS]
 
 
-def tool_definitions_for_api() -> list[dict[str, Any]]:
-    """Serialised shape for the Anthropic Messages API `tools=` field.
-
-    Back-compat alias (P3-07): equivalent to the EXECUTE-mode registry. P1's
-    callers imported this unconditional serialiser before mode partitioning
-    existed; it stays as `tool_definitions_for_mode("execute")` so they keep
-    working while they migrate to the explicit mode-aware call. New call sites
-    MUST use `tool_definitions_for_mode(mode)` — never this alias."""
-    return tool_definitions_for_mode("execute")
-
-
 # ─── AD17 mode-partitioned registry assembly (P3-07) ──────────────────────────
 #
 # AD17's rule is "6 action tools (fixed) + ≤4 exit-sentinel tools" — a split,
@@ -408,8 +397,7 @@ def tools_for_mode(mode: str) -> list[ToolDef]:
 
 def tool_definitions_for_mode(mode: str) -> list[dict[str, Any]]:
     """Serialised (Anthropic `tools=` shape) registry for a run mode. The
-    mode-aware counterpart to `tool_definitions_for_api`; the runner calls this
-    once at run start with the run's mode."""
+    runner calls this once at run start with the run's mode."""
     return [
         {"name": t.name, "description": t.description, "input_schema": t.input_schema}
         for t in tools_for_mode(mode)

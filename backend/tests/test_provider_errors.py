@@ -15,7 +15,6 @@ from app.design_agent.provider_errors import (
     ProviderErrorClass,
     classify_provider_error,
     is_alertable,
-    is_retryable,
     safe_error_class,
     safe_error_message,
 )
@@ -102,14 +101,6 @@ def test_safe_error_message_never_raw():
     assert msg == "The prototype service is temporarily unavailable."
 
 
-def test_is_retryable():
-    assert is_retryable(ProviderErrorClass.PROVIDER_CAPACITY) is True
-    assert is_retryable(ProviderErrorClass.PROVIDER_UNAVAILABLE) is True
-    assert is_retryable(ProviderErrorClass.PROVIDER_BILLING) is False
-    assert is_retryable(ProviderErrorClass.PROVIDER_AUTH) is False
-    assert is_retryable(ProviderErrorClass.INTERNAL) is False
-
-
 def test_is_alertable():
     assert is_alertable(ProviderErrorClass.PROVIDER_BILLING) is True
     for cls in (
@@ -119,6 +110,16 @@ def test_is_alertable():
         ProviderErrorClass.INTERNAL,
     ):
         assert is_alertable(cls) is False
+
+
+def test_provider_errors_module_has_no_dead_retryable():
+    """`is_retryable` was a back-compat classifier alias with zero production
+    callers — the real retry decision lives in `app.llm._is_retryable`, a
+    separate function operating on raw exceptions rather than the safe
+    taxonomy. Confirms the alias is gone, not just unused."""
+    import app.design_agent.provider_errors as pe_mod
+
+    assert not hasattr(pe_mod, "is_retryable")
 
 
 # ------------------------------- alert tests --------------------------------
