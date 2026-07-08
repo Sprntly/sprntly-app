@@ -85,14 +85,18 @@ const saveAs = vi.fn()
 vi.mock("file-saver", () => ({ saveAs }))
 
 const pdfOutput = vi.fn((_type?: string) => new Blob(["pdf"], { type: "application/pdf" }))
+// Records every text run written to the PDF so tests can assert what a bundled
+// (PRD + Evidence) export actually contains.
+const pdfTexts: string[] = []
+const pdfAddPage = vi.fn()
 vi.mock("jspdf", () => {
   class FakeDoc {
     internal = { pageSize: { getWidth: () => 595, getHeight: () => 842 } }
     setFont() {}
     setFontSize() {}
     splitTextToSize(t: string) { return [t] }
-    text() {}
-    addPage() {}
+    text(t: string) { pdfTexts.push(t) }
+    addPage() { pdfAddPage() }
     output(type?: string) { return pdfOutput(type) }
   }
   return { jsPDF: FakeDoc }
@@ -106,6 +110,7 @@ vi.mock("docx", () => {
   class TableRow { constructor(public o: unknown) {} }
   class TableCell { constructor(public o: unknown) {} }
   class Document { constructor(public o: unknown) {} }
+  class PageBreak { constructor(public o?: unknown) {} }
   return {
     Document,
     Paragraph,
@@ -113,6 +118,7 @@ vi.mock("docx", () => {
     Table,
     TableRow,
     TableCell,
+    PageBreak,
     HeadingLevel: { TITLE: "Title", HEADING_2: "Heading2" },
     WidthType: { PERCENTAGE: "pct" },
     Packer: { toBlob: packerToBlob },
@@ -134,6 +140,17 @@ const FAKE_PRD = {
   figma_file_key: undefined,
 }
 
+// A loaded Evidence brief (markdown/sections form) that reuses the PrdContent
+// shape. Shares the same insight as FAKE_PRD.
+const FAKE_EVIDENCE = {
+  title: "Handoff Threshold Evidence",
+  metaLine: "Evidence · insight 0",
+  sections: [
+    { type: "h2", text: "Signal" },
+    { type: "p", text: "Drop-off spikes past the 30-day mark." },
+  ],
+}
+
 const EMPTY_CONTENT = {
   prd: null,
   prdMeta: null,
@@ -149,6 +166,7 @@ const EMPTY_CONTENT = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  pdfTexts.length = 0
   // ContentPanel's width-restore effect reads window.localStorage on panel open;
   // provide a no-op stub so it doesn't throw in the test env (width persistence is
   // not under test here).
@@ -224,6 +242,61 @@ describe("ContentPanel header Share dropdown", () => {
     await waitFor(() => expect(saveAs).toHaveBeenCalled())
     const [, filename] = saveAs.mock.calls[0]
     expect(filename).toBe("handoff-threshold-prd.docx")
+  })
+})
+
+describe("Share bundles PRD + Evidence by default", () => {
+  it("Download PDF bundles PRD and Evidence into one file containing both", async () => {
+    content = { ...EMPTY_CONTENT, prd: FAKE_PRD, evidence: FAKE_EVIDENCE }
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
+    await waitFor(() => expect(saveAs).toHaveBeenCalled())
+    // A single combined file, named for the PRD.
+    expect(saveAs).toHaveBeenCalledTimes(1)
+    const [, filename] = saveAs.mock.calls[0]
+    expect(filename).toBe("handoff-threshold-prd.pdf")
+    // Both documents' titles are present in the one PDF.
+    expect(pdfTexts).toContain("Handoff Threshold PRD")
+    expect(pdfTexts).toContain("Handoff Threshold Evidence")
+    // The Evidence starts on its own page.
+    expect(pdfAddPage).toHaveBeenCalled()
+  })
+
+  it("Download DOCX bundles PRD and Evidence into one file", async () => {
+    content = { ...EMPTY_CONTENT, prd: FAKE_PRD, evidence: FAKE_EVIDENCE }
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download DOCX"))
+    await waitFor(() => expect(packerToBlob).toHaveBeenCalled())
+    await waitFor(() => expect(saveAs).toHaveBeenCalled())
+    expect(saveAs).toHaveBeenCalledTimes(1)
+    const [, filename] = saveAs.mock.calls[0]
+    expect(filename).toBe("handoff-threshold-prd.docx")
+  })
+
+  it("Email notes the Evidence in the body when it is loaded", () => {
+    content = { ...EMPTY_CONTENT, prd: FAKE_PRD, evidence: FAKE_EVIDENCE }
+    let assigned = ""
+    const realLocation = window.location
+    Object.defineProperty(window, "location", {
+      configurable: true,
+      value: { ...realLocation, href: "http://localhost:3000/prd/42" },
+    })
+    Object.defineProperty(window.location, "href", {
+      configurable: true,
+      get: () => assigned || "http://localhost:3000/prd/42",
+      set: (v: string) => { assigned = v },
+    })
+
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Email"))
+
+    expect(assigned).toMatch(/^mailto:/)
+    expect(decodeURIComponent(assigned)).toContain("Evidence")
+
+    Object.defineProperty(window, "location", { configurable: true, value: realLocation })
   })
 })
 

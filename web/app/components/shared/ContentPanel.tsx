@@ -34,8 +34,8 @@ function saveRememberedDest(prdId: number | null, listId: string): void {
   }
 }
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
-import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
-import type { PrdState } from "../../types/content"
+import { buildPrdMailto, downloadDocsPdf, downloadDocsDocx, printHtmlDocs, downloadHtmlDocsDoc } from "../../lib/prdExport"
+import type { PrdContent, PrdState } from "../../types/content"
 
 const TABS = [
   { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
@@ -53,9 +53,25 @@ function clampCpanelWidth(px: number): number {
 }
 
 // Header Share dropdown — Email (mailto) / Download PDF (jsPDF) / Download DOCX
-// (docx). Enabled only when a PRD is loaded. The heavy generators are
-// lazy-imported inside the handlers (see lib/prdExport).
-function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: string, sub: string) => void }) {
+// (docx). Every action shares BOTH the PRD and its supporting Evidence brief
+// (there is no PRD-vs-Evidence choice): downloads bundle the two documents into
+// one file, and email links the page that carries both. Enabled once a PRD is
+// loaded; the Evidence is included whenever it exists for this insight — the
+// menu fetches it on demand if the Evidence tab was never opened. The heavy
+// generators are lazy-imported inside the handlers (see lib/prdExport).
+function ShareMenu({
+  prd,
+  evidence,
+  prdMeta,
+  setContent,
+  onToast,
+}: {
+  prd: PrdState | null
+  evidence: PrdContent | null
+  prdMeta: { briefId: number; insightIndex: number } | null
+  setContent: (patch: { evidence: PrdContent | null }) => void
+  onToast: (title: string, sub: string) => void
+}) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const enabled = !!prd
@@ -69,20 +85,48 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
     return () => document.removeEventListener("mousedown", onDocClick)
   }, [open])
 
+  // Resolve the docs to share: the PRD plus its Evidence. If the Evidence isn't
+  // already loaded (the tab was never opened) but the insight is known, fetch
+  // it read-only so "share both" holds even on the first click. A missing/absent
+  // Evidence just falls back to sharing the PRD alone.
+  const resolveDocs = useCallback(async (): Promise<PrdContent[]> => {
+    if (!prd) return []
+    let ev = evidence
+    if (!ev) {
+      const briefId = prdMeta?.briefId ?? prd.briefId
+      const insightIndex = prdMeta?.insightIndex ?? prd.insightIndex
+      if (typeof briefId === "number" && typeof insightIndex === "number") {
+        try {
+          ev = await loadEvidenceByInsight(briefId, insightIndex)
+          if (ev) setContent({ evidence: ev })
+        } catch {
+          ev = null
+        }
+      }
+    }
+    return ev ? [prd, ev] : [prd]
+  }, [prd, evidence, prdMeta, setContent])
+
   const handleEmail = () => {
     if (!prd) return
     setOpen(false)
     const link = typeof window !== "undefined" ? window.location.href : ""
-    window.location.href = buildPrdMailto(prd.title, link)
+    // The linked page carries both the PRD and Evidence tabs; note the Evidence
+    // in the body when we know it exists.
+    window.location.href = buildPrdMailto(prd.title, link, !!evidence)
   }
   const handlePdf = async () => {
     if (!prd) return
     setOpen(false)
     try {
-      // v3 HTML PRD: print the page itself (its print stylesheet strips the
-      // editing chrome) rather than the empty parsed-section PDF.
-      if (prd.html) printPrdHtml(prd)
-      else await downloadPrdPdf(prd)
+      const docs = await resolveDocs()
+      // v3 HTML docs print the page itself (its print stylesheet strips the
+      // editing chrome); markdown docs use the jsPDF builder. Both PRD and
+      // Evidence are included — HTML ones share one print job.
+      const htmlDocs = docs.filter((d) => d.html)
+      const mdDocs = docs.filter((d) => !d.html)
+      if (htmlDocs.length) printHtmlDocs(htmlDocs)
+      if (mdDocs.length) await downloadDocsPdf(mdDocs)
     } catch {
       onToast("PDF export failed", "Could not generate the PDF. Please try again.")
     }
@@ -91,10 +135,14 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
     if (!prd) return
     setOpen(false)
     try {
-      // v3 HTML PRD exports as an HTML .doc (Word opens it directly), keeping
-      // the visual system; markdown PRDs use the docx builder.
-      if (prd.html) await downloadPrdHtmlDoc(prd)
-      else await downloadPrdDocx(prd)
+      const docs = await resolveDocs()
+      // v3 HTML docs export as an HTML .doc (Word opens it directly), keeping the
+      // visual system; markdown docs use the docx builder. PRD + Evidence are
+      // bundled: HTML ones into one .doc, markdown ones into one .docx.
+      const htmlDocs = docs.filter((d) => d.html)
+      const mdDocs = docs.filter((d) => !d.html)
+      if (htmlDocs.length) await downloadHtmlDocsDoc(htmlDocs)
+      if (mdDocs.length) await downloadDocsDocx(mdDocs)
     } catch {
       onToast("DOCX export failed", "Could not generate the document. Please try again.")
     }
@@ -118,7 +166,7 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
             <div className="share-menu-item-icon"><IconMail size={14} /></div>
             <div>
               <div style={{ fontWeight: 600 }}>Email</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Draft a mail with a link</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Draft a mail with a link to the PRD &amp; Evidence</div>
             </div>
           </div>
           <div className="share-menu-divider" />
@@ -126,14 +174,14 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
             <div className="share-menu-item-icon"><IconFileTypePdf size={14} /></div>
             <div>
               <div style={{ fontWeight: 600 }}>Download PDF</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export as .pdf</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export the PRD &amp; Evidence as .pdf</div>
             </div>
           </div>
           <div className="share-menu-item" role="menuitem" onClick={handleDocx}>
             <div className="share-menu-item-icon"><IconFileTypeDocx size={14} /></div>
             <div>
               <div style={{ fontWeight: 600 }}>Download DOCX</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export as .docx</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export the PRD &amp; Evidence as .docx</div>
             </div>
           </div>
         </div>
@@ -144,7 +192,7 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
 
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
-  const { content } = useContent()
+  const { content, setContent } = useContent()
 
   // Tracks the live pixel width; null = use the CSS default (60vw).
   const widthRef = useRef<number | null>(null)
@@ -237,7 +285,13 @@ export function ContentPanel() {
             <button className="cpanel-action-btn">
               <IconDeviceFloppy size={12} />Save
             </button>
-            <ShareMenu prd={content.prd} onToast={showToast} />
+            <ShareMenu
+              prd={content.prd}
+              evidence={content.evidence}
+              prdMeta={content.prdMeta}
+              setContent={setContent}
+              onToast={showToast}
+            />
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
             </button>

@@ -105,7 +105,31 @@ export function prdToExportBlocks(prd: PrdContent): ExportBlock[] {
         if (s.notes) para(s.notes)
         if (s.platformHint) para(`Platform: ${s.platformHint}`)
         break
-      // Evidence / chart variants don't carry export-meaningful prose; skip.
+      // ── Evidence variants ──────────────────────────────────────────────
+      // Rendered so a shared Evidence doc (which reuses PrdContent) exports
+      // legibly alongside the PRD. Charts still carry no export-able prose.
+      case "v2-hero":
+        bullets(s.cards.map((c) => `${c.label}: ${c.value}${c.delta ? ` (${c.delta})` : ""}${c.baseline ? ` — baseline ${c.baseline}` : ""}`))
+        break
+      case "v2-context-chip":
+        para(s.text)
+        break
+      case "v2-cuts-index":
+        bullets(s.rows.map((r) => `${r.n}. ${r.headline} — confidence: ${r.confidence}`))
+        break
+      case "v2-source":
+        para(`Sources: ${s.chips.map((c) => c.label).join(", ")}`)
+        break
+      case "v2-rules-callout":
+        para(`Supports: ${s.supports}`)
+        para(`Rules out: ${s.rulesOut}`)
+        break
+      case "v2-quote":
+        para(`"${s.body}" — ${s.channel}${s.context ? ` (${s.context})` : ""}`)
+        break
+      case "v2-forecast-omitted":
+        para(`Forecast omitted: ${s.reason}`)
+        break
       default:
         break
     }
@@ -113,10 +137,16 @@ export function prdToExportBlocks(prd: PrdContent): ExportBlock[] {
   return blocks
 }
 
-/** Build a mailto: URL for a PRD — subject `PRD: <title>`, body with a link. */
-export function buildPrdMailto(title: string, link: string): string {
+/**
+ * Build a mailto: URL for a PRD — subject `PRD: <title>`, body with a link.
+ * When `includeEvidence` is set the body notes that the supporting Evidence
+ * brief is shared too (both live on the same linked page).
+ */
+export function buildPrdMailto(title: string, link: string, includeEvidence = false): string {
   const subject = `PRD: ${title}`
-  const body = `Sharing the PRD "${title}".\n\nView it here: ${link}`
+  const body = includeEvidence
+    ? `Sharing the PRD "${title}" and its supporting Evidence.\n\nView them here: ${link}`
+    : `Sharing the PRD "${title}".\n\nView it here: ${link}`
   return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
 }
 
@@ -127,13 +157,15 @@ async function saveBlob(blob: Blob, filename: string): Promise<void> {
 }
 
 /**
- * Generate a legible PDF from the PRD and download it as `<slug>.pdf`.
- * jsPDF is lazy-imported. Layout is a simple flowing text layout with
- * headings, paragraphs, bullets and tabular rows — paginated as needed.
+ * Generate a legible PDF from one or more docs and download it as a single
+ * `<first-slug>.pdf`. Each doc (e.g. the PRD, then its Evidence brief) starts
+ * on a fresh page. jsPDF is lazy-imported. Layout is a simple flowing text
+ * layout with headings, paragraphs, bullets and tabular rows — paginated as
+ * needed.
  */
-export async function downloadPrdPdf(prd: PrdContent): Promise<void> {
+export async function downloadDocsPdf(docs: PrdContent[]): Promise<void> {
+  if (!docs.length) throw new Error("no documents to export")
   const { jsPDF } = await import("jspdf")
-  const blocks = prdToExportBlocks(prd)
 
   const doc = new jsPDF({ unit: "pt", format: "a4" })
   const pageW = doc.internal.pageSize.getWidth()
@@ -160,97 +192,118 @@ export async function downloadPrdPdf(prd: PrdContent): Promise<void> {
     }
   }
 
-  // Title
-  writeLines(prd.title || "PRD", 20, true)
-  if (prd.metaLine) { y += 2; writeLines(prd.metaLine, 9, false); }
-  y += 10
+  docs.forEach((prd, docIdx) => {
+    if (docIdx > 0) { doc.addPage(); y = margin }
 
-  for (const b of blocks) {
-    switch (b.kind) {
-      case "heading":
-        y += 8
-        writeLines(b.text, 13, true)
-        y += 2
-        break
-      case "paragraph":
-        writeLines(b.text, 10.5, false)
-        y += 4
-        break
-      case "bullets":
-        for (const item of b.items) {
-          const lineH = 10.5 * 1.35
-          ensureSpace(lineH)
-          doc.setFont("helvetica", "normal")
-          doc.setFontSize(10.5)
-          doc.text("•", margin + 6, y)
-          writeLines(item, 10.5, false, 18)
+    // Title
+    writeLines(prd.title || "PRD", 20, true)
+    if (prd.metaLine) { y += 2; writeLines(prd.metaLine, 9, false); }
+    y += 10
+
+    for (const b of prdToExportBlocks(prd)) {
+      switch (b.kind) {
+        case "heading":
+          y += 8
+          writeLines(b.text, 13, true)
+          y += 2
+          break
+        case "paragraph":
+          writeLines(b.text, 10.5, false)
+          y += 4
+          break
+        case "bullets":
+          for (const item of b.items) {
+            const lineH = 10.5 * 1.35
+            ensureSpace(lineH)
+            doc.setFont("helvetica", "normal")
+            doc.setFontSize(10.5)
+            doc.text("•", margin + 6, y)
+            writeLines(item, 10.5, false, 18)
+          }
+          y += 4
+          break
+        case "table": {
+          const cols = [b.headers, ...b.rows]
+          for (let r = 0; r < cols.length; r++) {
+            const isHeader = r === 0
+            writeLines(cols[r].join("  |  "), 9.5, isHeader)
+          }
+          y += 6
+          break
         }
-        y += 4
-        break
-      case "table": {
-        const cols = [b.headers, ...b.rows]
-        for (let r = 0; r < cols.length; r++) {
-          const isHeader = r === 0
-          writeLines(cols[r].join("  |  "), 9.5, isHeader)
-        }
-        y += 6
-        break
       }
     }
-  }
+  })
 
   const blob = doc.output("blob") as Blob
-  await saveBlob(blob, `${slugifyTitle(prd.title)}.pdf`)
+  await saveBlob(blob, `${slugifyTitle(docs[0].title)}.pdf`)
+}
+
+/** Back-compat single-PRD PDF download — delegates to the bundle builder. */
+export async function downloadPrdPdf(prd: PrdContent): Promise<void> {
+  await downloadDocsPdf([prd])
 }
 
 /**
- * Generate a .docx from the PRD and download it as `<slug>.docx`.
+ * Generate a .docx from one or more docs and download it as a single
+ * `<first-slug>.docx`. Each doc after the first starts on a fresh page.
  * `docx` is lazy-imported. Headings map to HeadingLevel, paragraphs to plain
  * paragraphs, bullets to a bullet-numbered list, tables to docx Tables.
  */
-export async function downloadPrdDocx(prd: PrdContent): Promise<void> {
+export async function downloadDocsDocx(docs: PrdContent[]): Promise<void> {
+  if (!docs.length) throw new Error("no documents to export")
   const docx = await import("docx")
   const { Document, Packer, Paragraph, HeadingLevel, TextRun, Table, TableRow, TableCell, WidthType } = docx
-  const blocks = prdToExportBlocks(prd)
 
   const children: InstanceType<typeof Paragraph | typeof Table>[] = []
-  children.push(new Paragraph({ text: prd.title || "PRD", heading: HeadingLevel.TITLE }))
-  if (prd.metaLine) {
-    children.push(new Paragraph({ children: [new TextRun({ text: prd.metaLine, italics: true, size: 18, color: "777777" })] }))
-  }
 
-  for (const b of blocks) {
-    switch (b.kind) {
-      case "heading":
-        children.push(new Paragraph({ text: b.text, heading: HeadingLevel.HEADING_2 }))
-        break
-      case "paragraph":
-        children.push(new Paragraph({ text: b.text }))
-        break
-      case "bullets":
-        for (const item of b.items) {
-          children.push(new Paragraph({ text: item, bullet: { level: 0 } }))
+  docs.forEach((prd, docIdx) => {
+    // Only a bundle (PRD + Evidence) needs a page break, so `PageBreak` is
+    // referenced lazily — single-doc exports never touch it.
+    if (docIdx > 0) children.push(new Paragraph({ children: [new docx.PageBreak()] }))
+    children.push(new Paragraph({ text: prd.title || "PRD", heading: HeadingLevel.TITLE }))
+    if (prd.metaLine) {
+      children.push(new Paragraph({ children: [new TextRun({ text: prd.metaLine, italics: true, size: 18, color: "777777" })] }))
+    }
+
+    for (const b of prdToExportBlocks(prd)) {
+      switch (b.kind) {
+        case "heading":
+          children.push(new Paragraph({ text: b.text, heading: HeadingLevel.HEADING_2 }))
+          break
+        case "paragraph":
+          children.push(new Paragraph({ text: b.text }))
+          break
+        case "bullets":
+          for (const item of b.items) {
+            children.push(new Paragraph({ text: item, bullet: { level: 0 } }))
+          }
+          break
+        case "table": {
+          const rows = [b.headers, ...b.rows].map((cells, ri) =>
+            new TableRow({
+              children: cells.map((c) =>
+                new TableCell({
+                  children: [new Paragraph({ children: [new TextRun({ text: c, bold: ri === 0 })] })],
+                }),
+              ),
+            }),
+          )
+          children.push(new Table({ rows, width: { size: 100, type: WidthType.PERCENTAGE } }))
+          break
         }
-        break
-      case "table": {
-        const rows = [b.headers, ...b.rows].map((cells, ri) =>
-          new TableRow({
-            children: cells.map((c) =>
-              new TableCell({
-                children: [new Paragraph({ children: [new TextRun({ text: c, bold: ri === 0 })] })],
-              }),
-            ),
-          }),
-        )
-        children.push(new Table({ rows, width: { size: 100, type: WidthType.PERCENTAGE } }))
-        break
       }
     }
-  }
+  })
 
   const document = new Document({ sections: [{ children }] })
   const blob = await Packer.toBlob(document)
-  await saveBlob(blob, `${slugifyTitle(prd.title)}.docx`)
+  await saveBlob(blob, `${slugifyTitle(docs[0].title)}.docx`)
+}
+
+/** Back-compat single-PRD DOCX download — delegates to the bundle builder. */
+export async function downloadPrdDocx(prd: PrdContent): Promise<void> {
+  await downloadDocsDocx([prd])
 }
 
 // ── v3 HTML PRD export ───────────────────────────────────────────────────────
@@ -258,14 +311,39 @@ export async function downloadPrdDocx(prd: PrdContent): Promise<void> {
 // strips the editing chrome, so export is the page itself — printed to PDF or
 // handed to Word — rather than the (empty) parsed-section path above.
 
+/** Pull every `<style>…</style>` block out of a full HTML document. */
+function extractStyles(html: string): string {
+  return (html.match(/<style[\s\S]*?<\/style>/gi) ?? []).join("\n")
+}
+
+/** Pull the `<body>` inner HTML out of a full HTML document (whole string if
+ *  there is no `<body>`). */
+function extractBody(html: string): string {
+  const m = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
+  return m ? m[1] : html
+}
+
 /**
- * Print the HTML PRD page (browser Print → "Save as PDF"). Opens the document
- * in a hidden same-origin iframe, prints it, then removes the iframe. Throws if
- * the iframe can't be created so the caller can surface a failure toast.
+ * Merge one or more self-contained HTML documents into a single printable
+ * document: all `<style>` blocks are hoisted into the head and each document's
+ * body is stacked with a page break between them. Used to print a PRD together
+ * with its supporting Evidence brief as one PDF.
  */
-export function printPrdHtml(prd: PrdContent): void {
-  const html = prd.html
-  if (!html) throw new Error("no HTML PRD to print")
+function mergeHtmlDocs(htmls: string[], breakStyle: string): string {
+  if (htmls.length === 1) return htmls[0]
+  const styles = htmls.map(extractStyles).join("\n")
+  const bodies = htmls
+    .map((h, i) => `<div${i < htmls.length - 1 ? ` style="${breakStyle}"` : ""}>${extractBody(h)}</div>`)
+    .join("\n")
+  return `<!doctype html><html><head><meta charset="utf-8">${styles}</head><body>${bodies}</body></html>`
+}
+
+/**
+ * Print raw HTML (browser Print → "Save as PDF"). Opens the document in a
+ * hidden same-origin iframe, prints it, then removes the iframe. Throws if the
+ * iframe can't be created so the caller can surface a failure toast.
+ */
+function printRawHtml(html: string): void {
   const frame = document.createElement("iframe")
   frame.style.position = "fixed"
   frame.style.right = "0"
@@ -294,13 +372,36 @@ export function printPrdHtml(prd: PrdContent): void {
 }
 
 /**
- * Download the HTML PRD page as a Word document (`<slug>.doc`). Word opens
- * HTML `.doc` files directly, so the visual system survives the export — no
- * lossy re-parse. file-saver is lazy-imported.
+ * Print one or more HTML documents as a single print job — each document on its
+ * own page. Used to print a PRD together with its supporting Evidence brief in
+ * one "Save as PDF" action. Throws if none of the docs carry HTML.
  */
+export function printHtmlDocs(docs: PrdContent[]): void {
+  const htmls = docs.map((d) => d.html).filter((h): h is string => !!h)
+  if (!htmls.length) throw new Error("no HTML documents to print")
+  printRawHtml(mergeHtmlDocs(htmls, "break-after:page;page-break-after:always;"))
+}
+
+/** Print a single HTML PRD page. Back-compat wrapper over `printHtmlDocs`. */
+export function printPrdHtml(prd: PrdContent): void {
+  printHtmlDocs([prd])
+}
+
+/**
+ * Download one or more HTML documents as a single Word document (`<slug>.doc`).
+ * Word opens HTML `.doc` files directly, so the visual system survives the
+ * export — no lossy re-parse. Multiple docs (PRD + Evidence) are merged into
+ * one file, each starting on a new page. file-saver is lazy-imported.
+ */
+export async function downloadHtmlDocsDoc(docs: PrdContent[]): Promise<void> {
+  const htmls = docs.map((d) => d.html).filter((h): h is string => !!h)
+  if (!htmls.length) throw new Error("no HTML documents to export")
+  const merged = mergeHtmlDocs(htmls, "page-break-after:always;break-after:page;")
+  const blob = new Blob([merged], { type: "application/msword" })
+  await saveBlob(blob, `${slugifyTitle(docs[0].title)}.doc`)
+}
+
+/** Download a single HTML PRD as a `.doc`. Back-compat wrapper. */
 export async function downloadPrdHtmlDoc(prd: PrdContent): Promise<void> {
-  const html = prd.html
-  if (!html) throw new Error("no HTML PRD to export")
-  const blob = new Blob([html], { type: "application/msword" })
-  await saveBlob(blob, `${slugifyTitle(prd.title)}.doc`)
+  await downloadHtmlDocsDoc([prd])
 }
