@@ -1,0 +1,80 @@
+name: Repair Supabase migration history
+
+# One-off, MANUAL maintenance workflow to reconcile Supabase migration-history
+# drift. The deploy-backend `migrate` job (supabase db push) began failing with
+#   ERROR: duplicate key value violates unique constraint "schema_migrations_pkey"
+#   Key (version)=(20260706000000) already exists.
+# i.e. a migration's version is recorded remotely but `db push` still re-lists it
+# as pending and dies inserting its schema_migrations row — blocking every later
+# migration (and the deploy that gates on it).
+#
+# This workflow is SAFE-BY-DEFAULT and dispatch-only:
+#   - mode=diagnose (default): runs `supabase migration list` ONLY — read-only,
+#     shows applied-vs-pending truth. Mutates nothing.
+#   - mode=repair: runs `supabase migration repair --status <status> <versions>`
+#     to align the CLI history with reality, then prints `migration list` again.
+#     It does NOT run `db push` or deploy — re-run "Deploy backend" afterwards to
+#     apply the remaining pending migrations and ship the code.
+#
+# Uses the SAME SUPABASE_DB_URL secret as deploy-backend (Session-mode pooler
+# connection string) — the secret never leaves CI. See supabase/MIGRATIONS.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'diagnose (read-only migration list) or repair (align history)'
+        type: choice
+        options: [diagnose, repair]
+        default: diagnose
+        required: true
+      versions:
+        description: 'repair mode only: space-separated migration versions to repair (e.g. "20260706000000 20260706010000")'
+        type: string
+        default: ''
+        required: false
+      status:
+        description: 'repair mode only: mark the versions as applied (skip on push) or reverted (re-run on push)'
+        type: choice
+        options: [applied, reverted]
+        default: applied
+        required: false
+
+concurrency:
+  group: repair-migrations
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Diagnose — current migration history (read-only)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error title=Missing secret::SUPABASE_DB_URL is not set — cannot reach the database."
+            exit 1
+          fi
+          echo "== supabase migration list (before) =="
+          supabase migration list --db-url "$SUPABASE_DB_URL"
+
+      - name: Repair — align history (repair mode only)
+        if: ${{ inputs.mode == 'repair' }}
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "${{ inputs.versions }}" ]; then
+            echo "::error title=No versions::mode=repair requires at least one version in the 'versions' input."
+            exit 1
+          fi
+          echo "== repairing versions '${{ inputs.versions }}' as status '${{ inputs.status }}' =="
+          supabase migration repair --status "${{ inputs.status }}" ${{ inputs.versions }} --db-url "$SUPABASE_DB_URL"
+          echo "== supabase migration list (after) =="
+          supabase migration list --db-url "$SUPABASE_DB_URL"
+          echo "Repair complete. Re-run the 'Deploy backend to api.sprntly.ai' workflow to apply remaining pending migrations and deploy."
