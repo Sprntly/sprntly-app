@@ -6,22 +6,17 @@ import {
   useRef,
   useState,
 } from "react"
-import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
-import { useWorkspace } from "../../context/WorkspaceContext"
 import { PrdSections } from "./PrdSections"
 import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
 import { SendToClaudeCode } from "./SendToClaudeCode"
-import { GenerateModal } from "../design-agent/GenerateModal"
+import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { EmptyPane } from "./EmptyPane"
-import { ApiError, designAgentApi, multiAgentApi, prdApi } from "../../lib/api"
-import { updateWorkspace } from "../../lib/onboarding/store"
-import type { DesignSourcePreference } from "../../lib/onboarding/types"
+import { ApiError, multiAgentApi, prdApi } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
-import { prototypePath } from "../../lib/routes"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
 import {
   IconGrid,
@@ -95,70 +90,16 @@ function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; saveStatus:
 }
 
 function ViewPrototypeButton({ prdId, figmaFileKey }: { prdId: number; figmaFileKey?: string | null }) {
-  const router = useRouter()
-  const { workspace, refresh } = useWorkspace()
-  const [hasProto, setHasProto] = useState<boolean | null>(null)
-  const [genOpen, setGenOpen] = useState(false)
-
-  useEffect(() => {
-    let cancelled = false
-    setHasProto(null)
-    designAgentApi
-      .getByPrd(prdId)
-      .then((proto) => {
-        if (!cancelled) setHasProto(proto != null)
-      })
-      .catch(() => {
-        if (!cancelled) setHasProto(false)
-      })
-    return () => { cancelled = true }
-  }, [prdId])
-
-  const handleSavePreference = useCallback(async (pref: DesignSourcePreference) => {
-    if (!workspace) return
-    await updateWorkspace(workspace.id, { design_source: pref })
-    await refresh()
-  }, [workspace, refresh])
-
-  const goToPrototype = useCallback(() => {
-    router.push(prototypePath(prdId))
-  }, [prdId, router])
-
-  // Label reflects real DB state (getByPrd returns non-null only for a READY
-  // prototype): "View Prototype" once one exists, "Generate Prototype" before.
-  // While the existence check is in flight (hasProto === null) show a neutral,
-  // disabled "Loading…" so the label never flashes the wrong action first.
-  const label =
-    hasProto === null ? "Loading…" : hasProto ? "View Prototype" : "Generate Prototype"
-
   return (
-    <>
-      <button
-        type="button"
-        className="prd-send-claude-btn"
-        disabled={hasProto === null}
-        onClick={() => {
-          if (hasProto === true) goToPrototype()
-          else setGenOpen(true)
-        }}
-      >
-        {label}
-      </button>
-      <GenerateModal
-        open={genOpen}
-        onClose={() => setGenOpen(false)}
-        prdId={prdId}
-        figmaFileKey={figmaFileKey ?? null}
-        onGenStart={() => {}}
-        onKickoff={(prototypeId) => {
-          setGenOpen(false)
-          router.push(`${prototypePath(prdId)}&pid=${encodeURIComponent(String(prototypeId))}`)
-        }}
-        onGenDone={() => {}}
-        savedPreference={workspace?.design_source ?? null}
-        onSavePreference={handleSavePreference}
-      />
-    </>
+    <GeneratePrototypeCTA
+      prdId={prdId}
+      figmaFileKey={figmaFileKey}
+      render={({ label, onClick, disabled }) => (
+        <button type="button" className="prd-send-claude-btn" disabled={disabled} onClick={onClick}>
+          {label}
+        </button>
+      )}
+    />
   )
 }
 

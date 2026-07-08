@@ -1,6 +1,17 @@
 // @vitest-environment jsdom
+//
+// The PRD footer's "Generate/View Prototype" button is a thin
+// <GeneratePrototypeCTA> mount now (see PrdPanelContent.tsx's
+// ViewPrototypeButton). GeneratePrototypeCTA and the underlying
+// useGeneratePrototype() hook are exercised directly by their own test
+// files — GeneratePrototypeCTA.test.tsx and useGeneratePrototype.test.tsx —
+// so this file stays focused on the INTEGRATION contract: that
+// PrdPanelContent wires prdId/figmaFileKey through correctly and that the
+// button's observable behavior (label text, click routing, generate-then-
+// navigate) is unchanged (or, where explicitly sanctioned, improved) by the
+// migration.
 import * as React from "react"
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
@@ -22,7 +33,12 @@ const mocks = vi.hoisted(() => ({
 
 let content: Record<string, unknown>
 let workspace: { id: number; design_source: unknown } | null
+// Captured on every render of the mocked GenerateModal/GenerationLoadingScreen
+// so tests can invoke the hook's callback props directly (the same pattern
+// useGeneratePrototype.test.tsx uses) without needing a real backend or real
+// SSE stream.
 let latestGenerateProps: Record<string, unknown> | null = null
+let latestLoadingProps: Record<string, unknown> | null = null
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: mocks.pushSpy, replace: vi.fn(), prefetch: vi.fn() }),
@@ -75,6 +91,12 @@ vi.mock("../../../lib/api", () => {
   }
 })
 
+// Mocks the two mounts <GeneratePrototypeCTA> owns internally (via
+// useGeneratePrototype). Capturing props on every render — even while
+// `open` is false and the mock itself renders nothing — lets tests invoke
+// onGenStart/onKickoff/onGenDone/onSavePreference directly, exactly like the
+// hook's own test file does, instead of trying to drive a real GenerateModal
+// form.
 vi.mock("../../design-agent/GenerateModal", () => ({
   GenerateModal: (props: Record<string, unknown>) => {
     latestGenerateProps = props
@@ -82,9 +104,6 @@ vi.mock("../../design-agent/GenerateModal", () => ({
     return (
       <div role="dialog" aria-label="Generate prototype">
         {!props.savedPreference && <div>Choose a design source</div>}
-        <button type="button" onClick={() => (props.onKickoff as (id: number) => void)(991)}>
-          Kick off
-        </button>
         <button
           type="button"
           onClick={() =>
@@ -100,6 +119,14 @@ vi.mock("../../design-agent/GenerateModal", () => ({
         </button>
       </div>
     )
+  },
+}))
+
+vi.mock("../../design-agent/GenerationLoadingScreen", () => ({
+  GenerationLoadingScreen: (props: Record<string, unknown>) => {
+    latestLoadingProps = props
+    if (!props.open) return null
+    return <div data-testid="loading-overlay">Generating…</div>
   },
 }))
 
@@ -130,6 +157,7 @@ async function openGeneratePopup() {
 beforeEach(() => {
   vi.resetAllMocks()
   latestGenerateProps = null
+  latestLoadingProps = null
   mocks.refresh.mockResolvedValue(undefined)
   mocks.updateWorkspace.mockResolvedValue(undefined)
   content = {
@@ -158,15 +186,78 @@ describe("PrdPanelContent View Prototype footer action", () => {
     )
   })
 
-  it("shows a disabled 'Loading…' while checking, then 'View Prototype' when one is ready", async () => {
+  // Regression — AC3: unchanged label contract from before the migration.
+  it("test_prd_panel_button_shows_loading_then_generate_label", async () => {
+    mocks.getByPrd.mockReset()
+    mocks.getByPrd.mockResolvedValueOnce(null)
     renderPanel()
     // Existence unknown on first render → neutral, disabled (no premature label).
     const loading = screen.getByRole("button", { name: "Loading…" })
     expect((loading as HTMLButtonElement).disabled).toBe(true)
-    // Default mock → ready prototype → flips to an enabled "View Prototype".
+    // No ready row → the label settles on "Generate Prototype".
+    const generate = await screen.findByRole("button", { name: "Generate Prototype" })
+    expect((generate as HTMLButtonElement).disabled).toBe(false)
+    expect(screen.queryByRole("button", { name: "View Prototype" })).toBeNull()
+  })
+
+  // Regression — AC3: unchanged label contract from before the migration.
+  it("test_prd_panel_button_shows_view_label_when_ready", async () => {
+    renderPanel()
+    const loading = screen.getByRole("button", { name: "Loading…" })
+    expect((loading as HTMLButtonElement).disabled).toBe(true)
+    // Default mock → ready prototype with bundle_url → flips to "View Prototype".
     const view = await screen.findByRole("button", { name: "View Prototype" })
     expect((view as HTMLButtonElement).disabled).toBe(false)
     expect(screen.queryByRole("button", { name: "Generate Prototype" })).toBeNull()
+  })
+
+  // Regression — AC4: clicking with cta === "view" re-verifies (a SECOND
+  // getByPrd call) before navigating — matches the shared hook's
+  // handleCtaClick "view" contract (CR-02), not a stale-navigation shortcut.
+  it("test_prd_panel_view_click_navigates_after_reverify", async () => {
+    renderPanel()
+    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
+    fireEvent.click(await screen.findByRole("button", { name: "View Prototype" }))
+    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledTimes(2))
+    expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42")
+    expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
+  })
+
+  // Creation / edge case — AC1 (the sanctioned kill): the user stays on the
+  // PRD screen while a generation is in flight — no router.push until the
+  // outcome is terminal — and the shared loading overlay (previously entirely
+  // absent on this surface) is now visible.
+  it("test_prd_panel_generate_stays_on_prd_screen_until_success", async () => {
+    await openGeneratePopup()
+    expect(latestGenerateProps).toBeTruthy()
+
+    // Simulate the real GenerateModal's kickoff sequence (it calls onClose()
+    // then onGenStart() in the same handler — see GenerateModal.tsx line 678).
+    await act(async () => {
+      ;(latestGenerateProps!.onClose as () => void)()
+      ;(latestGenerateProps!.onGenStart as (ctx?: unknown) => void)()
+    })
+
+    expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
+    expect(await screen.findByTestId("loading-overlay")).toBeTruthy()
+    expect(mocks.pushSpy).not.toHaveBeenCalled()
+  })
+
+  // Creation / edge case — AC2/AC9 (the sanctioned kill): on success,
+  // router.push is called exactly once with the bare prototypePath(prdId) —
+  // an exact string-equality assertion (not `toContain`), proving no `&pid=`
+  // handoff param is ever appended.
+  it("test_prd_panel_generate_success_navigates_without_pid_param", async () => {
+    await openGeneratePopup()
+    const proto = { id: 991, status: "ready", bundle_url: "/bundle" }
+
+    await act(async () => {
+      ;(latestGenerateProps!.onKickoff as (id: number) => void)(991)
+      ;(latestGenerateProps!.onGenDone as (result?: unknown) => void)({ ok: true, prototype: proto })
+    })
+
+    expect(mocks.pushSpy).toHaveBeenCalledTimes(1)
+    expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42")
   })
 
   it("shows 'Generate Prototype' when no ready prototype exists (404 → null)", async () => {
@@ -177,15 +268,6 @@ describe("PrdPanelContent View Prototype footer action", () => {
     expect(screen.queryByRole("button", { name: "View Prototype" })).toBeNull()
   })
 
-  it("test_view_prototype_existing_navigates_direct", async () => {
-    renderPanel()
-    await waitFor(() => expect(mocks.getByPrd).toHaveBeenCalledWith(42))
-    // Ready prototype → label resolves to "View Prototype"; clicking navigates.
-    fireEvent.click(await screen.findByRole("button", { name: "View Prototype" }))
-    expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42")
-    expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
-  })
-
   it("test_no_proto_null_resolve_opens_popup", async () => {
     mocks.getByPrd.mockReset()
     mocks.getByPrd.mockResolvedValueOnce(null)
@@ -194,15 +276,6 @@ describe("PrdPanelContent View Prototype footer action", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Generate Prototype" }))
     expect(await screen.findByRole("dialog", { name: "Generate prototype" })).toBeTruthy()
     expect(mocks.pushSpy).not.toHaveBeenCalled()
-  })
-
-  it("test_proto_record_navigates", async () => {
-    mocks.getByPrd.mockReset()
-    mocks.getByPrd.mockResolvedValueOnce({ id: 88, status: "ready", bundle_url: "/bundle" })
-    renderPanel()
-    fireEvent.click(await screen.findByRole("button", { name: "View Prototype" }))
-    expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42")
-    expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
   })
 
   it("test_getbyprd_reject_defensive_opens_popup", async () => {
@@ -221,15 +294,6 @@ describe("PrdPanelContent View Prototype footer action", () => {
     expect(latestGenerateProps?.open).toBe(false)
     expect(mocks.generateSpy).not.toHaveBeenCalled()
     expect(mocks.pushSpy).not.toHaveBeenCalled()
-  })
-
-  it("test_kickoff_closes_popup_and_navigates", async () => {
-    await openGeneratePopup()
-    fireEvent.click(screen.getByRole("button", { name: "Kick off" }))
-    await waitFor(() =>
-      expect(mocks.pushSpy).toHaveBeenCalledWith("/prototype?prd=42&pid=991"),
-    )
-    expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
   })
 
   it("test_generate_modal_receives_saved_preference", async () => {
@@ -277,5 +341,14 @@ describe("PrdPanelContent View Prototype footer action", () => {
     )
     expect(src).not.toContain("SHOW_PROTOTYPE_SECTION")
     expect(src).not.toContain("function PrototypeSection")
+  })
+
+  // AC9 — the `&pid=` handoff construction is gone entirely from this file.
+  it("test_no_pid_handoff_construction_in_source", () => {
+    const src = readFileSync(
+      resolve(process.cwd(), "app/components/shared/PrdPanelContent.tsx"),
+      "utf8",
+    )
+    expect(src).not.toMatch(/pid=/)
   })
 })
