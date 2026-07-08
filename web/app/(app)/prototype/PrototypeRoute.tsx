@@ -68,7 +68,7 @@ import {
   IconPin,
   IconCopy,
   IconShare,
-  IconPlus,
+  IconTerminalPrompt,
   IconChevronLeft,
 } from "../../components/shared/app-icons"
 import {
@@ -982,10 +982,10 @@ export function PrototypeRoute() {
           action={
             <button
               type="button"
-              className="btn btn-accent da-empty-hero-cta"
+              className="fc-btn-secondary"
               onClick={() => setGenerateRequested(true)}
             >
-              <IconPlus size={16} />
+              <IconTerminalPrompt size={13} />
               Generate prototype
             </button>
           }

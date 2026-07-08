@@ -1464,6 +1464,13 @@ export type BriefPrototypeMapEntry = {
 }
 export type BriefPrototypeMap = { brief_id: number; entries: BriefPrototypeMapEntry[] }
 
+/** Bound on the view-grant mint POST. If the request stalls (observed: Safari's
+ *  stricter cookie/ITP handling can hang a same-origin credentialed POST
+ *  indefinitely), the AbortController fires and the fetch rejects, letting
+ *  useViewGrant's existing mint() catch block surface its clean error state
+ *  instead of leaving the caller's promise pending forever. */
+export const VIEW_GRANT_FETCH_TIMEOUT_MS = 10_000
+
 export const designAgentApi = {
   /** Kicks off prototype generation in the background; returns immediately
    *  with a prototype_id. Client should poll designAgentApi.get(id) (via
@@ -1592,8 +1599,19 @@ export const designAgentApi = {
       const token = await accessTokenProvider()
       if (token) headers.Authorization = `Bearer ${token}`
     }
-    const res = await fetch(viewGrantUrl, { method: "POST", headers, credentials: "include" })
-    if (!res.ok) throw new ApiError(res.status, null, "view-grant failed")
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), VIEW_GRANT_FETCH_TIMEOUT_MS)
+    try {
+      const res = await fetch(viewGrantUrl, {
+        method: "POST",
+        headers,
+        credentials: "include",
+        signal: controller.signal,
+      })
+      if (!res.ok) throw new ApiError(res.status, null, "view-grant failed")
+    } finally {
+      clearTimeout(timeoutId)
+    }
   },
   /** Resume iteration on a completed prototype. Empty body. */
   resume: (prototypeId: number) =>

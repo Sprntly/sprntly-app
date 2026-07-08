@@ -66,7 +66,8 @@ CREATE TABLE prototypes (
     share_mode             TEXT NOT NULL DEFAULT 'private'
                            CHECK (share_mode IN ('private', 'public', 'passcode')),
     share_token            TEXT UNIQUE,
-    share_passcode_hash    TEXT
+    share_passcode_hash    TEXT,
+    grounding_note         TEXT
 );
 CREATE TABLE prototype_checkpoints (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -409,6 +410,181 @@ async def test_build_map_called_with_pinned_commit_sha(env, monkeypatch):
     args, _kwargs = captured_args[0]
     # asyncio.to_thread passes positional args through verbatim.
     assert args == (42, "org/repo", "pinned-sha")
+
+
+# ── Grounding-degrade signal ───────────────────────────────────────────────────
+#
+# `design_source == "github"` is the user's explicit codebase-grounding intent.
+# When the recreate pre-seed can't fully honour that intent, `grounding_note`
+# is set on the row so the degrade is no longer silent. A user-chosen skip
+# (no screen requested) or a non-codebase source is not a degrade.
+
+
+async def test_missing_map_commit_sha_sets_blank_canvas_note(env, monkeypatch):
+    """A codebase-grounded request with no pinned commit sha never even builds
+    a map (shell_map stays None) → the row's note describes a blank-canvas
+    generation. Fails on unfixed code: the column stays NULL."""
+    _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42,
+        design_source="github",
+        chosen_screen_route=None, map_commit_sha=None,
+    )
+
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert "no repository map was available" in row["grounding_note"]
+
+
+async def test_unmatched_chosen_screen_sets_shell_only_note(env, monkeypatch):
+    """A map builds fine, but the requested screen matches no node → the row's
+    note describes a shell-only generation. Fails on unfixed code: today this
+    path emits no log and no note at all."""
+    _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    fake_map = _make_map(route="/team", commit_sha="shaABC")
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: fake_map,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42,
+        design_source="github",
+        chosen_screen_route="/settings", map_commit_sha="shaABC",
+    )
+
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert "selected screen could not be matched" in row["grounding_note"]
+
+
+async def test_matched_screen_leaves_note_null(env, monkeypatch):
+    """The requested screen resolves to a node → full grounding, no note."""
+    _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    fake_map = _make_map(route="/team", commit_sha="shaABC")
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: fake_map,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42,
+        design_source="github",
+        chosen_screen_route="/team", map_commit_sha="shaABC",
+    )
+
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["grounding_note"] is None
+
+
+async def test_deliberate_skip_locate_leaves_note_null(env, monkeypatch):
+    """A map builds fine, but neither chosen_screen_id nor chosen_screen_route
+    was ever sent (the PM deliberately skipped locate) → the shell-grounded
+    Tier-2 result the user chose is not flagged as a degrade."""
+    _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    fake_map = _make_map(route="/team", commit_sha="shaABC")
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *_a, **_k: fake_map,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        github_repo="org/repo", github_installation_id=42,
+        design_source="github",
+        chosen_screen_route=None, chosen_screen_id=None, map_commit_sha="shaABC",
+    )
+
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["grounding_note"] is None
+
+
+async def test_non_github_source_never_sets_note(env, monkeypatch):
+    """A non-codebase source has no grounding expectation to degrade from —
+    the note stays untouched regardless of map/screen state."""
+    _stub_generate_capture(monkeypatch, env.routes)
+    _stub_stage_capture(monkeypatch, env.routes)
+
+    build_calls: list = []
+    monkeypatch.setattr(
+        "app.design_agent.codebase_map.service.build_map",
+        lambda *a, **k: build_calls.append((a, k)) or None,
+    )
+
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id="app", prd_id=prd_id,
+        target_platform="both", instructions="",
+        figma_file_key="figma-key-abc",
+        github_repo=None, github_installation_id=None,
+        design_source="figma",
+        chosen_screen_route=None, map_commit_sha=None,
+    )
+
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["grounding_note"] is None
+    assert build_calls == []
+
+
+def test_get_prototype_surfaces_grounding_note_key(env):
+    """After `set_grounding_note`, `get_prototype` returns a dict containing
+    `grounding_note` with the exact string written — proves the existing raw-
+    dict response contract already carries the new column."""
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id="app", template_version=1,
+    )
+    env.proto.set_grounding_note(
+        prototype_id=pid, workspace_id="app", note="a written note",
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["grounding_note"] == "a written note"
+
+
+def test_grounding_note_migration_is_idempotent():
+    """String-level check (no live Postgres in the dev env, per the sibling
+    migration tests' own convention): the migration guards its own column add
+    with `if not exists`, so re-applying it is a no-op."""
+    migration_path = (
+        Path(__file__).resolve().parents[1].parent
+        / "supabase" / "migrations"
+        / "20260708010000_design_agent_grounding_note.sql"
+    )
+    assert migration_path.exists()
+    sql = migration_path.read_text().lower()
+    assert "add column if not exists grounding_note" in sql
 
 
 # ── Installation-resolver baseline — AC7 ───────────────────────────────────────

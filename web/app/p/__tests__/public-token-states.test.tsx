@@ -42,14 +42,17 @@ import { IconMessage, IconPin } from "../../components/shared/app-icons"
 const HERE = dirname(fileURLToPath(import.meta.url))
 const CSS_PATH = resolve(HERE, "../../components/design-agent/design-agent.css")
 const PUBLIC_VIEWER_PATH = resolve(HERE, "../PublicTokenViewer.tsx")
+const PUBLIC_CHROME_PATH = resolve(HERE, "../PublicPrototypeChrome.tsx")
 const PASSCODE_GATE_PATH = resolve(HERE, "../PasscodeGate.tsx")
 
 let css = ""
 let publicViewerSrc = ""
+let chromeSrc = ""
 let passcodeGateSrc = ""
 beforeAll(() => {
   css = readFileSync(CSS_PATH, "utf8")
   publicViewerSrc = readFileSync(PUBLIC_VIEWER_PATH, "utf8")
+  chromeSrc = readFileSync(PUBLIC_CHROME_PATH, "utf8")
   passcodeGateSrc = readFileSync(PASSCODE_GATE_PATH, "utf8")
 })
 
@@ -213,15 +216,15 @@ describe("P6-18 no-drift / canonical", () => {
 // CommentsPanel mount, and (b) live-render the EQUIVALENT ready-state fragment
 // (headControls + chrome) through PrototypeViewer to prove it composes.
 describe("C2a public head controls + writable-anon comments", () => {
-  it("test_ready_state_jsx_has_mark_and_comment_buttons: PublicTokenViewer renders both head toggles with aria-pressed", () => {
-    expect(publicViewerSrc).toContain('data-testid="public-mark-toggle"')
-    expect(publicViewerSrc).toContain('data-testid="public-comments-toggle"')
+  it("test_ready_state_jsx_has_mark_and_comment_buttons: PublicPrototypeChrome renders both head toggles with aria-pressed", () => {
+    expect(chromeSrc).toContain('data-testid="public-mark-toggle"')
+    expect(chromeSrc).toContain('data-testid="public-comments-toggle"')
     // both buttons reflect their toggle state via aria-pressed. C2b: Mark is now
     // driven by the shared hook (pin.markMode); Comment stays local (commentsOpen).
-    expect(publicViewerSrc).toMatch(/aria-pressed=\{pin\.markMode\}/)
-    expect(publicViewerSrc).toMatch(/aria-pressed=\{commentsOpen\}/)
+    expect(chromeSrc).toMatch(/aria-pressed=\{pin\.markMode\}/)
+    expect(chromeSrc).toMatch(/aria-pressed=\{commentsOpen\}/)
     // controls are handed to PrototypeViewer via the new additive headControls prop
-    expect(publicViewerSrc).toMatch(/headControls=\{/)
+    expect(chromeSrc).toMatch(/headControls=\{/)
   })
 
   it("test_public_comments_mount_is_writable_anon: CommentsPanel mounts with canComment + token, NO prototypeId", () => {
@@ -229,8 +232,8 @@ describe("C2a public head controls + writable-anon comments", () => {
     // on) and the token (routes via createCommentByToken). It must NOT receive a
     // prototypeId — that keeps resolve/apply/ignore/delete hidden on the public
     // surface.
-    expect(publicViewerSrc).toMatch(/commentsOpen\s*&&/)
-    const mountMatch = publicViewerSrc.match(/<CommentsPanel[\s\S]*?\/>/)
+    expect(chromeSrc).toMatch(/commentsOpen\s*&&/)
+    const mountMatch = chromeSrc.match(/<CommentsPanel[\s\S]*?\/>/)
     expect(mountMatch).not.toBeNull()
     const mount = mountMatch![0]
     expect(mount).toContain("token=")
@@ -299,35 +302,35 @@ describe("C2b public marking — shared hook + token create-fn", () => {
     // Prove-it-fails-on-the-bug: if someone wires the AUTHED createComment on the
     // public surface, this fails. The public viewer has no prototypeId and must
     // not call the authed create.
-    expect(publicViewerSrc).toContain("usePinMarking({")
-    const start = publicViewerSrc.indexOf("usePinMarking({")
-    const call = publicViewerSrc.slice(start, start + 500)
+    expect(chromeSrc).toContain("usePinMarking({")
+    const start = chromeSrc.indexOf("usePinMarking({")
+    const call = chromeSrc.slice(start, start + 500)
     // the injected create-fn is the by-token public route
     expect(call).toMatch(/onCreate:\s*\(payload\)\s*=>\s*designAgentApi\.createCommentByToken\(/)
     // and NOT the authed prototype-id create (the wrong-create-fn bug)
     expect(call).not.toContain("createComment(prototype")
     // the whole file must not reach for the authed create on this surface
-    expect(publicViewerSrc).not.toMatch(/designAgentApi\.createComment\(/)
+    expect(chromeSrc).not.toMatch(/designAgentApi\.createComment\(/)
   })
 
   it("test_public_mark_button_drives_hook: the Mark head toggle is wired to pin.toggleMark / pin.markMode", () => {
-    expect(publicViewerSrc).toMatch(/aria-pressed=\{pin\.markMode\}/)
-    expect(publicViewerSrc).toMatch(/onClick=\{\(\)\s*=>\s*pin\.toggleMark\(\)\}/)
+    expect(chromeSrc).toMatch(/aria-pressed=\{pin\.markMode\}/)
+    expect(chromeSrc).toMatch(/onClick=\{\(\)\s*=>\s*pin\.toggleMark\(\)\}/)
   })
 
   it("test_public_mounts_overlay_via_stageOverlay: MarkOverlay + PinLayer are handed to PrototypeViewer's stageOverlay", () => {
-    expect(publicViewerSrc).toMatch(/stageOverlay=\{/)
-    const start = publicViewerSrc.indexOf("stageOverlay={")
-    const block = publicViewerSrc.slice(start, start + 400)
+    expect(chromeSrc).toMatch(/stageOverlay=\{/)
+    const start = chromeSrc.indexOf("stageOverlay={")
+    const block = chromeSrc.slice(start, start + 400)
     expect(block).toContain("<MarkOverlay")
     expect(block).toContain("onStageClick={pin.handleStageClick}")
     expect(block).toContain("<PinLayer")
   })
 
   it("test_public_mark_layer_is_read_only: PrototypeMarkLayer mounts with editorMode=false + canResolve=false (Apply/Ignore/resolve hidden)", () => {
-    expect(publicViewerSrc).toContain("<PrototypeMarkLayer")
-    const start = publicViewerSrc.indexOf("<PrototypeMarkLayer")
-    const mount = publicViewerSrc.slice(start, start + 400)
+    expect(chromeSrc).toContain("<PrototypeMarkLayer")
+    const start = chromeSrc.indexOf("<PrototypeMarkLayer")
+    const mount = chromeSrc.slice(start, start + 400)
     expect(mount).toContain("editorMode={false}")
     expect(mount).toContain("canResolve={false}")
     expect(mount).toContain("onSubmitComment={pin.handlePinSubmit}")
@@ -391,37 +394,37 @@ describe("Phase 3 name capture + viewer_name threading", () => {
   it("test_name_capture_form_gated_on_first_comment_no_stored_name: the form renders when commentsOpen && no stored name", () => {
     // A single derived `viewerNeedsName = !viewerName` is the source of truth,
     // and needsName = commentsOpen && viewerNeedsName drives the form.
-    expect(publicViewerSrc).toMatch(/viewerNeedsName\s*=\s*!viewerName/)
-    expect(publicViewerSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*viewerNeedsName/)
-    expect(publicViewerSrc).toMatch(/commentsOpen\s*&&\s*needsName\s*&&/)
-    expect(publicViewerSrc).toContain('data-testid="viewer-name-form"')
+    expect(chromeSrc).toMatch(/viewerNeedsName\s*=\s*!viewerName/)
+    expect(chromeSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*viewerNeedsName/)
+    expect(chromeSrc).toMatch(/commentsOpen\s*&&\s*needsName\s*&&/)
+    expect(chromeSrc).toContain('data-testid="viewer-name-form"')
     // single full-name input (first/last collapsed).
-    expect(publicViewerSrc).toContain('data-testid="viewer-full-name-input"')
-    expect(publicViewerSrc).not.toContain('data-testid="viewer-first-name-input"')
-    expect(publicViewerSrc).not.toContain('data-testid="viewer-last-name-input"')
+    expect(chromeSrc).toContain('data-testid="viewer-full-name-input"')
+    expect(chromeSrc).not.toContain('data-testid="viewer-first-name-input"')
+    expect(chromeSrc).not.toContain('data-testid="viewer-last-name-input"')
   })
 
   it("test_viewer_name_persists_to_localstorage: name is read from + written to the da-viewer-name key", () => {
-    expect(publicViewerSrc).toContain('"da-viewer-name"')
-    expect(publicViewerSrc).toMatch(/localStorage\.getItem\(VIEWER_NAME_KEY\)/)
-    expect(publicViewerSrc).toMatch(/localStorage\.setItem\(VIEWER_NAME_KEY/)
+    expect(chromeSrc).toContain('"da-viewer-name"')
+    expect(chromeSrc).toMatch(/localStorage\.getItem\(VIEWER_NAME_KEY\)/)
+    expect(chromeSrc).toMatch(/localStorage\.setItem\(VIEWER_NAME_KEY/)
     // on submit, persist THEN set state (so the panel renders next).
-    expect(publicViewerSrc).toMatch(/persistViewerName\(name\)/)
-    expect(publicViewerSrc).toMatch(/setViewerName\(name\)/)
+    expect(chromeSrc).toMatch(/persistViewerName\(name\)/)
+    expect(chromeSrc).toMatch(/setViewerName\(name\)/)
   })
 
   it("test_pii_notice_present: the capture form discloses where the name + comment go", () => {
-    expect(publicViewerSrc).toContain('data-testid="viewer-name-notice"')
-    expect(publicViewerSrc).toMatch(/Your name and comment are shared with the prototype/)
+    expect(chromeSrc).toContain('data-testid="viewer-name-notice"')
+    expect(chromeSrc).toMatch(/Your name and comment are shared with the prototype/)
   })
 
   it("test_viewer_name_threads_into_both_create_paths: pin onCreate AND CommentsPanel mount carry the viewer name", () => {
     // Pin create path: createCommentByToken(token, { ...payload, viewer_name: viewerName }).
-    expect(publicViewerSrc).toMatch(
+    expect(chromeSrc).toMatch(
       /createCommentByToken\([^)]*\{\s*\.\.\.payload,\s*viewer_name:\s*viewerName\s*\}/,
     )
     // CommentsPanel mount path: viewerName prop threaded.
-    const mountMatch = publicViewerSrc.match(/<CommentsPanel[\s\S]*?\/>/)
+    const mountMatch = chromeSrc.match(/<CommentsPanel[\s\S]*?\/>/)
     expect(mountMatch).not.toBeNull()
     expect(mountMatch![0]).toMatch(/viewerName=\{viewerName\}/)
     // still NO prototypeId on the public mount (min-disclosure preserved).
@@ -456,7 +459,7 @@ describe("Phase 3 name capture + viewer_name threading", () => {
   it("test_min_disclosure_holds_on_public_mount: resolve/apply/ignore/delete stay hidden", () => {
     // The writable-anon CommentsPanel mount must not pass a prototypeId, which is
     // what gates the resolve/apply/ignore/delete affordances OFF on the public surface.
-    const mountMatch = publicViewerSrc.match(/<CommentsPanel[\s\S]*?\/>/)
+    const mountMatch = chromeSrc.match(/<CommentsPanel[\s\S]*?\/>/)
     expect(mountMatch).not.toBeNull()
     expect(mountMatch![0]).toContain("canComment")
     expect(mountMatch![0]).not.toContain("prototypeId")
@@ -534,19 +537,19 @@ describe("passcode mint targets the app-origin /_da-bundle path (prod cookie cor
 // prop-threading in the container source, and the token-only/scoped CSS rule
 // (jsdom does not apply the external stylesheet).
 describe("single-device badge — wiring + CSS invariants", () => {
-  it("PublicTokenViewer derives the gate and threads showDesktop/showMobile/initialPlatform + gates the badge", () => {
+  it("PublicPrototypeChrome derives the gate and threads showDesktop/showMobile/initialPlatform + gates the badge", () => {
     // The gate mirrors the signed-in single-device viewer: single device
     // ⇒ suppress the toggle.
-    expect(publicViewerSrc).toContain('const showDesktop = targetPlatform !== "mobile"')
-    expect(publicViewerSrc).toContain('const showMobile = targetPlatform !== "desktop"')
+    expect(chromeSrc).toContain('const showDesktop = targetPlatform !== "mobile"')
+    expect(chromeSrc).toContain('const showMobile = targetPlatform !== "desktop"')
     // Props threaded to PrototypeViewer (a mid-tree drop fails the .dom test too).
-    expect(publicViewerSrc).toContain("showDesktop={showDesktop}")
-    expect(publicViewerSrc).toContain("showMobile={showMobile}")
-    expect(publicViewerSrc).toContain(
+    expect(chromeSrc).toContain("showDesktop={showDesktop}")
+    expect(chromeSrc).toContain("showMobile={showMobile}")
+    expect(chromeSrc).toContain(
       'initialPlatform={targetPlatform === "mobile" ? "mobile" : "desktop"}',
     )
     // The badge renders ONLY for a single-device prototype.
-    expect(publicViewerSrc).toContain("singleDevice && <DeviceBadge platform={targetPlatform} />")
+    expect(chromeSrc).toContain("singleDevice && <DeviceBadge platform={targetPlatform} />")
   })
 
   it("design-agent.css defines a scoped, token-only .device-badge rule appended after .platform-toggle", () => {

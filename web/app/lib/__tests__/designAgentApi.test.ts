@@ -4,6 +4,7 @@ import {
   API_URL,
   designAgentApi,
   setAccessTokenProvider,
+  VIEW_GRANT_FETCH_TIMEOUT_MS,
   type ManualEditTriple,
 } from "../api"
 
@@ -481,6 +482,83 @@ describe("designAgentApi", () => {
           edits: [{ anchor_id: "fb3007b5", property: "text", old_value: "a", new_value: "b" }],
         }),
       ).rejects.toMatchObject({ status: 400 })
+    })
+  })
+
+  // ── view-grant fetch timeout (stalled-request bug fix) ──────────────────
+  describe("viewGrant", () => {
+    const viewGrantUrl = "https://app.sprntly.ai/_da-bundle/x/view-grant"
+
+    beforeEach(() => {
+      vi.useFakeTimers()
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it("test_view_grant_stalled_fetch_rejects_within_timeout_bound — a fetch that never resolves rejects within VIEW_GRANT_FETCH_TIMEOUT_MS instead of hanging forever", async () => {
+      // Simulate a real fetch()'s AbortController contract: the returned
+      // promise never settles on its own, but rejects once the passed
+      // signal aborts (exactly what happens when viewGrant's own timeout
+      // fires). A fetch mock that ignores the signal (as the unfixed
+      // pre-ticket code effectively does, since it never passes one) would
+      // leave this promise pending forever and this test would time out —
+      // that's the regression this test proves is fixed.
+      fetchMock.mockImplementationOnce((_url: string, init?: RequestInit) => {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("The operation was aborted.", "AbortError"))
+          })
+        })
+      })
+
+      let settled = false
+      const promise = designAgentApi.viewGrant(viewGrantUrl)
+      // Single .then(onFulfilled, onRejected) attached directly to `promise` —
+      // marks it handled (avoids an unhandled-rejection warning) and tracks
+      // settlement on either outcome, without spinning off a second derived
+      // promise (e.g. via .finally()) that would itself go unhandled.
+      promise.then(
+        () => {
+          settled = true
+        },
+        () => {
+          settled = true
+        },
+      )
+
+      // Not yet at the bound: still pending.
+      await vi.advanceTimersByTimeAsync(VIEW_GRANT_FETCH_TIMEOUT_MS - 1)
+      expect(settled).toBe(false)
+
+      // Crossing the bound fires the AbortController and the fetch rejects.
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(promise).rejects.toBeInstanceOf(DOMException)
+      expect(settled).toBe(true)
+    })
+
+    it("test_view_grant_still_throws_apierror_on_non_ok_response — a resolved non-ok response still throws ApiError with the original status", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(401, { detail: "unauthorized" }))
+      await expect(designAgentApi.viewGrant(viewGrantUrl)).rejects.toMatchObject({
+        status: 401,
+      })
+    })
+
+    it("test_view_grant_clears_timeout_on_success — a promptly-resolving 204 leaves no dangling timer", async () => {
+      const baseline = vi.getTimerCount()
+      fetchMock.mockResolvedValueOnce(jsonResponse(204, null))
+      await designAgentApi.viewGrant(viewGrantUrl)
+      expect(vi.getTimerCount()).toBe(baseline)
+    })
+
+    it("test_view_grant_clears_timeout_on_thrown_apierror — the finally block clears the timeout even when a non-ok response throws", async () => {
+      const baseline = vi.getTimerCount()
+      fetchMock.mockResolvedValueOnce(jsonResponse(404, { detail: "not found" }))
+      await expect(designAgentApi.viewGrant(viewGrantUrl)).rejects.toMatchObject({
+        status: 404,
+      })
+      expect(vi.getTimerCount()).toBe(baseline)
     })
   })
 })

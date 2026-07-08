@@ -85,6 +85,7 @@ from app.db.prototypes import (
     passcode_rate_limit_register_failure,
     record_export_at_complete,
     resume_iteration,
+    set_grounding_note,
     set_share_config,
     start_prototype,
     verify_share_passcode,
@@ -1628,6 +1629,44 @@ async def _run_generation_bg(
                 )
                 located = None
                 shell_map = None
+
+        # Signal (not silent) when a codebase-grounded request degrades below full
+        # grounding. design_source == "github" is the user's explicit intent signal.
+        # Two degrade shapes below both mean the recreate pre-seed did not get what
+        # it needed; today neither is surfaced anywhere the user can see it.
+        if design_source == "github":
+            grounding_note: str | None = None
+            if shell_map is None:
+                # No repository map was even attempted/available for this run —
+                # covers: map_commit_sha absent, github_installation_id unresolved,
+                # AND build_map itself returning None (the existing
+                # recreate_wire_failed warning path) — all three collapse to
+                # shell_map staying None.
+                grounding_note = (
+                    "Generated without codebase grounding: no repository map was "
+                    "available for this run, so the prototype was built from the "
+                    "design system only."
+                )
+            elif located is None and (chosen_screen_id or chosen_screen_route):
+                # A map built fine, but the specific screen the user selected could
+                # not be matched (stale id/route after a repo change — the map's own
+                # "id-vs-route drift" seam). A shell-grounded prototype was still
+                # produced; only the screen-specific parity contract is missing.
+                grounding_note = (
+                    "The selected screen could not be matched in the repository "
+                    "map, so the prototype was generated against the general app "
+                    "shell instead of that specific screen."
+                )
+            if grounding_note is not None:
+                set_grounding_note(
+                    prototype_id=prototype_id,
+                    workspace_id=workspace_id,
+                    note=grounding_note,
+                )
+                logger.warning(
+                    "design_agent.grounding_degraded prototype_id=%s tier=%s",
+                    prototype_id, "blank" if shell_map is None else "shell_only",
+                )
 
         # Tier 1: serialise the HEAVY section (LLM recreate loop + vite
         # build + screenshot — the part that pins both cores on the 2-vCPU prod
