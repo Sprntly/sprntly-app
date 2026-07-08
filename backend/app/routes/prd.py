@@ -30,6 +30,11 @@ from app.db import (
 from app.db.backlog import get_backlog_item
 from app.db.briefs import get_current_brief
 from app.db.companies import slug_for_company_id
+from app.db.prd_input_questions import (
+    answer_question,
+    get_question,
+    list_questions,
+)
 from app.db.prds import (
     find_existing_prd_for_theme,
     get_prd,
@@ -379,3 +384,88 @@ def restore_version(
     if not result:
         raise HTTPException(404, "Version not found")
     return result
+
+
+# ── "User input needed" questions: surface in chat + answer → scoped edit ──────
+
+
+@router.get("/{prd_id}/input-questions")
+def get_input_questions(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """List the PRD's structured "User input needed" questions.
+
+    These are extracted from the PRD at generation time (best-effort) and
+    surfaced in the PRD's chat as messages with answer buttons. Returns every
+    question (pending + answered) so a reopened chat stays consistent; the client
+    renders pending ones as actionable and answered ones as resolved.
+    """
+    require_owned_prd(prd_id, company.company_id)
+    return {"questions": list_questions(prd_id)}
+
+
+class InputAnswerIn(BaseModel):
+    answer: str = Field(..., min_length=1)
+
+
+@router.post("/{prd_id}/input-questions/{question_id}/answer")
+def answer_input_question(
+    prd_id: int,
+    question_id: int,
+    body: InputAnswerIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Answer one "User input needed" question and fold the answer into the PRD.
+
+    Runs the SCOPED editor (app.prd_questions.apply_answer) — NOT a full
+    prd-author re-run — over the PRD's current HTML, rewriting only the sections
+    the answer affects and self-clearing the answered item from the "User input
+    needed" list. The edit is saved through the normal version-snapshot path (so
+    it is undoable), the question is marked answered, and the rendered PRD +
+    changed-section list are returned so the chat can confirm and the panel can
+    refresh live.
+    """
+    # Import here to keep the module import graph lean (the editor pulls the LLM
+    # gateway) and mirror the lazy-import discipline used elsewhere in this file.
+    from app.prd_questions import apply_answer
+
+    row = require_owned_prd(prd_id, company.company_id)
+    question = get_question(question_id)
+    if not question or question.get("prd_id") != prd_id:
+        raise HTTPException(404, "Question not found")
+
+    # Edit the RAW payload_md (the pure PRD HTML). Design-agent 'applied' patches
+    # are appended on read by get_prd_rendered; editing the raw doc and storing it
+    # back keeps those patches folding once (no double-fold).
+    prd_html = (row.get("payload_md") or "").strip()
+    if not prd_html:
+        raise HTTPException(409, "PRD has no content to edit")
+
+    try:
+        edit = apply_answer(
+            prd_html, question["prompt"], body.answer, enterprise_id=company.company_id
+        )
+    except RuntimeError as exc:
+        # The scoped edit produced nothing usable — leave the PRD untouched and
+        # surface it rather than storing an empty document.
+        raise HTTPException(502, f"Could not apply the answer: {exc}")
+
+    # Snapshot the pre-edit content so the change is undoable (mirrors PUT /{id}).
+    try:
+        save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by="auto")
+    except Exception:
+        logger.warning(
+            "auto-version snapshot failed for prd_id=%s before input-answer edit "
+            "(undo point not captured)", prd_id, exc_info=True,
+        )
+
+    update_prd_content(prd_id, row.get("title", ""), edit["html"])
+    answered = answer_question(question_id, body.answer, answered_by=company.user_name)
+
+    return {
+        "prd": get_prd_rendered(prd_id),
+        "question": answered,
+        "sections_changed": edit["sections_changed"],
+        "summary": edit["summary"],
+    }
