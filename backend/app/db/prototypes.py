@@ -886,6 +886,33 @@ def clear_pending_question(*, prototype_id: int, workspace_id: str) -> None:
     )
 
 
+def set_grounding_note(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    note: str,
+) -> None:
+    """Persist a plain-English note that this run's codebase grounding
+    degraded below what the request asked for. A sidecar, like
+    pending_question — no new status value. Set once, at generation time,
+    when design_source == "github" but the recreate pre-seed ended up with no
+    map (blank-canvas) or no matched screen (shell-only). Never cleared: the
+    note describes how THIS run resolved grounding, not a live mutable state.
+    Workspace-filtered (cross-tenant safety). Logs identifiers only — the
+    note text itself is fixed boilerplate (never PII/secrets), but the log
+    stays identifier-only per this file's existing convention.
+    """
+    c = require_client()
+    (
+        c.table(_TABLE)
+        .update({"grounding_note": note})
+        .eq("id", prototype_id)
+        .eq("workspace_id", workspace_id)
+        .execute()
+    )
+    logger.info("prototype_grounding_degraded prototype_id=%s", prototype_id)
+
+
 # ─── Checkpoint chain: advance current_checkpoint_id on iterate (P3-12, F7) ───
 #
 # The iterate staging path (`_stage_iterate_run`, P3-05) deliberately does NOT
