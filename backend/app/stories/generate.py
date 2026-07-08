@@ -450,6 +450,11 @@ def generate_user_stories(
         json_schema=_SCHEMA,
         skill="user-stories",
         model=model,
+        # Deterministic structured extraction — temperature 0 removes needless
+        # variability (and the truncation-driven retries that empty the tool
+        # call) for a schema-forced generation. Quality is set by the method +
+        # schema, not sampling entropy.
+        temperature=0,
         # Large structured output — stream on the long read timeout (was tripping
         # httpx.ReadTimeout on the default 120s non-streamed path). The canonical
         # ticket is big (five-section description, provenance, inherited AC,

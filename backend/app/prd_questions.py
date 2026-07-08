@@ -114,6 +114,9 @@ def _run_extract(prd_html: str, enterprise_id: str) -> list[dict]:
         input=_EXTRACT_USER.format(prd_html=prd_html),
         json_schema=_EXTRACT_SCHEMA,
         max_tokens=4000,
+        # Deterministic lift of an existing PRD section into structured
+        # questions — no creativity wanted; temperature 0 keeps it stable.
+        temperature=0,
     )
     out = result.output if isinstance(result.output, dict) else {}
     questions = out.get("questions") or []
