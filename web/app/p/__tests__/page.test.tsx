@@ -204,6 +204,7 @@ describe("PasscodeGate", () => {
       ok: true,
       bundleUrl: "https://cdn.example/p/xyz/index.html",
       isComplete: true,
+      targetPlatform: "both",
     })
   })
 
