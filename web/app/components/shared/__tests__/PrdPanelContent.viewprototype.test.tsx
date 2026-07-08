@@ -178,7 +178,7 @@ describe("PrdPanelContent View Prototype footer action", () => {
     const buttons = within(actions as HTMLElement).getAllByRole("button")
     // First button is the prototype CTA (its label resolves async from getByPrd);
     // second is Send to Claude Code.
-    expect(buttons[0].className).toContain("prd-send-claude-btn")
+    expect(buttons[0].className).toContain("fc-btn-secondary")
     expect(buttons[1].textContent).toContain("Send to Claude Code")
     // Default mock resolves a READY prototype → the CTA settles on "View Prototype".
     await waitFor(() =>

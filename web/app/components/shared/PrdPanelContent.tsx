@@ -23,6 +23,7 @@ import {
   IconLinkInsert,
   IconListBullet,
   IconRedo,
+  IconTerminalPrompt,
   IconUndo,
 } from "./app-icons"
 import type { PrdSection, PrdState } from "../../types/content"
@@ -95,7 +96,8 @@ function ViewPrototypeButton({ prdId, figmaFileKey }: { prdId: number; figmaFile
       prdId={prdId}
       figmaFileKey={figmaFileKey}
       render={({ label, onClick, disabled }) => (
-        <button type="button" className="prd-send-claude-btn" disabled={disabled} onClick={onClick}>
+        <button type="button" className="fc-btn-secondary" disabled={disabled} onClick={onClick}>
+          <IconTerminalPrompt size={13} />
           {label}
         </button>
       )}
