@@ -279,83 +279,36 @@ def find_existing_prototype(
     return resp.data[0] if resp.data else None
 
 
-def find_ready_prototype_by_prd(
+def find_prototype_by_prd(
     *,
     prd_id: int,
     workspace_id: str,
+    statuses: list[str] | None = None,
 ) -> dict[str, Any] | None:
-    """Return the most-recent READY prototype for a PRD, or None.
+    """Return the most-recent prototype for a PRD matching `statuses`, or None.
 
-    Read-only sibling of find_existing_prototype WITHOUT the generate dedup's
-    side-effect — backs GET /by-prd/{prd_id} so the PRD screen can show a
-    preview card / flip Approve to "View Prototype" on load. Matches READY
-    prototypes only (not 'generating'), filtered to the caller's workspace,
-    newest by id.
+    Read-only, no generate side-effect (unlike find_existing_prototype, which
+    also gates POST /generate's dedupe and filters on template_version/variant
+    — a different helper for a different purpose, kept separate). Filtered to
+    the caller's workspace, newest by id. `statuses=None` means no status
+    filter at all (matches ANY status, including 'failed'/'invalidated') —
+    this backs the three read-only /by-prd lookups:
+
+      statuses=["ready"]              -> GET /by-prd/{prd_id}        (ready only)
+      statuses=["ready", "generating"] -> GET /by-prd/{prd_id}/active (resume lookup)
+      statuses=None                    -> GET /by-prd/{prd_id}/latest (any status,
+                                           incl. 'failed' — backs the error+retry surface)
     """
     c = require_client()
-    resp = (
+    q = (
         c.table(_TABLE)
         .select("*")
         .eq("prd_id", prd_id)
         .eq("workspace_id", workspace_id)
-        .eq("status", "ready")
-        .order("id", desc=True)
-        .limit(1)
-        .execute()
     )
-    return resp.data[0] if resp.data else None
-
-
-def find_active_prototype_by_prd(
-    *,
-    prd_id: int,
-    workspace_id: str,
-) -> dict[str, Any] | None:
-    """Return the most-recent READY-or-GENERATING prototype for a PRD, or None.
-
-    Resume sibling of find_ready_prototype_by_prd: it also matches an in-flight
-    'generating' row so a page (re)load mid-generation can re-attach to it and
-    poll to ready, instead of dropping to the generate panel and stranding the
-    finished bundle (the readiness lag between the SSE 'done' at codegen-complete
-    and complete_prototype() at the end of the build/stage tail). Read-only, no
-    dedup side-effect, filtered to the caller's workspace, newest by id.
-    """
-    c = require_client()
-    resp = (
-        c.table(_TABLE)
-        .select("*")
-        .eq("prd_id", prd_id)
-        .eq("workspace_id", workspace_id)
-        .in_("status", ["ready", "generating"])
-        .order("id", desc=True)
-        .limit(1)
-        .execute()
-    )
-    return resp.data[0] if resp.data else None
-
-
-def find_latest_prototype_by_prd(
-    *,
-    prd_id: int,
-    workspace_id: str,
-) -> dict[str, Any] | None:
-    """Most-recent prototype for a PRD of ANY status (incl 'failed'), or None.
-
-    Sibling of find_ready/find_active that does NOT status-filter — backs the
-    failed-state surface so a failed latest row shows an error+retry instead of the
-    bare generate CTA (find_active excludes 'failed'). Read-only, workspace-scoped,
-    newest by id.
-    """
-    c = require_client()
-    resp = (
-        c.table(_TABLE)
-        .select("*")
-        .eq("prd_id", prd_id)
-        .eq("workspace_id", workspace_id)
-        .order("id", desc=True)
-        .limit(1)
-        .execute()
-    )
+    if statuses is not None:
+        q = q.in_("status", statuses)
+    resp = q.order("id", desc=True).limit(1).execute()
     return resp.data[0] if resp.data else None
 
 
