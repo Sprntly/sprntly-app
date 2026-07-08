@@ -40,6 +40,7 @@ import type { DesignSourcePreference } from "../../lib/onboarding/types"
 import { designAgentApi, type PrototypeRecord } from "../../lib/api"
 import { prototypePath } from "../../lib/routes"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
+import { reasonCopy } from "./GenerationErrorBanner"
 
 // Min-visible duration. If generation dedup-returns an existing prototype
 // almost instantly, the overlay would otherwise flash; keep it visible at
@@ -384,7 +385,33 @@ export function useGeneratePrototype(
       resolvedRef.current = true
       if (notifyModeRef.current) {
         // Notify mode already dismissed the overlay and handed off (default or
-        // host override) — this terminal callback only clears timers.
+        // host override) — the overlay itself is gone, but the mounted
+        // GenerateModal's onGenDone still fires when the background generation
+        // resolves. Reproduces ApproveModal.handleGenDone's notify-mode branch:
+        // a persistent completion toast (success or failure), then the
+        // cross-surface da:generating-done dispatch so useGenerationNotify /
+        // any listenForCrossSurfaceGenerating host stops tracking this run.
+        if (result?.ok && result.prototype) {
+          const protoForToast = result.prototype
+          showToast(
+            "Prototype ready",
+            "Your prototype finished generating.",
+            "Open",
+            {
+              persist: true,
+              onAction: () =>
+                onSuccess ? onSuccess(protoForToast) : router.push(prototypePath(prdId)),
+            },
+          )
+        } else if (result && !result.ok) {
+          showToast(
+            "Generation failed",
+            reasonCopy(result.message),
+            undefined,
+            { persist: true },
+          )
+        }
+        window.dispatchEvent(new CustomEvent("da:generating-done"))
         clearOverlayTimers()
         return
       }
@@ -397,7 +424,7 @@ export function useGeneratePrototype(
         minTimerRef.current = setTimeout(hideLoading, remaining)
       }
     },
-    [hideLoading, clearOverlayTimers],
+    [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId],
   )
 
   // Default "Notify me when ready" side effects — reproduces
@@ -423,11 +450,13 @@ export function useGeneratePrototype(
   // wrapper layer — the true-abort endpoint (`designAgentApi.cancel`) is only
   // wired by PrototypeRoute's own, out-of-scope state machine (see this
   // ticket's Scope boundary). Cancelling here safely dismisses the overlay
-  // without navigating or toasting, so the user is never trapped; the
-  // in-flight generation itself is left to resolve in the background (the
-  // mounted GenerateModal's onGenDone still fires, but notifyModeRef being set
-  // means it becomes a no-op — matching the "stays mounted, no shell handoff"
-  // posture the notify path already covers, minus the toast).
+  // without navigating, so the user is never trapped; the in-flight
+  // generation itself is left to resolve in the background (the mounted
+  // GenerateModal's onGenDone still fires, and — because notifyModeRef is set
+  // here too — it now runs the SAME notify-mode completion path as an actual
+  // "Notify me when ready" click: a persistent completion toast plus the
+  // da:generating-done dispatch, matching the "stays mounted, still gets
+  // told" posture the notify path already covers).
   const handleCancel = useCallback(() => {
     clearOverlayTimers()
     notifyModeRef.current = true
