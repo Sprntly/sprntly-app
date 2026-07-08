@@ -24,6 +24,7 @@ from __future__ import annotations
 import importlib
 import logging
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -330,3 +331,190 @@ async def test_by_token_returns_new_bundle_after_iterate(env, monkeypatch):
     # Token did not rotate across the iterate.
     row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
     assert row["share_token"] == token
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Layer 3 — shared _stage_checkpoint_and_bundle helper (routes)
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# The checkpoint-create → dist-stage (fail-closed) → source-stage (best-effort) →
+# comment-reconcile (best-effort) sequence is shared by _stage_complete_run and
+# _stage_iterate_run. These prove the helper's own contract and that the iterate
+# caller's external behavior is unchanged after the extraction.
+
+
+@pytest.mark.asyncio
+async def test_stage_checkpoint_and_bundle_returns_checkpoint_id_and_bundle_url(env, monkeypatch):
+    # Happy path: all 4 steps succeed → returns (checkpoint_id, bundle_url) where
+    # checkpoint_id is the freshly-created row and bundle_url is the stable proxy base.
+    _stub_staging(env, monkeypatch)
+    pid = _seed_ready(env, current_checkpoint_id=None)
+    before = _checkpoint_count(pid)
+
+    checkpoint_id, bundle_url = await env.routes._stage_checkpoint_and_bundle(
+        prototype_id=pid, workspace_id="app",
+        dist_files={"index.html": "<html></html>"},
+        virtual_fs={"src/App.tsx": "x"},
+        prompt_history=[], log_prefix="",
+    )
+
+    assert _checkpoint_count(pid) == before + 1
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    # The returned id is the new (highest) checkpoint and matches current-not-advanced.
+    assert isinstance(checkpoint_id, int)
+    assert bundle_url == env.routes.authed_bundle_url(pid)
+    # The helper does NOT own the terminal write — current_checkpoint_id untouched.
+    assert row["current_checkpoint_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_stage_checkpoint_and_bundle_dist_stage_failure_raises(env, monkeypatch):
+    # The dist-stage failure must PROPAGATE (the caller's except handles it); the
+    # helper never swallows it or calls fail_prototype itself.
+    async def _stage_raises(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        raise RuntimeError("boom")
+
+    async def _fake_vite(vfs):
+        return {"index.html": "<html></html>"}
+
+    monkeypatch.setattr(env.routes, "vite_build", _fake_vite)
+    monkeypatch.setattr(env.routes, "stage_bundle", _stage_raises)
+    monkeypatch.setattr(env.routes, "reconcile_comments_on_checkpoint", lambda **k: None)
+    pid = _seed_ready(env, current_checkpoint_id=None)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await env.routes._stage_checkpoint_and_bundle(
+            prototype_id=pid, workspace_id="app",
+            dist_files={"index.html": "<html></html>"},
+            virtual_fs={"src/App.tsx": "x"},
+            prompt_history=[], log_prefix="",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stage_checkpoint_and_bundle_source_stage_failure_logs_and_proceeds(env, monkeypatch, caplog):
+    # A source-stage (sub_prefix="_source") failure is best-effort: the helper logs
+    # `{log_prefix}source_stage_failed` and still returns successfully.
+    async def _stage(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        if sub_prefix == "_source":
+            raise RuntimeError("no source")
+        return "https://bundle/dist"
+
+    monkeypatch.setattr(env.routes, "stage_bundle", _stage)
+    monkeypatch.setattr(env.routes, "reconcile_comments_on_checkpoint", lambda **k: None)
+    pid = _seed_ready(env, current_checkpoint_id=None)
+
+    with caplog.at_level(logging.WARNING):
+        checkpoint_id, bundle_url = await env.routes._stage_checkpoint_and_bundle(
+            prototype_id=pid, workspace_id="app",
+            dist_files={"index.html": "<html></html>"},
+            virtual_fs={"src/App.tsx": "x"},
+            prompt_history=[], log_prefix="probe_",
+        )
+
+    assert bundle_url == env.routes.authed_bundle_url(pid)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("probe_source_stage_failed") for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_stage_checkpoint_and_bundle_reconcile_failure_logs_and_proceeds(env, monkeypatch, caplog):
+    # A comment-reconcile failure is best-effort: the helper logs
+    # `comments_reconcile_failed` and still returns successfully.
+    def _reconcile_raises(**kwargs):
+        raise RuntimeError("reconcile down")
+
+    _stub_staging(env, monkeypatch)  # vite/stage succeed
+    monkeypatch.setattr(env.routes, "reconcile_comments_on_checkpoint", _reconcile_raises)
+    pid = _seed_ready(env, current_checkpoint_id=None)
+
+    with caplog.at_level(logging.WARNING):
+        checkpoint_id, bundle_url = await env.routes._stage_checkpoint_and_bundle(
+            prototype_id=pid, workspace_id="app",
+            dist_files={"index.html": "<html></html>"},
+            virtual_fs={"src/App.tsx": "x"},
+            prompt_history=[], log_prefix="",
+        )
+
+    assert bundle_url == env.routes.authed_bundle_url(pid)
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("comments_reconcile_failed") for m in msgs)
+
+
+@pytest.mark.asyncio
+async def test_stage_iterate_run_dist_failure_still_calls_fail_prototype_and_returns_false(env, monkeypatch):
+    # Regression: an iterate whose dist-stage fails must route to fail_prototype
+    # with the same error string and return False, exactly as pre-extraction.
+    async def _fake_vite(vfs):
+        return {"index.html": "<html></html>"}
+
+    async def _stage_raises(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(env.routes, "vite_build", _fake_vite)
+    monkeypatch.setattr(env.routes, "stage_bundle", _stage_raises)
+    monkeypatch.setattr(env.routes, "reconcile_comments_on_checkpoint", lambda **k: None)
+    pid = _seed_ready(env, current_checkpoint_id=None)
+
+    result = await env.routes._stage_iterate_run(
+        prototype_id=pid, workspace_id="app",
+        virtual_fs={"src/App.tsx": "x"}, iterate_prompt="tweak",
+    )
+
+    assert result is False
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id="app")
+    assert row["status"] == "failed"
+    assert row["error"].startswith("RuntimeError: boom")
+
+
+@pytest.mark.asyncio
+async def test_stage_iterate_run_source_stage_log_prefix_is_iterate(env, monkeypatch, caplog):
+    # Regression: a source-stage failure on the iterate path logs the exact
+    # `iterate_source_stage_failed` key (the log_prefix="iterate_" contract), and
+    # never the bare `source_stage_failed` key.
+    async def _fake_vite(vfs):
+        return {"index.html": "<html></html>"}
+
+    async def _stage(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        if sub_prefix == "_source":
+            raise RuntimeError("no source")
+        return "https://bundle/dist"
+
+    monkeypatch.setattr(env.routes, "vite_build", _fake_vite)
+    monkeypatch.setattr(env.routes, "stage_bundle", _stage)
+    monkeypatch.setattr(env.routes, "reconcile_comments_on_checkpoint", lambda **k: None)
+    pid = _seed_ready(env, current_checkpoint_id=None)
+
+    with caplog.at_level(logging.WARNING):
+        result = await env.routes._stage_iterate_run(
+            prototype_id=pid, workspace_id="app",
+            virtual_fs={"src/App.tsx": "x"}, iterate_prompt="tweak",
+        )
+
+    assert result is True
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any(m.startswith("iterate_source_stage_failed") for m in msgs)
+    assert not any(m.startswith("source_stage_failed") for m in msgs)  # no bare key
+
+
+@pytest.mark.asyncio
+async def test_stage_iterate_run_never_calls_complete_prototype(env, monkeypatch):
+    # Regression (load-bearing invariant): an iterate is a checkpoint ADVANCE, never
+    # a first completion — it must call advance_current_checkpoint and NEVER
+    # complete_prototype (which would re-stamp completed_at). Guards that the
+    # extraction did not fold the terminal write into the shared helper.
+    _stub_staging(env, monkeypatch)
+    complete_spy = MagicMock()
+    advance_spy = MagicMock(return_value=None)
+    monkeypatch.setattr(env.routes, "complete_prototype", complete_spy)
+    monkeypatch.setattr(env.routes, "advance_current_checkpoint", advance_spy)
+    pid = _seed_ready(env, current_checkpoint_id=None)
+
+    result = await env.routes._stage_iterate_run(
+        prototype_id=pid, workspace_id="app",
+        virtual_fs={"src/App.tsx": "x"}, iterate_prompt="tweak",
+    )
+
+    assert result is True
+    assert complete_spy.call_count == 0          # never a first-completion write
+    assert advance_spy.call_count == 1           # the checkpoint-advance write ran
