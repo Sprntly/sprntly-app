@@ -191,7 +191,16 @@ export function generateIntentFromSearch(raw: string | null): boolean {
 
 /** Pure: read the transient prototype loading hint from the URL's `pid` query
  *  param. Only positive integers are accepted; malformed values are ignored so
- *  the route falls back to resolving by PRD alone. */
+ *  the route falls back to resolving by PRD alone.
+ *
+ *  Dead-caller flag: this function (and the `handoffPrototypeId` derivation +
+ *  its seed effect below) had exactly one production caller — the PRD footer
+ *  button's old `&pid=` handoff navigation — which was removed when that
+ *  button migrated onto the shared generate/view-prototype hook (it now
+ *  navigates only on success, never at kickoff, so nothing constructs a
+ *  `?pid=` URL anymore). Both stay in place here, unreachable in production,
+ *  pending their removal in a later pass that already touches this file for
+ *  its own migration. */
 export function prototypeHintFromSearch(raw: string | null): number | null {
   if (raw == null || raw === "" || !/^\d+$/.test(raw)) return null
   const id = Number(raw)
