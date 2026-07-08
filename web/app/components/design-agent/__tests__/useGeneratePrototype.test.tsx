@@ -10,6 +10,7 @@ import { act, cleanup, render } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { PrototypeRecord } from "../../../lib/api"
 import { prototypePath } from "../../../lib/routes"
+import { reasonCopy } from "../GenerationErrorBanner"
 import {
   useGeneratePrototype,
   type UseGeneratePrototypeOptions,
@@ -322,6 +323,125 @@ describe("useGeneratePrototype — notify-when-ready", () => {
       "Prototype is processing",
       "We'll let you know when it's ready.",
     )
+  })
+})
+
+describe("useGeneratePrototype — notify-mode completion (handleGenDone)", () => {
+  it("shows a persistent success toast with a working Open action and dispatches the done event", async () => {
+    const doneEvents: Event[] = []
+    const onDone = (e: Event) => doneEvents.push(e)
+    window.addEventListener("da:generating-done", onDone)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={21}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    // Arm notify mode via the real onNotifyWhenReady wiring (default path).
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(99)
+    })
+    await act(async () => {
+      latest.loadingScreenProps.onNotifyWhenReady()
+    })
+    showToast.mockClear()
+
+    const proto = readyRow(21)
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: true, prototype: proto })
+    })
+
+    expect(showToast).toHaveBeenCalledTimes(1)
+    const [title, sub, action, opts] = showToast.mock.calls[0]
+    expect(title).toBe("Prototype ready")
+    expect(sub).toBe("Your prototype finished generating.")
+    expect(action).toBe("Open")
+    expect(opts).toMatchObject({ persist: true })
+    expect(typeof opts.onAction).toBe("function")
+
+    // The action button navigates via the hook's own onSuccess-or-navigate
+    // pattern (no onSuccess supplied here, so it falls back to router.push).
+    opts.onAction()
+    expect(push).toHaveBeenCalledWith(prototypePath(21))
+
+    expect(doneEvents.length).toBe(1)
+    window.removeEventListener("da:generating-done", onDone)
+  })
+
+  it("routes the Open action through a supplied onSuccess instead of navigating", async () => {
+    const onSuccess = vi.fn()
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={22}
+        options={{ skipExistenceCheck: true, onSuccess }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(100)
+    })
+    await act(async () => {
+      latest.loadingScreenProps.onNotifyWhenReady()
+    })
+    showToast.mockClear()
+
+    const proto = readyRow(22)
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: true, prototype: proto })
+    })
+
+    const opts = showToast.mock.calls[0][3]
+    opts.onAction()
+    expect(onSuccess).toHaveBeenCalledWith(proto)
+    expect(push).not.toHaveBeenCalled()
+  })
+
+  it("shows a persistent failure toast and dispatches the done event", async () => {
+    const doneEvents: Event[] = []
+    const onDone = (e: Event) => doneEvents.push(e)
+    window.addEventListener("da:generating-done", onDone)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={23}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(101)
+    })
+    await act(async () => {
+      latest.loadingScreenProps.onNotifyWhenReady()
+    })
+    showToast.mockClear()
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: false, message: "boom" })
+    })
+
+    expect(showToast).toHaveBeenCalledWith(
+      "Generation failed",
+      reasonCopy("boom"),
+      undefined,
+      { persist: true },
+    )
+    expect(doneEvents.length).toBe(1)
+    window.removeEventListener("da:generating-done", onDone)
   })
 })
 
