@@ -105,14 +105,15 @@ function Harness() {
   )
 }
 
-function mountApp() {
-  return render(
-    React.createElement(
-      NavigationProvider,
-      null,
-      React.createElement(ContentProvider, null, React.createElement(Harness)),
-    ),
+const appTree = () =>
+  React.createElement(
+    NavigationProvider,
+    null,
+    React.createElement(ContentProvider, null, React.createElement(Harness)),
   )
+
+function mountApp() {
+  return render(appTree())
 }
 
 const panelProbe = () => screen.getByTestId("panel-probe").textContent
@@ -181,6 +182,35 @@ describe("ChatScreen — PRD panel restore after reload", () => {
     await act(async () => { fireEvent.click(tabBar().getByText("PRD · Later PRD")) })
     await waitFor(() => expect(panelProbe()).toBe("prd"))
     await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(55))
+    expect(runPrdGeneration).not.toHaveBeenCalled()
+  })
+
+  it("waits out the empty pre-fetch map window, then restores once the PRD resolves", async () => {
+    // The map hook starts loading:false with an EMPTY map and only fetches a commit
+    // later — so on the first render(s) after landing on the PRD tab, hasPrd reads
+    // false. The restore must treat that as "not yet", not "give up": it must still
+    // open once the map resolves. (An earlier design latched on this window and
+    // never restored on prod.)
+    mapState = { entriesByInsight: new Map(), loading: false } // pre-fetch: empty
+    seedPersistedTab(
+      { id: "tab-race", title: "PRD · Race", thread: [], dbConvId: null, briefMeta: { briefId: 4, insightIndex: 0 }, insightBody: null },
+      "tab-race",
+    )
+
+    const { rerender } = await act(async () => mountApp())
+    // Empty map → panel stays closed, nothing loaded yet.
+    expect(panelProbe()).toBe("none")
+    expect(loadPrdById).not.toHaveBeenCalled()
+
+    // The map resolves with a DB PRD; a re-render delivers it to the hook.
+    mapState = {
+      entriesByInsight: new Map([[0, { prd_id: 66, prd_title: "Race", prototype: null }]]),
+      loading: false,
+    }
+    await act(async () => { rerender(appTree()) })
+
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(66))
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 
