@@ -682,6 +682,8 @@ CREATE TABLE ticket_edits (
     status              TEXT,
     sprint              TEXT,
     assignee            TEXT,
+    -- Mirrors supabase/migrations/20260709120000_ticket_edits_subtasks.sql
+    subtasks            TEXT,
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, ticket_key)
 );

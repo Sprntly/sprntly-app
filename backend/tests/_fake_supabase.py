@@ -77,7 +77,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "kg_relationship":   {"properties", "provenance"},
     "agent_decision_log": {"factors", "output", "kg_refs"},
     "enterprise_config": {"overrides"},
-    "ticket_edits":      {"acceptance_criteria", "assignee"},
+    "ticket_edits":      {"acceptance_criteria", "assignee", "subtasks"},
     "prd_tickets":       {"stories"},
     "prd_input_questions": {"options"},
     "design_agent_map_cache": {"payload"},

@@ -1941,6 +1941,8 @@ export type TicketFields = {
   status?: string | null
   sprint?: string | null
   assignee?: TicketAssignee | null
+  /** Child issues override. Omit = keep generated; a list (incl. []) replaces. */
+  subtasks?: string[] | null
 }
 
 export type TicketDataResponse = {
@@ -1951,6 +1953,7 @@ export type TicketDataResponse = {
   status: string | null
   sprint: string | null
   assignee: TicketAssignee | null
+  subtasks: string[] | null
   attachments: { id: number; label: string; sub: string }[]
   comments: { id: number; author: string; body: string; time: string }[]
 }

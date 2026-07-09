@@ -78,12 +78,12 @@ def _transport_security() -> TransportSecuritySettings | None:
     The SDK's default protection validates the request Host against an
     allow-list (localhost only) and returns 421 Misdirected Request for
     anything else — which rejects requests arriving through a tunnel/proxy
-    (ngrok, a load balancer, mcp.sprntly.ai) whose Host isn't localhost.
+    (ngrok, a load balancer, api.sprntly.ai) whose Host isn't localhost.
 
     Two env knobs, both default-safe (protection stays ON with the SDK
     default when neither is set):
       - MCP_ALLOWED_HOSTS: comma-separated Host allow-list (the correct prod
-        setting, e.g. "mcp.sprntly.ai"). Also used for allowed_origins.
+        setting, e.g. "api.sprntly.ai"). Also used for allowed_origins.
       - MCP_DISABLE_DNS_REBINDING_PROTECTION: turn the check off entirely.
         Convenient for a throwaway tunnel test where the ngrok subdomain
         changes each restart; do NOT use in production.

@@ -41,7 +41,7 @@ export type McpSettingsViewProps = {
 }
 
 const getMcpUrl = (token: string) =>
-  (process.env.NEXT_PUBLIC_MCP_URL || "https://mcp.sprntly.ai").replace(
+  (process.env.NEXT_PUBLIC_MCP_URL || "https://api.sprntly.ai").replace(
     /\/$/,
     "",
   ) + `/mcp?token=${token}`

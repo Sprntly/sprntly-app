@@ -69,16 +69,9 @@ Then add it to a real client — Claude Code: `claude mcp add --transport http s
 
 ## Production
 
-Lives on the existing EC2 host as a separate systemd unit (`sprntly-mcp.service`) on port 8003, served at **`https://mcp.sprntly.ai/mcp`** (nginx proxies the `mcp.sprntly.ai` host to it — `backend/deploy/nginx.conf`; set `MCP_ALLOWED_HOSTS=mcp.sprntly.ai` so DNS-rebinding protection accepts the proxied Host). Deploys via the `.github/workflows/deploy-mcp.yml` GitHub Actions workflow on every push to `main` that touches `mcp/**`.
+Lives on the existing EC2 host as a separate systemd unit (`sprntly-mcp.service`) on port 8003, served at **`https://api.sprntly.ai/mcp`** (a `location /mcp` block in `backend/deploy/nginx.conf` — riding the existing api.sprntly.ai cert, so no DNS or certbot work is needed). Deploys via the `.github/workflows/deploy-mcp.yml` GitHub Actions workflow on every push to `main` that touches `mcp/**`.
 
-First-time setup on a fresh box:
-
-```bash
-# ssh ec2-user@<instance>
-cd ~/Sprntly/mcp
-# Create .env with BACKEND_URL and BACKEND_INTERNAL_KEY
-sudo bash deploy/setup.sh
-```
+Zero-touch: the workflow also creates `mcp/.env` on the box on first deploy — `BACKEND_INTERNAL_KEY` is read from the backend's own `.env`, and `MCP_ALLOWED_HOSTS` / `MCP_ALLOW_URL_TOKEN` are seeded with prod defaults. Values already present in the file are never overwritten, so `.env` can be hand-edited later without a deploy clobbering it. `mcp/deploy/setup.sh` remains as a manual fallback for a fresh box.
 
 ## Required env
 
@@ -86,6 +79,8 @@ sudo bash deploy/setup.sh
 | ----------------------- | ------------------------------------------------------ |
 | `BACKEND_URL`           | server — required; base URL of the Sprntly backend      |
 | `BACKEND_INTERNAL_KEY`  | server — required; must match the backend's `INTERNAL_API_KEY` |
+| `MCP_ALLOWED_HOSTS`     | prod — public hostname(s) nginx proxies from (`api.sprntly.ai`), or every proxied request 421s |
+| `MCP_ALLOW_URL_TOKEN`   | prod — `1` so the `?token=` connector URLs the Settings UI hands out authenticate |
 
 ## Tools
 

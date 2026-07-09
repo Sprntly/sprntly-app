@@ -50,6 +50,9 @@ class FieldsIn(BaseModel):
     status: str | None = None
     sprint: str | None = None
     assignee: dict[str, Any] | None = None
+    # Child issues. None (omitted) = keep the generated subtasks; a list
+    # (incl. []) = an explicit override, same semantics as the other fields.
+    subtasks: list[str] | None = None
 
 
 class AttachmentIn(BaseModel):
@@ -105,6 +108,7 @@ def get_ticket_data(
         "status": edit.get("status") if edit else None,
         "sprint": edit.get("sprint") if edit else None,
         "assignee": edit.get("assignee") if edit else None,
+        "subtasks": edit.get("subtasks") if edit else None,
         "attachments": [
             {"id": a["id"], "label": a["label"], "sub": a["sub"]}
             for a in (attach_resp.data or [])

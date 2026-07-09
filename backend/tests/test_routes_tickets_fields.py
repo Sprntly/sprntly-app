@@ -68,8 +68,30 @@ def test_data_defaults_when_no_edits(client: TestClient):
     assert data["title"] is None
     assert data["priority"] is None
     assert data["assignee"] is None
+    assert data["subtasks"] is None  # no override → UI keeps generated child issues
     assert data["attachments"] == []
     assert data["comments"] == []
+
+
+def test_subtasks_roundtrip_and_partial_save_preserves_them(client: TestClient):
+    """Child issues persist as an override and survive later partial saves;
+    an explicit [] is a real override (clear all), distinct from None."""
+    resp = client.put(f"/v1/tickets/{KEY}/fields", json={
+        "subtasks": ["[P] Write migration", "Wire the endpoint"],
+    })
+    assert resp.status_code == 200, resp.text
+
+    data = client.get(f"/v1/tickets/{KEY}/data").json()
+    assert data["subtasks"] == ["[P] Write migration", "Wire the endpoint"]
+
+    # A later status-only save must not clobber the subtasks override.
+    client.put(f"/v1/tickets/{KEY}/fields", json={"status": "In progress"})
+    data = client.get(f"/v1/tickets/{KEY}/data").json()
+    assert data["subtasks"] == ["[P] Write migration", "Wire the endpoint"]
+
+    # Explicit clear-all round-trips as [] (an override), not None.
+    client.put(f"/v1/tickets/{KEY}/fields", json={"subtasks": []})
+    assert client.get(f"/v1/tickets/{KEY}/data").json()["subtasks"] == []
 
 
 def test_fields_only_edit_leaves_description_null(client: TestClient):

@@ -482,6 +482,31 @@ def test_get_prd_owned_and_foreign(isolated_settings, monkeypatch):
     assert client.get("/internal/mcp/prd/9999", params={"company_id": cid_a}, headers=_headers()).status_code == 404
 
 
+def test_get_ticket_subtasks_override_wins(isolated_settings, monkeypatch):
+    """Edited child issues (ticket_edits.subtasks) replace the generated ones
+    in the MCP ticket read — same override-wins merge as title/priority."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_tickets(db, company_id=cid, prd_id=1, stories=[
+        {"id": "t1", "title": "T1", "subtasks": ["generated step"]},
+    ])
+
+    before = client.get(
+        "/internal/mcp/tickets/prd-1-t1/data", params={"company_id": cid}, headers=_headers()
+    ).json()
+    assert before["subtasks"] == ["generated step"]
+
+    db.table("ticket_edits").insert(
+        {"company_id": cid, "ticket_key": "prd-1-t1", "subtasks": ["edited step"]}
+    ).execute()
+    after = client.get(
+        "/internal/mcp/tickets/prd-1-t1/data", params={"company_id": cid}, headers=_headers()
+    ).json()
+    assert after["subtasks"] == ["edited step"]
+
+
 def test_get_prd_prototype_shared_and_private(isolated_settings, monkeypatch):
     """Ready+shared prototype → both links; private → app_url only. Never the
     bundle_url or passcode hash."""

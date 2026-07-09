@@ -361,7 +361,9 @@ def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
         "user_story": story.get("user_story"),
         "scope": story.get("scope"),
         "out_of_scope": story.get("out_of_scope"),
-        "subtasks": story.get("subtasks"),
+        # Subtasks are editable in the web panel (ticket_edits.subtasks) —
+        # override wins, same merge as title/priority.
+        "subtasks": _merged("subtasks"),
         "labels": story.get("labels"),
         "attachments": [
             {"id": a["id"], "label": a["label"], "sub": a["sub"]}
