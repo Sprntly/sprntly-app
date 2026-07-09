@@ -33,8 +33,8 @@ function saveRememberedDest(prdId: number | null, listId: string): void {
     /* storage unavailable — the choice just won't persist */
   }
 }
-import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
-import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
+import { IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
+import { downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
 import { printCombined, downloadCombinedDoc } from "../../lib/combinedExport"
 import type { PrdState, PrdContent } from "../../types/content"
 
@@ -97,12 +97,6 @@ function ShareMenu({
     return () => document.removeEventListener("mousedown", onDocClick)
   }, [open])
 
-  const handleEmail = () => {
-    if (!prd) return
-    setOpen(false)
-    const link = typeof window !== "undefined" ? window.location.href : ""
-    window.location.href = buildPrdMailto(prd.title, link)
-  }
   const handlePdf = async () => {
     if (!prd) return
     setOpen(false)
@@ -148,14 +142,6 @@ function ShareMenu({
       </button>
       {open && enabled && (
         <div className="share-menu share-menu--down open" role="menu">
-          <div className="share-menu-item" role="menuitem" onClick={handleEmail}>
-            <div className="share-menu-item-icon"><IconMail size={14} /></div>
-            <div>
-              <div style={{ fontWeight: 600 }}>Email</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Draft a mail with a link</div>
-            </div>
-          </div>
-          <div className="share-menu-divider" />
           <div className="share-menu-item" role="menuitem" onClick={handlePdf}>
             <div className="share-menu-item-icon"><IconFileTypePdf size={14} /></div>
             <div>
@@ -268,9 +254,6 @@ export function ContentPanel() {
           </div>
             <span className="cpanel-main-name">{content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}</span>
           <div className="cpanel-head-actions">
-            <button className="cpanel-action-btn">
-              <IconDeviceFloppy size={12} />Save
-            </button>
             <ShareMenu prd={content.prd} evidence={content.evidence} onToast={showToast} />
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
