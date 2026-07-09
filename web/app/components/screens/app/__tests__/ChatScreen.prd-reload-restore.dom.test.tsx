@@ -43,9 +43,11 @@ vi.mock("../../../../lib/api", () => {
 const runPrdGeneration = vi.fn().mockResolvedValue({
   ok: true, prd: { prd_id: 1, title: "Regenerated", metaLine: "", sections: [] },
 })
-const loadPrdById = vi.fn().mockResolvedValue({
-  ok: true, prd: { prd_id: 42, title: "Saved PRD", metaLine: "", sections: [] },
-})
+// Echo the requested id back as the loaded PRD, so tests can assert the panel is
+// showing the RIGHT tab's doc — not just that something loaded.
+const loadPrdById = vi.fn((id: number) =>
+  Promise.resolve({ ok: true, prd: { prd_id: id, title: `PRD ${id}`, metaLine: "", sections: [] } }),
+)
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (...a: unknown[]) => runPrdGeneration(...a),
   resumePrdGeneration: vi.fn(),
@@ -92,15 +94,19 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 }))
 
 import { NavigationProvider, useNavigation } from "../../../../context/NavigationContext"
-import { ContentProvider } from "../../../../context/ContentContext"
+import { ContentProvider, useContent } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
 function Harness() {
   const { contentPanelTab } = useNavigation()
+  const { content } = useContent()
   return React.createElement(
     React.Fragment,
     null,
     React.createElement("div", { "data-testid": "panel-probe" }, contentPanelTab ?? "none"),
+    // Which PRD (by id) the shared panel is currently showing — lets tests catch a
+    // panel that displays the WRONG tab's PRD, not just whether it's open.
+    React.createElement("div", { "data-testid": "prd-probe" }, content.prd?.prd_id != null ? String(content.prd.prd_id) : "none"),
     React.createElement(ChatScreen),
   )
 }
@@ -117,6 +123,7 @@ function mountApp() {
 }
 
 const panelProbe = () => screen.getByTestId("panel-probe").textContent
+const prdProbe = () => screen.getByTestId("prd-probe").textContent
 
 // Seed localStorage exactly as a reload would leave it: the tab persists (with its
 // briefMeta) but `prd` is stripped, and the active tab points at it.
@@ -245,5 +252,46 @@ describe("ChatScreen — PRD panel restore after reload", () => {
     expect(panelProbe()).toBe("none")
     expect(loadPrdById).not.toHaveBeenCalled()
     expect(runPrdGeneration).not.toHaveBeenCalled()
+  })
+
+  it("restores a BACKLOG PRD (no briefMeta) via the tab's own saved prdId", async () => {
+    // Backlog PRD tabs carry no briefMeta, so the brief-map path can't recover
+    // them. The tab's persisted `prdId` is the only recovery path — it must DB-load
+    // that exact PRD, never regenerate a duplicate.
+    mapState = { entriesByInsight: new Map(), loading: false } // no map help at all
+    seedPersistedTab(
+      { id: "tab-bk", title: "PRD · Backlog thing", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 88 },
+      "tab-bk",
+    )
+
+    await act(async () => { mountApp() })
+
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(88))
+    await waitFor(() => expect(prdProbe()).toBe("88"))
+    expect(runPrdGeneration).not.toHaveBeenCalled()
+  })
+
+  it("shows EACH tab's own PRD when switching between multiple PRD tabs", async () => {
+    // The panel is a single global overlay; switching between PRD tabs must re-sync
+    // it to the ACTIVE tab's PRD (the "wrong PRD on refocus" bug left a prior tab's
+    // doc showing). Two tabs with distinct saved ids; the panel must track them.
+    localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([
+      { id: "tab-a", title: "PRD · Alpha", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 10 },
+      { id: "tab-b", title: "PRD · Beta", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 20 },
+    ]))
+    localStorage.setItem("sprntly_chat_active_tab_acme", "tab-a")
+
+    await act(async () => { mountApp() })
+    // Landed on tab-a → its PRD (10).
+    await waitFor(() => expect(prdProbe()).toBe("10"))
+
+    // Switch to tab-b → panel must follow to PRD 20.
+    await act(async () => { fireEvent.click(tabBar().getByText("PRD · Beta")) })
+    await waitFor(() => expect(prdProbe()).toBe("20"))
+
+    // Switch back to tab-a → panel must show 10 again, not a stale 20.
+    await act(async () => { fireEvent.click(tabBar().getByText("PRD · Alpha")) })
+    await waitFor(() => expect(prdProbe()).toBe("10"))
   })
 })
