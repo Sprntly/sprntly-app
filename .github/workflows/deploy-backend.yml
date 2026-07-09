@@ -52,7 +52,14 @@ jobs:
           fi
           # --yes: non-interactive. db push compares against the baselined
           # migration history and applies only migrations not yet recorded.
-          supabase db push --db-url "$SUPABASE_DB_URL" --yes
+          # --include-all: also apply pending migrations whose version sorts
+          # BEFORE the latest already-applied one. Without it, a migration merged
+          # with an earlier timestamp than one already on prod (common when two
+          # PRs land close together) is "out of order" and `db push` aborts with
+          # "Found local migration files to be inserted before the last migration
+          # on remote database", blocking the whole deploy. All migration files
+          # in main are intended to apply, so include-all is the safe default.
+          supabase db push --db-url "$SUPABASE_DB_URL" --yes --include-all
 
   deploy:
     needs: migrate
