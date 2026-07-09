@@ -163,10 +163,10 @@ describe("Connectors (container) — design-v4 accordion", () => {
     // never renders in the accordion tree (whether the step is open or not).
     expect(screen.queryByText("MS Teams")).toBeNull()
     // Within the OPEN first category we render only supported connectors:
-    // ClickUp (oauth) but not Linear/Jira/Asana (coming soon).
+    // ClickUp + Jira (oauth) but not Linear/Asana (coming soon).
     expect(screen.getByText("ClickUp")).not.toBeNull()
+    expect(screen.getByText("Jira")).not.toBeNull()
     expect(screen.queryByText("Linear")).toBeNull()
-    expect(screen.queryByText("Jira")).toBeNull()
     expect(screen.queryByText("Asana")).toBeNull()
     // Design-kit-only names never appear.
     expect(screen.queryByText("Segment")).toBeNull()

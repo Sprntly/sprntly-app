@@ -56,8 +56,12 @@ def _maybe_refresh_token(
 
     Best-effort: a refresh failure (refresh token expired ~6mo / revoked / OAuth
     not configured) logs a WARNING and returns the input unchanged, so the
-    caller's sync surfaces the usual 401 → "reconnect required"."""
-    if provider != "github":
+    caller's sync surfaces the usual 401 → "reconnect required".
+
+    Jira (Atlassian) is handled alongside github: its access tokens expire ~1h
+    and its refresh tokens ROTATE, so — like github — we persist the whole new
+    payload on every refresh."""
+    if provider not in ("github", "jira"):
         return token_json
     refresh_token = token_json.get("refresh_token")
     if not refresh_token:
@@ -65,12 +69,20 @@ def _maybe_refresh_token(
     if not force and _token_is_fresh(token_json):
         return token_json
     try:
-        from app.connectors import github_app
         from app.connectors.tokens import encrypt_token_json
 
-        new_json_str = github_app.token_payload_to_store(
-            github_app.refresh_user_token(refresh_token)
-        )
+        if provider == "jira":
+            from app.connectors import jira_oauth
+
+            new_json_str = jira_oauth.token_payload_to_store(
+                jira_oauth.refresh_access_token(refresh_token)
+            )
+        else:
+            from app.connectors import github_app
+
+            new_json_str = github_app.token_payload_to_store(
+                github_app.refresh_user_token(refresh_token)
+            )
         db.update_connection_tokens(
             company_id, provider, encrypt_token_json(new_json_str)
         )

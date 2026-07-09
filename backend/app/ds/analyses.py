@@ -63,6 +63,9 @@ _BUG_HINTS = ("bug", "defect", "incident")
 PROVIDER_METRICS: dict[str, tuple[str, ...]] = {
     "hubspot":   ("open_deal_value_usd", "deals_open_count", "deals_lost_count"),
     "clickup":   ("tasks_open", "tasks_closed_7d", "bugs_open"),
+    # Jira issues are work items too — same metric names as ClickUp so both
+    # trackers feed the identical DS series/views.
+    "jira":      ("tasks_open", "tasks_closed_7d", "bugs_open"),
     "fireflies": ("meetings_7d",),
 }
 
@@ -156,6 +159,34 @@ def _aggregate_clickup(records: Iterable[RawRecord]) -> dict[date, dict[str, flo
     return weeks
 
 
+def _looks_like_bug_jira(rec: RawRecord) -> bool:
+    """Jira carries a native issue type (Bug/Story/Task/Epic), so prefer that;
+    fall back to labels + title heuristics (labels is Jira's field, not tags)."""
+    if any(h in str(rec.properties.get("type") or "").lower() for h in _BUG_HINTS):
+        return True
+    labels = [str(t).lower() for t in (rec.properties.get("labels") or [])]
+    if any(any(h in lbl for h in _BUG_HINTS) for lbl in labels):
+        return True
+    return any(h in (rec.title or "").lower() for h in _BUG_HINTS)
+
+
+def _aggregate_jira(records: Iterable[RawRecord]) -> dict[date, dict[str, float]]:
+    weeks: dict[date, dict[str, float]] = defaultdict(
+        lambda: {"tasks_open": 0.0, "tasks_closed_7d": 0.0, "bugs_open": 0.0})
+    for rec in records:
+        dt = _parse_ts(rec.timestamp)
+        if dt is None:
+            continue
+        wk = _week_start(dt)
+        if _is_closed_status(rec.properties.get("status")):
+            weeks[wk]["tasks_closed_7d"] += 1
+        else:
+            weeks[wk]["tasks_open"] += 1
+            if _looks_like_bug_jira(rec):
+                weeks[wk]["bugs_open"] += 1
+    return weeks
+
+
 def _aggregate_fireflies(records: Iterable[RawRecord]) -> dict[date, dict[str, float]]:
     weeks: dict[date, dict[str, float]] = defaultdict(lambda: {"meetings_7d": 0.0})
     for rec in records:
@@ -169,6 +200,7 @@ def _aggregate_fireflies(records: Iterable[RawRecord]) -> dict[date, dict[str, f
 _AGGREGATORS = {
     "hubspot":   _aggregate_hubspot,
     "clickup":   _aggregate_clickup,
+    "jira":      _aggregate_jira,
     "fireflies": _aggregate_fireflies,
 }
 

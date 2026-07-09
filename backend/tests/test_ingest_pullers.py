@@ -1,7 +1,7 @@
 """Tests for the Phase-1 ingestion pipeline: pullers → RawRecord → runner → KG."""
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -46,6 +46,58 @@ def test_clickup_puller_yields_tasks(monkeypatch):
     assert (r.provider, r.kind, r.external_id) == ("clickup", "task", "task-1")
     assert r.properties["status"] == "open"
     assert r.properties["tags"] == ["auth"]
+
+
+def test_jira_puller_yields_issues(monkeypatch):
+    from app.connectors import jira_oauth
+    from app.kg_ingest.pullers import jira
+
+    # cloud_id resolution is a separate call — stub it so the test targets pull().
+    monkeypatch.setattr(jira, "first_cloud_id", lambda tok: "cloud-1")
+
+    search_body = {
+        "issues": [{
+            "id": "10001", "key": "PROJ-1",
+            "fields": {
+                "summary": "Fix login bug",
+                "description": {
+                    "type": "doc", "version": 1,
+                    "content": [{"type": "paragraph", "content": [
+                        {"type": "text", "text": "Users report 500 on login"},
+                    ]}],
+                },
+                "status": {"name": "In Progress"},
+                "priority": {"name": "High"},
+                "issuetype": {"name": "Bug"},
+                "project": {"name": "Platform"},
+                "labels": ["auth"],
+                "assignee": {"displayName": "Jide"},
+                "updated": "2026-07-01T00:00:00.000+0000",
+            },
+        }],
+        "isLast": True,
+    }
+    resp = MagicMock()
+    resp.json.return_value = search_body
+    resp.raise_for_status.return_value = None
+    monkeypatch.setattr(jira.requests, "get", lambda *a, **k: resp)
+
+    recs = list(jira.pull("tok"))
+    assert len(recs) == 1
+    r = recs[0]
+    assert (r.provider, r.kind, r.external_id) == ("jira", "issue", "PROJ-1")
+    assert r.title == "Fix login bug"
+    assert "500 on login" in r.text
+    assert r.properties["status"] == "In Progress"
+    assert r.properties["type"] == "Bug"
+    assert r.properties["labels"] == ["auth"]
+    assert jira_oauth  # imported for symmetry / ensures module loads
+
+
+def test_jira_puller_no_site_yields_nothing(monkeypatch):
+    from app.kg_ingest.pullers import jira
+    monkeypatch.setattr(jira, "first_cloud_id", lambda tok: None)
+    assert list(jira.pull("tok")) == []
 
 
 def test_hubspot_puller_yields_deals_with_paging(monkeypatch):

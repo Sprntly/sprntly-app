@@ -279,7 +279,7 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
   it("shows the wired connectors and hides the 'Coming soon' ones", () => {
     const html = render({ categories: connectableCatalog() })
     // Wired (kept):
-    for (const name of ["Slack", "GitHub", "Figma", "ClickUp", "Google Docs", "HubSpot", "Fireflies"]) {
+    for (const name of ["Slack", "GitHub", "Figma", "ClickUp", "Jira", "Google Docs", "HubSpot", "Fireflies"]) {
       expect(html).toContain(name)
     }
     // Coming soon (removed):
@@ -291,8 +291,8 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
   it("renders a flat list (no category headers) with one shared upload control", () => {
     const html = render({ categories: connectableCatalog() })
     expect(html).not.toContain("set-block-h")
-    // 7 wired connector rows + one company-wide upload control.
-    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(7)
+    // 8 wired connector rows + one company-wide upload control.
+    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(8)
     expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(1)
   })
 

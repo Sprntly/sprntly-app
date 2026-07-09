@@ -17,18 +17,28 @@ import logging
 from typing import Any, Iterable
 
 from app import db
-from app.connectors import clickup_oauth
-from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
+from app.connectors import clickup_oauth, jira_oauth
+from app.connectors.tokens import (
+    TokenEncryptionError,
+    decrypt_token_json,
+    encrypt_token_json,
+)
 from app.db.clickup_sync import get_clickup_task_id, save_clickup_task_id
+from app.db.jira_sync import get_jira_issue_key, save_jira_issue_key
 from app.stories.generate import Story
 
 logger = logging.getLogger(__name__)
 
 CLICKUP_PROVIDER = "clickup"
+JIRA_PROVIDER = "jira"
 
 
 class ClickUpNotConnectedError(LookupError):
     """Raised when the company has no active ClickUp connection."""
+
+
+class JiraNotConnectedError(LookupError):
+    """Raised when the company has no active Jira connection."""
 
 
 def _clickup_fields(story: Story) -> dict[str, Any]:
@@ -189,3 +199,109 @@ def pull_clickup_status(
         if state.get("status") or state.get("assignee"):
             out[ticket_id] = state
     return out
+
+
+# ── Jira push ────────────────────────────────────────────────────────────────
+#
+# Mirrors the ClickUp push but targets a Jira PROJECT (not a list) and creates
+# issues. Two Jira-specific concerns: access tokens expire in ~1h (so we refresh
+# + persist before pushing), and every REST call needs the site's cloud_id
+# (cached on the connection's config_json at connect time).
+
+
+def _jira_creds(company_id: str) -> tuple[str, str]:
+    """Return `(access_token, cloud_id)` for the company's Jira connection,
+    refreshing + persisting an expired access token first.
+
+    Raises JiraNotConnectedError if not connected, the token is unreadable, or
+    the connection has no cloud_id / no way to refresh an expired token."""
+    import time
+
+    row = db.get_connection(company_id, JIRA_PROVIDER)
+    if not row or not row.get("token_json_encrypted"):
+        raise JiraNotConnectedError("Jira is not connected for this company")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except (TokenEncryptionError, ValueError) as e:
+        raise JiraNotConnectedError("Jira token is unreadable") from e
+
+    # Refresh an expired/near-expiry access token and persist the rotated payload.
+    obtained_at = token_json.get("obtained_at", 0)
+    expires_in = token_json.get("expires_in", 3600)
+    refresh_token = token_json.get("refresh_token")
+    if refresh_token and time.time() > obtained_at + expires_in - 120:
+        try:
+            token_json = json.loads(
+                jira_oauth.token_payload_to_store(
+                    jira_oauth.refresh_access_token(refresh_token)
+                )
+            )
+            db.update_connection_tokens(
+                company_id, JIRA_PROVIDER, encrypt_token_json(json.dumps(token_json))
+            )
+        except jira_oauth.JiraAuthExpiredError as e:
+            raise JiraNotConnectedError(str(e)) from e
+
+    access_token = token_json.get("access_token") or ""
+    if not access_token:
+        raise JiraNotConnectedError("Jira connection has no access_token")
+    cloud_id = (json.loads(row.get("config_json") or "{}")).get("cloud_id") \
+        or jira_oauth.first_cloud_id(access_token)
+    if not cloud_id:
+        raise JiraNotConnectedError("Jira connection has no accessible site")
+    return access_token, cloud_id
+
+
+def push_stories_to_jira(
+    company_id: str,
+    project_key: str,
+    stories: Iterable[Story],
+    *,
+    issue_type: str = "Task",
+) -> dict[str, Any]:
+    """Create (or idempotently update) one Jira issue per story in `project_key`.
+
+    Returns `{"created": [{story, task_id, url, updated}], "errors": [...]}`.
+    Error-isolated per story. Raises JiraNotConnectedError up-front if Jira
+    isn't connected. Mirrors push_stories_to_clickup's create-or-update-by-map
+    behavior so a re-push doesn't duplicate issues.
+    """
+    access_token, cloud_id = _jira_creds(company_id)
+
+    created: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for story in stories:
+        try:
+            ticket_id = story.stable_id()
+            existing = get_jira_issue_key(company_id, project_key, ticket_id)
+            if existing:
+                issue = jira_oauth.update_issue(
+                    access_token, cloud_id, existing,
+                    summary=story.title,
+                    description=story.to_description(),
+                    priority_name=story.jira_priority(),
+                )
+                issue_key = issue.get("key") or existing
+            else:
+                issue = jira_oauth.create_issue(
+                    access_token, cloud_id,
+                    project_key=project_key,
+                    summary=story.title,
+                    description=story.to_description(),
+                    issue_type=issue_type,
+                    priority_name=story.jira_priority(),
+                )
+                issue_key = issue.get("key")
+                if issue_key:
+                    save_jira_issue_key(company_id, project_key, ticket_id, issue_key)
+            created.append({
+                "story": story.title,
+                "task_id": issue_key,
+                "url": issue.get("url"),
+                "updated": bool(existing),
+            })
+        except Exception as e:  # noqa: BLE001 — isolate per-story failures
+            logger.warning("Jira push failed for story %r: %s", story.title, e)
+            errors.append({"story": story.title, "error": str(e)})
+
+    return {"created": created, "errors": errors}

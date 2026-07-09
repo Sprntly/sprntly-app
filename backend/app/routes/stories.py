@@ -18,14 +18,19 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
-from app.connectors import clickup_oauth
+from app.connectors import clickup_oauth, jira_oauth
 from app.stories.generate import (
     PRDNotFoundError,
     Story,
     generate_user_stories,
 )
 from app.prd_runner import warm_impl_spec
-from app.stories.push import ClickUpNotConnectedError, push_stories_to_clickup
+from app.stories.push import (
+    ClickUpNotConnectedError,
+    JiraNotConnectedError,
+    push_stories_to_clickup,
+    push_stories_to_jira,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +106,12 @@ class StoryIn(BaseModel):
 class PushIn(BaseModel):
     list_id: str = Field(..., min_length=1)
     stories: list[StoryIn] = Field(..., min_length=1)
+
+
+class PushJiraIn(BaseModel):
+    project_key: str = Field(..., min_length=1)
+    stories: list[StoryIn] = Field(..., min_length=1)
+    issue_type: str = Field(default="Task", min_length=1)
 
 
 @router.post("/generate")
@@ -270,6 +281,41 @@ def push(
     try:
         result = push_stories_to_clickup(company.company_id, body.list_id, stories)
     except ClickUpNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    return result
+
+
+@router.post("/jira/projects")
+def jira_projects(company: CompanyContext = Depends(require_company)):
+    """List the Jira projects this company can push stories into (target picker).
+
+    404 if Jira isn't connected.
+    """
+    from app.stories.push import _jira_creds
+
+    try:
+        access_token, cloud_id = _jira_creds(company.company_id)
+    except JiraNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    return {"projects": jira_oauth.list_projects(access_token, cloud_id)}
+
+
+@router.post("/jira/push")
+def push_jira(
+    body: PushJiraIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Create the given stories as issues in a Jira project (explicit write).
+
+    404 if Jira isn't connected. Per-story failures are isolated and reported
+    in `errors` rather than failing the whole batch.
+    """
+    stories = [Story.from_dict(s.model_dump()) for s in body.stories]
+    try:
+        result = push_stories_to_jira(
+            company.company_id, body.project_key, stories, issue_type=body.issue_type
+        )
+    except JiraNotConnectedError as e:
         raise HTTPException(404, str(e)) from e
     return result
 

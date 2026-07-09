@@ -134,12 +134,12 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
 })
 
 describe("CONNECTOR_IDS_WITH_OAUTH", () => {
-  it("contains the connectors whose UI surfaces a live OAuth flow (Drive/GitHub + ClickUp + HubSpot + Slack + Figma)", () => {
+  it("contains the connectors whose UI surfaces a live OAuth flow (Drive/GitHub + ClickUp + Jira + HubSpot + Slack + Figma)", () => {
     // Figma is OAuth-only for the app-review resubmission — Figma's reviewers
     // rejected the PAT-based connect path, so it was removed entirely (no
     // figma_pat module, no /figma/pat route).
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
-      ["clickup", "figma", "github", "google_drive", "hubspot", "slack"].sort(),
+      ["clickup", "figma", "github", "google_drive", "hubspot", "jira", "slack"].sort(),
     )
   })
 
@@ -165,6 +165,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "github",
         "google_drive",
         "hubspot",
+        "jira",
         "slack",
       ].sort(),
     )
