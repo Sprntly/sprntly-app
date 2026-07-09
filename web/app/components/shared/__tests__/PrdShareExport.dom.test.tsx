@@ -92,6 +92,13 @@ vi.mock("../../../lib/api", async () => {
 const saveAs = vi.fn()
 vi.mock("file-saver", () => ({ saveAs }))
 
+// printCombined builds + prints the combined Evidence + PRD doc. Spy on it so we
+// can assert the combined path (the real build is covered in combinedExport.test.ts).
+const printCombined = vi.fn()
+vi.mock("../../../lib/combinedExport", () => ({
+  printCombined: (...args: unknown[]) => printCombined(...args),
+}))
+
 const pdfOutput = vi.fn((_type?: string) => new Blob(["pdf"], { type: "application/pdf" }))
 vi.mock("jspdf", () => {
   class FakeDoc {
@@ -172,14 +179,14 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe("ContentPanel header Share dropdown", () => {
-  it("renders Download PDF / Download DOCX (no Email) once opened with a PRD loaded", () => {
+  it("renders only Download PDF once opened with a PRD loaded (no Email, no DOCX)", () => {
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
     const menu = screen.getByRole("menu")
     expect(within(menu).getByText("Download PDF")).toBeTruthy()
-    expect(within(menu).getByText("Download DOCX")).toBeTruthy()
-    // Email was removed from Share (mailto can't attach the docs).
+    // Email was removed (mailto can't attach); DOCX removed (not wired up yet).
     expect(within(menu).queryByText("Email")).toBeNull()
+    expect(within(menu).queryByText("Download DOCX")).toBeNull()
   })
 
   it("Share is disabled when no PRD is loaded", () => {
@@ -207,15 +214,6 @@ describe("ContentPanel header Share dropdown", () => {
     expect(filename).toBe("handoff-threshold-prd.pdf")
   })
 
-  it("Download DOCX generates a docx and triggers a download with the slugified filename", async () => {
-    render(<ContentPanel />)
-    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
-    fireEvent.click(within(screen.getByRole("menu")).getByText("Download DOCX"))
-    await waitFor(() => expect(packerToBlob).toHaveBeenCalled())
-    await waitFor(() => expect(saveAs).toHaveBeenCalled())
-    const [, filename] = saveAs.mock.calls[0]
-    expect(filename).toBe("handoff-threshold-prd.docx")
-  })
 })
 
 describe("ContentPanel Share — combined Evidence + PRD", () => {
@@ -230,29 +228,24 @@ describe("ContentPanel Share — combined Evidence + PRD", () => {
     html: "<html><head><style>:root{--g:#0a0} .wrap{color:var(--g)}</style></head><body><div class='wrap'>evidence body</div></body></html>",
   }
 
-  it("labels the downloads as Evidence + PRD when both are HTML briefs", () => {
+  it("labels Download PDF as Evidence + PRD when both are HTML briefs", () => {
     content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: HTML_EVIDENCE }
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
-    const menu = screen.getByRole("menu")
-    expect(within(menu).getByText(/Evidence \+ PRD as \.pdf/i)).toBeTruthy()
-    expect(within(menu).getByText(/Evidence \+ PRD as \.doc/i)).toBeTruthy()
+    expect(within(screen.getByRole("menu")).getByText(/Evidence \+ PRD as \.pdf/i)).toBeTruthy()
   })
 
-  it("Download DOCX saves ONE combined .doc containing both briefs", async () => {
+  it("Download PDF prints ONE combined doc from both briefs", async () => {
     content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: HTML_EVIDENCE }
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
-    fireEvent.click(within(screen.getByRole("menu")).getByText("Download DOCX"))
-    await waitFor(() => expect(saveAs).toHaveBeenCalled())
-    const [blob, filename] = saveAs.mock.calls[0]
-    // One combined Word doc (the -evidence-prd suffix marks the combined export);
-    // the HTML content + CSS scoping is asserted in combinedExport.test.ts.
-    expect(filename).toBe("handoff-threshold-prd-evidence-prd.doc")
-    expect((blob as Blob).type).toBe("application/msword")
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
+    // The combined print path is taken with the evidence + PRD; the actual HTML
+    // build + CSS scoping is asserted in combinedExport.test.ts.
+    await waitFor(() => expect(printCombined).toHaveBeenCalledWith(HTML_EVIDENCE, HTML_PRD))
   })
 
-  it("fetches evidence on demand (PRD tab) and still exports one combined .doc", async () => {
+  it("fetches evidence on demand (PRD tab) and still prints one combined doc", async () => {
     // Evidence is NOT in context (user never opened the Evidence tab), but the
     // PRD carries its insight, so the handler reads the evidence and combines.
     const HTML_PRD_WITH_INSIGHT = { ...HTML_PRD, briefId: 3, insightIndex: 1 }
@@ -264,25 +257,21 @@ describe("ContentPanel Share — combined Evidence + PRD", () => {
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
     // Optimistic combined label because the PRD has an insight to read from.
-    expect(within(screen.getByRole("menu")).getByText(/Evidence \+ PRD as \.doc/i)).toBeTruthy()
-    fireEvent.click(within(screen.getByRole("menu")).getByText("Download DOCX"))
+    expect(within(screen.getByRole("menu")).getByText(/Evidence \+ PRD as \.pdf/i)).toBeTruthy()
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
     await waitFor(() => expect(evidenceByInsight).toHaveBeenCalledWith(3, 1))
-    await waitFor(() => expect(saveAs).toHaveBeenCalled())
-    const [, filename] = saveAs.mock.calls[0]
-    expect(filename).toBe("handoff-threshold-prd-evidence-prd.doc")
+    await waitFor(() => expect(printCombined).toHaveBeenCalled())
   })
 
-  it("falls back to single-PRD export when there is no evidence", async () => {
+  it("falls back to the single-PRD export when there is no evidence", async () => {
     content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: null }
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
-    // Single-PRD labels, not the combined ones.
-    expect(within(screen.getByRole("menu")).getByText(/Export as \.docx/i)).toBeTruthy()
-    fireEvent.click(within(screen.getByRole("menu")).getByText("Download DOCX"))
-    await waitFor(() => expect(saveAs).toHaveBeenCalled())
-    const [, filename] = saveAs.mock.calls[0]
-    // HTML PRD → single .doc (no -evidence-prd suffix).
-    expect(filename).toBe("handoff-threshold-prd.doc")
+    // No insight to read from → single-PRD label, and the combined path is skipped.
+    expect(within(screen.getByRole("menu")).getByText(/Export as \.pdf/i)).toBeTruthy()
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
+    await waitFor(() => expect(saveAs).not.toHaveBeenCalled())
+    expect(printCombined).not.toHaveBeenCalled()
   })
 })
 

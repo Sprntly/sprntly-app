@@ -33,9 +33,9 @@ function saveRememberedDest(prdId: number | null, listId: string): void {
     /* storage unavailable — the choice just won't persist */
   }
 }
-import { IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
-import { downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
-import { printCombined, downloadCombinedDoc } from "../../lib/combinedExport"
+import { IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf } from "@tabler/icons-react"
+import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
+import { printCombined } from "../../lib/combinedExport"
 import type { PrdState, PrdContent } from "../../types/content"
 
 const TABS = [
@@ -53,9 +53,9 @@ function clampCpanelWidth(px: number): number {
   return Math.min(max, Math.max(CPANEL_WIDTH_MIN, Math.round(px)))
 }
 
-// Header Share dropdown — Email (mailto) / Download PDF (jsPDF) / Download DOCX
-// (docx). Enabled only when a PRD is loaded. The heavy generators are
-// lazy-imported inside the handlers (see lib/prdExport).
+// Header Share dropdown — Download PDF of the combined Evidence + PRD (falls
+// back to a single-PRD export when there's no evidence). Enabled only when a
+// PRD is loaded. The heavy generators are lazy-imported inside the handler.
 function ShareMenu({
   prd,
   evidence,
@@ -112,21 +112,6 @@ function ShareMenu({
       onToast("PDF export failed", "Could not generate the PDF. Please try again.")
     }
   }
-  const handleDocx = async () => {
-    if (!prd) return
-    setOpen(false)
-    try {
-      // Combined Evidence + PRD as one HTML .doc when both are HTML briefs
-      // (evidence fetched on demand); otherwise the single v3 HTML PRD as .doc,
-      // or the markdown docx builder.
-      const ev = prd.html ? await resolveEvidence() : null
-      if (ev?.html && prd.html) await downloadCombinedDoc(ev, prd)
-      else if (prd.html) await downloadPrdHtmlDoc(prd)
-      else await downloadPrdDocx(prd)
-    } catch {
-      onToast("DOCX export failed", "Could not generate the document. Please try again.")
-    }
-  }
 
   return (
     <div style={{ position: "relative" }} ref={ref}>
@@ -147,13 +132,6 @@ function ShareMenu({
             <div>
               <div style={{ fontWeight: 600 }}>Download PDF</div>
               <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{combined ? "Evidence + PRD as .pdf" : "Export as .pdf"}</div>
-            </div>
-          </div>
-          <div className="share-menu-item" role="menuitem" onClick={handleDocx}>
-            <div className="share-menu-item-icon"><IconFileTypeDocx size={14} /></div>
-            <div>
-              <div style={{ fontWeight: 600 }}>Download DOCX</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{combined ? "Evidence + PRD as .doc" : "Export as .docx"}</div>
             </div>
           </div>
         </div>
