@@ -80,7 +80,11 @@ def test_jira_puller_yields_issues(monkeypatch):
     resp = MagicMock()
     resp.json.return_value = search_body
     resp.raise_for_status.return_value = None
-    monkeypatch.setattr(jira.requests, "get", lambda *a, **k: resp)
+    captured = {}
+    def fake_get(url, params=None, headers=None, timeout=None):
+        captured["params"] = params
+        return resp
+    monkeypatch.setattr(jira.requests, "get", fake_get)
 
     recs = list(jira.pull("tok"))
     assert len(recs) == 1
@@ -91,6 +95,10 @@ def test_jira_puller_yields_issues(monkeypatch):
     assert r.properties["status"] == "In Progress"
     assert r.properties["type"] == "Bug"
     assert r.properties["labels"] == ["auth"]
+    # Regression guard: the enhanced /search/jql endpoint 400s on unbounded JQL,
+    # so the query MUST carry a search restriction (a bare ORDER BY is rejected).
+    jql = captured["params"]["jql"].lower()
+    assert "order by" in jql and ("created" in jql or "updated" in jql or ">=" in jql)
     assert jira_oauth  # imported for symmetry / ensures module loads
 
 
