@@ -564,3 +564,42 @@ describe("useGeneratePrototype — controlled open", () => {
     expect(onOpenChange).toHaveBeenCalledWith(false)
   })
 })
+
+describe("useGeneratePrototype — onCancel wiring (locating-phase Cancel control)", () => {
+  it("test_useGeneratePrototype_generateModalProps_onCancel_is_same_reference_as_loadingScreenProps_onCancel", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={24}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    expect(latest.generateModalProps.onCancel).toBe(latest.loadingScreenProps.onCancel)
+  })
+
+  it("test_useGeneratePrototype_generateModalProps_onCancel_dismisses_overlay_like_loadingScreenProps_onCancel", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={25}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(200)
+    })
+    expect(latest.loadingScreenProps.open).toBe(true)
+
+    await act(async () => {
+      latest.generateModalProps.onCancel()
+    })
+    expect(latest.loadingScreenProps.open).toBe(false)
+  })
+})
