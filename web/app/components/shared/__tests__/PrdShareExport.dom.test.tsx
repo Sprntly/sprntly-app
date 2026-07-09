@@ -172,13 +172,14 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe("ContentPanel header Share dropdown", () => {
-  it("renders Email / Download PDF / Download DOCX once opened with a PRD loaded", () => {
+  it("renders Download PDF / Download DOCX (no Email) once opened with a PRD loaded", () => {
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
     const menu = screen.getByRole("menu")
-    expect(within(menu).getByText("Email")).toBeTruthy()
     expect(within(menu).getByText("Download PDF")).toBeTruthy()
     expect(within(menu).getByText("Download DOCX")).toBeTruthy()
+    // Email was removed from Share (mailto can't attach the docs).
+    expect(within(menu).queryByText("Email")).toBeNull()
   })
 
   it("Share is disabled when no PRD is loaded", () => {
@@ -190,28 +191,10 @@ describe("ContentPanel header Share dropdown", () => {
     expect(screen.queryByRole("menu")).toBeNull()
   })
 
-  it("Email sets a mailto: URL carrying the PRD title in the subject", () => {
-    // jsdom refuses real navigation; capture href assignments via a stub.
-    let assigned = ""
-    const realLocation = window.location
-    Object.defineProperty(window, "location", {
-      configurable: true,
-      value: { ...realLocation, href: "http://localhost:3000/prd/42", get assign() { return undefined } },
-    })
-    Object.defineProperty(window.location, "href", {
-      configurable: true,
-      get: () => assigned || "http://localhost:3000/prd/42",
-      set: (v: string) => { assigned = v },
-    })
-
+  it("does not render a Save button in the content-panel header", () => {
     render(<ContentPanel />)
-    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
-    fireEvent.click(within(screen.getByRole("menu")).getByText("Email"))
-
-    expect(assigned).toMatch(/^mailto:/)
-    expect(decodeURIComponent(assigned)).toContain("PRD: Handoff Threshold PRD")
-
-    Object.defineProperty(window, "location", { configurable: true, value: realLocation })
+    const buttons = screen.getAllByRole("button")
+    expect(buttons.some((b) => /^\s*Save\s*$/i.test(b.textContent ?? ""))).toBe(false)
   })
 
   it("Download PDF generates a PDF and triggers a download with the slugified filename", async () => {
