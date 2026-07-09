@@ -971,6 +971,46 @@ export function ChatScreen() {
     if (!tab?.prd && !tab?.prdGenerating) closeContentPanel()
   }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, closeContentPanel])
 
+  // ── Restore the PRD panel after a reload ───────────────────────────────────
+  // Tabs persist across reloads (localStorage) but their cached `prd` does NOT —
+  // it's stripped to keep storage small (see the slim persist above). So a reload
+  // that lands back on a PRD-bound chat tab used to show the tab with the panel
+  // CLOSED, forcing a manual "View PRD" click. Here we reopen it automatically:
+  // once the brief prototype map resolves and confirms a PRD exists in the DB for
+  // this tab's insight, open the panel and LOAD the saved PRD by id (handleOpenPrd
+  // takes the DB-load branch — never a regeneration). Deliberately narrow so it
+  // can't leak the panel onto the wrong surface:
+  //   • Only the tab we MOUNTED on (mountTabRef) — a mid-session tab switch keeps
+  //     the existing switch semantics (the pin reopens the PRD on demand).
+  //   • Never the brief tab, and never a plain (non-PRD) chat — a reload onto a
+  //     new chat leaves the panel closed.
+  //   • Fires at most once (mountRestoreDoneRef), so a manual panel-close isn't
+  //     immediately undone.
+  //   • Waits out chatMapLoading so we don't give up before the DB truth is known.
+  const mountTabRef = useRef(activeTabId)
+  const mountRestoreDoneRef = useRef(false)
+  useEffect(() => {
+    if (mountRestoreDoneRef.current) return
+    const targetId = mountTabRef.current
+    // Nothing to restore for the brief tab / tab-less landing.
+    if (targetId == null || targetId === BRIEF_TAB_ID) { mountRestoreDoneRef.current = true; return }
+    // User navigated to a different tab before the map resolved → abandon.
+    if (activeTabId !== targetId) { mountRestoreDoneRef.current = true; return }
+    const tab = tabsRef.current.find((t) => t.id === targetId)
+    // Not a PRD-bound tab, already loaded/loading, or a panel is already open
+    // (e.g. openPrdInTab handled it) → nothing to do.
+    if (!tab || !tab.briefMeta || tab.prd || tab.prdGenerating || contentPanelTab) {
+      mountRestoreDoneRef.current = true
+      return
+    }
+    // Still fetching whether a DB PRD exists — wait for the next resolve.
+    if (chatMapLoading) return
+    mountRestoreDoneRef.current = true
+    if (chatInsightState?.hasPrd && chatInsightState.prdId != null) {
+      void handleOpenPrd()
+    }
+  }, [activeTabId, contentPanelTab, chatMapLoading, chatInsightState, handleOpenPrd])
+
   // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
   // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps
   // generating server-side. The pending USER turn lives in the persisted
