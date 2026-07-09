@@ -118,6 +118,8 @@ def env(isolated_settings, monkeypatch):
     importlib.reload(comments_mod)            # rebind require_client/utc_now
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)              # rebinds BOTH its top + EOF db imports
+    import app.routes.design_agent_comments as comment_routes_mod
+    importlib.reload(comment_routes_mod)      # rebind to the reloaded design_agent + db helpers
     import app.main as main_mod
     importlib.reload(main_mod)                # rebuild the app with the reloaded router
 
@@ -460,7 +462,7 @@ def test_comment_routes_registered_and_existing_intact(env):
 def test_comment_out_projects_position_fields(env):
     # _comment_to_out on a row WITH position → CommentOut carries the three values.
     # On a row WITHOUT the keys → all three None (uses .get, safe for older rows).
-    from app.routes.design_agent import _comment_to_out, CommentOut
+    from app.routes.design_agent_comments import _comment_to_out, CommentOut
 
     with_pos = _comment_to_out({
         "id": 1,
@@ -611,6 +613,8 @@ def env_general(isolated_settings, monkeypatch):
     importlib.reload(comments_mod)
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)
+    import app.routes.design_agent_comments as comment_routes_mod
+    importlib.reload(comment_routes_mod)
     import app.main as main_mod
     importlib.reload(main_mod)
 
@@ -722,7 +726,7 @@ def test_comment_out_serializes_null_anchor(env_general):
     # CommentOut / _comment_to_out project a null anchor_id cleanly (no
     # KeyError, no validation error) via .get(), matching the pattern already
     # used for pin_x_pct/pin_y_pct/resolved_anchor_id.
-    from app.routes.design_agent import _comment_to_out, CommentOut
+    from app.routes.design_agent_comments import _comment_to_out, CommentOut
 
     projected = _comment_to_out({
         "id": 9,

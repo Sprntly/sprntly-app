@@ -103,6 +103,10 @@ CREATE TABLE prototype_comments (
 _ROUTES_PATH = (
     pathlib.Path(__file__).resolve().parents[1] / "app" / "routes" / "design_agent.py"
 )
+_COMMENT_ROUTES_PATH = (
+    pathlib.Path(__file__).resolve().parents[1]
+    / "app" / "routes" / "design_agent_comments.py"
+)
 _RATE_LIMIT_PATH = (
     pathlib.Path(__file__).resolve().parents[1]
     / "app" / "design_agent" / "rate_limit.py"
@@ -128,11 +132,14 @@ def env(isolated_settings, monkeypatch):
     importlib.reload(comments_mod)
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)
+    import app.routes.design_agent_comments as comment_routes_mod
+    importlib.reload(comment_routes_mod)
     import app.main as main_mod
     importlib.reload(main_mod)
 
     return SimpleNamespace(
-        proto=proto_mod, comments=comments_mod, routes=routes_mod, main=main_mod
+        proto=proto_mod, comments=comments_mod, routes=routes_mod,
+        comment_routes=comment_routes_mod, main=main_mod
     )
 
 
@@ -375,8 +382,12 @@ def test_public_routes_contract_unchanged(env):
     assert "PUBLIC_COMMENT_LIMITER" in src
     assert "PUBLIC_TOKEN_LIMITER.check(" in src
     assert "PUBLIC_TOKEN_LIMITER.register(" in src
-    assert "PUBLIC_COMMENT_LIMITER.check(" in src
-    assert "PUBLIC_COMMENT_LIMITER.register(" in src
+    # The public-comment write guard was extracted into design_agent_comments.py
+    # (which consumes the PUBLIC_COMMENT_LIMITER re-exported by design_agent.py);
+    # the .check(/.register( calls now live there, not in the primary route module.
+    comments_src = _COMMENT_ROUTES_PATH.read_text()
+    assert "PUBLIC_COMMENT_LIMITER.check(" in comments_src
+    assert "PUBLIC_COMMENT_LIMITER.register(" in comments_src
 
     # Path + response_model unchanged on the resolver route.
     get_route = next(
@@ -413,11 +424,11 @@ def test_public_comment_request_client_none_no_crash(unauth, env):
         "client": None,                       # <-- the case under test
     }
     req = StarletteRequest(scope)
-    body = env.routes.CommentCreate(anchor_id="deadbeef", body="from a clientless request")
+    body = env.comment_routes.CommentCreate(anchor_id="deadbeef", body="from a clientless request")
 
     # With the write enabled, the clientless request must degrade to the "0.0.0.0"
     # sentinel key (not crash on None.host) and succeed, returning a CommentOut.
-    out = env.routes.post_comment_public(token=token, body=body, request=req)
+    out = env.comment_routes.post_comment_public(token=token, body=body, request=req)
     assert out.body == "from a clientless request"
     assert out.author == "Anonymous"   # no viewer_name supplied
     assert out.status == "open"
