@@ -69,6 +69,10 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/",
 }))
 
+// Spy for the on-demand evidence read (loadEvidenceByInsight → evidenceApi.byInsight).
+const evidenceByInsight = vi.fn((_briefId: number, _insightIndex: number) =>
+  Promise.resolve(null as unknown),
+)
 vi.mock("../../../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../../../lib/api")>("../../../lib/api")
   return {
@@ -76,6 +80,10 @@ vi.mock("../../../lib/api", async () => {
     prdApi: {
       ...actual.prdApi,
       latest: vi.fn(async () => { throw new actual.ApiError(404, "none") }),
+    },
+    evidenceApi: {
+      ...actual.evidenceApi,
+      byInsight: (briefId: number, insightIndex: number) => evidenceByInsight(briefId, insightIndex),
     },
   }
 })
@@ -259,6 +267,26 @@ describe("ContentPanel Share — combined Evidence + PRD", () => {
     // the HTML content + CSS scoping is asserted in combinedExport.test.ts.
     expect(filename).toBe("handoff-threshold-prd-evidence-prd.doc")
     expect((blob as Blob).type).toBe("application/msword")
+  })
+
+  it("fetches evidence on demand (PRD tab) and still exports one combined .doc", async () => {
+    // Evidence is NOT in context (user never opened the Evidence tab), but the
+    // PRD carries its insight, so the handler reads the evidence and combines.
+    const HTML_PRD_WITH_INSIGHT = { ...HTML_PRD, briefId: 3, insightIndex: 1 }
+    evidenceByInsight.mockResolvedValueOnce({
+      status: "ready",
+      payload_md: HTML_EVIDENCE.html,
+    })
+    content = { ...EMPTY_CONTENT, prd: HTML_PRD_WITH_INSIGHT, evidence: null }
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    // Optimistic combined label because the PRD has an insight to read from.
+    expect(within(screen.getByRole("menu")).getByText(/Evidence \+ PRD as \.doc/i)).toBeTruthy()
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download DOCX"))
+    await waitFor(() => expect(evidenceByInsight).toHaveBeenCalledWith(3, 1))
+    await waitFor(() => expect(saveAs).toHaveBeenCalled())
+    const [, filename] = saveAs.mock.calls[0]
+    expect(filename).toBe("handoff-threshold-prd-evidence-prd.doc")
   })
 
   it("falls back to single-PRD export when there is no evidence", async () => {
