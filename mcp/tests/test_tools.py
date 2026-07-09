@@ -174,6 +174,24 @@ async def test_list_prd_tickets_passthrough_not_assignee_scoped(company_ctx, mon
 
 
 @pytest.mark.asyncio
+async def test_get_prd_prototype_passthrough_for_developer(developer_ctx, monkeypatch):
+    """get_prd_prototype is a ticket/PRD-family tool: NOT role-gated, company
+    id injected from context, and a friendly message on 404/None."""
+    calls = _stub_backend(
+        monkeypatch,
+        {"/prd/5/prototype": {"prototype_id": 9, "status": "ready", "public_url": None}},
+    )
+    result = await tools._get_prd_prototype_impl(5)
+    assert result["status"] == "ready"
+    assert calls == [("/prd/5/prototype", {"company_id": "co-1"})]
+
+    _stub_backend(monkeypatch, {"/prd/8/prototype": None})
+    missing = await tools._get_prd_prototype_impl(8)
+    assert "No prototype" in missing["message"]
+    assert "PRD 8" in missing["message"]
+
+
+@pytest.mark.asyncio
 async def test_get_prd_passthrough_and_friendly_when_none(company_ctx, monkeypatch):
     calls = _stub_backend(monkeypatch, {"/prd/5": {"title": "My PRD"}})
     result = await tools._get_prd_impl(5)

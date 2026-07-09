@@ -797,6 +797,25 @@ CREATE TABLE drip_email_sends (
 CREATE INDEX drip_email_sends_company_user_idx
     ON drip_email_sends (company_id, user_id);
 
+-- Design-agent prototypes (mirrors 20260528000000_design_agent_prototypes.sql
+-- + the sharing / preview-image columns, SQLite-ized and trimmed to what the
+-- internal MCP prototype route reads: status, completion, sharing, links).
+CREATE TABLE prototypes (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    prd_id             INTEGER NOT NULL,
+    workspace_id       TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'generating',
+    is_complete        INTEGER NOT NULL DEFAULT 0,
+    target_platform    TEXT NOT NULL DEFAULT 'both',
+    preview_image_url  TEXT,
+    share_mode         TEXT NOT NULL DEFAULT 'private',
+    share_token        TEXT,
+    error              TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at       TEXT
+);
+CREATE INDEX prototypes_prd_idx ON prototypes (prd_id, workspace_id);
+
 -- Customer-issued MCP API tokens (mirrors 20260707120000_mcp_tokens.sql +
 -- 20260708120000_mcp_token_role.sql, SQLite-ized). uuid / timestamptz are
 -- TEXT here, matching the other seeded tables.

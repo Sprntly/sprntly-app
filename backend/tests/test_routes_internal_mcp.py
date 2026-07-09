@@ -47,6 +47,7 @@ def test_routes_401_without_internal_key(isolated_settings, monkeypatch):
     assert client.get("/internal/mcp/brief/current", params={"company_id": "x"}).status_code == 401
     assert client.get("/internal/mcp/backlog", params={"company_id": "x"}).status_code == 401
     assert client.get("/internal/mcp/prd/latest", params={"company_id": "x"}).status_code == 401
+    assert client.get("/internal/mcp/prd/1/prototype", params={"company_id": "x"}).status_code == 401
     assert (
         client.get("/internal/mcp/tickets/ABC-1/data", params={"company_id": "x"}).status_code
         == 401
@@ -478,6 +479,76 @@ def test_get_prd_owned_and_foreign(isolated_settings, monkeypatch):
     # Foreign company → 404 (no existence disclosure), and missing id → 404.
     assert client.get("/internal/mcp/prd/101", params={"company_id": cid_b}, headers=_headers()).status_code == 404
     assert client.get("/internal/mcp/prd/9999", params={"company_id": cid_a}, headers=_headers()).status_code == 404
+
+
+def test_get_prd_prototype_shared_and_private(isolated_settings, monkeypatch):
+    """Ready+shared prototype → both links; private → app_url only. Never the
+    bundle_url or passcode hash."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_chain(db, company_id=cid, slug="acme", prd_id=101)
+    db.table("prototypes").insert(
+        {
+            "prd_id": 101,
+            "workspace_id": cid,
+            "status": "ready",
+            "is_complete": True,
+            "share_mode": "public",
+            "share_token": "tok-abc123",
+            "preview_image_url": "https://cdn/x.png",
+        }
+    ).execute()
+
+    r = client.get(
+        "/internal/mcp/prd/101/prototype", params={"company_id": cid}, headers=_headers()
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ready"
+    assert body["is_complete"] is True
+    assert body["preview_image_url"] == "https://cdn/x.png"
+    assert body["app_url"].endswith("/prototype?prd=101")
+    assert body["public_url"].endswith("/p/acme/tok-abc123")
+    assert "bundle_url" not in body
+    assert "share_passcode_hash" not in body
+
+    # Private prototype (newest row wins): no public link, app link intact.
+    db.table("prototypes").insert(
+        {"prd_id": 101, "workspace_id": cid, "status": "ready",
+         "share_mode": "private", "share_token": "tok-hidden"}
+    ).execute()
+    private = client.get(
+        "/internal/mcp/prd/101/prototype", params={"company_id": cid}, headers=_headers()
+    ).json()
+    assert private["public_url"] is None
+    assert "tok-hidden" not in str(private)
+    assert private["app_url"].endswith("/prototype?prd=101")
+
+
+def test_get_prd_prototype_404s(isolated_settings, monkeypatch):
+    """No prototype yet → 404; a foreign company's prd_id → 404 before the
+    prototype lookup (require_owned_prd, no existence disclosure)."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid_a, cid_b = uuid.uuid4().hex, uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid_a, slug="acme", user_id="u-a")
+    _seed_company_and_member(db, company_id=cid_b, slug="globex", user_id="u-b")
+    _seed_prd_chain(db, company_id=cid_a, slug="acme", prd_id=101)
+    db.table("prototypes").insert(
+        {"prd_id": 101, "workspace_id": cid_a, "status": "ready",
+         "share_mode": "public", "share_token": "tok-a"}
+    ).execute()
+
+    assert client.get(
+        "/internal/mcp/prd/101/prototype", params={"company_id": cid_b}, headers=_headers()
+    ).status_code == 404
+
+    _seed_prd_chain(db, company_id=cid_a, slug="acme", prd_id=102)
+    assert client.get(
+        "/internal/mcp/prd/102/prototype", params={"company_id": cid_a}, headers=_headers()
+    ).status_code == 404
 
 
 def test_add_attachment_then_read_back(isolated_settings, monkeypatch):

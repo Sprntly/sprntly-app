@@ -135,6 +135,17 @@ async def _get_prd_impl(prd_id: int) -> dict:
     return result
 
 
+async def _get_prd_prototype_impl(prd_id: int) -> dict:
+    ctx = require_current_company()
+    result = await get_json(f"/prd/{prd_id}/prototype", company_id=ctx.company_id)
+    if result is None:
+        return {
+            "message": f"No prototype has been generated for PRD {prd_id} yet "
+            "(or the PRD was not found in your workspace)."
+        }
+    return result
+
+
 async def _update_ticket_fields_impl(
     ticket_key: str,
     status: str | None = None,
@@ -279,6 +290,18 @@ def register_tools(mcp: FastMCP) -> None:
         return await _list_prd_tickets_impl(
             prd_id, status=status, ticket_type=ticket_type
         )
+
+    @mcp.tool()
+    async def get_prd_prototype(prd_id: int) -> dict:
+        """Get the interactive design prototype behind a PRD: its status and
+        viewer links. `prd_id` comes from a ticket's `prd_id` (list_tickets /
+        get_ticket) or from get_prd. Check `status` ("ready" means viewable;
+        "generating"/"failed" are not) and `is_complete` (a PM has marked the
+        design final) before treating it as the source of truth. `app_url`
+        opens the prototype in the Sprntly app and needs a Sprntly login;
+        `public_url` is a no-login share link that only exists if a PM has
+        already shared the prototype — sharing cannot be enabled from here."""
+        return await _get_prd_prototype_impl(prd_id)
 
     @mcp.tool()
     async def update_ticket_fields(

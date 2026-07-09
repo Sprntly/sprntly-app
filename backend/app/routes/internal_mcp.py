@@ -173,6 +173,55 @@ def prd_by_id(prd_id: int, company_id: str) -> dict[str, Any]:
 
 
 @data_router.get(
+    "/prd/{prd_id}/prototype", dependencies=[Depends(_require_internal_key)]
+)
+def prd_prototype(prd_id: int, company_id: str) -> dict[str, Any]:
+    """The design prototype behind a PRD: status + viewer links, for the MCP
+    get_prd_prototype tool. Latest row of ANY status so a developer sees
+    "generating"/"failed" too, not just a bare 404.
+
+    Links only — never the signed bundle_url (it expires and bypasses the
+    share model) and never the passcode hash. `app_url` is the in-app viewer
+    (needs a Sprntly login); `public_url` exists only when a PM already
+    shared the prototype (share_mode public/passcode) — this surface never
+    changes share settings. Tenant-scoped via require_owned_prd, and the
+    prototype lookup itself is workspace-filtered (prototypes.workspace_id
+    IS the company_id)."""
+    from app.config import settings
+    from app.db.companies import slug_for_company_id
+    from app.db.prototypes import find_latest_prototype_by_prd
+    from app.deps.ownership import require_owned_prd
+
+    require_owned_prd(prd_id, company_id)  # raises 404 if not this company's
+    row = find_latest_prototype_by_prd(prd_id=prd_id, workspace_id=company_id)
+    if not row:
+        raise HTTPException(404, "no_prototype")
+
+    frontend = (settings.frontend_url or "").rstrip("/")
+    share_mode = row.get("share_mode") or "private"
+    public_url = None
+    if share_mode != "private" and row.get("share_token"):
+        slug = slug_for_company_id(company_id)
+        if slug:
+            public_url = f"{frontend}/p/{slug}/{row['share_token']}"
+
+    return {
+        "prototype_id": row["id"],
+        "prd_id": prd_id,
+        "status": row.get("status"),
+        "is_complete": bool(row.get("is_complete")),
+        "target_platform": row.get("target_platform"),
+        "preview_image_url": row.get("preview_image_url"),
+        "created_at": row.get("created_at"),
+        "completed_at": row.get("completed_at"),
+        "error": row.get("error"),
+        "app_url": f"{frontend}/prototype?prd={prd_id}",
+        "share_mode": share_mode,
+        "public_url": public_url,
+    }
+
+
+@data_router.get(
     "/tickets/{ticket_key}/data", dependencies=[Depends(_require_internal_key)]
 )
 def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
