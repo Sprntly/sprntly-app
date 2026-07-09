@@ -17,7 +17,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Backstop gate: re-run the ds-agent server tests before deploying, so a red
+  # suite can never reach the box even on a direct push to main. Belt-and-braces
+  # with the branch-protection required check (test-agent.yml on the PR).
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: ds-agent/pyproject.toml
+      - name: Install ds-agent (with dev extras)
+        working-directory: ds-agent
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e '.[dev]'
+      - name: Run pytest (server tests)
+        working-directory: ds-agent
+        run: python -m pytest tests/ -q --strict-markers
+
   deploy:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: SSH and deploy
