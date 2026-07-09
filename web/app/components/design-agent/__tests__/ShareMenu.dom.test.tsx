@@ -33,6 +33,18 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 const { shareMock } = vi.hoisted(() => ({ shareMock: vi.fn() }))
 vi.mock("../../../lib/api", () => ({ designAgentApi: { share: shareMock } }))
 
+// Mock useCompany so the container's context-sourced company DISPLAY name is
+// controllable per test (the real hook needs a WorkspaceProvider chain). Tests
+// that pass an explicit companyDisplaySlug prop are unaffected (the prop wins).
+const { companyMock } = vi.hoisted(() => ({ companyMock: { value: "Lab X" } }))
+vi.mock("../../../context/CompanyContext", () => ({
+  useCompany: () => ({
+    activeCompany: "asurion",
+    setActiveCompany: () => {},
+    activeCompanyDisplayName: companyMock.value,
+  }),
+}))
+
 import { ShareMenu, ShareMenuView } from "../ShareMenu"
 
 afterEach(() => {
@@ -162,34 +174,85 @@ describe("ShareMenu — private internal link", () => {
     expect(document.body.textContent).not.toContain("prototype?prd=undefined")
   })
 
-  it("keeps the public token link unchanged when a prototype query id is available", () => {
+  it("builds the public token link with both cosmetic segments when a prototype query id is available", () => {
     render(
       React.createElement(ShareMenu, {
         prototypeId: 785,
         prdId: 785,
         initialMode: "public",
         initialToken: "tok-public",
-        companySlug: "sprntly",
+        companyDisplaySlug: "sprntly",
+        prdTitle: "Onboarding Revamp",
       }),
     )
     const link = screen.getByTestId("share-link")
-    expect(link.textContent).toContain(`${window.location.origin}/p/sprntly/tok-public`)
+    expect(link.textContent).toContain(
+      `${window.location.origin}/p/sprntly/onboarding-revamp/tok-public`,
+    )
     expect(link.textContent).not.toContain("/prototype?prd=")
   })
 
-  it("keeps the passcode token link unchanged when a prototype query id is available", () => {
+  it("builds the passcode token link with both cosmetic segments when a prototype query id is available", () => {
     render(
       React.createElement(ShareMenu, {
         prototypeId: 785,
         prdId: 785,
         initialMode: "passcode",
         initialToken: "tok-pass",
-        companySlug: "sprntly",
+        companyDisplaySlug: "sprntly",
+        prdTitle: "Onboarding Revamp",
       }),
     )
     const link = screen.getByTestId("share-link")
-    expect(link.textContent).toContain(`${window.location.origin}/p/sprntly/tok-pass`)
+    expect(link.textContent).toContain(
+      `${window.location.origin}/p/sprntly/onboarding-revamp/tok-pass`,
+    )
     expect(link.textContent).not.toContain("/prototype?prd=")
+  })
+})
+
+// ─── SHARE-URL cosmetic segments: display-derived, not the raw opaque slug ────
+// The container computes both cosmetic URL segments from human-readable data —
+// the company DISPLAY name (via useCompany, mocked here) and the PRD title (via
+// the prdTitle prop) — never the opaque companies.slug. These assert the shape
+// of the live rendered/copied link.
+describe("ShareMenu (container) — display-derived cosmetic slugs (AC13/AC14)", () => {
+  it("renders a link built from the slugified display name + PRD title, not a raw opaque slug", () => {
+    companyMock.value = "Lab X"
+    render(
+      React.createElement(ShareMenu, {
+        prototypeId: 785,
+        prdId: 785,
+        initialMode: "public",
+        initialToken: "tok-public",
+        // No companyDisplaySlug prop → self-sources the display name from context.
+        prdTitle: "Customer Onboarding Revamp",
+      }),
+    )
+    const link = screen.getByTestId("share-link")
+    expect(link.textContent).toContain(
+      `${window.location.origin}/p/lab-x/customer-onboarding-revamp/tok-public`,
+    )
+    // ...and never the opaque, name-independent companies.slug shape (c + 11 chars).
+    expect(link.textContent).not.toMatch(/\/p\/c[a-z0-9]{11}\//)
+  })
+
+  it("falls back to the 'prototype' feature segment when prdTitle is missing, without throwing (AC14)", () => {
+    companyMock.value = "Lab X"
+    render(
+      React.createElement(ShareMenu, {
+        prototypeId: 785,
+        prdId: 785,
+        initialMode: "public",
+        initialToken: "tok-public",
+        // prdTitle omitted.
+      }),
+    )
+    const link = screen.getByTestId("share-link")
+    // Still exactly 3 path segments + token, using the feature fallback.
+    expect(link.textContent).toContain(
+      `${window.location.origin}/p/lab-x/prototype/tok-public`,
+    )
   })
 })
 

@@ -55,7 +55,7 @@ from app.design_agent.rate_limit import (  # public-surface rate limits
     PUBLIC_COMMENT_LIMITER,  # consumed by the public comment write route (design_agent_comments)
     PUBLIC_TOKEN_LIMITER,
 )
-from app.db.companies import slug_for_company_id
+from app.db.companies import display_name_for_company_id, slug_for_company_id
 from app.db.design_agent_jobs import (  # Tier 2 opt-in worker queue
     enqueue_job,
     worker_heartbeat_fresh,
@@ -102,6 +102,7 @@ from app.design_agent.event_stream import publish_step, subscribe as _sse_subscr
 from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
 from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_build_run
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
+from app.design_agent.url_slug import url_slugify  # cosmetic /p/<company>/<feature>/<token> segments
 from app.design_agent.codebase_map.recreate import (
     ThemeExpectations,
     _assert_structural_parity,
@@ -2768,12 +2769,39 @@ def _public_target_platform(row: dict[str, Any]) -> str:
     return tp if tp in ("desktop", "mobile") else "both"
 
 
+def _public_cosmetic_slugs(row: dict[str, Any]) -> tuple[str, str]:
+    """Compute the two cosmetic path segments for /p/<company>/<feature>/<token>.
+    Derived at SERVE TIME, never persisted. Fail-soft: a missing/empty
+    display_name or PRD title degrades to a fixed fallback rather than raising —
+    a public visitor must never see a 500 because a cosmetic lookup failed. Any
+    exception is caught, logged (identifiers only — no display_name/title
+    content), and degrades the same way.
+    """
+    try:
+        display_name = display_name_for_company_id(row["workspace_id"]) or ""
+        prd = get_prd_rendered(row["prd_id"]) if row.get("prd_id") else None
+        title = (prd or {}).get("title") or ""
+    except Exception:
+        logger.warning(
+            "design_agent.public_cosmetic_slugs_failed workspace_id=%s prd_id=%s",
+            row.get("workspace_id"), row.get("prd_id"), exc_info=True,
+        )
+        display_name, title = "", ""
+    return url_slugify(display_name, fallback="company"), url_slugify(title, fallback="prototype")
+
+
 class PublicPrototypeView(BaseModel):
     share_mode: Literal["public", "passcode"]  # "private" is never returned
     requires_passcode: bool                    # true iff share_mode == "passcode"
     bundle_url: str | None                     # null until a passcode is verified
     is_complete: bool
     company_slug: str                          # cosmetic segment of /p/<slug>/<token>
+    # Human-readable cosmetic segments for the 3-segment canonical URL
+    # /p/<company_display_slug>/<feature_slug>/<token>. Computed at serve time
+    # from companies.display_name / prds.title — no new column, never validated
+    # on read (same trust model as company_slug).
+    company_display_slug: str = Field("")
+    feature_slug: str = Field("")
     # Benign display enum ("desktop" | "mobile" | "both") — lets the public viewer
     # hide the Desktop/Mobile toggle for a single-device prototype (there is
     # nothing to toggle to) and show a static device badge instead. Reveals nothing
@@ -2824,6 +2852,7 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         raise HTTPException(status_code=404, detail="Not found")
     mode = row["share_mode"]
     logger.info("prototype_public_view_resolved token_hash=%s share_mode=%s", th, mode)
+    company_display_slug, feature_slug = _public_cosmetic_slugs(row)
     return PublicPrototypeView(
         share_mode=mode,
         requires_passcode=(mode == "passcode"),
@@ -2835,6 +2864,9 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         is_complete=bool(row.get("is_complete")),
         # INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
         company_slug=slug_for_company_id(row["workspace_id"]) or "",
+        # Human-readable cosmetic segments for /p/<company>/<feature>/<token>.
+        company_display_slug=company_display_slug,
+        feature_slug=feature_slug,
         # Null/legacy ("web") rows collapse to "both", so an older row degrades to
         # the always-toggle behaviour.
         target_platform=_public_target_platform(row),
@@ -2881,6 +2913,7 @@ def verify_passcode(
 
         set_share_grant_cookie(response, token=token, checkpoint_id=_cp)
     logger.info("prototype_public_view_resolved token_hash=%s share_mode=passcode", th)
+    company_display_slug, feature_slug = _public_cosmetic_slugs(row)
     return PublicPrototypeView(
         share_mode="passcode",
         requires_passcode=True,
@@ -2888,6 +2921,9 @@ def verify_passcode(
         bundle_url=_public_bundle_url(row),
         is_complete=bool(row.get("is_complete")),
         company_slug=slug_for_company_id(row["workspace_id"]) or "",
+        # Human-readable cosmetic segments for /p/<company>/<feature>/<token>.
+        company_display_slug=company_display_slug,
+        feature_slug=feature_slug,
         # Same normalisation as get_by_token so a passcode-unlocked single-device
         # prototype also gates its toggle.
         target_platform=_public_target_platform(row),

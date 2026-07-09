@@ -325,9 +325,10 @@ describe("AC5 — locked prototype hides the surface", () => {
 
 describe("AC6 — external-viewer exclusion (F12 internal-only)", () => {
   it("test_public_token_page_does_not_mount_clarifying_question_surface", () => {
-    // vitest runs from web/ (cwd). The public route was collapsed onto a shared
-    // [slug] first segment, so its source files live across app/p/ and its
-    // [slug]/[token] subtree — walk the whole subtree (excluding tests).
+    // vitest runs from web/ (cwd). Every public share depth (legacy, 2-seg,
+    // 3-seg) resolves through one catch-all route, so its source files live
+    // across app/p/ and its [...segments] subtree — walk the whole subtree
+    // (excluding tests).
     const root = join(process.cwd(), "app", "p")
     function walk(dir: string): string[] {
       const out: string[] = []
@@ -341,7 +342,8 @@ describe("AC6 — external-viewer exclusion (F12 internal-only)", () => {
       return out
     }
     const files = walk(root)
-    expect(files.some((f) => f.endsWith(join("[slug]", "[token]", "page.tsx")))).toBe(true)
+    // sanity: the walk actually found real files (the catch-all shell exists).
+    expect(files.some((f) => f.endsWith(join("[...segments]", "page.tsx")))).toBe(true)
     for (const f of files) {
       const src = readFileSync(f, "utf8")
       expect(src).not.toContain("ClarifyingQuestionSurface")

@@ -563,6 +563,17 @@ describe("PostGenerationResult — forwards onShared down to ShareMenu (P6-20 AC
     expect(share).toBeTruthy()
     expect((share!.props as { onShared?: unknown }).onShared).toBeUndefined()
   })
+
+  it("DaControlBar threads prdTitle down to the nested <ShareMenu> (test_post_generation_result_forwards_prd_title_to_share_menu, AC15)", () => {
+    // ShareMenu slugifies prdTitle into the cosmetic feature segment of the
+    // public share URL, so the title must reach it intact through the same
+    // View → DaControlBar → ShareMenu chain that onShared travels.
+    const share = shareMenuEl({ prdTitle: "Customer Onboarding Revamp" })
+    expect(share).toBeTruthy()
+    expect((share!.props as { prdTitle?: unknown }).prdTitle).toBe(
+      "Customer Onboarding Revamp",
+    )
+  })
 })
 
 describe("resolveViewHref (pure)", () => {

@@ -18,6 +18,7 @@
 import { useState } from "react"
 import { designAgentApi } from "../../lib/api"
 import { useCompany } from "../../context/CompanyContext"
+import { urlSlugify } from "../../lib/urlSlug"
 
 export type ShareMode = "private" | "public" | "passcode"
 
@@ -32,10 +33,15 @@ export type ShareMenuProps = {
    *  the share-gated CommentsPanel mounts without a re-mount. Optional so the
    *  public-viewer composition and existing callers keep type-checking. */
   onShared?: (token: string | null) => void
-  /** Cosmetic company slug for the public /p/<slug>/<token> URL. Optional — when
-   *  omitted the container self-sources it from `useCompany().activeCompany`
-   *  (safe outside a provider: it returns the demo default, never throws). */
-  companySlug?: string
+  /** Human-readable company name for the cosmetic company segment of the public
+   *  /p/<company>/<feature>/<token> URL. Optional — when omitted the container
+   *  self-sources it from `useCompany().activeCompanyDisplayName` (safe outside a
+   *  provider: it returns the demo default, never throws). Slugified before use. */
+  companyDisplaySlug?: string
+  /** Human-readable feature/PRD title for the cosmetic feature segment of the
+   *  public /p/<company>/<feature>/<token> URL. Optional — falls back to the
+   *  "prototype" segment when omitted/null. Slugified before use. */
+  prdTitle?: string | null
 }
 
 export type ShareMenuViewProps = {
@@ -147,10 +153,17 @@ export async function runSelectMode({
   }
 }
 
-// INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
-/** Build the public share URL from the opaque token (F6) + the company slug. */
-export function buildShareUrl(token: string, origin: string, companySlug: string): string {
-  return `${origin}/p/${companySlug}/${token}`
+/** Build the public share URL from the opaque token (F6) + the two cosmetic
+ *  human-readable segments: /p/<company>/<feature>/<token>. Both segments are
+ *  display-derived (company display name / PRD title), never the opaque
+ *  companies.slug; resolution is by token alone, so the segments are cosmetic. */
+export function buildShareUrl(
+  token: string,
+  origin: string,
+  companyDisplaySlug: string,
+  featureSlug: string,
+): string {
+  return `${origin}/p/${companyDisplaySlug}/${featureSlug}/${token}`
 }
 
 export function buildInternalLink(prdId: number, origin: string): string {
@@ -163,17 +176,21 @@ export async function runCopyShareLink({
   token,
   origin,
   companySlug,
+  featureSlug,
   clipboard,
 }: {
   url?: string
   token?: string
   origin?: string
   companySlug?: string
+  featureSlug?: string
   clipboard: Pick<Clipboard, "writeText">
 }): Promise<string> {
   const copiedUrl =
     url ??
-    (token && origin && companySlug ? buildShareUrl(token, origin, companySlug) : null)
+    (token && origin && companySlug
+      ? buildShareUrl(token, origin, companySlug, featureSlug ?? "prototype")
+      : null)
   if (!copiedUrl) {
     throw new Error("Missing share URL")
   }
@@ -282,7 +299,8 @@ export function ShareMenu({
   initialMode,
   initialToken,
   onShared,
-  companySlug,
+  companyDisplaySlug,
+  prdTitle,
 }: ShareMenuProps) {
   const [mode, setMode] = useState<ShareMode>(initialMode)
   const [token, setToken] = useState<string | null>(initialToken ?? null)
@@ -290,10 +308,14 @@ export function ShareMenu({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
-  // Prefer an explicitly-passed slug; otherwise self-source from the company
-  // context (returns the demo default outside a provider — never throws).
-  const { activeCompany } = useCompany()
-  const slug = companySlug ?? activeCompany
+  // Compute the two cosmetic URL segments from human-readable names: the company
+  // display name (prefer an explicitly-passed value; otherwise self-source from
+  // the company context, which returns the demo default outside a provider —
+  // never throws) and the PRD title. Both slugified; empty/missing degrade to a
+  // fixed fallback segment ("company" / "prototype").
+  const { activeCompanyDisplayName } = useCompany()
+  const companySlugForUrl = urlSlugify(companyDisplaySlug ?? activeCompanyDisplayName, "company")
+  const featureSlugForUrl = urlSlugify(prdTitle ?? "", "prototype")
 
   async function selectMode(next: ShareMode) {
     await runSelectMode({
@@ -317,7 +339,7 @@ export function ShareMenu({
         mode === "private" && prdId != null
           ? buildInternalLink(prdId, window.location.origin)
           : token
-            ? buildShareUrl(token, window.location.origin, slug)
+            ? buildShareUrl(token, window.location.origin, companySlugForUrl, featureSlugForUrl)
             : null
       if (!url) return
       await runCopyShareLink({ url, clipboard: navigator.clipboard })
@@ -330,7 +352,7 @@ export function ShareMenu({
 
   const shareUrl =
     mode !== "private" && token && typeof window !== "undefined"
-      ? buildShareUrl(token, window.location.origin, slug)
+      ? buildShareUrl(token, window.location.origin, companySlugForUrl, featureSlugForUrl)
       : null
   const internalUrl =
     mode === "private" && prdId != null && typeof window !== "undefined"

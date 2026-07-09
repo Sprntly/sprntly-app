@@ -19,6 +19,8 @@ import {
   buildShareUrl,
   buildInternalLink,
 } from "../ShareMenu"
+import { useCompany } from "../../../context/CompanyContext"
+import { DEMO_DEFAULT_COMPANY_SLUG } from "../../../lib/useActiveCompany"
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -156,13 +158,14 @@ describe("ShareMenuView — share link", () => {
 })
 
 describe("share-link helpers", () => {
-  it("buildShareUrl composes origin + /p/ + slug + token (F6)", () => {
-    // The public link now carries the cosmetic company slug between /p/ and the
-    // opaque token: /p/<slug>/<token> (intentional slug exposure — the one
-    // surface that renders companies.slug; sourced from useCompany().activeCompany).
-    expect(buildShareUrl("tok-abc", "https://app.sprntly.ai", "sprntly")).toBe(
-      "https://app.sprntly.ai/p/sprntly/tok-abc",
-    )
+  it("buildShareUrl composes origin + /p/ + company + feature + token (F6)", () => {
+    // The public link now carries TWO cosmetic, human-readable segments between
+    // /p/ and the opaque token: /p/<company>/<feature>/<token>. Both are
+    // display-derived (company display name / PRD title), never the opaque
+    // companies.slug; resolution stays by token alone.
+    expect(
+      buildShareUrl("tok-abc", "https://app.sprntly.ai", "lab-x", "onboarding-revamp"),
+    ).toBe("https://app.sprntly.ai/p/lab-x/onboarding-revamp/tok-abc")
   })
 
   it("buildInternalLink composes origin and prototype query", () => {
@@ -171,18 +174,30 @@ describe("share-link helpers", () => {
     )
   })
 
-  it("runCopyShareLink writes the slug'd share URL to the clipboard (AC12)", async () => {
+  it("runCopyShareLink writes the 3-segment share URL to the clipboard (AC12)", async () => {
     const writeText = vi.fn(async (_: string) => {})
     const url = await runCopyShareLink({
       token: "tok-abc",
       origin: "https://app.sprntly.ai",
-      companySlug: "sprntly",
+      companySlug: "lab-x",
+      featureSlug: "onboarding-revamp",
       clipboard: { writeText },
     })
     expect(writeText).toHaveBeenCalledWith(
-      "https://app.sprntly.ai/p/sprntly/tok-abc",
+      "https://app.sprntly.ai/p/lab-x/onboarding-revamp/tok-abc",
     )
-    expect(url).toBe("https://app.sprntly.ai/p/sprntly/tok-abc")
+    expect(url).toBe("https://app.sprntly.ai/p/lab-x/onboarding-revamp/tok-abc")
+  })
+
+  it("runCopyShareLink falls back to the 'prototype' feature segment when featureSlug is omitted", async () => {
+    const writeText = vi.fn(async (_: string) => {})
+    const url = await runCopyShareLink({
+      token: "tok-abc",
+      origin: "https://app.sprntly.ai",
+      companySlug: "lab-x",
+      clipboard: { writeText },
+    })
+    expect(url).toBe("https://app.sprntly.ai/p/lab-x/prototype/tok-abc")
   })
 
   it("runCopyShareLink writes a provided internal URL to the clipboard", async () => {
@@ -401,6 +416,32 @@ describe("runSelectMode — optimistic select + revert (P6-22 AC4)", () => {
     expect(s.setMode).toHaveBeenCalledWith("passcode") // optimistic
     expect(s.setMode).toHaveBeenLastCalledWith("private") // reverted
     expect(s.setError).toHaveBeenCalledWith("Enter a passcode first")
+  })
+})
+
+// AC16 — the additive `activeCompanyDisplayName` field on the company context
+// must not break the 11 existing call sites that destructure only
+// `{ activeCompany }` (or `{ activeCompany, setActiveCompany }`). This renders a
+// minimal single-field consumer against the REAL (unmocked) useCompany and
+// asserts it still resolves the unchanged value outside a provider.
+describe("useCompany — existing single-field consumers unaffected (AC16)", () => {
+  function ActiveCompanyOnly() {
+    const { activeCompany } = useCompany()
+    return React.createElement("span", { "data-testid": "ac" }, activeCompany)
+  }
+
+  it("a { activeCompany }-only consumer still gets the demo default outside a provider", () => {
+    const html = renderToStaticMarkup(React.createElement(ActiveCompanyOnly))
+    expect(html).toContain(DEMO_DEFAULT_COMPANY_SLUG)
+  })
+
+  it("the extended context also exposes activeCompanyDisplayName (defaulted outside a provider)", () => {
+    function DisplayNameConsumer() {
+      const { activeCompanyDisplayName } = useCompany()
+      return React.createElement("span", null, activeCompanyDisplayName)
+    }
+    const html = renderToStaticMarkup(React.createElement(DisplayNameConsumer))
+    expect(html).toContain(DEMO_DEFAULT_COMPANY_SLUG)
   })
 })
 

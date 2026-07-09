@@ -298,9 +298,10 @@ describe("success handoff — no self-poll (AC5)", () => {
 
 describe("external-viewer exclusion (F10 internal-only, AC7)", () => {
   it("the public /p route does not import IterateComposer (test_public_token_page_does_not_mount_iterate_composer)", () => {
-    // vitest runs from web/ (cwd). The public route was collapsed onto a shared
-    // [slug] first segment, so its source files are spread across app/p/ and its
-    // [slug]/[slug]/[token] subtree — walk the whole subtree (excluding tests).
+    // vitest runs from web/ (cwd). Every public share depth (legacy, 2-seg,
+    // 3-seg) resolves through one catch-all route, so its source files are
+    // spread across app/p/ and its [...segments] subtree — walk the whole
+    // subtree (excluding tests).
     const root = join(process.cwd(), "app", "p")
     function walk(dir: string): string[] {
       const out: string[] = []
@@ -314,8 +315,8 @@ describe("external-viewer exclusion (F10 internal-only, AC7)", () => {
       return out
     }
     const files = walk(root)
-    // sanity: the canonical viewer page exists in the subtree.
-    expect(files.some((f) => f.endsWith(join("[slug]", "[token]", "page.tsx")))).toBe(true)
+    // sanity: the walk actually found real files (the catch-all shell exists).
+    expect(files.some((f) => f.endsWith(join("[...segments]", "page.tsx")))).toBe(true)
     for (const f of files) {
       const src = readFileSync(f, "utf8")
       expect(src).not.toContain("IterateComposer")
