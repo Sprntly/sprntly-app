@@ -124,14 +124,17 @@ describe("TicketDetail", () => {
 
   it("a fields-only edit (null description) keeps the generated body, not a blank", async () => {
     // Regression: status set but description/criteria null → fall back to the
-    // generated story rather than blanking the textarea.
+    // generated story rather than blanking the description.
     api.getData.mockResolvedValue({
       ...noEdits(), status: "In progress", description: null, acceptance_criteria: null,
     })
     await renderDetail()
+    expect(screen.getByText("One-click guest-alert for Deal Alerts.")).toBeTruthy()
+    // And the editor seeds with that generated body (edit-what-you-see).
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /edit description/i })) })
     expect((screen.getByPlaceholderText("Add a description…") as HTMLTextAreaElement).value)
       .toBe("One-click guest-alert for Deal Alerts.")
-    // AC is now inherited/read-only (rendered as a checklist item, not an input).
+    // AC renders as a checklist item.
     expect(screen.getByText(/Admin can enable in one click/)).toBeTruthy()
   })
 
@@ -154,12 +157,16 @@ describe("TicketDetail", () => {
 
   it("editing the description persists via saveDescription", async () => {
     await renderDetail()
+    // Edit is explicit now: open the editor, type, Save.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /edit description/i })) })
     const ta = screen.getByPlaceholderText("Add a description…")
     await act(async () => {
       fireEvent.change(ta, { target: { value: "New description" } })
-      fireEvent.blur(ta)
+      fireEvent.click(screen.getByRole("button", { name: /^save$/i }))
     })
     expect(api.saveDescription).toHaveBeenCalledWith(KEY, "New description", ["Admin can enable in one click"])
+    // The edited text replaces the display.
+    expect(screen.getByText("New description")).toBeTruthy()
   })
 
   it("changing the status picker persists via saveFields", async () => {
@@ -297,8 +304,8 @@ describe("TicketDetail — structured (canonical) ticket", () => {
     expect(screen.getByText(/Inherited from the PRD/)).toBeTruthy()
     expect(screen.getByText("[failure]")).toBeTruthy()
     expect(screen.getByText("Acceptance criteria — 2")).toBeTruthy()
-    // Child + linked issues + rail provenance.
-    expect(screen.getByText("Child issues")).toBeTruthy()
+    // Child + linked issues + rail provenance (heading now carries a count).
+    expect(screen.getByText(/Child issues — 2/)).toBeTruthy()
     expect(screen.getByText(/is blocked by/)).toBeTruthy()
     // Provenance shows in both the grounding footer and the rail.
     expect(screen.getAllByText("Part A §5 R2").length).toBeGreaterThanOrEqual(1)
