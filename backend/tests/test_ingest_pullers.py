@@ -217,7 +217,7 @@ def test_runner_unknown_provider_raises(isolated_settings):
     from app.kg_ingest import runner
 
     with pytest.raises(ValueError, match="No puller"):
-        runner.sync_provider(GraphFacade(), "ent-A", "jira", token="t")
+        runner.sync_provider(GraphFacade(), "ent-A", "nonexistent_provider", token="t")
 
 
 def test_token_for_picks_right_field():
