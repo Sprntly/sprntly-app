@@ -27,6 +27,10 @@ jobs:
           GOOGLE_OAUTH_REDIRECT_URI: ${{ vars.GOOGLE_OAUTH_REDIRECT_URI }}
           TOKEN_ENCRYPTION_KEY:      ${{ secrets.TOKEN_ENCRYPTION_KEY }}
           FRONTEND_URL:              ${{ vars.FRONTEND_URL }}
+          # Shared secret gating the backend's /internal/* machine-to-machine
+          # API. deploy-mcp.yml bootstraps the MCP server's BACKEND_INTERNAL_KEY
+          # from this value on the box, so the two always match.
+          INTERNAL_API_KEY:          ${{ secrets.INTERNAL_API_KEY }}
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
@@ -34,7 +38,7 @@ jobs:
           script_stop: true
           # `envs` whitelists which workflow env vars get forwarded to the
           # remote shell — without this, the script can't see them.
-          envs: GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET,GOOGLE_OAUTH_REDIRECT_URI,TOKEN_ENCRYPTION_KEY,FRONTEND_URL
+          envs: GOOGLE_CLIENT_ID,GOOGLE_CLIENT_SECRET,GOOGLE_OAUTH_REDIRECT_URI,TOKEN_ENCRYPTION_KEY,FRONTEND_URL,INTERNAL_API_KEY
           script: |
             set -e
             ENV_FILE=~/Sprntly/backend/.env
@@ -56,6 +60,11 @@ jobs:
             upsert GOOGLE_OAUTH_REDIRECT_URI "$GOOGLE_OAUTH_REDIRECT_URI"
             upsert TOKEN_ENCRYPTION_KEY      "$TOKEN_ENCRYPTION_KEY"
             upsert FRONTEND_URL              "$FRONTEND_URL"
+            # Only written when the secret exists — an unset secret must not
+            # blank a key the box already has.
+            if [ -n "$INTERNAL_API_KEY" ]; then
+              upsert INTERNAL_API_KEY "$INTERNAL_API_KEY"
+            fi
             UPDATED=$(grep -cE '^(GOOGLE_|TOKEN_ENCRYPTION_KEY|FRONTEND_URL)=' "$ENV_FILE")
             echo "Wrote ${UPDATED}/5 keys to ${ENV_FILE}"
             sudo /bin/systemctl restart sprintly
