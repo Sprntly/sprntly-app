@@ -718,6 +718,35 @@ def get_by_prd(
     return row
 
 
+# Bounded retry for the resume-lookup race: a synchronously-committed
+# generation row is sometimes not yet visible to the very next independent
+# read (root cause not fully confirmed — ruled out: PostgREST response
+# caching, application-level caching; leading candidate: Supabase-
+# infrastructure read/connection timing, unconfirmed without dashboard
+# access). One short retry closes the gap for the common case; a
+# still-exhausted retry after this bound is itself the production signal
+# that the gap is larger than assumed here.
+_ACTIVE_LOOKUP_RETRY_ATTEMPTS = 2
+_DEFAULT_ACTIVE_LOOKUP_RETRY_DELAY_MS = 80
+
+
+def _active_lookup_retry_delay_ms() -> int:
+    """Retry delay, env-overridable. Malformed/absent falls back to the
+    default (mirrors design_agent_map_cache.py's `_ttl_seconds()` pattern —
+    never let a bad env value crash app startup)."""
+    raw = os.getenv("DESIGN_AGENT_ACTIVE_LOOKUP_RETRY_DELAY_MS")
+    if raw is None:
+        return _DEFAULT_ACTIVE_LOOKUP_RETRY_DELAY_MS
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        logger.warning(
+            "design_agent bad DESIGN_AGENT_ACTIVE_LOOKUP_RETRY_DELAY_MS=%r; using default %dms",
+            raw, _DEFAULT_ACTIVE_LOOKUP_RETRY_DELAY_MS,
+        )
+        return _DEFAULT_ACTIVE_LOOKUP_RETRY_DELAY_MS
+
+
 @router.get("/by-prd/{prd_id}/active")
 def get_active_by_prd(
     prd_id: int,
@@ -734,11 +763,31 @@ def get_active_by_prd(
     when no active prototype exists (frontend swallows 404→null). Workspace-
     filtered: a prototype in another workspace returns 404, not 403. Three-segment
     path, so it can never be shadowed by the single-segment `GET /{prototype_id}`.
+
+    Bounded retry: a fresh 'generating' row (just inserted by POST /generate,
+    milliseconds earlier) can occasionally miss the very first read here — see
+    the module-level comment above _ACTIVE_LOOKUP_RETRY_ATTEMPTS. Adds at most
+    one ~80ms sleep to the miss path; the common true-negative case (no active
+    prototype at all) still incurs this one extra attempt today — a
+    deliberate, small, bounded cost accepted to close the race, not a
+    regression (see the sizing rationale in the change that introduced it).
     """
     _require_feature_enabled()
-    row = find_prototype_by_prd(
-        prd_id=prd_id, workspace_id=company.company_id, statuses=["ready", "generating"]
-    )
+    workspace_id = company.company_id
+    row = None
+    for attempt in range(_ACTIVE_LOOKUP_RETRY_ATTEMPTS):
+        row = find_prototype_by_prd(
+            prd_id=prd_id, workspace_id=workspace_id, statuses=["ready", "generating"],
+        )
+        if row is not None:
+            if attempt > 0:
+                logger.info(
+                    "design_agent.active_prototype_lookup_retried prd_id=%s attempts=%s",
+                    prd_id, attempt + 1,
+                )
+            break
+        if attempt < _ACTIVE_LOOKUP_RETRY_ATTEMPTS - 1:
+            time.sleep(_active_lookup_retry_delay_ms() / 1000)
     if not row:
         raise HTTPException(status_code=404, detail="No active prototype for this PRD")
     return row

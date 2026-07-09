@@ -845,6 +845,146 @@ def test_active_by_prd_three_segment_resolves(env, client):
     assert client.get("/v1/design-agent/by-prd/176/active").status_code == 200
 
 
+# ─── GET /by-prd/{prd_id}/active — bounded read-after-write retry ────────────
+#
+# A synchronously-committed 'generating' row (just inserted by POST /generate,
+# milliseconds earlier) can occasionally miss the very first read on the resume
+# lookup. The route retries once (2 attempts total, ~80ms apart) to close that
+# gap, and logs on a successful retry so production can confirm how often it
+# fires. These tests pin the bound (never more than 2 attempts), the common
+# hit/miss paths, the env-overridable delay, and that the sibling routes did
+# NOT accidentally inherit the retry.
+
+
+def test_active_lookup_hits_on_first_attempt_no_retry(env, client, monkeypatch, caplog):
+    # Common hit path: a row on the first attempt → exactly one DB call, no sleep,
+    # no retry log line (the mitigation is invisible when the read succeeds).
+    calls = []
+
+    def _fake_find(*, prd_id, workspace_id, statuses=None):
+        calls.append(workspace_id)
+        return {"id": 900, "status": "generating", "prd_id": prd_id}
+
+    monkeypatch.setattr(env.routes, "find_prototype_by_prd", _fake_find)
+    with caplog.at_level(logging.INFO):
+        resp = client.get("/v1/design-agent/by-prd/180/active")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == 900
+    assert len(calls) == 1
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "active_prototype_lookup_retried" not in blob
+
+
+def test_active_lookup_retries_and_succeeds_on_second_attempt(
+    env, client, monkeypatch, caplog
+):
+    # Regression (red on the single-shot code): a MISS on the first attempt then a
+    # HIT on the second (the race) → 200 with the row, and the retry-succeeded
+    # instrument fires with attempts=2. Unfixed code would 404 on the first None.
+    row = {"id": 901, "status": "generating", "prd_id": 181}
+    seq = [None, row]
+    calls = []
+
+    def _fake_find(*, prd_id, workspace_id, statuses=None):
+        calls.append(workspace_id)
+        return seq[len(calls) - 1]
+
+    monkeypatch.setattr(env.routes, "find_prototype_by_prd", _fake_find)
+    monkeypatch.setattr(env.routes.time, "sleep", lambda *_: None)
+    with caplog.at_level(logging.INFO):
+        resp = client.get("/v1/design-agent/by-prd/181/active")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["id"] == 901
+    assert len(calls) == 2
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "design_agent.active_prototype_lookup_retried" in blob
+    assert "attempts=2" in blob
+
+
+def test_active_lookup_exhausts_retries_returns_404(env, client, monkeypatch):
+    # Common true-negative path (nothing active): a miss on BOTH attempts → 404 with
+    # the unchanged detail, EXACTLY 2 lookups and EXACTLY 1 delay (bounded, not
+    # unbounded — the deliberate ceiling for a lookup that runs on every mount).
+    calls = []
+    sleeps = []
+    monkeypatch.setattr(
+        env.routes, "find_prototype_by_prd", lambda **kw: calls.append(kw) or None
+    )
+    monkeypatch.setattr(env.routes.time, "sleep", lambda s: sleeps.append(s))
+    resp = client.get("/v1/design-agent/by-prd/182/active")
+    assert resp.status_code == 404
+    assert resp.json()["detail"] == "No active prototype for this PRD"
+    assert len(calls) == 2
+    assert len(sleeps) == 1
+
+
+def test_active_lookup_retry_delay_uses_env_override(env, client, monkeypatch):
+    # The inter-attempt delay is read from the env var when set to a valid int:
+    # 10ms → time.sleep(0.01). Lets ops tune the bound without a redeploy.
+    monkeypatch.setenv("DESIGN_AGENT_ACTIVE_LOOKUP_RETRY_DELAY_MS", "10")
+    sleeps = []
+    monkeypatch.setattr(env.routes, "find_prototype_by_prd", lambda **kw: None)
+    monkeypatch.setattr(env.routes.time, "sleep", lambda s: sleeps.append(s))
+    resp = client.get("/v1/design-agent/by-prd/183/active")
+    assert resp.status_code == 404
+    assert sleeps == [0.01]
+
+
+def test_active_lookup_retry_delay_malformed_env_falls_back_to_default(
+    env, monkeypatch, caplog
+):
+    # A malformed env value must NOT crash: the delay helper logs a warning and
+    # falls back to the 80ms default (mirrors the map-cache TTL safe-fallback).
+    monkeypatch.setenv("DESIGN_AGENT_ACTIVE_LOOKUP_RETRY_DELAY_MS", "notanumber")
+    with caplog.at_level(logging.WARNING):
+        val = env.routes._active_lookup_retry_delay_ms()
+    assert val == env.routes._DEFAULT_ACTIVE_LOOKUP_RETRY_DELAY_MS == 80
+    assert any(
+        "DESIGN_AGENT_ACTIVE_LOOKUP_RETRY_DELAY_MS" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+def test_active_lookup_workspace_scoped_across_retries(env, client, monkeypatch):
+    # Tenant isolation holds THROUGH the retry: every attempt filters by the
+    # caller's own workspace_id, so a row surfacing in a foreign workspace between
+    # attempts is never returned (the retry never widens the query).
+    seen_workspaces = []
+
+    def _fake_find(*, prd_id, workspace_id, statuses=None):
+        seen_workspaces.append(workspace_id)
+        return None
+
+    monkeypatch.setattr(env.routes, "find_prototype_by_prd", _fake_find)
+    monkeypatch.setattr(env.routes.time, "sleep", lambda *_: None)
+    resp = client.get("/v1/design-agent/by-prd/184/active")
+    assert resp.status_code == 404
+    assert seen_workspaces == [_TEST_COMPANY_ID, _TEST_COMPANY_ID]
+
+
+def test_ready_by_prd_route_has_no_retry(env, client, monkeypatch):
+    # Regression guard: the retry must NOT have been added to the ready-only
+    # sibling route — a miss makes exactly one lookup, no second attempt.
+    calls = []
+    monkeypatch.setattr(
+        env.routes, "find_prototype_by_prd", lambda **kw: calls.append(kw) or None
+    )
+    resp = client.get("/v1/design-agent/by-prd/185")
+    assert resp.status_code == 404
+    assert len(calls) == 1
+
+
+def test_latest_by_prd_route_has_no_retry(env, client, monkeypatch):
+    # Same guard for the any-status /latest fallback route: single-attempt lookup.
+    calls = []
+    monkeypatch.setattr(
+        env.routes, "find_prototype_by_prd", lambda **kw: calls.append(kw) or None
+    )
+    resp = client.get("/v1/design-agent/by-prd/186/latest")
+    assert resp.status_code == 404
+    assert len(calls) == 1
+
+
 # ─── GET /by-prd/{prd_id}/latest — any-status (incl 'failed') lookup ─────────
 
 
