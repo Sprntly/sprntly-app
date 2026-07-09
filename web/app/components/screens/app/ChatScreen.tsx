@@ -56,8 +56,14 @@ type ChatTab = {
    *  the opening insight message. Null for tabs not opened from a brief finding
    *  (backlog / plain chat) or when the finding had no body. */
   insightBody: string | null
-  /** Per-tab cached PRD (not persisted to localStorage — re-generate on reload). */
+  /** Per-tab cached PRD (not persisted to localStorage — reload restores it from
+   *  the DB by `prdId`). */
   prd: PrdState | null
+  /** This tab's OWN saved PRD id. Unlike the full `prd`, this small number IS
+   *  persisted, so a reload can DB-load the exact PRD this tab is about — no
+   *  regeneration, no reliance on the (mutable) brief insight→PRD map. It's the
+   *  only recovery path for backlog PRDs, whose tabs carry no `briefMeta`. */
+  prdId: number | null
   /** Per-tab cached evidence. */
   evidence: PrdContent | null
   prdGenerating: boolean
@@ -129,6 +135,7 @@ export function ChatScreen() {
         briefMeta: t.briefMeta ?? null,
         insightBody: t.insightBody ?? null,
         prd: null,
+        prdId: t.prdId ?? null,
         evidence: null,
         prdGenerating: false,
         evidenceGenerating: false,
@@ -183,7 +190,7 @@ export function ChatScreen() {
         setTabs((JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
           id: t.id ?? "", title: t.title ?? "", thread: t.thread ?? [],
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
-          insightBody: t.insightBody ?? null,
+          insightBody: t.insightBody ?? null, prdId: t.prdId ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
         })))
       } else {
@@ -341,7 +348,7 @@ export function ChatScreen() {
     const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     setTabs((prev) => [...prev, {
       id, title, thread: initialThread ?? [], dbConvId: dbId ?? null,
-      briefMeta: briefMeta ?? null, insightBody: null, prd: null, evidence: null,
+      briefMeta: briefMeta ?? null, insightBody: null, prd: null, prdId: null, evidence: null,
       prdGenerating: false, evidenceGenerating: false,
     }])
     setActiveTabId(id)
@@ -383,7 +390,7 @@ export function ChatScreen() {
     } else {
       setTabs((prev) => [...prev, {
         id: tabId, title, thread: [], dbConvId: null, briefMeta: meta,
-        insightBody: req.insightBody ?? null,
+        insightBody: req.insightBody ?? null, prdId: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
       }])
       setActiveTabId(tabId)
@@ -399,7 +406,7 @@ export function ChatScreen() {
     }
     // Caller already holds the PRD — show it immediately, no async work.
     if (source.kind === "ready") {
-      setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: source.prd, briefMeta: source.meta } : t))
+      setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: source.prd, prdId: source.prd.prd_id, briefMeta: source.meta } : t))
       setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
       return
     }
@@ -414,7 +421,7 @@ export function ChatScreen() {
           : source.kind === "generateBacklog" ? await runPrdGenerationFromBacklog(source.backlogItemId)
           : await loadPrdById(source.prdId)
         if (result.ok) {
-          setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdGenerating: false } : t))
+          setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
         } else {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
@@ -440,20 +447,24 @@ export function ChatScreen() {
       openContentPanel("prd")
       return
     }
-    // A PRD already exists in the DB for this insight but isn't on the tab —
-    // e.g. after a reload, where `prd` is stripped from the persisted tab. LOAD
-    // the existing PRD by id; do NOT regenerate (that would spawn a duplicate and
-    // burn a full generation). This is what makes the button "View PRD" open the
-    // real doc rather than kick off a new build.
-    if (chatInsightState?.hasPrd && chatInsightState.prdId != null) {
-      const prdId = chatInsightState.prdId
+    // A PRD already exists in the DB for this tab but isn't cached — e.g. after a
+    // reload, where `prd` is stripped from the persisted tab. LOAD it by id; do
+    // NOT regenerate (that would spawn a duplicate and burn a full generation).
+    // This is what makes "View PRD" open the real doc rather than kick off a build.
+    //
+    // Prefer this tab's OWN saved id: it's stable across brief regeneration and is
+    // the ONLY recovery path for backlog PRDs (whose tabs carry no briefMeta). Fall
+    // back to the brief insight→PRD map for older tabs that predate `prdId`.
+    const savedPrdId = tab.prdId ?? (chatInsightState?.hasPrd ? chatInsightState.prdId : null)
+    if (savedPrdId != null) {
+      const prdId = savedPrdId
       setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
       setContent({ prd: null, prdMeta: null, prdGenerating: true })
       openContentPanel("prd")
       try {
         const result = await loadPrdById(prdId)
         if (result.ok) {
-          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd } : t))
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
           setContent({ prd: result.prd, prdMeta: tab.briefMeta, prdGenerating: false })
         } else {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
@@ -483,7 +494,7 @@ export function ChatScreen() {
     try {
       const result = await runPrdGeneration(meta)
       if (result.ok) {
-        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd } : t))
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
         setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
@@ -563,7 +574,7 @@ export function ChatScreen() {
           try {
             const result = await resumePrdGeneration(prdId, meta)
             if (result.ok) {
-              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd } : t))
+              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
               setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
             } else {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
@@ -975,15 +986,16 @@ export function ChatScreen() {
     // Brief tab or the tab-less landing → no PRD to show; drop any lingering panel.
     if (isBriefTab || !activeTabId) { if (contentPanelTab) closeContentPanel(); return }
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
-    const ownsPrd = !!tab?.prd || !!tab?.prdGenerating
+    const ownsPrd = !!tab?.prd || !!tab?.prdGenerating || tab?.prdId != null
       || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
     if (ownsPrd) {
-      if (contentPanelTab !== "prd") {
-        // Pre-claim the tab so the reload-restore effect below doesn't ALSO fire
-        // handleOpenPrd for this same commit (it checks this set first).
-        autoRestoredTabsRef.current.add(activeTabId)
-        void handleOpenPrd()
-      }
+      // Sync the global panel to THIS tab's PRD — ALWAYS, even if it already reads
+      // "prd", because another PRD tab may have left ITS doc in the shared panel
+      // (that was the "wrong PRD on refocus" bug). handleOpenPrd uses the cached
+      // prd (instant) or DB-loads this tab's own id. Pre-claim the tab so the
+      // reload-restore effect below doesn't ALSO fire handleOpenPrd this commit.
+      autoRestoredTabsRef.current.add(activeTabId)
+      void handleOpenPrd()
     } else if (contentPanelTab) {
       closeContentPanel()
     }
@@ -1021,11 +1033,20 @@ export function ChatScreen() {
     if (!activeTabId || isBriefTab) return
     if (autoRestoredTabsRef.current.has(activeTabId)) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
-    // Not a PRD-bound tab, already loaded/loading, or a panel is already open →
-    // nothing to restore right now (don't latch; conditions above are transient).
-    if (!tab || !tab.briefMeta || tab.prd || tab.prdGenerating || contentPanelTab) return
-    // Only a CONFIRMED DB PRD triggers the restore. A not-yet-resolved map reads as
-    // hasPrd=false → treat as "wait", not "give up", and re-check on the next render.
+    // Already loaded/loading, or a panel is already open → nothing to restore right
+    // now (don't latch; these conditions are transient).
+    if (!tab || tab.prd || tab.prdGenerating || contentPanelTab) return
+    // This tab's OWN saved id restores immediately — no map needed. This is the
+    // path that brings back a backlog PRD (no briefMeta) after a reload.
+    if (tab.prdId != null) {
+      autoRestoredTabsRef.current.add(activeTabId)
+      void handleOpenPrd()
+      return
+    }
+    // Otherwise it must be a brief-insight tab whose DB PRD the map confirms. A
+    // not-yet-resolved map reads as hasPrd=false → treat as "wait", not "give up",
+    // and re-check on the next render (the empty pre-fetch window latch bug).
+    if (!tab.briefMeta) return
     if (!(chatInsightState?.hasPrd && chatInsightState.prdId != null)) return
     autoRestoredTabsRef.current.add(activeTabId)
     void handleOpenPrd()
@@ -1176,7 +1197,7 @@ export function ChatScreen() {
       const kept = prev.filter((t) => t.thread.length > 0)
       return [...kept, {
         id, title: NEW_CHAT_TITLE, thread: [], dbConvId: null, briefMeta: null,
-        insightBody: null,
+        insightBody: null, prdId: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
       }]
     })
@@ -1233,7 +1254,8 @@ export function ChatScreen() {
   // from localStorage on reload, so relying on it alone made the CTA say
   // "Generate PRD" for an insight that already has one; the DB signal keeps the
   // label ("View PRD") and the action (load, not regenerate) correct after reload.
-  const chatPrdExists = !!activeTab?.prd || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
+  const chatPrdExists = !!activeTab?.prd || activeTab?.prdId != null
+    || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
   // While the brief-prototype map is still loading we don't yet KNOW whether a
   // PRD exists, so committing to "Generate PRD" would flash the wrong label then
   // flip to "View PRD" once the map lands. Show a neutral "Loading…" until we
