@@ -74,6 +74,9 @@ export function changedSectionsLine(sections: string[]): string {
 export type PrdInputQuestionCardProps = {
   question: PrdInputQuestion
   busy?: boolean
+  /** The answer currently being submitted, so the picked option can be marked
+   *  active while the (slow, ~1 min) scoped edit runs. */
+  pendingAnswer?: string | null
   error?: string | null
   /** Resolution line shown once answered (e.g. the changed-sections summary). */
   resolvedLine?: string | null
@@ -89,6 +92,7 @@ export type PrdInputQuestionCardProps = {
 export function PrdInputQuestionCard({
   question,
   busy = false,
+  pendingAnswer = null,
   error = null,
   resolvedLine = null,
   answerText,
@@ -132,19 +136,23 @@ export function PrdInputQuestionCard({
           </div>
         ) : hasChoices ? (
           <div className="piq-choices" data-testid="prd-input-question-choices">
-            {question.options.map((opt, i) => (
-              <button
-                key={`${i}-${opt.label}`}
-                type="button"
-                className="bc-action-btn piq-choice"
-                data-testid="prd-input-question-choice"
-                disabled={busy}
-                onClick={() => onChoose(opt.label)}
-                title={opt.description ?? undefined}
-              >
-                {opt.label}
-              </button>
-            ))}
+            {question.options.map((opt, i) => {
+              const active = busy && pendingAnswer === opt.label
+              return (
+                <button
+                  key={`${i}-${opt.label}`}
+                  type="button"
+                  className={`bc-action-btn piq-choice${active ? " piq-choice--active" : ""}`}
+                  data-testid="prd-input-question-choice"
+                  disabled={busy}
+                  aria-busy={active}
+                  onClick={() => onChoose(opt.label)}
+                  title={opt.description ?? undefined}
+                >
+                  {opt.label}
+                </button>
+              )
+            })}
           </div>
         ) : (
           <form
@@ -173,6 +181,18 @@ export function PrdInputQuestionCard({
             </button>
           </form>
         )}
+
+        {busy && !isAnswered ? (
+          <div
+            className="piq-applying"
+            role="status"
+            aria-live="polite"
+            data-testid="prd-input-question-applying"
+          >
+            <span className="piq-applying-spinner" aria-hidden />
+            <span>Applying your answer — folding it into the PRD (this can take a minute)…</span>
+          </div>
+        ) : null}
 
         {error ? (
           <div className="piq-error" role="alert" data-testid="prd-input-question-error">
@@ -212,6 +232,7 @@ export function PrdInputQuestions({
   const [questions, setQuestions] = useState<PrdInputQuestion[]>([])
   const [answerText, setAnswerText] = useState<Record<number, string>>({})
   const [busyId, setBusyId] = useState<number | null>(null)
+  const [pendingAnswer, setPendingAnswer] = useState<string | null>(null)
   const [errorId, setErrorId] = useState<{ id: number; msg: string } | null>(null)
   const [resolvedLines, setResolvedLines] = useState<Record<number, string>>({})
 
@@ -239,6 +260,7 @@ export function PrdInputQuestions({
       const answer = rawAnswer.trim()
       if (!answer || busyId != null) return
       setBusyId(question.id)
+      setPendingAnswer(answer)
       setErrorId(null)
       try {
         const answerFn = answerQuestion ?? prdApi.answerInputQuestion
@@ -262,6 +284,7 @@ export function PrdInputQuestions({
         })
       } finally {
         setBusyId(null)
+        setPendingAnswer(null)
       }
     },
     [prdId, busyId, answerQuestion, onPrdUpdated],
@@ -282,6 +305,7 @@ export function PrdInputQuestions({
           key={q.id}
           question={q}
           busy={busyId === q.id}
+          pendingAnswer={busyId === q.id ? pendingAnswer : null}
           error={errorId?.id === q.id ? errorId.msg : null}
           resolvedLine={resolvedLines[q.id] ?? null}
           answerText={answerText[q.id] ?? ""}
