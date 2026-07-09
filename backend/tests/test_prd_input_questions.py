@@ -64,6 +64,19 @@ def test_replace_and_list_round_trip(isolated_settings):
     assert all(r["status"] == "pending" for r in rows)
 
 
+def test_need_without_options_stays_free_text(isolated_settings):
+    # A NEED item whose answer is inherently free-form (no candidate set) keeps an
+    # empty options list → the UI renders a plain text box, not buttons.
+    import app.db.prd_input_questions as q
+    _, prd_id = _seed_prd(isolated_settings["db"])
+    q.replace_questions(prd_id, [
+        {"tag": "need", "prompt": "What is the exact webhook URL?", "owner": "Eng"},
+    ])
+    rows = q.list_questions(prd_id)
+    assert rows[0]["tag"] == "need"
+    assert rows[0]["options"] == []
+
+
 def test_replace_is_delete_then_insert(isolated_settings):
     import app.db.prd_input_questions as q
     _, prd_id = _seed_prd(isolated_settings["db"])

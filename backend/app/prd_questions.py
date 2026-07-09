@@ -7,11 +7,13 @@ document. This module gives them a life:
 
   1. `extract_input_questions(prd_id)` — a LIGHTWEIGHT pass (run once after the PRD
      is generated) reads the finished PRD and lifts each "User input needed" item
-     into a structured question. For an [ESCALATE] product decision it also
-     proposes a small set of plausible answer options (rendered as buttons in the
-     PRD's chat); a [NEED] (missing-data) item carries no options and is answered
-     as free text. Persisted via db.prd_input_questions. Best-effort — a failure
-     here NEVER fails PRD generation.
+     into a structured question. It proposes a small set of plausible answer
+     options (rendered as buttons in the PRD's chat) whenever a meaningful
+     candidate set exists — resolutions for an [ESCALATE] decision, candidate
+     values/ranges for an enumerable [NEED] data item. A [NEED] whose answer is
+     inherently free-form (a name, URL, id, verbatim string) carries NO options
+     and is answered as free text. Persisted via db.prd_input_questions.
+     Best-effort — a failure here NEVER fails PRD generation.
 
   2. `apply_answer(prd_html, question, answer)` — the SCOPED EDITOR. Given the
      current PRD HTML and ONE resolved decision (question + chosen answer), it
@@ -84,17 +86,21 @@ DATA / a fact the team must supply.
 - `prompt`: the decision or the missing fact, phrased as a clear, self-contained \
 question a PM can answer without re-reading the PRD.
 - `owner`: the owner named on the item (e.g. "PM", "Data"), or omit if none.
-- `options`: ALWAYS propose 2–4 SHORT, MUTUALLY-EXCLUSIVE candidate answers the \
-owner can pick from (each a `label`, plus an optional one-line `description`). \
-  • For an "escalate" decision these are the plausible resolutions of the decision \
-    (grounded in the PRD's own context, with the tradeoff in `description`). \
-  • For a "need" data item these are the most likely candidate VALUES — typically \
-    bracketed ranges or buckets that plausibly cover the true value (e.g. \
-    "0–20%", "20–50%", ">50%", or "Fewer than 10", "10–50", "50+"). The user can \
-    always type an exact value in the UI, so options need not be exhaustive — pick \
-    a sensible, well-spread set. \
-NEVER return an empty `options` array for either tag; always give at least 2 \
-selectable options.
+- `options`: propose 2–4 SHORT, MUTUALLY-EXCLUSIVE candidate answers the owner can \
+pick from (each a `label`, plus an optional one-line `description`) WHENEVER a \
+meaningful candidate set exists — prefer options over free text. \
+  • For an "escalate" decision, give the plausible resolutions of the decision \
+    (grounded in the PRD's own context, with the tradeoff in `description`). An \
+    escalate item almost always has selectable resolutions. \
+  • For a "need" data item, give the most likely candidate VALUES when they are \
+    enumerable — typically bracketed ranges or buckets that plausibly cover the \
+    true value (e.g. "0–20%", "20–50%", ">50%", or "Fewer than 10", "10–50", \
+    "50+"). The user can always type an exact value in the UI, so options need \
+    not be exhaustive — pick a sensible, well-spread set. \
+  • BUT emit an EMPTY `options` array (`[]`) when the answer is inherently \
+    free-form and no candidate set is meaningful — e.g. a name, URL, ID, date, a \
+    specific verbatim string, or an open-ended explanation. Do NOT invent fake \
+    buckets for these; leave them as free text so the user just types the value.
 
 Rules: invent NOTHING beyond what the PRD supports; options must be plausible \
 given the document. If the PRD has no "User input needed" items, return an empty \
