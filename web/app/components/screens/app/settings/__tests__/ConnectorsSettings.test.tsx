@@ -298,18 +298,19 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
 
   it("renders each connector's real brand logo from a locally bundled SVG", () => {
     const html = render({ categories: connectableCatalog() })
-    // 6 of the 7 wired connectors have an official bundled SVG mark.
+    // 7 of the 8 wired connectors have an official bundled SVG mark.
     for (const id of [
       "slack",
       "github",
       "figma",
       "hubspot",
       "clickup",
+      "jira",
       "google_drive",
     ]) {
       expect(html).toContain(`src="/connectors/${id}.svg"`)
     }
-    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(6)
+    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(7)
     // No runtime favicon fetch remains.
     expect(html).not.toContain("s2/favicons")
     // Fireflies has no bundled SVG, so it keeps its letter glyph (no <img>).
