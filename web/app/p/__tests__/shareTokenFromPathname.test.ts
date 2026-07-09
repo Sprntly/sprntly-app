@@ -49,6 +49,23 @@ describe("shareTokenFromPathname", () => {
     expect(shareTokenFromPathname("/p/tok-legacy")).toBe("tok-legacy")
   })
 
+  it("derives the REAL token from the 3-segment /p/<company>/<feature>/<token> URL (AC9)", () => {
+    // The token is always the LAST /p segment regardless of depth, so the new
+    // 3-segment canonical route resolves the same token as the 2-segment one —
+    // no change to the depth-agnostic helper needed.
+    expect(shareTokenFromPathname("/p/acme/onboarding-revamp/tok-abc123")).toBe(
+      "tok-abc123",
+    )
+    // Same token, 2-seg vs 3-seg depth → identical resolution.
+    expect(shareTokenFromPathname("/p/acme/tok-abc123")).toBe(
+      shareTokenFromPathname("/p/acme/onboarding-revamp/tok-abc123"),
+    )
+  })
+
+  it("returns null for the 3-segment prerender sentinel (/p/_/_/_.html)", () => {
+    expect(shareTokenFromPathname("/p/_/_/_")).toBeNull()
+  })
+
   it("returns null for the prerender sentinel (the bug: never resolve by-token/_)", () => {
     // /p/_/_.html (2-seg sentinel) and /p/_.html (1-seg sentinel).
     expect(shareTokenFromPathname("/p/_/_")).toBeNull()

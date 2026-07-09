@@ -19,6 +19,7 @@ import { nextViewerState } from "../PublicTokenViewer"
 import { resolveToken } from "../resolveToken"
 import { legacyRedirectTarget } from "../[slug]/LegacyTokenRedirect"
 import { generateStaticParams as canonicalStaticParams } from "../[slug]/[token]/page"
+import { generateStaticParams as canonicalThreeSegStaticParams } from "../[slug]/[featureSlug]/[token]/page"
 import { generateStaticParams as legacyStaticParams } from "../[slug]/page"
 import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
 import { PasscodeGateView, submitPasscode } from "../PasscodeGate"
@@ -39,7 +40,7 @@ afterEach(() => {
 })
 
 describe("resolveToken", () => {
-  it("returns the resolved view on a 200, parsing company_slug", async () => {
+  it("returns the resolved view on a 200, parsing company_slug + cosmetic segments", async () => {
     mockFetch({
       status: 200,
       body: {
@@ -48,6 +49,8 @@ describe("resolveToken", () => {
         bundle_url: "https://cdn.example/p/abc/index.html",
         is_complete: true,
         company_slug: "sprntly",
+        company_display_slug: "lab-x",
+        feature_slug: "customer-onboarding-revamp",
         target_platform: "mobile",
       },
     })
@@ -57,6 +60,8 @@ describe("resolveToken", () => {
       bundle_url: "https://cdn.example/p/abc/index.html",
       is_complete: true,
       company_slug: "sprntly",
+      company_display_slug: "lab-x",
+      feature_slug: "customer-onboarding-revamp",
       target_platform: "mobile",
     })
   })
@@ -72,6 +77,22 @@ describe("resolveToken", () => {
       },
     })
     expect((await resolveToken("tok"))?.company_slug).toBe("")
+  })
+
+  it("defaults company_display_slug + feature_slug to '' when the backend omits them", async () => {
+    mockFetch({
+      status: 200,
+      body: {
+        share_mode: "public",
+        requires_passcode: false,
+        bundle_url: "https://cdn.example/p/abc/index.html",
+        is_complete: true,
+        company_slug: "sprntly",
+      },
+    })
+    const view = await resolveToken("tok")
+    expect(view?.company_display_slug).toBe("")
+    expect(view?.feature_slug).toBe("")
   })
 
   it("defaults target_platform to 'both' when the backend omits it", async () => {
@@ -107,6 +128,8 @@ describe("nextViewerState branch logic", () => {
       bundle_url: "https://cdn.example/p/abc/index.html",
       is_complete: true,
       company_slug: "sprntly",
+      company_display_slug: "lab-x",
+      feature_slug: "customer-onboarding-revamp",
       target_platform: "both",
     })
     expect(state).toEqual({
@@ -140,6 +163,8 @@ describe("nextViewerState branch logic", () => {
         bundle_url: null,
         is_complete: false,
         company_slug: "sprntly",
+        company_display_slug: "lab-x",
+        feature_slug: "customer-onboarding-revamp",
         target_platform: "both",
       }),
     ).toEqual({ kind: "passcode" })
@@ -157,6 +182,8 @@ describe("nextViewerState branch logic", () => {
         bundle_url: null,
         is_complete: false,
         company_slug: "sprntly",
+        company_display_slug: "lab-x",
+        feature_slug: "customer-onboarding-revamp",
         target_platform: "both",
       }),
     ).toEqual({ kind: "notfound" })
@@ -241,7 +268,7 @@ describe("PasscodeGate", () => {
 // after resolving that token (the router.replace itself lives in the client
 // component, exercised in E2E).
 describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
-  it("computes /p/<slug>/<token> from a resolved view", () => {
+  it("computes /p/<company>/<feature>/<token> from a resolved view", () => {
     expect(
       legacyRedirectTarget(
         {
@@ -250,11 +277,31 @@ describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
           bundle_url: "https://cdn.example/p/abc/index.html",
           is_complete: true,
           company_slug: "sprntly",
+          company_display_slug: "lab-x",
+          feature_slug: "customer-onboarding-revamp",
           target_platform: "both",
         },
         "abc",
       ),
-    ).toBe("/p/sprntly/abc")
+    ).toBe("/p/lab-x/customer-onboarding-revamp/abc")
+  })
+
+  it("falls back to /p/company/prototype/<token> when both cosmetic segments are empty", () => {
+    expect(
+      legacyRedirectTarget(
+        {
+          share_mode: "public",
+          requires_passcode: false,
+          bundle_url: "https://cdn.example/p/abc/index.html",
+          is_complete: true,
+          company_slug: "sprntly",
+          company_display_slug: "",
+          feature_slug: "",
+          target_platform: "both",
+        },
+        "abc",
+      ),
+    ).toBe("/p/company/prototype/abc")
   })
 
   it("returns null for a 404/null view (the caller calls notFound())", () => {
@@ -265,6 +312,14 @@ describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
 describe("canonical /p/[slug]/[token] route", () => {
   it("generateStaticParams returns the 2-seg sentinel for static export", () => {
     expect(canonicalStaticParams()).toEqual([{ slug: "_", token: "_" }])
+  })
+})
+
+describe("canonical /p/[slug]/[featureSlug]/[token] route", () => {
+  it("generateStaticParams returns the 3-seg sentinel for static export", () => {
+    expect(canonicalThreeSegStaticParams()).toEqual([
+      { slug: "_", featureSlug: "_", token: "_" },
+    ])
   })
 })
 

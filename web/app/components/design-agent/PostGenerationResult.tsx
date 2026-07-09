@@ -824,6 +824,7 @@ export function DaControlBar({
             initialMode={shareMode}
             initialToken={shareToken}
             onShared={onShared}
+            prdTitle={prdTitle}
           />
         </DaPopover>
 

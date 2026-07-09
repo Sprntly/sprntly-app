@@ -1,9 +1,10 @@
 "use client"
 // Legacy `/p/<token>` route — client redirect to the canonical
-// `/p/<slug>/<token>` form. No real share links were ever minted at the legacy
-// shape (verified), so this is hygiene: it keeps any old bookmark working by
-// resolving the token to its company_slug and replacing the URL. It renders NO
-// viewer chrome — resolution + redirect only.
+// `/p/<company>/<feature>/<token>` form. No real share links were ever minted at
+// the legacy shape (verified), so this is hygiene: it keeps any old bookmark
+// working by resolving the token to its human-readable company + feature
+// segments and replacing the URL. It renders NO viewer chrome — resolution +
+// redirect only.
 //
 // Prod builds with `output: "export"` (static, no server runtime), so the
 // redirect MUST be client-side. The pure target-computation (legacyRedirectTarget)
@@ -26,7 +27,9 @@ export function legacyRedirectTarget(
   token: string,
 ): string | null {
   if (!view) return null
-  return `/p/${view.company_slug}/${token}`
+  const company = view.company_display_slug || "company"
+  const feature = view.feature_slug || "prototype"
+  return `/p/${company}/${feature}/${token}`
 }
 
 export function LegacyTokenRedirect() {

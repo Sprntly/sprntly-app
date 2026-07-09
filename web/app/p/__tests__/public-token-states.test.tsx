@@ -478,6 +478,8 @@ describe("P6-18 behaviour unchanged (AC5 — CSS-only fix, no logic drift)", () 
         bundle_url: null,
         is_complete: false,
         company_slug: "",
+        company_display_slug: "",
+        feature_slug: "",
         target_platform: "both",
       }),
     ).toEqual({ kind: "passcode" })
