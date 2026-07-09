@@ -217,4 +217,18 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await waitFor(() => expect(tabBar().getByText("New chat")).toBeTruthy())
     await waitFor(() => expect(panelProbe()).toBe("none"))
   })
+
+  it("reopens the panel when REFOCUSING the PRD tab after switching away", async () => {
+    // The panel must follow the tab: leave a PRD tab (panel closes), come back to
+    // it, and the PRD panel should reopen — not stay closed forcing a pin click.
+    renderWith(READY)
+    await clickOpenPrd()
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    // Switch away to the brief → panel closes.
+    await act(async () => { fireEvent.click(tabBar().getByText("Weekly brief")) })
+    await waitFor(() => expect(panelProbe()).toBe("none"))
+    // Refocus the PRD tab → the panel comes back.
+    await act(async () => { fireEvent.click(tabBar().getByText("PRD · Ready doc")) })
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+  })
 })
