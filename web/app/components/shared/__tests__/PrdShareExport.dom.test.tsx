@@ -69,6 +69,10 @@ vi.mock("next/navigation", () => ({
   usePathname: () => "/",
 }))
 
+// Spy for the on-demand evidence read (loadEvidenceByInsight → evidenceApi.byInsight).
+const evidenceByInsight = vi.fn((_briefId: number, _insightIndex: number) =>
+  Promise.resolve(null as unknown),
+)
 vi.mock("../../../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../../../lib/api")>("../../../lib/api")
   return {
@@ -77,12 +81,23 @@ vi.mock("../../../lib/api", async () => {
       ...actual.prdApi,
       latest: vi.fn(async () => { throw new actual.ApiError(404, "none") }),
     },
+    evidenceApi: {
+      ...actual.evidenceApi,
+      byInsight: (briefId: number, insightIndex: number) => evidenceByInsight(briefId, insightIndex),
+    },
   }
 })
 
 // ── Mock the heavy export generators (lazy-imported in lib/prdExport) ────────
 const saveAs = vi.fn()
 vi.mock("file-saver", () => ({ saveAs }))
+
+// printCombined builds + prints the combined Evidence + PRD doc. Spy on it so we
+// can assert the combined path (the real build is covered in combinedExport.test.ts).
+const printCombined = vi.fn()
+vi.mock("../../../lib/combinedExport", () => ({
+  printCombined: (...args: unknown[]) => printCombined(...args),
+}))
 
 const pdfOutput = vi.fn((_type?: string) => new Blob(["pdf"], { type: "application/pdf" }))
 vi.mock("jspdf", () => {
@@ -164,13 +179,14 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe("ContentPanel header Share dropdown", () => {
-  it("renders Email / Download PDF / Download DOCX once opened with a PRD loaded", () => {
+  it("renders only Download PDF once opened with a PRD loaded (no Email, no DOCX)", () => {
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
     const menu = screen.getByRole("menu")
-    expect(within(menu).getByText("Email")).toBeTruthy()
     expect(within(menu).getByText("Download PDF")).toBeTruthy()
-    expect(within(menu).getByText("Download DOCX")).toBeTruthy()
+    // Email was removed (mailto can't attach); DOCX removed (not wired up yet).
+    expect(within(menu).queryByText("Email")).toBeNull()
+    expect(within(menu).queryByText("Download DOCX")).toBeNull()
   })
 
   it("Share is disabled when no PRD is loaded", () => {
@@ -182,28 +198,10 @@ describe("ContentPanel header Share dropdown", () => {
     expect(screen.queryByRole("menu")).toBeNull()
   })
 
-  it("Email sets a mailto: URL carrying the PRD title in the subject", () => {
-    // jsdom refuses real navigation; capture href assignments via a stub.
-    let assigned = ""
-    const realLocation = window.location
-    Object.defineProperty(window, "location", {
-      configurable: true,
-      value: { ...realLocation, href: "http://localhost:3000/prd/42", get assign() { return undefined } },
-    })
-    Object.defineProperty(window.location, "href", {
-      configurable: true,
-      get: () => assigned || "http://localhost:3000/prd/42",
-      set: (v: string) => { assigned = v },
-    })
-
+  it("does not render a Save button in the content-panel header", () => {
     render(<ContentPanel />)
-    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
-    fireEvent.click(within(screen.getByRole("menu")).getByText("Email"))
-
-    expect(assigned).toMatch(/^mailto:/)
-    expect(decodeURIComponent(assigned)).toContain("PRD: Handoff Threshold PRD")
-
-    Object.defineProperty(window, "location", { configurable: true, value: realLocation })
+    const buttons = screen.getAllByRole("button")
+    expect(buttons.some((b) => /^\s*Save\s*$/i.test(b.textContent ?? ""))).toBe(false)
   })
 
   it("Download PDF generates a PDF and triggers a download with the slugified filename", async () => {
@@ -216,14 +214,64 @@ describe("ContentPanel header Share dropdown", () => {
     expect(filename).toBe("handoff-threshold-prd.pdf")
   })
 
-  it("Download DOCX generates a docx and triggers a download with the slugified filename", async () => {
+})
+
+describe("ContentPanel Share — combined Evidence + PRD", () => {
+  const HTML_PRD = {
+    prd_id: 42,
+    title: "Handoff Threshold PRD",
+    html: "<html><head><style>:root{--g:#00f} .page{color:var(--g)}</style></head><body><div class='page'>prd body</div></body></html>",
+  }
+  const HTML_EVIDENCE = {
+    evidence_id: 9,
+    title: "Handoff Evidence",
+    html: "<html><head><style>:root{--g:#0a0} .wrap{color:var(--g)}</style></head><body><div class='wrap'>evidence body</div></body></html>",
+  }
+
+  it("labels Download PDF as Evidence + PRD when both are HTML briefs", () => {
+    content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: HTML_EVIDENCE }
     render(<ContentPanel />)
     fireEvent.click(screen.getByRole("button", { name: /Share/i }))
-    fireEvent.click(within(screen.getByRole("menu")).getByText("Download DOCX"))
-    await waitFor(() => expect(packerToBlob).toHaveBeenCalled())
-    await waitFor(() => expect(saveAs).toHaveBeenCalled())
-    const [, filename] = saveAs.mock.calls[0]
-    expect(filename).toBe("handoff-threshold-prd.docx")
+    expect(within(screen.getByRole("menu")).getByText(/Evidence \+ PRD as \.pdf/i)).toBeTruthy()
+  })
+
+  it("Download PDF prints ONE combined doc from both briefs", async () => {
+    content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: HTML_EVIDENCE }
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
+    // The combined print path is taken with the evidence + PRD; the actual HTML
+    // build + CSS scoping is asserted in combinedExport.test.ts.
+    await waitFor(() => expect(printCombined).toHaveBeenCalledWith(HTML_EVIDENCE, HTML_PRD))
+  })
+
+  it("fetches evidence on demand (PRD tab) and still prints one combined doc", async () => {
+    // Evidence is NOT in context (user never opened the Evidence tab), but the
+    // PRD carries its insight, so the handler reads the evidence and combines.
+    const HTML_PRD_WITH_INSIGHT = { ...HTML_PRD, briefId: 3, insightIndex: 1 }
+    evidenceByInsight.mockResolvedValueOnce({
+      status: "ready",
+      payload_md: HTML_EVIDENCE.html,
+    })
+    content = { ...EMPTY_CONTENT, prd: HTML_PRD_WITH_INSIGHT, evidence: null }
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    // Optimistic combined label because the PRD has an insight to read from.
+    expect(within(screen.getByRole("menu")).getByText(/Evidence \+ PRD as \.pdf/i)).toBeTruthy()
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
+    await waitFor(() => expect(evidenceByInsight).toHaveBeenCalledWith(3, 1))
+    await waitFor(() => expect(printCombined).toHaveBeenCalled())
+  })
+
+  it("falls back to the single-PRD export when there is no evidence", async () => {
+    content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: null }
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    // No insight to read from → single-PRD label, and the combined path is skipped.
+    expect(within(screen.getByRole("menu")).getByText(/Export as \.pdf/i)).toBeTruthy()
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download PDF"))
+    await waitFor(() => expect(saveAs).not.toHaveBeenCalled())
+    expect(printCombined).not.toHaveBeenCalled()
   })
 })
 

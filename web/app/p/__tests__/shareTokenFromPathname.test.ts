@@ -1,12 +1,13 @@
 // Regression lock for the prod static-export token bug.
 //
-// Under output:"export" the `/p/[slug]/[token]` + `/p/[slug]` routes are
-// prerendered under the "_" sentinel and nginx rewrites every real /p URL to that
-// one static file, so useParams() returns "_" on the client — never the real
-// token in the address bar. These pure helpers derive the real token from
-// window.location.pathname instead. This test proves they extract the REAL token
-// from a realistic pathname and reject the sentinel — the exact failure that
-// shipped (by-token/_ → "Could not load this prototype").
+// Under output:"export" the catch-all `/p/[...segments]` route is prerendered
+// under a small set of "_" sentinel paths and nginx rewrites every real /p URL
+// (by depth) to the matching static file, so useParams() returns the sentinel
+// segments on the client — never the real token in the address bar. These pure
+// helpers derive the real token from window.location.pathname instead. This
+// test proves they extract the REAL token from a realistic pathname and reject
+// the sentinel — the exact failure that shipped (by-token/_ → "Could not load
+// this prototype").
 import { describe, it, expect } from "vitest"
 import {
   publicPathSegments,
@@ -47,6 +48,23 @@ describe("shareTokenFromPathname", () => {
 
   it("derives the token from the legacy 1-segment /p/<token> URL", () => {
     expect(shareTokenFromPathname("/p/tok-legacy")).toBe("tok-legacy")
+  })
+
+  it("derives the REAL token from the 3-segment /p/<company>/<feature>/<token> URL (AC9)", () => {
+    // The token is always the LAST /p segment regardless of depth, so the new
+    // 3-segment canonical route resolves the same token as the 2-segment one —
+    // no change to the depth-agnostic helper needed.
+    expect(shareTokenFromPathname("/p/acme/onboarding-revamp/tok-abc123")).toBe(
+      "tok-abc123",
+    )
+    // Same token, 2-seg vs 3-seg depth → identical resolution.
+    expect(shareTokenFromPathname("/p/acme/tok-abc123")).toBe(
+      shareTokenFromPathname("/p/acme/onboarding-revamp/tok-abc123"),
+    )
+  })
+
+  it("returns null for the 3-segment prerender sentinel (/p/_/_/_.html)", () => {
+    expect(shareTokenFromPathname("/p/_/_/_")).toBeNull()
   })
 
   it("returns null for the prerender sentinel (the bug: never resolve by-token/_)", () => {

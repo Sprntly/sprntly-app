@@ -23,10 +23,15 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
-from app.connectors import clickup_oauth
+from app.connectors import clickup_oauth, jira_oauth
 from app.db.client import require_client, utc_now
 from app.llm import call_json
-from app.stories.push import ClickUpNotConnectedError, _clickup_access_token
+from app.stories.push import (
+    ClickUpNotConnectedError,
+    JiraNotConnectedError,
+    _clickup_access_token,
+    _jira_creds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -312,6 +317,21 @@ def _clickup_priority(value: str | None) -> int | None:
     return _PRIORITY_MAP.get(value) or _PRIORITY_MAP.get(value.lower())
 
 
+# Internal ticket priorities (P0–P3 / urgent…low) → Jira's named-priority scheme.
+_JIRA_PRIORITY_MAP: dict[str, str] = {
+    "P0": "Highest", "P1": "High", "P2": "Medium", "P3": "Low",
+    "urgent": "Highest", "high": "High", "normal": "Medium", "low": "Low",
+}
+
+
+def _jira_priority(value: str | None) -> str | None:
+    """Map an internal priority to a Jira named priority; None when
+    unset/unknown so the field is omitted (projects may lack a priority field)."""
+    if not value:
+        return None
+    return _JIRA_PRIORITY_MAP.get(value) or _JIRA_PRIORITY_MAP.get(value.lower())
+
+
 class TaskIn(BaseModel):
     """One selected task to push. `task_id` is the stable ticket_key the UI
     selected (e.g. "MER-481"); it keys this task's stored overrides
@@ -329,6 +349,12 @@ class TaskIn(BaseModel):
 class PushClickUpIn(BaseModel):
     list_id: str = Field(..., min_length=1)
     tasks: list[TaskIn] = Field(..., min_length=1)
+
+
+class PushJiraIn(BaseModel):
+    project_key: str = Field(..., min_length=1)
+    tasks: list[TaskIn] = Field(..., min_length=1)
+    issue_type: str = Field(default="Task", min_length=1)
 
 
 def _load_overrides(c: Any, cid: str, ticket_key: str) -> dict[str, Any]:
@@ -463,6 +489,93 @@ def push_clickup(
         except Exception as e:  # noqa: BLE001 — isolate per-task failures
             logger.warning(
                 "ClickUp push failed for task %r (%s): %s",
+                task.title, task.task_id, e,
+            )
+            errors.append({
+                "task_id": task.task_id, "title": task.title, "error": str(e),
+            })
+
+    return {"ok": not errors, "created": created, "errors": errors}
+
+
+@router.post("/jira/projects")
+def jira_projects(company: CompanyContext = Depends(require_company)):
+    """List the Jira projects this company can push tickets into (target picker).
+
+    404 if Jira isn't connected.
+    """
+    try:
+        access_token, cloud_id = _jira_creds(company.company_id)
+    except JiraNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    return {"projects": jira_oauth.list_projects(access_token, cloud_id)}
+
+
+@router.post("/push-jira")
+def push_jira(
+    body: PushJiraIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Create the selected tasks as Jira issues in a project (explicit write).
+
+    Mirrors push-clickup: merges each ticket's saved overrides (ticket_edits →
+    description + acceptance criteria; ticket_comments → Notes) over the base
+    fields, renders a text body, and creates one issue per task.
+
+    Returns `{ok, created: [{task_id, jira_issue_key, url, title}],
+    errors: [{task_id, title, error}]}`. Per-task failures are isolated. 404 if
+    Jira isn't connected; 401 if the stored token is no longer valid (reconnect).
+    """
+    try:
+        access_token, cloud_id = _jira_creds(company.company_id)
+    except JiraNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+
+    c = require_client()
+    cid = company.company_id
+
+    created: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for task in body.tasks:
+        try:
+            overrides = _load_overrides(c, cid, task.task_id)
+            description = (
+                overrides["description"]
+                if overrides["description"] is not None
+                else task.description
+            )
+            acceptance = (
+                overrides["acceptance_criteria"]
+                if overrides["acceptance_criteria"] is not None
+                else task.acceptance_criteria
+            )
+            body_text = _render_markdown(
+                description=description or "",
+                acceptance_criteria=acceptance or [],
+                comments=overrides["comments"],
+            )
+            result = jira_oauth.create_issue(
+                access_token, cloud_id,
+                project_key=body.project_key,
+                summary=task.title,
+                description=body_text or None,
+                issue_type=body.issue_type,
+                priority_name=_jira_priority(task.priority),
+            )
+            created.append({
+                "task_id": task.task_id,
+                "jira_issue_key": result.get("key"),
+                "url": result.get("url"),
+                "title": task.title,
+            })
+        except jira_oauth.JiraAuthExpiredError as e:
+            # Token-level failure isn't per-task — fail the whole push so the UI
+            # prompts a reconnect instead of marking every task as errored.
+            raise HTTPException(401, str(e)) from e
+        except Exception as e:  # noqa: BLE001 — isolate per-task failures
+            logger.warning(
+                "Jira push failed for task %r (%s): %s",
                 task.title, task.task_id, e,
             )
             errors.append({

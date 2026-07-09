@@ -20,10 +20,7 @@ import { describe, expect, it } from "vitest"
 // the classic runtime, so expose React globally (repo test convention).
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import {
-  DesignAgentLauncher,
-  type LauncherDrawerProps,
-} from "../DesignAgentLauncher"
+import { DesignAgentLauncher } from "../DesignAgentLauncher"
 import {
   PostGenerationResultView,
   type PostGenerationResultViewProps,
@@ -35,12 +32,18 @@ const APP_DIR = join(HERE, "..", "..", "..")
 const CSS_PATH = join(HERE, "..", "design-agent.css")
 const LAYOUT_PATH = join(APP_DIR, "layout.tsx")
 const PUBLIC_VIEWER_PATH = join(APP_DIR, "p", "PublicTokenViewer.tsx")
+// The anon-viewer chrome (mark tool, comments, name capture, single-device
+// gate) was extracted out of PublicTokenViewer.tsx into this sibling file; the
+// ready-state markup this suite checks for (da-ready / PrototypeViewer mount)
+// now lives here instead.
+const PUBLIC_CHROME_PATH = join(APP_DIR, "p", "PublicPrototypeChrome.tsx")
 
 const GLOBALS_PATH = join(APP_DIR, "globals.css")
 
 const CSS = readFileSync(CSS_PATH, "utf8")
 const LAYOUT = readFileSync(LAYOUT_PATH, "utf8")
 const PUBLIC_VIEWER = readFileSync(PUBLIC_VIEWER_PATH, "utf8")
+const PUBLIC_CHROME = readFileSync(PUBLIC_CHROME_PATH, "utf8")
 const GLOBALS = readFileSync(GLOBALS_PATH, "utf8")
 
 const DOT_HEXES = ["#E5806B", "#E8C24A", "#6FBF8F"]
@@ -87,11 +90,6 @@ function selectorLines(css: string): string[] {
     .map((l) => l.trim())
     .filter((l) => l.length > 0 && !l.startsWith("@"))
     .filter((l) => l.endsWith("{") || l.endsWith(","))
-}
-
-function makeDrawerSpy() {
-  const renderDrawer = (_props: LauncherDrawerProps) => null
-  return { renderDrawer }
 }
 
 function renderResultView(
@@ -156,12 +154,10 @@ describe("scoping invariant", () => {
 // ── AC2: wrapper class present on all three roots ─────────────────────────
 describe("wrapper class on the three DA roots (AC2)", () => {
   it("test_launcher_root_has_surface_class — prd-design-launcher root carries design-agent-surface", () => {
-    const { renderDrawer } = makeDrawerSpy()
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncher, {
         prdId: 1,
         figmaFileKey: null,
-        renderDrawer,
       }),
     )
     expect(html).toMatch(
@@ -185,11 +181,14 @@ describe("wrapper class on the three DA roots (AC2)", () => {
     expect(PUBLIC_VIEWER).toContain(
       'className="design-agent-surface da-public-error"',
     )
-    // main ready-state return: design-agent-surface wraps da-ready which wraps
-    // da-stage which wraps PrototypeViewer (collapsible sidebar layout).
-    expect(PUBLIC_VIEWER).toContain('className="design-agent-surface"')
-    expect(PUBLIC_VIEWER).toContain("da-ready")
-    expect(PUBLIC_VIEWER).toContain("<PrototypeViewer")
+    // main ready-state return: PublicTokenViewer mounts PublicPrototypeChrome,
+    // which itself wraps design-agent-surface around da-ready which wraps
+    // da-stage which wraps PrototypeViewer (collapsible sidebar layout). The
+    // anon-viewer chrome (and this markup) was extracted out of
+    // PublicTokenViewer.tsx into that sibling file.
+    expect(PUBLIC_CHROME).toContain('className="design-agent-surface"')
+    expect(PUBLIC_CHROME).toContain("da-ready")
+    expect(PUBLIC_CHROME).toContain("<PrototypeViewer")
   })
 })
 

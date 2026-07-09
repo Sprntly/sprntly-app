@@ -68,13 +68,12 @@ describe("Sidebar — New chat wiring", () => {
 // full set — especially the Feedback action that sits next to sign-out — so a
 // future CSS/markup change can't silently remove one.
 describe("Sidebar — nav affordances preserved after restyle", () => {
-  it("renders New chat, Weekly brief, All chats, Backlog, Sources, Settings, Feedback + Sign out", () => {
+  it("renders New chat, Weekly brief, All chats, Sources, Settings, Feedback + Sign out", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
       "Weekly brief",
       "All chats",
-      "Backlog Projects",
       "Sources",
       "Settings",
       "Feedback",
@@ -82,6 +81,11 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     ]) {
       expect(screen.getByLabelText(label)).toBeTruthy()
     }
+  })
+
+  it("no longer renders the Backlog rail icon (functionality kept, icon removed)", () => {
+    render(React.createElement(Sidebar))
+    expect(screen.queryByLabelText("Backlog Projects")).toBeNull()
   })
 
   it("Feedback opens the feedback modal (not a nav)", () => {

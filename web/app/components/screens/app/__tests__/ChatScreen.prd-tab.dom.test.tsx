@@ -24,7 +24,9 @@ if (typeof window !== "undefined") window.scrollTo = () => {}
 if (typeof window !== "undefined" && !window.matchMedia) {
   window.matchMedia = (query: string) =>
     ({
-      matches: false, media: query, onchange: null,
+      // Report reduced-motion so AskReplyBody renders replies in full immediately
+      // (no simulated typing stream) — keeps thread-text assertions deterministic.
+      matches: /prefers-reduced-motion/.test(query), media: query, onchange: null,
       addEventListener: () => {}, removeEventListener: () => {},
       addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
     }) as unknown as MediaQueryList
@@ -39,7 +41,9 @@ vi.mock("../../../../lib/api", () => {
   return {
     ApiError,
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
-    briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
+    briefApi: {
+      current: vi.fn().mockResolvedValue({ id: 1, insights: [] }),
+    },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
@@ -183,6 +187,26 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await waitFor(() => expect(panelProbe()).toBe("prd"))
   })
 
+  it("shows the insight ONCE in the opening insight card — no duplicate seeded turn", async () => {
+    renderWith({
+      title: "PRD · Retention",
+      source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
+      insightBody: "Users churn early. Fix onboarding.",
+    })
+    await clickOpenPrd()
+
+    // The tab opens ON its insight: the opening insight card carries the finding
+    // body. That card IS Spiky presenting the insight, so there is NO separate
+    // seeded thread turn repeating the same text below it (the duplication bug).
+    const card = await screen.findByTestId("chat-insight-msg")
+    expect(within(card).getByText(/Users churn early\./)).toBeTruthy()
+
+    // The insight body appears exactly once, and the thread renders no turns —
+    // the only .bc-turn is the insight card itself.
+    expect(screen.getAllByText(/Users churn early\./)).toHaveLength(1)
+    expect(document.querySelectorAll(".bc-turn:not(.bc-turn--insight)")).toHaveLength(0)
+  })
+
   it("reuses the same tab (by title) instead of stacking duplicates", async () => {
     renderWith(READY)
     await clickOpenPrd()
@@ -204,5 +228,31 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await waitFor(() => expect(panelProbe()).toBe("none"))
     // Brief surface is showing, panel is gone.
     expect(briefSection()).toBeTruthy()
+  })
+
+  it("closes the panel when starting a NEW chat after opening a PRD", async () => {
+    renderWith(READY)
+    await clickOpenPrd()
+    // Panel is open over the new PRD tab.
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    // Hit the "+" (New chat) affordance → a fresh plain chat tab with no PRD.
+    // The global panel must not carry the previous tab's PRD onto it.
+    await act(async () => { fireEvent.click(tabBar().getByLabelText("New chat")) })
+    await waitFor(() => expect(tabBar().getByText("New chat")).toBeTruthy())
+    await waitFor(() => expect(panelProbe()).toBe("none"))
+  })
+
+  it("reopens the panel when REFOCUSING the PRD tab after switching away", async () => {
+    // The panel must follow the tab: leave a PRD tab (panel closes), come back to
+    // it, and the PRD panel should reopen — not stay closed forcing a pin click.
+    renderWith(READY)
+    await clickOpenPrd()
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    // Switch away to the brief → panel closes.
+    await act(async () => { fireEvent.click(tabBar().getByText("Weekly brief")) })
+    await waitFor(() => expect(panelProbe()).toBe("none"))
+    // Refocus the PRD tab → the panel comes back.
+    await act(async () => { fireEvent.click(tabBar().getByText("PRD · Ready doc")) })
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
   })
 })

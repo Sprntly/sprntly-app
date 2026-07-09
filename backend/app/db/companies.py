@@ -223,6 +223,24 @@ def slug_for_company_id(company_id: str) -> str | None:
 
 
 @retry_on_disconnect
+def display_name_for_company_id(company_id: str) -> str | None:
+    """Resolve a company id → its display_name. None if not found. Mirrors
+    slug_for_company_id (id-keyed) but selects display_name instead of slug —
+    added for the cosmetic /p/<company_display_slug>/<feature_slug>/<token>
+    URL segment. companies.slug stays off-limits for this (opaque tenant key,
+    see slug_for_company_id's callers)."""
+    client = require_client()
+    result = (
+        client.table("companies")
+        .select("display_name")
+        .eq("id", company_id)
+        .limit(1)
+        .execute()
+    )
+    return result.data[0]["display_name"] if result.data else None
+
+
+@retry_on_disconnect
 def get_notification_settings(company_id: str) -> dict:
     """Read a company's `notification_settings` JSONB (per-company delivery
     config). Returns `{}` when the company is missing or the column is unset —

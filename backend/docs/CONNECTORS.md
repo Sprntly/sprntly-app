@@ -268,3 +268,83 @@ You can't point GitHub's webhook at localhost. Two options:
    cache.
 4. Wait until any cached tokens expire (≤55 min), then delete the old
    key from the App settings.
+
+---
+
+## Jira
+
+Sprntly connects to Jira Cloud via an **Atlassian OAuth 2.0 (3LO)** app.
+Register at <https://developer.atlassian.com/console/myapps/> →
+**Create** → **OAuth 2.0 integration**.
+
+### Why 3LO (vs an Atlassian Connect app or API token)?
+
+- **Per-user consent, org-wide reach**: the connecting user grants access
+  to the Jira sites they can see; no per-project token juggling.
+- **Read + write from one grant**: `read:jira-work` + `write:jira-work`
+  cover KG ingest (issues) and pushing generated tickets as issues.
+- **Refreshable**: with `offline_access` we get a refresh token, so a
+  connection keeps working past the ~1 h access-token lifetime without a
+  reconnect.
+
+### App settings
+
+- **Name**: `Sprntly`
+- **Callback URL** (Authorization → OAuth 2.0 (3LO) → *Callback URL*):
+  `https://api.sprntly.ai/v1/connectors/jira/callback` (production) plus
+  one localhost URL for dev as needed, e.g.
+  `http://localhost:8000/v1/connectors/jira/callback`.
+
+### Permissions (scopes)
+
+Add the **Jira API** under *Permissions*, then grant these scopes. They
+are declared in `app/connectors/jira_oauth.py::JIRA_SCOPES`; the app's
+declared scopes must be a superset or the consent screen 400s.
+
+| Scope | Why |
+|---|---|
+| `read:jira-work` | Read issues + projects (KG ingest, project picker) |
+| `write:jira-work` | Create/update issues (push stories + tickets) |
+| `read:jira-user` | Resolve the authorizing user (`/myself`) for the label |
+| `offline_access` | Get a **refresh token** — access tokens last ~1 h |
+
+`offline_access` plus `prompt=consent` on the authorize URL are what make
+Atlassian return a refresh token; without both, every sync past the first
+hour would 401.
+
+### Env vars
+
+| Var | Source |
+|---|---|
+| `JIRA_CLIENT_ID` | App → Settings → *Client ID* |
+| `JIRA_CLIENT_SECRET` | App → Settings → *Secret* |
+| `JIRA_OAUTH_REDIRECT_URI` | matches the app's Callback URL exactly |
+
+### The cloud_id quirk (important)
+
+A 3LO token authenticates against `api.atlassian.com`, **not** the
+customer's `*.atlassian.net` host. Every REST call needs the target
+site's `cloud_id`, which is **not** in the token response. We resolve it
+via `GET /oauth/token/accessible-resources` at connect time and cache it
+in `connections.config_json.cloud_id`; the KG puller (which only carries
+the access token) re-resolves it on the fly via `first_cloud_id`. REST
+calls then go to
+`https://api.atlassian.com/ex/jira/{cloud_id}/rest/api/3/...`.
+
+### Token lifecycle
+
+- Access tokens expire in ~1 h. Refresh tokens **rotate** — each refresh
+  returns a new refresh token, so we persist the whole payload (same as
+  the GitHub user token, unlike HubSpot's stable refresh token).
+- Refresh happens lazily before a KG sync (`kg_ingest/auto_sync.py`),
+  before a push (`stories/push.py::_jira_creds`), and in the health probe
+  (`connector_probe.py`). A rejected refresh surfaces as
+  `JiraAuthExpiredError` → the UI prompts a reconnect.
+
+### Caveats
+
+- Issue descriptions are **Atlassian Document Format (ADF)**, not
+  markdown — `jira_oauth._adf_from_text` wraps plain text into ADF
+  paragraphs on create/update.
+- `priority` is omitted when unmapped: not every project defines a
+  priority field, and Jira 400s on unknown fields.

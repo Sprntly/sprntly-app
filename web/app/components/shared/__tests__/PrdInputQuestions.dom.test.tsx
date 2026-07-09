@@ -49,6 +49,19 @@ const needQ: PrdInputQuestion = {
   status: "pending",
 }
 
+// A NEED (data) question that now carries candidate value options → selectable
+// buttons, same as an escalate decision.
+const needWithOptionsQ: PrdInputQuestion = {
+  id: 13,
+  prd_id: 1,
+  ordinal: 2,
+  tag: "need",
+  prompt: "Manual follow-up rate today?",
+  owner: "Data",
+  options: [{ label: "0–20%" }, { label: "20–50%" }, { label: ">50%" }],
+  status: "pending",
+}
+
 const answeredRecord: PrdRecord = {
   id: 1,
   brief_id: 5,
@@ -97,7 +110,7 @@ describe("PrdInputQuestionCard", () => {
     expect(screen.queryByTestId("prd-input-question-input")).toBeNull()
   })
 
-  it("renders a free-text box for a need question", () => {
+  it("renders a free-text box for a need question with no options", () => {
     render(
       <PrdInputQuestionCard
         question={needQ}
@@ -109,6 +122,77 @@ describe("PrdInputQuestionCard", () => {
     )
     expect(screen.getByTestId("prd-input-question-input")).toBeTruthy()
     expect(screen.queryByTestId("prd-input-question-choice")).toBeNull()
+  })
+
+  it("renders selectable option buttons for a need question that has options", () => {
+    render(
+      <PrdInputQuestionCard
+        question={needWithOptionsQ}
+        answerText=""
+        onAnswerTextChange={() => {}}
+        onChoose={() => {}}
+        onSubmitText={() => {}}
+      />,
+    )
+    const choices = screen.getAllByTestId("prd-input-question-choice")
+    expect(choices.map((c) => c.textContent)).toEqual(["0–20%", "20–50%", ">50%"])
+    // Options lead — the free-text box is hidden behind "Other…" and not shown yet.
+    expect(screen.getByTestId("prd-input-question-other")).toBeTruthy()
+    expect(screen.queryByTestId("prd-input-question-input")).toBeNull()
+  })
+
+  it("reveals the free-text box when 'Other…' is clicked", () => {
+    render(
+      <PrdInputQuestionCard
+        question={needWithOptionsQ}
+        answerText=""
+        onAnswerTextChange={() => {}}
+        onChoose={() => {}}
+        onSubmitText={() => {}}
+      />,
+    )
+    expect(screen.queryByTestId("prd-input-question-input")).toBeNull()
+    fireEvent.click(screen.getByTestId("prd-input-question-other"))
+    expect(screen.getByTestId("prd-input-question-input")).toBeTruthy()
+  })
+
+  it("routes an option click through onChoose", () => {
+    const onChoose = vi.fn()
+    render(
+      <PrdInputQuestionCard
+        question={needWithOptionsQ}
+        answerText=""
+        onAnswerTextChange={() => {}}
+        onChoose={onChoose}
+        onSubmitText={() => {}}
+      />,
+    )
+    fireEvent.click(screen.getAllByTestId("prd-input-question-choice")[1])
+    expect(onChoose).toHaveBeenCalledWith("20–50%")
+  })
+
+  it("shows an in-progress indicator and marks the picked option while busy", () => {
+    render(
+      <PrdInputQuestionCard
+        question={escalateQ}
+        busy
+        pendingAnswer="Off"
+        answerText=""
+        onAnswerTextChange={() => {}}
+        onChoose={() => {}}
+        onSubmitText={() => {}}
+      />,
+    )
+    // The applying status is announced and every option is disabled.
+    expect(screen.getByTestId("prd-input-question-applying")).toBeTruthy()
+    const choices = screen.getAllByTestId("prd-input-question-choice")
+    expect(choices.every((c) => (c as HTMLButtonElement).disabled)).toBe(true)
+    // Only the picked option is marked active/aria-busy.
+    const off = choices.find((c) => c.textContent === "Off")!
+    expect(off.getAttribute("aria-busy")).toBe("true")
+    expect(off.className).toContain("piq-choice--active")
+    const on = choices.find((c) => c.textContent === "On")!
+    expect(on.getAttribute("aria-busy")).toBe("false")
   })
 
   it("shows a resolved line once answered", () => {

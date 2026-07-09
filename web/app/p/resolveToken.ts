@@ -14,6 +14,13 @@ export type ResolvedView = {
   // resolver returns it on the by-token response; default to "" defensively so
   // a missing field never crashes the redirect / canonicalize path.
   company_slug: string
+  // Human-readable cosmetic segments for the 3-segment canonical URL
+  // /p/<company_display_slug>/<feature_slug>/<token>. Derived at serve time from
+  // companies.display_name / prds.title. Default to "" when the backend omits
+  // them (pre-deploy backend or a malformed body) so the redirect path degrades
+  // to its own fallback rather than crashing.
+  company_display_slug: string
+  feature_slug: string
   // "desktop" | "mobile" | "both" — drives the public viewer's single-device
   // toggle gate + device badge. Defaults to "both" when the backend omits it
   // (pre-deploy backend or a malformed body) so the viewer degrades to showing
@@ -43,6 +50,8 @@ export async function resolveToken(
     bundle_url: body.bundle_url ?? null,
     is_complete: body.is_complete as boolean,
     company_slug: body.company_slug ?? "",
+    company_display_slug: body.company_display_slug ?? "",
+    feature_slug: body.feature_slug ?? "",
     target_platform: body.target_platform ?? "both",
   }
 }

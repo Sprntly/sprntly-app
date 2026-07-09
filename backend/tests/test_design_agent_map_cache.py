@@ -228,6 +228,25 @@ def test_sweep_deletes_only_expired(l2, monkeypatch):
     assert shas == {"sha-fresh"}
 
 
+def test_delete_cached_maps_for_installation_removes_matching_rows(l2):
+    # Two rows for installation 1 (different repos) + one for installation 2.
+    l2.put_cached_map(1, "org/repo-a", "sha-a", _sample_map("sha-a", "org/repo-a").model_dump(mode="json"))
+    l2.put_cached_map(1, "org/repo-b", "sha-b", _sample_map("sha-b", "org/repo-b").model_dump(mode="json"))
+    l2.put_cached_map(2, "org/repo-c", "sha-c", _sample_map("sha-c", "org/repo-c").model_dump(mode="json"))
+
+    deleted = l2.delete_cached_maps_for_installation(1)
+    assert deleted == 2
+    # Installation 1's rows are gone; installation 2 is untouched.
+    assert l2.get_cached_map(1, "org/repo-a", "sha-a") is None
+    assert l2.get_cached_map(1, "org/repo-b", "sha-b") is None
+    assert l2.get_cached_map(2, "org/repo-c", "sha-c") is not None
+
+
+def test_delete_cached_maps_for_installation_no_rows_returns_zero(l2):
+    # No rows seeded for this installation → 0, no error.
+    assert l2.delete_cached_maps_for_installation(999) == 0
+
+
 # ── db helper: FAIL-SOFT (load-bearing) ──────────────────────────────────────
 
 def test_get_fail_soft_on_db_error(l2, monkeypatch, caplog):
@@ -250,6 +269,15 @@ def test_put_fail_soft_on_db_error(l2, monkeypatch, caplog):
 def test_sweep_fail_soft_on_db_error(l2, monkeypatch):
     monkeypatch.setattr(l2, "require_client", MagicMock(side_effect=RuntimeError("db down")))
     assert l2.sweep_expired_map_cache() == 0  # never raises
+
+
+def test_delete_cached_maps_for_installation_db_error_fails_soft(l2, monkeypatch, caplog):
+    # A DB error → warning + 0, never an exception (matches get/put's contract).
+    monkeypatch.setattr(l2, "require_client", MagicMock(side_effect=RuntimeError("db down")))
+    with caplog.at_level(logging.WARNING, logger="app.db.design_agent_map_cache"):
+        deleted = l2.delete_cached_maps_for_installation(1)  # must not raise
+    assert deleted == 0
+    assert any("delete_for_installation failed" in r.getMessage() for r in caplog.records)
 
 
 def test_missing_table_is_a_miss_not_a_crash(isolated_settings, monkeypatch):
@@ -453,3 +481,59 @@ def test_l2_get_raising_does_not_break_build(monkeypatch):
     assert isinstance(result, MapResult)
     assert mocks["probe"].call_count == 1  # rebuilt after the raised-get miss
     assert result.commit_sha == "sha-raise"
+
+
+# ── regression: uninstall webhook invalidates BOTH cache tiers ────────────────
+
+def test_installation_deleted_webhook_clears_map_cache(l2, monkeypatch):
+    """When a GitHub App installation is uninstalled, the webhook handler must
+    invalidate the codebase-map cache in BOTH tiers so a torn-down installation
+    can never serve a stale cached map if its id is later reissued.
+
+    Regression: before the fix the deleted-installation branch tore down the
+    installation row + token cache but left both cache tiers populated, so a
+    reissued installation_id would be served the stale map. This test seeds both
+    tiers, fires the deleted-installation branch, and asserts the durable tier
+    is emptied and a subsequent build genuinely rebuilds (L1 no longer served).
+    """
+    from app.routes.connectors import _handle_installation_event
+
+    install_id = 4242
+    key = (install_id, "org/repo", "sha-live")
+
+    # Point the service's durable-tier seam at the fake-DB-wired module.
+    monkeypatch.setattr(service, "_l2_module", l2)
+    monkeypatch.setattr(service, "_l2_resolved", True)
+
+    # Seed BOTH tiers for the installation.
+    sample = _sample_map("sha-live")
+    l2.put_cached_map(install_id, "org/repo", "sha-live", sample.model_dump(mode="json"))
+    service._CACHE.put(key, sample)
+    assert l2.get_cached_map(install_id, "org/repo", "sha-live") is not None
+    assert service._CACHE.get(key) is not None
+
+    # Fire the uninstall webhook branch.
+    _handle_installation_event({
+        "action": "deleted",
+        "installation": {
+            "id": install_id,
+            "account": {"id": 1, "login": "octocat", "type": "User"},
+        },
+    })
+
+    # Durable tier emptied for this installation.
+    assert l2.get_cached_map(install_id, "org/repo", "sha-live") is None
+
+    # A subsequent build MISSES both tiers → a real rebuild runs (the in-process
+    # entry was dropped too, so no stale map is served).
+    mocks = _build_mocks()
+    patches = _patch_build(_snapshot("sha-live"), build_mock=mocks)
+    for p in patches:
+        p.start()
+    try:
+        rebuilt = build_map(install_id, "org/repo", "org/repo@main")
+    finally:
+        for p in patches:
+            p.stop()
+    assert isinstance(rebuilt, MapResult)
+    assert mocks["probe"].call_count == 1  # rebuilt, did not serve a stale cache

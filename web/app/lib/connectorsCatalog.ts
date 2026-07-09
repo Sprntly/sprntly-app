@@ -34,7 +34,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", logoSvg: "/connectors/linear.svg", oauth: false },
-      { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", logoSvg: "/connectors/jira.svg", oauth: false },
+      { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", logoSvg: "/connectors/jira.svg", oauth: true },
       { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoSvg: "/connectors/clickup.svg", oauth: true },
       { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: false },
     ],

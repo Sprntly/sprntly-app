@@ -57,7 +57,7 @@ import {
 } from "../../components/design-agent/notificationStore"
 import { GenerationErrorBanner, reasonCopy, isRetryableFailure } from "../../components/design-agent/GenerationErrorBanner"
 import { GenerateSurfaceErrorBoundary } from "../../components/design-agent/GenerateSurfaceErrorBoundary"
-import { GenerationLoadingScreen, type LocatePhaseState } from "../../components/design-agent/GenerationLoadingScreen"
+import { GenerationLoadingScreen } from "../../components/design-agent/GenerationLoadingScreen"
 import { PostGenerationResult } from "../../components/design-agent/PostGenerationResult"
 import { PrototypeEmptyState } from "../../components/design-agent/PrototypeEmptyState"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
@@ -68,7 +68,7 @@ import {
   IconPin,
   IconCopy,
   IconShare,
-  IconPlus,
+  IconTerminalPrompt,
   IconChevronLeft,
 } from "../../components/shared/app-icons"
 import {
@@ -189,6 +189,12 @@ export function generateIntentFromSearch(raw: string | null): boolean {
   return raw === "1"
 }
 
+// `?pid=` handoff (prototypeHintFromSearch / handoffPrototypeId below): its
+// only in-app producer (PrdPanelContent.tsx's old onKickoff nav) was removed
+// during a generation-flow consolidation pass (2026-07-08). KEPT deliberately
+// as defensive handling of a URL shape that could still arrive via an old
+// bookmark or a shared link — not deleted just because its one producer is
+// gone. Re-evaluate only if this becomes a genuine maintenance burden.
 /** Pure: read the transient prototype loading hint from the URL's `pid` query
  *  param. Only positive integers are accepted; malformed values are ignored so
  *  the route falls back to resolving by PRD alone. */
@@ -534,6 +540,15 @@ export function PrototypeRoute() {
   // callback never captures a stale false from the render before kickoff.
   const genLoadingRef = useRef(false)
 
+  // (2026-07-08) DELIBERATELY NOT migrated onto useGeneratePrototype() (see the
+  // generate/view-prototype consolidation work elsewhere for the shared hook's
+  // contract). This surface's loading overlay is driven by THREE triggers
+  // (user-click-generate via GenerateModal, resume-mid-generation-on-reload via
+  // a direct runDesignAgentGeneration poll, cold-load onto a failed-latest row)
+  // sharing this one state machine; only the first goes through GenerateModal's
+  // callback contract the shared hook wraps. This file is already the reference
+  // implementation (full overlay + cancel + notify + resume + failed-retry) the
+  // other 3 (already-migrated) entry points were unified toward.
   // Full-screen loading-overlay visibility + the prototype_id known once the
   // generate POST returns (lets the loading screen subscribe to the SSE stream).
   const [genLoading, setGenLoading] = useState(false)
@@ -546,10 +561,6 @@ export function PrototypeRoute() {
   const [genFigmaKey, setGenFigmaKey] = useState<string | null>(null)
   const [genGithubRepo, setGenGithubRepo] = useState<string | null>(null)
   const [genProtoId, setGenProtoId] = useState<number | null>(null)
-  // The pre-build locate phase (locating / crumb / picker) emitted by
-  // GenerateModal, threaded into the full-screen loading surface so ONE surface
-  // runs Locating → (crumb | picker) → Building. Null = Building / no locate phase.
-  const [locatePhase, setLocatePhase] = useState<LocatePhaseState | null>(null)
 
   // A valid `pid` is a transient handoff hint from a just-started generation.
   // Seed the build loader immediately, before the PRD-level active lookup
@@ -902,7 +913,6 @@ export function PrototypeRoute() {
               prototypeId={genProtoId}
               onCancel={handleGenCancel}
               onNotifyWhenReady={genProtoId != null ? handleNotifyWhenReady : undefined}
-              locatePhase={locatePhase ?? undefined}
             />
           </GenerateSurfaceErrorBoundary>
         </div>
@@ -972,10 +982,10 @@ export function PrototypeRoute() {
           action={
             <button
               type="button"
-              className="btn btn-accent da-empty-hero-cta"
+              className="fc-btn-secondary"
               onClick={() => setGenerateRequested(true)}
             >
-              <IconPlus size={16} />
+              <IconTerminalPrompt size={13} />
               Generate prototype
             </button>
           }
@@ -1033,7 +1043,6 @@ export function PrototypeRoute() {
             onKickoff={(id) => setGenProtoId(id)}
             onGenDone={handleGenDone}
             savedPreference={savedPreference}
-            onLocatePhase={setLocatePhase}
           />
           <GenerationLoadingScreen
             open={genLoading}
@@ -1042,7 +1051,6 @@ export function PrototypeRoute() {
             prototypeId={genProtoId}
             onCancel={handleGenCancel}
             onNotifyWhenReady={genProtoId != null ? handleNotifyWhenReady : undefined}
-            locatePhase={locatePhase ?? undefined}
           />
         </GenerateSurfaceErrorBoundary>
       </div>

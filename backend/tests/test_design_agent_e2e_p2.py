@@ -372,8 +372,11 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
         uuid.UUID(str(token))  # opaque UUID (F6)
 
         # 8. UNAUTHENTICATED resolver → 200, minimum-disclosure body. (AC #3, #8)
-        # f7ed6e5 added company_slug — the cosmetic /p/<slug>/<token> URL segment
-        # (the one intentional disclosure beyond the original 4-key minimum).
+        # company_slug is the cosmetic /p/<slug>/<token> URL segment; the two
+        # human-readable segments (company_display_slug / feature_slug) are the
+        # cosmetic /p/<company>/<feature>/<token> URL segments — all three are
+        # display-only, never validated on read (same trust model), and are the
+        # only intentional disclosures beyond the original 4-key minimum.
         async with httpx.AsyncClient(
             transport=transport, base_url="http://test"
         ) as unauth:
@@ -382,7 +385,8 @@ async def test_p2_full_lifecycle_public_share_and_export(env, monkeypatch):
             body = res.json()
             assert set(body.keys()) == {
                 "share_mode", "requires_passcode", "bundle_url", "is_complete",
-                "company_slug", "target_platform",
+                "company_slug", "company_display_slug", "feature_slug",
+                "target_platform",
             }
             assert body["share_mode"] == "public"
             assert body["requires_passcode"] is False

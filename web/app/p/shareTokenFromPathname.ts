@@ -1,13 +1,16 @@
 // Share-token derivation for the public `/p` routes under static export.
 //
 // WHY THIS EXISTS: prod builds with `output: "export"` (next.config.ts), so the
-// dynamic `/p/[slug]/[token]` and `/p/[slug]` routes are prerendered ONCE under a
-// sentinel param (`generateStaticParams` → `{ slug: "_", token: "_" }`), emitting
-// `/p/_/_.html` + `/p/_.html`. nginx then rewrites EVERY real `/p/...` request to
-// that one static file (the SPA shell). Consequently `useParams()` on the client
-// returns the prerendered SENTINEL (`"_"`), NOT the token in the address bar — so
-// resolving against it hits `by-token/_` and fails. The live URL is the only
-// source of truth for the real token, and it lives on `window.location.pathname`.
+// catch-all `/p/[...segments]` route (which serves every real depth — legacy
+// 1-seg, canonical 2-seg, canonical 3-seg) is prerendered under a handful of
+// sentinel params (`generateStaticParams` → `{ segments: ["_"] }`,
+// `{ segments: ["_", "_"] }`, `{ segments: ["_", "_", "_"] }`), emitting
+// `/p/_.html`, `/p/_/_.html`, `/p/_/_/_.html`. nginx then rewrites EVERY real
+// `/p/...` request (by depth) to the matching static file (the SPA shell).
+// Consequently `useParams()` on the client returns the prerendered SENTINEL
+// segments, NOT the token in the address bar — so resolving against it hits
+// `by-token/_` and fails. The live URL is the only source of truth for the
+// real token, and it lives on `window.location.pathname`.
 //
 // These helpers are pure (no `window` access of their own — the caller passes the
 // pathname in), so they are node-env unit-testable without a DOM/router, matching

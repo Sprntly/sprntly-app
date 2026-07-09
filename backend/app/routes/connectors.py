@@ -58,6 +58,7 @@ from app.connectors import (
     github_app,
     google_oauth,
     hubspot_oauth,
+    jira_oauth,
     slack_oauth,
 )
 from app.connectors.google_drive_sync import (
@@ -362,6 +363,16 @@ def start_oauth(
             raise HTTPException(500, "HubSpot OAuth is not configured on the server")
         url = hubspot_oauth.authorize_url(
             state=hubspot_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == jira_oauth.JIRA_PROVIDER:
+        if not jira_oauth.jira_configured():
+            raise HTTPException(500, "Jira OAuth is not configured on the server")
+        url = jira_oauth.authorize_url(
+            state=jira_oauth.sign_oauth_state(
                 company_id=company.company_id, return_to=return_to,
             )
         )
@@ -1518,6 +1529,60 @@ def clickup_disconnect(
     return {"deleted": True, "provider": clickup_oauth.CLICKUP_PROVIDER}
 
 
+@router.get("/jira/callback")
+def jira_callback(code: str, state: str):
+    payload = jira_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+    token_json = jira_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Jira did not return an access_token")
+
+    # Resolve the Jira site(s) this token can act on. cloud_id is required for
+    # every subsequent REST call (ingest + issue creation) and is NOT in the
+    # token response, so we cache it (and the site list) on the connection.
+    sites = jira_oauth.get_accessible_resources(access_token)
+    cloud_id = sites[0].get("id") if sites else None
+    user = jira_oauth.fetch_authenticated_user(access_token, cloud_id) if cloud_id else {}
+    label = (
+        user.get("emailAddress")
+        or user.get("displayName")
+        or (sites[0].get("name") if sites else None)
+    )
+
+    try:
+        token_encrypted = encrypt_token_json(
+            jira_oauth.token_payload_to_store(token_json)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=jira_oauth.JIRA_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=jira_oauth.JIRA_SCOPES,
+        account_label=label or None,
+        config_json=json.dumps({"cloud_id": cloud_id, "sites": sites, "user": user}),
+    )
+
+    kickoff_sync(company_id, jira_oauth.JIRA_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, jira_oauth.JIRA_PROVIDER)
+
+
+@router.delete("/jira")
+def jira_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin_for_org_connector(company, jira_oauth.JIRA_PROVIDER)
+    row = db.get_connection(company.company_id, jira_oauth.JIRA_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Jira is not connected")
+    db.delete_connection(company.company_id, jira_oauth.JIRA_PROVIDER)
+    return {"deleted": True, "provider": jira_oauth.JIRA_PROVIDER}
+
+
 # ─────────────────────── HubSpot ───────────────────────
 #
 # Commit I. OAuth-only — no corpus sync yet.
@@ -2280,6 +2345,8 @@ def _handle_installation_event(payload: dict) -> None:
     elif action == "deleted":
         db.delete_github_installation(int(install_id))
         github_app.clear_installation_token_cache(int(install_id))
+        from app.design_agent.codebase_map.service import clear_map_cache
+        clear_map_cache(int(install_id))
 
 
 def _handle_installation_repositories_event(payload: dict) -> None:

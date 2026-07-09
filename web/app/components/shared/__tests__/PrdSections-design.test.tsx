@@ -5,10 +5,7 @@ import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 import { PrdSections } from "../PrdSections"
-import {
-  DesignAgentLauncher,
-  type LauncherDrawerProps,
-} from "../../design-agent/DesignAgentLauncher"
+import { DesignAgentLauncher } from "../../design-agent/DesignAgentLauncher"
 import type { PrdSection } from "../../../types/content"
 
 // PrdSections.tsx — like every Sprntly component — has no `import React`; it
@@ -85,14 +82,11 @@ describe("PrdSections — prd-design block (UX-9: dead slot + empty-state)", () 
     expect(PRD_SECTIONS_SRC).not.toContain("prdMetaLine={prdMetaLine}")
     // Affordance invariant: the launcher renders the prd-design launcher root,
     // but the bare "Generate Prototype" button has moved into the Approve modal
-    // flow — the launcher surface no longer carries an inline generate button
-    // (stub drawer so useNavigation is not reached).
-    const stubDrawer = (_props: LauncherDrawerProps) => null
+    // flow — the launcher surface no longer carries an inline generate button.
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncher, {
         prdId: 42,
         figmaFileKey: null,
-        renderDrawer: stubDrawer,
       }),
     )
     expect(html).toContain("prd-design-launcher")
@@ -151,20 +145,17 @@ describe("PrdSections — prd-design block (UX-9: dead slot + empty-state)", () 
 })
 
 describe("PrdSections — prd-design generate-trigger relocation + hot-file exception", () => {
-  const stubDrawer = (_props: LauncherDrawerProps) => null
-
   it("test_prd_design_renders_relocated_trigger — the prd-design launcher routes through the Approve-modal flow, not a bare inline generate button", () => {
     // The launcher surface mounts (contentEditable={false} so it never disturbs
     // the PRD body). The generate trigger itself now lives in the Approve modal
     // (GenerateModal is opened from ApproveModal), so the launcher surface no
-    // longer renders a bare "Generate Prototype" button. Stub drawer keeps the
-    // render off useNavigation (no NavigationProvider in node env).
+    // longer renders a bare "Generate Prototype" button. The launcher no longer
+    // mounts a drawer at all, so no NavigationContext stub is needed.
     const html = renderToStaticMarkup(
       React.createElement(DesignAgentLauncher, {
         prdId: 7,
         figmaFileKey: null,
         prdTitle: "Checkout flow",
-        renderDrawer: stubDrawer,
       }),
     )
     expect(html).toContain("prd-design-launcher")

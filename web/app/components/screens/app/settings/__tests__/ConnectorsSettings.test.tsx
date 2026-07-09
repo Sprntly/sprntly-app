@@ -279,7 +279,7 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
   it("shows the wired connectors and hides the 'Coming soon' ones", () => {
     const html = render({ categories: connectableCatalog() })
     // Wired (kept):
-    for (const name of ["Slack", "GitHub", "Figma", "ClickUp", "Google Docs", "HubSpot", "Fireflies"]) {
+    for (const name of ["Slack", "GitHub", "Figma", "ClickUp", "Jira", "Google Docs", "HubSpot", "Fireflies"]) {
       expect(html).toContain(name)
     }
     // Coming soon (removed):
@@ -291,25 +291,26 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
   it("renders a flat list (no category headers) with one shared upload control", () => {
     const html = render({ categories: connectableCatalog() })
     expect(html).not.toContain("set-block-h")
-    // 7 wired connector rows + one company-wide upload control.
-    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(7)
+    // 8 wired connector rows + one company-wide upload control.
+    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(8)
     expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(1)
   })
 
   it("renders each connector's real brand logo from a locally bundled SVG", () => {
     const html = render({ categories: connectableCatalog() })
-    // 6 of the 7 wired connectors have an official bundled SVG mark.
+    // 7 of the 8 wired connectors have an official bundled SVG mark.
     for (const id of [
       "slack",
       "github",
       "figma",
       "hubspot",
       "clickup",
+      "jira",
       "google_drive",
     ]) {
       expect(html).toContain(`src="/connectors/${id}.svg"`)
     }
-    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(6)
+    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(7)
     // No runtime favicon fetch remains.
     expect(html).not.toContain("s2/favicons")
     // Fireflies has no bundled SVG, so it keeps its letter glyph (no <img>).

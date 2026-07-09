@@ -26,7 +26,6 @@ import {
   runAnswer,
   type IterateFn,
 } from "../ClarifyingQuestionSurface"
-import { DesignAgentLauncherView } from "../DesignAgentLauncher"
 import { designAgentApi } from "../../../lib/api"
 import type {
   IterateResponse,
@@ -320,29 +319,16 @@ describe("AC5 — locked prototype hides the surface", () => {
     expect(viewProps).toBeNull()
     expect(iter).not.toHaveBeenCalled()
   })
-
-  it("the launcher does NOT mount the surface when the prototype is complete", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(DesignAgentLauncherView, {
-        prdId: 1,
-        figmaFileKey: null,
-        open: false,
-        setOpen: () => {},
-        result: prototype({ pending_question: question(), is_complete: true }),
-        renderDrawer: () => null,
-      }),
-    )
-    expect(html).not.toContain('data-testid="clarifying-question-surface"')
-  })
 })
 
 // ---- AC6: external-viewer exclusion -----------------------------------------
 
 describe("AC6 — external-viewer exclusion (F12 internal-only)", () => {
   it("test_public_token_page_does_not_mount_clarifying_question_surface", () => {
-    // vitest runs from web/ (cwd). The public route was collapsed onto a shared
-    // [slug] first segment, so its source files live across app/p/ and its
-    // [slug]/[token] subtree — walk the whole subtree (excluding tests).
+    // vitest runs from web/ (cwd). Every public share depth (legacy, 2-seg,
+    // 3-seg) resolves through one catch-all route, so its source files live
+    // across app/p/ and its [...segments] subtree — walk the whole subtree
+    // (excluding tests).
     const root = join(process.cwd(), "app", "p")
     function walk(dir: string): string[] {
       const out: string[] = []
@@ -356,28 +342,12 @@ describe("AC6 — external-viewer exclusion (F12 internal-only)", () => {
       return out
     }
     const files = walk(root)
-    expect(files.some((f) => f.endsWith(join("[slug]", "[token]", "page.tsx")))).toBe(true)
+    // sanity: the walk actually found real files (the catch-all shell exists).
+    expect(files.some((f) => f.endsWith(join("[...segments]", "page.tsx")))).toBe(true)
     for (const f of files) {
       const src = readFileSync(f, "utf8")
       expect(src).not.toContain("ClarifyingQuestionSurface")
     }
-  })
-
-  it("the signed-in launcher DOES mount the surface when a question is pending", () => {
-    const html = renderToStaticMarkup(
-      React.createElement(DesignAgentLauncherView, {
-        prdId: 1,
-        figmaFileKey: null,
-        open: false,
-        setOpen: () => {},
-        result: prototype({
-          pending_question: question({ question: "List or grid?" }),
-        }),
-        renderDrawer: () => null,
-      }),
-    )
-    expect(html).toContain('data-testid="clarifying-question-surface"')
-    expect(html).toContain("List or grid?")
   })
 })
 

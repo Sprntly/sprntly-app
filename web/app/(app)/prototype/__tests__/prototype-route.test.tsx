@@ -477,19 +477,26 @@ describe("PrototypeRoute — consumes ?generate=1 intent on mount (no refresh re
   })
 })
 
-// ─── PrototypeRoute wires savedPreference + onLocatePhase to GenerateModal ────
+// ─── PrototypeRoute wires savedPreference to GenerateModal ────────────────────
 //
-// These source-assertion tests prove that PrototypeRoute passes the two props
-// that were previously missing, following the same pattern as the ApproveModal
+// These source-assertion tests prove that PrototypeRoute passes the prop
+// that was previously missing, following the same pattern as the ApproveModal
 // source-assertion tests. The assertions FAIL on the old unwired mount (before
 // the fix) and PASS on the wired version.
+//
+// (2026-07-08) This block previously also asserted a `locatePhase`/
+// `onLocatePhase` wiring between GenerateModal and GenerationLoadingScreen.
+// That state was confirmed inert on every path (both receiving components
+// destructured-and-ignored it) and was removed as dead-prop cleanup; those
+// three assertions are removed here along with it rather than left pinning
+// code that no longer exists.
 //
 // Why source-assertion rather than jsdom mount: PrototypeRoute reads
 // useSearchParams + useRouter (Next.js navigation) and useWorkspace (auth-
 // guarded context); mounting it in vitest's node-env requires a large context
 // pyramid with no additional coverage over what the source check provides.
 
-describe("PrototypeRoute — savedPreference + onLocatePhase wired to GenerateModal", () => {
+describe("PrototypeRoute — savedPreference wired to GenerateModal", () => {
   const src = readFileSync(
     resolve(process.cwd(), "app/(app)/prototype/PrototypeRoute.tsx"),
     "utf8",
@@ -507,25 +514,6 @@ describe("PrototypeRoute — savedPreference + onLocatePhase wired to GenerateMo
     // preference so the github flash-suppression render guard and the
     // auto-skip effect have the data they need.
     expect(src).toContain("savedPreference={savedPreference}")
-  })
-
-  it("passes onLocatePhase to GenerateModal wired to setLocatePhase", () => {
-    // onLocatePhase drives the pre-build locate phase into the loading screen
-    // so Locating → crumb / picker → Building shows on the /prototype surface.
-    expect(src).toContain("onLocatePhase={setLocatePhase}")
-  })
-
-  it("threads locatePhase into GenerationLoadingScreen", () => {
-    // The locate phase emitted by GenerateModal must reach the loading screen
-    // so the Locating / crumb / picker phases render on this surface too.
-    expect(src).toContain("locatePhase={locatePhase")
-  })
-
-  it("declares locatePhase state with the LocatePhaseState type", () => {
-    // The state variable and its type annotation must be present — ensures the
-    // import of LocatePhaseState was not accidentally omitted.
-    expect(src).toContain("LocatePhaseState")
-    expect(src).toContain("useState<LocatePhaseState | null>")
   })
 })
 

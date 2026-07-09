@@ -7,10 +7,10 @@
 // Relative imports (not `@/…`) to match the codebase + the vitest resolver.
 import { useState } from "react"
 import type { FormEvent, ReactNode } from "react"
-import { PrototypeViewer } from "../components/design-agent/PrototypeViewer"
+import { PublicPrototypeChrome } from "./PublicPrototypeChrome"
 
 export type PasscodeResult =
-  | { ok: true; bundleUrl: string; isComplete: boolean }
+  | { ok: true; bundleUrl: string; isComplete: boolean; targetPlatform: string }
   | { ok: false; error: string }
 
 /** The app-origin /_da-bundle passcode-verify URL for a share token.
@@ -50,13 +50,23 @@ export async function submitPasscode(args: {
   }
   if (res.status === 401) return { ok: false, error: "Incorrect passcode." }
   if (!res.ok) return { ok: false, error: "Could not verify passcode." }
-  const body = (await res.json()) as { bundle_url: string; is_complete: boolean }
-  return { ok: true, bundleUrl: body.bundle_url, isComplete: body.is_complete }
+  const body = (await res.json()) as {
+    bundle_url: string
+    is_complete: boolean
+    target_platform?: string
+  }
+  return {
+    ok: true,
+    bundleUrl: body.bundle_url,
+    isComplete: body.is_complete,
+    targetPlatform: body.target_platform ?? "both",
+  }
 }
 
-type VerifiedView = { bundleUrl: string; isComplete: boolean }
+type VerifiedView = { bundleUrl: string; isComplete: boolean; targetPlatform?: string }
 
 export function PasscodeGateView(props: {
+  token?: string
   view: VerifiedView | null
   passcode: string
   error: string | null
@@ -64,13 +74,15 @@ export function PasscodeGateView(props: {
   onPasscodeChange: (value: string) => void
   onSubmit: (e: FormEvent) => void
 }): ReactNode {
-  // Once verified, the gate is replaced by the viewer (same primitive the
-  // public-mode page renders, so the post-passcode experience is identical).
+  // Once verified, the gate is replaced by the same mark/comments chrome the
+  // public-link viewer uses, so the post-passcode experience is identical.
   if (props.view) {
     return (
-      <PrototypeViewer
+      <PublicPrototypeChrome
+        token={props.token ?? ""}
         bundleUrl={props.view.bundleUrl}
         isComplete={props.view.isComplete}
+        targetPlatform={props.view.targetPlatform ?? "both"}
       />
     )
   }
@@ -110,7 +122,7 @@ export function PasscodeGate({ token }: { token: string }) {
     const result = await submitPasscode({ token, passcode })
     setBusy(false)
     if (result.ok) {
-      setView({ bundleUrl: result.bundleUrl, isComplete: result.isComplete })
+      setView({ bundleUrl: result.bundleUrl, isComplete: result.isComplete, targetPlatform: result.targetPlatform })
     } else {
       setError(result.error)
     }
@@ -118,6 +130,7 @@ export function PasscodeGate({ token }: { token: string }) {
 
   return (
     <PasscodeGateView
+      token={token}
       view={view}
       passcode={passcode}
       error={error}

@@ -6,7 +6,6 @@ import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
-import { useWorkspace } from "../../context/WorkspaceContext"
 import { briefApi, type AskResponse } from "../../lib/api"
 import { loadLatestPrd } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
@@ -20,12 +19,12 @@ import type {
 } from "../../lib/brief-v2-adapter"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
-import { IconClose, IconSendUp, IconSparkle, IconUndo } from "./app-icons"
+import { IconClose, IconSendUp, IconSparkle, IconTerminalPrompt, IconUndo } from "./app-icons"
 import { useBriefPrototypeMap } from "../design-agent/useBriefPrototypeMap"
 import { prototypeStateForInsight } from "../design-agent/briefPrototypeMap.helpers"
 import { GenerateModal } from "../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../design-agent/GenerationLoadingScreen"
-import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
+import { useGeneratePrototype } from "../design-agent/useGeneratePrototype"
 import { prototypePath } from "../../lib/routes"
 import { useRouter } from "next/navigation"
 
@@ -153,15 +152,6 @@ function IconChevronRight({ size = 12 }: { size?: number }) {
     </svg>
   )
 }
-function IconTerminalPrompt({ size = 14 }: { size?: number }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-      <polyline points="4 17 10 11 4 5" />
-      <line x1="12" y1="19" x2="20" y2="19" />
-    </svg>
-  )
-}
-
 /** Pure: the primary finding-card CTA. When a PRD already exists for this
  *  insight the button becomes "View PRD" (opens the existing PRD); otherwise
  *  "Generate PRD" (runs the full system), reflecting in-flight as "Generating…".
@@ -423,7 +413,6 @@ export function BriefChat() {
   const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
-  const { workspace } = useWorkspace()
   // Keep the pipeline-status poll mounted (other surfaces rely on its side
   // effects); the brief header no longer reads its result directly.
   usePipelineStatus(activeCompany)
@@ -458,34 +447,28 @@ export function BriefChat() {
   const { entriesByInsight, loading: prototypeMapLoading, refetch: refetchPrototypeMap } =
     useBriefPrototypeMap(briefId)
 
-  // GenerateModal / LoadingScreen state — mounted once at BriefChat level
-  const genLoadingRef = useRef(false)
-  const [genLoading, setGenLoading] = useState(false)
+  // Which prdId/source context to feed the shared generate/view-prototype
+  // hook below — BriefChat's own click-routing (cardPreview) decides WHEN to
+  // generate; the hook owns the GenerateModal/loading-overlay lifecycle once
+  // that decision is made.
   const [genPrdId, setGenPrdId] = useState<number | null>(null)
-  const [genFigmaKey, setGenFigmaKey] = useState<string | null>(null)
-  const [genGithubRepo, setGenGithubRepo] = useState<string | null>(null)
-  const [genProtoId, setGenProtoId] = useState<number | null>(null)
-  const [genModalOpen, setGenModalOpen] = useState(false)
+  const [genFigmaKey] = useState<string | null>(null)
 
-  const handleGenStart = useCallback((ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => {
-    setGenFigmaKey(ctx?.figmaFileKey ?? null)
-    setGenGithubRepo(ctx?.githubRepo ?? null)
-    setGenProtoId(null)
-    genLoadingRef.current = true
-    setGenLoading(true)
-  }, [])
-
-  const handleGenDone = useCallback((result?: DesignAgentGenResult) => {
-    genLoadingRef.current = false
-    setGenLoading(false)
-    setGenModalOpen(false)
-    if (result?.ok && genPrdId != null) {
-      // Carry the prd context: /prototype?prd=<id>, NOT a bare goTo("prototype").
-      // PrototypeRoute resolves the just-built prototype from `?prd=`; a bare nav
-      // drops to the "No PRD selected" empty state (the build looks lost).
-      router.push(prototypePath(genPrdId))
-    }
-  }, [genPrdId, router])
+  // skipExistenceCheck: useBriefPrototypeMap's batch fetch is ALREADY this
+  // card's existence source of truth (see cardPreview below) — a second,
+  // redundant getByPrd here would just re-derive the same answer per card.
+  //
+  // listenForCrossSurfaceGenerating is intentionally OMITTED (defaults false).
+  // Each finding card's View/Generate label comes from the batch map, not from
+  // this hook's `cta` — so listening for the app-wide (unscoped, no-prdId)
+  // da:generating/da:generating-done signal would only ever be DEAD state
+  // here, and worse, a single BriefChat-level hook instance would flip to
+  // "generating" the moment ANY card anywhere started a run. Leaving this off
+  // is a deliberate, documented choice, not a gap.
+  const gen = useGeneratePrototype(genPrdId, {
+    figmaFileKey: genFigmaKey,
+    skipExistenceCheck: true,
+  })
 
   useEffect(() => {
     mountedRef.current = true
@@ -926,13 +909,13 @@ export function BriefChat() {
       } else if (state.hasPrd && !state.prototypeReady && state.prdId != null) {
         // case 2: PRD exists but no prototype → open generate modal
         setGenPrdId(state.prdId)
-        setGenModalOpen(true)
+        gen.openGenerateModal()
       } else {
         // case 3: no PRD → PRD-first flow
         void runGate(() => cardGeneratePrd(finding))
       }
     },
-    [content.briefDetails, entriesByInsight, router, prototypeFlow, runGate, cardGeneratePrd],
+    [content.briefDetails, entriesByInsight, router, prototypeFlow, runGate, cardGeneratePrd, gen.openGenerateModal],
   )
 
   // "View PRD" — open the insight's EXISTING PRD at /prd?prd=<id> (mirrors the
@@ -1183,26 +1166,10 @@ export function BriefChat() {
             </span>
           </div>
         </div>
-      {genModalOpen && genPrdId != null && (
-        <GenerateModal
-          open={genModalOpen}
-          onClose={() => {
-            if (!genLoadingRef.current) setGenModalOpen(false)
-          }}
-          prdId={genPrdId}
-          figmaFileKey={genFigmaKey}
-          savedPreference={workspace?.design_source ?? null}
-          onGenStart={handleGenStart}
-          onKickoff={(id) => setGenProtoId(id)}
-          onGenDone={handleGenDone}
-        />
+      {gen.generateModalProps.open && genPrdId != null && (
+        <GenerateModal {...gen.generateModalProps} />
       )}
-      <GenerationLoadingScreen
-        open={genLoading}
-        figmaFileKey={genFigmaKey}
-        githubRepo={genGithubRepo}
-        prototypeId={genProtoId}
-      />
+      <GenerationLoadingScreen {...gen.loadingScreenProps} />
     </section>
   )
 }

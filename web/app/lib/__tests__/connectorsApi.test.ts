@@ -155,6 +155,12 @@ describe("connectorsApi Slack methods", () => {
     expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/slack`)
     expect(lastCall!.init?.method).toBe("DELETE")
   })
+
+  it("disconnectJira DELETEs the bare endpoint", async () => {
+    await connectorsApi.disconnectJira()
+    expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/jira`)
+    expect(lastCall!.init?.method).toBe("DELETE")
+  })
 })
 
 describe("connectorsApi.testConnection", () => {

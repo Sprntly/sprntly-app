@@ -31,9 +31,14 @@ from app.connectors import (
     github_app,
     google_oauth,
     hubspot_oauth,
+    jira_oauth,
     slack_oauth,
 )
-from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
+from app.connectors.tokens import (
+    TokenEncryptionError,
+    decrypt_token_json,
+    encrypt_token_json,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +134,44 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
     elif provider == hubspot_oauth.HUBSPOT_PROVIDER:
         access_token = token_json.get("access_token") or ""
         user_obj = hubspot_oauth.fetch_token_info(access_token) or {}
+    elif provider == jira_oauth.JIRA_PROVIDER:
+        # Jira access tokens expire in ~1h. Refresh (and persist) an expired
+        # token before probing, so a connection stays "healthy" past the first
+        # hour. Persisting is REQUIRED: Atlassian rotates refresh tokens, so a
+        # throwaway refresh would strand the stored one.
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = jira_oauth.refresh_access_token(refresh_token)
+                token_json = json.loads(jira_oauth.token_payload_to_store(new_json))
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    jira_oauth.JIRA_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except jira_oauth.JiraAuthExpiredError as e:
+                raise ProbeError(f"Jira token rejected: {e}", reason="rejected") from e
+            except Exception:  # noqa: BLE001 — non-auth refresh error → treat as soft
+                logger.warning("Jira probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        cloud_id = (json.loads(row.get("config_json") or "{}")).get("cloud_id") \
+            or jira_oauth.first_cloud_id(access_token)
+        raw_user = (
+            jira_oauth.fetch_authenticated_user(access_token, cloud_id)
+            if cloud_id else {}
+        )
+        # Normalize Jira's field names onto the keys _label_from_user expects.
+        if raw_user:
+            user_obj = {
+                "email": raw_user.get("emailAddress"),
+                "name": raw_user.get("displayName"),
+            }
     elif provider == slack_oauth.SLACK_PROVIDER:
         access_token = token_json.get("access_token") or ""
         # Canonical token-validity check: team.info returns {id, name, domain},

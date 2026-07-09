@@ -51,7 +51,6 @@ from app.design_agent.tools import (
     ToolDef,
     all_tools,
     dispatch,
-    tool_definitions_for_api,
     tool_definitions_for_mode,
     tools_for_mode,
 )
@@ -182,11 +181,6 @@ def test_tool_definitions_for_mode_shape():
 # ═══════════════════════════════════════════════════════════════════════════
 # Layer 1b — Back-compat (AC8, AC10)
 # ═══════════════════════════════════════════════════════════════════════════
-
-
-def test_tool_definitions_for_api_equals_execute_mode():
-    # AC8: the deprecated alias == the execute-mode registry serialisation.
-    assert tool_definitions_for_api() == tool_definitions_for_mode("execute")
 
 
 def test_module_level_asserts_still_pass():

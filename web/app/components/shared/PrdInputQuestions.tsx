@@ -74,6 +74,9 @@ export function changedSectionsLine(sections: string[]): string {
 export type PrdInputQuestionCardProps = {
   question: PrdInputQuestion
   busy?: boolean
+  /** The answer currently being submitted, so the picked option can be marked
+   *  active while the (slow, ~1 min) scoped edit runs. */
+  pendingAnswer?: string | null
   error?: string | null
   /** Resolution line shown once answered (e.g. the changed-sections summary). */
   resolvedLine?: string | null
@@ -83,12 +86,16 @@ export type PrdInputQuestionCardProps = {
   onSubmitText: () => void
 }
 
-/** Pure presentational card for one question — no hooks, no I/O. Renders the
- *  agent chrome + prompt, then EITHER option buttons (escalate) OR a free-text
- *  answer box (need). Once answered it renders a compact resolved line instead. */
+/** Presentational card for one question — one local UI toggle, no I/O. Renders
+ *  the agent chrome + prompt, then selectable option buttons whenever the question
+ *  carries options (BOTH decision resolutions and candidate data values), with an
+ *  "Other…" button that reveals a free-text box for anything the options miss. A
+ *  question with no options falls back to a plain free-text box. Once answered it
+ *  renders a compact resolved line instead. */
 export function PrdInputQuestionCard({
   question,
   busy = false,
+  pendingAnswer = null,
   error = null,
   resolvedLine = null,
   answerText,
@@ -97,8 +104,39 @@ export function PrdInputQuestionCard({
   onSubmitText,
 }: PrdInputQuestionCardProps) {
   const isAnswered = question.status === "answered"
-  const hasChoices = question.tag === "escalate" && question.options.length > 0
+  const hasChoices = question.options.length > 0
   const tagLabel = question.tag === "escalate" ? "DECISION" : "INPUT"
+  // When the question has options, the free-text box is hidden behind an "Other…"
+  // affordance so options lead; a question with no options shows it outright.
+  const [showOther, setShowOther] = useState(false)
+
+  const textForm = (
+    <form
+      className="piq-form"
+      data-testid="prd-input-question-form"
+      onSubmit={(e) => {
+        e.preventDefault()
+        onSubmitText()
+      }}
+    >
+      <textarea
+        className="piq-input"
+        data-testid="prd-input-question-input"
+        value={answerText}
+        placeholder="Provide the answer…"
+        onChange={(e) => onAnswerTextChange(e.target.value)}
+        disabled={busy}
+      />
+      <button
+        type="submit"
+        className="bc-action-btn bc-action-btn--primary"
+        data-testid="prd-input-question-submit"
+        disabled={busy || !answerText.trim()}
+      >
+        {busy ? "Updating PRD…" : "Answer"}
+      </button>
+    </form>
+  )
 
   return (
     <div className="bc-turn piq-turn" data-testid="prd-input-question">
@@ -131,48 +169,55 @@ export function PrdInputQuestionCard({
             ) : null}
           </div>
         ) : hasChoices ? (
-          <div className="piq-choices" data-testid="prd-input-question-choices">
-            {question.options.map((opt, i) => (
+          <>
+            <div className="piq-choices" data-testid="prd-input-question-choices">
+              {question.options.map((opt, i) => {
+                const active = busy && pendingAnswer === opt.label
+                return (
+                  <button
+                    key={`${i}-${opt.label}`}
+                    type="button"
+                    className={`bc-action-btn piq-choice${active ? " piq-choice--active" : ""}`}
+                    data-testid="prd-input-question-choice"
+                    disabled={busy}
+                    aria-busy={active}
+                    onClick={() => onChoose(opt.label)}
+                    title={opt.description ?? undefined}
+                  >
+                    {opt.label}
+                  </button>
+                )
+              })}
+              {/* Escape hatch: none of the proposed options fit → type an exact
+                  answer. Mirrors the design-agent card's "Write your own…". */}
               <button
-                key={`${i}-${opt.label}`}
                 type="button"
-                className="bc-action-btn piq-choice"
-                data-testid="prd-input-question-choice"
+                className={`bc-action-btn piq-choice piq-choice--other${showOther ? " piq-choice--active" : ""}`}
+                data-testid="prd-input-question-other"
                 disabled={busy}
-                onClick={() => onChoose(opt.label)}
-                title={opt.description ?? undefined}
+                aria-expanded={showOther}
+                onClick={() => setShowOther((v) => !v)}
               >
-                {opt.label}
+                Other…
               </button>
-            ))}
-          </div>
+            </div>
+            {showOther ? textForm : null}
+          </>
         ) : (
-          <form
-            className="piq-form"
-            data-testid="prd-input-question-form"
-            onSubmit={(e) => {
-              e.preventDefault()
-              onSubmitText()
-            }}
-          >
-            <textarea
-              className="piq-input"
-              data-testid="prd-input-question-input"
-              value={answerText}
-              placeholder="Provide the answer…"
-              onChange={(e) => onAnswerTextChange(e.target.value)}
-              disabled={busy}
-            />
-            <button
-              type="submit"
-              className="bc-action-btn bc-action-btn--primary"
-              data-testid="prd-input-question-submit"
-              disabled={busy || !answerText.trim()}
-            >
-              {busy ? "Updating PRD…" : "Answer"}
-            </button>
-          </form>
+          textForm
         )}
+
+        {busy && !isAnswered ? (
+          <div
+            className="piq-applying"
+            role="status"
+            aria-live="polite"
+            data-testid="prd-input-question-applying"
+          >
+            <span className="piq-applying-spinner" aria-hidden />
+            <span>Applying your answer — folding it into the PRD (this can take a minute)…</span>
+          </div>
+        ) : null}
 
         {error ? (
           <div className="piq-error" role="alert" data-testid="prd-input-question-error">
@@ -212,6 +257,7 @@ export function PrdInputQuestions({
   const [questions, setQuestions] = useState<PrdInputQuestion[]>([])
   const [answerText, setAnswerText] = useState<Record<number, string>>({})
   const [busyId, setBusyId] = useState<number | null>(null)
+  const [pendingAnswer, setPendingAnswer] = useState<string | null>(null)
   const [errorId, setErrorId] = useState<{ id: number; msg: string } | null>(null)
   const [resolvedLines, setResolvedLines] = useState<Record<number, string>>({})
 
@@ -239,6 +285,7 @@ export function PrdInputQuestions({
       const answer = rawAnswer.trim()
       if (!answer || busyId != null) return
       setBusyId(question.id)
+      setPendingAnswer(answer)
       setErrorId(null)
       try {
         const answerFn = answerQuestion ?? prdApi.answerInputQuestion
@@ -262,6 +309,7 @@ export function PrdInputQuestions({
         })
       } finally {
         setBusyId(null)
+        setPendingAnswer(null)
       }
     },
     [prdId, busyId, answerQuestion, onPrdUpdated],
@@ -282,6 +330,7 @@ export function PrdInputQuestions({
           key={q.id}
           question={q}
           busy={busyId === q.id}
+          pendingAnswer={busyId === q.id ? pendingAnswer : null}
           error={errorId?.id === q.id ? errorId.msg : null}
           resolvedLine={resolvedLines[q.id] ?? null}
           answerText={answerText[q.id] ?? ""}

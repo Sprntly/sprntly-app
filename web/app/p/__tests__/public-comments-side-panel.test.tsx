@@ -16,12 +16,15 @@ import { dirname, resolve } from "node:path"
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PUBLIC_VIEWER_PATH = resolve(HERE, "../PublicTokenViewer.tsx")
+const PUBLIC_CHROME_PATH = resolve(HERE, "../PublicPrototypeChrome.tsx")
 const CSS_PATH = resolve(HERE, "../../components/design-agent/design-agent.css")
 
 let publicViewerSrc = ""
+let chromeSrc = ""
 let cssSrc = ""
 beforeAll(() => {
   publicViewerSrc = readFileSync(PUBLIC_VIEWER_PATH, "utf8")
+  chromeSrc = readFileSync(PUBLIC_CHROME_PATH, "utf8")
   cssSrc = readFileSync(CSS_PATH, "utf8")
 })
 
@@ -47,11 +50,11 @@ function makeComment(overrides: Partial<CommentRecord> = {}): CommentRecord {
 
 // 1 + 3. Public view uses .da-right collapsible sidebar
 describe("Locked scope #1+#3 — da-right collapsible sidebar layout", () => {
-  it("PublicTokenViewer.tsx contains da-right, da-right-top, da-right-body, and da-ready class names", () => {
-    expect(publicViewerSrc).toContain("da-right")
-    expect(publicViewerSrc).toContain("da-right-top")
-    expect(publicViewerSrc).toContain("da-right-body")
-    expect(publicViewerSrc).toContain("da-ready")
+  it("PublicPrototypeChrome.tsx contains da-right, da-right-top, da-right-body, and da-ready class names", () => {
+    expect(chromeSrc).toContain("da-right")
+    expect(chromeSrc).toContain("da-right-top")
+    expect(chromeSrc).toContain("da-right-body")
+    expect(chromeSrc).toContain("da-ready")
   })
 
   it("design-agent.css defines .da-right and .da-right.open selectors", () => {
@@ -61,34 +64,58 @@ describe("Locked scope #1+#3 — da-right collapsible sidebar layout", () => {
 
   it("commentsOpen controls the da-right open class in source (source invariant)", () => {
     // The aside element uses commentsOpen to conditionally append 'open' to da-right
-    expect(publicViewerSrc).toMatch(/da-right.*commentsOpen/)
+    expect(chromeSrc).toMatch(/da-right.*commentsOpen/)
   })
 
   it("aria-hidden on aside reflects commentsOpen (accessible collapse)", () => {
-    expect(publicViewerSrc).toMatch(/aria-hidden=\{commentsOpen\s*\?\s*"false"\s*:\s*"true"\}/)
+    expect(chromeSrc).toMatch(/aria-hidden=\{commentsOpen\s*\?\s*"false"\s*:\s*"true"\}/)
   })
 })
 
 // 2. Old top-chrome CommentsPanel mount removed
 describe("Locked scope #2 — CommentsPanel no longer in PrototypeViewer chrome slot", () => {
-  it("chrome= prop of PrototypeViewer contains only ManualEditOverlay, not CommentsPanel", () => {
+  it("chrome= prop of PrototypeViewer no longer references CommentsPanel", () => {
     // The old layout had CommentsPanel nested inside chrome={<>...</>}; the new
     // layout puts it in the da-right sidebar which is a sibling of PrototypeViewer.
-    // Extract the chrome= prop block and confirm it only contains ManualEditOverlay.
-    const chromeStart = publicViewerSrc.indexOf("chrome={")
+    // The manual-edit overlay's mount here was permanently inert (no prototypeId)
+    // and was removed — chrome is now an explicit no-op. Bound the slice to the
+    // <PrototypeViewer> element's own closing tag (the next "/>" after chrome=),
+    // NOT a fixed char count — a fixed window would overrun into unrelated
+    // sibling JSX/comments once the chrome value shrank to `null`.
+    const chromeStart = chromeSrc.indexOf("chrome={")
     expect(chromeStart).toBeGreaterThan(-1)
-    // Find the chrome={...} block up to its closing /> or /> end of PrototypeViewer.
-    // We know the chrome block is only ManualEditOverlay (one element, no fragment).
-    // Grab a bounded slice from chrome={ to the next />
-    const chromePropSlice = publicViewerSrc.slice(chromeStart, chromeStart + 500)
-    expect(chromePropSlice).toContain("ManualEditOverlay")
+    const closeTagIdx = chromeSrc.indexOf("/>", chromeStart)
+    expect(closeTagIdx).toBeGreaterThan(-1)
+    const chromePropSlice = chromeSrc.slice(chromeStart, closeTagIdx)
     expect(chromePropSlice).not.toContain("CommentsPanel")
+  })
+
+  it("PublicTokenViewer.tsx source no longer references ManualEditOverlay anywhere (test_public_token_viewer_chrome_omits_manual_edit_overlay)", () => {
+    // The manual-edit overlay's trigger only renders with a prototypeId, which
+    // this minimum-disclosure public surface never supplies — the mount was a
+    // permanently-inert placeholder and has been removed (import + chrome prop
+    // reference). Source-invariant check: PublicTokenViewer.tsx is hook-driven
+    // (useParams/useEffect) and not SSR-renderable in this node-env run — see
+    // the sibling design-agent-css.test.tsx convention for the same file.
+    expect(publicViewerSrc).not.toContain("ManualEditOverlay")
+    // The chrome logic moved wholesale into PublicPrototypeChrome.tsx, which
+    // owns the chrome slot now — it must not carry a ManualEditOverlay
+    // reference either (it never did; the mount was inert and removed before
+    // the extraction, per the dead-mount sweep this ticket's Inputs section
+    // references).
+    expect(chromeSrc).not.toContain("ManualEditOverlay")
+  })
+
+  it("test_public_token_viewer_source_has_no_chrome_logic: PublicTokenViewer no longer contains chrome logic (usePinMarking/CommentsPanel/generalComments)", () => {
+    expect(publicViewerSrc).not.toContain("usePinMarking")
+    expect(publicViewerSrc).not.toContain("<CommentsPanel")
+    expect(publicViewerSrc).not.toContain("generalComments")
   })
 
   it("CommentsPanel appears in da-right-body context (sibling aside, not chrome slot)", () => {
     // CommentsPanel must appear AFTER the da-right-body marker in source
-    const rightBodyIdx = publicViewerSrc.indexOf("da-right-body")
-    const commentsPanelIdx = publicViewerSrc.indexOf("<CommentsPanel")
+    const rightBodyIdx = chromeSrc.indexOf("da-right-body")
+    const commentsPanelIdx = chromeSrc.indexOf("<CommentsPanel")
     expect(rightBodyIdx).toBeGreaterThan(-1)
     expect(commentsPanelIdx).toBeGreaterThan(-1)
     // CommentsPanel comes after da-right-body (it's inside the sidebar, not before it)
@@ -99,32 +126,32 @@ describe("Locked scope #2 — CommentsPanel no longer in PrototypeViewer chrome 
 // 5. Name capture form is inside the panel (not a standalone floating overlay)
 describe("Locked scope #5 — name capture form inside the da-right panel", () => {
   it("needsName derives from commentsOpen && viewerNeedsName, with viewerNeedsName = !viewerName as the single source of truth (source invariant)", () => {
-    expect(publicViewerSrc).toMatch(/viewerNeedsName\s*=\s*!viewerName/)
-    expect(publicViewerSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*viewerNeedsName/)
+    expect(chromeSrc).toMatch(/viewerNeedsName\s*=\s*!viewerName/)
+    expect(chromeSrc).toMatch(/needsName\s*=\s*commentsOpen\s*&&\s*viewerNeedsName/)
   })
 
   it("name form is conditionally rendered with commentsOpen && needsName && pattern (source invariant)", () => {
-    expect(publicViewerSrc).toMatch(/commentsOpen\s*&&\s*needsName\s*&&/)
+    expect(chromeSrc).toMatch(/commentsOpen\s*&&\s*needsName\s*&&/)
   })
 
   it("name form data-testids present (source invariant)", () => {
-    expect(publicViewerSrc).toContain('data-testid="viewer-name-form"')
-    expect(publicViewerSrc).toContain('data-testid="viewer-full-name-input"')
-    expect(publicViewerSrc).not.toContain('data-testid="viewer-first-name-input"')
-    expect(publicViewerSrc).not.toContain('data-testid="viewer-last-name-input"')
-    expect(publicViewerSrc).toContain('data-testid="viewer-name-notice"')
+    expect(chromeSrc).toContain('data-testid="viewer-name-form"')
+    expect(chromeSrc).toContain('data-testid="viewer-full-name-input"')
+    expect(chromeSrc).not.toContain('data-testid="viewer-first-name-input"')
+    expect(chromeSrc).not.toContain('data-testid="viewer-last-name-input"')
+    expect(chromeSrc).toContain('data-testid="viewer-name-notice"')
   })
 
   it("PII notice text present (source invariant)", () => {
-    expect(publicViewerSrc).toMatch(/Your name and comment are shared with the prototype/)
+    expect(chromeSrc).toMatch(/Your name and comment are shared with the prototype/)
   })
 
   it("localStorage helpers are present (source invariant)", () => {
-    expect(publicViewerSrc).toContain('"da-viewer-name"')
-    expect(publicViewerSrc).toMatch(/localStorage\.getItem\(VIEWER_NAME_KEY\)/)
-    expect(publicViewerSrc).toMatch(/localStorage\.setItem\(VIEWER_NAME_KEY/)
-    expect(publicViewerSrc).toMatch(/persistViewerName\(name\)/)
-    expect(publicViewerSrc).toMatch(/setViewerName\(name\)/)
+    expect(chromeSrc).toContain('"da-viewer-name"')
+    expect(chromeSrc).toMatch(/localStorage\.getItem\(VIEWER_NAME_KEY\)/)
+    expect(chromeSrc).toMatch(/localStorage\.setItem\(VIEWER_NAME_KEY/)
+    expect(chromeSrc).toMatch(/persistViewerName\(name\)/)
+    expect(chromeSrc).toMatch(/setViewerName\(name\)/)
   })
 })
 
@@ -246,7 +273,7 @@ describe("Resolve suppression — anonymous = view + create only, no resolve aff
   it("public CommentsPanel mount has no prototypeId (canResolve=false by construction)", () => {
     // CommentsPanel container: canResolve = prototypeId != null
     // With no prototypeId on the public mount, canResolve stays false
-    const mountMatch = publicViewerSrc.match(/<CommentsPanel[\s\S]*?\/>/)
+    const mountMatch = chromeSrc.match(/<CommentsPanel[\s\S]*?\/>/)
     expect(mountMatch).not.toBeNull()
     const mount = mountMatch![0]
     expect(mount).toContain("canComment")
@@ -259,40 +286,40 @@ describe("Resolve suppression — anonymous = view + create only, no resolve aff
 // Head controls wiring (carried over from source-invariant tests)
 describe("Head controls source invariants", () => {
   it("public-mark-toggle and public-comments-toggle data-testids present", () => {
-    expect(publicViewerSrc).toContain('data-testid="public-mark-toggle"')
-    expect(publicViewerSrc).toContain('data-testid="public-comments-toggle"')
+    expect(chromeSrc).toContain('data-testid="public-mark-toggle"')
+    expect(chromeSrc).toContain('data-testid="public-comments-toggle"')
   })
 
   it("aria-pressed on both toggles reflects correct state", () => {
-    expect(publicViewerSrc).toMatch(/aria-pressed=\{pin\.markMode\}/)
-    expect(publicViewerSrc).toMatch(/aria-pressed=\{commentsOpen\}/)
+    expect(chromeSrc).toMatch(/aria-pressed=\{pin\.markMode\}/)
+    expect(chromeSrc).toMatch(/aria-pressed=\{commentsOpen\}/)
   })
 
   it("headControls prop is present", () => {
-    expect(publicViewerSrc).toMatch(/headControls=\{/)
+    expect(chromeSrc).toMatch(/headControls=\{/)
   })
 
   it("stageOverlay contains MarkOverlay and PinLayer", () => {
-    expect(publicViewerSrc).toMatch(/stageOverlay=\{/)
-    const start = publicViewerSrc.indexOf("stageOverlay={")
-    const block = publicViewerSrc.slice(start, start + 400)
+    expect(chromeSrc).toMatch(/stageOverlay=\{/)
+    const start = chromeSrc.indexOf("stageOverlay={")
+    const block = chromeSrc.slice(start, start + 400)
     expect(block).toContain("<MarkOverlay")
     expect(block).toContain("onStageClick={pin.handleStageClick}")
     expect(block).toContain("<PinLayer")
   })
 
   it("usePinMarking is wired with createCommentByToken (not authed createComment)", () => {
-    expect(publicViewerSrc).toContain("usePinMarking({")
-    const start = publicViewerSrc.indexOf("usePinMarking({")
-    const call = publicViewerSrc.slice(start, start + 500)
+    expect(chromeSrc).toContain("usePinMarking({")
+    const start = chromeSrc.indexOf("usePinMarking({")
+    const call = chromeSrc.slice(start, start + 500)
     expect(call).toMatch(/onCreate:\s*\(payload\)\s*=>\s*designAgentApi\.createCommentByToken\(/)
-    expect(publicViewerSrc).not.toMatch(/designAgentApi\.createComment\(/)
+    expect(chromeSrc).not.toMatch(/designAgentApi\.createComment\(/)
   })
 
   it("PrototypeMarkLayer has editorMode=false, canResolve=false, no onPinApply/onPinIgnore", () => {
-    expect(publicViewerSrc).toContain("<PrototypeMarkLayer")
-    const start = publicViewerSrc.indexOf("<PrototypeMarkLayer")
-    const mount = publicViewerSrc.slice(start, start + 400)
+    expect(chromeSrc).toContain("<PrototypeMarkLayer")
+    const start = chromeSrc.indexOf("<PrototypeMarkLayer")
+    const mount = chromeSrc.slice(start, start + 400)
     expect(mount).toContain("editorMode={false}")
     expect(mount).toContain("canResolve={false}")
     expect(mount).toContain("onSubmitComment={pin.handlePinSubmit}")

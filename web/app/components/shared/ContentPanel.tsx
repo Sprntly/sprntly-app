@@ -33,9 +33,10 @@ function saveRememberedDest(prdId: number | null, listId: string): void {
     /* storage unavailable — the choice just won't persist */
   }
 }
-import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
-import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
-import type { PrdState } from "../../types/content"
+import { IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf } from "@tabler/icons-react"
+import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
+import { printCombined } from "../../lib/combinedExport"
+import type { PrdState, PrdContent } from "../../types/content"
 
 const TABS = [
   { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
@@ -52,13 +53,40 @@ function clampCpanelWidth(px: number): number {
   return Math.min(max, Math.max(CPANEL_WIDTH_MIN, Math.round(px)))
 }
 
-// Header Share dropdown — Email (mailto) / Download PDF (jsPDF) / Download DOCX
-// (docx). Enabled only when a PRD is loaded. The heavy generators are
-// lazy-imported inside the handlers (see lib/prdExport).
-function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: string, sub: string) => void }) {
+// Header Share dropdown — Download PDF of the combined Evidence + PRD (falls
+// back to a single-PRD export when there's no evidence). Enabled only when a
+// PRD is loaded. The heavy generators are lazy-imported inside the handler.
+function ShareMenu({
+  prd,
+  evidence,
+  onToast,
+}: {
+  prd: PrdState | null
+  evidence: PrdContent | null
+  onToast: (title: string, sub: string) => void
+}) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const enabled = !!prd
+  // An HTML PRD generated from a brief insight almost always has an Evidence
+  // brief, so we offer the combined Evidence + PRD download. The evidence may
+  // not be loaded into context yet (it's populated by the Evidence tab), so the
+  // export handlers fetch it on demand from the PRD's insight when needed.
+  const canFetchEvidence = prd?.briefId != null && prd?.insightIndex != null
+  const combined = !!prd?.html && (!!evidence?.html || canFetchEvidence)
+
+  // Resolve the Evidence brief for a combined export: prefer what's already in
+  // context, else read-load it from the PRD's insight. Returns null when the
+  // insight has no ready HTML evidence (→ caller exports the PRD alone).
+  const resolveEvidence = async (): Promise<PrdContent | null> => {
+    if (evidence?.html) return evidence
+    if (prd?.briefId == null || prd?.insightIndex == null) return null
+    try {
+      return await loadEvidenceByInsight(prd.briefId, prd.insightIndex)
+    } catch {
+      return null
+    }
+  }
 
   useEffect(() => {
     if (!open) return
@@ -69,34 +97,19 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
     return () => document.removeEventListener("mousedown", onDocClick)
   }, [open])
 
-  const handleEmail = () => {
-    if (!prd) return
-    setOpen(false)
-    const link = typeof window !== "undefined" ? window.location.href : ""
-    window.location.href = buildPrdMailto(prd.title, link)
-  }
   const handlePdf = async () => {
     if (!prd) return
     setOpen(false)
     try {
-      // v3 HTML PRD: print the page itself (its print stylesheet strips the
-      // editing chrome) rather than the empty parsed-section PDF.
-      if (prd.html) printPrdHtml(prd)
+      // Combined Evidence + PRD when both are HTML briefs (evidence fetched on
+      // demand); otherwise the v3 HTML PRD prints itself (its print stylesheet
+      // strips the editing chrome), and a markdown PRD uses the section builder.
+      const ev = prd.html ? await resolveEvidence() : null
+      if (ev?.html && prd.html) printCombined(ev, prd)
+      else if (prd.html) printPrdHtml(prd)
       else await downloadPrdPdf(prd)
     } catch {
       onToast("PDF export failed", "Could not generate the PDF. Please try again.")
-    }
-  }
-  const handleDocx = async () => {
-    if (!prd) return
-    setOpen(false)
-    try {
-      // v3 HTML PRD exports as an HTML .doc (Word opens it directly), keeping
-      // the visual system; markdown PRDs use the docx builder.
-      if (prd.html) await downloadPrdHtmlDoc(prd)
-      else await downloadPrdDocx(prd)
-    } catch {
-      onToast("DOCX export failed", "Could not generate the document. Please try again.")
     }
   }
 
@@ -114,26 +127,11 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
       </button>
       {open && enabled && (
         <div className="share-menu share-menu--down open" role="menu">
-          <div className="share-menu-item" role="menuitem" onClick={handleEmail}>
-            <div className="share-menu-item-icon"><IconMail size={14} /></div>
-            <div>
-              <div style={{ fontWeight: 600 }}>Email</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Draft a mail with a link</div>
-            </div>
-          </div>
-          <div className="share-menu-divider" />
           <div className="share-menu-item" role="menuitem" onClick={handlePdf}>
             <div className="share-menu-item-icon"><IconFileTypePdf size={14} /></div>
             <div>
               <div style={{ fontWeight: 600 }}>Download PDF</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export as .pdf</div>
-            </div>
-          </div>
-          <div className="share-menu-item" role="menuitem" onClick={handleDocx}>
-            <div className="share-menu-item-icon"><IconFileTypeDocx size={14} /></div>
-            <div>
-              <div style={{ fontWeight: 600 }}>Download DOCX</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export as .docx</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{combined ? "Evidence + PRD as .pdf" : "Export as .pdf"}</div>
             </div>
           </div>
         </div>
@@ -234,10 +232,7 @@ export function ContentPanel() {
           </div>
             <span className="cpanel-main-name">{content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}</span>
           <div className="cpanel-head-actions">
-            <button className="cpanel-action-btn">
-              <IconDeviceFloppy size={12} />Save
-            </button>
-            <ShareMenu prd={content.prd} onToast={showToast} />
+            <ShareMenu prd={content.prd} evidence={content.evidence} onToast={showToast} />
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
             </button>

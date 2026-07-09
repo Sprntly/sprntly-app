@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react"
 import { designAgentApi, getAccessToken } from "../../lib/api"
 import type { LocateConfirmCandidate } from "./ClarifyingQuestionSurface"
+import { GenerationCancelButton } from "./GenerationCancelButton"
 
 /**
  * The pre-build phase the loading surface should render. Passed from
@@ -374,16 +375,7 @@ export function GenerationLoadingScreen({
                 Notify me when ready
               </button>
             )}
-            {onCancel && (
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm proto-gen-cancel-btn"
-                data-testid="proto-gen-cancel-btn"
-                onClick={handleCancel}
-              >
-                Cancel
-              </button>
-            )}
+            {onCancel && <GenerationCancelButton onCancel={handleCancel} />}
           </div>
         )}
       </div>

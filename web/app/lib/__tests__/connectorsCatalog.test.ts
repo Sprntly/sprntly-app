@@ -134,12 +134,12 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
 })
 
 describe("CONNECTOR_IDS_WITH_OAUTH", () => {
-  it("contains the connectors whose UI surfaces a live OAuth flow (Drive/GitHub + ClickUp + HubSpot + Slack + Figma)", () => {
+  it("contains the connectors whose UI surfaces a live OAuth flow (Drive/GitHub + ClickUp + Jira + HubSpot + Slack + Figma)", () => {
     // Figma is OAuth-only for the app-review resubmission — Figma's reviewers
     // rejected the PAT-based connect path, so it was removed entirely (no
     // figma_pat module, no /figma/pat route).
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
-      ["clickup", "figma", "github", "google_drive", "hubspot", "slack"].sort(),
+      ["clickup", "figma", "github", "google_drive", "hubspot", "jira", "slack"].sort(),
     )
   })
 
@@ -165,6 +165,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "github",
         "google_drive",
         "hubspot",
+        "jira",
         "slack",
       ].sort(),
     )
@@ -204,7 +205,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     ])
   })
 
-  it("shows only the 7 wired connectors (OAuth + API key) and nothing else", () => {
+  it("shows only the 8 wired connectors (OAuth + API key) and nothing else", () => {
     const ids = connectableCatalog()
       .flatMap((c) => c.items)
       .map((i) => i.id)
@@ -217,6 +218,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "github",
         "google_drive",
         "hubspot",
+        "jira",
         "slack",
       ].sort(),
     )
@@ -228,7 +230,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(titles).not.toContain("Monitoring & Reliability")
     const byTitle = (t: string) =>
       connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
-    expect(byTitle("Project Management")).toEqual(["clickup"])
+    expect(byTitle("Project Management")).toEqual(["jira", "clickup"])
     expect(byTitle("Business documentation")).toEqual(["google_drive"])
     expect(byTitle("Code")).toEqual(["github"])
     expect(byTitle("Communication")).toEqual(["slack"])

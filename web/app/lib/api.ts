@@ -1083,6 +1083,10 @@ export const connectorsApi = {
       `/v1/connectors/github/installations/${installationId}/repositories/${repositoryId}`,
     ),
 
+  // ---- Jira ----------------------------------------------------------------
+  disconnectJira: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/jira`),
+
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/clickup`),
@@ -1464,6 +1468,13 @@ export type BriefPrototypeMapEntry = {
 }
 export type BriefPrototypeMap = { brief_id: number; entries: BriefPrototypeMapEntry[] }
 
+/** Bound on the view-grant mint POST. If the request stalls (observed: Safari's
+ *  stricter cookie/ITP handling can hang a same-origin credentialed POST
+ *  indefinitely), the AbortController fires and the fetch rejects, letting
+ *  useViewGrant's existing mint() catch block surface its clean error state
+ *  instead of leaving the caller's promise pending forever. */
+export const VIEW_GRANT_FETCH_TIMEOUT_MS = 10_000
+
 export const designAgentApi = {
   /** Kicks off prototype generation in the background; returns immediately
    *  with a prototype_id. Client should poll designAgentApi.get(id) (via
@@ -1592,8 +1603,19 @@ export const designAgentApi = {
       const token = await accessTokenProvider()
       if (token) headers.Authorization = `Bearer ${token}`
     }
-    const res = await fetch(viewGrantUrl, { method: "POST", headers, credentials: "include" })
-    if (!res.ok) throw new ApiError(res.status, null, "view-grant failed")
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), VIEW_GRANT_FETCH_TIMEOUT_MS)
+    try {
+      const res = await fetch(viewGrantUrl, {
+        method: "POST",
+        headers,
+        credentials: "include",
+        signal: controller.signal,
+      })
+      if (!res.ok) throw new ApiError(res.status, null, "view-grant failed")
+    } finally {
+      clearTimeout(timeoutId)
+    }
   },
   /** Resume iteration on a completed prototype. Empty body. */
   resume: (prototypeId: number) =>
@@ -1914,6 +1936,19 @@ export type TicketPushResult = {
   errors: { task_id: string; title: string; error: string }[]
 }
 
+/** A Jira project the company can push into (target picker). */
+export type JiraProject = {
+  id: string
+  key: string
+  name: string
+}
+
+export type JiraTicketPushResult = {
+  ok: boolean
+  created: { task_id: string; jira_issue_key: string; url: string | null; title: string }[]
+  errors: { task_id: string; title: string; error: string }[]
+}
+
 /** One task to push into ClickUp. `task_id` is the stable ticket key the user
  *  selected; the backend merges its saved edits/comments over these base
  *  fields before creating the ClickUp task. */
@@ -2006,6 +2041,17 @@ export const ticketPushApi = {
     api.post<TicketPushResult>("/v1/tickets/push-clickup", {
       list_id: listId,
       tasks,
+    }),
+  /** Fetch Jira projects the company can push tickets into. 404 when not connected. */
+  listJiraProjects: () =>
+    api.post<{ projects: JiraProject[] }>("/v1/tickets/jira/projects", {}),
+  /** Push the selected tasks into a Jira project as issues. Same override-merge
+   *  behavior as pushToClickUp; returns the created issue keys + URLs. */
+  pushToJira: (projectKey: string, tasks: TicketPushTask[], issueType = "Task") =>
+    api.post<JiraTicketPushResult>("/v1/tickets/push-jira", {
+      project_key: projectKey,
+      tasks,
+      issue_type: issueType,
     }),
 }
 
@@ -2102,6 +2148,17 @@ export const storiesApi = {
   /** Create the reviewed stories as tasks in a ClickUp list (explicit write). */
   pushToClickUp: (listId: string, stories: GeneratedStory[]) =>
     api.post<StoryPushResult>("/v1/stories/push", { list_id: listId, stories }),
+  /** Jira projects the company can push into (target picker). 404 if Jira
+   *  isn't connected. */
+  listJiraProjects: () =>
+    api.post<{ projects: JiraProject[] }>("/v1/stories/jira/projects", {}),
+  /** Create the reviewed stories as issues in a Jira project (explicit write). */
+  pushToJira: (projectKey: string, stories: GeneratedStory[], issueType = "Task") =>
+    api.post<StoryPushResult>("/v1/stories/jira/push", {
+      project_key: projectKey,
+      stories,
+      issue_type: issueType,
+    }),
   /** Bidirectional read: current ClickUp state (status/assignee/url) for tickets
    *  already synced to a list, keyed by ticket id. Unsynced tickets are absent. */
   pullClickUpStatus: (listId: string, ticketIds: string[]) =>

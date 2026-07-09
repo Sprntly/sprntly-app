@@ -209,6 +209,32 @@ describe("ChatScreen — pinned brief tab", () => {
     expect(tabBar().getAllByText(NEW_CHAT_TITLE)).toHaveLength(1)
   })
 
+  it("'+' keeps insight-bound tabs (briefMeta) with an empty thread, prunes blank ones", () => {
+    // The "+" handler prunes DISPOSABLE tabs (empty thread AND no insight/PRD) to
+    // keep the strip clean. A PRD/insight tab opens with an empty thread — its
+    // insight lives in the opening insight card, not a thread turn — so briefMeta
+    // (not thread length) is what marks it non-disposable and keeps it alive. A
+    // genuinely blank tab (no thread, no briefMeta) is still pruned.
+    localStorage.setItem(
+      "sprntly_chat_tabs_acme",
+      JSON.stringify([
+        { id: "t-prd", title: "My PRD", thread: [], dbConvId: null, briefMeta: { briefId: 1, insightIndex: 0 } },
+        { id: "t-empty", title: "Some chat", thread: [], dbConvId: null, briefMeta: null },
+      ]),
+    )
+    renderScreen()
+    expect(tabBar().getByText("My PRD")).toBeTruthy()
+    expect(tabBar().getByText("Some chat")).toBeTruthy()
+
+    act(() => { fireEvent.click(tabBar().getByTitle("New chat")) })
+
+    // The insight-bound PRD tab survives; the blank "Some chat" is pruned; a
+    // fresh "New chat" tab is appended.
+    expect(tabBar().getByText("My PRD")).toBeTruthy()
+    expect(tabBar().queryByText("Some chat")).toBeNull()
+    expect(tabBar().getByText(NEW_CHAT_TITLE)).toBeTruthy()
+  })
+
   it("first message renames the 'New chat' tab in place (no duplicate tab)", async () => {
     renderScreen()
     act(() => { fireEvent.click(tabBar().getByTitle("New chat")) })

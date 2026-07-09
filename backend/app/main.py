@@ -48,6 +48,7 @@ from app.routes import (
     datasets as datasets_routes,
     design_agent,
     design_agent_bundle,
+    design_agent_comments,
     feedback,
     ingest,
     internal_mcp,
@@ -282,6 +283,12 @@ app.include_router(internal.router)
 # /by-token/{token}/bundle/{asset_path:path} routes resolve before the
 # single-segment GET /{prototype_id} catch-all in design_agent.router.
 app.include_router(design_agent_bundle.router)
+# Comments router — same prefix as design_agent.router, registered before it to
+# mirror the bundle router's placement convention above. Not load-bearing for
+# these routes (all are 2-or-3-segment paths, safe in either registration order
+# — see design_agent_comments.py's module docstring), but kept consistent with
+# the established pattern rather than introducing a second convention.
+app.include_router(design_agent_comments.router)
 app.include_router(design_agent.router)
 app.include_router(multi_agent.router)
 app.include_router(pipeline.router)

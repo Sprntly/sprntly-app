@@ -296,6 +296,8 @@ def env(isolated_settings, monkeypatch, tmp_path):
 
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)
+    import app.routes.design_agent_comments as comment_routes_mod
+    importlib.reload(comment_routes_mod)  # rebind to the reloaded require_company + db helpers
     import app.main as main_mod
     importlib.reload(main_mod)
 

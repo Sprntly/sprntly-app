@@ -6584,6 +6584,51 @@
     color: var(--danger);
   }
 
+  /* The scoped edit that folds an answer into the PRD is a slow (~1 min) model
+     call. Without visible progress the disabled buttons read as broken, so show
+     a spinner + reassuring copy and mark the picked option active. */
+  .piq-choice--active {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* The "Other…" escape hatch reads as a secondary affordance next to the
+     concrete options — dashed outline, muted until hovered/opened. */
+  .piq-choice--other {
+    border-style: dashed;
+    color: var(--ink-3);
+  }
+
+  .piq-choice--other:hover:not(:disabled) {
+    color: var(--ink-2);
+  }
+
+  .piq-applying {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 10px;
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+
+  .piq-applying-spinner {
+    flex: none;
+    width: 13px;
+    height: 13px;
+    border: 2px solid currentColor;
+    border-top-color: transparent;
+    border-radius: 50%;
+    display: inline-block;
+    animation: piq-spin 0.7s linear infinite;
+  }
+
+  @keyframes piq-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   /* Composer dock — transparent so the composer + suggestions float over the
      thread rather than sitting on a grey footer panel. */
   .bc-dock {
