@@ -47,11 +47,13 @@ def replace_questions(prd_id: int, questions: list[dict[str, Any]]) -> list[dict
         if not prompt:
             continue
         tag = q.get("tag") if q.get("tag") in _LEGAL_TAG else "need"
+        # Both ESCALATE (product decision) and NEED (missing data) items carry
+        # selectable answer options: extraction proposes decision resolutions for
+        # ESCALATE and candidate values/ranges for NEED. The UI renders them as
+        # buttons with an "Other…" escape hatch to free text, so an empty options
+        # list (older rows / an extraction that produced none) still degrades to a
+        # plain free-text box.
         options = q.get("options") or []
-        # Only ESCALATE (product-decision) items carry answer buttons; a NEED item
-        # is missing data → free text, so its options are always empty.
-        if tag != "escalate":
-            options = []
         rows.append({
             "prd_id": prd_id,
             "ordinal": i,

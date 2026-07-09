@@ -6592,6 +6592,17 @@
     color: var(--accent);
   }
 
+  /* The "Other…" escape hatch reads as a secondary affordance next to the
+     concrete options — dashed outline, muted until hovered/opened. */
+  .piq-choice--other {
+    border-style: dashed;
+    color: var(--ink-3);
+  }
+
+  .piq-choice--other:hover:not(:disabled) {
+    color: var(--ink-2);
+  }
+
   .piq-applying {
     display: flex;
     align-items: center;
