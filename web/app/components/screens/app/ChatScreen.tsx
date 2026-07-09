@@ -951,20 +951,66 @@ export function ChatScreen() {
     openContentPanel("prd")
   }, [prdPanelPending, openContentPanel])
 
-  // Keep the content panel scoped to real chat tabs. The panel is a single global
-  // overlay; "View PRD" on a brief finding spawns a PRD chat tab and slides the
-  // panel open over it (wanted). But because the panel is global, switching back
-  // to the pinned brief tab would leave it hanging over the weekly brief (not
-  // wanted). When the user SWITCHES to the brief tab, close any panel a PRD tab
-  // left open. Guarded on an actual tab switch, so the brief's own inline actions
-  // (Tickets / Evidence / multi-agent — which open the panel WITHOUT a tab
-  // switch) are untouched and stay visible.
+  // Keep the content panel scoped to the tab that owns it. The panel is a single
+  // global overlay; "View PRD" on a brief finding spawns a PRD chat tab and slides
+  // the panel open over it (wanted). But because the panel is global, switching to
+  // ANOTHER tab that has no PRD of its own — the pinned brief tab, or a fresh "New
+  // chat" — would leave it hanging there (not wanted). So on an actual tab switch,
+  // close a lingering panel unless the tab we land on owns a PRD (already loaded
+  // or mid-generation) or a PRD open is imminent (prdPanelPending, set by
+  // openPrdInTab a commit before it opens the panel). Guarded on the switch, so
+  // the brief's own inline actions (Tickets / Evidence / multi-agent — which open
+  // the panel WITHOUT a tab switch) are untouched and stay visible.
   const prevTabForPanelRef = useRef(activeTabId)
   useEffect(() => {
     const switchedTab = prevTabForPanelRef.current !== activeTabId
     prevTabForPanelRef.current = activeTabId
-    if (switchedTab && isBriefTab && contentPanelTab) closeContentPanel()
-  }, [activeTabId, isBriefTab, contentPanelTab, closeContentPanel])
+    if (!switchedTab || !contentPanelTab || prdPanelPending) return
+    if (isBriefTab) { closeContentPanel(); return }
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab?.prd && !tab?.prdGenerating) closeContentPanel()
+  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, closeContentPanel])
+
+  // ── Restore the PRD panel after a reload ───────────────────────────────────
+  // Tabs persist across reloads (localStorage) but their cached `prd` does NOT —
+  // it's stripped to keep storage small (see the slim persist above). So a reload
+  // that lands back on a PRD-bound chat tab used to show the tab with the panel
+  // CLOSED, forcing a manual "View PRD" click. Here we reopen it automatically:
+  // once the brief prototype map resolves and confirms a PRD exists in the DB for
+  // the ACTIVE tab's insight, open the panel and LOAD the saved PRD by id
+  // (handleOpenPrd takes the DB-load branch — never a regeneration).
+  //
+  // Keyed on the active tab (not a captured mount tab): `activeCompany` resolves
+  // asynchronously and the company-change effect re-seeds the active tab a commit
+  // or two after mount, so "the tab we reloaded onto" isn't known at first render.
+  // Instead we handle each tab AT MOST ONCE (autoRestoredTabsRef) the first time
+  // it's active with its map resolved — robust to that timing. Guards keep the
+  // panel off the wrong surface:
+  //   • Never the brief tab, and never a plain (non-PRD) chat → a reload (or
+  //     switch) onto a new chat leaves the panel closed.
+  //   • Skips when the tab already holds/loads a PRD or a panel is already open
+  //     (openPrdInTab / a manual open handled it).
+  //   • Once-per-tab, so a manual panel-close is never immediately undone.
+  //   • Waits out chatMapLoading so it doesn't give up before the DB truth lands.
+  const autoRestoredTabsRef = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    if (!activeTabId || isBriefTab) return
+    if (autoRestoredTabsRef.current.has(activeTabId)) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    // Not a PRD-bound tab, already loaded/loading, or a panel is already open →
+    // mark handled so we don't reconsider it every render.
+    if (!tab || !tab.briefMeta || tab.prd || tab.prdGenerating || contentPanelTab) {
+      autoRestoredTabsRef.current.add(activeTabId)
+      return
+    }
+    // Still fetching whether a DB PRD exists — wait for the next resolve (do NOT
+    // mark handled yet, or we'd give up before the map lands).
+    if (chatMapLoading) return
+    autoRestoredTabsRef.current.add(activeTabId)
+    if (chatInsightState?.hasPrd && chatInsightState.prdId != null) {
+      void handleOpenPrd()
+    }
+  }, [activeTabId, isBriefTab, contentPanelTab, chatMapLoading, chatInsightState, handleOpenPrd])
 
   // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
   // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps

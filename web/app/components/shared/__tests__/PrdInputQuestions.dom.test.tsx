@@ -111,6 +111,30 @@ describe("PrdInputQuestionCard", () => {
     expect(screen.queryByTestId("prd-input-question-choice")).toBeNull()
   })
 
+  it("shows an in-progress indicator and marks the picked option while busy", () => {
+    render(
+      <PrdInputQuestionCard
+        question={escalateQ}
+        busy
+        pendingAnswer="Off"
+        answerText=""
+        onAnswerTextChange={() => {}}
+        onChoose={() => {}}
+        onSubmitText={() => {}}
+      />,
+    )
+    // The applying status is announced and every option is disabled.
+    expect(screen.getByTestId("prd-input-question-applying")).toBeTruthy()
+    const choices = screen.getAllByTestId("prd-input-question-choice")
+    expect(choices.every((c) => (c as HTMLButtonElement).disabled)).toBe(true)
+    // Only the picked option is marked active/aria-busy.
+    const off = choices.find((c) => c.textContent === "Off")!
+    expect(off.getAttribute("aria-busy")).toBe("true")
+    expect(off.className).toContain("piq-choice--active")
+    const on = choices.find((c) => c.textContent === "On")!
+    expect(on.getAttribute("aria-busy")).toBe("false")
+  })
+
   it("shows a resolved line once answered", () => {
     render(
       <PrdInputQuestionCard

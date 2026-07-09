@@ -35,7 +35,8 @@ function saveRememberedDest(prdId: number | null, listId: string): void {
 }
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
 import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
-import type { PrdState } from "../../types/content"
+import { canExportCombined, printCombined, downloadCombinedDoc } from "../../lib/combinedExport"
+import type { PrdState, PrdContent } from "../../types/content"
 
 const TABS = [
   { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
@@ -55,10 +56,21 @@ function clampCpanelWidth(px: number): number {
 // Header Share dropdown — Email (mailto) / Download PDF (jsPDF) / Download DOCX
 // (docx). Enabled only when a PRD is loaded. The heavy generators are
 // lazy-imported inside the handlers (see lib/prdExport).
-function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: string, sub: string) => void }) {
+function ShareMenu({
+  prd,
+  evidence,
+  onToast,
+}: {
+  prd: PrdState | null
+  evidence: PrdContent | null
+  onToast: (title: string, sub: string) => void
+}) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const enabled = !!prd
+  // Evidence + PRD are combined into one download when both are HTML briefs
+  // (the current default); otherwise we fall back to the single-PRD export.
+  const combined = canExportCombined(evidence, prd)
 
   useEffect(() => {
     if (!open) return
@@ -79,9 +91,11 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
     if (!prd) return
     setOpen(false)
     try {
-      // v3 HTML PRD: print the page itself (its print stylesheet strips the
-      // editing chrome) rather than the empty parsed-section PDF.
-      if (prd.html) printPrdHtml(prd)
+      // Combined Evidence + PRD when both are HTML briefs; otherwise the v3 HTML
+      // PRD prints itself (its print stylesheet strips the editing chrome), and
+      // a markdown PRD uses the parsed-section PDF builder.
+      if (combined) printCombined(evidence, prd)
+      else if (prd.html) printPrdHtml(prd)
       else await downloadPrdPdf(prd)
     } catch {
       onToast("PDF export failed", "Could not generate the PDF. Please try again.")
@@ -91,9 +105,10 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
     if (!prd) return
     setOpen(false)
     try {
-      // v3 HTML PRD exports as an HTML .doc (Word opens it directly), keeping
-      // the visual system; markdown PRDs use the docx builder.
-      if (prd.html) await downloadPrdHtmlDoc(prd)
+      // Combined Evidence + PRD as one HTML .doc when both are HTML briefs;
+      // otherwise the single v3 HTML PRD as .doc, or the markdown docx builder.
+      if (combined) await downloadCombinedDoc(evidence, prd)
+      else if (prd.html) await downloadPrdHtmlDoc(prd)
       else await downloadPrdDocx(prd)
     } catch {
       onToast("DOCX export failed", "Could not generate the document. Please try again.")
@@ -126,14 +141,14 @@ function ShareMenu({ prd, onToast }: { prd: PrdState | null; onToast: (title: st
             <div className="share-menu-item-icon"><IconFileTypePdf size={14} /></div>
             <div>
               <div style={{ fontWeight: 600 }}>Download PDF</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export as .pdf</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{combined ? "Evidence + PRD as .pdf" : "Export as .pdf"}</div>
             </div>
           </div>
           <div className="share-menu-item" role="menuitem" onClick={handleDocx}>
             <div className="share-menu-item-icon"><IconFileTypeDocx size={14} /></div>
             <div>
               <div style={{ fontWeight: 600 }}>Download DOCX</div>
-              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>Export as .docx</div>
+              <div style={{ fontSize: 11, color: "var(--muted)", fontWeight: 400 }}>{combined ? "Evidence + PRD as .doc" : "Export as .docx"}</div>
             </div>
           </div>
         </div>
@@ -237,7 +252,7 @@ export function ContentPanel() {
             <button className="cpanel-action-btn">
               <IconDeviceFloppy size={12} />Save
             </button>
-            <ShareMenu prd={content.prd} onToast={showToast} />
+            <ShareMenu prd={content.prd} evidence={content.evidence} onToast={showToast} />
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
             </button>
