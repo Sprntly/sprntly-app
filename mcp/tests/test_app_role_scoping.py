@@ -57,6 +57,7 @@ async def test_developer_token_never_lists_pm_only_tools():
         "get_ticket",
         "get_prd",
         "get_prd_prototype",
+        "get_prd_evidence",
         "update_ticket_fields",
         "update_ticket_description",
         "add_ticket_comment",

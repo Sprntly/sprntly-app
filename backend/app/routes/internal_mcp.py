@@ -221,6 +221,48 @@ def prd_prototype(prd_id: int, company_id: str) -> dict[str, Any]:
     }
 
 
+# Evidence content can be a large self-contained HTML brief (variant v3) —
+# cap what rides back through the MCP so one tool call can't flood an AI
+# client's context. Ready markdown briefs are far below this.
+_EVIDENCE_CONTENT_CAP = 150_000
+
+
+@data_router.get(
+    "/prd/{prd_id}/evidence", dependencies=[Depends(_require_internal_key)]
+)
+def prd_evidence(prd_id: int, company_id: str) -> dict[str, Any]:
+    """The research evidence behind a PRD — the provenance for WHY this PRD
+    exists, for the MCP get_prd_evidence tool.
+
+    A PRD is generated from one brief insight (prds.brief_id +
+    prds.insight_index), and evidence rows are keyed by that same pair, so
+    the PRD row is the join. Variant-permissive (newest ready/generating row
+    of any format era) like GET /v1/evidence/{id}; 404 when none exists yet.
+    Tenant-scoped via require_owned_prd (prd → brief → dataset → company)."""
+    from app.db.evidences import find_latest_evidence
+    from app.deps.ownership import require_owned_prd
+
+    prd = require_owned_prd(prd_id, company_id)  # raises 404 if not this company's
+    row = find_latest_evidence(prd["brief_id"], prd["insight_index"])
+    if not row:
+        raise HTTPException(404, "no_evidence")
+
+    content = row.get("payload_md") or ""
+    truncated = len(content) > _EVIDENCE_CONTENT_CAP
+    return {
+        "evidence_id": row["id"],
+        "prd_id": prd_id,
+        "title": row.get("title"),
+        "status": row.get("status"),
+        "variant": row.get("variant"),
+        # v3 rows hold a self-contained HTML visual brief; earlier variants
+        # are markdown. Tell the client which it's reading.
+        "content_format": "html" if row.get("variant") == "v3" else "markdown",
+        "content": content[:_EVIDENCE_CONTENT_CAP],
+        "content_truncated": truncated,
+    }
+
+
 @data_router.get(
     "/tickets/{ticket_key}/data", dependencies=[Depends(_require_internal_key)]
 )

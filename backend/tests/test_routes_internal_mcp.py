@@ -48,6 +48,7 @@ def test_routes_401_without_internal_key(isolated_settings, monkeypatch):
     assert client.get("/internal/mcp/backlog", params={"company_id": "x"}).status_code == 401
     assert client.get("/internal/mcp/prd/latest", params={"company_id": "x"}).status_code == 401
     assert client.get("/internal/mcp/prd/1/prototype", params={"company_id": "x"}).status_code == 401
+    assert client.get("/internal/mcp/prd/1/evidence", params={"company_id": "x"}).status_code == 401
     assert (
         client.get("/internal/mcp/tickets/ABC-1/data", params={"company_id": "x"}).status_code
         == 401
@@ -548,6 +549,65 @@ def test_get_prd_prototype_404s(isolated_settings, monkeypatch):
     _seed_prd_chain(db, company_id=cid_a, slug="acme", prd_id=102)
     assert client.get(
         "/internal/mcp/prd/102/prototype", params={"company_id": cid_a}, headers=_headers()
+    ).status_code == 404
+
+
+def test_get_prd_evidence_resolves_via_prd_insight(isolated_settings, monkeypatch):
+    """Evidence is keyed by (brief_id, insight_index) — the PRD row is the
+    join. Latest ready/generating row of ANY variant wins (permissive read),
+    and v3 rows are flagged as html content."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_chain(db, company_id=cid, slug="acme", prd_id=101)
+    prd = db.table("prds").select("*").eq("id", 101).execute().data[0]
+    db.table("evidences").insert(
+        {"brief_id": prd["brief_id"], "insight_index": prd["insight_index"],
+         "title": "Old evidence", "payload_md": "# old", "status": "ready", "variant": "v2"}
+    ).execute()
+    db.table("evidences").insert(
+        {"brief_id": prd["brief_id"], "insight_index": prd["insight_index"],
+         "title": "Why this matters", "payload_md": "<html>brief</html>",
+         "status": "ready", "variant": "v3"}
+    ).execute()
+
+    r = client.get(
+        "/internal/mcp/prd/101/evidence", params={"company_id": cid}, headers=_headers()
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["title"] == "Why this matters"  # newest row wins
+    assert body["content"] == "<html>brief</html>"
+    assert body["content_format"] == "html"
+    assert body["content_truncated"] is False
+
+    # Markdown-era rows are flagged as markdown.
+    db.table("evidences").insert(
+        {"brief_id": prd["brief_id"], "insight_index": prd["insight_index"],
+         "title": "Newer md", "payload_md": "# md", "status": "ready", "variant": "v2"}
+    ).execute()
+    again = client.get(
+        "/internal/mcp/prd/101/evidence", params={"company_id": cid}, headers=_headers()
+    ).json()
+    assert again["content_format"] == "markdown"
+
+
+def test_get_prd_evidence_404s(isolated_settings, monkeypatch):
+    """No evidence yet → 404; foreign company's prd_id → 404 via
+    require_owned_prd (no existence disclosure)."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid_a, cid_b = uuid.uuid4().hex, uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid_a, slug="acme", user_id="u-a")
+    _seed_company_and_member(db, company_id=cid_b, slug="globex", user_id="u-b")
+    _seed_prd_chain(db, company_id=cid_a, slug="acme", prd_id=101)
+
+    assert client.get(
+        "/internal/mcp/prd/101/evidence", params={"company_id": cid_a}, headers=_headers()
+    ).status_code == 404
+    assert client.get(
+        "/internal/mcp/prd/101/evidence", params={"company_id": cid_b}, headers=_headers()
     ).status_code == 404
 
 

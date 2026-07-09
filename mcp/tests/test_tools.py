@@ -192,6 +192,24 @@ async def test_get_prd_prototype_passthrough_for_developer(developer_ctx, monkey
 
 
 @pytest.mark.asyncio
+async def test_get_prd_evidence_passthrough_for_developer(developer_ctx, monkeypatch):
+    """get_prd_evidence is a ticket/PRD-family tool: NOT role-gated, company
+    id injected from context, friendly message on 404/None."""
+    calls = _stub_backend(
+        monkeypatch,
+        {"/prd/5/evidence": {"evidence_id": 3, "content": "# why", "content_format": "markdown"}},
+    )
+    result = await tools._get_prd_evidence_impl(5)
+    assert result["content"] == "# why"
+    assert calls == [("/prd/5/evidence", {"company_id": "co-1"})]
+
+    _stub_backend(monkeypatch, {"/prd/8/evidence": None})
+    missing = await tools._get_prd_evidence_impl(8)
+    assert "No evidence" in missing["message"]
+    assert "PRD 8" in missing["message"]
+
+
+@pytest.mark.asyncio
 async def test_get_prd_passthrough_and_friendly_when_none(company_ctx, monkeypatch):
     calls = _stub_backend(monkeypatch, {"/prd/5": {"title": "My PRD"}})
     result = await tools._get_prd_impl(5)

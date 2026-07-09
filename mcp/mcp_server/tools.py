@@ -146,6 +146,17 @@ async def _get_prd_prototype_impl(prd_id: int) -> dict:
     return result
 
 
+async def _get_prd_evidence_impl(prd_id: int) -> dict:
+    ctx = require_current_company()
+    result = await get_json(f"/prd/{prd_id}/evidence", company_id=ctx.company_id)
+    if result is None:
+        return {
+            "message": f"No evidence has been generated for PRD {prd_id} yet "
+            "(or the PRD was not found in your workspace)."
+        }
+    return result
+
+
 async def _update_ticket_fields_impl(
     ticket_key: str,
     status: str | None = None,
@@ -302,6 +313,17 @@ def register_tools(mcp: FastMCP) -> None:
         `public_url` is a no-login share link that only exists if a PM has
         already shared the prototype — sharing cannot be enabled from here."""
         return await _get_prd_prototype_impl(prd_id)
+
+    @mcp.tool()
+    async def get_prd_evidence(prd_id: int) -> dict:
+        """Get the research evidence behind a PRD — the customer signals and
+        analysis explaining WHY this PRD (and its tickets) exist. `prd_id`
+        comes from a ticket's `prd_id` (list_tickets / get_ticket) or from
+        get_prd. `content` is the evidence brief itself; check
+        `content_format` — "markdown" is directly readable, "html" is a
+        self-contained visual page (read the text within it). A "generating"
+        status means the content isn't ready yet."""
+        return await _get_prd_evidence_impl(prd_id)
 
     @mcp.tool()
     async def update_ticket_fields(
