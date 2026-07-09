@@ -11,8 +11,6 @@ import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { PrdSections } from "./PrdSections"
 import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
-import { SendToClaudeCode } from "./SendToClaudeCode"
-import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { EmptyPane } from "./EmptyPane"
 import { ApiError, multiAgentApi, prdApi } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
@@ -23,11 +21,9 @@ import {
   IconLinkInsert,
   IconListBullet,
   IconRedo,
-  IconTerminalPrompt,
   IconUndo,
 } from "./app-icons"
 import type { PrdSection, PrdState } from "../../types/content"
-import footerStyles from "./design-agent-prd-footer.module.css"
 
 const PRD_DRAFT_KEY = (prdId: number) => `sprntly_prd_draft_${prdId}`
 function loadDraft(prdId: number): string | null {
@@ -87,21 +83,6 @@ function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; saveStatus:
         {hasDoc ? statusLabel : "No draft"}
       </div>
     </div>
-  )
-}
-
-function ViewPrototypeButton({ prdId, figmaFileKey }: { prdId: number; figmaFileKey?: string | null }) {
-  return (
-    <GeneratePrototypeCTA
-      prdId={prdId}
-      figmaFileKey={figmaFileKey}
-      render={({ label, onClick, disabled }) => (
-        <button type="button" className="fc-btn-secondary" disabled={disabled} onClick={onClick}>
-          <IconTerminalPrompt size={13} />
-          {label}
-        </button>
-      )}
-    />
   )
 }
 
@@ -347,13 +328,6 @@ export function PrdPanelContent() {
               <path d="M5 7L1 3h8z" />
             </svg>
           </button>
-          {/* Hand the PRD off to a coding agent: generate (and cache) the
-              machine-readable Implementation Spec on demand and copy it to the
-              clipboard. The machine PRD is no longer a viewable tab. */}
-          <div className={`prd-bottom-actions ${footerStyles.actions}`}>
-            <ViewPrototypeButton prdId={prd.prd_id} figmaFileKey={prd.figma_file_key ?? null} />
-            <SendToClaudeCode prdId={prd.prd_id} onToast={showToast} />
-          </div>
         </div>
       )}
 
