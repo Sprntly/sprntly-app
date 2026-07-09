@@ -972,7 +972,8 @@ export function ChatScreen() {
     const switchedTab = prevTabForPanelRef.current !== activeTabId
     prevTabForPanelRef.current = activeTabId
     if (!switchedTab || prdPanelPending) return
-    if (isBriefTab) { if (contentPanelTab) closeContentPanel(); return }
+    // Brief tab or the tab-less landing → no PRD to show; drop any lingering panel.
+    if (isBriefTab || !activeTabId) { if (contentPanelTab) closeContentPanel(); return }
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
     const ownsPrd = !!tab?.prd || !!tab?.prdGenerating
       || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
