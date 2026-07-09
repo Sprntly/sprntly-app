@@ -9,7 +9,7 @@
 // closed. These tests seed localStorage (as a reload would leave it), mount the
 // REAL ChatScreen, and assert the panel + the DB-load vs regenerate choice.
 import * as React from "react"
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -124,6 +124,8 @@ function seedPersistedTab(tab: Record<string, unknown>, activeId: string) {
   localStorage.setItem("sprntly_chat_active_tab_acme", activeId)
 }
 
+const tabBar = () => within(screen.getByTestId("chat-tab-bar"))
+
 beforeEach(() => {
   localStorage.clear()
   runPrdGeneration.mockClear()
@@ -153,6 +155,32 @@ describe("ChatScreen — PRD panel restore after reload", () => {
     // runPrdGeneration was never called.
     await waitFor(() => expect(panelProbe()).toBe("prd"))
     await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(42))
+    expect(runPrdGeneration).not.toHaveBeenCalled()
+  })
+
+  it("restores when the PRD tab becomes active AFTER mount (async company/tab re-seed)", async () => {
+    // The panel restore must key on the active tab, not a tab captured at first
+    // render — because `activeCompany` resolves asynchronously and re-seeds the
+    // active tab a commit later. Model that "resolve-later" by mounting on the
+    // brief tab, then activating the PRD tab; the panel must still restore.
+    mapState = {
+      entriesByInsight: new Map([[0, { prd_id: 55, prd_title: "Later PRD", prototype: null }]]),
+      loading: false,
+    }
+    localStorage.setItem(
+      "sprntly_chat_tabs_acme",
+      JSON.stringify([{ id: "tab-late", title: "PRD · Later PRD", thread: [], dbConvId: null, briefMeta: { briefId: 3, insightIndex: 0 }, insightBody: null }]),
+    )
+    localStorage.setItem("sprntly_chat_active_tab_acme", "brief") // land on brief first
+
+    await act(async () => { mountApp() })
+    // On the brief tab, no restore.
+    expect(panelProbe()).toBe("none")
+
+    // Now the PRD tab becomes active (as the company re-seed would do).
+    await act(async () => { fireEvent.click(tabBar().getByText("PRD · Later PRD")) })
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(55))
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 
