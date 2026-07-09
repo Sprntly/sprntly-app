@@ -951,25 +951,43 @@ export function ChatScreen() {
     openContentPanel("prd")
   }, [prdPanelPending, openContentPanel])
 
-  // Keep the content panel scoped to the tab that owns it. The panel is a single
-  // global overlay; "View PRD" on a brief finding spawns a PRD chat tab and slides
-  // the panel open over it (wanted). But because the panel is global, switching to
-  // ANOTHER tab that has no PRD of its own — the pinned brief tab, or a fresh "New
-  // chat" — would leave it hanging there (not wanted). So on an actual tab switch,
-  // close a lingering panel unless the tab we land on owns a PRD (already loaded
-  // or mid-generation) or a PRD open is imminent (prdPanelPending, set by
-  // openPrdInTab a commit before it opens the panel). Guarded on the switch, so
-  // the brief's own inline actions (Tickets / Evidence / multi-agent — which open
-  // the panel WITHOUT a tab switch) are untouched and stay visible.
+  // The content panel is a single global overlay, but it must FOLLOW the active
+  // tab: a PRD-bound tab shows its PRD on the right; the brief tab or a plain chat
+  // shows nothing. Because the panel is global, this has to be reconciled on every
+  // genuine tab switch. On switching to…
+  //   • a PRD-bound tab (a PRD already cached/generating, or one in the DB) → open
+  //     it (handleOpenPrd syncs the cached PRD or DB-loads by id). This is what
+  //     makes REFOCUSING a PRD tab bring its panel back, instead of leaving it
+  //     closed after you'd visited another tab.
+  //   • the brief tab, or a plain (non-PRD) chat → close any lingering panel so it
+  //     never hangs over the wrong surface.
+  // Gated on an actual switch (prevTabForPanelRef) so a manual panel-close while
+  // staying on a tab isn't immediately undone, and so the brief's own inline
+  // actions (Tickets / Evidence / multi-agent — which open the panel WITHOUT a
+  // switch) are untouched. `prdPanelPending` (set by openPrdInTab a commit before
+  // it opens the panel) suppresses the reconcile during that hand-off.
+  const autoRestoredTabsRef = useRef<Set<string>>(new Set())
   const prevTabForPanelRef = useRef(activeTabId)
   useEffect(() => {
     const switchedTab = prevTabForPanelRef.current !== activeTabId
     prevTabForPanelRef.current = activeTabId
-    if (!switchedTab || !contentPanelTab || prdPanelPending) return
-    if (isBriefTab) { closeContentPanel(); return }
+    if (!switchedTab || prdPanelPending) return
+    // Brief tab or the tab-less landing → no PRD to show; drop any lingering panel.
+    if (isBriefTab || !activeTabId) { if (contentPanelTab) closeContentPanel(); return }
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
-    if (!tab?.prd && !tab?.prdGenerating) closeContentPanel()
-  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, closeContentPanel])
+    const ownsPrd = !!tab?.prd || !!tab?.prdGenerating
+      || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
+    if (ownsPrd) {
+      if (contentPanelTab !== "prd") {
+        // Pre-claim the tab so the reload-restore effect below doesn't ALSO fire
+        // handleOpenPrd for this same commit (it checks this set first).
+        autoRestoredTabsRef.current.add(activeTabId)
+        void handleOpenPrd()
+      }
+    } else if (contentPanelTab) {
+      closeContentPanel()
+    }
+  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, chatInsightState, handleOpenPrd, closeContentPanel])
 
   // ── Restore the PRD panel after a reload ───────────────────────────────────
   // Tabs persist across reloads (localStorage) but their cached `prd` does NOT —
@@ -997,8 +1015,8 @@ export function ChatScreen() {
   //   • Skips when the tab already holds/loads a PRD or a panel is already open
   //     (openPrdInTab / a manual open handled it) — and once opened, `tab.prd` is
   //     cached, so a manual panel-close is never undone.
-  //   • Fires at most once per tab (autoRestoredTabsRef).
-  const autoRestoredTabsRef = useRef<Set<string>>(new Set())
+  //   • Fires at most once per tab (autoRestoredTabsRef, shared with the switch
+  //     reconcile above so the two never double-open the same tab in one commit).
   useEffect(() => {
     if (!activeTabId || isBriefTab) return
     if (autoRestoredTabsRef.current.has(activeTabId)) return
