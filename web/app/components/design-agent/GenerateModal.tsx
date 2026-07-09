@@ -52,6 +52,7 @@ import {
 import type { DesignSourcePreference } from "../../lib/onboarding/types"
 import { SourceTypePills } from "./SourceTypePills"
 import { GenerateLoadingState } from "./GenerateLoadingState"
+import { GenerationCancelButton } from "./GenerationCancelButton"
 import locateErrorStyles from "./GenerateModalLocateError.module.css"
 import type { LocatePhaseState } from "./GenerationLoadingScreen"
 
@@ -250,6 +251,7 @@ export function GenerateModal({
   onGenStart,
   onKickoff,
   onGenDone,
+  onCancel,
   // Persisted design source preference. When set and the named source is
   // healthy (connected + key/repo valid), the modal fires generation immediately
   // without user interaction and closes itself. Pass null to always show.
@@ -296,6 +298,14 @@ export function GenerateModal({
   // the parent can reveal the full-screen post-generation canvas on success. May
   // be undefined if the flow rejects before producing a result.
   onGenDone?: (result?: DesignAgentGenResult) => void
+  /** Optional. When provided, renders a labeled "Cancel" control during the
+   *  in-modal "locating" phase (the codebase-source screen-resolve call, up
+   *  to ~90s per LOCATE_POLL_TIMEOUT_MS) — the one phase where this modal's
+   *  own body is the sole visible surface. NOT rendered during "generating":
+   *  that phase is already covered by the full-page GenerationLoadingScreen
+   *  overlay (z-index 1000 vs this modal's 200), which supplies its own
+   *  working Cancel + "Notify me when ready" once mounted. */
+  onCancel?: () => void
   savedPreference?: DesignSourcePreference | null
   onSavePreference?: (pref: DesignSourcePreference) => Promise<void>
   /** Emits the current pre-build locate phase so the parent can thread it into
@@ -1683,6 +1693,12 @@ export function GenerateModal({
               matchedRoute={matchedRoute}
               note={proceedNote}
             />
+          )}
+
+          {flowPhase === "locating" && onCancel && (
+            <div className="proto-gen-footer">
+              <GenerationCancelButton onCancel={onCancel} />
+            </div>
           )}
 
           {/* error phase — the resolve job failed or timed out. An EXPLICIT

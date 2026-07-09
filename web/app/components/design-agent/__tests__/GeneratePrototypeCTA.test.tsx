@@ -54,6 +54,7 @@ function makeResult(
       onGenStart: vi.fn(),
       onKickoff: vi.fn(),
       onGenDone: vi.fn(),
+      onCancel: vi.fn(),
       savedPreference: null,
       onSavePreference: vi.fn(async () => {}),
     },
