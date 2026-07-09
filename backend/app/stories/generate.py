@@ -220,6 +220,11 @@ _SYSTEM = (
 # ClickUp priority is an int 1-4 (1=urgent ... 4=low). Map the skill's
 # human-readable label to that scale for the push step.
 _PRIORITY_TO_CLICKUP = {"urgent": 1, "high": 2, "normal": 3, "low": 4}
+# Jira's default named-priority scheme (Highest…Lowest). Projects can rename
+# these, in which case create_issue omits an unknown one rather than 400.
+_PRIORITY_TO_JIRA = {
+    "urgent": "Highest", "high": "High", "normal": "Medium", "low": "Low",
+}
 
 
 def _clean_str_list(value: Any) -> list[str]:
@@ -284,6 +289,12 @@ class Story:
         if not self.priority:
             return None
         return _PRIORITY_TO_CLICKUP.get(self.priority.lower())
+
+    def jira_priority(self) -> Optional[str]:
+        """Jira's named priority for this story, or None if unset/unknown."""
+        if not self.priority:
+            return None
+        return _PRIORITY_TO_JIRA.get(self.priority.lower())
 
     def to_description(self) -> str:
         """Render the ticket as a tracker task description (markdown). Uses the

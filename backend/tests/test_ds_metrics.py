@@ -85,6 +85,38 @@ def test_clickup_aggregates_open_closed_and_bugs(isolated_settings):
     assert weekly[wk]["bugs_open"] == 2.0
 
 
+def _jira_issue(id_, status, updated, *, issuetype="Task", labels=None, title="Issue"):
+    return RawRecord(
+        provider="jira", kind="issue", external_id=id_, title=title,
+        text="", timestamp=updated,
+        properties={"status": status, "type": issuetype, "labels": labels or []},
+    )
+
+
+def test_jira_aggregates_open_closed_and_bugs(isolated_settings):
+    from app.ds import analyses
+
+    recs = [
+        _jira_issue("PROJ-1", "In Progress", "2026-05-04T00:00:00.000+0000"),
+        # Bug detected via Jira's NATIVE issue type (not tags/labels).
+        _jira_issue("PROJ-2", "To Do", "2026-05-04T00:00:00.000+0000", issuetype="Bug"),
+        _jira_issue("PROJ-3", "Done", "2026-05-04T00:00:00.000+0000"),  # closed
+        # Bug detected via a label.
+        _jira_issue("PROJ-4", "Open", "2026-05-04T00:00:00.000+0000", labels=["defect"]),
+    ]
+    weekly = analyses.compute_weekly_aggregates("jira", recs)
+    wk = date(2026, 5, 4)
+    assert weekly[wk]["tasks_open"] == 3.0
+    assert weekly[wk]["tasks_closed_7d"] == 1.0
+    assert weekly[wk]["bugs_open"] == 2.0
+
+
+def test_jira_is_a_known_ds_provider(isolated_settings):
+    from app.ds import analyses
+    assert "jira" in analyses.PROVIDER_METRICS
+    assert analyses.PROVIDER_METRICS["jira"] == ("tasks_open", "tasks_closed_7d", "bugs_open")
+
+
 def test_fireflies_counts_meetings_per_week(isolated_settings):
     from app.ds import analyses
 

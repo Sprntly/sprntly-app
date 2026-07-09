@@ -1932,6 +1932,19 @@ export type TicketPushResult = {
   errors: { task_id: string; title: string; error: string }[]
 }
 
+/** A Jira project the company can push into (target picker). */
+export type JiraProject = {
+  id: string
+  key: string
+  name: string
+}
+
+export type JiraTicketPushResult = {
+  ok: boolean
+  created: { task_id: string; jira_issue_key: string; url: string | null; title: string }[]
+  errors: { task_id: string; title: string; error: string }[]
+}
+
 /** One task to push into ClickUp. `task_id` is the stable ticket key the user
  *  selected; the backend merges its saved edits/comments over these base
  *  fields before creating the ClickUp task. */
@@ -2021,6 +2034,17 @@ export const ticketPushApi = {
     api.post<TicketPushResult>("/v1/tickets/push-clickup", {
       list_id: listId,
       tasks,
+    }),
+  /** Fetch Jira projects the company can push tickets into. 404 when not connected. */
+  listJiraProjects: () =>
+    api.post<{ projects: JiraProject[] }>("/v1/tickets/jira/projects", {}),
+  /** Push the selected tasks into a Jira project as issues. Same override-merge
+   *  behavior as pushToClickUp; returns the created issue keys + URLs. */
+  pushToJira: (projectKey: string, tasks: TicketPushTask[], issueType = "Task") =>
+    api.post<JiraTicketPushResult>("/v1/tickets/push-jira", {
+      project_key: projectKey,
+      tasks,
+      issue_type: issueType,
     }),
 }
 
@@ -2117,6 +2141,17 @@ export const storiesApi = {
   /** Create the reviewed stories as tasks in a ClickUp list (explicit write). */
   pushToClickUp: (listId: string, stories: GeneratedStory[]) =>
     api.post<StoryPushResult>("/v1/stories/push", { list_id: listId, stories }),
+  /** Jira projects the company can push into (target picker). 404 if Jira
+   *  isn't connected. */
+  listJiraProjects: () =>
+    api.post<{ projects: JiraProject[] }>("/v1/stories/jira/projects", {}),
+  /** Create the reviewed stories as issues in a Jira project (explicit write). */
+  pushToJira: (projectKey: string, stories: GeneratedStory[], issueType = "Task") =>
+    api.post<StoryPushResult>("/v1/stories/jira/push", {
+      project_key: projectKey,
+      stories,
+      issue_type: issueType,
+    }),
   /** Bidirectional read: current ClickUp state (status/assignee/url) for tickets
    *  already synced to a list, keyed by ticket id. Unsynced tickets are absent. */
   pullClickUpStatus: (listId: string, ticketIds: string[]) =>
