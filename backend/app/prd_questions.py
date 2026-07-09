@@ -84,10 +84,17 @@ DATA / a fact the team must supply.
 - `prompt`: the decision or the missing fact, phrased as a clear, self-contained \
 question a PM can answer without re-reading the PRD.
 - `owner`: the owner named on the item (e.g. "PM", "Data"), or omit if none.
-- `options`: for an "escalate" decision, 2–4 SHORT, MUTUALLY-EXCLUSIVE candidate \
-answers grounded in the PRD's own context (each a `label`, plus an optional \
-one-line `description` of the tradeoff). For a "need" data item emit an EMPTY \
-`options` array — it is answered with a value, not a choice.
+- `options`: ALWAYS propose 2–4 SHORT, MUTUALLY-EXCLUSIVE candidate answers the \
+owner can pick from (each a `label`, plus an optional one-line `description`). \
+  • For an "escalate" decision these are the plausible resolutions of the decision \
+    (grounded in the PRD's own context, with the tradeoff in `description`). \
+  • For a "need" data item these are the most likely candidate VALUES — typically \
+    bracketed ranges or buckets that plausibly cover the true value (e.g. \
+    "0–20%", "20–50%", ">50%", or "Fewer than 10", "10–50", "50+"). The user can \
+    always type an exact value in the UI, so options need not be exhaustive — pick \
+    a sensible, well-spread set. \
+NEVER return an empty `options` array for either tag; always give at least 2 \
+selectable options.
 
 Rules: invent NOTHING beyond what the PRD supports; options must be plausible \
 given the document. If the PRD has no "User input needed" items, return an empty \

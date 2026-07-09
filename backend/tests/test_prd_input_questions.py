@@ -49,16 +49,18 @@ def test_replace_and_list_round_trip(isolated_settings):
     q.replace_questions(prd_id, [
         {"tag": "escalate", "prompt": "Reminders on by default?", "owner": "PM",
          "options": [{"label": "On"}, {"label": "Off", "description": "less noise"}]},
-        {"tag": "need", "prompt": "Manual follow-up rate today?", "owner": "Data"},
+        {"tag": "need", "prompt": "Manual follow-up rate today?", "owner": "Data",
+         "options": [{"label": "0–20%"}, {"label": "20–50%"}, {"label": ">50%"}]},
     ])
     rows = q.list_questions(prd_id)
     assert [r["ordinal"] for r in rows] == [0, 1]
     assert rows[0]["tag"] == "escalate"
     assert rows[0]["prompt"] == "Reminders on by default?"
     assert [o["label"] for o in rows[0]["options"]] == ["On", "Off"]
-    # A NEED item never carries options (answered as free text).
+    # A NEED item now also carries selectable options (candidate values/ranges);
+    # they are preserved through persistence, not stripped.
     assert rows[1]["tag"] == "need"
-    assert rows[1]["options"] == []
+    assert [o["label"] for o in rows[1]["options"]] == ["0–20%", "20–50%", ">50%"]
     assert all(r["status"] == "pending" for r in rows)
 
 
