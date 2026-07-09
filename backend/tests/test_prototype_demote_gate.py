@@ -272,7 +272,7 @@ def test_restore_preserves_workspace_id(proto):
 
 
 def test_restored_prototype_is_found_by_get_by_prd(proto):
-    """After the restore, find_ready_prototype_by_prd returns the row for its own
+    """After the restore, the ready-only lookup returns the row for its own
     workspace and None under a different workspace — i.e. click-PRD→view is
     restored without any PRD-layer change."""
     pid = _seed_proto(
@@ -280,14 +280,22 @@ def test_restored_prototype_is_found_by_get_by_prd(proto):
         workspace_id="app", prd_id=42,
     )
     # Before: the View lookup (ready-only) cannot see the demoted row.
-    assert proto.find_ready_prototype_by_prd(prd_id=42, workspace_id="app") is None
+    assert (
+        proto.find_prototype_by_prd(prd_id=42, workspace_id="app", statuses=["ready"])
+        is None
+    )
 
     proto.restore_template_demoted_prototypes()
 
-    found = proto.find_ready_prototype_by_prd(prd_id=42, workspace_id="app")
+    found = proto.find_prototype_by_prd(
+        prd_id=42, workspace_id="app", statuses=["ready"]
+    )
     assert found is not None
     assert found["id"] == pid
-    assert proto.find_ready_prototype_by_prd(prd_id=42, workspace_id="other") is None
+    assert (
+        proto.find_prototype_by_prd(prd_id=42, workspace_id="other", statuses=["ready"])
+        is None
+    )
 
 
 def test_restore_no_invalidated_rows_returns_zero(proto):

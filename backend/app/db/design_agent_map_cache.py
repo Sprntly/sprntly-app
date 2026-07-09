@@ -175,6 +175,36 @@ def put_cached_map(
         )
 
 
+def delete_cached_maps_for_installation(installation_id: int) -> int:
+    """Delete every L2 cache row for a GitHub installation. Called when an
+    installation is uninstalled so a stale/mismatched map can never be served
+    if the installation_id is later reissued. Fail-soft like get/put: any DB
+    error logs a warning and returns 0 — a failed delete never blocks the
+    uninstall webhook's own teardown of the installation row + token cache.
+    """
+    try:
+        c = require_client()
+        resp = (
+            c.table(_TABLE).select("id")
+            .eq("installation_id", installation_id)
+            .execute()
+        )
+        ids = [r["id"] for r in (resp.data or [])]
+        if ids:
+            c.table(_TABLE).delete().in_("id", ids).execute()
+            logger.info(
+                "map_cache_l2 deleted_for_installation installation_id=%s count=%d",
+                installation_id, len(ids),
+            )
+        return len(ids)
+    except Exception:
+        logger.warning(
+            "map_cache_l2 delete_for_installation failed installation_id=%s",
+            installation_id, exc_info=True,
+        )
+        return 0
+
+
 def sweep_expired_map_cache() -> int:
     """Opportunistic cleanup: delete rows older than the L2 TTL. Returns the
     number deleted (0 on disabled L2 or any DB error).

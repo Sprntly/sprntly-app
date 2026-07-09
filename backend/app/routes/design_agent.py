@@ -52,10 +52,10 @@ from app.auth import CompanyContext, require_company, require_company_from_query
 from app.config import settings
 from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
 from app.design_agent.rate_limit import (  # public-surface rate limits
-    PUBLIC_COMMENT_LIMITER,
+    PUBLIC_COMMENT_LIMITER,  # consumed by the public comment write route (design_agent_comments)
     PUBLIC_TOKEN_LIMITER,
 )
-from app.db.companies import slug_for_company_id
+from app.db.companies import display_name_for_company_id, slug_for_company_id
 from app.db.design_agent_jobs import (  # Tier 2 opt-in worker queue
     enqueue_job,
     worker_heartbeat_fresh,
@@ -71,10 +71,8 @@ from app.db.prototypes import (
     delete_prototype,
     fail_prototype,
     find_existing_prototype,
+    find_prototype_by_prd,
     find_prototype_by_share_token,
-    find_active_prototype_by_prd,
-    find_latest_prototype_by_prd,
-    find_ready_prototype_by_prd,
     flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
@@ -91,6 +89,7 @@ from app.db.prototypes import (
     verify_share_passcode,
     clear_pending_question,
 )
+from app.db.prototype_comments import list_comments  # iterate grounding reads open threads
 from app.db.usage_events import finalize_usage_event, start_usage_event
 from app.llm_telemetry import RunUsage
 from app.design_agent.client import get_design_agent_client
@@ -103,6 +102,7 @@ from app.design_agent.event_stream import publish_step, subscribe as _sse_subscr
 from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
 from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_build_run
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
+from app.design_agent.url_slug import url_slugify  # cosmetic /p/<company>/<feature>/<token> segments
 from app.design_agent.codebase_map.recreate import (
     ThemeExpectations,
     _assert_structural_parity,
@@ -711,12 +711,41 @@ def get_by_prd(
     pattern only ever matches one-segment paths.
     """
     _require_feature_enabled()
-    row = find_ready_prototype_by_prd(
-        prd_id=prd_id, workspace_id=company.company_id
+    row = find_prototype_by_prd(
+        prd_id=prd_id, workspace_id=company.company_id, statuses=["ready"]
     )
     if not row:
         raise HTTPException(status_code=404, detail="No ready prototype for this PRD")
     return row
+
+
+# Bounded retry for the resume-lookup race: a synchronously-committed
+# generation row is sometimes not yet visible to the very next independent
+# read (root cause not fully confirmed — ruled out: PostgREST response
+# caching, application-level caching; leading candidate: Supabase-
+# infrastructure read/connection timing, unconfirmed without dashboard
+# access). One short retry closes the gap for the common case; a
+# still-exhausted retry after this bound is itself the production signal
+# that the gap is larger than assumed here.
+_ACTIVE_LOOKUP_RETRY_ATTEMPTS = 2
+_DEFAULT_ACTIVE_LOOKUP_RETRY_DELAY_MS = 80
+
+
+def _active_lookup_retry_delay_ms() -> int:
+    """Retry delay, env-overridable. Malformed/absent falls back to the
+    default (mirrors design_agent_map_cache.py's `_ttl_seconds()` pattern —
+    never let a bad env value crash app startup)."""
+    raw = os.getenv("DESIGN_AGENT_ACTIVE_LOOKUP_RETRY_DELAY_MS")
+    if raw is None:
+        return _DEFAULT_ACTIVE_LOOKUP_RETRY_DELAY_MS
+    try:
+        return max(int(raw), 0)
+    except (TypeError, ValueError):
+        logger.warning(
+            "design_agent bad DESIGN_AGENT_ACTIVE_LOOKUP_RETRY_DELAY_MS=%r; using default %dms",
+            raw, _DEFAULT_ACTIVE_LOOKUP_RETRY_DELAY_MS,
+        )
+        return _DEFAULT_ACTIVE_LOOKUP_RETRY_DELAY_MS
 
 
 @router.get("/by-prd/{prd_id}/active")
@@ -735,11 +764,31 @@ def get_active_by_prd(
     when no active prototype exists (frontend swallows 404→null). Workspace-
     filtered: a prototype in another workspace returns 404, not 403. Three-segment
     path, so it can never be shadowed by the single-segment `GET /{prototype_id}`.
+
+    Bounded retry: a fresh 'generating' row (just inserted by POST /generate,
+    milliseconds earlier) can occasionally miss the very first read here — see
+    the module-level comment above _ACTIVE_LOOKUP_RETRY_ATTEMPTS. Adds at most
+    one ~80ms sleep to the miss path; the common true-negative case (no active
+    prototype at all) still incurs this one extra attempt today — a
+    deliberate, small, bounded cost accepted to close the race, not a
+    regression (see the sizing rationale in the change that introduced it).
     """
     _require_feature_enabled()
-    row = find_active_prototype_by_prd(
-        prd_id=prd_id, workspace_id=company.company_id
-    )
+    workspace_id = company.company_id
+    row = None
+    for attempt in range(_ACTIVE_LOOKUP_RETRY_ATTEMPTS):
+        row = find_prototype_by_prd(
+            prd_id=prd_id, workspace_id=workspace_id, statuses=["ready", "generating"],
+        )
+        if row is not None:
+            if attempt > 0:
+                logger.info(
+                    "design_agent.active_prototype_lookup_retried prd_id=%s attempts=%s",
+                    prd_id, attempt + 1,
+                )
+            break
+        if attempt < _ACTIVE_LOOKUP_RETRY_ATTEMPTS - 1:
+            time.sleep(_active_lookup_retry_delay_ms() / 1000)
     if not row:
         raise HTTPException(status_code=404, detail="No active prototype for this PRD")
     return row
@@ -764,7 +813,7 @@ def get_latest_by_prd(
     `GET /{prototype_id}`.
     """
     _require_feature_enabled()
-    row = find_latest_prototype_by_prd(
+    row = find_prototype_by_prd(
         prd_id=prd_id, workspace_id=company.company_id
     )
     if not row:
@@ -831,12 +880,12 @@ def get_brief_prototype_map(
     Feature-flag-gated and workspace-isolated identically to GET /by-prd/{prd_id}:
       - 404 when DESIGN_AGENT_ENABLED is off (feature invisible).
       - workspace_id resolved from the caller's company membership (require_company).
-      - prototype lookup is workspace-scoped via find_ready_prototype_by_prd.
+      - prototype lookup is workspace-scoped via find_prototype_by_prd.
 
     Brief ownership check: this endpoint does NOT explicitly verify that brief_id
     belongs to the caller's workspace. Sibling read routes (e.g. GET /by-prd/{prd_id})
     follow the same approach — cross-workspace containment is enforced at the
-    prototype layer (find_ready_prototype_by_prd filters by workspace_id), and a
+    prototype layer (find_prototype_by_prd filters by workspace_id), and a
     foreign-workspace brief simply yields no PRD rows. The caller therefore learns
     nothing about a brief they don't own — the entries list is empty. FLAG: if an
     explicit brief→company ownership check is added to sibling routes, add the same
@@ -850,8 +899,8 @@ def get_brief_prototype_map(
 
     entries: list[BriefPrototypeMapEntry] = []
     for prd in prds:
-        proto_row = find_ready_prototype_by_prd(
-            prd_id=prd["id"], workspace_id=workspace_id
+        proto_row = find_prototype_by_prd(
+            prd_id=prd["id"], workspace_id=workspace_id, statuses=["ready"]
         )
         prototype = (
             PrototypeReadiness(preview_image_url=proto_row.get("preview_image_url"))
@@ -1416,18 +1465,26 @@ def cancel_prototype_route(
 # ─── Background generation ────────────────────────────────────────────────
 
 
-def _finalize_generation_failed(
+def _finalize_usage_event_failed(
+    *,
     event_id: int | None,
     workspace_id: str,
     prototype_id: int,
     error_class: str,
+    kind: Literal["full_generation", "iteration"],
 ) -> None:
-    """Fail-open finalize of a generation usage-ledger row to 'failed'.
+    """Fail-open finalize of a usage-ledger row to 'failed'.
 
-    A ledger-write failure must never change generation control flow, so every
-    finalize at a failure terminal is wrapped here: identifiers-only WARNING on
-    error, never propagated. No tokens are required on a failure (the run did not
-    bill a complete generation), so only the status + error_class are recorded.
+    Shared by both the generation and iteration failure terminals — a
+    ledger-write failure must never change control flow at either terminal, so
+    every finalize call here is wrapped: identifiers-only WARNING on error,
+    never propagated. No tokens are required on a failure (the run did not
+    bill a complete generation/iteration), so only status + error_class are
+    recorded. `kind` distinguishes the two call sites in the log line only —
+    it carries no other behavior difference (both terminals are otherwise
+    identical: same DB call, same fail-open guard, same no-op on a None
+    event_id, which covers PLAN mode or a failure before the ledger row
+    opened).
     """
     if event_id is None:
         return
@@ -1440,37 +1497,8 @@ def _finalize_generation_failed(
         )
     except Exception:  # noqa: BLE001 — ledger is fail-open; identifiers only.
         logger.warning(
-            "usage_event_finalize_failed event_id=%s prototype_id=%s kind=full_generation",
-            event_id, prototype_id,
-        )
-
-
-def _finalize_iteration_failed(
-    event_id: int | None,
-    workspace_id: str,
-    prototype_id: int,
-    error_class: str,
-) -> None:
-    """Fail-open finalize of an iteration usage-ledger row to 'failed'.
-
-    Iteration counterpart of `_finalize_generation_failed`: identifiers-only
-    WARNING on error, never propagated, so a ledger-write failure can never
-    change iteration control flow. A None event_id (PLAN mode, or a failure
-    before the row opened) is a no-op.
-    """
-    if event_id is None:
-        return
-    try:
-        finalize_usage_event(
-            event_id=event_id,
-            workspace_id=workspace_id,
-            status="failed",
-            error_class=error_class,
-        )
-    except Exception:  # noqa: BLE001 — ledger is fail-open; identifiers only.
-        logger.warning(
-            "usage_event_finalize_failed event_id=%s prototype_id=%s kind=iteration",
-            event_id, prototype_id,
+            "usage_event_finalize_failed event_id=%s prototype_id=%s kind=%s",
+            event_id, prototype_id, kind,
         )
 
 
@@ -1769,7 +1797,13 @@ async def _run_generation_bg(
                     workspace_id=workspace_id,
                     error="agent_loop completed but emitted no files",
                 )
-                _finalize_generation_failed(event_id, workspace_id, prototype_id, "no_files")
+                _finalize_usage_event_failed(
+                    event_id=event_id,
+                    workspace_id=workspace_id,
+                    prototype_id=prototype_id,
+                    error_class="no_files",
+                    kind="full_generation",
+                )
             else:
                 # Include the structured error_message / error_class from
                 # RunResult so the underlying failure (e.g. an Anthropic
@@ -1790,9 +1824,13 @@ async def _run_generation_bg(
                     workspace_id=workspace_id,
                     error=" | ".join(error_parts),
                 )
-                _finalize_generation_failed(
-                    event_id, workspace_id, prototype_id,
-                    getattr(result, "error_class", None) or f"status_{result.status}",
+                _finalize_usage_event_failed(
+                    event_id=event_id,
+                    workspace_id=workspace_id,
+                    prototype_id=prototype_id,
+                    error_class=getattr(result, "error_class", None)
+                    or f"status_{result.status}",
+                    kind="full_generation",
                 )
     except asyncio.CancelledError:
         # The cancel endpoint called task.cancel() (the user aborted from the
@@ -1831,7 +1869,13 @@ async def _run_generation_bg(
             from app.design_agent.provider_alert import maybe_alert_provider_outage
 
             maybe_alert_provider_outage(cls, context={"prototype_id": prototype_id})
-        _finalize_generation_failed(event_id, workspace_id, prototype_id, cls.value)
+        _finalize_usage_event_failed(
+            event_id=event_id,
+            workspace_id=workspace_id,
+            prototype_id=prototype_id,
+            error_class=cls.value,
+            kind="full_generation",
+        )
         fail_prototype(
             prototype_id=prototype_id,
             workspace_id=workspace_id,
@@ -1974,6 +2018,101 @@ async def _build_repair_loop(
         raise TypeCheckRepairExhausted(
             f"build still failing after repair and strip: {exc}"
         ) from exc
+
+
+async def _stage_checkpoint_and_bundle(
+    *,
+    prototype_id: int,
+    workspace_id: str,
+    dist_files: dict[str, str],
+    virtual_fs: dict[str, str],
+    prompt_history: list[dict],
+    log_prefix: str,
+) -> tuple[int, str]:
+    """Shared checkpoint + dual-stage + comment-reconcile sequence used by BOTH
+    the first-completion staging path and the iterate staging path.
+
+    Does NOT touch `prototypes.status` / `completed_at` / `current_checkpoint_id`
+    — the caller owns the terminal write (`complete_prototype` vs
+    `advance_current_checkpoint`), because that is the one genuine difference
+    between a first completion and a checkpoint advance (an iterate must never
+    re-stamp `completed_at`).
+
+    Steps, each keeping its pre-existing fail-open / fail-closed posture:
+
+    1. `create_checkpoint` — the returned id seeds the bundle prefix.
+    2. `stage_bundle(dist_files)` — the BUILT dist/. Raises on failure; the
+       caller's own `except` wraps this call and routes to `fail_prototype`, so
+       the caller-side error contract is unchanged. This function does NOT call
+       `fail_prototype` itself.
+    3. `stage_bundle(virtual_fs, sub_prefix="_source")` — best-effort raw source
+       for the next iterate / manual edit. A failure logs
+       ``{log_prefix}source_stage_failed`` and proceeds.
+    4. `reconcile_comments_on_checkpoint` — best-effort orphan/re-attach of
+       comments whose anchor vanished from this build. A failure logs
+       ``comments_reconcile_failed`` (same key on both paths) and proceeds.
+
+    Returns ``(checkpoint_id, bundle_url)`` where `bundle_url` is the STABLE
+    app-origin proxy base from `authed_bundle_url(prototype_id)` — never the
+    server-side signed object URL `stage_bundle` returns.
+    """
+    # Step: checkpoint row (id seeds the bundle prefix). prd/figma hashes +
+    # comment_state land later; for now the checkpoint records the bundle only.
+    checkpoint_id = create_checkpoint(
+        prototype_id=prototype_id,
+        workspace_id=workspace_id,
+        bundle_url=None,            # populated on the prototype row after staging
+        prd_revision_hash=None,     # PRD-hash + figma-hash wired later
+        figma_frame_hash=None,
+        prompt_history=prompt_history,
+        comment_state=[],
+    )
+
+    # Step: stage the BUILT dist/ (never raw virtual_fs). Raises on failure —
+    # the caller's except wraps this exactly as it did pre-extraction. The signed
+    # URL returned here is server-side only and never browser-facing (NO-BYPASS).
+    await stage_bundle(
+        prototype_id=prototype_id,
+        checkpoint_id=checkpoint_id,
+        files=dist_files,
+    )
+
+    # Step: stage the RAW virtual_fs under _source/ so the export serialiser and
+    # the NEXT iterate can read real TSX, not minified bundles. Best-effort: a
+    # source-stage failure logs and proceeds — the load-bearing artefact (dist/)
+    # is already staged.
+    try:
+        await stage_bundle(
+            prototype_id=prototype_id,
+            checkpoint_id=checkpoint_id,
+            files=virtual_fs,
+            sub_prefix="_source",
+        )
+    except Exception as exc:  # noqa: BLE001 — source-stage is best-effort.
+        logger.warning(
+            "%ssource_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
+            log_prefix, prototype_id, checkpoint_id, type(exc).__name__,
+        )
+
+    # Step: orphan/re-attach every OPEN comment whose anchor vanished from THIS
+    # build's bundle. Path-agnostic (keys on prototype_id, not checkpoint_id).
+    # Best-effort: the bundle is already staged, so a reconcile failure must NOT
+    # fail the build — it logs and the run still proceeds.
+    try:
+        reconcile_comments_on_checkpoint(
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+            dist_files=dist_files,
+        )
+    except Exception as exc:  # noqa: BLE001 — reconcile is best-effort housekeeping.
+        logger.warning(
+            "comments_reconcile_failed prototype_id=%s error_class=%s",
+            prototype_id, type(exc).__name__,
+        )
+
+    # NO-BYPASS migration: the persisted bundle_url is the STABLE app-origin PROXY
+    # base, not the 24h signed object URL. Computed here so neither caller repeats it.
+    return checkpoint_id, authed_bundle_url(prototype_id)
 
 
 async def _stage_complete_run(
@@ -2258,24 +2397,19 @@ async def _stage_complete_run(
         prototype_id, len(dist_files),
     )
 
-    # Step 2 — checkpoint row (id seeds the bundle prefix). prd/figma hashes +
-    # comment_state land later; for now the checkpoint records the bundle only.
-    checkpoint_id = create_checkpoint(
-        prototype_id=prototype_id,
-        workspace_id=workspace_id,
-        bundle_url=None,            # populated on the prototype row after staging
-        prd_revision_hash=None,     # PRD-hash + figma-hash wired later
-        figma_frame_hash=None,
-        prompt_history=[],
-        comment_state=[],
-    )
-
-    # Step 3 — stage the BUILT dist/ (not raw virtual_fs).
+    # Step 2 — checkpoint the build, stage the dist/ bundle, stage the raw source,
+    # and reconcile comments (shared with the iterate path). Fail-closed on the
+    # dist stage (routed to THIS function's fail_prototype below); best-effort on
+    # source-stage + reconcile. log_prefix="" reproduces the exact
+    # "source_stage_failed" key (no leading underscore, no prefix).
     try:
-        bundle_url = await stage_bundle(
+        checkpoint_id, bundle_url = await _stage_checkpoint_and_bundle(
             prototype_id=prototype_id,
-            checkpoint_id=checkpoint_id,
-            files=dist_files,
+            workspace_id=workspace_id,
+            dist_files=dist_files,
+            virtual_fs=virtual_fs,
+            prompt_history=[],
+            log_prefix="",
         )
     except Exception as exc:  # noqa: BLE001 — surface staging failure on the row.
         fail_prototype(
@@ -2284,40 +2418,6 @@ async def _stage_complete_run(
             error=f"{type(exc).__name__}: {exc}",
         )
         return False
-
-    # Step 3.5 — Stage the RAW virtual_fs alongside dist/ under _source/ so the
-    # export serialiser can read raw TSX, not minified bundles.
-    # Best-effort: a source-stage failure logs and proceeds — the prototype is
-    # still ready (the load-bearing artefact is the dist/ bundle). The serialiser
-    # gracefully falls back to its "no source staged" message if this step failed.
-    try:
-        await stage_bundle(
-            prototype_id=prototype_id,
-            checkpoint_id=checkpoint_id,
-            files=virtual_fs,
-            sub_prefix="_source",
-        )
-    except Exception as exc:  # noqa: BLE001 — source-stage is best-effort.
-        logger.warning(
-            "source_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
-            prototype_id, checkpoint_id, type(exc).__name__,
-        )
-
-    # Step 3.6 — orphan/re-attach. Orphan every OPEN comment whose anchor
-    # vanished from THIS build's bundle. Best-effort: the bundle is already
-    # staged, so a reconcile failure must NOT fail the build — it logs and the
-    # prototype still completes ready (orphaning is housekeeping, not a gate).
-    try:
-        reconcile_comments_on_checkpoint(
-            prototype_id=prototype_id,
-            workspace_id=workspace_id,
-            dist_files=dist_files,
-        )
-    except Exception as exc:  # noqa: BLE001 — reconcile is best-effort housekeeping.
-        logger.warning(
-            "comments_reconcile_failed prototype_id=%s error_class=%s",
-            prototype_id, type(exc).__name__,
-        )
 
     # Step 3.7 — best-effort preview screenshot of the staged bundle. HONEST-DEGRADE:
     # a capture that returns no image (no browser runtime / nav error / timeout), or
@@ -2359,16 +2459,17 @@ async def _stage_complete_run(
 
     # Step 4 — mark ready + thread current_checkpoint_id back to the prototype.
     # NO-BYPASS migration (plan §8-A/B): the persisted bundle_url is the STABLE
-    # app-origin PROXY base, NOT the 24h Supabase signed URL `stage_bundle`
-    # returned (that signed URL was used above only for the server-side screenshot
-    # capture and is never browser-facing). The authed surface serves this proxy
-    # base via the da_view_grant cookie; the public surface re-derives a by-token
-    # proxy URL on read (_public_bundle_url). Signing now happens inside the proxy
-    # handler, sign-on-read, so a browser never receives a direct/signed object URL.
+    # app-origin PROXY base returned by `_stage_checkpoint_and_bundle`, NOT the
+    # 24h Supabase signed object URL (that signed URL was used only for the
+    # server-side screenshot capture and is never browser-facing). The authed
+    # surface serves this proxy base via the da_view_grant cookie; the public
+    # surface re-derives a by-token proxy URL on read (_public_bundle_url). Signing
+    # happens inside the proxy handler, sign-on-read, so a browser never receives a
+    # direct/signed object URL.
     complete_prototype(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
-        bundle_url=authed_bundle_url(prototype_id),
+        bundle_url=bundle_url,
         current_checkpoint_id=checkpoint_id,
         preview_image_url=preview_image_url,
     )
@@ -2668,12 +2769,39 @@ def _public_target_platform(row: dict[str, Any]) -> str:
     return tp if tp in ("desktop", "mobile") else "both"
 
 
+def _public_cosmetic_slugs(row: dict[str, Any]) -> tuple[str, str]:
+    """Compute the two cosmetic path segments for /p/<company>/<feature>/<token>.
+    Derived at SERVE TIME, never persisted. Fail-soft: a missing/empty
+    display_name or PRD title degrades to a fixed fallback rather than raising —
+    a public visitor must never see a 500 because a cosmetic lookup failed. Any
+    exception is caught, logged (identifiers only — no display_name/title
+    content), and degrades the same way.
+    """
+    try:
+        display_name = display_name_for_company_id(row["workspace_id"]) or ""
+        prd = get_prd_rendered(row["prd_id"]) if row.get("prd_id") else None
+        title = (prd or {}).get("title") or ""
+    except Exception:
+        logger.warning(
+            "design_agent.public_cosmetic_slugs_failed workspace_id=%s prd_id=%s",
+            row.get("workspace_id"), row.get("prd_id"), exc_info=True,
+        )
+        display_name, title = "", ""
+    return url_slugify(display_name, fallback="company"), url_slugify(title, fallback="prototype")
+
+
 class PublicPrototypeView(BaseModel):
     share_mode: Literal["public", "passcode"]  # "private" is never returned
     requires_passcode: bool                    # true iff share_mode == "passcode"
     bundle_url: str | None                     # null until a passcode is verified
     is_complete: bool
     company_slug: str                          # cosmetic segment of /p/<slug>/<token>
+    # Human-readable cosmetic segments for the 3-segment canonical URL
+    # /p/<company_display_slug>/<feature_slug>/<token>. Computed at serve time
+    # from companies.display_name / prds.title — no new column, never validated
+    # on read (same trust model as company_slug).
+    company_display_slug: str = Field("")
+    feature_slug: str = Field("")
     # Benign display enum ("desktop" | "mobile" | "both") — lets the public viewer
     # hide the Desktop/Mobile toggle for a single-device prototype (there is
     # nothing to toggle to) and show a static device badge instead. Reveals nothing
@@ -2724,6 +2852,7 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         raise HTTPException(status_code=404, detail="Not found")
     mode = row["share_mode"]
     logger.info("prototype_public_view_resolved token_hash=%s share_mode=%s", th, mode)
+    company_display_slug, feature_slug = _public_cosmetic_slugs(row)
     return PublicPrototypeView(
         share_mode=mode,
         requires_passcode=(mode == "passcode"),
@@ -2735,6 +2864,9 @@ def get_by_token(token: str, request: Request) -> PublicPrototypeView:
         is_complete=bool(row.get("is_complete")),
         # INTENTIONAL slug exposure (intentional, reviewed): companies.slug is the cosmetic segment of the public /p/<slug>/<token> URL — the ONE surface overriding the "slug is internal, never render" convention (api.ts:163, brief.py:34).
         company_slug=slug_for_company_id(row["workspace_id"]) or "",
+        # Human-readable cosmetic segments for /p/<company>/<feature>/<token>.
+        company_display_slug=company_display_slug,
+        feature_slug=feature_slug,
         # Null/legacy ("web") rows collapse to "both", so an older row degrades to
         # the always-toggle behaviour.
         target_platform=_public_target_platform(row),
@@ -2781,6 +2913,7 @@ def verify_passcode(
 
         set_share_grant_cookie(response, token=token, checkpoint_id=_cp)
     logger.info("prototype_public_view_resolved token_hash=%s share_mode=passcode", th)
+    company_display_slug, feature_slug = _public_cosmetic_slugs(row)
     return PublicPrototypeView(
         share_mode="passcode",
         requires_passcode=True,
@@ -2788,6 +2921,9 @@ def verify_passcode(
         bundle_url=_public_bundle_url(row),
         is_complete=bool(row.get("is_complete")),
         company_slug=slug_for_company_id(row["workspace_id"]) or "",
+        # Human-readable cosmetic segments for /p/<company>/<feature>/<token>.
+        company_display_slug=company_display_slug,
+        feature_slug=feature_slug,
         # Same normalisation as get_by_token so a passcode-unlocked single-device
         # prototype also gates its toggle.
         target_platform=_public_target_platform(row),
@@ -3032,321 +3168,6 @@ def _export_filename(proto: dict[str, Any]) -> str:
     import re
     base = f"prototype-{proto['id']}"
     return re.sub(r"[^A-Za-z0-9_-]", "-", base) + "-design-brief.md"
-
-
-# ─── Anchored comments ──────────────────────────────────────────────────────
-#
-# Anyone with the share URL can comment; spec §4 Stage 2 splits write access
-# by surface, not by capability gate — internal users act through the authed app
-# routes, external viewers through the public `/p/<token>` variant. This block
-# mounts the HTTP surface over the `db.prototype_comments` helpers:
-#
-#   POST  /{prototype_id}/comments              (authed — create)
-#   GET   /{prototype_id}/comments              (authed — list, all statuses)
-#   PATCH /{prototype_id}/comments/{cid}/resolve (authed — resolve)
-#   POST  /by-token/{token}/comments            (public, NO auth — create)
-#   GET   /by-token/{token}/comments            (public, NO auth — list)
-#
-# The internal routes reuse the authed-route gates verbatim (feature flag +
-# require_app_session + workspace filter via get_prototype). The public routes
-# mirror get_by_token's posture exactly: the token IS the access primitive,
-# so NO auth dependency and NO session workspace claim — workspace_id is taken
-# from the RESOLVED prototype row. Per spec §4 Stage 2 ("only internal users with
-# credentials can act"), external viewers create + read only; there is NO public
-# resolve route. Public-write rate limiting is OUT of scope here — it lands
-# later.
-from app.db.prototype_comments import insert_comment, list_comments, resolve_comment, delete_comment
-
-
-class CommentCreate(BaseModel):
-    # None = a general (unpinned) comment -- prototype-level feedback with no
-    # element anchor. A pinned/anchored comment always sends a non-empty string;
-    # an empty STRING is rejected below (distinct invalid input, not "no anchor").
-    anchor_id: str | None = Field(default=None, max_length=64)
-    body: str = Field(..., min_length=1, max_length=4000)
-
-    @field_validator("anchor_id")
-    @classmethod
-    def _anchor_id_not_empty_string(cls, v: str | None) -> str | None:
-        if v == "":
-            raise ValueError("anchor_id must be omitted/null (general comment) or a non-empty string")
-        return v
-    pin_x_pct: float | None = Field(default=None, ge=0, le=100)
-    pin_y_pct: float | None = Field(default=None, ge=0, le=100)
-    resolved_anchor_id: str | None = Field(default=None, max_length=64)
-    # Public-surface only: the anonymous viewer's self-supplied display name,
-    # mapped onto the EXISTING `author` column (no new column / no migration).
-    # The authed route ignores it — internal authors come from the session
-    # identity. Length-capped so it can't be used as an oversized log/store vector.
-    viewer_name: str | None = Field(default=None, max_length=80)
-
-
-class CommentOut(BaseModel):
-    id: int
-    anchor_id: str | None = None
-    body: str
-    author: str
-    status: str           # 'open' | 'resolved' | 'orphaned'
-    created_at: str
-    resolved_at: str | None = None
-    pin_x_pct: float | None = None
-    pin_y_pct: float | None = None
-    resolved_anchor_id: str | None = None
-
-
-def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
-    """Project a DB row to the CommentOut shape (ISO-string timestamps).
-
-    Timestamps are stringified defensively: Postgres returns timestamptz objects
-    via supabase, the SQLite fake returns TEXT — `str()` normalises both to the
-    ISO string CommentOut expects without leaking driver-specific types."""
-    return {
-        "id": row["id"],
-        "anchor_id": row.get("anchor_id"),
-        "body": row["body"],
-        "author": row["author"],
-        "status": row["status"],
-        "created_at": str(row["created_at"]),
-        "resolved_at": str(row["resolved_at"]) if row.get("resolved_at") else None,
-        "pin_x_pct": row.get("pin_x_pct"),
-        "pin_y_pct": row.get("pin_y_pct"),
-        "resolved_anchor_id": row.get("resolved_anchor_id"),
-    }
-
-
-# ─── Internal (authed) comment routes ─────────────────────────────────────
-
-
-@router.post(
-    "/{prototype_id}/comments",
-    response_model=CommentOut,
-    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
-)
-def post_comment(
-    prototype_id: int,
-    body: CommentCreate,
-    company: CompanyContext = Depends(require_company),
-) -> CommentOut:
-    """Create a comment as an internal user. Workspace-filtered: 404 if the
-    prototype is not in the caller's workspace (cross-tenant existence is not
-    disclosed). Attributed to the internal author label."""
-    _require_feature_enabled()
-    workspace_id = company.company_id
-    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
-    if not proto:
-        raise HTTPException(status_code=404, detail="Prototype not found")
-    row = insert_comment(
-        prototype_id=prototype_id,
-        workspace_id=workspace_id,
-        anchor_id=body.anchor_id,
-        body=body.body,
-        author=company.user_name or company.user_email or company.user_id,
-        user_id=company.user_id,
-        pin_x_pct=body.pin_x_pct,
-        pin_y_pct=body.pin_y_pct,
-        resolved_anchor_id=body.resolved_anchor_id,
-    )
-    return CommentOut(**_comment_to_out(row))
-
-
-@router.get("/{prototype_id}/comments", response_model=list[CommentOut])
-def get_comments(
-    prototype_id: int,
-    company: CompanyContext = Depends(require_company),
-) -> list[CommentOut]:
-    """List every comment for a prototype (all statuses, created_at-ascending).
-    Workspace-filtered: 404 if the prototype is not in the caller's workspace."""
-    _require_feature_enabled()
-    workspace_id = company.company_id
-    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
-    if not proto:
-        raise HTTPException(status_code=404, detail="Prototype not found")
-    return [
-        CommentOut(**_comment_to_out(r))
-        for r in list_comments(prototype_id=prototype_id, workspace_id=workspace_id)
-    ]
-
-
-@router.patch(
-    "/{prototype_id}/comments/{cid}/resolve",
-    response_model=CommentOut,
-    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
-)
-def patch_resolve_comment(
-    prototype_id: int,
-    cid: int,
-    company: CompanyContext = Depends(require_company),
-) -> CommentOut:
-    """Resolve a comment (internal only — external viewers cannot resolve, per
-    spec §4 Stage 2 'only internal users with credentials can act'). Returns 404
-    when the comment is not in the caller's workspace OR belongs to a different
-    prototype than the one in the path (no cross-prototype resolve)."""
-    _require_feature_enabled()
-    workspace_id = company.company_id
-    row = resolve_comment(comment_id=cid, workspace_id=workspace_id)
-    if not row or row["prototype_id"] != prototype_id:
-        raise HTTPException(status_code=404, detail="Comment not found")
-    return CommentOut(**_comment_to_out(row))
-
-
-@router.delete("/{prototype_id}/comments/{cid}", status_code=204, dependencies=[Depends(require_same_origin)])
-def delete_comment_route(
-    prototype_id: int,
-    cid: int,
-    company: CompanyContext = Depends(require_company),
-) -> Response:
-    _require_feature_enabled()
-    workspace_id = company.company_id
-    delete_comment(comment_id=cid, workspace_id=workspace_id)
-    return Response(status_code=204)
-
-
-# ─── Public (token-resolved, NO auth) comment routes ──────────────────────
-#
-# "Anyone with the URL can comment." The token IS the access primitive.
-# Workspace is taken from the RESOLVED prototype row (not a session claim).
-# External viewers may CREATE + READ comments but NOT resolve them. The
-# resolution posture matches get_by_token exactly (404 for missing / private /
-# not-ready) so brute-force scanning discloses nothing.
-
-
-@router.post("/by-token/{token}/comments", response_model=CommentOut)
-def post_comment_public(token: str, body: CommentCreate, request: Request) -> CommentOut:
-    """Public comment write. Resolves token → prototype; rejects when the
-    prototype is private or not ready (404, matching get_by_token's posture).
-    The comment is attributed to the viewer's self-supplied name (or
-    "Anonymous"), and the workspace_id is taken from the resolved row — never a
-    session claim.
-
-    Anonymous public comment WRITES are ENABLED: the share token IS the access
-    primitive (anyone with the URL can comment). This is an unauthenticated
-    write endpoint by design; the abuse controls are unchanged and load-bearing:
-      - the feature-flag gate (`_require_feature_enabled`) — invisible when off;
-      - the resolution 404-posture (missing / private / not-ready all 404,
-        indistinguishable from each other, so brute-force scanning discloses
-        nothing);
-      - the per-IP `PUBLIC_COMMENT_LIMITER` (10/hour/IP), mounted after the 404
-        resolution and before the write;
-      - log hygiene: the token is hashed (never raw) and neither the comment body
-        nor the viewer name (PII) is ever logged."""
-    _require_feature_enabled()
-    proto = find_prototype_by_share_token(token)
-    if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
-        raise HTTPException(status_code=404, detail="Not found")
-    # Per-IP public-comment rate limit (10/hour/IP). Mounted AFTER the 404
-    # resolution (a private/missing/not-ready prototype 404s first, so the limiter
-    # never discloses a hidden prototype's existence) and BEFORE insert_comment (the
-    # spend-meaningful write). Keyed by client IP — the same machine can spam across
-    # many tokens, so per-IP, not per-token, is the spam boundary. Null-guard mirrors
-    # the passcode route's `request.client.host if request.client else "0.0.0.0"`.
-    client_ip = request.client.host if request.client else "0.0.0.0"
-    if not PUBLIC_COMMENT_LIMITER.check(client_ip):
-        retry_after = PUBLIC_COMMENT_LIMITER.retry_after(client_ip)
-        logger.info(
-            "public_comment_rate_limited ip_present=%s retry_after_seconds=%s",
-            request.client is not None, retry_after,
-        )
-        raise HTTPException(
-            status_code=429,
-            detail={"error": "rate_limit", "retry_after_seconds": retry_after},
-        )
-    PUBLIC_COMMENT_LIMITER.register(client_ip)
-    # Viewer-supplied display name → the existing `author` column. Trimmed and
-    # falling back to "Anonymous" for blank/omitted names. NEVER logged (PII).
-    author = (body.viewer_name or "").strip() or "Anonymous"
-    row = insert_comment(
-        prototype_id=proto["id"],
-        workspace_id=proto["workspace_id"],   # from the resolved row, not a session
-        anchor_id=body.anchor_id,
-        body=body.body,
-        author=author,
-        pin_x_pct=body.pin_x_pct,
-        pin_y_pct=body.pin_y_pct,
-        resolved_anchor_id=body.resolved_anchor_id,
-    )
-    # Token hashed, never raw (the token is the access primitive); no
-    # comment body in the log line (PII). insert_comment emits its own
-    # `comment_created` line; this adds the public-surface correlation marker.
-    logger.info(
-        "comment_created_public token_hash=%s prototype_id=%s comment_id=%s",
-        _share_token_hash(token), proto["id"], row["id"],
-    )
-    return CommentOut(**_comment_to_out(row))
-
-
-@router.get("/by-token/{token}/comments", response_model=list[CommentOut])
-def get_comments_public(token: str) -> list[CommentOut]:
-    """Public comment read. All viewers can read existing comments (spec §4).
-    Same 404 posture as the public write for missing / private / not-ready."""
-    _require_feature_enabled()
-    proto = find_prototype_by_share_token(token)
-    if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
-        raise HTTPException(status_code=404, detail="Not found")
-    return [
-        CommentOut(**_comment_to_out(r))
-        for r in list_comments(prototype_id=proto["id"], workspace_id=proto["workspace_id"])
-    ]
-
-
-# ─── Comment clarify ────────────────────────────────────────────────────────────
-#
-# POST /{prototype_id}/clarify-comment
-#
-# Lightweight LLM call (claude-haiku-4-5-20251001, max_tokens=200) that
-# generates a single clarifying question for a comment body before the Apply
-# flow commits an iterate. Backed by the shared `get_design_agent_client()`
-# factory. Uses the design agent API key.
-# Not in the iterate queue — this is a synchronous pre-flight, fast enough
-# (<1s on Haiku) to sit in the request path without a background task.
-
-
-class ClarifyCommentRequest(BaseModel):
-    comment_body: str = Field(..., min_length=1, max_length=4000)
-
-
-class ClarifyCommentResponse(BaseModel):
-    question: str
-
-
-@router.post("/{prototype_id}/clarify-comment", response_model=ClarifyCommentResponse, dependencies=[Depends(require_same_origin)])
-def clarify_comment_route(
-    prototype_id: int,
-    body: ClarifyCommentRequest,
-    company: CompanyContext = Depends(require_company),
-) -> ClarifyCommentResponse:
-    """Return a single clarifying question for a comment before Apply is confirmed.
-
-    Workspace-isolated (require_company) and feature-flag-gated. Uses the shared
-    Design Agent Anthropic client with a lightweight Haiku call so the
-    dialog loads in <1s without touching the iterate queue.
-    """
-    _require_feature_enabled()
-    workspace_id = company.company_id
-    proto = get_prototype(prototype_id=prototype_id, workspace_id=workspace_id)
-    if proto is None:
-        raise HTTPException(status_code=404, detail="Prototype not found")
-    client = get_design_agent_client()
-    FALLBACK_QUESTION = "Looks good — any additional context to add?"
-    try:
-        msg = client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            timeout=10.0,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f'You are reviewing a design feedback comment about to be applied to a UI prototype.\n'
-                    f'Comment: "{body.comment_body}"\n'
-                    f'Ask exactly ONE brief, specific clarifying question to understand the designer\'s intent before applying this change. '
-                    f'Be concise (one sentence max). Do not explain yourself, just ask the question.'
-                ),
-            }],
-        )
-        text_blocks = [b for b in (msg.content or []) if hasattr(b, "text")]
-        question = text_blocks[0].text.strip() if text_blocks else FALLBACK_QUESTION
-    except Exception:
-        question = FALLBACK_QUESTION
-    return ClarifyCommentResponse(question=question)
 
 
 # ─── Iterate: re-prompt + Apply-driven edits ───────────────────────────────────
@@ -3810,7 +3631,13 @@ async def _run_iterate_bg(
                 workspace_id=workspace_id,
                 error="iterate agent_loop completed but emitted no files",
             )
-            _finalize_iteration_failed(iter_event_id, workspace_id, prototype_id, "no_files")
+            _finalize_usage_event_failed(
+                event_id=iter_event_id,
+                workspace_id=workspace_id,
+                prototype_id=prototype_id,
+                error_class="no_files",
+                kind="iteration",
+            )
         elif result.status == "awaiting_clarification":
             # A clarifying_question terminal-PAUSE is NOT a failure.
             # The runner already persisted the question on `pending_question`;
@@ -3849,9 +3676,13 @@ async def _run_iterate_bg(
                 workspace_id=workspace_id,
                 error=" | ".join(error_parts),
             )
-            _finalize_iteration_failed(
-                iter_event_id, workspace_id, prototype_id,
-                getattr(result, "error_class", None) or f"status_{result.status}",
+            _finalize_usage_event_failed(
+                event_id=iter_event_id,
+                workspace_id=workspace_id,
+                prototype_id=prototype_id,
+                error_class=getattr(result, "error_class", None)
+                or f"status_{result.status}",
+                kind="iteration",
             )
     except Exception as exc:  # noqa: BLE001 — bg task must never leak; row is failed.
         from app.design_agent.provider_errors import (
@@ -3875,8 +3706,12 @@ async def _run_iterate_bg(
         # iter_event_id may be unbound if the failure preceded its assignment
         # (e.g. get_prototype raised); guard with locals() so the fail-open
         # finalize never itself raises a NameError.
-        _finalize_iteration_failed(
-            locals().get("iter_event_id"), workspace_id, prototype_id, cls.value,
+        _finalize_usage_event_failed(
+            event_id=locals().get("iter_event_id"),
+            workspace_id=workspace_id,
+            prototype_id=prototype_id,
+            error_class=cls.value,
+            kind="iteration",
         )
         fail_prototype(
             prototype_id=prototype_id,
@@ -3993,23 +3828,20 @@ async def _stage_iterate_run(
         prototype_id, len(dist_files),
     )
 
-    # Step 2 — new checkpoint; thread the iterate prompt into prompt_history.
-    checkpoint_id = create_checkpoint(
-        prototype_id=prototype_id,
-        workspace_id=workspace_id,
-        bundle_url=None,
-        prd_revision_hash=None,    # PRD-hash + figma-hash wired later on this path
-        figma_frame_hash=None,
-        prompt_history=[{"kind": "iterate", "prompt": iterate_prompt}],
-        comment_state=[],
-    )
-
-    # Step 3 — stage the BUILT dist/ (never raw virtual_fs).
+    # Step 2 — checkpoint the build (threading the iterate prompt into
+    # prompt_history), stage the dist/ bundle + raw source, and reconcile comments
+    # (shared with the first-completion path). Fail-closed on the dist stage
+    # (routed to THIS function's fail_prototype below); best-effort on source-stage
+    # + reconcile. log_prefix="iterate_" reproduces the exact
+    # "iterate_source_stage_failed" key.
     try:
-        bundle_url = await stage_bundle(
+        checkpoint_id, bundle_url = await _stage_checkpoint_and_bundle(
             prototype_id=prototype_id,
-            checkpoint_id=checkpoint_id,
-            files=dist_files,
+            workspace_id=workspace_id,
+            dist_files=dist_files,
+            virtual_fs=virtual_fs,
+            prompt_history=[{"kind": "iterate", "prompt": iterate_prompt}],
+            log_prefix="iterate_",
         )
     except Exception as exc:  # noqa: BLE001 — surface staging failure on the row.
         fail_prototype(
@@ -4019,51 +3851,18 @@ async def _stage_iterate_run(
         )
         return False
 
-    # Step 3.5 — stage the RAW virtual_fs under _source/ so the NEXT iterate's
-    # read_source_files_for_checkpoint returns real TSX. Best-effort (mirrors
-    # _stage_complete_run): a source-stage failure logs and proceeds.
-    try:
-        await stage_bundle(
-            prototype_id=prototype_id,
-            checkpoint_id=checkpoint_id,
-            files=virtual_fs,
-            sub_prefix="_source",
-        )
-    except Exception as exc:  # noqa: BLE001 — source-stage is best-effort.
-        logger.warning(
-            "iterate_source_stage_failed prototype_id=%s checkpoint_id=%s error_class=%s",
-            prototype_id, checkpoint_id, type(exc).__name__,
-        )
-
-    # Step 3.6 — orphan/re-attach on the ITERATE path. An iterate is a new
-    # checkpoint build, so it MUST reconcile comments too (the iterate path shipped
-    # before this helper existed; wired here so generate AND iterate both orphan
-    # vanished anchors). Same path-agnostic helper as _stage_complete_run — it
-    # keys on prototype_id, not checkpoint_id. Best-effort: a reconcile failure
-    # must NOT fail the iterate (the bundle is already staged).
-    try:
-        reconcile_comments_on_checkpoint(
-            prototype_id=prototype_id,
-            workspace_id=workspace_id,
-            dist_files=dist_files,
-        )
-    except Exception as exc:  # noqa: BLE001 — reconcile is best-effort housekeeping.
-        logger.warning(
-            "comments_reconcile_failed prototype_id=%s error_class=%s",
-            prototype_id, type(exc).__name__,
-        )
-
     # Step 4 — Advance current_checkpoint_id + bundle_url WITHOUT a
     # completed_at re-stamp (NOT complete_prototype). This does not
     # rotate share_token / share_mode, so the public /p/<token> URL is unchanged
-    # and now resolves to the new checkpoint's bundle. NO-BYPASS (plan §8): store
-    # the STABLE app-origin proxy base (not the staged signed URL `bundle_url`,
-    # which is server-side only); the proxy signs-on-read per checkpoint.
+    # and now resolves to the new checkpoint's bundle. NO-BYPASS (plan §8): the
+    # bundle_url returned by `_stage_checkpoint_and_bundle` is the STABLE app-origin
+    # proxy base (not the staged signed object URL, which is server-side only); the
+    # proxy signs-on-read per checkpoint.
     advance_current_checkpoint(
         prototype_id=prototype_id,
         workspace_id=workspace_id,
         checkpoint_id=checkpoint_id,
-        bundle_url=authed_bundle_url(prototype_id),
+        bundle_url=bundle_url,
     )
     return True
 

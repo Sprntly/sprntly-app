@@ -28,7 +28,7 @@ from fastapi.testclient import TestClient
 from tests.conftest import _TEST_COMPANY_ID
 
 # SQLite-compatible prototypes DDL with preview_image_url column (mirrors
-# test_design_agent_screenshot._PROTOTYPE_DDL — the column that find_ready_prototype_by_prd
+# test_design_agent_screenshot._PROTOTYPE_DDL — the column that find_prototype_by_prd
 # returns and that PrototypeReadiness exposes to callers).
 _PROTOTYPE_DDL = """
 CREATE TABLE prototypes (
@@ -79,7 +79,7 @@ def env(isolated_settings, monkeypatch):
     """isolated_settings + prototypes tables + feature flag ON.
 
     Reloads app.db.prds → app.db.prototypes → app.routes.design_agent → app.main
-    in dependency order so the route's list_prds_by_brief + find_ready_prototype_by_prd
+    in dependency order so the route's list_prds_by_brief + find_prototype_by_prd
     bind to the fake-Supabase-wired helpers. The prds table is already in conftest's
     _FAKE_SCHEMA; only prototypes + prototype_checkpoints need to be added here.
     """
@@ -302,7 +302,7 @@ def test_brief_prototype_map_prototype_workspace_isolated(client):
     entry.prototype is null even though the prd_id has a ready prototype row."""
     prd = _seed_prd(brief_id=5, insight_index=0)
     # Prototype is seeded under a foreign workspace — the caller (co-test) must not
-    # see it; find_ready_prototype_by_prd filters by workspace_id.
+    # see it; find_prototype_by_prd filters by workspace_id.
     _seed_prototype(prd_id=prd, workspace_id=_OTHER_WS, status="ready",
                     preview_image_url="https://example.com/foreign.png")
 

@@ -2280,6 +2280,8 @@ def _handle_installation_event(payload: dict) -> None:
     elif action == "deleted":
         db.delete_github_installation(int(install_id))
         github_app.clear_installation_token_cache(int(install_id))
+        from app.design_agent.codebase_map.service import clear_map_cache
+        clear_map_cache(int(install_id))
 
 
 def _handle_installation_repositories_event(payload: dict) -> None:

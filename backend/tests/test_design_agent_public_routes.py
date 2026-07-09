@@ -23,6 +23,7 @@ module-level passcode rate-limit state is reset per test.
 from __future__ import annotations
 
 import importlib
+import logging
 import uuid
 from types import SimpleNamespace
 
@@ -119,12 +120,20 @@ def _seed(
     is_complete: int = 0,
     workspace_id: str = "app",
     target_platform: str = "both",
+    display_name: str | None = None,
+    prd_id: int = 1,
+    prd_title: str | None = None,
 ) -> str:
     """Insert one prototype row directly into the fake DB; return its share_token.
 
     Direct SQL (same approach as test_db_prototypes_sharing's CHECK test) keeps
     the seed independent of set_share_config's workspace guard — we are testing
     the public read path, which is workspace-blind on purpose.
+
+    `display_name` overrides the owning company's display_name (defaults to
+    "Company <workspace_id>"). `prd_title`, when given, also seeds a matching
+    `prds` row (id=`prd_id`) so the cosmetic feature slug resolves; when omitted,
+    no PRD row is seeded and the feature slug degrades to its fallback.
     """
     from tests import _fake_supabase
 
@@ -133,15 +142,25 @@ def _seed(
     # so multiple seeds in one test (same workspace) don't collide on the PK.
     db.execute(
         "INSERT OR IGNORE INTO companies (id, slug, display_name) VALUES (?, ?, ?)",
-        [workspace_id, f"slug-{workspace_id}", f"Company {workspace_id}"],
+        [
+            workspace_id,
+            f"slug-{workspace_id}",
+            display_name if display_name is not None else f"Company {workspace_id}",
+        ],
     )
+    if prd_title is not None:
+        db.execute(
+            "INSERT OR IGNORE INTO prds (id, brief_id, insight_index, title) "
+            "VALUES (?, ?, ?, ?)",
+            [prd_id, 1, 0, prd_title],
+        )
     token = str(uuid.uuid4())
     db.execute(
         "INSERT INTO prototypes "
         "(prd_id, workspace_id, template_version, status, share_mode, share_token, "
         " share_passcode_hash, bundle_url, is_complete, target_platform) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [1, workspace_id, 1, status, share_mode, token, passcode_hash, bundle_url,
+        [prd_id, workspace_id, 1, status, share_mode, token, passcode_hash, bundle_url,
          is_complete, target_platform],
     )
     return token
@@ -171,12 +190,14 @@ def test_get_by_token_returns_200_unauthenticated_for_public_mode(unauth):
 
 def test_response_body_keys_are_minimum_disclosure(unauth):
     # AC5 — EXACTLY the disclosed fields; no prototype_id / prd_id / workspace_id
-    # leak. company_slug is the one intentional addition (cosmetic URL segment).
+    # leak. company_slug + the two cosmetic display-derived segments
+    # (company_display_slug / feature_slug) are intentional URL-segment additions,
+    # never validated on read (same trust model as company_slug).
     token = _seed(share_mode="public")
     body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
     assert set(body.keys()) == {
         "share_mode", "requires_passcode", "bundle_url", "is_complete", "company_slug",
-        "target_platform",
+        "company_display_slug", "feature_slug", "target_platform",
     }
 
 
@@ -186,6 +207,51 @@ def test_get_by_token_returns_owning_company_slug(unauth):
     token = _seed(share_mode="public", workspace_id="acme")
     body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
     assert body["company_slug"] == "slug-acme"  # _seed creates company id=acme slug=slug-acme
+
+
+def test_get_by_token_includes_company_display_slug_and_feature_slug(unauth):
+    # AC4 — the two cosmetic segments are derived at serve time from the owning
+    # company's display_name and the prototype's PRD title; company_slug (raw,
+    # opaque) is unchanged.
+    token = _seed(
+        share_mode="public",
+        workspace_id="acme",
+        display_name="Lab X",
+        prd_title="Customer Onboarding Revamp",
+    )
+    body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
+    assert body["company_display_slug"] == "lab-x"
+    assert body["feature_slug"] == "customer-onboarding-revamp"
+    assert body["company_slug"] == "slug-acme"  # raw slug unchanged
+
+
+def test_get_by_token_falls_back_when_display_name_missing(unauth):
+    # AC6 — an empty/null display_name degrades the company segment to "company".
+    token = _seed(
+        share_mode="public",
+        workspace_id="acme",
+        display_name="",
+        prd_title="Customer Onboarding Revamp",
+    )
+    body = unauth.get(f"/v1/design-agent/by-token/{token}").json()
+    assert body["company_display_slug"] == "company"
+    assert body["feature_slug"] == "customer-onboarding-revamp"
+
+
+def test_get_by_token_falls_back_when_prd_missing(unauth):
+    # AC7 — the prototype's prd_id points at no PRD row (the fake DB does not
+    # enforce the FK) → feature segment degrades to "prototype", still 200.
+    token = _seed(
+        share_mode="public",
+        workspace_id="acme",
+        display_name="Lab X",
+        prd_id=999,  # no prds row seeded for this id
+    )
+    resp = unauth.get(f"/v1/design-agent/by-token/{token}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["feature_slug"] == "prototype"
+    assert body["company_display_slug"] == "lab-x"
 
 
 def test_public_view_includes_target_platform(unauth):
@@ -262,8 +328,29 @@ def test_verify_passcode_returns_bundle_url_on_correct_passcode(unauth, env):
     assert body["is_complete"] is True
     assert set(body.keys()) == {
         "share_mode", "requires_passcode", "bundle_url", "is_complete", "company_slug",
-        "target_platform",
+        "company_display_slug", "feature_slug", "target_platform",
     }
+
+
+def test_verify_passcode_includes_company_display_slug_and_feature_slug(unauth, env):
+    # AC5 — the passcode-verify success path computes the two cosmetic segments
+    # the same way as get_by_token.
+    h = env.proto.hash_share_passcode("hunter2")
+    token = _seed(
+        share_mode="passcode",
+        passcode_hash=h,
+        workspace_id="acme",
+        display_name="Lab X",
+        prd_title="Customer Onboarding Revamp",
+    )
+    resp = unauth.post(
+        f"/v1/design-agent/by-token/{token}/passcode", json={"passcode": "hunter2"}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["company_display_slug"] == "lab-x"
+    assert body["feature_slug"] == "customer-onboarding-revamp"
+    assert body["company_slug"] == "slug-acme"  # raw slug unchanged
 
 
 def test_verify_passcode_includes_target_platform(unauth, env):
@@ -436,3 +523,49 @@ def test_fresh_bundle_url_signs_from_object_path_with_bucket(monkeypatch):
     assert signed_paths == ["prototypes/11/22/index.html"]
     assert out == "https://signed.example/prototypes/11/22/index.html?fresh=1"
     assert "STALE" not in out
+
+
+# ─── cosmetic slug helpers (SHARE URL company + feature segments) ─────────────
+
+
+def test_display_name_for_company_id_returns_display_name(env):
+    # AC8 — a known id resolves to that company's display_name.
+    from tests import _fake_supabase
+    from app.db.companies import display_name_for_company_id
+
+    _fake_supabase.get_fake_db().execute(
+        "INSERT INTO companies (id, slug, display_name) VALUES (?, ?, ?)",
+        ["comp-1", "slug-comp-1", "Lab X"],
+    )
+    assert display_name_for_company_id("comp-1") == "Lab X"
+
+
+def test_display_name_for_company_id_unknown_id_returns_none(env):
+    # AC8 — an unknown id resolves to None (no row).
+    from app.db.companies import display_name_for_company_id
+
+    assert display_name_for_company_id("does-not-exist") is None
+
+
+def test_public_cosmetic_slugs_fail_soft_on_lookup_exception(env, monkeypatch, caplog):
+    # AC19 — a lookup raising inside _public_cosmetic_slugs is caught: the helper
+    # returns the ("company", "prototype") fallbacks, and the warning it logs
+    # carries identifiers (workspace_id/prd_id) ONLY — never display_name/title
+    # content — so nothing sensitive leaks to logs.
+    routes = env.routes
+    monkeypatch.setattr(routes, "display_name_for_company_id", lambda _cid: "Secret Co Name")
+
+    def _boom(_prd_id):
+        raise RuntimeError("prd store down")
+
+    monkeypatch.setattr(routes, "get_prd_rendered", _boom)
+
+    row = {"workspace_id": "acme", "prd_id": 1}
+    with caplog.at_level(logging.WARNING):
+        result = routes._public_cosmetic_slugs(row)
+
+    assert result == ("company", "prototype")
+    log_text = " ".join(r.getMessage() for r in caplog.records)
+    assert "public_cosmetic_slugs_failed" in log_text
+    assert "acme" in log_text            # workspace_id identifier is present
+    assert "Secret Co Name" not in log_text  # display_name content is NOT logged
