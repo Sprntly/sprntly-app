@@ -227,6 +227,54 @@ describe("ContentPanel header Share dropdown", () => {
   })
 })
 
+describe("ContentPanel Share — combined Evidence + PRD", () => {
+  const HTML_PRD = {
+    prd_id: 42,
+    title: "Handoff Threshold PRD",
+    html: "<html><head><style>:root{--g:#00f} .page{color:var(--g)}</style></head><body><div class='page'>prd body</div></body></html>",
+  }
+  const HTML_EVIDENCE = {
+    evidence_id: 9,
+    title: "Handoff Evidence",
+    html: "<html><head><style>:root{--g:#0a0} .wrap{color:var(--g)}</style></head><body><div class='wrap'>evidence body</div></body></html>",
+  }
+
+  it("labels the downloads as Evidence + PRD when both are HTML briefs", () => {
+    content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: HTML_EVIDENCE }
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    const menu = screen.getByRole("menu")
+    expect(within(menu).getByText(/Evidence \+ PRD as \.pdf/i)).toBeTruthy()
+    expect(within(menu).getByText(/Evidence \+ PRD as \.doc/i)).toBeTruthy()
+  })
+
+  it("Download DOCX saves ONE combined .doc containing both briefs", async () => {
+    content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: HTML_EVIDENCE }
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download DOCX"))
+    await waitFor(() => expect(saveAs).toHaveBeenCalled())
+    const [blob, filename] = saveAs.mock.calls[0]
+    // One combined Word doc (the -evidence-prd suffix marks the combined export);
+    // the HTML content + CSS scoping is asserted in combinedExport.test.ts.
+    expect(filename).toBe("handoff-threshold-prd-evidence-prd.doc")
+    expect((blob as Blob).type).toBe("application/msword")
+  })
+
+  it("falls back to single-PRD export when there is no evidence", async () => {
+    content = { ...EMPTY_CONTENT, prd: HTML_PRD, evidence: null }
+    render(<ContentPanel />)
+    fireEvent.click(screen.getByRole("button", { name: /Share/i }))
+    // Single-PRD labels, not the combined ones.
+    expect(within(screen.getByRole("menu")).getByText(/Export as \.docx/i)).toBeTruthy()
+    fireEvent.click(within(screen.getByRole("menu")).getByText("Download DOCX"))
+    await waitFor(() => expect(saveAs).toHaveBeenCalled())
+    const [, filename] = saveAs.mock.calls[0]
+    // HTML PRD → single .doc (no -evidence-prd suffix).
+    expect(filename).toBe("handoff-threshold-prd.doc")
+  })
+})
+
 describe("PrdPanelContent bottom bar", () => {
   it("renders Version history + the autosave/Save control, and NOT Approve or Share", () => {
     content = { ...EMPTY_CONTENT, prd: FAKE_PRD }
