@@ -29,6 +29,11 @@ _PAGE_LIMIT = 5          # pages per site — pilot-scale cap; bump when needed
 _PAGE_SIZE = 100
 # Only the fields we render — keeps the payload small and the extractor focused.
 _FIELDS = "summary,description,status,priority,issuetype,project,labels,assignee,updated,created"
+# The enhanced /search/jql endpoint REJECTS unbounded JQL ("Unbounded JQL
+# queries are not allowed here"), so a bare "ORDER BY updated DESC" 400s. Anchor
+# the query with a wide `created` floor to bound it while still matching every
+# issue, newest-updated first.
+_JQL = 'created >= "2000-01-01" ORDER BY updated DESC'
 
 
 def _plain_text_from_adf(node: object) -> str:
@@ -65,7 +70,7 @@ def pull(token: str) -> Iterator[RawRecord]:
 
     for _ in range(_PAGE_LIMIT):
         params: dict[str, object] = {
-            "jql": "ORDER BY updated DESC",
+            "jql": _JQL,
             "maxResults": _PAGE_SIZE,
             "fields": _FIELDS,
         }
