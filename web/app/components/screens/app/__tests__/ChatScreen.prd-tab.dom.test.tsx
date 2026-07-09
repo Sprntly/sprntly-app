@@ -24,7 +24,9 @@ if (typeof window !== "undefined") window.scrollTo = () => {}
 if (typeof window !== "undefined" && !window.matchMedia) {
   window.matchMedia = (query: string) =>
     ({
-      matches: false, media: query, onchange: null,
+      // Report reduced-motion so AskReplyBody renders replies in full immediately
+      // (no simulated typing stream) — keeps thread-text assertions deterministic.
+      matches: /prefers-reduced-motion/.test(query), media: query, onchange: null,
       addEventListener: () => {}, removeEventListener: () => {},
       addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
     }) as unknown as MediaQueryList
@@ -39,7 +41,15 @@ vi.mock("../../../../lib/api", () => {
   return {
     ApiError,
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
-    briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
+    briefApi: {
+      current: vi.fn().mockResolvedValue({ id: 1, insights: [] }),
+      byId: vi.fn().mockResolvedValue({
+        id: 7,
+        insights: [
+          { title: "Retention insight", subtitle: "Users churn early.", recommendation: "Fix onboarding.", confidence: 0.9 },
+        ],
+      }),
+    },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
@@ -181,6 +191,21 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     // ChatScreen (not the caller) runs the generation for the new PRD tab.
     await waitFor(() => expect(runPrdGeneration).toHaveBeenCalledWith({ briefId: 7, insightIndex: 0 }))
     await waitFor(() => expect(panelProbe()).toBe("prd"))
+  })
+
+  it("seeds the tab's thread with Spiky's opening insight turn (title + body)", async () => {
+    renderWith({
+      title: "PRD · Retention",
+      source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
+    })
+    await clickOpenPrd()
+
+    // The insight (title + body) is fed into the thread as Spiky's turn, so the
+    // tab opens ON the insight instead of the generic "Welcome back" landing.
+    await waitFor(() => expect(screen.getByText("Retention insight")).toBeTruthy())
+    expect(screen.getByText(/Users churn early\./)).toBeTruthy()
+    // It's an agent-only turn — no empty user bubble.
+    expect(document.querySelector(".bc-user-bubble")).toBeNull()
   })
 
   it("reuses the same tab (by title) instead of stacking duplicates", async () => {

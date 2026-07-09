@@ -25,7 +25,7 @@ import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
-import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
+import { pickDefaultDetailKey, findingBodyDesc } from "../../../lib/brief-adapter"
 import type { PrdState, PrdContent } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
 import { prototypePath } from "../../../lib/routes"
@@ -366,6 +366,37 @@ export function ChatScreen() {
     })
   }, [activeTabId])
 
+  // Seed a PRD/insight tab's thread with Spiky's OPENING turn — the insight the
+  // PRD is about (the same title + body the brief card shows). This makes the tab
+  // open ON the insight (not the generic "Welcome back" landing) and puts the
+  // insight into the thread so it's part of the conversation CONTEXT for any
+  // follow-up asks. It's an agent-only turn (empty query — the render skips the
+  // user bubble for it). Idempotent: only ever seeds a still-empty thread, once.
+  const seedInsightTurn = useCallback(async (tabId: string, meta: BriefMeta) => {
+    // Bail only when the tab is KNOWN to already carry a thread. A freshly-opened
+    // tab isn't in tabsRef yet (setTabs hasn't committed), so `existing` is
+    // undefined here — we proceed and let the functional update below seed it once
+    // React has committed it (after the await).
+    const existing = tabsRef.current.find((t) => t.id === tabId)
+    if (existing && existing.thread.length > 0) return
+    try {
+      const brief = await briefApi.byId(meta.briefId)
+      const insight = brief.insights?.[meta.insightIndex]
+      if (!insight) return
+      const reply: AskResponse = {
+        answer: `**${insight.title}**\n\n${findingBodyDesc(insight)}`,
+        key_points: [], citations: [], confidence: insight.confidence ?? 0, unanswered: "",
+      }
+      setTabs((prev) => prev.map((t) =>
+        t.id === tabId && t.thread.length === 0
+          ? { ...t, thread: [{ id: `insight-${tabId}`, query: "", reply }] }
+          : t))
+    } catch {
+      // Non-fatal: if the insight can't be fetched the tab just opens without a
+      // seeded turn (falls back to the landing). PRD generation is unaffected.
+    }
+  }, [])
+
   // ── Open a PRD as a NEW CHAT TAB with the content panel over it ─────────────
   // A "view/generate PRD" from another surface (brief cards, brief composer,
   // backlog) routes here via NavigationContext.openPrdTab → pendingPrdTab. We
@@ -397,6 +428,8 @@ export function ChatScreen() {
     }
     setDraft("")
     setPrdPanelPending(true)
+    // Seed the tab's thread with Spiky presenting the insight (idempotent).
+    if (meta) void seedInsightTurn(tabId, meta)
 
     // Reuse a PRD already cached on this tab (unless the caller handed us a fresh
     // one) — don't regenerate/re-fetch an already-open PRD.
@@ -434,7 +467,7 @@ export function ChatScreen() {
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
-  }, [setContent, showToast])
+  }, [setContent, showToast, seedInsightTurn])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
@@ -1182,7 +1215,9 @@ export function ChatScreen() {
     // back) — not a tab-less landing. Reuse-or-create: if an empty "New chat" tab
     // already exists (no messages), just activate it rather than piling up
     // duplicates. We still prune OTHER empty tabs (keep the strip clean) but never
-    // the one the user is about to sit on.
+    // the one the user is about to sit on. NOTE: "empty" means thread.length === 0
+    // — PRD/evidence tabs seed their thread with the insight (see openPrdInTab), so
+    // they are NOT empty and are never pruned here.
     let targetId: string | null = null
     setTabs((prev) => {
       const existingEmpty = prev.find((t) => t.thread.length === 0 && t.title === NEW_CHAT_TITLE)
@@ -1556,11 +1591,17 @@ export function ChatScreen() {
                       if (hasFreshReply) animatedTurnIds.current.add(turn.id)
                       return (
                         <div key={turn.id} className="bc-turn">
-                          <div className="bc-user-head">
-                            <span className="bc-avatar">{userInitials}</span>
-                            <span className="bc-user-name">{name}</span>
-                          </div>
-                          <div className="bc-user-bubble">{turn.query}</div>
+                          {/* Agent-only turns (e.g. Spiky's seeded insight
+                              opener) carry no query — skip the user bubble. */}
+                          {turn.query ? (
+                            <>
+                              <div className="bc-user-head">
+                                <span className="bc-avatar">{userInitials}</span>
+                                <span className="bc-user-name">{name}</span>
+                              </div>
+                              <div className="bc-user-bubble">{turn.query}</div>
+                            </>
+                          ) : null}
                           <div className="bc-agent-head">
                             <span className="bc-agent-mark">
                               <IconSparkle size={14} />
