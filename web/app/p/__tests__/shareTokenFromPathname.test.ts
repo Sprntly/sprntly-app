@@ -1,12 +1,13 @@
 // Regression lock for the prod static-export token bug.
 //
-// Under output:"export" the `/p/[slug]/[token]` + `/p/[slug]` routes are
-// prerendered under the "_" sentinel and nginx rewrites every real /p URL to that
-// one static file, so useParams() returns "_" on the client — never the real
-// token in the address bar. These pure helpers derive the real token from
-// window.location.pathname instead. This test proves they extract the REAL token
-// from a realistic pathname and reject the sentinel — the exact failure that
-// shipped (by-token/_ → "Could not load this prototype").
+// Under output:"export" the catch-all `/p/[...segments]` route is prerendered
+// under a small set of "_" sentinel paths and nginx rewrites every real /p URL
+// (by depth) to the matching static file, so useParams() returns the sentinel
+// segments on the client — never the real token in the address bar. These pure
+// helpers derive the real token from window.location.pathname instead. This
+// test proves they extract the REAL token from a realistic pathname and reject
+// the sentinel — the exact failure that shipped (by-token/_ → "Could not load
+// this prototype").
 import { describe, it, expect } from "vitest"
 import {
   publicPathSegments,

@@ -17,10 +17,9 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { nextViewerState } from "../PublicTokenViewer"
 import { resolveToken } from "../resolveToken"
-import { legacyRedirectTarget } from "../[slug]/LegacyTokenRedirect"
-import { generateStaticParams as canonicalStaticParams } from "../[slug]/[token]/page"
-import { generateStaticParams as canonicalThreeSegStaticParams } from "../[slug]/[featureSlug]/[token]/page"
-import { generateStaticParams as legacyStaticParams } from "../[slug]/page"
+import { legacyRedirectTarget } from "../LegacyTokenRedirect"
+import { pathDepthKind } from "../PublicPathRouter"
+import { generateStaticParams as catchAllStaticParams } from "../[...segments]/page"
 import { PrototypeViewer } from "../../components/design-agent/PrototypeViewer"
 import { PasscodeGateView, submitPasscode } from "../PasscodeGate"
 
@@ -261,12 +260,12 @@ describe("PasscodeGate", () => {
   })
 })
 
-// Sharing model: the legacy `/p/<token>` route now redirects to the canonical
-// `/p/<slug>/<token>` form. The legacy route's shared first segment is named
-// [slug] (Next same-name rule), so the client component reads the share token
-// from params.slug; legacyRedirectTarget is the pure target-computation it calls
-// after resolving that token (the router.replace itself lives in the client
-// component, exercised in E2E).
+// Sharing model: the legacy `/p/<token>` path now redirects to the canonical
+// `/p/<company>/<feature>/<token>` form. A single catch-all route
+// ([...segments]/page.tsx) dispatches by REAL path depth (PublicPathRouter),
+// not by a per-depth dynamic folder name; legacyRedirectTarget is the pure
+// target-computation LegacyTokenRedirect calls after resolving the token (the
+// router.replace itself lives in the client component, exercised in E2E).
 describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
   it("computes /p/<company>/<feature>/<token> from a resolved view", () => {
     expect(
@@ -309,25 +308,40 @@ describe("legacyRedirectTarget (legacy → canonical redirect)", () => {
   })
 })
 
-describe("canonical /p/[slug]/[token] route", () => {
-  it("generateStaticParams returns the 2-seg sentinel for static export", () => {
-    expect(canonicalStaticParams()).toEqual([{ slug: "_", token: "_" }])
-  })
-})
-
-describe("canonical /p/[slug]/[featureSlug]/[token] route", () => {
-  it("generateStaticParams returns the 3-seg sentinel for static export", () => {
-    expect(canonicalThreeSegStaticParams()).toEqual([
-      { slug: "_", featureSlug: "_", token: "_" },
+// A single catch-all route (/p/[...segments]/page.tsx) serves every /p/...
+// depth — the 1-seg legacy bookmark, the 2-seg canonical form, and the 3-seg
+// canonical form all resolve through it. generateStaticParams emits one static
+// shell per depth we still want a distinct nginx sentinel file for.
+describe("catch-all /p/[...segments] route", () => {
+  it("generateStaticParams emits the 1-seg, 2-seg, and 3-seg sentinels for static export", () => {
+    expect(catchAllStaticParams()).toEqual([
+      { segments: ["_"] },
+      { segments: ["_", "_"] },
+      { segments: ["_", "_", "_"] },
     ])
   })
 })
 
-// The legacy 1-segment route lives at /p/[slug] (the shared first segment is
-// named [slug] to satisfy Next's same-name rule; the value is the share token).
-describe("legacy /p/[slug] route", () => {
-  it("generateStaticParams returns the 1-seg sentinel for static export", () => {
-    expect(legacyStaticParams()).toEqual([{ slug: "_" }])
+// PublicPathRouter dispatches by the REAL request depth (not by which static
+// sentinel Next prerendered) — 1 segment is the legacy bookmark shape; any
+// other depth is a canonical share link, rendered inline regardless of how
+// many cosmetic segments precede the token.
+describe("pathDepthKind (PublicPathRouter dispatch)", () => {
+  it("classifies a 1-segment path as legacy", () => {
+    expect(pathDepthKind("/p/tok-abc123")).toBe("legacy")
+  })
+
+  it("classifies a 2-segment path as canonical", () => {
+    expect(pathDepthKind("/p/acme/tok-abc123")).toBe("canonical")
+  })
+
+  it("classifies a 3-segment path as canonical", () => {
+    expect(pathDepthKind("/p/acme/onboarding-revamp/tok-abc123")).toBe("canonical")
+  })
+
+  it("is base-path aware, matching publicPathSegments", () => {
+    expect(pathDepthKind("/demo/p/tok-abc123", "/demo")).toBe("legacy")
+    expect(pathDepthKind("/demo/p/acme/tok-abc123", "/demo")).toBe("canonical")
   })
 })
 
