@@ -983,34 +983,35 @@ export function ChatScreen() {
   // Keyed on the active tab (not a captured mount tab): `activeCompany` resolves
   // asynchronously and the company-change effect re-seeds the active tab a commit
   // or two after mount, so "the tab we reloaded onto" isn't known at first render.
-  // Instead we handle each tab AT MOST ONCE (autoRestoredTabsRef) the first time
-  // it's active with its map resolved — robust to that timing. Guards keep the
-  // panel off the wrong surface:
+  //
+  // We act ONLY on a positive signal — the map has resolved AND reports a DB PRD
+  // for this insight — and mark the tab handled ONLY when we actually open it.
+  // This matters because useBriefPrototypeMap starts `loading:false` with an empty
+  // map and only flips to `loading:true` inside its own effect (a commit later):
+  // an earlier design that gave up whenever `hasPrd` was false would latch onto
+  // that empty pre-fetch window and never restore. Here a false/empty reading is
+  // simply "not yet" — we wait for a later render. Guards keep the panel off the
+  // wrong surface:
   //   • Never the brief tab, and never a plain (non-PRD) chat → a reload (or
   //     switch) onto a new chat leaves the panel closed.
   //   • Skips when the tab already holds/loads a PRD or a panel is already open
-  //     (openPrdInTab / a manual open handled it).
-  //   • Once-per-tab, so a manual panel-close is never immediately undone.
-  //   • Waits out chatMapLoading so it doesn't give up before the DB truth lands.
+  //     (openPrdInTab / a manual open handled it) — and once opened, `tab.prd` is
+  //     cached, so a manual panel-close is never undone.
+  //   • Fires at most once per tab (autoRestoredTabsRef).
   const autoRestoredTabsRef = useRef<Set<string>>(new Set())
   useEffect(() => {
     if (!activeTabId || isBriefTab) return
     if (autoRestoredTabsRef.current.has(activeTabId)) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
     // Not a PRD-bound tab, already loaded/loading, or a panel is already open →
-    // mark handled so we don't reconsider it every render.
-    if (!tab || !tab.briefMeta || tab.prd || tab.prdGenerating || contentPanelTab) {
-      autoRestoredTabsRef.current.add(activeTabId)
-      return
-    }
-    // Still fetching whether a DB PRD exists — wait for the next resolve (do NOT
-    // mark handled yet, or we'd give up before the map lands).
-    if (chatMapLoading) return
+    // nothing to restore right now (don't latch; conditions above are transient).
+    if (!tab || !tab.briefMeta || tab.prd || tab.prdGenerating || contentPanelTab) return
+    // Only a CONFIRMED DB PRD triggers the restore. A not-yet-resolved map reads as
+    // hasPrd=false → treat as "wait", not "give up", and re-check on the next render.
+    if (!(chatInsightState?.hasPrd && chatInsightState.prdId != null)) return
     autoRestoredTabsRef.current.add(activeTabId)
-    if (chatInsightState?.hasPrd && chatInsightState.prdId != null) {
-      void handleOpenPrd()
-    }
-  }, [activeTabId, isBriefTab, contentPanelTab, chatMapLoading, chatInsightState, handleOpenPrd])
+    void handleOpenPrd()
+  }, [activeTabId, isBriefTab, contentPanelTab, chatInsightState, handleOpenPrd])
 
   // ── Resume orphaned in-flight ASK jobs on (re)mount ───────────────────────
   // A chat Ask is fire-and-forget: POST returns an ask_id and the answer keeps
