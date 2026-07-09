@@ -474,10 +474,15 @@ def env(isolated_settings, monkeypatch):
     importlib.reload(comments_mod)
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)
+    import app.routes.design_agent_comments as comment_routes_mod
+    importlib.reload(comment_routes_mod)
     import app.main as main_mod
     importlib.reload(main_mod)
 
-    return SimpleNamespace(proto=proto_mod, comments=comments_mod, routes=routes_mod, main=main_mod)
+    return SimpleNamespace(
+        proto=proto_mod, comments=comments_mod, routes=routes_mod,
+        comment_routes=comment_routes_mod, main=main_mod,
+    )
 
 
 @pytest.fixture
@@ -777,3 +782,92 @@ def test_routes_design_agent_still_compiles_and_route_registered(env):
     assert "/v1/design-agent/{prototype_id}/iterate" in paths
     assert "/v1/design-agent/{prototype_id}" in paths
     assert "/v1/design-agent/generate" in paths
+
+
+# ─── Comment-router split: reachability + structural regression ──────────────
+#
+# The comment routes were extracted from design_agent.py into a sibling module
+# mounted on a SECOND APIRouter at the same /v1/design-agent prefix, registered
+# immediately before the primary router in main.py (mirroring the bundle proxy).
+# These guard that the extraction is a PURE relocation: the moved paths still
+# resolve to their handlers through the assembled app (NOT shadowed by the
+# single-segment GET /{prototype_id} catch-all in the primary router), and the
+# primary router no longer defines the moved handlers/models.
+
+
+class _RaisingDesignAgentClient:
+    """A design-agent client whose .messages.create always raises — drives the
+    clarify route down its documented fallback-question branch with no real LLM
+    call, so the test asserts REACHABILITY without a network dependency."""
+
+    class _Messages:
+        def create(self, **kwargs):
+            raise RuntimeError("no LLM in tests")
+
+    def __init__(self) -> None:
+        self.messages = self._Messages()
+
+
+def test_comment_routes_reachable_after_split(env, client, monkeypatch):
+    # AC7: a 2-segment GET /{id}/comments and a 3-segment POST /{id}/clarify-comment
+    # both RESOLVE to their (relocated) handlers through the assembled app — NOT
+    # captured by the single-segment GET /{prototype_id} catch-all (which would
+    # surface as a 422 int-coercion or the wrong response shape).
+    monkeypatch.setattr(
+        env.comment_routes, "get_design_agent_client", lambda: _RaisingDesignAgentClient()
+    )
+    pid = _seed_ready(env)
+
+    # GET list — reaches the list handler; no comments seeded → empty array, 200.
+    resp = client.get(f"/v1/design-agent/{pid}/comments")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == []
+
+    # POST clarify — reaches the clarify handler; the raising client trips the
+    # fallback-question branch, so a well-formed 200 proves reachability.
+    resp = client.post(
+        f"/v1/design-agent/{pid}/clarify-comment",
+        json={"comment_body": "make the header bigger"},
+    )
+    assert resp.status_code == 200, resp.text
+    question = resp.json()["question"]
+    assert isinstance(question, str) and question
+
+
+def test_design_agent_router_no_longer_defines_comment_routes(env):
+    # AC2/AC3 encoded as a running test: the primary route module's SOURCE no
+    # longer defines the moved handlers/models (they live in the sibling module).
+    import app.routes.design_agent as routes_mod
+
+    with open(routes_mod.__file__, encoding="utf-8") as fh:
+        src = fh.read()
+    for handler in (
+        "def post_comment(", "def get_comments(", "def patch_resolve_comment(",
+        "def delete_comment_route(", "def post_comment_public(",
+        "def get_comments_public(", "def clarify_comment_route(",
+    ):
+        assert handler not in src, f"{handler!r} should have moved out of the primary route module"
+    for model in (
+        "class CommentCreate", "class CommentOut",
+        "class ClarifyCommentRequest", "class ClarifyCommentResponse",
+    ):
+        assert model not in src, f"{model!r} should have moved out of the primary route module"
+
+
+def test_app_starts_with_both_routers_registered(env):
+    # AC5/AC6: the app assembles with BOTH routers at the same prefix, no
+    # duplicate-route error; a primary-router path and comments-router paths are
+    # each mounted, and no (path, method) pair is registered twice.
+    flat = {r.path for r in env.main.app.routes}
+    assert "/v1/design-agent/{prototype_id}" in flat            # primary router (catch-all, stayed)
+    assert "/v1/design-agent/{prototype_id}/comments" in flat   # comments router (moved)
+    assert "/v1/design-agent/{prototype_id}/clarify-comment" in flat
+    assert "/v1/design-agent/by-token/{token}/comments" in flat
+
+    regs = [
+        (r.path, tuple(sorted(getattr(r, "methods", None) or ())))
+        for r in env.main.app.routes
+        if r.path == "/v1/design-agent/{prototype_id}/comments"
+    ]
+    # POST (create) and GET (list) share the path but differ by method — no dupes.
+    assert len(regs) == len(set(regs)), f"duplicate registration for /comments: {regs}"
