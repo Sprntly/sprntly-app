@@ -12735,6 +12735,29 @@
     flex: 0 1 auto;
   }
 
+  /* One-time server-URL banner: full connector URL in the field, copy
+     button flush on its right. */
+  .sp-mcp .mcp-copy-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+  }
+
+  .sp-mcp .mcp-copy-row .input {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--ff-mono, ui-monospace, monospace);
+    font-size: 12px;
+  }
+
+  .sp-mcp .mcp-copy-row .btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
   .set-block-h {
     display: flex;
     align-items: center;

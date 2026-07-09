@@ -1,6 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
+import { IconCheck, IconCopy } from "@tabler/icons-react"
 import {
   mcpTokensApi,
   type McpToken,
@@ -51,6 +52,46 @@ const ROLE_LABELS: Record<McpTokenRole, string> = {
   pm: "PM (full access)",
 }
 
+/**
+ * The one-time server-URL field: the full connector URL (token embedded)
+ * with a copy button beside it. Local `copied` state is transient UI
+ * feedback only, so it lives here rather than in the container.
+ */
+function CopyUrlField({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false)
+  const onCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(value)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      // Clipboard API unavailable (http, old browser) — leave the field
+      // selected so a manual Ctrl+C still works.
+    }
+  }, [value])
+  return (
+    <span className="mcp-copy-row">
+      <input
+        type="text"
+        className="input"
+        readOnly
+        value={value}
+        onFocus={(e) => e.currentTarget.select()}
+        aria-label="MCP server URL"
+      />
+      <button
+        type="button"
+        className="btn"
+        onClick={onCopy}
+        title={copied ? "Copied!" : "Copy server URL"}
+        aria-label="Copy server URL"
+      >
+        {copied ? <IconCheck size={16} /> : <IconCopy size={16} />}
+      </button>
+    </span>
+  )
+}
+
 export function McpSettingsView({
   tokens,
   loading,
@@ -78,18 +119,11 @@ export function McpSettingsView({
 
       {justCreated && (
         <p className="settings-msg settings-msg-success" role="alert">
-          <strong>{justCreated.name}</strong> created. Copy this token now —
-          it will not be shown again.
+          <strong>{justCreated.name}</strong> created. Copy this server URL
+          into your MCP client now — it contains your secret token and will
+          not be shown again.
           <br />
-          <input
-            type="text"
-            className="input"
-            readOnly
-            value={justCreated.token}
-            onFocus={(e) => e.currentTarget.select()}
-          />
-          <br />
-          Server URL: <code>{getMcpUrl(justCreated.token)}</code>
+          <CopyUrlField value={getMcpUrl(justCreated.token)} />
           <br />
           <label>
             <input
@@ -97,7 +131,7 @@ export function McpSettingsView({
               checked={copiedAck}
               onChange={(e) => onCopiedAckChange(e.target.checked)}
             />{" "}
-            I&apos;ve copied this token
+            I&apos;ve copied this URL
           </label>{" "}
           <button
             type="button"
