@@ -145,6 +145,7 @@ export type GenerateModalWiredProps = {
   onGenStart: (ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => void
   onKickoff: (prototypeId: number) => void
   onGenDone: (result?: DesignAgentGenResult) => void
+  onCancel: () => void
   savedPreference: DesignSourcePreference | null
   onSavePreference: (pref: DesignSourcePreference) => Promise<void>
 }
@@ -507,6 +508,7 @@ export function useGeneratePrototype(
     onGenStart: handleGenStart,
     onKickoff: handleKickoff,
     onGenDone: handleGenDone,
+    onCancel: handleCancel,
     savedPreference,
     onSavePreference: handleSavePreference,
   }

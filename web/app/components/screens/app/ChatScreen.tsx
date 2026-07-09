@@ -33,7 +33,7 @@ import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
 import { GenerateModal } from "../../design-agent/GenerateModal"
 import { GenerationLoadingScreen } from "../../design-agent/GenerationLoadingScreen"
-import type { DesignAgentGenResult } from "../../../lib/runDesignAgentGeneration"
+import { useGeneratePrototype } from "../../design-agent/useGeneratePrototype"
 import { AGENT_NAME } from "../../../lib/agent"
 
 type ThreadTurn = {
@@ -107,7 +107,7 @@ export function ChatScreen() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const auth = useAuth()
-  const { profile, workspace } = useWorkspace()
+  const { profile } = useWorkspace()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
@@ -226,42 +226,32 @@ export function ChatScreen() {
     return prototypeStateForInsight(chatEntriesByInsight, activeTab.briefMeta.insightIndex)
   }, [activeTab?.briefMeta, chatEntriesByInsight])
 
-  // GenerateModal / LoadingScreen state for the chat surface
-  const chatGenLoadingRef = useRef(false)
-  const [chatGenLoading, setChatGenLoading] = useState(false)
+  // GenerateModal / LoadingScreen state for the chat surface — delegated to
+  // the shared generate/view-prototype hook so this surface's Cancel/Notify
+  // wiring is correct by construction rather than hand-rolled.
   const [chatGenPrdId, setChatGenPrdId] = useState<number | null>(null)
-  const [chatGenFigmaKey, setChatGenFigmaKey] = useState<string | null>(null)
-  const [chatGenGithubRepo, setChatGenGithubRepo] = useState<string | null>(null)
-  const [chatGenProtoId, setChatGenProtoId] = useState<number | null>(null)
-  const [chatGenModalOpen, setChatGenModalOpen] = useState(false)
 
-  const handleChatGenStart = useCallback((ctx?: { figmaFileKey?: string | null; githubRepo?: string | null }) => {
-    setChatGenFigmaKey(ctx?.figmaFileKey ?? null)
-    setChatGenGithubRepo(ctx?.githubRepo ?? null)
-    setChatGenProtoId(null)
-    chatGenLoadingRef.current = true
-    setChatGenLoading(true)
-  }, [])
-
-  const handleChatGenDone = useCallback((result?: DesignAgentGenResult) => {
-    chatGenLoadingRef.current = false
-    setChatGenLoading(false)
-    setChatGenModalOpen(false)
-    if (result?.ok && chatGenPrdId != null) {
-      router.push(prototypePath(chatGenPrdId))
-    }
-  }, [chatGenPrdId, router])
+  // skipExistenceCheck: chatInsightState (from useBriefPrototypeMap's batch
+  // fetch, already mounted above) is ALREADY this tab's existence source of
+  // truth (see handleChatPrototype below) — a second, redundant getByPrd here
+  // would just re-derive the same answer. Mirrors BriefChat.tsx's identical
+  // genPrdId/gen pair — same structural shape (existence state driven by a
+  // batch map, not the hook's own `cta`), so the same hook options apply.
+  // listenForCrossSurfaceGenerating is intentionally omitted for the same
+  // reason BriefChat omits it: this tab's label comes from the batch map, not
+  // the hook's own `cta`.
+  const gen = useGeneratePrototype(chatGenPrdId, { skipExistenceCheck: true })
 
   const handleChatPrototype = useCallback(() => {
     if (chatInsightState?.hasPrd && chatInsightState.prototypeReady && chatInsightState.prdId != null) {
       router.push(prototypePath(chatInsightState.prdId))
     } else if (chatInsightState?.hasPrd && !chatInsightState.prototypeReady && chatInsightState.prdId != null) {
       setChatGenPrdId(chatInsightState.prdId)
-      setChatGenModalOpen(true)
+      gen.openGenerateModal()
     } else {
       goTo("prototype")
     }
-  }, [chatInsightState, router, goTo])
+  }, [chatInsightState, router, goTo, gen.openGenerateModal])
 
   const setThread = useCallback((updater: ThreadTurn[] | ((prev: ThreadTurn[]) => ThreadTurn[])) => {
     setTabs((prev) => prev.map((t) => {
@@ -1728,24 +1718,10 @@ export function ChatScreen() {
           )}
         </div>
       </div>
-      {chatGenModalOpen && chatGenPrdId != null && (
-        <GenerateModal
-          open={chatGenModalOpen}
-          onClose={() => { if (!chatGenLoadingRef.current) setChatGenModalOpen(false) }}
-          prdId={chatGenPrdId}
-          figmaFileKey={chatGenFigmaKey}
-          savedPreference={workspace?.design_source ?? null}
-          onGenStart={handleChatGenStart}
-          onKickoff={(id) => setChatGenProtoId(id)}
-          onGenDone={handleChatGenDone}
-        />
+      {gen.generateModalProps.open && chatGenPrdId != null && (
+        <GenerateModal {...gen.generateModalProps} />
       )}
-      <GenerationLoadingScreen
-        open={chatGenLoading}
-        figmaFileKey={chatGenFigmaKey}
-        githubRepo={chatGenGithubRepo}
-        prototypeId={chatGenProtoId}
-      />
+      <GenerationLoadingScreen {...gen.loadingScreenProps} />
     </AppLayout>
   )
 }
