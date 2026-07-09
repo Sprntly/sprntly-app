@@ -233,7 +233,7 @@ function signalLineFromInsight(insight: Insight): string {
   return "Grounded in weekly product corpus"
 }
 
-export function findingBodyDesc(insight: Insight): string {
+function findingBodyDesc(insight: Insight): string {
   const parts = [insight.subtitle?.trim(), insight.recommendation?.trim()].filter(Boolean)
   let t = parts.join(" ")
   if (!t.trim()) t = insight.headline?.trim() || insight.title

@@ -43,12 +43,6 @@ vi.mock("../../../../lib/api", () => {
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: {
       current: vi.fn().mockResolvedValue({ id: 1, insights: [] }),
-      byId: vi.fn().mockResolvedValue({
-        id: 7,
-        insights: [
-          { title: "Retention insight", subtitle: "Users churn early.", recommendation: "Fix onboarding.", confidence: 0.9 },
-        ],
-      }),
     },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
@@ -193,19 +187,24 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await waitFor(() => expect(panelProbe()).toBe("prd"))
   })
 
-  it("seeds the tab's thread with Spiky's opening insight turn (title + body)", async () => {
+  it("shows the insight ONCE in the opening insight card — no duplicate seeded turn", async () => {
     renderWith({
       title: "PRD · Retention",
       source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
+      insightBody: "Users churn early. Fix onboarding.",
     })
     await clickOpenPrd()
 
-    // The insight (title + body) is fed into the thread as Spiky's turn, so the
-    // tab opens ON the insight instead of the generic "Welcome back" landing.
-    await waitFor(() => expect(screen.getByText("Retention insight")).toBeTruthy())
-    expect(screen.getByText(/Users churn early\./)).toBeTruthy()
-    // It's an agent-only turn — no empty user bubble.
-    expect(document.querySelector(".bc-user-bubble")).toBeNull()
+    // The tab opens ON its insight: the opening insight card carries the finding
+    // body. That card IS Spiky presenting the insight, so there is NO separate
+    // seeded thread turn repeating the same text below it (the duplication bug).
+    const card = await screen.findByTestId("chat-insight-msg")
+    expect(within(card).getByText(/Users churn early\./)).toBeTruthy()
+
+    // The insight body appears exactly once, and the thread renders no turns —
+    // the only .bc-turn is the insight card itself.
+    expect(screen.getAllByText(/Users churn early\./)).toHaveLength(1)
+    expect(document.querySelectorAll(".bc-turn:not(.bc-turn--insight)")).toHaveLength(0)
   })
 
   it("reuses the same tab (by title) instead of stacking duplicates", async () => {
