@@ -12760,6 +12760,49 @@
     box-shadow: var(--shadow-sm);
   }
 
+  /* MCP Access pane: the new-token form stacks — label + description on
+     top, then name / role / submit controls in a wrapping row beneath
+     (the default .settings-row flex squeezed them beside the text). */
+  .sp-mcp .mcp-token-form-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 12px;
+    flex-wrap: wrap;
+  }
+
+  .sp-mcp .mcp-token-form-controls .input {
+    flex: 1 1 220px;
+    width: auto;
+  }
+
+  .sp-mcp .mcp-token-form-controls select.input {
+    flex: 0 1 auto;
+  }
+
+  /* One-time server-URL banner: full connector URL in the field, copy
+     button flush on its right. */
+  .sp-mcp .mcp-copy-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+  }
+
+  .sp-mcp .mcp-copy-row .input {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--ff-mono, ui-monospace, monospace);
+    font-size: 12px;
+  }
+
+  .sp-mcp .mcp-copy-row .btn {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
   .set-block-h {
     display: flex;
     align-items: center;
@@ -17189,6 +17232,23 @@
   background: var(--panel); color: var(--ink2);
 }
 .tkv2-dep--block { border-color: var(--urgent-br); background: var(--urgent-b); color: var(--urgent); }
+/* Linked-issue chips are buttons that open the referenced ticket. */
+.tkv2-dep--link { cursor: pointer; font-family: inherit; transition: border-color .15s, color .15s; }
+.tkv2-dep--link:hover { border-color: var(--green); color: var(--green-d); text-decoration: underline; }
+.tkv2-dep--block.tkv2-dep--link:hover { border-color: var(--urgent); color: var(--urgent); }
+
+/* ── detail: inline edit affordances (description / AC / child issues) ── */
+.tkv2-editbtn {
+  display: inline-flex; align-items: center; gap: 4px; margin-left: 10px;
+  font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  background: none; border: 1px solid var(--line); border-radius: 8px;
+  padding: 2px 9px; color: var(--soft); cursor: pointer; text-transform: none;
+  vertical-align: middle; transition: border-color .15s, color .15s;
+}
+.tkv2-editbtn:hover { border-color: var(--green); color: var(--green-d); }
+.tkv2-editrow { display: flex; gap: 7px; align-items: center; margin-bottom: 7px; }
+.tkv2-editrow .input { flex: 1; min-width: 0; font-size: 13.5px; }
+.tkv2-editrow .tkv2-btn2 { flex: 0 0 auto; padding: 6px 8px; }
 
 /* ── detail: attachments (deep links, open new tab) ── */
 .tkv2-att { display: flex; gap: 9px; flex-wrap: wrap; }

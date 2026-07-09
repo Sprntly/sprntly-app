@@ -1,0 +1,94 @@
+name: Deploy mcp to api.sprntly.ai/mcp
+
+# Deploys the customer-facing MCP server to its own systemd unit on EC2
+# (port 8003, nginx serves it at api.sprntly.ai/mcp — riding the existing
+# api cert, so no DNS/certbot work is ever needed on the box). Fully
+# zero-touch: first deploy bootstraps mcp/.env from values already on the
+# box (BACKEND_INTERNAL_KEY is read from backend/.env), later deploys leave
+# any manually edited values alone (upsert-if-missing).
+# Lives in sprntly-app only — sprntly-demo does not deploy it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'mcp/**'
+      - '.github/workflows/deploy-mcp.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-mcp
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH and deploy
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd ~/Sprntly
+            git fetch --quiet origin main
+            git reset --hard origin/main
+            cd mcp
+            if [ ! -d .venv ]; then
+              python3.11 -m venv .venv
+            fi
+            .venv/bin/pip install -q -e .
+            # Bootstrap mcp/.env (the systemd unit hard-requires it via
+            # EnvironmentFile=). Keys are only ADDED if missing — existing
+            # values, however they were set, are never overwritten, so this
+            # is safe to run on every deploy.
+            ENV_FILE=~/Sprntly/mcp/.env
+            touch "$ENV_FILE"
+            chmod 600 "$ENV_FILE"
+            ensure() {
+              grep -q "^$1=" "$ENV_FILE" || echo "$1=$2" >> "$ENV_FILE"
+            }
+            # The internal key must equal the backend's INTERNAL_API_KEY —
+            # read it from the backend's own env file on the box instead of
+            # duplicating it as a GitHub secret.
+            INTERNAL_KEY=$(grep '^INTERNAL_API_KEY=' ~/Sprntly/backend/.env | head -1 | cut -d= -f2-)
+            if [ -z "$INTERNAL_KEY" ] && ! grep -q '^BACKEND_INTERNAL_KEY=' "$ENV_FILE"; then
+              echo "FATAL: INTERNAL_API_KEY not found in ~/Sprntly/backend/.env and" >&2
+              echo "BACKEND_INTERNAL_KEY not already set in mcp/.env — token resolve" >&2
+              echo "cannot work. Add INTERNAL_API_KEY to backend/.env first." >&2
+              exit 1
+            fi
+            ensure BACKEND_URL "http://127.0.0.1:8000"
+            ensure BACKEND_INTERNAL_KEY "$INTERNAL_KEY"
+            # nginx proxies with Host: api.sprntly.ai — allow it through the
+            # SDK's DNS-rebinding protection (default is localhost-only).
+            ensure MCP_ALLOWED_HOSTS "api.sprntly.ai"
+            # The Settings UI hands out connector URLs with the token
+            # embedded as ?token=... (claude.ai's connector UI has no
+            # header field), so the URL-token fallback must be on.
+            ensure MCP_ALLOW_URL_TOKEN "1"
+            # Keep nginx config in sync — the /mcp location lives in the
+            # same nginx file as the main backend, so we re-apply it here
+            # too in case it changed alongside an mcp-only PR.
+            sudo cp ~/Sprntly/backend/deploy/nginx.conf /etc/nginx/conf.d/sprintly.conf
+            sudo nginx -t
+            sudo systemctl reload nginx
+            # systemd unit may have changed; enable so it survives reboots
+            sudo cp deploy/sprntly-mcp.service /etc/systemd/system/sprntly-mcp.service
+            sudo systemctl daemon-reload
+            sudo systemctl enable sprntly-mcp.service
+            sudo systemctl restart sprntly-mcp.service
+            # Wait up to 15s for the service to bind. Avoids races when the
+            # backend deploy restarts concurrently.
+            for i in $(seq 1 15); do
+              if curl -fsS http://127.0.0.1:8003/health >/dev/null 2>&1; then
+                echo "sprntly-mcp.service healthy after ${i}s"
+                break
+              fi
+              sleep 1
+            done
+            curl -fsS http://127.0.0.1:8003/health
+            echo "MCP deploy OK: $(git -C ~/Sprntly rev-parse --short HEAD)"

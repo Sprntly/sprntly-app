@@ -713,13 +713,25 @@ export function TicketsTab() {
   // A ticket is open → show the editable detail in place of the list.
   const selectedStory = selectedIndex != null ? stories[selectedIndex] : null
   if (selectedStory && prdId != null) {
+    // Linked issues reference sibling tickets BY TITLE (the generator's
+    // blocked_by/blocks contract) — resolve the title to its story in this
+    // PRD's set and open it in place.
+    const openLinked = (title: string) => {
+      const want = title.trim().toLowerCase()
+      const idx = stories.findIndex((s) => (s.title || "").trim().toLowerCase() === want)
+      if (idx >= 0) setSelectedIndex(idx)
+    }
     return (
       <div className="tkt-list-wrap">
         <TicketDetail
+          // Remount per ticket: a linked-issue jump swaps the story prop on a
+          // mounted detail, and its useState seeds would otherwise stay stale.
+          key={`tk-${prdId}-${selectedIndex}`}
           story={selectedStory}
           index={selectedIndex as number}
           prdId={prdId}
           onBack={() => setSelectedIndex(null)}
+          onOpenLinked={openLinked}
         />
       </div>
     )

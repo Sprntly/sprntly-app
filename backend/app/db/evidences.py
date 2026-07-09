@@ -81,6 +81,28 @@ def get_evidence(evidence_id: int) -> dict | None:
 
 
 @retry_on_disconnect
+def find_latest_evidence(brief_id: int, insight_index: int) -> dict | None:
+    """Newest ready/generating evidence for a brief insight, ANY variant.
+
+    Permissive sibling of find_existing_evidence for read-only surfaces (the
+    MCP evidence tool): a workspace whose evidence predates the current
+    variant should still get its best available row rather than a 404 —
+    mirrors the variant-permissive GET /{evidence_id} route."""
+    c = require_client()
+    resp = (
+        c.table("evidences")
+        .select("*")
+        .eq("brief_id", brief_id)
+        .eq("insight_index", insight_index)
+        .in_("status", ["ready", "generating"])
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+@retry_on_disconnect
 def find_existing_evidence(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:

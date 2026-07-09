@@ -51,7 +51,9 @@ from app.routes import (
     design_agent_comments,
     feedback,
     ingest,
+    internal_mcp,
     metrics,
+    mcp_tokens,
     multi_agent,
     onboarding,
     oncall,
@@ -303,6 +305,9 @@ app.include_router(conversations.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
 app.include_router(feedback.router)
+app.include_router(mcp_tokens.router)
+app.include_router(internal_mcp.resolve_router)
+app.include_router(internal_mcp.data_router)
 
 # Serve prototype bundles in dev (filesystem fallback when no Supabase Storage bucket).
 _proto_dir = Path(settings.storage_dir)

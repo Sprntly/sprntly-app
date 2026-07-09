@@ -109,6 +109,10 @@ _RELOAD_ORDER = [
     "app.connectors.figma_oauth",
     "app.connectors.github_app",
     "app.routes.connectors",
+    "app.routes.internal",
+    "app.db.mcp_tokens",
+    "app.routes.mcp_tokens",
+    "app.routes.internal_mcp",
     "app.main",
 ]
 
@@ -678,6 +682,8 @@ CREATE TABLE ticket_edits (
     status              TEXT,
     sprint              TEXT,
     assignee            TEXT,
+    -- Mirrors supabase/migrations/20260709120000_ticket_edits_subtasks.sql
+    subtasks            TEXT,
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, ticket_key)
 );
@@ -699,6 +705,23 @@ CREATE TABLE ticket_comments (
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_ticket_comments_key ON ticket_comments (company_id, ticket_key);
+
+-- Persisted PRD-generated tickets (mirrors 20260627120000_prd_tickets.sql).
+-- One row per PRD; the individual tickets are elements of the `stories` JSON
+-- array (each has a stable `id` = ticket_key). Source of ticket EXISTENCE
+-- (the ticket_edits/comments/attachments tables above only layer overrides on
+-- top). bigint identity / jsonb / timestamptz are INTEGER / TEXT here.
+CREATE TABLE prd_tickets (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id    TEXT NOT NULL,
+    prd_id        INTEGER NOT NULL UNIQUE,
+    content_hash  TEXT NOT NULL DEFAULT '',
+    stories       TEXT NOT NULL DEFAULT '[]',
+    status        TEXT NOT NULL DEFAULT 'ready',
+    error         TEXT,
+    generated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_prd_tickets_company ON prd_tickets (company_id);
 
 -- Roadmap doc storage (mirrors 20260623120000_roadmap_doc.sql, SQLite-ized).
 -- One row per company (UNIQUE company_id) so a re-upload upserts in place. Holds
@@ -775,6 +798,44 @@ CREATE TABLE drip_email_sends (
 );
 CREATE INDEX drip_email_sends_company_user_idx
     ON drip_email_sends (company_id, user_id);
+
+-- Design-agent prototypes (mirrors 20260528000000_design_agent_prototypes.sql
+-- + the sharing / preview-image columns, SQLite-ized and trimmed to what the
+-- internal MCP prototype route reads: status, completion, sharing, links).
+CREATE TABLE prototypes (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    prd_id             INTEGER NOT NULL,
+    workspace_id       TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'generating',
+    is_complete        INTEGER NOT NULL DEFAULT 0,
+    target_platform    TEXT NOT NULL DEFAULT 'both',
+    preview_image_url  TEXT,
+    share_mode         TEXT NOT NULL DEFAULT 'private',
+    share_token        TEXT,
+    error              TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at       TEXT
+);
+CREATE INDEX prototypes_prd_idx ON prototypes (prd_id, workspace_id);
+
+-- Customer-issued MCP API tokens (mirrors 20260707120000_mcp_tokens.sql +
+-- 20260708120000_mcp_token_role.sql, SQLite-ized). uuid / timestamptz are
+-- TEXT here, matching the other seeded tables.
+CREATE TABLE mcp_tokens (
+    id           TEXT PRIMARY KEY,
+    company_id   TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT 'MCP token',
+    token_hash   TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    scopes       TEXT NOT NULL DEFAULT 'read',
+    token_role   TEXT NOT NULL DEFAULT 'pm'
+        CHECK (token_role IN ('developer', 'pm')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    last_used_at TEXT,
+    revoked_at   TEXT
+);
+CREATE INDEX mcp_tokens_company_idx ON mcp_tokens (company_id);
 """
 
 
