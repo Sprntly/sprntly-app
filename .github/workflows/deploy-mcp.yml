@@ -1,8 +1,12 @@
-name: Deploy mcp to api.sprntly.ai/mcp
+name: Deploy mcp to mcp.sprntly.ai/mcp
 
 # Deploys the customer-facing MCP server to its own systemd unit on EC2
-# (port 8003, nginx serves it at api.sprntly.ai/mcp). Lives in sprntly-app
-# only — sprntly-demo does not deploy it.
+# (port 8003, nginx serves it at mcp.sprntly.ai/mcp; the legacy
+# api.sprntly.ai/mcp path stays proxied for pre-cutover connector URLs).
+# NOTE: the mcp.sprntly.ai server block needs its TLS cert issued once on
+# the box before a deploy copies the new nginx.conf, or `nginx -t` fails —
+# see the prereq comment on that block in backend/deploy/nginx.conf.
+# Lives in sprntly-app only — sprntly-demo does not deploy it.
 
 on:
   push:

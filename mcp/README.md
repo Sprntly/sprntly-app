@@ -1,6 +1,6 @@
 # Sprntly MCP Server
 
-A customer-facing [Model Context Protocol](https://modelcontextprotocol.io) server: lets a Sprntly customer connect their own AI client (Claude Desktop, Claude Code, claude.ai custom connectors) to **their own** Sprntly workspace — briefs, PRDs, tickets, backlog — the same trust model as the existing OAuth connectors (Google Drive/Figma/Slack/etc.), just inbound instead of outbound.
+A customer-facing [Model Context Protocol](https://modelcontextprotocol.io) server: lets a Sprntly customer connect their own AI client (Claude Desktop, Claude Code, claude.ai custom connectors) to **their own** Sprntly workspace — tickets, PRDs, prototypes, evidence, briefs, backlog — the same trust model as the existing OAuth connectors (Google Drive/Figma/Slack/etc.), just inbound instead of outbound. What a token can see is scoped by its **role** (`developer` or `pm`, chosen when the token is minted — see [Token roles](#token-roles)).
 
 ## Layout
 
@@ -11,7 +11,7 @@ mcp/
 │   ├── auth.py            # CompanyContext + contextvar, read by tools
 │   ├── middleware.py       # pure-ASGI bearer-token auth wrapper
 │   ├── backend_client.py  # async httpx calls to the backend's internal API
-│   ├── tools.py            # the 5 v1 MCP tools
+│   ├── tools.py            # the MCP tools + token-role gating (PM_ONLY_TOOLS)
 │   └── __main__.py         # ASGI entry: `app = create_app()`
 ├── deploy/
 │   ├── sprntly-mcp.service # systemd unit
@@ -19,9 +19,18 @@ mcp/
 └── tests/
 ```
 
-**Zero database credentials.** This service never touches Supabase directly. Every request carries `Authorization: Bearer <mcp_token>` (minted by a customer from Settings → MCP Access); this server calls the backend's internal (`X-Internal-Key`-gated) API to resolve that token to a `{company_id, user_id, role}`, then calls the backend's internal data routes — passing `company_id` explicitly — to fetch data. See `backend/app/routes/mcp_tokens.py` (token issuance) and `backend/app/routes/internal_mcp.py` (resolve + data routes).
+**Zero database credentials.** This service never touches Supabase directly. Every request carries `Authorization: Bearer <mcp_token>` (minted by a customer from Settings → MCP Access); this server calls the backend's internal (`X-Internal-Key`-gated) API to resolve that token to a `{company_id, user_id, role, token_role}`, then calls the backend's internal data routes — passing `company_id` explicitly — to fetch data. See `backend/app/routes/mcp_tokens.py` (token issuance) and `backend/app/routes/internal_mcp.py` (resolve + data routes).
 
-None of the 5 tools take a `dataset`/`company` parameter — the company scope is resolved once, server-side, from the bearer token, never from client input (one-user-one-company is a schema-enforced invariant on the backend).
+None of the tools take a `dataset`/`company` parameter — the company scope is resolved once, server-side, from the bearer token, never from client input (one-user-one-company is a schema-enforced invariant on the backend).
+
+## Token roles
+
+A token is minted as **`developer`** or **`pm`** (picked in Settings → MCP Access, immutable after creation; stored as `mcp_tokens.token_role`):
+
+- **developer** — the ticket-centric tool set only: your assigned tickets, their PRDs, prototypes, and evidence.
+- **pm** — everything: the developer set plus the workspace-level product surfaces (`list_datasets`, `get_current_brief`, `get_backlog`, `get_latest_prd`).
+
+Tokens minted before roles existed default to `pm` (they keep the full tool set they were created with). Enforcement is two-layer: `RoleScopedFastMCP` (app.py) filters `tools/list` per request so a developer token's client never sees the PM-only tools, and every PM-only tool impl re-checks the role before touching the backend — a client calling a hidden tool anyway gets a refusal, not data.
 
 ## Local development
 
@@ -60,7 +69,7 @@ Then add it to a real client — Claude Code: `claude mcp add --transport http s
 
 ## Production
 
-Lives on the existing EC2 host as a separate systemd unit (`sprntly-mcp.service`) on port 8003. Nginx (`backend/deploy/nginx.conf`) proxies `api.sprntly.ai/mcp` to it. Deploys via the `Deploy mcp to api.sprntly.ai/mcp` GitHub Actions workflow on every push to `main` that touches `mcp/**`.
+Lives on the existing EC2 host as a separate systemd unit (`sprntly-mcp.service`) on port 8003, served at **`https://mcp.sprntly.ai/mcp`** (nginx proxies the `mcp.sprntly.ai` host to it — `backend/deploy/nginx.conf`; set `MCP_ALLOWED_HOSTS=mcp.sprntly.ai` so DNS-rebinding protection accepts the proxied Host). Deploys via the `.github/workflows/deploy-mcp.yml` GitHub Actions workflow on every push to `main` that touches `mcp/**`.
 
 First-time setup on a fresh box:
 
@@ -80,20 +89,27 @@ sudo bash deploy/setup.sh
 
 ## Tools
 
-**Read:** `list_datasets`, `get_current_brief`, `get_backlog`, `get_latest_prd`, `get_prd(prd_id)`, `list_tickets(status?, ticket_type?)`, `get_ticket(ticket_key)`.
+**Both roles (the developer set):**
 
-**Write (tickets):** `update_ticket_fields` (status/priority/title/sprint — assignment is deliberately web-only), `update_ticket_description` (description + acceptance criteria), `add_ticket_comment`, `add_ticket_attachment` (link a PR/branch).
+| tool | what it does |
+| --- | --- |
+| `list_tickets(status?, ticket_type?)` | The tickets **assigned to the token owner** (assignment is matched on the assignee set in the web app; teammates' and unassigned tickets never appear). |
+| `get_ticket(ticket_key)` | Full ticket — generated title, description, acceptance criteria, scope and context (what/why) **merged with any edits**, plus comments and attachments. Everything needed to implement it. |
+| `get_prd(prd_id)` | The parent PRD for full product context (a ticket's `prd_id` comes from `list_tickets`/`get_ticket`). |
+| `list_prd_tickets(prd_id, status?, ticket_type?)` | **All** tickets in one PRD — the full scope across every assignee (deliberately not assignee-scoped). |
+| `get_prd_prototype(prd_id)` | The design prototype behind a PRD: status (`generating`/`ready`/`failed`), `is_complete`, preview image, and viewer links — `app_url` (in-app, needs login) always; `public_url` (no-login share link) only if a PM already shared it. Never changes share settings, never exposes the signed bundle URL. |
+| `get_prd_evidence(prd_id)` | The research evidence behind the PRD's parent insight (why the PRD exists). Resolved via the PRD's `brief_id` + `insight_index` — the same join the web's Evidence tab uses. Returns `content` + `content_format` (`markdown` or `html`), capped at 150k chars. Read-only, never triggers generation. |
+| `update_ticket_fields(ticket_key, ...)` | Update status/priority/title/sprint — assignment is deliberately web-only. |
+| `update_ticket_description(ticket_key, ...)` | Replace description; acceptance criteria only when explicitly passed. |
+| `add_ticket_comment(ticket_key, body)` | Comment on a ticket, attributed to the token owner. |
+| `add_ticket_attachment(ticket_key, label, sub?)` | Link a PR/branch to a ticket. |
 
-The ticket tools let a developer work a ticket from their coding editor:
-- `list_tickets` discovers tickets with their current status (optionally filtered by `status`/`ticket_type`).
-- `get_ticket` returns the full ticket — the generated title, description, acceptance criteria, scope and context (what/why) **merged with any edits**, plus comments and attachments — i.e. everything needed to implement it.
-- `get_prd` pulls the parent PRD for full product context (a ticket's `prd_id` comes from `list_tickets`/`get_ticket`).
-- `update_ticket_fields` / `update_ticket_description` / `add_ticket_comment` / `add_ticket_attachment` update status, edit content, note progress, or link a PR.
+**PM tokens only:** `list_datasets`, `get_current_brief` (weekly brief), `get_backlog` (ranked backlog), `get_latest_prd`.
 
-All tools are company-scoped from the token — no `dataset`/`company` parameter. The server also sends FastMCP `instructions` on connect to orient the model on this flow.
+All tools are company-scoped from the token — no `dataset`/`company` parameter. The server also sends FastMCP `instructions` on connect to orient the model on the ticket → PRD → prototype/evidence flow.
 
 Comments are attributed to the **token owner** (resolved server-side from the token's `user_id` → their profile name, else email, else `mcp`) — the client can't post as someone else.
 
-Any token can read **and** write (no separate read-only vs read-write scopes in this version).
+Any token can read **and** write within its role's tool set (roles gate *which* tools, not read vs write).
 
 **Still out of scope:** async-job tools (PRD/brief/evidence generation — these need internal polling to stay synchronous from the client's view), OAuth-based MCP auth (static bearer token is simpler and matches the existing API-key UX bar), per-token read/write scopes, and rate limiting (none exists anywhere in this codebase yet — a leaked token has no request-volume ceiling; track this as a follow-up).
