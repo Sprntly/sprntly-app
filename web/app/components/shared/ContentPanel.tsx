@@ -35,7 +35,7 @@ function saveRememberedDest(prdId: number | null, listId: string): void {
 }
 import { IconMicroscope, IconFileText, IconTicket, IconDeviceFloppy, IconShare, IconMail, IconFileTypePdf, IconFileTypeDocx } from "@tabler/icons-react"
 import { buildPrdMailto, downloadPrdPdf, downloadPrdDocx, printPrdHtml, downloadPrdHtmlDoc } from "../../lib/prdExport"
-import { canExportCombined, printCombined, downloadCombinedDoc } from "../../lib/combinedExport"
+import { printCombined, downloadCombinedDoc } from "../../lib/combinedExport"
 import type { PrdState, PrdContent } from "../../types/content"
 
 const TABS = [
@@ -68,9 +68,25 @@ function ShareMenu({
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
   const enabled = !!prd
-  // Evidence + PRD are combined into one download when both are HTML briefs
-  // (the current default); otherwise we fall back to the single-PRD export.
-  const combined = canExportCombined(evidence, prd)
+  // An HTML PRD generated from a brief insight almost always has an Evidence
+  // brief, so we offer the combined Evidence + PRD download. The evidence may
+  // not be loaded into context yet (it's populated by the Evidence tab), so the
+  // export handlers fetch it on demand from the PRD's insight when needed.
+  const canFetchEvidence = prd?.briefId != null && prd?.insightIndex != null
+  const combined = !!prd?.html && (!!evidence?.html || canFetchEvidence)
+
+  // Resolve the Evidence brief for a combined export: prefer what's already in
+  // context, else read-load it from the PRD's insight. Returns null when the
+  // insight has no ready HTML evidence (→ caller exports the PRD alone).
+  const resolveEvidence = async (): Promise<PrdContent | null> => {
+    if (evidence?.html) return evidence
+    if (prd?.briefId == null || prd?.insightIndex == null) return null
+    try {
+      return await loadEvidenceByInsight(prd.briefId, prd.insightIndex)
+    } catch {
+      return null
+    }
+  }
 
   useEffect(() => {
     if (!open) return
@@ -91,10 +107,11 @@ function ShareMenu({
     if (!prd) return
     setOpen(false)
     try {
-      // Combined Evidence + PRD when both are HTML briefs; otherwise the v3 HTML
-      // PRD prints itself (its print stylesheet strips the editing chrome), and
-      // a markdown PRD uses the parsed-section PDF builder.
-      if (combined) printCombined(evidence, prd)
+      // Combined Evidence + PRD when both are HTML briefs (evidence fetched on
+      // demand); otherwise the v3 HTML PRD prints itself (its print stylesheet
+      // strips the editing chrome), and a markdown PRD uses the section builder.
+      const ev = prd.html ? await resolveEvidence() : null
+      if (ev?.html && prd.html) printCombined(ev, prd)
       else if (prd.html) printPrdHtml(prd)
       else await downloadPrdPdf(prd)
     } catch {
@@ -105,9 +122,11 @@ function ShareMenu({
     if (!prd) return
     setOpen(false)
     try {
-      // Combined Evidence + PRD as one HTML .doc when both are HTML briefs;
-      // otherwise the single v3 HTML PRD as .doc, or the markdown docx builder.
-      if (combined) await downloadCombinedDoc(evidence, prd)
+      // Combined Evidence + PRD as one HTML .doc when both are HTML briefs
+      // (evidence fetched on demand); otherwise the single v3 HTML PRD as .doc,
+      // or the markdown docx builder.
+      const ev = prd.html ? await resolveEvidence() : null
+      if (ev?.html && prd.html) await downloadCombinedDoc(ev, prd)
       else if (prd.html) await downloadPrdHtmlDoc(prd)
       else await downloadPrdDocx(prd)
     } catch {
