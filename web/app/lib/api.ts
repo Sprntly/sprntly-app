@@ -1083,6 +1083,10 @@ export const connectorsApi = {
       `/v1/connectors/github/installations/${installationId}/repositories/${repositoryId}`,
     ),
 
+  // ---- Jira ----------------------------------------------------------------
+  disconnectJira: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/jira`),
+
   // ---- ClickUp -------------------------------------------------------------
   disconnectClickup: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/clickup`),
