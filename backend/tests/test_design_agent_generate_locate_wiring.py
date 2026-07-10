@@ -46,6 +46,7 @@ from tests.conftest import _TEST_COMPANY_ID
 # SQLite-compatible translation of the prototypes migration (mirrors the
 # routes test). Same DDL kept local per file so reloads stay independent.
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

@@ -89,6 +89,7 @@ _ITERATE_DIST = {"index.html": f'<div data-anchor-id="{_ANCHOR_KEPT}"></div>'}
 # prototype_pending_iterations (P3-06). prd_patches + prds come from conftest's base
 # _FAKE_SCHEMA (do NOT recreate them). The fake exercises SQL semantics, not PG DDL.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

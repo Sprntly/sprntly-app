@@ -60,6 +60,7 @@ CREATE TABLE design_agent_usage_events (
 """
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

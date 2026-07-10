@@ -312,6 +312,7 @@ def test_assemble_output_is_markdown_clean():
 # ─── integration fixture (fake-Supabase DB) ───────────────────────────────────
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

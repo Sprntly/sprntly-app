@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient
 # SQLite-compatible end-state of prototypes (P1-06 + P2-06 sharing/lock columns) +
 # prototype_checkpoints + prototype_comments. Mirrors test_design_agent_iterate.py.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

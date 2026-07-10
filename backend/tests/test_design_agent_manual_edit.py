@@ -408,6 +408,7 @@ def test_manual_edit_uses_design_agent_client(monkeypatch):
 
 # Mirrors test_design_agent_iterate.py's _DDL (prototypes + checkpoints + comments).
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

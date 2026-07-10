@@ -42,6 +42,7 @@ from tests.conftest import _TEST_COMPANY_ID
 # TEST-LOCAL `prototype_exports` mirror of P2-09's future table. P2-07 itself
 # ships no migration — this DDL only feeds the in-memory fake.
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

@@ -316,6 +316,7 @@ def test_wrap_up_nudge_has_remove_imports_clause():
 # ─── Route hook — fake Supabase DB ───────────────────────────────────────────
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

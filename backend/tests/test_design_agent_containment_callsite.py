@@ -230,6 +230,7 @@ async def test_containment_after_theme_before_checkpoint(routes_mod, monkeypatch
 # ── Scope derivation: _run_generation_bg ───────────────────────────────────────
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

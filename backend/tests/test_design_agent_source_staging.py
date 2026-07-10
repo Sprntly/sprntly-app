@@ -222,6 +222,7 @@ async def test_bundle_staged_log_includes_sub_prefix(monkeypatch, tmp_path, capl
 # ─── Route hook — best-effort source staging (AC #4, #8, #9) ─────────────────
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

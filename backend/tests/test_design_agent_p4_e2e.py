@@ -108,6 +108,7 @@ _REPLACE_LINE = _SEARCH_LINE.replace("bg-blue-600", "bg-red-600")
 # base _FAKE_SCHEMA (do NOT recreate them). The SQLite fake exercises SQL
 # semantics, not PG-specific DDL (booleans/jsonb translated by the fake's layer).
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

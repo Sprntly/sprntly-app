@@ -26,6 +26,7 @@ from tests.conftest import _TEST_COMPANY_ID
 # independent). prototypes/checkpoints mirror the other DA route suites; the two
 # Tier-2 tables mirror supabase/migrations/20260616100000_design_agent_jobs.sql.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

@@ -417,6 +417,7 @@ def test_prepend_plan_addendum_is_pure():
 
 # Mirrors test_design_agent_iterate.py's _DDL + the P3-07 `plan` column.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

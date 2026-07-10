@@ -118,6 +118,7 @@ def _skip_no_toolchain(func):
 # SQLite-compatible DDL for the P1-06 prototypes tables (mirrors
 # test_design_agent_routes.py — the fake exercises SQL semantics, not PG DDL).
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

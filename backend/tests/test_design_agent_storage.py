@@ -924,6 +924,7 @@ async def test_vite_build_full_path_blocks_runtime_break_integration(generous_vi
 # ─── Route hook — fake Supabase DB (AC #9-#13, #16) ──────────────────────────
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

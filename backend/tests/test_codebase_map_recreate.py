@@ -933,6 +933,7 @@ def test_token_signals_exclude_scaffold_defaults():
 # ── Staging integration ───────────────────────────────────────────────────────
 
 _STAGE_PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

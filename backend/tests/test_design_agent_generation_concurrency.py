@@ -25,6 +25,7 @@ from tests import _fake_supabase
 # Local SQLite-compatible prototypes DDL (each design-agent route test keeps its
 # own copy so reloads stay independent — per the per-file-DDL convention).
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

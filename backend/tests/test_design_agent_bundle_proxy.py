@@ -36,6 +36,7 @@ from fastapi.testclient import TestClient
 
 # End-state prototypes DDL (sharing columns) — mirrors the public-routes suite.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

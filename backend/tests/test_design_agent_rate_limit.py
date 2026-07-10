@@ -38,6 +38,7 @@ from tests.conftest import _TEST_COMPANY_ID
 # start_prototype + complete_prototype to seed a ready row). The queue table is
 # included so an un-stubbed enqueue path never NameErrors on the table.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

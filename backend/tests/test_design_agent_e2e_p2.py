@@ -94,6 +94,7 @@ _APP_TSX = json.loads(
 # 20260530000100_design_agent_exports.sql (the fake exercises SQL semantics, not
 # PG-specific DDL — booleans/jsonb are translated by the fake's encode/decode).
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

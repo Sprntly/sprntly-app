@@ -50,6 +50,7 @@ from app.design_agent.rate_limit import SlidingWindowLimiter
 # needs the comments table. Copied verbatim from test_design_agent_comment_routes.py
 # so the fake exercises the same SQL semantics.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

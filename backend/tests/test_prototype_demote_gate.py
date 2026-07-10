@@ -32,6 +32,7 @@ from fastapi.testclient import TestClient
 # SQLite-compatible prototypes DDL (same translation test_db_prototypes.py uses):
 # the fake exercises SQL semantics, not Postgres-specific DDL.
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

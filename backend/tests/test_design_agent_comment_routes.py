@@ -47,6 +47,7 @@ from tests.conftest import _TEST_COMPANY_ID
 # exercises SQL semantics, not Postgres DDL. The prototype_comments status CHECK
 # is inlined so the fake rejects illegal statuses exactly as Postgres will.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

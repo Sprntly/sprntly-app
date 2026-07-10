@@ -167,6 +167,7 @@ CREATE TABLE IF NOT EXISTS prd_patches (
 # Mirrors test_design_agent_clarifying_question.py's prototypes DDL — the columns
 # `start_prototype` inserts + the id/created_at the fake auto-fills.
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

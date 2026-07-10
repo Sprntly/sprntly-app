@@ -21,6 +21,7 @@ import pytest
 _FAKE_PNG = b"\x89PNG\r\n\x1a\nfake-screenshot-bytes"
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

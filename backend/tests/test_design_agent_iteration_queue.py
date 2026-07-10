@@ -44,6 +44,7 @@ _MIGRATION = (
 # SQLite-compatible mirror of the prototypes end-state (P1-06 + P2-06) plus the
 # P3-06 queue table. Only the columns the helpers touch are needed.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

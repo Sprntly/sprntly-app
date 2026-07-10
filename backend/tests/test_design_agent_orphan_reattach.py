@@ -52,6 +52,7 @@ CREATE TABLE prototype_comments (
 # Prototype + checkpoint DDL for the integration build-non-failure test (mirrors
 # test_design_agent_source_staging.py's `_PROTOTYPE_DDL`).
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

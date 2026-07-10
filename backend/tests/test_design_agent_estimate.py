@@ -173,6 +173,7 @@ def test_estimate_missing_checkpoint_yields_empty_bundle(monkeypatch):
 # fake-wired helpers: `prototypes` (get_prototype) and `prototype_comments`
 # (list_comments). Mirrors the sibling design-agent route tests' DDL shape.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

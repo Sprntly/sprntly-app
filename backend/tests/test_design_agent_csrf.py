@@ -38,6 +38,7 @@ _FOREIGN_ORIGIN = "https://evil.example"
 # SQLite-compatible `prototypes` end-state (mirrors test_design_agent_public_routes.py)
 # so the public/authed handlers that resolve a row do not 500 before the gate is proven.
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

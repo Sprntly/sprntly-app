@@ -360,6 +360,7 @@ def test_iterate_prototype_honours_max_iters(monkeypatch):
 # prototype_checkpoints + prototype_comments (P3-01). Mirrors
 # test_design_agent_comment_routes.py.
 _DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

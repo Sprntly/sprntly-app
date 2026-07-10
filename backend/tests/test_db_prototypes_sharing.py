@@ -30,6 +30,7 @@ import pytest
 # share_passcode_hash / is_complete / complete_checkpoint_id. The CHECK + UNIQUE
 # constraints are inlined so the fake enforces the same semantics Postgres will.
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

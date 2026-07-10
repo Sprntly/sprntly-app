@@ -249,6 +249,7 @@ async def test_capture_never_logs_bundle_contents(monkeypatch, caplog):
 # ═══════════════════════════════════════════════════════════════════════════
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

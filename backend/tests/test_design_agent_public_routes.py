@@ -35,6 +35,7 @@ from fastapi.testclient import TestClient
 # Postgres DDL). The five sharing columns are present so find_prototype_by_share_token
 # can resolve a row.
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

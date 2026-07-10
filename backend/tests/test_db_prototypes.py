@@ -22,6 +22,7 @@ import pytest
 # alter) are translated/omitted the same way conftest._FAKE_SCHEMA does for the
 # existing tables — the fake exercises SQL semantics, not Postgres-specific DDL.
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

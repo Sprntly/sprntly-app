@@ -126,6 +126,7 @@ def _always_vite_build_error(headline):
 # ─── Route hook — fake Supabase DB (duplicated per-file convention) ───────────
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

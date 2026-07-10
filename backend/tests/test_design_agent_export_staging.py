@@ -48,6 +48,7 @@ from tests.conftest import _TEST_COMPANY_ID
 # (prototype_id, checkpoint_id) UNIQUE constraint, distinct from the P2-07
 # lifecycle test's throwaway mirror.
 _EXPORT_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

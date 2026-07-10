@@ -42,6 +42,7 @@ from tests.conftest import (
 # SQLite-compatible translation of the P1-06 prototypes migration (mirrors
 # test_db_prototypes.py — the fake exercises SQL semantics, not Postgres DDL).
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

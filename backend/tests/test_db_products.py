@@ -36,6 +36,7 @@ from tests.conftest import _TEST_COMPANY_ID, _TEST_USER_ID
 # SQLite-compatible translation of the prototypes migration (identical to the
 # other Design Agent route suites — the fake exercises SQL semantics, not PG DDL).
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

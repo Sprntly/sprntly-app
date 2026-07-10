@@ -408,6 +408,7 @@ def test_dispatch_clarifying_question_routes_to_executor():
 
 
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,
@@ -633,6 +634,7 @@ def test_clear_pending_question_logs_cleared(proto, caplog):
 # share_token / is_complete / complete_checkpoint_id so the helper-preservation
 # AC (AC3) can seed + assert them.
 _ROUTE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

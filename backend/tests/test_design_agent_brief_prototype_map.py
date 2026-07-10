@@ -31,6 +31,7 @@ from tests.conftest import _TEST_COMPANY_ID
 # test_design_agent_screenshot._PROTOTYPE_DDL — the column that find_prototype_by_prd
 # returns and that PrototypeReadiness exposes to callers).
 _PROTOTYPE_DDL = """
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,
