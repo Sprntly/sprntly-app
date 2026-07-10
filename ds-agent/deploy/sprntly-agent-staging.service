@@ -1,0 +1,18 @@
+[Unit]
+Description=Sprntly STAGING DS Agent (api.staging.sprntly.ai/agent)
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/Sprntly-staging/ds-agent
+# Symlink to prod's ds-agent/.env for now (same secrets). Own upload dir so
+# staging uploads never collide with prod's.
+EnvironmentFile=/home/ec2-user/Sprntly-staging/ds-agent/.env
+Environment="AGENT_UPLOAD_DIR=/var/lib/sprntly-agent-staging/uploads"
+ExecStart=/home/ec2-user/Sprntly-staging/ds-agent/.venv/bin/uvicorn ds_agent.server.__main__:app --host 127.0.0.1 --port 8012
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

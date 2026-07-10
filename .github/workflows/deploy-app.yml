@@ -1,20 +1,33 @@
-name: Deploy to app.sprntly.ai
+name: Deploy app (staging + prod)
 
-# Builds the static Next export and rsyncs it to /var/www/sprntly-app/ on
-# EC2, which nginx serves at https://app.sprntly.ai/. Backend deploys are
-# in deploy-backend.yml; this workflow only touches the frontend bundle.
+# Dual-target frontend deploy. Builds the static Next export and rsyncs it to
+# the environment's web root on EC2, which nginx serves.
+#   push to main        -> STAGING  (staging.sprntly.ai, /var/www/sprntly-app-staging/,
+#                                     built against https://api.staging.sprntly.ai)
+#   push to production  -> PROD     (app.sprntly.ai,     /var/www/sprntly-app/,
+#                                     built against https://api.sprntly.ai)
+# The app is a STATIC export, so NEXT_PUBLIC_API_URL is baked in at build time —
+# staging and prod are genuinely different bundles pointing at different API
+# hosts. The Supabase URL/anon key are shared (same project) for now.
+# Backend deploys are in deploy-backend.yml; this workflow only touches the
+# frontend bundle.
 
 on:
   push:
-    branches: [main]
+    branches: [main, production]
     paths:
       - 'web/**'
       - '.github/workflows/deploy-app.yml'
   workflow_dispatch:
 
 concurrency:
-  group: deploy-app
+  group: deploy-app-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  API_URL:  ${{ github.ref == 'refs/heads/production' && 'https://api.sprntly.ai' || 'https://api.staging.sprntly.ai' }}
+  DEST_DIR: ${{ github.ref == 'refs/heads/production' && '/var/www/sprntly-app/' || '/var/www/sprntly-app-staging/' }}
+  APP_HOST: ${{ github.ref == 'refs/heads/production' && 'app.sprntly.ai' || 'staging.sprntly.ai' }}
 
 jobs:
   deploy:
@@ -65,9 +78,9 @@ jobs:
               ;;
           esac
 
-      - name: Build static export
+      - name: Build static export (${{ env.APP_HOST }} -> ${{ env.API_URL }})
         env:
-          NEXT_PUBLIC_API_URL: https://api.sprntly.ai
+          NEXT_PUBLIC_API_URL: ${{ env.API_URL }}
           NEXT_PUBLIC_DESIGN_AGENT_ENABLED: "1"
           NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
@@ -88,7 +101,7 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
 
-      - name: Rsync to EC2 (/var/www/sprntly-app/)
+      - name: Rsync to EC2 (${{ env.DEST_DIR }})
         env:
           EC2_USER: ${{ secrets.EC2_USER }}
           EC2_HOST: ${{ secrets.EC2_HOST }}
@@ -96,16 +109,16 @@ jobs:
           rsync -az --delete \
             -e "ssh -i ~/.ssh/id_ed25519" \
             web/out/ \
-            "$EC2_USER@$EC2_HOST:/var/www/sprntly-app/"
+            "$EC2_USER@$EC2_HOST:${DEST_DIR}"
 
-      - name: Smoke test app.sprntly.ai (retry up to 15s)
+      - name: Smoke test ${{ env.APP_HOST }} (retry up to 15s)
         run: |
           for i in $(seq 1 15); do
-            if curl -fsS -o /dev/null https://app.sprntly.ai/; then
-              echo "app.sprntly.ai healthy after ${i}s"
+            if curl -fsS -o /dev/null "https://${APP_HOST}/"; then
+              echo "${APP_HOST} healthy after ${i}s"
               break
             fi
             sleep 1
           done
-          curl -fsS -o /dev/null -w "app index:   HTTP %{http_code}\n" https://app.sprntly.ai/
-          curl -fsS -o /dev/null -w "app sign-in: HTTP %{http_code}\n" https://app.sprntly.ai/sign-in
+          curl -fsS -o /dev/null -w "app index:   HTTP %{http_code}\n" "https://${APP_HOST}/"
+          curl -fsS -o /dev/null -w "app sign-in: HTTP %{http_code}\n" "https://${APP_HOST}/sign-in"
