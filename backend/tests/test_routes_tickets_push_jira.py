@@ -216,6 +216,43 @@ def test_push_stories_to_jira_creates_then_updates_idempotently(jira_env, monkey
     assert r2["created"][0]["task_id"] == "PROJ-9"
 
 
+def test_push_stories_to_jira_threads_per_story_assignee(jira_env, monkeypatch):
+    """A story carrying assignee_account_id assigns the created issue; a story
+    without one is created unassigned. Per-story, not batch-wide."""
+    from app.stories import push as push_mod
+    from app.stories.generate import Story
+
+    ctx = _connected_client(monkeypatch)
+    assigned = Story(title="Login flow", body="log in", assignee_account_id="acc-1")
+    unassigned = Story(title="Logout flow", body="log out")
+
+    monkeypatch.setattr(push_mod, "_jira_creds", lambda cid: ("tok", "cloud-1"))
+    monkeypatch.setattr(push_mod, "get_jira_issue_key", lambda cid, pk, tid: None)
+    monkeypatch.setattr(push_mod, "save_jira_issue_key", lambda cid, pk, tid, key: None)
+
+    with patch.object(
+        push_mod.jira_oauth, "create_issue",
+        side_effect=[{"id": "1", "key": "P-1", "url": "u"}, {"id": "2", "key": "P-2", "url": "u"}],
+    ) as mock_create:
+        push_mod.push_stories_to_jira(ctx.company_id, "PROJ", [assigned, unassigned])
+
+    assert mock_create.call_args_list[0].kwargs["assignee_account_id"] == "acc-1"
+    assert mock_create.call_args_list[1].kwargs["assignee_account_id"] is None
+
+
+def test_story_assignee_is_push_only_not_serialized(monkeypatch):
+    """assignee_account_id is a push-time field: from_dict reads it, but to_dict
+    omits it (so it never lands in the ticket cache) and it doesn't shift the
+    content hash."""
+    from app.stories.generate import Story
+
+    s = Story.from_dict({"title": "T", "body": "B", "assignee_account_id": "acc-9"})
+    assert s.assignee_account_id == "acc-9"
+    assert "assignee_account_id" not in s.to_dict()
+    # same title/body → same stable id regardless of assignee
+    assert s.stable_id() == Story(title="T", body="B").stable_id()
+
+
 def test_jira_projects_picker(jira_env, monkeypatch):
     ctx = _connected_client(monkeypatch)
     projects = [{"id": "1", "key": "AAA", "name": "Alpha"}]
