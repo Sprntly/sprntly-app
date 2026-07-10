@@ -392,6 +392,29 @@ export function ChatScreen() {
     } catch { /* non-fatal: fall back to an empty thread */ }
   }, [])
 
+  // The open-path prd_id (source ready/load, or a generate that resolves) is
+  // unreliable: "View PRD" degrades to a generate/find-or-create when the
+  // insight→PRD map hasn't populated yet, so the tab's prdId can stay null. But
+  // chatInsightState resolves the ACTIVE tab's real PRD id from that same map,
+  // keyed by briefMeta — and it lands reliably once the map loads, independent of
+  // the open path. So whenever we know the active tab's prd_id: (1) backfill
+  // tab.prdId (null only) so chat persistence stamps the right PRD, and (2)
+  // rehydrate the saved chat (guarded to an empty, unconverted tab). This is what
+  // makes a reopened PRD actually restore its prior questions.
+  const resolvedInsightPrdId = chatInsightState?.hasPrd ? chatInsightState.prdId : null
+  useEffect(() => {
+    if (resolvedInsightPrdId == null || activeTabId == null) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab) return
+    if (tab.prdId == null) {
+      setTabs((prev) => prev.map((t) =>
+        t.id === activeTabId && t.prdId == null ? { ...t, prdId: resolvedInsightPrdId } : t))
+    }
+    if (tab.thread.length === 0 && tab.dbConvId == null) {
+      void hydratePrdThread(activeTabId, resolvedInsightPrdId)
+    }
+  }, [activeTabId, resolvedInsightPrdId, hydratePrdThread])
+
   // ── Open a PRD as a NEW CHAT TAB with the content panel over it ─────────────
   // A "view/generate PRD" from another surface (brief cards, brief composer,
   // backlog) routes here via NavigationContext.openPrdTab → pendingPrdTab. We
