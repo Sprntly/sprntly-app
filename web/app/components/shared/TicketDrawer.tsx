@@ -436,6 +436,167 @@ function ConnectedTicketForm({
   )
 }
 
+// ── Jira ticket form (real create + per-ticket assignee) ───────────────────
+//
+// When Jira is connected, the drawer creates a REAL issue via
+// ticketPushApi.pushToJira (the #701 per-task path with assignee_account_id),
+// with a project picker + a member-picker assignee — replacing the old
+// hardcoded mock (ConnectedTicketForm), which is kept only for the not-yet-real
+// trackers (Linear/Asana).
+
+function JiraTicketForm({ onClose }: { onClose: () => void }) {
+  const { showToast, goTo } = useNavigation()
+  const { content } = useContent()
+  const [projects, setProjects] = useState<{ id: string; key: string; name: string }[]>([])
+  const [projectKey, setProjectKey] = useState("")
+  const [issueType, setIssueType] = useState("Task")
+  const [members, setMembers] = useState<{ accountId: string; displayName: string | null; email: string | null }[]>([])
+  const [assigneeAccountId, setAssigneeAccountId] = useState("")
+  const [title, setTitle] = useState(content.prd?.title ?? "")
+  const [priority, setPriority] = useState<"P0" | "P1" | "P2" | "P3">("P1")
+  const [description, setDescription] = useState(() => prdDescription(content.prd))
+  const [creating, setCreating] = useState(false)
+  const [projectsState, setProjectsState] = useState<"loading" | "idle" | "error">("loading")
+
+  // Load the Jira projects once (target picker).
+  useEffect(() => {
+    let cancelled = false
+    import("../../lib/api").then(({ ticketPushApi }) => {
+      ticketPushApi.listJiraProjects()
+        .then((r) => {
+          if (cancelled) return
+          setProjects(r.projects)
+          setProjectKey(r.projects[0]?.key ?? "")
+          setProjectsState("idle")
+        })
+        .catch(() => { if (!cancelled) setProjectsState("error") })
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  // Load assignable members whenever the project changes (project-scoped).
+  useEffect(() => {
+    if (!projectKey) return
+    let cancelled = false
+    setMembers([])
+    setAssigneeAccountId("")
+    import("../../lib/api").then(({ ticketPushApi }) => {
+      ticketPushApi.listJiraMembers(projectKey)
+        .then((r) => { if (!cancelled) setMembers(r.members) })
+        .catch(() => { if (!cancelled) setMembers([]) })
+    })
+    return () => { cancelled = true }
+  }, [projectKey])
+
+  const handleCreate = async () => {
+    if (!projectKey) return
+    setCreating(true)
+    // Save internally too (parity with the ClickUp path) so the ticket shows in
+    // the Tickets screen and can be tracked back.
+    const assigneeName = members.find((m) => m.accountId === assigneeAccountId)?.displayName ?? ""
+    const ticket = saveTicket({ title, priority, category: "Product", assignee: assigneeName, description })
+    try {
+      const { ticketPushApi } = await import("../../lib/api")
+      const result = await ticketPushApi.pushToJira(projectKey, [{
+        task_id: ticket.id,
+        title: ticket.title,
+        description: ticket.description,
+        priority: ticket.priority,
+        assignee_account_id: assigneeAccountId || null,
+      }], issueType)
+      onClose()
+      if (result.created?.length > 0) {
+        const issue = result.created[0]
+        showToast(
+          `Ticket created in Jira · ${issue.jira_issue_key}`,
+          `"${title.slice(0, 50)}" pushed to ${projectKey}.`,
+          issue.url || "View tickets →",
+        )
+      } else {
+        const err = result.errors?.[0]?.error ?? "saved locally"
+        showToast("Jira push failed", `"${title.slice(0, 50)}" — ${err.slice(0, 80)}`, "View tickets →")
+      }
+      goTo("tickets")
+    } catch (e) {
+      onClose()
+      const msg = e instanceof Error ? e.message : "Unknown error"
+      showToast("Jira push failed", `"${title.slice(0, 50)}" saved locally — ${msg.slice(0, 80)}`, "View tickets →")
+      goTo("tickets")
+    } finally {
+      setCreating(false)
+    }
+  }
+
+  return (
+    <>
+      <div className="drawer-body">
+        <p className="drawer-sub">
+          Jira is connected. This creates a real issue in your chosen project — the PRD summary travels in the description.
+        </p>
+
+        <div className="ticket-row">
+          <div className="ticket-row-label">Project</div>
+          <select className="ticket-select" value={projectKey} onChange={(e) => setProjectKey(e.target.value)} disabled={creating || projectsState !== "idle"}>
+            {projectsState === "loading" && <option>Loading…</option>}
+            {projectsState === "error" && <option>Couldn’t load projects</option>}
+            {projects.map((p) => <option key={p.id || p.key} value={p.key}>{p.name} ({p.key})</option>)}
+          </select>
+        </div>
+
+        <div className="ticket-row">
+          <div className="ticket-row-label">Issue type</div>
+          <select className="ticket-select" value={issueType} onChange={(e) => setIssueType(e.target.value)} disabled={creating}>
+            {["Task", "Story", "Bug", "Epic"].map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+        </div>
+
+        <div className="ticket-row">
+          <div className="ticket-row-label">Title</div>
+          <input type="text" className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Ticket title" />
+        </div>
+
+        <div className="ticket-row">
+          <div className="ticket-row-label">Priority</div>
+          <select className="ticket-select" value={priority} onChange={(e) => setPriority(e.target.value as typeof priority)} disabled={creating}>
+            <option value="P0">P0 — Highest</option>
+            <option value="P1">P1 — High</option>
+            <option value="P2">P2 — Medium</option>
+            <option value="P3">P3 — Low</option>
+          </select>
+        </div>
+
+        <div className="ticket-row">
+          <div className="ticket-row-label">Assignee</div>
+          <select className="ticket-select" value={assigneeAccountId} onChange={(e) => setAssigneeAccountId(e.target.value)} disabled={creating || !projectKey} aria-label="Assignee">
+            <option value="">Unassigned</option>
+            {members.map((m) => <option key={m.accountId} value={m.accountId}>{m.displayName || m.email || m.accountId}</option>)}
+          </select>
+        </div>
+
+        <div className="ticket-row" style={{ gridTemplateColumns: "110px 1fr", alignItems: "flex-start" }}>
+          <div className="ticket-row-label" style={{ paddingTop: 10 }}>Description</div>
+          <textarea className="textarea" value={description} onChange={(e) => setDescription(e.target.value)} style={{ minHeight: 140, fontSize: 12.5 }} />
+        </div>
+      </div>
+
+      <div className="drawer-foot">
+        <span style={{ fontSize: 11.5, color: "var(--muted)" }}>
+          {projectKey ? `Will create in Jira · ${projectKey}` : "Select a Jira project"}
+        </span>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="btn" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn btn-accent" onClick={handleCreate} disabled={!title.trim() || !projectKey || creating}>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <IconCheck size={16} />
+              {creating ? "Creating…" : "Create & push"}
+            </span>
+          </button>
+        </div>
+      </div>
+    </>
+  )
+}
+
 // ── Main drawer ────────────────────────────────────────────────────────────
 
 export function TicketDrawer() {
@@ -449,6 +610,10 @@ export function TicketDrawer() {
 
   if (activeDrawer !== "ticket") return null
 
+  const jiraConnected =
+    connections !== null && connections.some((c) => c.status === "active" && c.provider === "jira")
+  // Jira has a real create path now; other TICKET_PROVIDERS (Linear/Asana) are
+  // still the design mock until their connectors exist.
   const connected = connections !== null && hasTicketConnector(connections)
 
   return (
@@ -469,6 +634,8 @@ export function TicketDrawer() {
           <div className="drawer-body" style={{ color: "var(--ink-4)", fontSize: 13 }}>
             Loading…
           </div>
+        ) : jiraConnected ? (
+          <JiraTicketForm onClose={closeDrawers} />
         ) : connected ? (
           <ConnectedTicketForm connections={connections} onClose={closeDrawers} />
         ) : (
