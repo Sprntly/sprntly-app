@@ -145,15 +145,18 @@ def test_human_prd_carries_html_page_contract(isolated_settings, monkeypatch):
     prd_runner._run_sync(prd_id, brief_id, 0)
 
     a_input = captured[0]["input"]
-    # The skill's HTML template (markup + design system) reaches the prompt…
-    assert "<!DOCTYPE html>" in a_input
-    assert 'contenteditable="true"' in a_input
+    # The stable HTML template (markup + design system) now rides the CACHEABLE
+    # PREFIX (identical across every PRD → a cache read), not the per-PRD tail.
+    a_prefix = captured[0]["user_cacheable_prefix"]
+    assert "<!DOCTYPE html>" in a_prefix
+    assert 'contenteditable="true"' in a_prefix
     # …in the v4.1 section order (eyebrows)…
     for label in (">Context", ">Problem", ">Evidence", ">Requirements", ">Appendix"):
-        assert label in a_input, f"human PRD prompt missing section {label!r}"
-    # …the directive steers to a self-contained HTML page, not markdown / blocks…
+        assert label in a_prefix, f"human PRD template missing section {label!r}"
+    # …the directive (the dynamic tail) steers to a self-contained HTML page…
     assert "self-contained HTML page" in a_input
     assert ":::" not in a_input, "HTML human PRD must not impose `:::` blocks"
+    assert ":::" not in a_prefix
     assert "Start your output at `<!DOCTYPE html>`" in a_input
     # …and _run_sync passes no author → the byline renders the [NEED: author] slot.
     assert prd_runner._AUTHOR_FALLBACK in a_input
@@ -411,18 +414,22 @@ def test_real_gateway_human_prd_carries_prd_author_method(isolated_settings, mon
     prd_id = _start_prd(db_mod, brief_id)
 
     systems: dict[str, str] = {}
+    prefixes: dict[str, str] = {}
 
     def _call_md(**kwargs):
         systems["a"] = kwargs["system"]
+        prefixes["a"] = kwargs.get("user_cacheable_prefix") or ""
         return _PART_A
 
     import app.graph.gateway as gw
     monkeypatch.setattr(gw, "call_md", _call_md)
     prd_runner._run_sync(prd_id, brief_id, 0)
 
-    assert "METHOD (skill: prd-author" in systems["a"]
+    # The skill METHOD now rides the cacheable prefix (not the system prompt).
+    assert "METHOD (skill: prd-author" in prefixes["a"]
     assert "Sprntly's PRD Page generator" in systems["a"]
     # The human-PRD flow must NOT carry the implementation-spec METHOD.
+    assert "METHOD (skill: implementation-spec" not in prefixes["a"]
     assert "METHOD (skill: implementation-spec" not in systems["a"]
 
 
@@ -440,9 +447,11 @@ def test_real_gateway_spec_carries_implementation_spec_method(
     db_mod.complete_prd(prd_id, title="t", md=_PART_A)
 
     systems: dict[str, str] = {}
+    prefixes: dict[str, str] = {}
 
     def _call_md(**kwargs):
         systems["b"] = kwargs["system"]
+        prefixes["b"] = kwargs.get("user_cacheable_prefix") or ""
         assert "PART A — HUMAN PRD" in kwargs["user"]
         return _PART_B
 
@@ -450,7 +459,8 @@ def test_real_gateway_spec_carries_implementation_spec_method(
     monkeypatch.setattr(gw, "call_md", _call_md)
     result = prd_runner.ensure_impl_spec(prd_id)
 
-    assert "METHOD (skill: implementation-spec" in systems["b"]
+    # The skill METHOD now rides the cacheable prefix (not the system prompt).
+    assert "METHOD (skill: implementation-spec" in prefixes["b"]
     assert "Sprntly's Implementation Spec agent" in systems["b"]
     assert "Implementation Spec" in result["llm_part"]
 

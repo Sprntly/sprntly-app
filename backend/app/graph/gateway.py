@@ -133,6 +133,7 @@ def llm_call(
     long_output: bool = False,
     log: bool = True,
     background: bool = False,
+    temperature: Optional[float] = None,
 ) -> LLMResult:
     """One attributed, telemetered LLM call. See module docstring.
 
@@ -151,6 +152,16 @@ def llm_call(
     if skill is not None:
         method_block, version_suffix = _build_method_prefix(skill, skill_module)
         prompt_version = f"{prompt_version}{version_suffix}"
+        # The bound skill's method is a large, byte-stable block — route it into
+        # the cacheable prefix (BEFORE any caller-supplied prefix) so it is a
+        # cache read on subsequent calls rather than reprocessed every time. Both
+        # the json and md paths now share this: call_md gained a cacheable-prefix
+        # parameter, so markdown skills (prd-author, implementation-spec,
+        # evidence-brief) stop folding the method uncached into `system`.
+        user_cacheable_prefix = (
+            method_block if user_cacheable_prefix is None
+            else f"{method_block}\n{user_cacheable_prefix}"
+        )
     # Long-output calls stream on the long read timeout so a large/slow
     # generation never trips the default per-request timeout. Triggered either by
     # a registered long-output skill (e.g. prd-author) OR an explicit
@@ -164,25 +175,25 @@ def llm_call(
     meta: dict = {}
     t0 = time.monotonic()
     if json_schema is not None:
-        # call_json supports a cacheable user prefix — keep the method there so
-        # it's cache-friendly across calls; the agent system prompt stays after.
-        if method_block:
-            user_cacheable_prefix = (
-                method_block if user_cacheable_prefix is None
-                else f"{method_block}\n{user_cacheable_prefix}"
-            )
+        # The method (if any) is already merged into user_cacheable_prefix above,
+        # so it stays cache-friendly across calls; the agent system prompt is the
+        # layer after it.
         output: Any = call_json(
             system=system, user=input, model=chosen_model, max_tokens=max_tokens,
             schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
             meta_out=meta, stream=stream, timeout=timeout, background=background,
+            temperature=temperature,
         )
     else:
-        # call_md has no cacheable-prefix path; fold the method into the system
-        # prompt (method first, agent layer after) so the binding still applies.
-        md_system = f"{method_block}\n{system}" if method_block else system
+        # call_md now supports the same cacheable prefix, so the method (merged
+        # above) rides the prefix — a cache read on repeat calls — instead of
+        # being concatenated uncached into `system`. The agent `system` prompt is
+        # cached too when substantial (see _build_base_kwargs).
         output = call_md(
-            system=md_system, user=input, model=chosen_model, max_tokens=max_tokens,
+            system=system, user=input, model=chosen_model, max_tokens=max_tokens,
+            user_cacheable_prefix=user_cacheable_prefix,
             meta_out=meta, stream=stream, timeout=timeout, background=background,
+            temperature=temperature,
         )
     latency_ms = int((time.monotonic() - t0) * 1000)
 
