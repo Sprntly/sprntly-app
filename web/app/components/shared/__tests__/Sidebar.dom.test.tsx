@@ -56,7 +56,7 @@ describe("Sidebar — New chat wiring", () => {
     render(React.createElement(Sidebar))
     fireEvent.click(screen.getByLabelText("Weekly brief"))
     expect(goTo).toHaveBeenCalledWith("brief")
-    fireEvent.click(screen.getByLabelText("All chats"))
+    fireEvent.click(screen.getByLabelText("History"))
     expect(goTo).toHaveBeenCalledWith("chats")
     // The new-chat helper was not triggered by either.
     expect(goToNewChat).not.toHaveBeenCalled()
@@ -73,7 +73,7 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     for (const label of [
       "New chat",
       "Weekly brief",
-      "All chats",
+      "History",
       "Sources",
       "Settings",
       "Feedback",
