@@ -33,6 +33,12 @@ export type ChatPersistenceDeps = {
   getApi: () => Promise<ConversationsPersistenceApi>
   /** Read a tab's current Supabase conversation id (null if not yet created). */
   getTabConvId: (tabId: string) => number | null
+  /**
+   * Read the PRD id a tab is about (null for plain chat/brief tabs). Stamped onto
+   * the conversation at create time so a reopened PRD can find + rehydrate it via
+   * conversationsApi.byPrd.
+   */
+  getTabPrdId?: (tabId: string) => number | null
   /** Persist a newly-created conversation id onto its tab. */
   setTabConvId: (tabId: string, convId: number) => void
   /**
@@ -66,6 +72,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
     // after the user turn, before `getApi()` settles — shares this same create
     // instead of starting a second one. This is the core of the "ONE conversation
     // per tab" invariant under fire-and-forget timing.
+    const prdId = deps.getTabPrdId?.(tabId) ?? undefined
     const createPromise: Promise<number> = (async () => {
       const api = await deps.getApi()
       const conv = await api.create({
@@ -73,6 +80,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
         preview: create.query.slice(0, 200),
         query: create.query,
         agent_type: "ask",
+        ...(prdId != null ? { prd_id: prdId } : {}),
       })
       deps.setTabConvId(tabId, conv.id)
       deps.onConversationCreated?.(create.turnId, conv.id)

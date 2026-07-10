@@ -2213,6 +2213,8 @@ export type ConversationRecord = {
   query: string
   reply: string
   pinned: boolean
+  /** The PRD this conversation is about, when opened from a PRD tab (else null). */
+  prd_id?: number | null
   created_at: string
   updated_at: string
 }
@@ -2228,8 +2230,12 @@ export type ConversationTurn = {
 export const conversationsApi = {
   list: () =>
     api.get<{ conversations: ConversationRecord[] }>("/v1/conversations"),
-  create: (body: { title: string; preview?: string; agent_type?: string; query?: string; reply?: string; pinned?: boolean }) =>
+  create: (body: { title: string; preview?: string; agent_type?: string; query?: string; reply?: string; pinned?: boolean; prd_id?: number }) =>
     api.post<ConversationRecord>("/v1/conversations", body),
+  /** Most recent conversation (with its turns) for a PRD, so reopening the PRD
+   *  tab can rehydrate the earlier chat. `conversation` is null when none exists. */
+  byPrd: (prdId: number) =>
+    api.get<{ conversation: ConversationRecord | null; turns: ConversationTurn[] }>(`/v1/conversations/by-prd/${prdId}`),
   update: (id: number, body: { title?: string; preview?: string; query?: string; reply?: string; pinned?: boolean }) =>
     api.patch<ConversationRecord>(`/v1/conversations/${id}`, body),
   remove: (id: number) =>

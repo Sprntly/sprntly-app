@@ -824,6 +824,36 @@ CREATE TABLE mcp_tokens (
     revoked_at   TEXT
 );
 CREATE INDEX mcp_tokens_company_idx ON mcp_tokens (company_id);
+
+-- Chat history (mirrors 20260611110000_conversations.sql +
+-- 20260611120000_conversation_turns.sql). prd_id links a conversation to the
+-- PRD it's about (20260709130000_conversations_prd_id.sql) so a reopened PRD
+-- tab can rehydrate its earlier turns via GET /v1/conversations/by-prd/{prd_id}.
+CREATE TABLE conversations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  TEXT NOT NULL,
+    user_id     TEXT,
+    title       TEXT NOT NULL DEFAULT '',
+    preview     TEXT NOT NULL DEFAULT '',
+    agent_type  TEXT NOT NULL DEFAULT 'ask',
+    query       TEXT NOT NULL DEFAULT '',
+    reply       TEXT NOT NULL DEFAULT '',
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    prd_id      INTEGER,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_conversations_company ON conversations (company_id, created_at);
+CREATE INDEX idx_conversations_company_prd ON conversations (company_id, prd_id, updated_at);
+
+CREATE TABLE conversation_turns (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    role            TEXT NOT NULL DEFAULT 'user',
+    content         TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
 """
 
 
