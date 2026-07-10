@@ -17237,15 +17237,18 @@
 .tkv2-dep--link:hover { border-color: var(--green); color: var(--green-d); text-decoration: underline; }
 .tkv2-dep--block.tkv2-dep--link:hover { border-color: var(--urgent); color: var(--urgent); }
 
-/* ── detail: inline edit affordances (description / AC / child issues) ── */
-.tkv2-editbtn {
-  display: inline-flex; align-items: center; gap: 4px; margin-left: 10px;
-  font-size: 11px; font-weight: 600; letter-spacing: .04em;
-  background: none; border: 1px solid var(--line); border-radius: 8px;
-  padding: 2px 9px; color: var(--soft); cursor: pointer; text-transform: none;
-  vertical-align: middle; transition: border-color .15s, color .15s;
-}
-.tkv2-editbtn:hover { border-color: var(--green); color: var(--green-d); }
+/* ── detail: inline edit affordances (description / AC / child issues) ──
+   PRD-style click-to-edit: the text itself is the affordance — click it to
+   edit in place; edits auto-save (no Edit/Save buttons). */
+.tkv2-editable { cursor: text; border-radius: 8px; transition: background .12s; }
+.tkv2-editable:hover { background: rgba(0, 0, 0, .035); }
+.tkv2-editable:focus-visible { outline: 1.5px solid var(--green); outline-offset: 1px; }
+.tkv2-editable--desc { margin: -6px -8px; padding: 6px 8px; }
+/* The description is contenteditable in place — it keeps the page's styling
+   while editing; only a whisper of background marks the active region. */
+.tkv2-descedit { outline: none; min-height: 22px; }
+.tkv2-descedit:focus { background: rgba(0, 0, 0, .025); }
+.tkv2-descedit:empty::before { content: attr(data-placeholder); color: var(--soft); font-size: 13px; }
 .tkv2-editrow { display: flex; gap: 7px; align-items: center; margin-bottom: 7px; }
 .tkv2-editrow .input { flex: 1; min-width: 0; font-size: 13.5px; }
 .tkv2-editrow .tkv2-btn2 { flex: 0 0 auto; padding: 6px 8px; }

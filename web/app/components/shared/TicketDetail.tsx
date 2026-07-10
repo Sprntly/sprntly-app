@@ -1,9 +1,9 @@
 "use client"
 
-import { Fragment, useEffect, useMemo, useState } from "react"
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   IconArrowLeft, IconChevronDown, IconCheck, IconExternalLink,
-  IconPencil, IconPlus, IconX,
+  IconPlus, IconX,
 } from "@tabler/icons-react"
 import { useNavigation } from "../../context/NavigationContext"
 import {
@@ -155,6 +155,169 @@ export function parseDescBlocks(text: string): DescBlock[] {
   })
 }
 
+// ── Description ⇄ contenteditable HTML ──
+//
+// PRD-style in-place editing: the styled description sections themselves are
+// one contenteditable region. They render from an HTML string (so React never
+// reconciles the children while the user types) and the edited DOM serializes
+// back to the labeled-text override format — the exact inverse of the
+// storyToEditableText/parseDescBlocks round trip, so an untouched focus+blur
+// produces identical text and saves nothing.
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+}
+
+/** HTML twin of highlightGWT (same keyword set, same .k spans). */
+function gwtHtml(text: string): string {
+  return escapeHtml(text).replace(
+    /\b(Given|When|Then|As an?|I want|so that)\b/g,
+    '<span class="k">$1</span>',
+  )
+}
+
+/** A generated (structured) story's sections as editable HTML. */
+function structuredDescHtml(s: GeneratedStory): string {
+  const parts: string[] = []
+  const label = (l: string) => `<div class="tkv2-dlbl">${l}</div>`
+  if (s.what) parts.push(`${label("What")}<p class="tkv2-dtx">${escapeHtml(s.what)}</p>`)
+  if (s.why_now) parts.push(`${label("Why now")}<p class="tkv2-dtx">${escapeHtml(s.why_now)}</p>`)
+  if (s.user_story) parts.push(`${label("User story")}<p class="tkv2-dtx">${gwtHtml(s.user_story)}</p>`)
+  if (s.scope && s.scope.length) {
+    parts.push(`${label("The ticket must cover")}<ul class="tkv2-dlist">${
+      s.scope.map((x) => `<li>${escapeHtml(x)}</li>`).join("")}</ul>`)
+  }
+  if (s.out_of_scope) parts.push(`${label("Out of scope")}<p class="tkv2-dtx">${escapeHtml(s.out_of_scope)}</p>`)
+  return parts.length ? parts.join("") : (s.body ? `<p class="tkv2-dtx" style="white-space:pre-wrap">${escapeHtml(s.body)}</p>` : "")
+}
+
+/** An edited description's parsed blocks as editable HTML (same styled
+ *  sections the generated ticket shows — edit-what-you-see). */
+function descBlocksHtml(blocks: DescBlock[]): string {
+  return blocks.map((b) => {
+    const label = b.label ? `<div class="tkv2-dlbl">${escapeHtml(b.label)}</div>` : ""
+    const body = b.items
+      ? `<ul class="tkv2-dlist">${b.items.map((it) => `<li>${escapeHtml(it)}</li>`).join("")}</ul>`
+      : `<p class="tkv2-dtx" style="white-space:pre-wrap">${b.label === "User story" ? gwtHtml(b.text) : escapeHtml(b.text)}</p>`
+    return label + body
+  }).join("")
+}
+
+/** Serialize the edited contenteditable DOM back to the labeled-text form:
+ *  .tkv2-dlbl → a section-label line (blank-line separated), <ul> → "- item"
+ *  lines, anything else → its text. */
+export function serializeDescDom(root: HTMLElement): string {
+  const lines: string[] = []
+  for (const node of Array.from(root.childNodes)) {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = (node.textContent || "").trim()
+      if (t) lines.push(t)
+      continue
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) continue
+    const el = node as HTMLElement
+    // innerText preserves <br>/<div> line breaks; jsdom lacks it → textContent.
+    // NOTE: both regex literals below match U+00A0 (non-breaking space, which
+    // contenteditable inserts for consecutive spaces) — not an ASCII space.
+    const text = (el.innerText ?? el.textContent ?? "").replace(/ /g, " ")
+    if (el.classList.contains("tkv2-dlbl")) {
+      if (lines.length) lines.push("")
+      lines.push(text.trim())
+    } else if (el.tagName === "UL") {
+      for (const li of Array.from(el.querySelectorAll("li"))) {
+        const t = ((li as HTMLElement).innerText ?? li.textContent ?? "").replace(/ /g, " ").trim()
+        if (t) lines.push(`- ${t}`)
+      }
+    } else if (text.trim()) {
+      lines.push(text.replace(/\s+$/, ""))
+    }
+  }
+  return lines.join("\n")
+}
+
+/** Click-to-edit list rows (acceptance criteria + child issues share the
+ *  interaction). PRD-style editing: click a row's text to edit it in place;
+ *  blur or Enter commits and auto-saves, an emptied row (or ✕) removes it,
+ *  Escape cancels. No Edit/Save buttons. */
+function InlineEditList({ items, commit, addLabel, itemLabel, renderRow }: {
+  items: string[]
+  /** Persist the new list (state + API) — called only when something changed. */
+  commit: (next: string[]) => void
+  addLabel: string
+  /** aria-label prefix for rows, e.g. "Edit acceptance criterion". */
+  itemLabel: string
+  renderRow: (text: string, i: number) => ReactNode
+}) {
+  const [editing, setEditingState] = useState<number | null>(null) // items.length = adding
+  const [draft, setDraft] = useState("")
+  const escaped = useRef(false) // Escape pressed → the pending blur discards the draft
+  // Mirrors `editing` so a stale blur (double-fire, or blur after Escape
+  // already closed the editor) can't commit twice.
+  const editingRef = useRef<number | null>(null)
+  const setEditing = (v: number | null) => { editingRef.current = v; setEditingState(v) }
+
+  const finish = (remove = false) => {
+    const idx = editingRef.current
+    if (idx == null) return
+    const v = draft.trim()
+    const next = [...items]
+    if (remove || (!v && idx < items.length)) {
+      if (idx < items.length) next.splice(idx, 1)
+    } else if (idx >= items.length) {
+      if (v) next.push(v)
+    } else {
+      next[idx] = v
+    }
+    setEditing(null)
+    if (next.length !== items.length || next.some((x, i) => x !== items[i])) commit(next)
+  }
+
+  const editorRow = (
+    <div className="tkv2-editrow">
+      <input
+        className="input"
+        value={draft}
+        autoFocus
+        aria-label={editing != null && editing < items.length ? itemLabel : addLabel}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => {
+          if (escaped.current) { escaped.current = false; setEditing(null) } else finish()
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.currentTarget.blur()
+          if (e.key === "Escape") { escaped.current = true; e.currentTarget.blur() }
+        }}
+      />
+      <button type="button" className="tkv2-btn2 tkv2-btn2--ghost" aria-label="Remove"
+        onMouseDown={(e) => e.preventDefault() /* keep focus so blur doesn't double-commit */}
+        onClick={() => finish(true)}>
+        <IconX size={13} />
+      </button>
+    </div>
+  )
+
+  return (
+    <>
+      {items.map((t, i) => (editing === i ? (
+        <Fragment key={i}>{editorRow}</Fragment>
+      ) : (
+        <div key={i} className="tkv2-editable" role="button" tabIndex={0}
+          title="Click to edit — saves automatically"
+          aria-label={`${itemLabel} ${i + 1}`}
+          onClick={() => { setDraft(t); setEditing(i) }}
+          onKeyDown={(e) => { if (e.key === "Enter") { setDraft(t); setEditing(i) } }}>
+          {renderRow(t, i)}
+        </div>
+      )))}
+      {editing != null && editing >= items.length ? editorRow : (
+        <button type="button" className="tkv2-btn2 tkv2-btn2--ghost" onClick={() => { setDraft(""); setEditing(items.length) }}>
+          <IconPlus size={13} /> {addLabel}
+        </button>
+      )}
+    </>
+  )
+}
+
 /** In-panel ticket detail — the `ticket` skill's canonical detail (Jira
  *  anatomy): full-width five-section description over a two-column zone (main
  *  story column + Details rail). Structured fields drive it; legacy/thin
@@ -190,14 +353,15 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
   // ticket, then updates".
   const [loaded, setLoaded] = useState(false)
 
-  // Edit modes. The description override is one text column; structured
-  // tickets serialize their sections into it for editing and the display
-  // parses it back into sections (see storyToEditableText/parseDescBlocks).
+  // Description editing. The override is one text column; structured tickets
+  // serialize their sections into it and the display parses it back (see
+  // storyToEditableText/parseDescBlocks). PRD-style: the rendered sections
+  // themselves are contenteditable — no textarea swap. The DOM serializes
+  // back to the labeled-text form on input (debounced) and commits on blur.
   const [hasDescOverride, setHasDescOverride] = useState(false)
-  const [editingDesc, setEditingDesc] = useState(false)
-  const [descDraft, setDescDraft] = useState("")
-  const [acDraft, setAcDraft] = useState<string[] | null>(null) // null = not editing
-  const [subsDraft, setSubsDraft] = useState<string[] | null>(null) // null = not editing
+  const descRef = useRef<HTMLDivElement>(null)
+  const descTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const descPending = useRef<string | null>(null)
 
   // Does this ticket carry the structured five-section contract, or is it a
   // legacy/thin story (body only)? Drives description rendering.
@@ -248,61 +412,54 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
   const pickStatus = (v: string) => { setStatus(v); setOpenMenu(null); saveFields({ status: v }) }
   const pickPriority = (v: string) => { setPriority(v); setOpenMenu(null); saveFields({ priority: v }) }
 
-  // ── Description editing ──
-  // Seed with exactly what's displayed: the saved override when there is one,
-  // else the structured sections serialized to text, else the plain body.
-  const startEditDesc = () => {
-    setDescDraft(hasDescOverride ? description : structured ? storyToEditableText(story) : description)
-    setEditingDesc(true)
-  }
-  const saveEditDesc = () => {
-    const d = descDraft
-    setDescription(d); setHasDescOverride(true); setEditingDesc(false)
-    saveDescription(d, criteria)
-  }
+  // ── Description editing (contenteditable in place, autosave) ──
+  // What the display currently represents as text: the saved override when
+  // there is one, else the structured sections serialized, else the plain body.
+  const displayedDescText = () =>
+    hasDescOverride ? description : structured ? storyToEditableText(story) : description
 
-  // ── Acceptance-criteria editing (draft list; null = view mode) ──
-  const saveAcDraft = () => {
-    if (!acDraft) return
-    const next = acDraft.map((c) => c.trim()).filter(Boolean)
-    setCriteria(next); setAcDraft(null)
-    saveDescription(description, next)
-  }
+  // The editable region's HTML. Rendered via dangerouslySetInnerHTML so React
+  // leaves the live DOM alone while the user types (the string only changes
+  // when a blur commits state, never mid-edit).
+  const descHtml = useMemo(() => {
+    if (structured && !hasDescOverride) return structuredDescHtml(story)
+    return description ? descBlocksHtml(parseDescBlocks(description)) : ""
+  }, [structured, hasDescOverride, description, story])
 
-  // ── Child-issue (subtask) editing ──
-  const saveSubsDraft = () => {
-    if (!subsDraft) return
-    const next = subsDraft.map((s) => s.trim()).filter(Boolean)
-    setSubtasks(next); setSubsDraft(null)
-    saveFields({ subtasks: next })
+  const onDescInput = () => {
+    const root = descRef.current
+    if (!root) return
+    const text = serializeDescDom(root)
+    descPending.current = text
+    if (descTimer.current) clearTimeout(descTimer.current)
+    descTimer.current = setTimeout(() => {
+      descTimer.current = null
+      descPending.current = null
+      // API-only while typing — a state commit would rebuild the DOM under
+      // the cursor. State catches up on blur.
+      saveDescription(text, criteria)
+    }, 1500)
   }
-
-  /** One draft-list row editor (AC + child issues share the interaction). */
-  const editRows = (
-    draft: string[],
-    setDraft: (v: string[]) => void,
-    addLabel: string,
-  ) => (
-    <>
-      {draft.map((v, i) => (
-        <div key={i} className="tkv2-editrow">
-          <input
-            className="input"
-            value={v}
-            autoFocus={i === draft.length - 1 && v === ""}
-            onChange={(e) => setDraft(draft.map((x, j) => (j === i ? e.target.value : x)))}
-          />
-          <button type="button" className="tkv2-btn2 tkv2-btn2--ghost" aria-label="Remove"
-            onClick={() => setDraft(draft.filter((_, j) => j !== i))}>
-            <IconX size={13} />
-          </button>
-        </div>
-      ))}
-      <button type="button" className="tkv2-btn2 tkv2-btn2--ghost" onClick={() => setDraft([...draft, ""])}>
-        <IconPlus size={13} /> {addLabel}
-      </button>
-    </>
-  )
+  const onDescBlur = () => {
+    if (descTimer.current) { clearTimeout(descTimer.current); descTimer.current = null }
+    descPending.current = null
+    const root = descRef.current
+    if (!root) return
+    const text = serializeDescDom(root)
+    if (text === displayedDescText()) return
+    setDescription(text); setHasDescOverride(true)
+    saveDescription(text, criteria)
+  }
+  // Flush a not-yet-debounced description edit if the view unmounts before
+  // blur fires (e.g. navigating back) so the last keystrokes aren't lost.
+  const flushDesc = useRef<() => void>(() => {})
+  flushDesc.current = () => {
+    if (descTimer.current) { clearTimeout(descTimer.current); descTimer.current = null }
+    if (descPending.current == null) return
+    ticketDataApi.saveDescription(key, descPending.current, criteria).catch(() => { /* best-effort */ })
+    descPending.current = null
+  }
+  useEffect(() => () => flushDesc.current(), [])
 
   const openReassign = () => {
     setOpenMenu((m) => (m === "reassign" ? null : "reassign"))
@@ -382,77 +539,43 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
         <>
 
       <div className="tkv2-edithint">
-        ✎ Title, status, assignee, priority, description, acceptance criteria,
-        child issues, and comments can all be edited here. Edits are saved as
-        overrides on top of the generated ticket.
+        ✎ Click any text — title, description, acceptance criteria, child
+        issues — to edit it in place. Changes save automatically as overrides
+        on top of the generated ticket.
       </div>
 
       {/* Full-width description */}
       <div className="tkv2-descwide">
         <div className="tkv2-sec">
-          <h4>
-            Description
-            {!editingDesc ? (
-              <button type="button" className="tkv2-editbtn" onClick={startEditDesc} aria-label="Edit description">
-                <IconPencil size={13} /> Edit
-              </button>
-            ) : null}
-          </h4>
-          {editingDesc ? (
-            <>
-              <textarea
-                className="tkv2-dtx"
-                style={{ width: "100%", minHeight: 220, resize: "vertical", border: "1px solid var(--line)", borderRadius: 8, padding: "9px 13px" }}
-                value={descDraft}
-                placeholder="Add a description…"
-                autoFocus
-                onChange={(e) => setDescDraft(e.target.value)}
-              />
-              <div className="tkv2-actions2">
-                <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={saveEditDesc}>Save</button>
-                <button type="button" className="tkv2-btn2 tkv2-btn2--ghost" onClick={() => setEditingDesc(false)}>Cancel</button>
-              </div>
-            </>
-          ) : structured && !hasDescOverride ? (
-            <>
-              {story.what ? (<><div className="tkv2-dlbl">What</div><p className="tkv2-dtx">{story.what}</p></>) : null}
-              {story.why_now ? (<><div className="tkv2-dlbl">Why now</div><p className="tkv2-dtx">{story.why_now}</p></>) : null}
-              {story.user_story ? (<><div className="tkv2-dlbl">User story</div><p className="tkv2-dtx">{highlightGWT(story.user_story)}</p></>) : null}
-              {story.scope && story.scope.length ? (
-                <><div className="tkv2-dlbl">The ticket must cover</div>
-                  <ul className="tkv2-dlist">{story.scope.map((s, i) => <li key={i}>{s}</li>)}</ul></>
-              ) : null}
-              {story.out_of_scope ? (<><div className="tkv2-dlbl">Out of scope</div><p className="tkv2-dtx">{story.out_of_scope}</p></>) : null}
-              {(story.prd_section || (story.signals && story.signals.length) || (story.data_gaps && story.data_gaps.length)) ? (
-                <p className="tkv2-dtx tkv2-ground" style={{ marginTop: 10 }}>
-                  Grounding: {story.prd_section ? <a>{story.prd_section}</a> : null}
-                  {story.signals && story.signals.length ? <> · {story.signals.join(" · ")}</> : null}
-                  {story.data_gaps && story.data_gaps.length
-                    ? story.data_gaps.map((g, i) => <span key={i} className="tkv2-need"> [{g}]</span>)
-                    : null}
-                </p>
-              ) : null}
-            </>
-          ) : description ? (
-            // Edited description — parse the labeled text back into the same
-            // styled sections the generated ticket shows (edit-what-you-see).
-            parseDescBlocks(description).map((b, i) => (
-              <Fragment key={i}>
-                {b.label ? <div className="tkv2-dlbl">{b.label}</div> : null}
-                {b.items ? (
-                  <ul className="tkv2-dlist">{b.items.map((it, j) => <li key={j}>{it}</li>)}</ul>
-                ) : (
-                  <p className="tkv2-dtx" style={{ whiteSpace: "pre-wrap" }}>
-                    {b.label === "User story" ? highlightGWT(b.text) : b.text}
-                  </p>
-                )}
-              </Fragment>
-            ))
-          ) : (
-            <p className="tkv2-dtx">
-              <span className="tkv2-empty">No description yet — click Edit to add one.</span>
+          <h4>Description</h4>
+          {/* The styled sections themselves are editable in place (PRD-style):
+              click into the text and type — no editor swap, no Save button. */}
+          <div
+            ref={descRef}
+            className="tkv2-editable tkv2-editable--desc tkv2-descedit"
+            contentEditable
+            suppressContentEditableWarning
+            role="textbox"
+            aria-multiline="true"
+            aria-label="Ticket description"
+            title="Click to edit — saves automatically"
+            data-placeholder="No description yet — click to add one."
+            onInput={onDescInput}
+            onBlur={onDescBlur}
+            dangerouslySetInnerHTML={{ __html: descHtml }}
+          />
+          {/* Grounding is generated metadata, not part of the editable text —
+              keep it outside the editable region. */}
+          {structured && !hasDescOverride &&
+          (story.prd_section || (story.signals && story.signals.length) || (story.data_gaps && story.data_gaps.length)) ? (
+            <p className="tkv2-dtx tkv2-ground" style={{ marginTop: 10 }}>
+              Grounding: {story.prd_section ? <a>{story.prd_section}</a> : null}
+              {story.signals && story.signals.length ? <> · {story.signals.join(" · ")}</> : null}
+              {story.data_gaps && story.data_gaps.length
+                ? story.data_gaps.map((g, i) => <span key={i} className="tkv2-need"> [{g}]</span>)
+                : null}
             </p>
-          )}
+          ) : null}
         </div>
       </div>
 
@@ -543,30 +666,20 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
       <div className="tkv2-body">
           {/* Acceptance criteria */}
           <div className="tkv2-sec">
-            <h4>
-              Acceptance criteria — {acCount}
-              {acDraft == null ? (
-                <button type="button" className="tkv2-editbtn" onClick={() => setAcDraft([...criteria])} aria-label="Edit acceptance criteria">
-                  <IconPencil size={13} /> Edit
-                </button>
+            <h4>Acceptance criteria — {acCount}</h4>
+            <div className="tkv2-ac">
+              {acCount === 0 ? (
+                <div className="tkv2-empty" style={{ marginBottom: 8 }}>No acceptance criteria yet.</div>
               ) : null}
-            </h4>
-            {acDraft != null ? (
-              <div className="tkv2-ac">
-                {editRows(acDraft, setAcDraft, "Add criterion")}
-                <div className="tkv2-actions2">
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={saveAcDraft}>Save</button>
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--ghost" onClick={() => setAcDraft(null)}>Cancel</button>
-                </div>
-              </div>
-            ) : acCount === 0 ? (
-              <div className="tkv2-empty">No acceptance criteria yet — click Edit to add some.</div>
-            ) : (
-              <div className="tkv2-ac">
-                {criteria.map((c, i) => {
+              <InlineEditList
+                items={criteria}
+                addLabel="Add criterion"
+                itemLabel="Edit acceptance criterion"
+                commit={(next) => { setCriteria(next); saveDescription(description, next) }}
+                renderRow={(c) => {
                   const { tag, rest } = splitAcTag(c)
                   return (
-                    <div key={i} className="tkv2-acitem">
+                    <div className="tkv2-acitem">
                       <span className="tkv2-cb" />
                       <span className="tkv2-actxt">
                         {tag === "failure" ? <span className="tkv2-tagf">[failure]</span> : null}
@@ -575,48 +688,40 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
                       </span>
                     </div>
                   )
-                })}
-                {story.ac_inherited ? (
+                }}
+              />
+              {acCount > 0 ? (
+                story.ac_inherited ? (
                   <span className="tkv2-inherit">Inherited from the PRD&apos;s implementation spec — edits here override the inherited set</span>
                 ) : (
                   <span className="tkv2-gen">GENERATED ⚠ not inherited — run prd-author for a Part B to inherit spec-first tests</span>
-                )}
-              </div>
-            )}
+                )
+              ) : null}
+            </div>
           </div>
 
           {/* Child issues */}
           <div className="tkv2-sec">
-            <h4>
-              Child issues{subtasks.length ? ` — ${subtasks.length}` : ""}
-              {subsDraft == null ? (
-                <button type="button" className="tkv2-editbtn" onClick={() => setSubsDraft([...subtasks])} aria-label="Edit child issues">
-                  <IconPencil size={13} /> Edit
-                </button>
-              ) : null}
-            </h4>
-            {subsDraft != null ? (
-              <>
-                {editRows(subsDraft, setSubsDraft, "Add child issue")}
-                <div className="tkv2-actions2">
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={saveSubsDraft}>Save</button>
-                  <button type="button" className="tkv2-btn2 tkv2-btn2--ghost" onClick={() => setSubsDraft(null)}>Cancel</button>
-                </div>
-              </>
-            ) : subtasks.length === 0 ? (
-              <div className="tkv2-empty">No child issues yet — click Edit to add some.</div>
-            ) : (
-              subtasks.map((t, i) => {
+            <h4>Child issues{subtasks.length ? ` — ${subtasks.length}` : ""}</h4>
+            {subtasks.length === 0 ? (
+              <div className="tkv2-empty" style={{ marginBottom: 8 }}>No child issues yet.</div>
+            ) : null}
+            <InlineEditList
+              items={subtasks}
+              addLabel="Add child issue"
+              itemLabel="Edit child issue"
+              commit={(next) => { setSubtasks(next); saveFields({ subtasks: next }) }}
+              renderRow={(t) => {
                 const parallel = /^\s*\[P\]\s*/i.test(t)
                 const label = t.replace(/^\s*\[P\]\s*/i, "")
                 return (
-                  <div key={i} className="tkv2-subt">
+                  <div className="tkv2-subt">
                     <span className="tkv2-cb" /> {label}
                     {parallel ? <span className="tkv2-sk">[P] parallel</span> : null}
                   </div>
                 )
-              })
-            )}
+              }}
+            />
           </div>
 
           {/* Linked issues — title references to sibling tickets in this PRD;
