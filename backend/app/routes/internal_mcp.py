@@ -189,11 +189,14 @@ def prd_prototype(prd_id: int, company_id: str) -> dict[str, Any]:
     IS the company_id)."""
     from app.config import settings
     from app.db.companies import slug_for_company_id
-    from app.db.prototypes import find_latest_prototype_by_prd
+    # #683 renamed find_latest_prototype_by_prd → find_prototype_by_prd (statuses=None
+    # keeps the "any status, newest wins" behavior this route needs); #692 shipped
+    # the stale name, so the route ImportError'd at call time. See issue #697.
+    from app.db.prototypes import find_prototype_by_prd
     from app.deps.ownership import require_owned_prd
 
     require_owned_prd(prd_id, company_id)  # raises 404 if not this company's
-    row = find_latest_prototype_by_prd(prd_id=prd_id, workspace_id=company_id)
+    row = find_prototype_by_prd(prd_id=prd_id, workspace_id=company_id)
     if not row:
         raise HTTPException(404, "no_prototype")
 

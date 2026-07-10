@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
+
 import app.auth  # noqa: F401 — ensure app.config/app.auth in sys.modules
 
 from fastapi.testclient import TestClient
@@ -17,6 +19,36 @@ from fastapi.testclient import TestClient
 from app.db.mcp_tokens import create_mcp_token
 
 _INTERNAL_KEY = "test-internal-key"
+
+# The internal-MCP prototype route (`GET /internal/mcp/prd/{id}/prototype`) reads
+# a `prototypes` table. It is intentionally NOT in the shared base schema — the
+# ~40 Design Agent tests each create their own richer copy on the singleton fake
+# DB and a base-schema copy collides with them (issue #697). So we create the
+# trimmed variant this route needs locally, on the per-test reset DB.
+_PROTOTYPES_DDL = """
+CREATE TABLE prototypes (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    prd_id             INTEGER NOT NULL,
+    workspace_id       TEXT NOT NULL,
+    status             TEXT NOT NULL DEFAULT 'generating',
+    is_complete        INTEGER NOT NULL DEFAULT 0,
+    target_platform    TEXT NOT NULL DEFAULT 'both',
+    preview_image_url  TEXT,
+    share_mode         TEXT NOT NULL DEFAULT 'private',
+    share_token        TEXT,
+    error              TEXT,
+    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at       TEXT
+);
+"""
+
+
+@pytest.fixture(autouse=True)
+def _prototypes_table(isolated_settings):
+    """Create the route's `prototypes` table on the freshly-reset fake DB."""
+    from tests import _fake_supabase
+
+    _fake_supabase.get_fake_db().executescript(_PROTOTYPES_DDL)
 
 
 def _seed_company_and_member(client, *, company_id: str, slug: str, user_id: str) -> None:
