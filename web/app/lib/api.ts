@@ -2014,8 +2014,10 @@ export const ticketDataApi = {
   /** Remove an attachment. */
   removeAttachment: (ticketKey: string, attachmentId: number) =>
     api.delete(`/v1/tickets/${encodeURIComponent(ticketKey)}/attachments/${attachmentId}`),
-  /** Add a comment. */
-  addComment: (ticketKey: string, author: string, body: string) =>
+  /** Add a comment. The author is resolved SERVER-SIDE from the signed-in
+   *  session (profile name → email); the optional `author` here is only
+   *  honored for the "Sprntly" system notes — anything else is ignored. */
+  addComment: (ticketKey: string, body: string, author = "user") =>
     api.post<{ id: number; author: string; body: string; time: string }>(
       `/v1/tickets/${encodeURIComponent(ticketKey)}/comments`, { author, body },
     ),

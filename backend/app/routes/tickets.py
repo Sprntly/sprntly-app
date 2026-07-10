@@ -66,6 +66,11 @@ class AttachmentIn(BaseModel):
 
 
 class CommentIn(BaseModel):
+    """`author` is IGNORED for normal comments — the author is resolved
+    server-side from the signed-in session (profile name → email) so a
+    comment is always attributed to the real person and can't be spoofed.
+    One exception passes through: the literal "Sprntly" system author, used
+    by the change-loop's Accept & propagate note."""
     author: str = "user"
     body: str = Field(..., min_length=1)
 
@@ -209,12 +214,22 @@ def add_comment(
     body: CommentIn,
     company: CompanyContext = Depends(require_company),
 ):
-    """Add a comment to a ticket."""
+    """Add a comment to a ticket, attributed to the signed-in user.
+
+    The author comes from the session (profile name → email → "user"), never
+    from the client — matching the MCP comment route's attribution model.
+    Only the "Sprntly" system author (Accept & propagate notes) passes
+    through as sent."""
+    author = (
+        "Sprntly"
+        if body.author == "Sprntly"
+        else (company.user_name or company.user_email or "user")
+    )
     c = require_client()
     resp = c.table("ticket_comments").insert({
         "company_id": company.company_id,
         "ticket_key": ticket_key,
-        "author": body.author,
+        "author": author,
         "body": body.body,
     }).execute()
     row = resp.data[0]

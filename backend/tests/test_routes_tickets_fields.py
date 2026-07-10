@@ -104,6 +104,28 @@ def test_fields_only_edit_leaves_description_null(client: TestClient):
     assert data["acceptance_criteria"] is None  # not [] → UI keeps the generated AC
 
 
+def test_comment_author_resolved_from_session_not_client(isolated_settings, monkeypatch):
+    """A comment is attributed to the signed-in user (profile name → email →
+    'user'); a client-supplied author is ignored — except the 'Sprntly'
+    system author used by Accept & propagate notes."""
+    ctx = company_client(monkeypatch)
+    db = isolated_settings["supabase"]
+    db.table("profiles").insert({"id": ctx.user_id, "full_name": "Ada Lovelace"}).execute()
+
+    spoofed = ctx.client.post(
+        f"/v1/tickets/{KEY}/comments", json={"author": "Mallory", "body": "hi"}
+    ).json()
+    assert spoofed["author"] == "Ada Lovelace"
+
+    omitted = ctx.client.post(f"/v1/tickets/{KEY}/comments", json={"body": "again"}).json()
+    assert omitted["author"] == "Ada Lovelace"
+
+    system = ctx.client.post(
+        f"/v1/tickets/{KEY}/comments", json={"author": "Sprntly", "body": "✳ propagated"}
+    ).json()
+    assert system["author"] == "Sprntly"
+
+
 def test_comment_summary_needs_two_comments(client: TestClient):
     # 0 comments → null, no LLM call.
     assert client.get(f"/v1/tickets/{KEY}/comments/summary").json()["summary"] is None
@@ -132,9 +154,12 @@ def test_comment_summary_calls_llm(client: TestClient, monkeypatch):
     out = client.get(f"/v1/tickets/{KEY}/comments/summary").json()
     assert out["summary"] == "Team aligned to ship behind a flag; open question on step 3."
     assert out["proposed_criterion"] is None
-    # The thread (author: body lines) was handed to the model.
-    assert "Sam: Ship behind a flag?" in seen["user"]
-    assert "Lee:" in seen["user"]
+    # The thread (author: body lines) was handed to the model. Authors are
+    # resolved server-side from the session (no profile/email seeded → "user"),
+    # never taken from the client — the spoofed "Sam"/"Lee" don't appear.
+    assert "user: Ship behind a flag?" in seen["user"]
+    assert "user: Yes, flag it; step 3 still open." in seen["user"]
+    assert "Sam:" not in seen["user"]
 
 
 def test_comment_summary_surfaces_proposed_criterion(client: TestClient, monkeypatch):

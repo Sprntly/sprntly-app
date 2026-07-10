@@ -321,7 +321,9 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
   const addComment = () => {
     const body = commentText.trim()
     if (!body) return
-    ticketDataApi.addComment(key, "You", body).then((c) => {
+    // No author sent — the backend attributes the comment to the signed-in
+    // user (profile name → email) and echoes it back in the response.
+    ticketDataApi.addComment(key, body).then((c) => {
       setComments((xs) => [...xs, c]); setCommentText("")
     }).catch(() => showToast("Couldn't post comment", "Try again."))
   }
@@ -335,7 +337,7 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
     const next = [...criteria, proposedCriterion]
     setCriteria(next)
     saveDescription(description, next)
-    ticketDataApi.addComment(key, "Sprntly", `✳ Accepted & propagated to acceptance criteria: ${proposedCriterion}`)
+    ticketDataApi.addComment(key, `✳ Accepted & propagated to acceptance criteria: ${proposedCriterion}`, "Sprntly")
       .then((c) => setComments((xs) => [...xs, c]))
       .catch(() => { /* best-effort */ })
     setProposedCriterion(null)

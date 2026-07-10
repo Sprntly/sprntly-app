@@ -190,15 +190,18 @@ describe("TicketDetail", () => {
     })
   })
 
-  it("posting a comment persists via addComment", async () => {
-    api.addComment.mockResolvedValue({ id: 1, author: "You", body: "Looks good", time: "now" })
+  it("posting a comment persists via addComment and shows the server-resolved author", async () => {
+    // The backend attributes the comment to the signed-in user and echoes it
+    // back; the client sends only the body.
+    api.addComment.mockResolvedValue({ id: 1, author: "Ada Lovelace", body: "Looks good", time: "2026-07-09 18:00:00+00" })
     await renderDetail()
     const ta = screen.getByPlaceholderText("Ask about this ticket…")
     await act(async () => {
       fireEvent.change(ta, { target: { value: "Looks good" } })
       fireEvent.click(screen.getByRole("button", { name: /send/i }))
     })
-    expect(api.addComment).toHaveBeenCalledWith(KEY, "You", "Looks good")
+    expect(api.addComment).toHaveBeenCalledWith(KEY, "Looks good")
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy()
   })
 
   it("shows the AI summary block once there are 2+ comments", async () => {
