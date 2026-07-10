@@ -47,6 +47,8 @@ vi.mock("../../../../lib/api", () => {
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
+      // Default: no saved history for a PRD. Individual tests override per prd_id.
+      byPrd: vi.fn().mockResolvedValue({ conversation: null, turns: [] }),
     },
     // A PRD tab mounts PrdInputQuestions, which loads its questions from prdApi;
     // stub it to an empty set so the panel behaviour under test is unaffected.
@@ -110,6 +112,7 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 import { NavigationProvider, useNavigation, type PrdTabRequest } from "../../../../context/NavigationContext"
 import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
+import { conversationsApi } from "../../../../lib/api"
 
 // Harness: openPrdTab as a button (the real handoff entry point any surface uses)
 // + a probe that surfaces the current content-panel tab, so tests can observe the
@@ -148,6 +151,7 @@ beforeEach(() => {
   pathname = "/"
   runPrdGeneration.mockClear()
   runAskGeneration.mockClear()
+  vi.mocked(conversationsApi.byPrd).mockReset().mockResolvedValue({ conversation: null, turns: [] })
 })
 afterEach(() => {
   cleanup()
@@ -216,6 +220,35 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await clickOpenPrd()
 
     expect(tabBar().getAllByText("PRD · Ready doc")).toHaveLength(1)
+  })
+
+  it("rehydrates the PRD's earlier chat thread (by prd_id) when reopened", async () => {
+    // The PRD (prd_id 5) already has a saved conversation from a past session.
+    vi.mocked(conversationsApi.byPrd).mockResolvedValue({
+      conversation: { id: 42, prd_id: 5 } as never,
+      turns: [
+        { id: 1, conversation_id: 42, role: "user", content: "How does auth work?", created_at: "t0" },
+        { id: 2, conversation_id: 42, role: "assistant", content: "It uses OAuth.", created_at: "t1" },
+      ] as never,
+    })
+
+    renderWith(READY)
+    await clickOpenPrd()
+
+    // Reopening the PRD looked it up by its id and restored the prior turns.
+    await waitFor(() => expect(conversationsApi.byPrd).toHaveBeenCalledWith(5))
+    expect(await screen.findByText("How does auth work?")).toBeTruthy()
+    await waitFor(() => expect(screen.getByText("It uses OAuth.")).toBeTruthy())
+  })
+
+  it("leaves the thread empty when the PRD has no saved conversation", async () => {
+    // byPrd default (beforeEach) returns no conversation.
+    renderWith(READY)
+    await clickOpenPrd()
+
+    await waitFor(() => expect(conversationsApi.byPrd).toHaveBeenCalledWith(5))
+    // No restored turns rendered (READY carries no insight card either).
+    expect(document.querySelectorAll(".bc-turn:not(.bc-turn--insight)")).toHaveLength(0)
   })
 
   it("closes the panel when switching back to the brief tab (no bleed over the brief)", async () => {
