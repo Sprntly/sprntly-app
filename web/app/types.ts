@@ -64,7 +64,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   "ob-business-context": "Setup · Step 4 of 5",
   "ob-strategy": "Setup · Step 5 of 5",
   chat: "Home",
-  chats: "All chats",
+  chats: "History",
   brief: "Weekly brief",
   detail: "Evidence",
   ondemand: "Home",
