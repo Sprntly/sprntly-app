@@ -22,13 +22,16 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
 }))
 
-const { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus, getData, teamList } = vi.hoisted(() => ({
+const { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus, listJiraProjects, listJiraMembers, pushToJira, getData, teamList } = vi.hoisted(() => ({
   getForPrd: vi.fn(),
   generate: vi.fn(),
   getJob: vi.fn(),
   listClickUpLists: vi.fn(),
   pushToClickUp: vi.fn(),
   pullClickUpStatus: vi.fn(),
+  listJiraProjects: vi.fn(),
+  listJiraMembers: vi.fn(),
+  pushToJira: vi.fn(),
   getData: vi.fn(),
   teamList: vi.fn(),
 }))
@@ -36,7 +39,7 @@ vi.mock("../../../lib/api", async (orig) => {
   const actual = await orig<typeof import("../../../lib/api")>()
   return {
     ...actual,
-    storiesApi: { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus },
+    storiesApi: { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus, listJiraProjects, listJiraMembers, pushToJira },
     ticketDataApi: { ...actual.ticketDataApi, getData },
     teamApi: { list: teamList },
   }
@@ -293,6 +296,76 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     // No picker — pushed directly to the remembered list.
     expect(screen.queryByText(/select a project/i)).toBeNull()
     expect(pushToClickUp).toHaveBeenCalledWith("list-1", stories)
+  })
+
+  it("Push to Jira opens the modal, assigns a ticket per-member, and pushes with the accountId", async () => {
+    window.localStorage.clear()
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["jira"] }
+    const stories = [{ id: "tk-1", title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
+    listJiraProjects.mockResolvedValue({ projects: [{ id: "1", key: "KAN", name: "Kanban" }] })
+    listJiraMembers.mockResolvedValue({ members: [
+      { accountId: "acc-1", displayName: "Apurva Jain", email: "a@x.co", active: true, avatarUrl: null },
+    ] })
+    pushToJira.mockResolvedValue({ created: [{ story: "T1", task_id: "KAN-1", url: "u" }], errors: [] })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
+
+    // Single tracker (Jira) → button pushes straight into the Jira flow.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /push to jira/i }))
+    })
+    expect(listJiraProjects).toHaveBeenCalled()
+    // Modal + members load (project-scoped assignable users).
+    await waitFor(() => expect(listJiraMembers).toHaveBeenCalledWith("KAN"))
+    const assigneeSelect = await screen.findByLabelText("Assignee for T1") as HTMLSelectElement
+    // Wait for members to populate the per-ticket picker (Unassigned + Apurva).
+    await waitFor(() => expect(assigneeSelect.options.length).toBe(2))
+
+    await act(async () => {
+      fireEvent.change(assigneeSelect, { target: { value: "acc-1" } })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /push 1 ticket/i }))
+    })
+
+    expect(pushToJira).toHaveBeenCalledWith(
+      "KAN",
+      [{ ...stories[0], assignee_account_id: "acc-1" }],
+      "Task",
+    )
+    // "Remember for this PRD" on by default → project key persisted.
+    expect(window.localStorage.getItem("sprntly_ticket_jira_dest_7")).toBe("KAN")
+  })
+
+  it("with both trackers connected, the push button opens a chooser that routes to Jira", async () => {
+    window.localStorage.clear()
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup", "jira"] }
+    const stories = [{ id: "tk-1", title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
+    listJiraProjects.mockResolvedValue({ projects: [{ id: "1", key: "KAN", name: "Kanban" }] })
+    listJiraMembers.mockResolvedValue({ members: [] })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
+
+    // Both connected → the button is a chooser, not a direct push.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /push to tracker/i }))
+    })
+    // Choosing Jira routes into the Jira flow.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitem", { name: /push to jira/i }))
+    })
+    expect(listJiraProjects).toHaveBeenCalled()
+    expect(listClickUpLists).not.toHaveBeenCalled()
   })
 
   it("Sync from ClickUp pulls status back and shows it on the ticket card", async () => {
