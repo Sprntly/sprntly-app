@@ -1,67 +1,6 @@
 <!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>Part A template — prd-author v4.2</title>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Spectral:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
-:root{--green:#1A6B47;--ink:#1F241F;--sub:#5B615B;--page:#FFFFFF;--desk:#FFFFFF;--rule:#E3E1D8;
---happy:#E7F1EA;--happy-t:#1A6B47;--edge:#FBF0DC;--edge-t:#8A5A12;--fail:#F9E7E4;--fail-t:#9C3223;}
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:var(--desk);font-family:'Inter',sans-serif;color:var(--ink);font-size:15px;line-height:1.55;padding:24px 16px 80px}
-.frame{max-width:780px;margin:0 auto}
-.page{position:relative;background:var(--page);border:1px solid #DDDBD3;border-radius:2px;box-shadow:0 1px 2px rgba(31,36,31,.06),0 14px 36px rgba(31,36,31,.08);padding:64px 72px 76px;caret-color:var(--green)}
-.page ::selection{background:#DCEEE4}
-.page[contenteditable]:focus{outline:none}
-.page > *:hover{outline:1px dashed #A8CBB8;outline-offset:6px;border-radius:2px;cursor:text}
-.page .goal:hover,.page table:hover{outline-offset:8px}
-h1{font:600 33px/1.2 'Spectral',serif;letter-spacing:-.01em;margin-bottom:10px;padding-right:110px}
-.byline{font:500 12.5px/1 'IBM Plex Mono',monospace;color:var(--sub);margin-bottom:34px}
-.byline .bk{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin-right:9px}
-.eyebrow{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin:30px 0 8px;padding-top:18px;border-top:1px solid var(--rule)}
-.eyebrow:first-of-type{border-top:none;padding-top:0;margin-top:0}
-p{margin-bottom:8px}
-.term{border-bottom:1.5px dotted #B9B5A6}
-ul{list-style:none}
-ul.ev li{padding:10px 0 10px 16px;position:relative;border-bottom:1px dashed var(--rule)}
-ul.ev li:last-child{border-bottom:none}
-ul.ev li::before{content:'';position:absolute;left:0;top:19px;width:6px;height:6px;border-radius:50%;background:var(--green)}
-.evmeta{display:flex;gap:8px;flex-wrap:wrap;align-items:baseline;margin-top:4px;font:400 12.5px/1.5 'IBM Plex Mono',monospace;color:var(--sub)}
-.evtype{font:500 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:.08em;text-transform:uppercase;padding:4px 7px;border-radius:4px;background:#EFEDE6;color:var(--sub)}
-.evquote{font-family:'Spectral',serif;font-style:italic;font-size:16px;line-height:1.5}
-.src{color:var(--sub);font-size:13.5px}
-.goal{border:1px solid var(--rule);border-radius:6px;background:#FCFBF8;padding:16px 18px;display:grid;gap:9px}
-.goal .row{display:grid;grid-template-columns:118px 1fr;gap:12px;align-items:baseline}
-.goal .k{font:500 11px/1.5 'IBM Plex Mono',monospace;letter-spacing:.03em;color:var(--sub);text-transform:uppercase}
-.formula{font-family:'IBM Plex Mono',monospace;font-size:13.5px}
-.impact-blank{display:inline-block;min-width:230px;border-bottom:2px dotted #B9B5A6;color:#9A968A;font-size:13.5px;font-style:italic;padding-bottom:2px}
-.conf{font:500 10.5px/1 'IBM Plex Mono',monospace;padding:3px 7px;border-radius:4px;margin-left:6px;vertical-align:1px}
-.conf.med{background:var(--edge);color:var(--edge-t)} .conf.low{background:var(--fail);color:var(--fail-t)}
-ol.users{list-style:none;counter-reset:u;display:grid;gap:8px}
-ol.users li{counter-increment:u;padding-left:34px;position:relative}
-ol.users li::before{content:counter(u);position:absolute;left:0;top:1px;width:22px;height:22px;border-radius:50%;background:var(--green);color:#fff;font:600 11.5px/22px 'Inter',sans-serif;text-align:center}
-.hyp{border-left:3px solid var(--green);padding:2px 0 2px 16px;font-size:15.5px}
-table{width:100%;border-collapse:collapse;font-size:13.5px;background:#fff;border:1px solid var(--rule);border-radius:6px;overflow:hidden}
-th{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.1em;text-transform:uppercase;color:var(--sub);text-align:left;padding:10px 12px;border-bottom:1px solid var(--rule);background:#FCFBF8}
-td{padding:10px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
-tr:last-child td{border-bottom:none}
-td.id{font-family:'IBM Plex Mono',monospace;font-size:12.5px;color:var(--sub);white-space:nowrap}
-td.req{font-weight:600;min-width:130px}
-.pill{display:inline-block;font:500 11px/1 'Inter',sans-serif;padding:5px 9px;border-radius:999px;white-space:nowrap}
-.pill.h{background:var(--happy);color:var(--happy-t)} .pill.e{background:var(--edge);color:var(--edge-t)} .pill.f{background:var(--fail);color:var(--fail-t)}
-ul.inputs li{display:flex;gap:10px;align-items:baseline;margin-bottom:8px}
-ul.inputs .box{width:13px;height:13px;border:1.5px solid #B9B5A6;border-radius:3px;flex:none;transform:translateY(2px)}
-.tag{font:500 10.5px/1 'IBM Plex Mono',monospace;padding:3px 7px;border-radius:4px;flex:none}
-.tag.esc{background:var(--fail);color:var(--fail-t)} .tag.need{background:var(--edge);color:var(--edge-t)}
-.owner{color:var(--sub);font-size:13px;white-space:nowrap}
-.appendix{margin-top:44px;border-top:2px solid var(--ink);padding-top:14px}
-.appendix .label{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--ink)}
-.appendix .note{color:var(--sub);font-size:12.5px;margin:4px 0 16px}
-.appendix h3{font:600 12px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--sub);margin:16px 0 6px}
-.riskiest{border:1px solid var(--rule);border-left:3px solid var(--fail-t);background:#fff;border-radius:0 6px 6px 0;padding:13px 16px;margin-top:8px}
-.riskiest .rk{font:600 11px/1 'IBM Plex Mono',monospace;color:var(--fail-t);letter-spacing:.05em;text-transform:uppercase}
-.riskiest p{margin:6px 0 0}
-.pre{margin-top:10px;padding-top:10px;border-top:1px dashed var(--rule);font-size:13.5px;color:var(--sub);font-style:italic}
-@media(max-width:640px){.page{padding:34px 22px 44px}.goal .row{grid-template-columns:1fr}h1{padding-right:0;padding-top:34px}}
-@media print{body{background:#fff;padding:0}.page{border:none;box-shadow:none;padding:20px}.page > *:hover{outline:none}}
-</style></head><body><div class="frame">
+<style>/* Sprntly injects the canonical stylesheet (assets/prd.css) here at save time — leave this block EMPTY; do not write CSS rules. */</style></head><body><div class="frame">
 <div class="page" contenteditable="true" spellcheck="false"><h1>{{Descriptive title — no other metadata}}</h1><div class="byline"><span class="bk">Author</span>{{LOGGED-IN USER — pulled automatically; [NEED: author] if unavailable}}</div><div class="eyebrow">Context</div><p>{{Cold-reader context: what the product is and who it serves; how the affected workflow works TODAY, step by step; define any term of art (dotted-underline it). Test: a reader with no prior knowledge can judge the rest of this document.}}</p><div class="eyebrow">Problem</div><p>{{business pain + user pain, no smuggled solution}}</p><div class="eyebrow">Evidence</div><ul class="ev"><li>{{claim with magnitude in bold}}<div class="evmeta"><span class="evtype">{{type: data analysis / customer complaints / competitive analysis / ...}}</span><span>— {{source}}</span><span>·</span><span>{{date}}</span></div></li><li><span class="evquote">“{{verbatim quote, word for word — never paraphrased into a quote}}”</span><div class="evmeta"><span class="evtype">User quote</span><span>— {{who said it, where}}</span><span>·</span><span>{{date}}</span></div></li><li><span class="tag need">[NEED]</span> {{missing data — appears on the evidence page when the signal lands}}<div class="evmeta"><span>— not yet in Sprntly; appears on the evidence page when the signal lands</span></div></li></ul><div class="eyebrow">Users</div><ol class="users"><li><strong>{{User 1}}</strong> — {{scenario}}</li><li><strong>{{User 2 — optional, two max}}</strong> — {{scenario}}</li></ol><div class="eyebrow">Goal</div><div class="goal">
 <div class="row"><span class="k">Primary metric</span><span><strong>{{Metric}}</strong> <span class="formula">= {{formula}}</span> · Baseline: <strong>{{baseline or [NEED]}}</strong></span></div>
 <div class="row"><span class="k">Projected impact</span><span><span class="impact-blank">blank — fills when a defensible chain exists</span> <em>or</em> {{X to Y + assumption chain}} <span class="conf med">confidence: medium</span></span></div>

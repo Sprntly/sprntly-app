@@ -56,8 +56,8 @@ A single **visual brief (HTML), 1–3 pages**, audience = **product team**, body
 The brief **is** rendered HTML, not a description of one. Every brief uses the **same shared design system** so a team reads each one the same way; only the content and the charts flex. **Render, don't drift.**
 
 **Hard rules**
-- Output is **one self-contained `.html` file**: a `<meta charset="utf-8">`, one inline `<style>` block, then one `<div class="wrap">` holding the brief. **No external CSS/JS, no web fonts, no chart libraries, no build step, no `<img>` for charts.** It must open correctly by double-clicking the file.
-- **Use the canonical design system verbatim.** Copy the `<style>` block from `examples/01-lyra-language-app.html` (the most complete one) as your base and do not change the `:root` tokens, fonts, spacing, or any core component rule. You may *append* a small bespoke class when a brief genuinely needs one — never edit or remove the shared rules. Two briefs placed side by side must look like the same template.
+- Output is **one HTML file**: a `<meta charset="utf-8">`, an EMPTY `<style></style>` element, then one `<div class="wrap">` holding the brief. **No external CSS/JS, no web fonts, no chart libraries, no build step, no `<img>` for charts.**
+- **Leave the `<style>` block EMPTY — do NOT write any CSS rules.** Sprntly injects the canonical design system (`assets/evidence.css`) into that block server-side at save time, so the stored file is self-contained and every brief renders from the *same* stylesheet — two briefs side by side look like the same template by construction. Use the canonical class names (`.wrap`, `.eyebrow`, `.deck`, `.meta`, `.tldr`, `.opp-top`, `.kicker`, `.voc`, `.q`, `figure`, `table`, `.extract`, …) so your markup matches the injected stylesheet; the `examples/` show the full class vocabulary. CSS you emit yourself is discarded — do not spend output on it.
 - **Charts are hand-authored inline `<svg viewBox="…">`**, drawn directly from the provided numbers — never a JS chart, never a screenshot, never a placeholder. Use the chart-text classes (`.ax` axis labels, `.vlabel` value labels, `.blabel` bar/category labels) and the color tokens (`--problem` for the leak/problem, `--opp` for the opportunity/wedge, `--bar-neutral` for the comparison baseline, `--grid` for gridlines). Wrap each chart in `<figure>…<figcaption>` and keep `svg{width:100%}` so it scales.
 
 **Section → required HTML component** (use these classes; this is what makes every brief render identically)
@@ -99,8 +99,8 @@ This skill is meant to be run the same way every time: the ordered method + fixe
 - [ ] Correlation vs causation labeled; the wedge's strength stated plainly.
 - [ ] The value-driven hypothesis is reasoned internally (behavior change → business value, testable) and handed to `prd-author`, but is **not rendered as a card/section in the brief**.
 - [ ] ≤ 3 pages; data-scientist body voice; product-team audience; **no footer/methods/machinery.**
-- [ ] **Renders as one self-contained HTML file** (inline `<style>`, single `.wrap`, no external CSS/JS, no chart libs); opens by double-click.
-- [ ] **Canonical design system used verbatim** (tokens/fonts/core classes from `examples/01` unchanged); each section uses its required component class.
+- [ ] **Emits ONE HTML file with an EMPTY `<style></style>`** (the server injects `assets/evidence.css`), a single `.wrap`, no external CSS/JS, no chart libs.
+- [ ] **Uses the canonical class names** so the markup matches the injected stylesheet; each section uses its required component class. Do NOT write CSS rules yourself.
 - [ ] **Every chart is hand-authored inline `<svg>`** from the provided numbers, in a `figure`/`figcaption`, using the `.ax/.vlabel/.blabel` + color tokens — no JS charts, screenshots, or placeholders.
 
 ## Known gaps / limitations
