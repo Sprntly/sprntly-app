@@ -779,6 +779,39 @@ def test_system_prompt_forbids_mixed_unit_and_filler_charts():
     assert "never invent" in sys
 
 
+def test_brief_schema_declares_prototypeable():
+    """`prototypeable` is a REQUIRED boolean on every insight — it gates the
+    weekly-brief prototype CTA on the frontend (BriefChat), so the model must
+    emit it on every insight rather than leave it to a legacy default."""
+    from app.synthesis import agent as synth
+
+    insight_schema = synth._BRIEF_SCHEMA["properties"]["insights"]["items"]
+    props = insight_schema["properties"]
+    assert "prototypeable" in props
+    assert props["prototypeable"]["type"] == "boolean"
+    # Required — a missing flag would silently fall back to the frontend's
+    # "treat as prototypeable" legacy default, defeating the gate on new briefs.
+    assert "prototypeable" in insight_schema["required"]
+    # The description must scope it to visualizable UI/UX fixes only.
+    desc = props["prototypeable"]["description"].lower()
+    assert "ui/ux" in desc or "ui" in desc
+    assert "visualiz" in desc  # matches "visualized"
+
+
+def test_system_prompt_states_prototypeable_rule():
+    """The prompt must instruct true ONLY for user-facing UI/UX changes and
+    false for backend/data/pricing/ops — the rule that keeps the prototype
+    option off non-visualizable (ops/data/pricing) findings."""
+    from app.synthesis import agent as synth
+
+    sys = synth._SYSTEM.lower()
+    assert "prototypeable=true" in sys
+    # True case is scoped to user-facing UI/UX.
+    assert "user-facing ui/ux" in sys
+    # False case names the non-visualizable categories.
+    assert "backend/data/pricing/process/ops" in sys
+
+
 def test_sanitize_chart_hints_drops_junk_keeps_real():
     """Deterministic backstop: empty/single-point/all-equal bar-line-pie charts
     and non-numeric data are dropped; real multi-point charts and stat tiles
