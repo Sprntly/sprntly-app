@@ -46,11 +46,18 @@ JIRA_ACCESSIBLE_RESOURCES_URL = "https://api.atlassian.com/oauth/token/accessibl
 JIRA_API_BASE = "https://api.atlassian.com/ex/jira"  # + /{cloud_id}/rest/api/3/...
 
 # Fixed scope set for the Sprntly Jira connector.
-#   read:jira-work    — read issues + projects (KG ingest, project picker)
-#   write:jira-work   — create issues (push stories/tickets)
-#   read:jira-user    — resolve the authorizing user (myself) for the label
-#   offline_access    — REQUIRED to receive a refresh_token (tokens last ~1h)
-JIRA_SCOPES = "read:jira-work write:jira-work read:jira-user offline_access"
+#   read:jira-work       — read issues + projects (KG ingest, project picker)
+#   write:jira-work      — create issues (push stories/tickets)
+#   read:jira-user       — resolve the authorizing user (myself) for the label
+#   report:personal-data — call the Personal Data Reporting API (GDPR); required
+#                          on a token to POST /app/report-accounts. Adding it here
+#                          means every connection's token can serve as the app
+#                          bearer token for the reporting cycle.
+#   offline_access       — REQUIRED to receive a refresh_token (tokens last ~1h)
+JIRA_SCOPES = (
+    "read:jira-work write:jira-work read:jira-user "
+    "report:personal-data offline_access"
+)
 
 JWT_ALG = "HS256"
 STATE_TTL_SECONDS = 600
