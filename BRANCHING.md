@@ -33,26 +33,38 @@ The four deploy workflows (`deploy-backend`, `deploy-app`, `deploy-agent`,
 `deploy-mcp`) each trigger on both branches and resolve the target env from
 `github.ref`.
 
-## Shared `.env` (for now — INTENTIONAL, has sharp edges)
+## Environments (DB is isolated; most secrets still shared)
 
-Staging shares prod's Supabase project and secrets: `~/Sprntly-staging/backend/.env`
-is a **symlink** to `~/Sprntly/backend/.env`. Consequences until we split envs:
+Staging runs against its **own Supabase project** — `sprntly-dev`
+(`ghcpqurzykyymtwtngtx`, us-east-2) — separate from prod
+(`vnfnmiauoblodxmjmaqw`). `~/Sprntly-staging/backend/.env` is a **real file**
+(prod's `.env` with the Supabase/DB/DATA_DIR/FRONTEND_URL/ALLOWED_ORIGINS keys
+overridden for dev). The workflows pick the project per branch:
 
-- **Staging writes to the prod database.** Test data lands in prod; destructive
-  tests hit prod rows. Be careful.
-- **DB migrations auto-apply to the shared (prod) schema the moment they hit
-  `main`** — before the prod code that uses them ships. Keep migrations additive
-  / backward-compatible.
-- **OAuth callbacks & auth emails point at prod** (`FRONTEND_URL=https://app.sprntly.ai`,
-  redirect URIs registered for `app.sprntly.ai`). Connector-connect and signup-email
-  flows won't be staging-correct until staging gets its own `.env`.
-- `ALLOWED_ORIGINS` includes `https://staging.sprntly.ai` so the staging frontend
-  can call the staging API. `COOKIE_DOMAIN=.sprntly.ai` covers both.
+- **deploy-app** builds the static bundle with `NEXT_PUBLIC_SUPABASE_URL/ANON_KEY`
+  = prod on `production`, `*_DEV` on `main`.
+- **deploy-backend** migrate job runs `db push` against `SUPABASE_DB_URL` on
+  `production`, `SUPABASE_DB_URL_DEV` on `main` — staging migrations never touch
+  the prod schema.
 
-### Phase 2 (env split) — later
-Give staging its own Supabase project + `.env` (own `SUPABASE_*`, `FRONTEND_URL`,
-OAuth apps/redirect URIs). Replace the symlink with a real file; no workflow
-changes needed.
+What this buys us: no prod-data pollution, no cross-env migration bleed, and
+background schedulers (weekly brief, connector refresh) run against the empty
+dev DB instead of double-firing on prod.
+
+Still **shared** for now (the "other secrets shared" scope): Anthropic/OpenAI
+keys, connector OAuth apps, Resend, `TOKEN_ENCRYPTION_KEY`, `JWT_SECRET`. So:
+
+- **Connector-connect (OAuth) is not staging-correct yet** — the OAuth apps'
+  redirect URIs are registered for prod hosts. `FRONTEND_URL=https://staging.sprntly.ai`
+  in the staging `.env` fixes dev *auth* email/redirect links (dev Supabase auth),
+  but third-party connector OAuth needs its own apps to be fully isolated.
+- `ALLOWED_ORIGINS` in the staging `.env` = `staging.sprntly.ai` + localhost;
+  `COOKIE_DOMAIN=.sprntly.ai` covers it.
+
+### Phase 3 (full isolation) — later
+Give staging its own connector OAuth apps + Resend + `TOKEN_ENCRYPTION_KEY`.
+Also configure the dev Supabase project's Auth (Site URL, redirect allow-list,
+SMTP) so signup/login emails work on staging.
 
 ## Prod safety
 Never deploy `production` or touch prod services/DB/DNS without explicit sign-off.

@@ -58,9 +58,10 @@ jobs:
           # Session-mode pooler connection string from the Supabase dashboard
           # (Settings -> Database -> Connection pooling -> Mode: Session). The
           # GitHub runner is IPv4-only, so the IPv6 direct host can't be used —
-          # the pooler is the IPv4 path. Stored as a repo/org secret. Shared
-          # project, so this is the same DB for staging and prod.
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # the pooler is the IPv4 path. Per-branch: prod migrates the prod DB,
+          # staging (main) migrates the SEPARATE dev project (sprntly-dev) via
+          # SUPABASE_DB_URL_DEV — so staging schema changes never touch prod.
+          SUPABASE_DB_URL: ${{ github.ref == 'refs/heads/production' && secrets.SUPABASE_DB_URL || secrets.SUPABASE_DB_URL_DEV }}
         run: |
           if [ -z "$SUPABASE_DB_URL" ]; then
             echo "::warning title=Migrations skipped::SUPABASE_DB_URL secret is not set — pending migrations were NOT applied. Add the Session-mode pooler connection string from the Supabase dashboard to enable auto-apply. Until then, prod schema can drift."

@@ -28,6 +28,11 @@ env:
   API_URL:  ${{ github.ref == 'refs/heads/production' && 'https://api.sprntly.ai' || 'https://api.staging.sprntly.ai' }}
   DEST_DIR: ${{ github.ref == 'refs/heads/production' && '/var/www/sprntly-app/' || '/var/www/sprntly-app-staging/' }}
   APP_HOST: ${{ github.ref == 'refs/heads/production' && 'app.sprntly.ai' || 'staging.sprntly.ai' }}
+  # Per-branch Supabase project: prod builds against the prod project, staging
+  # (main) against the separate dev project (sprntly-dev). The *_DEV secrets hold
+  # the dev project's URL + publishable anon key.
+  SUPA_URL:  ${{ github.ref == 'refs/heads/production' && secrets.NEXT_PUBLIC_SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL_DEV }}
+  SUPA_ANON: ${{ github.ref == 'refs/heads/production' && secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY_DEV }}
 
 jobs:
   deploy:
@@ -43,8 +48,8 @@ jobs:
 
       - name: Validate Supabase build secrets
         env:
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPA_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.SUPA_ANON }}
         run: |
           url="$(printf '%s' "$NEXT_PUBLIC_SUPABASE_URL" | tr -d '[:space:]')"
           key="$(printf '%s' "$NEXT_PUBLIC_SUPABASE_ANON_KEY" | tr -d '[:space:]')"
@@ -82,8 +87,8 @@ jobs:
         env:
           NEXT_PUBLIC_API_URL: ${{ env.API_URL }}
           NEXT_PUBLIC_DESIGN_AGENT_ENABLED: "1"
-          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
-          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPA_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.SUPA_ANON }}
           NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST: ${{ secrets.NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST }}
           NEXT_PUBLIC_GOOGLE_API_KEY: ${{ vars.NEXT_PUBLIC_GOOGLE_API_KEY }}
         run: |
