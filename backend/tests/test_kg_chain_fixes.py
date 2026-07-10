@@ -247,7 +247,9 @@ def test_prd_runner_completes_via_stream(isolated_settings, monkeypatch):
 
     # Exactly one call, the human PRD; the implementation-spec is on demand.
     assert skills_seen == ["prd-author"]
-    assert completed["md"] == "HUMAN PRD BODY"
+    # Body preserved; canonical stylesheet injected server-side at finalize.
+    assert "HUMAN PRD BODY" in completed["md"]
+    assert ":root{--green:#1A6B47" in completed["md"]
 
 
 # =====================================================================
