@@ -300,6 +300,33 @@ def jira_projects(company: CompanyContext = Depends(require_company)):
     return {"projects": jira_oauth.list_projects(access_token, cloud_id)}
 
 
+class JiraMembersIn(BaseModel):
+    project_key: str = Field(..., min_length=1)
+    query: str | None = None
+
+
+@router.post("/jira/members")
+def jira_members(
+    body: JiraMembersIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """List users assignable to issues in a Jira project (assignee picker).
+
+    Returns `{members: [{accountId, displayName, email, active, avatarUrl}]}`.
+    404 if Jira isn't connected.
+    """
+    from app.stories.push import _jira_creds
+
+    try:
+        access_token, cloud_id = _jira_creds(company.company_id)
+    except JiraNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    members = jira_oauth.list_assignable_users(
+        access_token, cloud_id, body.project_key, query=body.query
+    )
+    return {"members": members}
+
+
 @router.post("/jira/push")
 def push_jira(
     body: PushJiraIn,

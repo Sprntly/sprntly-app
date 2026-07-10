@@ -50,7 +50,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-business-context": "/onboarding/business-context",
   "ob-strategy": "/onboarding/strategy",
   chat: "/",
-  chats: "/chats",
+  chats: "/history",
   brief: "/brief",
   detail: "/evidence",
   ondemand: "/",
@@ -74,7 +74,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/": "chat",
-  "/chats": "chats",
+  "/history": "chats",
   "/brief": "brief",
   "/evidence": "detail",
   "/past": "past",

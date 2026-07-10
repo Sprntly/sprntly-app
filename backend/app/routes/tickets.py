@@ -359,6 +359,9 @@ class TaskIn(BaseModel):
     description: str = ""
     acceptance_criteria: list[str] = Field(default_factory=list)
     priority: str | None = None
+    # Atlassian accountId (from GET /jira/members) to assign the created issue to.
+    # None = leave unassigned. Ignored for ClickUp pushes.
+    assignee_account_id: str | None = None
 
 
 class PushClickUpIn(BaseModel):
@@ -526,6 +529,31 @@ def jira_projects(company: CompanyContext = Depends(require_company)):
     return {"projects": jira_oauth.list_projects(access_token, cloud_id)}
 
 
+class JiraMembersIn(BaseModel):
+    project_key: str = Field(..., min_length=1)
+    query: str | None = None
+
+
+@router.post("/jira/members")
+def jira_members(
+    body: JiraMembersIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """List the users assignable to issues in a Jira project (assignee picker).
+
+    Returns `{members: [{accountId, displayName, email, active, avatarUrl}]}`.
+    `query` narrows by name/email for type-ahead. 404 if Jira isn't connected.
+    """
+    try:
+        access_token, cloud_id = _jira_creds(company.company_id)
+    except JiraNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    members = jira_oauth.list_assignable_users(
+        access_token, cloud_id, body.project_key, query=body.query
+    )
+    return {"members": members}
+
+
 @router.post("/push-jira")
 def push_jira(
     body: PushJiraIn,
@@ -577,6 +605,7 @@ def push_jira(
                 description=body_text or None,
                 issue_type=body.issue_type,
                 priority_name=_jira_priority(task.priority),
+                assignee_account_id=task.assignee_account_id or None,
             )
             created.append({
                 "task_id": task.task_id,

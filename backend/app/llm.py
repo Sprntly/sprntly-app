@@ -271,6 +271,7 @@ def _build_base_kwargs(
     system: str,
     user: str,
     user_cacheable_prefix: str | None,
+    temperature: float | None = None,
 ) -> dict:
     """Build the kwargs dict passed to `messages.create`.
 
@@ -279,14 +280,21 @@ def _build_base_kwargs(
     content as a list of text blocks, with `cache_control: ephemeral` on the
     prefix (and on the system prompt when it's substantial enough to be
     worth caching).
+
+    `temperature` (when not None) is threaded straight through to
+    `messages.create` — omitted entirely when None so the API default (1.0) is
+    used, keeping every existing caller byte-identical.
     """
     if user_cacheable_prefix is None:
-        return {
+        base = {
             "model": model,
             "max_tokens": max_tokens,
             "system": system,
             "messages": [{"role": "user", "content": user}],
         }
+        if temperature is not None:
+            base["temperature"] = temperature
+        return base
     system_param: list[dict] = [
         {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
         if len(system) > 1000
@@ -300,12 +308,15 @@ def _build_base_kwargs(
         },
         {"type": "text", "text": user},
     ]
-    return {
+    base = {
         "model": model,
         "max_tokens": max_tokens,
         "system": system_param,
         "messages": [{"role": "user", "content": content}],
     }
+    if temperature is not None:
+        base["temperature"] = temperature
+    return base
 
 
 def _capture_meta(meta_out: dict | None, msg, model: str) -> None:
@@ -358,6 +369,7 @@ def call_json(
     stream: bool = False,
     timeout: float | None = None,
     background: bool = False,
+    temperature: float | None = None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
 
@@ -382,6 +394,7 @@ def call_json(
         system=system,
         user=user,
         user_cacheable_prefix=user_cacheable_prefix,
+        temperature=temperature,
     )
     if timeout is not None:
         # Per-request read-timeout override (an SDK request option) — used for
@@ -433,22 +446,34 @@ def call_md(
     user: str,
     model: str = DEFAULT_MODEL,
     max_tokens: int = 16000,
+    user_cacheable_prefix: str | None = None,
     meta_out: dict | None = None,
     stream: bool = False,
     timeout: float | None = None,
     background: bool = False,
+    temperature: float | None = None,
 ) -> str:
     """Call Claude expecting plain markdown output.
 
     `stream=True` streams the response (required for long/large outputs; avoids
     the read timeout) and `timeout` overrides the per-request read timeout for
     a single slow call. Both default off, so existing callers are unchanged.
+
+    `user_cacheable_prefix` mirrors `call_json`: when supplied it is sent as a
+    separate `cache_control: ephemeral` text block before `user` (and the system
+    prompt is cached too when substantial), so a large STABLE prefix — e.g. a
+    bound skill's METHOD block or a static HTML template — is reused across calls
+    within the cache TTL instead of being re-processed on every call and retry.
+    When None, the kwargs shape is byte-identical to before (plain string system
+    + content), so every existing caller is unchanged.
     """
-    kwargs: dict = dict(
+    kwargs: dict = _build_base_kwargs(
         model=model,
         max_tokens=max_tokens,
         system=system,
-        messages=[{"role": "user", "content": user}],
+        user=user,
+        user_cacheable_prefix=user_cacheable_prefix,
+        temperature=temperature,
     )
     if timeout is not None:
         kwargs["timeout"] = timeout

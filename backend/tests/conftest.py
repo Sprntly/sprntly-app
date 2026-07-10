@@ -799,24 +799,12 @@ CREATE TABLE drip_email_sends (
 CREATE INDEX drip_email_sends_company_user_idx
     ON drip_email_sends (company_id, user_id);
 
--- Design-agent prototypes (mirrors 20260528000000_design_agent_prototypes.sql
--- + the sharing / preview-image columns, SQLite-ized and trimmed to what the
--- internal MCP prototype route reads: status, completion, sharing, links).
-CREATE TABLE prototypes (
-    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    prd_id             INTEGER NOT NULL,
-    workspace_id       TEXT NOT NULL,
-    status             TEXT NOT NULL DEFAULT 'generating',
-    is_complete        INTEGER NOT NULL DEFAULT 0,
-    target_platform    TEXT NOT NULL DEFAULT 'both',
-    preview_image_url  TEXT,
-    share_mode         TEXT NOT NULL DEFAULT 'private',
-    share_token        TEXT,
-    error              TEXT,
-    created_at         TEXT NOT NULL DEFAULT (datetime('now')),
-    completed_at       TEXT
-);
-CREATE INDEX prototypes_prd_idx ON prototypes (prd_id, workspace_id);
+-- NOTE: the `prototypes` table is intentionally NOT in this shared base schema.
+-- The ~40 Design Agent tests each create their own (richer) `prototypes` on the
+-- singleton in-memory DB in their fixtures; a base-schema copy collides with
+-- those ("table prototypes already exists"). The one consumer that reads it
+-- through a route rather than creating it — tests/test_routes_internal_mcp.py —
+-- creates the trimmed variant locally in its own fixture. See issue #697.
 
 -- Customer-issued MCP API tokens (mirrors 20260707120000_mcp_tokens.sql +
 -- 20260708120000_mcp_token_role.sql, SQLite-ized). uuid / timestamptz are
@@ -836,6 +824,36 @@ CREATE TABLE mcp_tokens (
     revoked_at   TEXT
 );
 CREATE INDEX mcp_tokens_company_idx ON mcp_tokens (company_id);
+
+-- Chat history (mirrors 20260611110000_conversations.sql +
+-- 20260611120000_conversation_turns.sql). prd_id links a conversation to the
+-- PRD it's about (20260709130000_conversations_prd_id.sql) so a reopened PRD
+-- tab can rehydrate its earlier turns via GET /v1/conversations/by-prd/{prd_id}.
+CREATE TABLE conversations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  TEXT NOT NULL,
+    user_id     TEXT,
+    title       TEXT NOT NULL DEFAULT '',
+    preview     TEXT NOT NULL DEFAULT '',
+    agent_type  TEXT NOT NULL DEFAULT 'ask',
+    query       TEXT NOT NULL DEFAULT '',
+    reply       TEXT NOT NULL DEFAULT '',
+    pinned      INTEGER NOT NULL DEFAULT 0,
+    prd_id      INTEGER,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_conversations_company ON conversations (company_id, created_at);
+CREATE INDEX idx_conversations_company_prd ON conversations (company_id, prd_id, updated_at);
+
+CREATE TABLE conversation_turns (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    role            TEXT NOT NULL DEFAULT 'user',
+    content         TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
 """
 
 

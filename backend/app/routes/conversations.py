@@ -28,6 +28,9 @@ class ConversationIn(BaseModel):
     query: str = ""
     reply: str = ""
     pinned: bool = False
+    # The PRD this conversation is about, when opened from a PRD tab. Lets a
+    # reopened PRD rehydrate its earlier chat turns via GET /by-prd/{prd_id}.
+    prd_id: int | None = None
 
 
 class ConversationUpdate(BaseModel):
@@ -62,7 +65,7 @@ def create_conversation(
 ):
     """Create a new conversation."""
     c = require_client()
-    resp = c.table("conversations").insert({
+    row: dict[str, Any] = {
         "company_id": company.company_id,
         "title": body.title,
         "preview": body.preview,
@@ -70,8 +73,42 @@ def create_conversation(
         "query": body.query,
         "reply": body.reply,
         "pinned": body.pinned,
-    }).execute()
+    }
+    if body.prd_id is not None:
+        row["prd_id"] = body.prd_id
+    resp = c.table("conversations").insert(row).execute()
     return resp.data[0] if resp.data else {}
+
+
+@router.get("/by-prd/{prd_id}")
+def get_conversation_by_prd(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """Return the most recent conversation for a PRD (plus its turns), so a
+    reopened PRD tab can rehydrate its prior chat. Empty (not 404) when the PRD
+    has no saved conversation yet."""
+    c = require_client()
+    conv = (
+        c.table("conversations")
+        .select("*")
+        .eq("company_id", company.company_id)
+        .eq("prd_id", prd_id)
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not conv.data:
+        return {"conversation": None, "turns": []}
+    conversation = conv.data[0]
+    turns = (
+        c.table("conversation_turns")
+        .select("*")
+        .eq("conversation_id", conversation["id"])
+        .order("created_at")
+        .execute()
+    )
+    return {"conversation": conversation, "turns": turns.data or []}
 
 
 @router.patch("/{conversation_id}")

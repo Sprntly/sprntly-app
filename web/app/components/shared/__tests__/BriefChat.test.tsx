@@ -483,6 +483,48 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
     // A sibling visualizable finding still offers it.
     expect(within(cardFor(SUPPORTING.title)).queryByRole("button", { name: /prototype/i })).not.toBeNull()
   })
+
+  it("still lets you OPEN an existing prototype on a non-prototypeable finding (view, not generate)", async () => {
+    // A prototype was already built for insight 0 (e.g. from the PRD chat, which
+    // doesn't consult `prototypeable`), but the synthesis LLM marked the finding
+    // non-prototypeable. The card must NOT hide an existing prototype behind the
+    // visualizability gate — it stays reachable as "View prototype". (The gate is
+    // reopened by `prototypeReady`, i.e. a real prototype exists — NOT merely by a
+    // PRD existing — so we still never offer *generate* on an ops/data finding.)
+    mapEntries.set(0, {
+      insight_index: 0,
+      prd_id: 42,
+      prd_title: "Measurement Stack",
+      prototype: { ready: true, preview_image_url: null },
+    } as never)
+    const brief: BriefV2State = { ...BRIEF, hero: { ...HERO, prototypeable: false } }
+    await act(async () => {
+      renderBriefWith(brief)
+    })
+    const btn = within(cardFor(HERO.title)).getByRole("button", { name: "View prototype" })
+    expect(btn).toBeTruthy()
+    // Clicking opens THAT insight's prototype (prd 42), not any generate flow.
+    fireEvent.click(btn)
+    expect(pushSpy).toHaveBeenCalledWith(prototypePath(42))
+  })
+
+  it("keeps hiding the prototype option on a non-prototypeable finding with only a PRD (no prototype)", async () => {
+    // Guard the tightness of the gate: a PRD exists for insight 0 but NO prototype
+    // (prototype: null). Because we reopen on `prototypeReady` (not `hasPrd`), a
+    // non-prototypeable finding here must still offer nothing — we don't want to
+    // surface "Generate prototype" for a backend/data/ops finding.
+    mapEntries.set(0, {
+      insight_index: 0,
+      prd_id: 42,
+      prd_title: "Measurement Stack",
+      prototype: null,
+    } as never)
+    const brief: BriefV2State = { ...BRIEF, hero: { ...HERO, prototypeable: false } }
+    await act(async () => {
+      renderBriefWith(brief)
+    })
+    expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
+  })
 })
 
 // ── Composer "generate a prototype" → carries the open PRD's id in the URL ─────

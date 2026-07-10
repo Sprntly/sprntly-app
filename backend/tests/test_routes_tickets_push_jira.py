@@ -226,3 +226,73 @@ def test_jira_projects_picker(jira_env, monkeypatch):
         r = ctx.client.post("/v1/tickets/jira/projects")
     assert r.status_code == 200, r.text
     assert r.json()["projects"] == projects
+
+
+def test_push_passes_assignee_account_id(jira_env, monkeypatch):
+    ctx = _connected_client(monkeypatch)
+    with (
+        patch("app.stories.push.jira_oauth.first_cloud_id", return_value="cloud-1"),
+        patch("app.routes.tickets.jira_oauth.create_issue", return_value=_ok_issue()) as mock_create,
+    ):
+        r = ctx.client.post("/v1/tickets/push-jira", json={
+            "project_key": "P", "tasks": [
+                {"task_id": "K1", "title": "T", "assignee_account_id": "acc-123"},
+            ],
+        })
+    assert r.status_code == 200, r.text
+    assert mock_create.call_args.kwargs["assignee_account_id"] == "acc-123"
+
+
+def test_push_omits_assignee_when_unset(jira_env, monkeypatch):
+    ctx = _connected_client(monkeypatch)
+    with (
+        patch("app.stories.push.jira_oauth.first_cloud_id", return_value="cloud-1"),
+        patch("app.routes.tickets.jira_oauth.create_issue", return_value=_ok_issue()) as mock_create,
+    ):
+        r = ctx.client.post("/v1/tickets/push-jira", json={
+            "project_key": "P", "tasks": [{"task_id": "K1", "title": "T"}],
+        })
+    assert r.status_code == 200, r.text
+    assert mock_create.call_args.kwargs["assignee_account_id"] is None
+
+
+def test_jira_members_picker(jira_env, monkeypatch):
+    ctx = _connected_client(monkeypatch)
+    members = [
+        {"accountId": "acc-1", "displayName": "Sam Rivera",
+         "email": "sam@acme.co", "active": True, "avatarUrl": None},
+    ]
+    with (
+        patch("app.stories.push.jira_oauth.first_cloud_id", return_value="cloud-1"),
+        patch(
+            "app.routes.tickets.jira_oauth.list_assignable_users",
+            return_value=members,
+        ) as mock_members,
+    ):
+        r = ctx.client.post("/v1/tickets/jira/members", json={"project_key": "PROJ"})
+    assert r.status_code == 200, r.text
+    assert r.json()["members"] == members
+    # project_key threaded through; no query when unset.
+    assert mock_members.call_args.args[2] == "PROJ"
+    assert mock_members.call_args.kwargs["query"] is None
+
+
+def test_jira_members_passes_query(jira_env, monkeypatch):
+    ctx = _connected_client(monkeypatch)
+    with (
+        patch("app.stories.push.jira_oauth.first_cloud_id", return_value="cloud-1"),
+        patch(
+            "app.routes.tickets.jira_oauth.list_assignable_users", return_value=[],
+        ) as mock_members,
+    ):
+        r = ctx.client.post(
+            "/v1/tickets/jira/members", json={"project_key": "P", "query": "sam"},
+        )
+    assert r.status_code == 200, r.text
+    assert mock_members.call_args.kwargs["query"] == "sam"
+
+
+def test_jira_members_404_when_not_connected(jira_env, monkeypatch):
+    ctx = company_client(monkeypatch)  # no seeded Jira connection
+    r = ctx.client.post("/v1/tickets/jira/members", json={"project_key": "P"})
+    assert r.status_code == 404

@@ -356,6 +356,42 @@ export function ChatScreen() {
     })
   }, [activeTabId])
 
+  // Rehydrate a PRD tab's chat thread from its saved conversation. A PRD's chat
+  // is keyed by prd_id in Supabase (conversationsApi.byPrd), so reopening a PRD —
+  // even on a new device or after the localStorage tab is gone — restores the
+  // user's earlier questions + Spiky's answers instead of an empty thread. Only
+  // ever fills a still-empty, unconverted tab (guarded again inside the setter so
+  // a race with live typing can't clobber it); non-fatal on any failure.
+  const hydratePrdThread = useCallback(async (tabId: string, prdId: number) => {
+    // A just-created tab may not be in tabsRef yet (state not flushed), so DON'T
+    // bail when it's missing — only when it's present AND already has content. The
+    // setTabs guard below re-checks, so a genuinely absent tab is a harmless no-op.
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    if (tab && (tab.thread.length > 0 || tab.dbConvId != null)) return
+    try {
+      const { conversationsApi } = await import("../../../lib/api")
+      const { conversation, turns } = await conversationsApi.byPrd(prdId)
+      if (!conversation || turns.length === 0) return
+      const restored: ThreadTurn[] = []
+      for (let i = 0; i < turns.length; i++) {
+        const t = turns[i]
+        if (t.role === "user") {
+          const next = turns[i + 1]
+          const reply = next?.role === "assistant"
+            ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse
+            : undefined
+          restored.push({ id: `prdhist-${conversation.id}-${i}`, query: t.content, reply })
+          if (reply) i++
+        }
+      }
+      if (restored.length === 0) return
+      setTabs((prev) => prev.map((t) =>
+        t.id === tabId && t.thread.length === 0 && t.dbConvId == null
+          ? { ...t, thread: restored, dbConvId: conversation.id }
+          : t))
+    } catch { /* non-fatal: fall back to an empty thread */ }
+  }, [])
+
   // ── Open a PRD as a NEW CHAT TAB with the content panel over it ─────────────
   // A "view/generate PRD" from another surface (brief cards, brief composer,
   // backlog) routes here via NavigationContext.openPrdTab → pendingPrdTab. We
@@ -388,6 +424,14 @@ export function ChatScreen() {
     setDraft("")
     setPrdPanelPending(true)
 
+    // Reopening an EXISTING PRD (ready | load)? Rehydrate its saved chat thread by
+    // prd_id so the user's prior questions come back. New PRDs (generate*) have no
+    // prior conversation, so we skip — their prd_id is stamped on first send.
+    const knownPrdId = source.kind === "ready" ? source.prd.prd_id
+      : source.kind === "load" ? source.prdId
+      : null
+    if (knownPrdId != null) void hydratePrdThread(tabId, knownPrdId)
+
     // Reuse a PRD already cached on this tab (unless the caller handed us a fresh
     // one) — don't regenerate/re-fetch an already-open PRD.
     if (existing?.prd && source.kind !== "ready") {
@@ -413,6 +457,12 @@ export function ChatScreen() {
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+          // The prd_id was UNKNOWN upfront (generate | generateBacklog — including
+          // "View PRD" find-or-create, which resolves an EXISTING PRD). Now that we
+          // have it, rehydrate the tab's chat by prd_id. New PRDs return no
+          // conversation (no-op); an existing one restores the user's prior turns.
+          // The upfront ready/load path already hydrated, so skip those here.
+          if (knownPrdId == null) void hydratePrdThread(tabId, result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })
@@ -424,7 +474,7 @@ export function ChatScreen() {
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
-  }, [setContent, showToast])
+  }, [setContent, showToast, hydratePrdThread])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
@@ -680,6 +730,7 @@ export function ChatScreen() {
     persistenceRef.current = createChatPersistence({
       getApi: () => import("../../../lib/api").then((m) => m.conversationsApi),
       getTabConvId: (tabId) => tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null,
+      getTabPrdId: (tabId) => tabsRef.current.find((t) => t.id === tabId)?.prdId ?? null,
       setTabConvId: (tabId, convId) => setTabConvId(tabId, convId),
       onConversationCreated: (turnId, convId) => {
         // Tag the in-memory conversation with the DB id so the rail can load turns.

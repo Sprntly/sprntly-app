@@ -269,6 +269,21 @@ async def _run_scheduled_cycle() -> None:
     await _run_synthesis_for_all_companies()
 
 
+def _run_jira_personal_data_report() -> None:
+    """GDPR obligation for the distributed Jira app: report the Atlassian
+    accountIds we store to Atlassian and erase any it flags as closed. Fully
+    isolated — a failure here never affects other jobs. No-op when Jira isn't
+    configured or no connection stores personal data."""
+    try:
+        from app.connectors import jira_oauth, jira_personal_data
+
+        if not jira_oauth.jira_configured():
+            return
+        jira_personal_data.run_report_cycle()
+    except Exception:  # noqa: BLE001 — compliance job must never crash the scheduler
+        logger.exception("jira personal-data report cycle failed")
+
+
 def start_scheduler() -> None:
     """Initialize and start the APScheduler. Call from FastAPI lifespan."""
     global _scheduler
@@ -370,6 +385,18 @@ def start_scheduler() -> None:
             name=f"Connector token health monitor (every {ch_mins}m)",
             replace_existing=True,
         )
+
+    # Jira Personal Data Reporting (GDPR): a distributed Atlassian app that
+    # stores personal data must report the accountIds it holds to Atlassian and
+    # erase accounts Atlassian flags as closed. Atlassian's cycle period is 7
+    # days; we run daily for headroom. Cheap no-op when Jira isn't configured.
+    _scheduler.add_job(
+        _run_jira_personal_data_report,
+        trigger=IntervalTrigger(hours=24),
+        id="jira_personal_data_report",
+        name="Jira personal-data reporting (GDPR, every 24h)",
+        replace_existing=True,
+    )
 
     _scheduler.start()
     logger.info(
