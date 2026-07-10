@@ -933,6 +933,10 @@ def test_token_signals_exclude_scaffold_defaults():
 # ── Staging integration ───────────────────────────────────────────────────────
 
 _STAGE_PROTOTYPE_DDL = """
+-- Drop the base-schema `prototypes` table (conftest creates a trimmed variant)
+-- before recreating the richer shape these tests need; otherwise the shared
+-- singleton fake DB errors "table prototypes already exists".
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,

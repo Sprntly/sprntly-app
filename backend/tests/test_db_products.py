@@ -36,6 +36,11 @@ from tests.conftest import _TEST_COMPANY_ID, _TEST_USER_ID
 # SQLite-compatible translation of the prototypes migration (identical to the
 # other Design Agent route suites — the fake exercises SQL semantics, not PG DDL).
 _PROTOTYPE_DDL = """
+-- The shared fake-DB base schema (conftest) now creates a `prototypes` table
+-- with a different (trimmed) column set, so drop it first and recreate with the
+-- richer shape these tests need. Without the DROP this errors "table prototypes
+-- already exists" on the shared singleton DB.
+DROP TABLE IF EXISTS prototypes;
 CREATE TABLE prototypes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
     prd_id                 INTEGER,
