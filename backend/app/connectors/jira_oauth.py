@@ -274,6 +274,65 @@ def list_projects(access_token: str, cloud_id: str) -> list[dict[str, Any]]:
     return [p for p in out if p.get("key")]
 
 
+def list_assignable_users(
+    access_token: str,
+    cloud_id: str,
+    project_key: str,
+    *,
+    query: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return the users who can be assigned issues in `project_key`, as
+    `{accountId, displayName, email, active, avatarUrl}` dicts. Powers the
+    assignee picker on the push UI.
+
+    Uses `/user/assignable/search?project=KEY` — the project-scoped list Jira
+    itself uses for its assignee dropdown (only users with the *Assignable User*
+    permission, unlike the site-wide `/users/search`). `query` narrows by
+    name/email server-side for type-ahead. Read via the `read:jira-user` scope.
+    Best-effort pagination capped for pilot scale; returns [] on a bad token so
+    the picker degrades to "unassigned" rather than erroring the whole push.
+    """
+    out: list[dict[str, Any]] = []
+    start = 0
+    for _ in range(10):  # hard page cap — pilot scale
+        params: dict[str, Any] = {
+            "project": project_key,
+            "startAt": start,
+            "maxResults": 50,
+        }
+        if query:
+            params["query"] = query
+        resp = requests.get(
+            f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/user/assignable/search",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            params=params,
+            timeout=_TIMEOUT,
+        )
+        if not resp.ok:
+            logger.warning(
+                "Jira assignable/search failed for %s: %s %s",
+                project_key, resp.status_code, resp.text[:200],
+            )
+            break
+        page = resp.json() or []
+        for u in page:
+            acct = u.get("accountId")
+            if not acct:
+                continue
+            out.append({
+                "accountId": acct,
+                "displayName": u.get("displayName"),
+                "email": u.get("emailAddress"),
+                "active": u.get("active", True),
+                "avatarUrl": (u.get("avatarUrls") or {}).get("24x24"),
+            })
+        # This endpoint returns a bare list (no isLast); a short page = the end.
+        if len(page) < 50:
+            break
+        start += len(page)
+    return out
+
+
 def _adf_from_text(text: str) -> dict[str, Any]:
     """Wrap plain text in a minimal Atlassian Document Format (ADF) doc.
 
@@ -305,6 +364,7 @@ def create_issue(
     description: str | None = None,
     issue_type: str = "Task",
     priority_name: str | None = None,
+    assignee_account_id: str | None = None,
     extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create one Jira issue in `project_key`. Returns `{id, key, url}`.
@@ -313,6 +373,8 @@ def create_issue(
     ADF (Jira v3 requires it). `priority_name` maps to Jira's named priorities
     (e.g. "Highest"/"High"/"Medium"/"Low"); omitted when None because not every
     project defines a priority field and Jira 400s on unknown fields.
+    `assignee_account_id` sets `fields.assignee` (an Atlassian accountId from
+    list_assignable_users); omitted when None so the issue is created unassigned.
 
     Raises JiraAuthExpiredError on 401/403 so the caller can prompt a reconnect;
     any other non-OK raises HTTPException(502) so per-issue failures stay isolated.
@@ -326,6 +388,8 @@ def create_issue(
         fields["description"] = _adf_from_text(description)
     if priority_name is not None:
         fields["priority"] = {"name": priority_name}
+    if assignee_account_id is not None:
+        fields["assignee"] = {"accountId": assignee_account_id}
     if extra_fields:
         fields.update(extra_fields)
 
@@ -368,13 +432,16 @@ def update_issue(
     summary: str | None = None,
     description: str | None = None,
     priority_name: str | None = None,
+    assignee_account_id: str | None = None,
 ) -> dict[str, Any]:
     """Update an existing Jira issue's editable fields. Returns `{key, url}`.
 
     Backs idempotent re-push: a ticket already mapped to an issue is UPDATEd in
-    place rather than duplicated. Only summary/description/priority are touched
-    (project + issuetype are immutable post-create). Same auth/error contract as
-    create_issue: 401/403 → JiraAuthExpiredError, other non-OK → HTTPException.
+    place rather than duplicated. Only summary/description/priority/assignee are
+    touched (project + issuetype are immutable post-create). `assignee_account_id`
+    reassigns the issue (pass an empty string to explicitly unassign). Same
+    auth/error contract as create_issue: 401/403 → JiraAuthExpiredError, other
+    non-OK → HTTPException.
     """
     fields: dict[str, Any] = {}
     if summary is not None:
@@ -383,6 +450,9 @@ def update_issue(
         fields["description"] = _adf_from_text(description)
     if priority_name is not None:
         fields["priority"] = {"name": priority_name}
+    if assignee_account_id is not None:
+        # accountId=None is Jira's "unassign" sentinel; "" from our API maps to it.
+        fields["assignee"] = {"accountId": assignee_account_id or None}
     if not fields:
         return {"key": issue_key, "url": None}
 
