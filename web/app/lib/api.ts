@@ -1943,6 +1943,16 @@ export type JiraProject = {
   name: string
 }
 
+/** A user assignable to issues in a Jira project (assignee picker). `accountId`
+ *  is the Atlassian id passed back on push to set the issue's assignee. */
+export type JiraMember = {
+  accountId: string
+  displayName: string | null
+  email: string | null
+  active: boolean
+  avatarUrl: string | null
+}
+
 export type JiraTicketPushResult = {
   ok: boolean
   created: { task_id: string; jira_issue_key: string; url: string | null; title: string }[]
@@ -1958,6 +1968,9 @@ export type TicketPushTask = {
   description?: string
   acceptance_criteria?: string[]
   priority?: string
+  /** Atlassian accountId (from listJiraMembers) to assign the issue to on a Jira
+   *  push. Omit/null = unassigned. Ignored for ClickUp. */
+  assignee_account_id?: string | null
 }
 
 /** The team member picked as a ticket's assignee (subset of TeamMemberRecord). */
@@ -2045,8 +2058,16 @@ export const ticketPushApi = {
   /** Fetch Jira projects the company can push tickets into. 404 when not connected. */
   listJiraProjects: () =>
     api.post<{ projects: JiraProject[] }>("/v1/tickets/jira/projects", {}),
+  /** List users assignable to issues in a Jira project (assignee picker). `query`
+   *  narrows by name/email for type-ahead. 404 when Jira isn't connected. */
+  listJiraMembers: (projectKey: string, query?: string) =>
+    api.post<{ members: JiraMember[] }>("/v1/tickets/jira/members", {
+      project_key: projectKey,
+      ...(query ? { query } : {}),
+    }),
   /** Push the selected tasks into a Jira project as issues. Same override-merge
-   *  behavior as pushToClickUp; returns the created issue keys + URLs. */
+   *  behavior as pushToClickUp; each task's assignee_account_id (if set) assigns
+   *  the issue. Returns the created issue keys + URLs. */
   pushToJira: (projectKey: string, tasks: TicketPushTask[], issueType = "Task") =>
     api.post<JiraTicketPushResult>("/v1/tickets/push-jira", {
       project_key: projectKey,
@@ -2152,6 +2173,13 @@ export const storiesApi = {
    *  isn't connected. */
   listJiraProjects: () =>
     api.post<{ projects: JiraProject[] }>("/v1/stories/jira/projects", {}),
+  /** List users assignable to issues in a Jira project (assignee picker). 404 if
+   *  Jira isn't connected. */
+  listJiraMembers: (projectKey: string, query?: string) =>
+    api.post<{ members: JiraMember[] }>("/v1/stories/jira/members", {
+      project_key: projectKey,
+      ...(query ? { query } : {}),
+    }),
   /** Create the reviewed stories as issues in a Jira project (explicit write). */
   pushToJira: (projectKey: string, stories: GeneratedStory[], issueType = "Task") =>
     api.post<StoryPushResult>("/v1/stories/jira/push", {
