@@ -15,11 +15,6 @@ from app.skill_router import is_call_digest, is_voc_report_request
 NOW = datetime(2026, 6, 24, 15, 30, tzinfo=timezone.utc)
 
 
-class _Result:
-    def __init__(self, output):
-        self.output = output
-
-
 # ── intent detection ─────────────────────────────────────────────────────────
 
 def test_is_call_digest_positive():
@@ -158,40 +153,43 @@ def test_build_corpus_respects_char_budget(monkeypatch):
 
 # ── answer branches ──────────────────────────────────────────────────────────
 
-def test_answer_not_connected_skips_llm(monkeypatch):
+def test_answer_not_connected_skips_report(monkeypatch):
+    import app.voc_report as vr
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
     called = []
-    monkeypatch.setattr(cd, "llm_call", lambda **k: called.append(k))
+    monkeypatch.setattr(vr, "build", lambda **k: called.append(k) or "<html></html>")
     p = cd.answer(enterprise_id="co", question="summarize calls last week")
     assert "Fireflies" in p["answer"]
     assert p["_skill_source"] == "call-digest"
     assert called == []  # no spend when there's nothing to summarize
 
 
-def test_answer_ok_runs_voc_skill_over_corpus(monkeypatch):
+def test_answer_ok_renders_html_report_over_corpus(monkeypatch):
+    import app.voc_report as vr
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
     captured = {}
     monkeypatch.setattr(
-        cd, "llm_call",
-        lambda **k: captured.update(k) or _Result(
-            {"answer": "VoC report", "key_points": [], "citations": [],
-             "confidence": 0.8, "unanswered": ""}),
+        vr, "build",
+        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>report</body></html>",
     )
     p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
-    assert p["answer"] == "VoC report"
+    # The answer is the rendered HTML report (front-end shows it in an iframe).
+    assert p["answer"].startswith("<!DOCTYPE html>")
+    assert p["key_points"] == [] and p["citations"] == []
     assert p["_skill"] == "voice-of-customer-report"
     assert p["_skill_source"] == "call-digest"
-    # The skill ran over the assembled corpus, scoped to the VoC skill.
-    assert captured["skill"] == "voice-of-customer-report"
-    assert "Call 1" in captured["input"] and 'Cust: "quote 1"' in captured["input"]
+    # The report ran over the assembled corpus, scoped to the VoC skill.
+    assert captured["model"] == cd.ANSWER_MODEL
+    assert "Call 1" in captured["corpus_text"] and 'Cust: "quote 1"' in captured["corpus_text"]
 
 
-def test_answer_llm_failure_degrades_gracefully(monkeypatch):
+def test_answer_report_failure_degrades_gracefully(monkeypatch):
+    import app.voc_report as vr
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
     def boom(**k):
         raise RuntimeError("model timeout")
-    monkeypatch.setattr(cd, "llm_call", boom)
+    monkeypatch.setattr(vr, "build", boom)
     p = cd.answer(enterprise_id="co", question="summarize customer calls")
     assert "error" in p["answer"].lower() and p["_skill_source"] == "call-digest"

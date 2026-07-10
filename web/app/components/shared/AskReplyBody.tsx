@@ -4,7 +4,9 @@ import { isValidElement, type ReactNode } from "react"
 import ReactMarkdown, { type Components } from "react-markdown"
 import remarkGfm from "remark-gfm"
 import type { AskResponse } from "../../lib/api"
+import { looksLikeHtmlBrief } from "../../lib/htmlBrief"
 import { useAnswerSimulatedStream } from "../../lib/useAnswerSimulatedStream"
+import { HtmlReportView } from "./HtmlReportView"
 import { InlineChart, parseChartBody } from "./InlineChart"
 
 /** Pull a plain-text body out of react-markdown's `code` children prop. */
@@ -61,6 +63,19 @@ export function AskReplyBody({
   omitCitations?: boolean
 }) {
   const { visible, done, isStreaming } = useAnswerSimulatedStream(reply.answer, simulateTyping)
+
+  // A skill answer that IS a self-contained HTML document (e.g. the
+  // voice-of-customer-report) renders in a sandboxed iframe — ReactMarkdown would
+  // escape the tags. The report is self-contained, so we skip the simulated-typing
+  // stream and the key_points/citations chrome below it.
+  if (looksLikeHtmlBrief(reply.answer)) {
+    const report = <HtmlReportView html={reply.answer} title="Voice of Customer report" />
+    return animateIn ? (
+      <div className="ask-reply-body ask-reply-body--enter">{report}</div>
+    ) : (
+      report
+    )
+  }
 
   const inner = (
     <>

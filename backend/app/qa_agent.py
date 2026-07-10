@@ -253,6 +253,37 @@ def _answer_single_shot(decision: RouteDecision, enterprise_id, question, histor
     return _tag(payload, decision)
 
 
+def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history) -> Optional[dict]:
+    """VoC as the pinned HTML report when there's no live call source but the KG
+    has signal. Grounds voice-of-customer-report on the SAME KG bundle the direct
+    Ask path uses and renders it through the fixed template (frontend shows it in
+    a sandboxed iframe). Returns None when the KG yields nothing, so the caller
+    falls through to the generic single-shot answer (which explains what to
+    connect). The live-calls path (call_digest) takes precedence and is handled
+    upstream in `answer`."""
+    from app import voc_report
+    from app.graph.retrieval import render_context_section
+
+    bundle = _retrieve_kg_bundle(enterprise_id, question)
+    if not bundle:
+        return None
+    corpus_text = render_context_section(bundle)
+    try:
+        html = voc_report.build(
+            enterprise_id=enterprise_id,
+            question=(_render_history(history)) + question,
+            corpus_text=corpus_text,
+            source_line="=== KNOWLEDGE GRAPH — customer signal ===",
+            model=HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL,
+        )
+    except Exception:  # noqa: BLE001 — fall back to the generic skill answer
+        logger.exception("voc report from KG failed for %s", enterprise_id)
+        return None
+    payload = {"answer": html, "key_points": [], "citations": [],
+               "confidence": decision.confidence, "unanswered": ""}
+    return _tag(payload, decision)
+
+
 def _answer_with_script(decision: RouteDecision, enterprise_id, question, history) -> dict:
     """Skill answer via a tool-use loop so the skill's deterministic script runs
     ON OUR INFRA (app.skills.scripts) instead of the model estimating the math."""
@@ -385,6 +416,14 @@ def answer(
     # follow-up has already confirmed, so it runs.
     if decision.skill_id in COST_GATED and decision.source != "pinned":
         return _confirm_payload(decision.skill_id, question)
+
+    # VoC routed with no live call source (call_digest is handled upstream): render
+    # the pinned HTML report from KG signal when there is any; else fall through to
+    # the generic answer (which explains what to connect).
+    if decision.skill_id == "voice-of-customer-report":
+        voc = _answer_voc_report(decision, enterprise_id, question, history)
+        if voc is not None:
+            return _maybe_verify(voc, enterprise_id)
 
     if decision.skill_id in SCRIPT_TOOLS:
         payload = _answer_with_script(decision, enterprise_id, question, history)
