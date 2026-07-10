@@ -457,6 +457,12 @@ export function ChatScreen() {
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+          // The prd_id was UNKNOWN upfront (generate | generateBacklog — including
+          // "View PRD" find-or-create, which resolves an EXISTING PRD). Now that we
+          // have it, rehydrate the tab's chat by prd_id. New PRDs return no
+          // conversation (no-op); an existing one restores the user's prior turns.
+          // The upfront ready/load path already hydrated, so skip those here.
+          if (knownPrdId == null) void hydratePrdThread(tabId, result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })

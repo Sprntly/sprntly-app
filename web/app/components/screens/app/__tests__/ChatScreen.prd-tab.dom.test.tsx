@@ -241,6 +241,31 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await waitFor(() => expect(screen.getByText("It uses OAuth.")).toBeTruthy())
   })
 
+  it("rehydrates after a `generate` (find-or-create) resolves to an existing PRD", async () => {
+    // "View PRD" degrades to a generate/find-or-create when the insight→PRD map
+    // isn't loaded yet; the prd_id is only known AFTER generation resolves
+    // (runPrdGeneration → prd_id 77). That resolved PRD already has a saved chat.
+    vi.mocked(conversationsApi.byPrd).mockImplementation(async (id: number) =>
+      id === 77
+        ? { conversation: { id: 43, prd_id: 77 } as never,
+            turns: [
+              { id: 1, conversation_id: 43, role: "user", content: "Earlier question?", created_at: "t0" },
+              { id: 2, conversation_id: 43, role: "assistant", content: "Earlier answer.", created_at: "t1" },
+            ] as never }
+        : { conversation: null, turns: [] })
+
+    renderWith({
+      title: "PRD · Retention",
+      source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
+    })
+    await clickOpenPrd()
+
+    // Hydration waits for the prd_id from generation, then looks it up.
+    await waitFor(() => expect(conversationsApi.byPrd).toHaveBeenCalledWith(77))
+    expect(await screen.findByText("Earlier question?")).toBeTruthy()
+    await waitFor(() => expect(screen.getByText("Earlier answer.")).toBeTruthy())
+  })
+
   it("leaves the thread empty when the PRD has no saved conversation", async () => {
     // byPrd default (beforeEach) returns no conversation.
     renderWith(READY)
