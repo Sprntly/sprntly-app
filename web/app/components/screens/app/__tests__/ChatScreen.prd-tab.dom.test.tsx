@@ -105,8 +105,11 @@ vi.mock("../../../../context/CompanyContext", () => ({
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => ({ kind: "anonymous" }) }))
 
+// Mutable holder so a test can seed the insight→PRD map (drives chatInsightState,
+// which resolves the active PRD tab's real prd_id independent of the open path).
+const mockPrototypeMap: { entries: Map<number, unknown> } = { entries: new Map() }
 vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
-  useBriefPrototypeMap: () => ({ entriesByInsight: new Map(), refetch: vi.fn() }),
+  useBriefPrototypeMap: () => ({ entriesByInsight: mockPrototypeMap.entries, refetch: vi.fn() }),
 }))
 
 import { NavigationProvider, useNavigation, type PrdTabRequest } from "../../../../context/NavigationContext"
@@ -152,6 +155,7 @@ beforeEach(() => {
   runPrdGeneration.mockClear()
   runAskGeneration.mockClear()
   vi.mocked(conversationsApi.byPrd).mockReset().mockResolvedValue({ conversation: null, turns: [] })
+  mockPrototypeMap.entries = new Map()
 })
 afterEach(() => {
   cleanup()
@@ -264,6 +268,38 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await waitFor(() => expect(conversationsApi.byPrd).toHaveBeenCalledWith(77))
     expect(await screen.findByText("Earlier question?")).toBeTruthy()
     await waitFor(() => expect(screen.getByText("Earlier answer.")).toBeTruthy())
+  })
+
+  it("rehydrates from the insight→PRD map even when the open path never set prdId", async () => {
+    // The real live bug: "View PRD" degrades to a generate open (map race), so the
+    // open path's prd_id (runPrdGeneration → 77) is unreliable / the tab's prdId
+    // can stay null. But the insight→PRD map resolves this insight (index 0) to the
+    // REAL prd_id 55, which chatInsightState surfaces. The effect must hydrate off
+    // that — independent of the open path — and byPrd(77) returns nothing.
+    mockPrototypeMap.entries = new Map([[0, { prd_id: 55, prototype: null, prd_title: "North Star" }]])
+    // Open path yields NO prd_id (generation "fails"), mirroring the live case where
+    // the tab's prdId stays null — so hydration must come from the insight map (55).
+    runPrdGeneration.mockResolvedValueOnce({ ok: false, message: "no prd" })
+    vi.mocked(conversationsApi.byPrd).mockImplementation(async (id: number) =>
+      id === 55
+        ? { conversation: { id: 44, prd_id: 55 } as never,
+            turns: [
+              { id: 1, conversation_id: 44, role: "user", content: "Mapped question?", created_at: "t0" },
+              { id: 2, conversation_id: 44, role: "assistant", content: "Mapped answer.", created_at: "t1" },
+            ] as never }
+        : { conversation: null, turns: [] })
+
+    renderWith({
+      title: "PRD · Retention",
+      source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
+    })
+    await clickOpenPrd()
+
+    // The map resolves insight 0 → prd_id 55, so the effect hydrates off that even
+    // though the open path produced no prd_id.
+    expect(await screen.findByText("Mapped question?")).toBeTruthy()
+    await waitFor(() => expect(screen.getByText("Mapped answer.")).toBeTruthy())
+    expect(conversationsApi.byPrd).toHaveBeenCalledWith(55)
   })
 
   it("leaves the thread empty when the PRD has no saved conversation", async () => {
