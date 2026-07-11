@@ -101,6 +101,9 @@ class StoryIn(BaseModel):
     decide_by: str | None = None
     timebox: str | None = None
     exit_condition: str | None = None
+    # Push-time only: Atlassian accountId to assign this ticket to on a Jira push
+    # (per-ticket assignee picker). None = unassigned. Ignored for ClickUp.
+    assignee_account_id: str | None = None
 
 
 class PushIn(BaseModel):

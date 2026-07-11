@@ -21,12 +21,14 @@ import logging
 from app.corpus import load_corpus
 from app.db import complete_evidence, fail_evidence, get_brief_by_id
 from app.graph.gateway import llm_call
+from app.html_style import inject_canonical_css
 from app.llm import strip_code_fence
 from app.prompts import (
     EVIDENCE_KG_PROMPT_VERSION,
     EVIDENCE_KG_SYSTEM,
     EVIDENCE_KG_USER_TEMPLATE,
 )
+from app.skills.loader import get_skill
 from app.synthesis_brief import resolve_company
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,9 @@ def _run_sync(evidence_id: int, brief_id: int, insight_index: int) -> None:
     raw = result.output if isinstance(result.output, str) else str(result.output)
     # Strip any ```html code fence the model added so the stored payload is raw HTML.
     html = strip_code_fence(raw)
+    # The model emits an EMPTY `<style>`; inject the canonical stylesheet so the
+    # stored brief is self-contained and matches the KG path (see app.html_style).
+    html = inject_canonical_css(html, get_skill("evidence-brief").assets["evidence.css"])
     title = insight.get("title") or f"Insight #{insight_index + 1}"
     complete_evidence(evidence_id=evidence_id, title=title, md=html)
 

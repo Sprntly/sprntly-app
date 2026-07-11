@@ -17521,4 +17521,9 @@
 .tkv2-pitem--sel { background: var(--green-s); color: var(--green-d); font-weight: 600; }
 .tkv2-ppath { font-size: 10px; color: var(--soft); font-weight: 400; margin-left: auto; padding-left: 10px; overflow: hidden; text-overflow: ellipsis; }
 .tkv2-pfoot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--line); font-size: 11px; color: var(--soft); }
+.tkv2-select {
+  font-family: var(--font-body); font-size: 12.5px; color: var(--ink2); background: var(--paper);
+  border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; cursor: pointer; max-width: 100%;
+}
+.tkv2-select:disabled { opacity: .55; cursor: default; }
 

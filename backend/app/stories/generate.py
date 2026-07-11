@@ -275,11 +275,19 @@ class Story:
     # Spike fields
     timebox: Optional[str] = None
     exit_condition: Optional[str] = None
+<<<<<<< HEAD
     # The id stamped into the stored dict at generation time. When a persisted
     # story is rehydrated (from_dict) this pins stable_id() to the ORIGINAL id,
     # so applying edit overrides (changed title/body) never re-hashes it into a
     # different identity — tracker mappings and edit keys stay attached.
     pinned_id: Optional[str] = None
+=======
+    # Push-time only: the Atlassian accountId to assign the issue to when pushing
+    # to Jira (from the per-ticket assignee picker). NOT a generated property —
+    # deliberately excluded from to_dict()/stable_id() so it never lands in the
+    # ticket cache or shifts the content hash; the client sends it fresh on push.
+    assignee_account_id: Optional[str] = None
+>>>>>>> 7008f2475a5784496ec2fae43380453ddc61a1e3
 
     def stable_id(self) -> str:
         """A content-derived id (hash of title + body). Stable across list
@@ -404,6 +412,7 @@ class Story:
             decide_by=(d.get("decide_by") or None),
             timebox=(d.get("timebox") or None),
             exit_condition=(d.get("exit_condition") or None),
+            assignee_account_id=(d.get("assignee_account_id") or None),
         )
 
 

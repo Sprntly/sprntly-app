@@ -56,6 +56,7 @@ from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.retrieval import insight_evidence_trail, render_evidence_trail_section
+from app.html_style import inject_canonical_css
 from app.llm import strip_code_fence
 from app.prompts import PRD_VARIANT, VOICE_GUARD
 from app.skills.loader import get_skill
@@ -105,22 +106,24 @@ label unknowns per the METHOD (`[NEED: …]` / `[ASSUMPTION]` / `[ESCALATE]`) \
 rather than guessing.
 
 OUTPUT FORMAT — follow the METHOD's visual specification EXACTLY. Emit ONE \
-self-contained HTML document: a `<meta charset>`, one inline `<style>` block \
-(copy the canonical design system verbatim from the provided TEMPLATE, keeping \
-the `:root` tokens unchanged), then the editable `contenteditable` document page. \
-No external CSS/JS, no markdown, no `:::` blocks, no \
-Implementation Spec, no commentary outside the document. Output the raw HTML \
-document ONLY — do NOT wrap it in a Markdown code fence; the first characters of \
-your response must be the HTML itself (e.g. `<!DOCTYPE html>`).""" + VOICE_GUARD
+HTML document: a `<meta charset>`, the EMPTY `<style></style>` element exactly as \
+the provided TEMPLATE shows it, then the editable `contenteditable` document \
+page. Do NOT write any CSS rules — leave `<style>` empty; Sprntly injects the \
+canonical stylesheet server-side, so CSS you emit is only discarded. No external \
+CSS/JS, no markdown, no `:::` blocks, no Implementation Spec, no commentary \
+outside the document. Output the raw HTML document ONLY — do NOT wrap it in a \
+Markdown code fence; the first characters of your response must be the HTML \
+itself (e.g. `<!DOCTYPE html>`).""" + VOICE_GUARD
 
 # The Part A directive. Carries the byline author, the insight + evidence, and
 # the HTML TEMPLATE, and steers the model to fill the template's {{placeholders}}
 # into a finished HTML page. The frontend renders this HTML in a sandboxed iframe
 # (variant v3).
 _PART_A_DIRECTIVE = """\
-PART DIRECTIVE: Produce ONLY Part A — the human PRD — as ONE self-contained HTML \
-page built from the provided TEMPLATE (copy its `<style>` and skeleton verbatim, \
-keep the `:root` tokens). The METHOD governs your REASONING and quality bar \
+PART DIRECTIVE: Produce ONLY Part A — the human PRD — as ONE HTML \
+page built from the provided TEMPLATE (copy its skeleton; keep the `<style>` \
+block EMPTY — the server injects the canonical stylesheet). The METHOD governs \
+your REASONING and quality bar \
 (cold-reader Context, signal-linked Evidence with type labels + verbatim quotes, \
 one primary metric split from guardrails with a projected-impact slot, a \
 Hypothesis before Requirements, exactly one riskiest assumption with a \
@@ -136,11 +139,12 @@ with NO link — do not add an href or an evidence-page link in it; items not ye
 in Sprntly still carry the "appears when the signal lands" note. \
 Do NOT include an Implementation Spec. Start your output at `<!DOCTYPE html>`."""
 
-# The static HTML skeleton + design system. It is byte-identical across every PRD
-# generation, so it is sent as the cacheable PREFIX (merged after the skill METHOD
-# by the gateway) rather than in the per-PRD user tail — turning ~10KB of stable
-# markup into a cache read on every warm fan-out and retry. `_USER_TEMPLATE` (the
-# dynamic tail) references it as "the TEMPLATE provided above".
+# The static HTML skeleton (empty `<style>` marker, no CSS — the canonical
+# stylesheet is injected server-side at finalize). It is byte-identical across
+# every PRD generation, so it is sent as the cacheable PREFIX (merged after the
+# skill METHOD by the gateway) rather than in the per-PRD user tail — a cache read
+# on every warm fan-out and retry. `_USER_TEMPLATE` (the dynamic tail) references
+# it as "the TEMPLATE provided above".
 _TEMPLATE_PREFIX = """\
 TEMPLATE (the HTML skeleton + design system — produce a filled copy as your output):
 {template}"""
@@ -149,8 +153,8 @@ _USER_TEMPLATE = """\
 {part_directive}
 
 Write Part A (the human PRD HTML page) for the following brief insight, filling \
-a copy of the TEMPLATE provided above (its `<style>` and skeleton, `:root` \
-tokens unchanged).
+a copy of the TEMPLATE provided above — copy its skeleton and keep the `<style>` \
+block EMPTY (the server injects the stylesheet).
 
 BRIEF INSIGHT (the problem to turn into a PRD):
 {insight_json}
@@ -307,9 +311,10 @@ def _build_context(
         evidence, trail = _resolve_grounding(dataset, brief, insight_index)
     # Part A is generated as a self-contained HTML page in the prd-author visual
     # system. The template is the skill's own HTML skeleton (with {{placeholders}}
-    # + the canonical `<style>`) — injected verbatim so the model copies the design
-    # system rather than reproducing ~90 lines of CSS from prose. (The
-    # Implementation Spec does NOT use this template.)
+    # + an EMPTY `<style>` marker) — injected verbatim so the model fills the exact
+    # structure; the canonical stylesheet is spliced in server-side at finalize
+    # (see _finalize_part_a / app.html_style). (The Implementation Spec does NOT
+    # use this template.)
     template = _load_part_a_template()
     title = insight.get("title") or f"Insight #{insight_index + 1}"
     # FORMAT/STYLE EXEMPLARS — the company's uploaded gold-standard PRD examples
@@ -339,9 +344,10 @@ def _build_context(
 
 
 def _load_part_a_template() -> str:
-    """The prd-author skill's Part A HTML skeleton (with {{placeholders}} + the
-    canonical inline `<style>`). Injected verbatim into the prompt so the model
-    fills a copy of the exact visual system."""
+    """The prd-author skill's Part A HTML skeleton (with {{placeholders}} + an
+    EMPTY `<style>` marker). Injected verbatim into the prompt so the model fills
+    a copy of the exact structure; the canonical stylesheet (`assets/prd.css`) is
+    injected server-side at finalize, not emitted by the model."""
     return get_skill(_SKILL).templates["prd-template.html"]
 
 
@@ -420,8 +426,14 @@ def _finalize_part_a(
 
     Part A is a raw HTML document — any stray ```html code fence is stripped so
     the stored `payload_md` is a clean document the frontend renders directly.
+    The model emits an EMPTY `<style>` block; the canonical stylesheet
+    (`assets/prd.css`) is injected here so the stored document is self-contained
+    (see app.html_style) without the model paying to re-emit ~90 lines of CSS.
     """
     human_part = strip_code_fence(str(result_a.output).strip())
+    human_part = inject_canonical_css(
+        human_part, get_skill(_SKILL).assets["prd.css"]
+    )
     title = ctx["title"]
     complete_prd(prd_id=prd_id, title=title, md=human_part)
 

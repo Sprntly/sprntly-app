@@ -8,6 +8,7 @@ import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
+<<<<<<< HEAD
 import { useRouter } from "next/navigation"
 import {
   ApiError, storiesApi,
@@ -22,6 +23,53 @@ import {
   IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf,
   IconRefresh, IconChevronDown, IconPlugConnected,
 } from "@tabler/icons-react"
+=======
+import { ApiError, storiesApi, type ClickUpList, type ClickUpTicketState, type GeneratedStory, type JiraProject } from "../../lib/api"
+import { PrdPanelContent } from "./PrdPanelContent"
+import { TicketDetail, priorityPill } from "./TicketDetail"
+import { DestinationPicker } from "./DestinationPicker"
+import { JiraPushModal, type JiraPushChoice } from "./JiraPushModal"
+
+// Per-PRD push destination ("remember for this PRD"). Persisted client-side so a
+// second push for the same PRD goes straight to the remembered list without
+// re-opening the picker. Keyed by PRD id; scoped to this browser for now
+// (server-side per-workspace persistence is a follow-up).
+function rememberedDest(prdId: number | null): string | null {
+  if (prdId == null || typeof window === "undefined") return null
+  try {
+    return window.localStorage.getItem(`sprntly_ticket_dest_${prdId}`)
+  } catch {
+    return null
+  }
+}
+function saveRememberedDest(prdId: number | null, listId: string): void {
+  if (prdId == null || typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(`sprntly_ticket_dest_${prdId}`, listId)
+  } catch {
+    /* storage unavailable — the choice just won't persist */
+  }
+}
+// Jira's remembered destination is a project key, kept under a separate key so it
+// never collides with the ClickUp list id above (a PRD can have both).
+function rememberedJiraDest(prdId: number | null): string | null {
+  if (prdId == null || typeof window === "undefined") return null
+  try {
+    return window.localStorage.getItem(`sprntly_ticket_jira_dest_${prdId}`)
+  } catch {
+    return null
+  }
+}
+function saveRememberedJiraDest(prdId: number | null, projectKey: string): void {
+  if (prdId == null || typeof window === "undefined") return
+  try {
+    window.localStorage.setItem(`sprntly_ticket_jira_dest_${prdId}`, projectKey)
+  } catch {
+    /* storage unavailable — the choice just won't persist */
+  }
+}
+import { IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf } from "@tabler/icons-react"
+>>>>>>> 7008f2475a5784496ec2fae43380453ddc61a1e3
 import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
 import { printCombined } from "../../lib/combinedExport"
 import type { PrdState, PrdContent } from "../../types/content"
@@ -460,10 +508,15 @@ export function TicketsTab() {
   const prd = content.prd
   const prdId = prd?.prd_id ?? null
   const prdTitle = prd?.title ?? "PRD"
+<<<<<<< HEAD
   // Which task-management tools this workspace has connected — drives the sync
   // button's label (one tool), its dropdown (several), or the connectors
   // redirect (none).
   const connectedTrackers = TRACKERS.filter((t) => content.connectedConnectorIds.includes(t.id))
+=======
+  const isClickUpConnected = content.connectedConnectorIds.includes("clickup")
+  const isJiraConnected = content.connectedConnectorIds.includes("jira")
+>>>>>>> 7008f2475a5784496ec2fae43380453ddc61a1e3
 
   // ── Generation (PRD → tickets via the user-stories skill) ──────────────
   type GenState =
@@ -489,8 +542,27 @@ export function TicketsTab() {
     | { kind: "picking"; provider: TrackerProvider; lists: ClickUpList[] }
   const [pickState, setPickState] = useState<PickState>({ kind: "idle" })
   const [selectedListId, setSelectedListId] = useState<string>("")
+<<<<<<< HEAD
   // null = not loaded yet for this PRD.
   const [syncState, setSyncState] = useState<TicketSyncState | null>(null)
+=======
+  // "Remember for this PRD" toggle in the destination picker.
+  const [rememberDest, setRememberDest] = useState<boolean>(true)
+
+  // ── Jira push (parallel to ClickUp; separate state so ClickUp is untouched) ──
+  type JiraPushState =
+    | { kind: "idle" }
+    | { kind: "fetching-projects" }
+    | { kind: "picking"; projects: JiraProject[] }
+    | { kind: "pushing" }
+    | { kind: "error"; message: string }
+  const [jiraPush, setJiraPush] = useState<JiraPushState>({ kind: "idle" })
+  // Tracker chooser popover (only shown when BOTH trackers are connected).
+  const [trackerMenu, setTrackerMenu] = useState(false)
+  // Current ClickUp state pulled back per ticket id (bidirectional sync).
+  const [syncedStatuses, setSyncedStatuses] = useState<Record<string, ClickUpTicketState>>({})
+  const [syncing, setSyncing] = useState(false)
+>>>>>>> 7008f2475a5784496ec2fae43380453ddc61a1e3
 
   // Manual regenerate: tickets are cached per PRD and only auto-regenerate when
   // the PRD changes, so give the user an explicit way to force a fresh set. A
@@ -676,6 +748,7 @@ export function TicketsTab() {
     }
   }
 
+<<<<<<< HEAD
   /** Destination chosen → register it server-side and run the first sync.
    *  From here on the backend auto-syncs this PRD on an interval. */
   const confirmDestination = async () => {
@@ -688,6 +761,77 @@ export function TicketsTab() {
       ...(s ?? {}), configured: true, provider,
       destination_id: list.id, destination_name: list.name, sync_status: "syncing",
     }))
+=======
+  // ── Jira push ────────────────────────────────────────────────────────────
+  // A stable per-ticket key for the assignee map (content id, else index).
+  const storyKey = (s: GeneratedStory, i: number) => s.id ?? `idx-${i}`
+
+  // Open the Jira push modal (fetch the project list first). Unlike ClickUp we
+  // always show the modal — the per-ticket assignee step needs it — rather than
+  // fast-pathing a remembered destination.
+  const handleJiraPush = async () => {
+    if (stories.length === 0) return
+    if (jiraPush.kind === "fetching-projects" || jiraPush.kind === "pushing") return
+    if (!isJiraConnected) {
+      showToast("Jira not connected", "Connect Jira in Settings to push these tickets.")
+      return
+    }
+    setJiraPush({ kind: "fetching-projects" })
+    try {
+      const r = await storiesApi.listJiraProjects()
+      if (r.projects.length === 0) {
+        setJiraPush({ kind: "error", message: "No Jira projects found. Create a project in Jira first." })
+        return
+      }
+      setJiraPush({ kind: "picking", projects: r.projects })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error"
+      setJiraPush({ kind: "error", message: msg })
+    }
+  }
+
+  // Perform the push from the modal's choice: attach each ticket's chosen
+  // assignee accountId onto the story, then push. Idempotent create-or-update
+  // runs on the backend (jira_issue_map), so a re-push updates in place.
+  const doJiraPush = async (choice: JiraPushChoice) => {
+    if (choice.remember) saveRememberedJiraDest(prdId, choice.projectKey)
+    setJiraPush({ kind: "pushing" })
+    try {
+      const withAssignee = stories.map((s, i) => ({
+        ...s,
+        assignee_account_id: choice.assigneeByKey[storyKey(s, i)] || null,
+      }))
+      const result = await storiesApi.pushToJira(choice.projectKey, withAssignee, choice.issueType)
+      setJiraPush({ kind: "idle" })
+      if (result.errors.length > 0) {
+        showToast("Jira push partial", `${result.created.length} created, ${result.errors.length} failed.`)
+      } else {
+        showToast("Pushed to Jira", `${result.created.length} issue${result.created.length !== 1 ? "s" : ""} created in ${choice.projectKey}.`)
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error"
+      setJiraPush({ kind: "error", message: msg })
+      showToast("Jira push failed", msg.slice(0, 120))
+    }
+  }
+
+  // Bidirectional read: pull the current ClickUp state for tickets already
+  // synced to this PRD's remembered list, and surface it on the cards.
+  const handleSyncFromClickUp = async () => {
+    if (syncing) return
+    if (!isClickUpConnected) {
+      showToast("ClickUp not connected", "Connect ClickUp in Settings first.")
+      return
+    }
+    const listId = rememberedDest(prdId)
+    if (!listId) {
+      showToast("Nothing to sync yet", "Push these tickets to ClickUp first, then sync brings their status back.")
+      return
+    }
+    const ticketIds = stories.map((s) => s.id).filter((x): x is string => Boolean(x))
+    if (ticketIds.length === 0) return
+    setSyncing(true)
+>>>>>>> 7008f2475a5784496ec2fae43380453ddc61a1e3
     try {
       await storiesApi.triggerSync(prdId, {
         provider, destination_id: list.id, destination_name: list.name,
@@ -745,6 +889,7 @@ export function TicketsTab() {
     )
   }
 
+<<<<<<< HEAD
   // ── The unified tracker button's face ─────────────────────────────────────
   // One button carries the whole lifecycle: connect (nothing connected) →
   // push (connected, never pushed) → syncing/synced (configured; click = sync
@@ -783,6 +928,19 @@ export function TicketsTab() {
       disabled: pickState.kind === "fetching" || syncState == null,
     }
   })()
+=======
+  const pushLabel =
+    pushState.kind === "fetching-lists" ? "Loading…"
+      : pushState.kind === "pushing" ? "Pushing…"
+      : pushState.kind === "error" ? "Retry"
+      : pushState.kind === "done" ? "Push again"
+      : "Push to ClickUp"
+  const jiraPushLabel =
+    jiraPush.kind === "fetching-projects" ? "Loading…"
+      : jiraPush.kind === "pushing" ? "Pushing…"
+      : jiraPush.kind === "error" ? "Retry"
+      : "Push to Jira"
+>>>>>>> 7008f2475a5784496ec2fae43380453ddc61a1e3
 
   // A ticket is open → show the editable detail in place of the list.
   const selectedStory = selectedIndex != null ? stories[selectedIndex] : null
@@ -828,6 +986,7 @@ export function TicketsTab() {
               <IconRefresh size={15} /> Regenerate
             </button>
             <div style={{ position: "relative", display: "inline-flex" }}>
+<<<<<<< HEAD
               <button
                 type="button"
                 className={`tkv2-btn ${syncState?.configured && connectedTrackers.length > 0 ? "tkv2-btn--sync" : "tkv2-btn--push"}`}
@@ -855,6 +1014,40 @@ export function TicketsTab() {
                 </>
               )}
               {pickState.kind === "picking" && (
+=======
+              {/* Tracker-aware push: both connected → a chooser; one → straight
+                  to that tracker; neither → ClickUp button that routes the user
+                  to Settings (existing not-connected handling). */}
+              {isClickUpConnected && isJiraConnected ? (
+                <button
+                  type="button"
+                  className="tkv2-btn tkv2-btn--push"
+                  onClick={() => setTrackerMenu((v) => !v)}
+                  disabled={pushState.kind === "pushing" || jiraPush.kind === "pushing"}
+                >
+                  ✓ Push to tracker ▾
+                </button>
+              ) : isJiraConnected ? (
+                <button
+                  type="button"
+                  className="tkv2-btn tkv2-btn--push"
+                  onClick={handleJiraPush}
+                  disabled={jiraPush.kind === "fetching-projects" || jiraPush.kind === "pushing"}
+                >
+                  ✓ {jiraPushLabel}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="tkv2-btn tkv2-btn--push"
+                  onClick={handleClickUpPush}
+                  disabled={pushState.kind === "fetching-lists" || pushState.kind === "pushing"}
+                >
+                  ✓ {pushLabel}
+                </button>
+              )}
+              {pushState.kind === "picking" && (
+>>>>>>> 7008f2475a5784496ec2fae43380453ddc61a1e3
                 <DestinationPicker
                   tool={trackerLabel(pickState.provider)}
                   lists={pickState.lists}
@@ -864,6 +1057,15 @@ export function TicketsTab() {
                   onPush={() => void confirmDestination()}
                   onCancel={() => setPickState({ kind: "idle" })}
                 />
+              )}
+              {trackerMenu && isClickUpConnected && isJiraConnected && (
+                <>
+                  <div onClick={() => setTrackerMenu(false)} style={{ position: "fixed", inset: 0, zIndex: 30 }} aria-hidden />
+                  <div className="tkv2-picker" role="menu" aria-label="Choose a tracker" style={{ position: "absolute", top: "100%", right: 0, zIndex: 31, minWidth: 180 }}>
+                    <button type="button" className="tkv2-pitem" role="menuitem" onClick={() => { setTrackerMenu(false); void handleClickUpPush() }}>Push to ClickUp</button>
+                    <button type="button" className="tkv2-pitem" role="menuitem" onClick={() => { setTrackerMenu(false); void handleJiraPush() }}>Push to Jira</button>
+                  </div>
+                </>
               )}
             </div>
             {/* A configured PRD with several tools connected can still switch. */}
@@ -890,6 +1092,25 @@ export function TicketsTab() {
           Last sync had problems: {syncState.last_error} — click the sync button to retry.
         </div>
       )}
+      {jiraPush.kind === "pushing" && (
+        <div className="tkt-push-status">Pushing to Jira…</div>
+      )}
+      {jiraPush.kind === "error" && (
+        <div className="tkt-push-status tkt-push-status--err">{jiraPush.message}</div>
+      )}
+
+      {/* Jira push modal: project + issue type + per-ticket assignee list. */}
+      {jiraPush.kind === "picking" && (
+        <JiraPushModal
+          items={stories.map((s, i) => ({ key: storyKey(s, i), title: s.title }))}
+          projects={jiraPush.projects}
+          initialProjectKey={rememberedJiraDest(prdId)}
+          loadMembers={async (projectKey) => (await storiesApi.listJiraMembers(projectKey)).members}
+          onPush={(choice) => void doJiraPush(choice)}
+          onCancel={() => setJiraPush({ kind: "idle" })}
+          busy={false}
+        />
+      )}
 
       <div className="tkv2-intro">
         <span className="tkv2-spark">✳</span>
@@ -911,9 +1132,13 @@ export function TicketsTab() {
       </div>
 
       <div className="tkv2-foot">
+<<<<<<< HEAD
         Tickets are generated from the PRD.
         {connectedTrackers.length === 0 && " Connect ClickUp or Jira to push them — the button above takes you there."}
         {syncState?.configured && ` Synced with ${currentTool} every few minutes — edits and status changes flow both ways, newest edit wins.`}
+=======
+        Tickets are generated from the PRD.{!isClickUpConnected && !isJiraConnected && " Connect ClickUp or Jira in Settings to push them."}
+>>>>>>> 7008f2475a5784496ec2fae43380453ddc61a1e3
       </div>
     </div>
   )

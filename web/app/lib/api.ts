@@ -2132,6 +2132,10 @@ export type GeneratedStory = {
   // ── Spike fields ──
   timebox?: string | null
   exit_condition?: string | null
+  // ── Push-time only (Jira): Atlassian accountId to assign this ticket to.
+  // Set by the per-ticket assignee picker just before a Jira push; not a
+  // generated property (backend omits it from the cache). null = unassigned. ──
+  assignee_account_id?: string | null
 }
 
 export type StoryPushResult = {

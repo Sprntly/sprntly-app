@@ -308,7 +308,10 @@ def test_build_feeds_signals_to_llm_and_logs_refs(facade, isolated_settings,
     # System prompt enforces the never-invent rule.
     assert "Never invent" in captured["system"]
 
-    assert md.startswith("# Evidence")
+    # The model's body is preserved; the canonical stylesheet is injected around
+    # it (Phase 2 — model emits empty <style>, server splices assets/evidence.css).
+    assert "# Evidence" in md
+    assert "--problem:#dd4b32" in md
     # kg_refs = signal ids + hypothesis id + theme id.
     assert set(meta["kg_refs"]) == {s.id for s in signals} | {hyp.id, theme.id}
 
@@ -427,7 +430,9 @@ def test_run_sync_kg_completes_with_doc(isolated_settings, monkeypatch):
 
     row = db_mod.get_evidence(evidence_id)
     assert row["status"] == "ready"
-    assert row["payload_md"] == "# KG evidence body"
+    # Body preserved; canonical stylesheet injected around it (Phase 2).
+    assert "# KG evidence body" in row["payload_md"]
+    assert "--problem:#dd4b32" in row["payload_md"]
     assert row["title"] == "SSO gap blocks $1.4M in deals"
 
 
@@ -466,8 +471,10 @@ def test_run_sync_kg_falls_back_to_legacy_when_no_backing(
 
     row = db_mod.get_evidence(evidence_id)
     assert row["status"] == "ready"
-    # legacy path produced the HTML brief from the corpus
-    assert row["payload_md"] == '<div class="wrap"><h1>Legacy corpus brief</h1></div>'
+    # legacy path produced the HTML brief from the corpus, with the canonical
+    # stylesheet injected server-side (Phase 2 — same contract as the KG path).
+    assert '<div class="wrap"><h1>Legacy corpus brief</h1></div>' in row["payload_md"]
+    assert "--problem:#dd4b32" in row["payload_md"]
     assert kg_calls == []                        # KG llm_call never fired
     assert len(legacy_calls) == 1                # legacy corpus call did
     assert legacy_calls[0]["skill"] == "evidence-brief"  # same skill binding
@@ -569,3 +576,7 @@ def test_payload_md_shape_matches_ui_contract(isolated_settings, monkeypatch):
     assert '<div class="wrap"' in row["payload_md"]
     assert "<svg" in row["payload_md"]
     assert ":::" not in row["payload_md"]
+    # Phase 2: the model emits an EMPTY <style>; the finalizer injects the
+    # canonical evidence stylesheet so the stored doc is self-contained.
+    assert "--problem:#dd4b32" in row["payload_md"]
+    assert row["payload_md"].count("<style>") == 1

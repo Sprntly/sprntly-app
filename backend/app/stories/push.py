@@ -274,12 +274,14 @@ def push_stories_to_jira(
         try:
             ticket_id = story.stable_id()
             existing = get_jira_issue_key(company_id, project_key, ticket_id)
+            assignee = getattr(story, "assignee_account_id", None) or None
             if existing:
                 issue = jira_oauth.update_issue(
                     access_token, cloud_id, existing,
                     summary=story.title,
                     description=story.to_description(),
                     priority_name=story.jira_priority(),
+                    assignee_account_id=assignee,
                 )
                 issue_key = issue.get("key") or existing
             else:
@@ -290,6 +292,7 @@ def push_stories_to_jira(
                     description=story.to_description(),
                     issue_type=issue_type,
                     priority_name=story.jira_priority(),
+                    assignee_account_id=assignee,
                 )
                 issue_key = issue.get("key")
                 if issue_key:

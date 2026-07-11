@@ -1,20 +1,32 @@
-name: Deploy ds-agent to api.sprntly.ai/agent
+name: Deploy ds-agent (staging + prod)
 
-# Deploys the DS chat agent to its own systemd unit on EC2 (port 8002,
-# nginx serves it at api.sprntly.ai/agent/). Lives in sprntly-app only —
-# sprntly-demo does not deploy the agent.
+# Dual-target ds-agent deploy. Its own systemd unit on EC2, served by nginx
+# under the api host at /agent/.
+#   push to main        -> STAGING  (api.staging.sprntly.ai/agent, ~/Sprntly-staging,
+#                                     sprntly-agent-staging.service on :8012)
+#   push to production  -> PROD     (api.sprntly.ai/agent,         ~/Sprntly,
+#                                     sprntly-agent.service on :8002)
+# Lives in sprntly-app only — sprntly-demo does not deploy the agent.
 
 on:
   push:
-    branches: [main]
+    branches: [main, production]
     paths:
       - 'ds-agent/**'
       - '.github/workflows/deploy-agent.yml'
   workflow_dispatch:
 
 concurrency:
-  group: deploy-agent
+  group: deploy-agent-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  DEPLOY_BRANCH: ${{ github.ref == 'refs/heads/production' && 'production' || 'main' }}
+  CLONE_DIR:     ${{ github.ref == 'refs/heads/production' && 'Sprntly' || 'Sprntly-staging' }}
+  SERVICE:       ${{ github.ref == 'refs/heads/production' && 'sprntly-agent' || 'sprntly-agent-staging' }}
+  UNIT_FILE:     ${{ github.ref == 'refs/heads/production' && 'sprntly-agent.service' || 'sprntly-agent-staging.service' }}
+  PORT:          ${{ github.ref == 'refs/heads/production' && '8002' || '8012' }}
+  AGENT_DATA:    ${{ github.ref == 'refs/heads/production' && '/var/lib/sprntly-agent' || '/var/lib/sprntly-agent-staging' }}
 
 jobs:
   deploy:
@@ -27,14 +39,17 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script_stop: true
+          envs: DEPLOY_BRANCH,CLONE_DIR,SERVICE,UNIT_FILE,PORT,AGENT_DATA
           script: |
             set -e
-            cd ~/Sprntly
-            git fetch --quiet origin main
-            git reset --hard origin/main
-            # Persistent upload dir survives `git reset --hard`.
-            sudo mkdir -p /var/lib/sprntly-agent/uploads
-            sudo chown -R $(whoami):$(whoami) /var/lib/sprntly-agent
+            echo "Deploying ds-agent branch=$DEPLOY_BRANCH -> ~/$CLONE_DIR ($SERVICE on :$PORT)"
+            cd ~/$CLONE_DIR
+            git fetch --quiet origin $DEPLOY_BRANCH
+            git reset --hard origin/$DEPLOY_BRANCH
+            # Persistent upload dir survives `git reset --hard`. Per-env dir so
+            # staging uploads never collide with prod.
+            sudo mkdir -p $AGENT_DATA/uploads
+            sudo chown -R $(whoami):$(whoami) $AGENT_DATA
             cd ds-agent
             if [ ! -d .venv ]; then
               python3.11 -m venv .venv
@@ -43,21 +58,20 @@ jobs:
             # Keep nginx config in sync — the /agent/ location lives in the
             # same nginx file as the main backend, so we re-apply it here too
             # in case it changed alongside an agent-only PR.
-            sudo cp ~/Sprntly/backend/deploy/nginx.conf /etc/nginx/conf.d/sprintly.conf
+            sudo cp ~/$CLONE_DIR/backend/deploy/nginx.conf /etc/nginx/conf.d/sprintly.conf
             sudo nginx -t
             sudo systemctl reload nginx
             # systemd unit may have changed
-            sudo cp deploy/sprntly-agent.service /etc/systemd/system/sprntly-agent.service
+            sudo cp deploy/$UNIT_FILE /etc/systemd/system/$UNIT_FILE
             sudo systemctl daemon-reload
-            sudo systemctl restart sprntly-agent.service
-            # Wait up to 15s for the agent to bind. Avoids races when the
-            # backend deploy restarts concurrently.
+            sudo systemctl restart $SERVICE.service
+            # Wait up to 15s for the agent to bind on the env's port.
             for i in $(seq 1 15); do
-              if curl -fsS http://127.0.0.1:8002/health >/dev/null 2>&1; then
-                echo "sprntly-agent.service healthy after ${i}s"
+              if curl -fsS http://127.0.0.1:$PORT/health >/dev/null 2>&1; then
+                echo "$SERVICE healthy after ${i}s"
                 break
               fi
               sleep 1
             done
-            curl -fsS http://127.0.0.1:8002/health
-            echo "Agent deploy OK: $(git -C ~/Sprntly rev-parse --short HEAD)"
+            curl -fsS http://127.0.0.1:$PORT/health
+            echo "Agent deploy OK ($SERVICE): $(git -C ~/$CLONE_DIR rev-parse --short HEAD)"
