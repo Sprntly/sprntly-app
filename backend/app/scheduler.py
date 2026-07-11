@@ -269,6 +269,43 @@ async def _run_scheduled_cycle() -> None:
     await _run_synthesis_for_all_companies()
 
 
+async def _run_ticket_sync_cycle() -> None:
+    """Two-way ticket sync tick: for every PRD whose tickets were pushed to a
+    tracker (prd_ticket_sync rows with auto_sync=true), push local edits (web +
+    MCP, merged from ticket_edits) and pull tracker status back.
+
+    Per-row isolated: one PRD failing (disconnected tracker, deleted list,
+    rate limit) records last_error on its row and the loop moves on. Rows with
+    a recent in-flight sync (an ad-hoc button run) are skipped, not doubled.
+    The blocking tracker HTTP work runs off the event loop, one row at a time —
+    deliberately serial so a big tenant can't burst-hammer tracker APIs; the
+    interval (TICKET_SYNC_INTERVAL_MINUTES) is the rate-limit relief valve."""
+    from app.db.ticket_sync import list_auto_sync_configs
+    from app.stories.sync import run_prd_sync, sync_in_flight
+
+    try:
+        configs = list_auto_sync_configs() or []
+    except Exception:
+        logger.exception("ticket sync: failed to list sync configs")
+        return
+
+    for cfg in configs:
+        company_id, prd_id = cfg.get("company_id"), cfg.get("prd_id")
+        if not company_id or prd_id is None:
+            continue
+        if sync_in_flight(cfg):
+            continue
+        try:
+            result = await asyncio.to_thread(run_prd_sync, company_id, prd_id)
+            logger.info(
+                "ticket sync: prd=%s provider=%s → pushed=%s errors=%s",
+                prd_id, cfg.get("provider"),
+                result.get("pushed"), result.get("push_errors"),
+            )
+        except Exception as exc:  # noqa: BLE001 — per-row isolation
+            logger.warning("ticket sync failed for prd %s: %s", prd_id, exc)
+
+
 def _run_jira_personal_data_report() -> None:
     """GDPR obligation for the distributed Jira app: report the Atlassian
     accountIds we store to Atlassian and erase any it flags as closed. Fully
@@ -386,6 +423,21 @@ def start_scheduler() -> None:
             replace_existing=True,
         )
 
+    # Ticket tracker sync: after the first manual push registers a PRD's
+    # destination, this keeps Sprntly ↔ ClickUp/Jira converged automatically —
+    # local edits (web + MCP) push out, tracker status pulls back. 15-min
+    # default; TICKET_SYNC_INTERVAL_MINUTES widens it (60–120) if tracker rate
+    # limits ever bite. Opt-out via TICKET_SYNC_ENABLED=false.
+    if settings.ticket_sync_enabled:
+        ts_mins = getattr(settings, "ticket_sync_interval_minutes", 15) or 15
+        _scheduler.add_job(
+            _run_ticket_sync_cycle,
+            trigger=IntervalTrigger(minutes=ts_mins),
+            id="ticket_sync",
+            name=f"Ticket tracker two-way sync (every {ts_mins}m)",
+            replace_existing=True,
+        )
+
     # Jira Personal Data Reporting (GDPR): a distributed Atlassian app that
     # stores personal data must report the accountIds it holds to Atlassian and
     # erase accounts Atlassian flags as closed. Atlassian's cycle period is 7
@@ -401,9 +453,13 @@ def start_scheduler() -> None:
     _scheduler.start()
     logger.info(
         "Scheduler started: weekly brief tick every %dm "
-        "(Monday 09:00 per-company tz) + connector refresh every %dh%s",
+        "(Monday 09:00 per-company tz) + connector refresh every %dh%s%s",
         tick_minutes, interval_hours,
         " + drip emails" if settings.drip_emails_enabled else "",
+        (
+            f" + ticket sync every {getattr(settings, 'ticket_sync_interval_minutes', 15) or 15}m"
+            if settings.ticket_sync_enabled else ""
+        ),
     )
 
 

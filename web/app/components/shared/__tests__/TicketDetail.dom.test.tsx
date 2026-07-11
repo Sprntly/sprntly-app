@@ -130,10 +130,11 @@ describe("TicketDetail", () => {
     })
     await renderDetail()
     expect(screen.getByText("One-click guest-alert for Deal Alerts.")).toBeTruthy()
-    // And the editor seeds with that generated body (edit-what-you-see).
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /edit description/i })) })
-    expect((screen.getByPlaceholderText("Add a description…") as HTMLTextAreaElement).value)
-      .toBe("One-click guest-alert for Deal Alerts.")
+    // The description region itself is the editor (contenteditable), seeded
+    // with that generated body (edit-what-you-see).
+    const box = screen.getByRole("textbox", { name: /ticket description/i })
+    expect(box.getAttribute("contenteditable")).toBe("true")
+    expect(box.textContent).toContain("One-click guest-alert for Deal Alerts.")
     // AC renders as a checklist item.
     expect(screen.getByText(/Admin can enable in one click/)).toBeTruthy()
   })
@@ -157,16 +158,74 @@ describe("TicketDetail", () => {
 
   it("editing the description persists via saveDescription", async () => {
     await renderDetail()
-    // Edit is explicit now: open the editor, type, Save.
-    await act(async () => { fireEvent.click(screen.getByRole("button", { name: /edit description/i })) })
-    const ta = screen.getByPlaceholderText("Add a description…")
+    // PRD-style: the styled text is contenteditable in place; blur auto-saves
+    // (no editor swap, no Save button).
+    const box = screen.getByRole("textbox", { name: /ticket description/i })
     await act(async () => {
-      fireEvent.change(ta, { target: { value: "New description" } })
-      fireEvent.click(screen.getByRole("button", { name: /^save$/i }))
+      box.textContent = "New description"
+      fireEvent.input(box)
+      fireEvent.blur(box)
     })
     expect(api.saveDescription).toHaveBeenCalledWith(KEY, "New description", ["Admin can enable in one click"])
     // The edited text replaces the display.
     expect(screen.getByText("New description")).toBeTruthy()
+  })
+
+  it("blurring an untouched description does not save", async () => {
+    await renderDetail()
+    // Round trip: rendered DOM serializes back to exactly the displayed text.
+    await act(async () => { fireEvent.blur(screen.getByRole("textbox", { name: /ticket description/i })) })
+    expect(api.saveDescription).not.toHaveBeenCalled()
+  })
+
+  it("clicking an acceptance criterion edits it in place and blur auto-saves", async () => {
+    await renderDetail()
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Edit acceptance criterion 1" })) })
+    const input = screen.getByLabelText("Edit acceptance criterion")
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "Admin can disable in one click" } })
+      fireEvent.blur(input)
+    })
+    expect(api.saveDescription).toHaveBeenCalledWith(
+      KEY, "One-click guest-alert for Deal Alerts.", ["Admin can disable in one click"],
+    )
+    expect(screen.getByText(/Admin can disable in one click/)).toBeTruthy()
+  })
+
+  it("emptying an acceptance criterion removes it", async () => {
+    await renderDetail()
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Edit acceptance criterion 1" })) })
+    const input = screen.getByLabelText("Edit acceptance criterion")
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "" } })
+      fireEvent.blur(input)
+    })
+    expect(api.saveDescription).toHaveBeenCalledWith(KEY, "One-click guest-alert for Deal Alerts.", [])
+  })
+
+  it("Escape cancels an in-place criterion edit without saving", async () => {
+    await renderDetail()
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Edit acceptance criterion 1" })) })
+    const input = screen.getByLabelText("Edit acceptance criterion")
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "half-typed edit" } })
+      fireEvent.keyDown(input, { key: "Escape" })
+      fireEvent.blur(input)
+    })
+    expect(api.saveDescription).not.toHaveBeenCalled()
+    expect(screen.getByText(/Admin can enable in one click/)).toBeTruthy()
+  })
+
+  it("adding a child issue persists via saveFields on blur", async () => {
+    await renderDetail()
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Add child issue" })) })
+    const input = screen.getByLabelText("Add child issue")
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "Write the migration" } })
+      fireEvent.blur(input)
+    })
+    expect(api.saveFields).toHaveBeenCalledWith(KEY, { subtasks: ["Write the migration"] })
+    expect(screen.getByText("Write the migration")).toBeTruthy()
   })
 
   it("changing the status picker persists via saveFields", async () => {
@@ -190,15 +249,44 @@ describe("TicketDetail", () => {
     })
   })
 
-  it("posting a comment persists via addComment", async () => {
-    api.addComment.mockResolvedValue({ id: 1, author: "You", body: "Looks good", time: "now" })
+  it("Send shows Sending… and locks until the comment request settles", async () => {
+    // Deferred promise: hold the request open to observe the in-flight state.
+    let resolveAdd: (c: unknown) => void = () => {}
+    api.addComment.mockReturnValue(new Promise((res) => { resolveAdd = res }))
+    await renderDetail()
+
+    await act(async () => {
+      fireEvent.change(screen.getByPlaceholderText("Ask about this ticket…"), {
+        target: { value: "First!" },
+      })
+      fireEvent.click(screen.getByRole("button", { name: /send/i }))
+    })
+    // In flight: label swaps, button + input lock, re-clicks can't double-post.
+    const btn = screen.getByRole("button", { name: /sending…/i }) as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    fireEvent.click(btn)
+    expect(api.addComment).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resolveAdd({ id: 9, author: "Ada", body: "First!", time: "2026-07-11 12:00:00+00" })
+    })
+    // Settled: back to Send, input cleared for the next comment.
+    expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy()
+    expect((screen.getByPlaceholderText("Ask about this ticket…") as HTMLInputElement).value).toBe("")
+  })
+
+  it("posting a comment persists via addComment and shows the server-resolved author", async () => {
+    // The backend attributes the comment to the signed-in user and echoes it
+    // back; the client sends only the body.
+    api.addComment.mockResolvedValue({ id: 1, author: "Ada Lovelace", body: "Looks good", time: "2026-07-09 18:00:00+00" })
     await renderDetail()
     const ta = screen.getByPlaceholderText("Ask about this ticket…")
     await act(async () => {
       fireEvent.change(ta, { target: { value: "Looks good" } })
       fireEvent.click(screen.getByRole("button", { name: /send/i }))
     })
-    expect(api.addComment).toHaveBeenCalledWith(KEY, "You", "Looks good")
+    expect(api.addComment).toHaveBeenCalledWith(KEY, "Looks good")
+    expect(screen.getByText("Ada Lovelace")).toBeTruthy()
   })
 
   it("shows the AI summary block once there are 2+ comments", async () => {
@@ -309,6 +397,36 @@ describe("TicketDetail — structured (canonical) ticket", () => {
     expect(screen.getByText(/is blocked by/)).toBeTruthy()
     // Provenance shows in both the grounding footer and the rail.
     expect(screen.getAllByText("Part A §5 R2").length).toBeGreaterThanOrEqual(1)
+  })
+
+  it("blurring the untouched five-section description saves no override (round trip)", async () => {
+    await act(async () => {
+      render(React.createElement(TicketDetail, { story: STRUCTURED, index: 1, prdId: 42, onBack: vi.fn() }))
+    })
+    await waitFor(() => expect(api.getData).toHaveBeenCalled())
+    await act(async () => { fireEvent.blur(screen.getByRole("textbox", { name: /ticket description/i })) })
+    expect(api.saveDescription).not.toHaveBeenCalled()
+  })
+
+  it("editing a structured section in place persists the serialized labeled text", async () => {
+    await act(async () => {
+      render(React.createElement(TicketDetail, { story: STRUCTURED, index: 1, prdId: 42, onBack: vi.fn() }))
+    })
+    await waitFor(() => expect(api.getData).toHaveBeenCalled())
+    const box = screen.getByRole("textbox", { name: /ticket description/i })
+    // Simulate an in-place edit of the "What" paragraph.
+    const what = box.querySelector("p.tkv2-dtx") as HTMLElement
+    await act(async () => {
+      what.textContent = "A sharper one-page battle card."
+      fireEvent.input(box)
+      fireEvent.blur(box)
+    })
+    const [, savedText] = api.saveDescription.mock.calls[0]
+    // The edited section is in the override, in labeled-text form, with the
+    // untouched sections intact.
+    expect(savedText).toContain("What\nA sharper one-page battle card.")
+    expect(savedText).toContain("The ticket must cover\n- Who to target")
+    expect(savedText).toContain("Out of scope\nPricing changes (that's T-5).")
   })
 
   it("flags generated (non-inherited) criteria", async () => {

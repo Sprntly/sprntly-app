@@ -9,7 +9,7 @@
  *
  * Connection state is fetched separately from `GET /v1/connectors`.
  */
-import type { ConnectorCategoryRow, ConnectorItemRow } from "../types/content"
+import type { ConnectorCategoryRow, ConnectorItemRow, ConnectorType } from "../types/content"
 import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 
 export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
@@ -20,11 +20,11 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "mixpanel",         name: "Mixpanel",         logo: "M", logoText: "M", logoColor: "#7856FF", oauth: false },
-      { id: "amplitude",        name: "Amplitude",        logo: "A", logoText: "A", logoColor: "#1A6CFF", logoSvg: "/connectors/amplitude.svg", oauth: false },
-      { id: "google_analytics", name: "Google Analytics", logo: "G", logoText: "G", logoColor: "#F9AB00", logoSvg: "/connectors/google_analytics.svg", oauth: false },
-      { id: "heap",             name: "Heap",             logo: "H", logoText: "H", logoColor: "#FF6E6E", oauth: false },
-      { id: "posthog",          name: "PostHog",          logo: "P", logoText: "P", logoColor: "#0CC1AE", logoSvg: "/connectors/posthog.svg", oauth: false },
+      { id: "mixpanel",         name: "Mixpanel",         logo: "M", logoText: "M", logoColor: "#7856FF", oauth: false, types: ["analytics"] },
+      { id: "amplitude",        name: "Amplitude",        logo: "A", logoText: "A", logoColor: "#1A6CFF", logoSvg: "/connectors/amplitude.svg", oauth: false, types: ["analytics"] },
+      { id: "google_analytics", name: "Google Analytics", logo: "G", logoText: "G", logoColor: "#F9AB00", logoSvg: "/connectors/google_analytics.svg", oauth: false, types: ["analytics"] },
+      { id: "heap",             name: "Heap",             logo: "H", logoText: "H", logoColor: "#FF6E6E", oauth: false, types: ["analytics"] },
+      { id: "posthog",          name: "PostHog",          logo: "P", logoText: "P", logoColor: "#0CC1AE", logoSvg: "/connectors/posthog.svg", oauth: false, types: ["analytics"] },
     ],
   },
   {
@@ -33,10 +33,10 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", logoSvg: "/connectors/linear.svg", oauth: false },
-      { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", logoSvg: "/connectors/jira.svg", oauth: true },
-      { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoSvg: "/connectors/clickup.svg", oauth: true },
-      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: false },
+      { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", logoSvg: "/connectors/linear.svg", oauth: false, types: ["task-tracking"] },
+      { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", logoSvg: "/connectors/jira.svg", oauth: true, types: ["task-tracking"] },
+      { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoSvg: "/connectors/clickup.svg", oauth: true, types: ["task-tracking"] },
+      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: false, types: ["task-tracking"] },
     ],
   },
   {
@@ -47,11 +47,11 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", logoSvg: "/connectors/notion.svg", oauth: false },
+      { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", logoSvg: "/connectors/notion.svg", oauth: false, types: ["documents"] },
       // Backend provider is `google_drive` (existing OAuth + sync). Surface
       // it as "Google Docs" per design — the connector pulls Google Docs
       // out of Drive folders, so the label matches user expectation.
-      { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoSvg: "/connectors/google_drive.svg", oauth: true },
+      { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoSvg: "/connectors/google_drive.svg", oauth: true, types: ["documents"] },
     ],
   },
   {
@@ -60,14 +60,14 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false },
-      { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", logoSvg: "/connectors/zendesk.svg", oauth: false },
+      { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false, types: ["customer-voice", "communication"] },
+      { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", logoSvg: "/connectors/zendesk.svg", oauth: false, types: ["customer-voice"] },
       // Fireflies has no official SVG mark we could bundle, so it keeps the
       // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
-      { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey" },
-      { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false },
-      { id: "dovetail",   name: "Dovetail",   logo: "D", logoText: "D", logoColor: "#9B59B6", oauth: false },
-      { id: "salesforce", name: "Salesforce", logo: "S", logoText: "S", logoColor: "#00A1E0", logoSvg: "/connectors/salesforce.svg", oauth: false },
+      { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings", "customer-voice"] },
+      { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, types: ["meetings", "customer-voice"] },
+      { id: "dovetail",   name: "Dovetail",   logo: "D", logoText: "D", logoColor: "#9B59B6", oauth: false, types: ["customer-voice"] },
+      { id: "salesforce", name: "Salesforce", logo: "S", logoText: "S", logoColor: "#00A1E0", logoSvg: "/connectors/salesforce.svg", oauth: false, types: ["crm", "customer-voice"] },
     ],
   },
   {
@@ -76,9 +76,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "stripe",     name: "Stripe",     logo: "S", logoText: "S", logoColor: "#635BFF", logoSvg: "/connectors/stripe.svg", oauth: false },
-      { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false },
-      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", logoSvg: "/connectors/hubspot.svg", oauth: true },
+      { id: "stripe",     name: "Stripe",     logo: "S", logoText: "S", logoColor: "#635BFF", logoSvg: "/connectors/stripe.svg", oauth: false, types: ["revenue"] },
+      { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false, types: ["revenue", "analytics"] },
+      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", logoSvg: "/connectors/hubspot.svg", oauth: true, types: ["crm", "revenue"] },
     ],
   },
   {
@@ -87,9 +87,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", logoSvg: "/connectors/github.svg", oauth: true },
-      { id: "gitlab",    name: "GitLab",    logo: "G", logoText: "G", logoColor: "#FC6D26", logoSvg: "/connectors/gitlab.svg", oauth: false },
-      { id: "bitbucket", name: "Bitbucket", logo: "B", logoText: "B", logoColor: "#205081", logoSvg: "/connectors/bitbucket.svg", oauth: false },
+      { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", logoSvg: "/connectors/github.svg", oauth: true, types: ["code"] },
+      { id: "gitlab",    name: "GitLab",    logo: "G", logoText: "G", logoColor: "#FC6D26", logoSvg: "/connectors/gitlab.svg", oauth: false, types: ["code"] },
+      { id: "bitbucket", name: "Bitbucket", logo: "B", logoText: "B", logoColor: "#205081", logoSvg: "/connectors/bitbucket.svg", oauth: false, types: ["code"] },
     ],
   },
   {
@@ -99,10 +99,10 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "sentry",    name: "Sentry",    logo: "S", logoText: "S", logoColor: "#362D59", logoSvg: "/connectors/sentry.svg", oauth: false },
-      { id: "datadog",   name: "Datadog",   logo: "D", logoText: "D", logoColor: "#632CA6", logoSvg: "/connectors/datadog.svg", oauth: false },
-      { id: "newrelic",  name: "New Relic", logo: "N", logoText: "N", logoColor: "#06AC38", oauth: false },
-      { id: "pagerduty", name: "PagerDuty", logo: "P", logoText: "P", logoColor: "#06A77D", logoSvg: "/connectors/pagerduty.svg", oauth: false },
+      { id: "sentry",    name: "Sentry",    logo: "S", logoText: "S", logoColor: "#362D59", logoSvg: "/connectors/sentry.svg", oauth: false, types: ["monitoring"] },
+      { id: "datadog",   name: "Datadog",   logo: "D", logoText: "D", logoColor: "#632CA6", logoSvg: "/connectors/datadog.svg", oauth: false, types: ["monitoring"] },
+      { id: "newrelic",  name: "New Relic", logo: "N", logoText: "N", logoColor: "#06AC38", oauth: false, types: ["monitoring"] },
+      { id: "pagerduty", name: "PagerDuty", logo: "P", logoText: "P", logoColor: "#06A77D", logoSvg: "/connectors/pagerduty.svg", oauth: false, types: ["monitoring"] },
     ],
   },
   {
@@ -114,8 +114,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // Figma is OAuth-only. The legacy PAT connect path was removed entirely
       // (no figma_pat module, no /figma/pat route) — Figma's app review requires
       // OAuth as the sole public connect mechanism.
-      { id: "figma",  name: "Figma",  logo: "F", logoText: "F", logoColor: "#F24E1E", logoSvg: "/connectors/figma.svg", oauth: true },
-      { id: "framer", name: "Framer", logo: "F", logoText: "F", logoColor: "#000000", logoSvg: "/connectors/framer.svg", oauth: false },
+      { id: "figma",  name: "Figma",  logo: "F", logoText: "F", logoColor: "#F24E1E", logoSvg: "/connectors/figma.svg", oauth: true, types: ["design"] },
+      { id: "framer", name: "Framer", logo: "F", logoText: "F", logoColor: "#000000", logoSvg: "/connectors/framer.svg", oauth: false, types: ["design"] },
     ],
   },
   {
@@ -126,8 +126,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     items: [
       // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
       // (Slack Marketplace requires OAuth install, not a pasted bot token).
-      { id: "slack",   name: "Slack",    logo: "S", logoText: "S", logoColor: "#4A154B", logoSvg: "/connectors/slack.svg", oauth: true },
-      { id: "msteams", name: "MS Teams", logo: "M", logoText: "M", logoColor: "#5059C9", logoSvg: "/connectors/msteams.svg", oauth: false },
+      { id: "slack",   name: "Slack",    logo: "S", logoText: "S", logoColor: "#4A154B", logoSvg: "/connectors/slack.svg", oauth: true, types: ["communication"] },
+      { id: "msteams", name: "MS Teams", logo: "M", logoText: "M", logoColor: "#5059C9", logoSvg: "/connectors/msteams.svg", oauth: false, types: ["communication"] },
     ],
   },
 ]
@@ -183,4 +183,53 @@ export function connectableCatalog(
       (i) => isConnectableConnector(i) || alsoKeepIds.has(i.id),
     ),
   })).filter((cat) => cat.items.length > 0)
+}
+
+// ── Connector types ──────────────────────────────────────────────────────────
+//
+// Every catalog item carries `types` (multi-valued — what the tool IS), the
+// mirror of the backend authority (backend/app/connectors/catalog.py).
+// Features read these instead of hardcoding provider ids.
+
+/** Human labels for the type chips shown on connector cards. */
+export const CONNECTOR_TYPE_LABELS: Record<ConnectorType, string> = {
+  "task-tracking": "Task tracking",
+  communication: "Communication",
+  documents: "Documents",
+  "customer-voice": "Customer voice",
+  meetings: "Meetings",
+  analytics: "Analytics",
+  revenue: "Revenue",
+  crm: "CRM",
+  code: "Code",
+  monitoring: "Monitoring",
+  design: "Design",
+}
+
+const ALL_ITEMS: ConnectorItemRow[] = CONNECTOR_CATALOG.flatMap((c) => c.items)
+
+/** A connector's types ([] for unknown ids — never throws). */
+export function connectorTypes(id: string): ConnectorType[] {
+  return ALL_ITEMS.find((i) => i.id === id)?.types ?? []
+}
+
+/** Every catalog connector carrying `type` (e.g. all task trackers). */
+export function connectorsWithType(type: ConnectorType): ConnectorItemRow[] {
+  return ALL_ITEMS.filter((i) => (i.types ?? []).includes(type))
+}
+
+/**
+ * Providers the backend's ticket-sync engine implements (mirror of
+ * app/stories/sync.py SYNC_PROVIDERS). A connector must be typed
+ * `task-tracking` AND be in this set to appear on the sync button — the type
+ * declares what a tool is, the engine declares what we can do with it.
+ */
+export const TICKET_SYNC_IMPLEMENTED = new Set<string>(["clickup", "jira"])
+
+/** The task trackers tickets can actually sync with: {id, label} for the
+ *  sync button, its tool menu, and its labels. */
+export function ticketSyncTrackers(): { id: string; label: string }[] {
+  return connectorsWithType("task-tracking")
+    .filter((i) => TICKET_SYNC_IMPLEMENTED.has(i.id))
+    .map((i) => ({ id: i.id, label: i.name }))
 }

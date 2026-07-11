@@ -88,8 +88,8 @@ Zero-touch: the workflow also creates `mcp/.env` on the box on first deploy — 
 
 | tool | what it does |
 | --- | --- |
-| `list_tickets(status?, ticket_type?)` | The tickets **assigned to the token owner** (assignment is matched on the assignee set in the web app; teammates' and unassigned tickets never appear). |
-| `get_ticket(ticket_key)` | Full ticket — generated title, description, acceptance criteria, scope and context (what/why) **merged with any edits**, plus comments and attachments. Everything needed to implement it. |
+| `list_tickets(status?, ticket_type?)` | The tickets **assigned to the token owner** (assignment is matched on the assignee set in the web app; teammates' and unassigned tickets never appear). When a ticket's PRD syncs with a tracker, each row also carries `tracker_provider` / `tracker_status` / `tracker_url`. |
+| `get_ticket(ticket_key)` | Full ticket — generated title, description, acceptance criteria, scope and context (what/why) **merged with any edits**, plus comments and attachments. Everything needed to implement it. Includes `tracker` (provider, status, assignee, url, last_synced_at) when the PRD's tickets sync with ClickUp/Jira — the sync is server-side, automatic, and **two-way**: MCP edits reach the tracker on the next pass, and tracker-side edits/status moves flow back into the ticket (newest edit wins). |
 | `get_prd(prd_id)` | The parent PRD for full product context (a ticket's `prd_id` comes from `list_tickets`/`get_ticket`). |
 | `list_prd_tickets(prd_id, status?, ticket_type?)` | **All** tickets in one PRD — the full scope across every assignee (deliberately not assignee-scoped). |
 | `get_prd_prototype(prd_id)` | The design prototype behind a PRD: status (`generating`/`ready`/`failed`), `is_complete`, preview image, and viewer links — `app_url` (in-app, needs login) always; `public_url` (no-login share link) only if a PM already shared it. Never changes share settings, never exposes the signed bundle URL. |

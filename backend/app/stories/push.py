@@ -308,3 +308,26 @@ def push_stories_to_jira(
             errors.append({"story": story.title, "error": str(e)})
 
     return {"created": created, "errors": errors}
+
+
+def pull_jira_status(
+    company_id: str, project_key: str, ticket_ids: Iterable[str]
+) -> dict[str, dict[str, Any]]:
+    """Bidirectional read, Jira flavor of pull_clickup_status: for each ticket
+    already synced to `project_key`, fetch its current Jira state (status,
+    assignee, url). Keyed by the ticket's stable_id; tickets never pushed (no
+    mapping row) are simply absent. Best-effort per ticket."""
+    access_token, cloud_id = _jira_creds(company_id)
+    # Resolve the browse base URL once for the whole batch.
+    site_url = jira_oauth._site_url_for_cloud(access_token, cloud_id)
+    out: dict[str, dict[str, Any]] = {}
+    for ticket_id in ticket_ids:
+        issue_key = get_jira_issue_key(company_id, project_key, ticket_id)
+        if not issue_key:
+            continue
+        state = jira_oauth.get_issue(
+            access_token, cloud_id, issue_key, site_url=site_url
+        )
+        if state.get("status") or state.get("assignee"):
+            out[ticket_id] = state
+    return out

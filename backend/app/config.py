@@ -281,6 +281,12 @@ class Settings(BaseSettings):
     # brief_schedule.DUE_WINDOW (1h) so a window is never skipped between ticks;
     # 15 min gives ~4 chances to catch each window even if a tick runs late.
     weekly_brief_tick_minutes: int = 15
+    # Ticket tracker sync: every tick, two-way sync each PRD whose tickets were
+    # pushed to ClickUp/Jira (prd_ticket_sync rows with auto_sync=true). 15 min
+    # by default; raise via TICKET_SYNC_INTERVAL_MINUTES (e.g. 60–120) if
+    # tracker API rate limits ever bite.
+    ticket_sync_enabled: bool = True
+    ticket_sync_interval_minutes: int = 15
     scraping_user_agent: str = "Sprntly/1.0 (product intelligence)"
 
     # ── Onboarding drip / nudge emails (v0 checklist 2.1) ────────────────

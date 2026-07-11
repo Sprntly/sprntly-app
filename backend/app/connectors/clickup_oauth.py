@@ -21,6 +21,7 @@ import json
 import logging
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import jwt
@@ -356,12 +357,17 @@ def add_dependency(access_token: str, task_id: str, *, depends_on: str) -> None:
 
 
 def get_task(access_token: str, task_id: str) -> dict[str, Any]:
-    """Fetch a task's current state from ClickUp and normalize the fields we
-    reconcile back into Sprntly: status name, first assignee's display name, and
-    the task url. Returns {} on a 4xx/5xx so a single stale/deleted task never
-    breaks the whole pull."""
+    """Fetch a task's current state from ClickUp and normalize the fields the
+    two-way sync reconciles: workflow state (status, first assignee's display
+    name, url) plus the CONTENT side (title, markdown description) and
+    ClickUp's last-update time (`updated_at`, ISO) so the sync can decide
+    which side of an edit is newer. Returns {} on a 4xx/5xx so a single
+    stale/deleted task never breaks the whole pull."""
     try:
-        data = _get(access_token, f"/task/{task_id}")
+        data = _get(
+            access_token, f"/task/{task_id}",
+            params={"include_markdown_description": "true"},
+        )
     except Exception:  # noqa: BLE001 — a per-task fetch failure is non-fatal
         logger.warning("ClickUp get_task failed for %s", task_id)
         return {}
@@ -370,11 +376,30 @@ def get_task(access_token: str, task_id: str) -> dict[str, Any]:
     if assignees:
         a = assignees[0] or {}
         assignee = a.get("username") or a.get("email")
+    # date_updated is a ms-epoch string.
+    updated_at = None
+    try:
+        ms = int(data.get("date_updated") or 0)
+        if ms:
+            updated_at = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        pass
     return {
         "status": (data.get("status") or {}).get("status"),
         "assignee": assignee,
         "url": data.get("url"),
+        "title": data.get("name"),
+        "description": data.get("markdown_description") or data.get("description") or "",
+        "updated_at": updated_at,
     }
+
+
+def set_task_status(access_token: str, task_id: str, status: str) -> None:
+    """Set a task's workflow status (the Sprntly→tracker half of two-way
+    status sync). ClickUp statuses are LIST-SPECIFIC custom names, so this is
+    inherently best-effort — an unknown name 400s; callers treat failure as
+    non-fatal."""
+    _write("PUT", f"/task/{task_id}", access_token, {"status": status})
 
 
 def _get(token: str, path: str, params: dict | None = None) -> dict[str, Any]:
