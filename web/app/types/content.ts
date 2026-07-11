@@ -235,10 +235,31 @@ export interface TeamPendingRow {
   sent: string
 }
 
+/**
+ * What a connector IS (multi-valued): drives feature availability across the
+ * app — e.g. the ticket sync offers connected `task-tracking` connectors —
+ * instead of features hardcoding provider ids. Mirrors the backend authority
+ * (backend/app/connectors/catalog.py).
+ */
+export type ConnectorType =
+  | "task-tracking"
+  | "communication"
+  | "documents"
+  | "customer-voice"
+  | "meetings"
+  | "analytics"
+  | "revenue"
+  | "crm"
+  | "code"
+  | "monitoring"
+  | "design"
+
 export interface ConnectorItemRow {
   id: string
   logo: string
   name: string
+  /** The connector's types (e.g. ClickUp → ["task-tracking"]). */
+  types?: ConnectorType[]
   /**
    * Single-letter glyph rendered in the connector logo box (sprntly_Design-3).
    * For example, "M" for Mixpanel. The legacy `logo` field stays for

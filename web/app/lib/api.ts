@@ -909,6 +909,10 @@ export type ConnectionSummary = {
   id: string
   provider: "google_drive" | "figma" | "github" | string
   status: "active" | "error" | "revoked" | string
+  /** What this provider IS, multi-valued (e.g. ["task-tracking"]) — mirrors
+   *  backend/app/connectors/catalog.py; features derive availability from
+   *  these rather than hardcoding provider ids. */
+  types?: string[]
   google_email: string | null
   account_label?: string | null
   scopes: string
@@ -2195,9 +2199,40 @@ export const storiesApi = {
     api.post<{ statuses: Record<string, ClickUpTicketState> }>(
       "/v1/stories/pull-status", { list_id: listId, ticket_ids: ticketIds },
     ),
+  /** This PRD's tracker-sync state: destination, whether a sync is running,
+   *  last-synced time, and the pulled per-ticket tracker statuses.
+   *  `configured: false` = tickets were never pushed anywhere. */
+  getSyncState: (prdId: number) =>
+    api.get<TicketSyncState>(`/v1/stories/sync/${prdId}`),
+  /** Run a two-way sync pass in the background (push local edits + pull tracker
+   *  status). Pass `dest` on the FIRST push (or to switch tool/destination);
+   *  omit it to re-sync the configured destination. Poll getSyncState after. */
+  triggerSync: (prdId: number, dest?: {
+    provider: TrackerProvider; destination_id: string; destination_name?: string
+  }) =>
+    api.post<{ status: "syncing" }>(`/v1/stories/sync/${prdId}`, dest ?? {}),
 }
 
 export type ClickUpTicketState = { status: string | null; assignee: string | null; url: string | null }
+
+// ── Ticket tracker sync (per-PRD) ────────────────────────────────────────────
+
+export type TrackerProvider = "clickup" | "jira"
+
+/** Per-PRD tracker-sync state (GET /v1/stories/sync/{prd_id}). After the first
+ *  push registers a destination, the backend auto-syncs on an interval; the
+ *  sync button reads/triggers the same state. */
+export type TicketSyncState = {
+  configured: boolean
+  provider?: TrackerProvider
+  destination_id?: string
+  destination_name?: string | null
+  auto_sync?: boolean
+  sync_status?: "idle" | "syncing"
+  last_synced_at?: string | null
+  last_error?: string | null
+  statuses?: Record<string, ClickUpTicketState>
+}
 
 // ── Team members ──────────────────────────────────────────────────────────
 

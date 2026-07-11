@@ -341,7 +341,30 @@ def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
         v = edit.get(field)
         return v if v is not None else story.get(field)
 
+    # Tracker sync state (passive read): where this PRD's tickets sync to and
+    # this ticket's last-pulled tracker status/url. None when never pushed.
+    # Kept read-only on the MCP surface — syncs are triggered from the web /
+    # scheduler; an MCP edit is picked up by the next sync pass automatically.
+    tracker = None
+    if prd_id is not None:
+        from app.db.ticket_sync import get_sync_config
+
+        cfg = get_sync_config(company_id, prd_id)
+        if cfg:
+            sid = story.get("id") or story_ref
+            st = (cfg.get("statuses") or {}).get(sid) or {}
+            tracker = {
+                "provider": cfg.get("provider"),
+                "destination_name": cfg.get("destination_name"),
+                "status": st.get("status"),
+                "assignee": st.get("assignee"),
+                "url": st.get("url"),
+                "last_synced_at": cfg.get("last_synced_at"),
+                "last_error": cfg.get("last_error"),
+            }
+
     return {
+        "tracker": tracker,
         "id": ticket_key,
         "prd_id": prd_id,
         "title": _merged("title"),
@@ -435,6 +458,13 @@ def list_tickets(
     )
     edit_by_key = {e["ticket_key"]: e for e in edits}
 
+    # One query for all this company's tracker-sync rows → per-PRD provider +
+    # per-ticket pulled tracker state, so each listed ticket can carry its
+    # tracker status/url without N lookups.
+    from app.db.ticket_sync import list_sync_configs
+
+    sync_by_prd = {c["prd_id"]: c for c in list_sync_configs(company_id)}
+
     want_status = status.strip().lower() if status else None
     want_type = ticket_type.strip().lower() if ticket_type else None
 
@@ -465,6 +495,8 @@ def list_tickets(
                     or assignee.get("user_id") != assignee_user_id
                 ):
                     continue
+            sync_cfg = sync_by_prd.get(row.get("prd_id")) or {}
+            tracker_state = (sync_cfg.get("statuses") or {}).get(story.get("id")) or {}
             tickets.append(
                 {
                     "id": key,
@@ -473,6 +505,12 @@ def list_tickets(
                     "status": cur_status,
                     "priority": e["priority"] if e.get("priority") is not None else story.get("priority"),
                     "prd_id": row.get("prd_id"),
+                    # Tracker sync (when this PRD's tickets were pushed): the
+                    # tool the PRD syncs with and this ticket's last-pulled
+                    # status/url there. None/absent fields when never pushed.
+                    "tracker_provider": sync_cfg.get("provider"),
+                    "tracker_status": tracker_state.get("status"),
+                    "tracker_url": tracker_state.get("url"),
                 }
             )
     return {"tickets": tickets, "count": len(tickets)}

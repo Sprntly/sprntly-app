@@ -723,6 +723,28 @@ CREATE TABLE prd_tickets (
 );
 CREATE INDEX idx_prd_tickets_company ON prd_tickets (company_id);
 
+-- Per-PRD tracker sync state (mirrors 20260710120000_prd_ticket_sync.sql).
+-- One row per (company, prd): the ClickUp list / Jira project the PRD's
+-- tickets sync with, the last sync outcome, and the pulled per-ticket
+-- tracker statuses (jsonb → TEXT here).
+CREATE TABLE prd_ticket_sync (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id       TEXT NOT NULL,
+    prd_id           INTEGER NOT NULL,
+    provider         TEXT NOT NULL,
+    destination_id   TEXT NOT NULL,
+    destination_name TEXT,
+    auto_sync        INTEGER NOT NULL DEFAULT 1,
+    sync_status      TEXT NOT NULL DEFAULT 'idle',
+    sync_started_at  TEXT,
+    last_synced_at   TEXT,
+    last_error       TEXT,
+    statuses         TEXT NOT NULL DEFAULT '{}',
+    created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, prd_id)
+);
+
 -- Roadmap doc storage (mirrors 20260623120000_roadmap_doc.sql, SQLite-ized).
 -- One row per company (UNIQUE company_id) so a re-upload upserts in place. Holds
 -- the original file (base64) + extracted text the weekly brief reads + the

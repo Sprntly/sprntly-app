@@ -275,12 +275,20 @@ class Story:
     # Spike fields
     timebox: Optional[str] = None
     exit_condition: Optional[str] = None
+    # The id stamped into the stored dict at generation time. When a persisted
+    # story is rehydrated (from_dict) this pins stable_id() to the ORIGINAL id,
+    # so applying edit overrides (changed title/body) never re-hashes it into a
+    # different identity — tracker mappings and edit keys stay attached.
+    pinned_id: Optional[str] = None
 
     def stable_id(self) -> str:
         """A content-derived id (hash of title + body). Stable across list
         reordering and identical regenerations; a genuinely different story
         (changed title/body) hashes differently, so per-ticket edit overrides
-        keyed off this id never misattach to the wrong ticket."""
+        keyed off this id never misattach to the wrong ticket. A rehydrated
+        story keeps its stored id (`pinned_id`) so edits don't change it."""
+        if self.pinned_id:
+            return self.pinned_id
         seed = f"{self.title}\x1f{self.body}".encode("utf-8")
         return hashlib.sha256(seed).hexdigest()[:12]
 
@@ -367,6 +375,7 @@ class Story:
     def from_dict(cls, d: dict[str, Any]) -> "Story":
         sp = d.get("story_points")
         return cls(
+            pinned_id=(str(d.get("id")).strip() or None) if d.get("id") else None,
             title=str(d.get("title") or "").strip(),
             body=str(d.get("body") or d.get("user_story") or "").strip(),
             acceptance_criteria=[str(x) for x in (d.get("acceptance_criteria") or [])],

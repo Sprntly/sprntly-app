@@ -347,6 +347,9 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
   const [members, setMembers] = useState<TeamMemberRecord[] | null>(null)
   const [openMenu, setOpenMenu] = useState<null | "status" | "reassign" | "priority">(null)
   const [commentText, setCommentText] = useState("")
+  // Posting is in flight — the Send button shows "Sending…" and locks so a
+  // slow request can't double-post.
+  const [sendingComment, setSendingComment] = useState(false)
 
   // Hold the body until saved overrides are loaded — rendering the generated
   // ticket first and swapping when the fetch lands reads as "shows the old
@@ -477,12 +480,14 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
 
   const addComment = () => {
     const body = commentText.trim()
-    if (!body) return
+    if (!body || sendingComment) return
+    setSendingComment(true)
     // No author sent — the backend attributes the comment to the signed-in
     // user (profile name → email) and echoes it back in the response.
     ticketDataApi.addComment(key, body).then((c) => {
       setComments((xs) => [...xs, c]); setCommentText("")
     }).catch(() => showToast("Couldn't post comment", "Try again."))
+      .finally(() => setSendingComment(false))
   }
 
   // Accept & propagate: apply the thread's proposed acceptance criterion to this
@@ -815,8 +820,16 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
                 value={commentText}
                 onChange={(e) => setCommentText(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") addComment() }}
+                disabled={sendingComment}
               />
-              <button type="button" className="tkv2-btn2 tkv2-btn2--primary" onClick={addComment} disabled={!commentText.trim()}>Send</button>
+              <button
+                type="button"
+                className="tkv2-btn2 tkv2-btn2--primary"
+                onClick={addComment}
+                disabled={!commentText.trim() || sendingComment}
+              >
+                {sendingComment ? "Sending…" : "Send"}
+              </button>
             </div>
           </div>
       </div>

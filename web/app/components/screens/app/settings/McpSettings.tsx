@@ -1,7 +1,7 @@
 "use client"
 
 import { useCallback, useEffect, useState } from "react"
-import { IconCheck, IconCopy } from "@tabler/icons-react"
+import { IconBook2, IconCheck, IconCopy, IconX } from "@tabler/icons-react"
 import {
   mcpTokensApi,
   type McpToken,
@@ -50,6 +50,158 @@ const getMcpUrl = (token: string) =>
 const ROLE_LABELS: Record<McpTokenRole, string> = {
   developer: "Developer (tickets & PRDs)",
   pm: "PM (full access)",
+}
+
+// ── Install guide ────────────────────────────────────────────────────────────
+//
+// Per-client connection instructions, parameterized by the connector URL.
+// Every client boils down to "give this URL to the client" — the guide shows
+// each one's exact command / config / click-path with a copy button. Adding a
+// client = one entry here.
+
+type GuideClient = {
+  id: string
+  label: string
+  /** Numbered click-path / context steps shown above the copy block. */
+  steps: string[]
+  /** What to copy: a terminal command, a JSON config, or the bare URL. */
+  block: (url: string) => string
+  blockLabel: string
+}
+
+const GUIDE_CLIENTS: GuideClient[] = [
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    steps: [
+      "Open a terminal in any project (or your home directory).",
+      "Run the command below — it registers Sprntly as an MCP server.",
+      "Start (or restart) Claude Code and ask it about your tickets.",
+    ],
+    block: (url) => `claude mcp add --transport http sprntly "${url}"`,
+    blockLabel: "Terminal command",
+  },
+  {
+    id: "claude-ai",
+    label: "claude.ai",
+    steps: [
+      "Go to claude.ai → Settings → Connectors.",
+      "Click “Add custom connector”.",
+      "Name it “Sprntly” and paste the connector URL below, then Add.",
+      "In a chat, enable the Sprntly connector from the tools menu.",
+    ],
+    block: (url) => url,
+    blockLabel: "Connector URL",
+  },
+  {
+    id: "claude-desktop",
+    label: "Claude Desktop",
+    steps: [
+      "Open Claude Desktop → Settings → Connectors.",
+      "Click “Add custom connector”.",
+      "Name it “Sprntly” and paste the connector URL below, then Add.",
+    ],
+    block: (url) => url,
+    blockLabel: "Connector URL",
+  },
+  {
+    id: "chatgpt",
+    label: "ChatGPT",
+    steps: [
+      "In ChatGPT go to Settings → Connectors (requires a plan with connectors; enable Developer mode under Advanced if the option is hidden).",
+      "Click “Create” and choose MCP server.",
+      "Name it “Sprntly”, paste the connector URL below, set authentication to “No authentication” (the token is in the URL), and save.",
+    ],
+    block: (url) => url,
+    blockLabel: "MCP server URL",
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    steps: [
+      "Create (or open) .cursor/mcp.json in your project — or ~/.cursor/mcp.json to enable it everywhere.",
+      "Add the entry below and save; Cursor picks it up on the next reload.",
+    ],
+    block: (url) =>
+      JSON.stringify({ mcpServers: { sprntly: { url } } }, null, 2),
+    blockLabel: ".cursor/mcp.json",
+  },
+]
+
+/** A copyable command/config block (the guide's payload). */
+function CopyBlock({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false)
+  const onCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      /* clipboard unavailable — the block is selectable for manual copy */
+    }
+  }, [text])
+  return (
+    <div className="mcp-guide-block">
+      <div className="mcp-guide-block-h">
+        <span>{label}</span>
+        <button type="button" className="btn" onClick={onCopy}
+          title={copied ? "Copied!" : "Copy"} aria-label={`Copy ${label}`}>
+          {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
+        </button>
+      </div>
+      <pre>{text}</pre>
+    </div>
+  )
+}
+
+/**
+ * "Guide to install" modal: pick a client, get its exact setup instructions
+ * with the connector URL filled in. When the user just minted a token the
+ * commands carry the REAL one-time URL; otherwise a YOUR_TOKEN placeholder
+ * (the raw token is only ever shown once, at creation).
+ */
+function McpInstallGuide({ url, hasRealToken, onClose }: {
+  url: string
+  hasRealToken: boolean
+  onClose: () => void
+}) {
+  const [clientId, setClientId] = useState(GUIDE_CLIENTS[0].id)
+  const client = GUIDE_CLIENTS.find((c) => c.id === clientId) ?? GUIDE_CLIENTS[0]
+  return (
+    <>
+      <div className="mcp-guide-backdrop" onClick={onClose} aria-hidden />
+      <div className="mcp-guide" role="dialog" aria-modal="true" aria-label="Install guide"
+        onKeyDown={(e) => { if (e.key === "Escape") onClose() }}>
+        <div className="mcp-guide-top">
+          <div className="mcp-guide-title">Connect your AI client</div>
+          <button type="button" className="btn" onClick={onClose} aria-label="Close guide">
+            <IconX size={15} />
+          </button>
+        </div>
+        {!hasRealToken && (
+          <div className="mcp-guide-note">
+            The commands below use a <code>YOUR_TOKEN</code> placeholder —
+            create a token above and swap in the connector URL it shows you
+            (it&apos;s only displayed once).
+          </div>
+        )}
+        <div className="mcp-guide-tabs" role="tablist" aria-label="AI clients">
+          {GUIDE_CLIENTS.map((c) => (
+            <button key={c.id} type="button" role="tab"
+              aria-selected={c.id === client.id}
+              className={`mcp-guide-tab${c.id === client.id ? " mcp-guide-tab--sel" : ""}`}
+              onClick={() => setClientId(c.id)}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+        <ol className="mcp-guide-steps">
+          {client.steps.map((s, i) => <li key={i}>{s}</li>)}
+        </ol>
+        <CopyBlock text={client.block(url)} label={client.blockLabel} />
+      </div>
+    </>
+  )
 }
 
 /**
@@ -109,6 +261,13 @@ export function McpSettingsView({
   onRevoke,
   revokingId,
 }: McpSettingsViewProps) {
+  // The install guide is transient UI; with a token just minted it carries
+  // the real one-time connector URL, otherwise a placeholder.
+  const [guideOpen, setGuideOpen] = useState(false)
+  const guideUrl = justCreated
+    ? getMcpUrl(justCreated.token)
+    : getMcpUrl("YOUR_TOKEN")
+
   return (
     <div className="set-pane sp-mcp">
       <div className="set-h">MCP Access</div>
@@ -116,6 +275,14 @@ export function McpSettingsView({
         Connect your own AI client (Claude Desktop, Claude Code, claude.ai) to
         this workspace&apos;s briefs, PRDs, tickets, and backlog.
       </div>
+
+      {guideOpen && (
+        <McpInstallGuide
+          url={guideUrl}
+          hasRealToken={Boolean(justCreated)}
+          onClose={() => setGuideOpen(false)}
+        />
+      )}
 
       {justCreated && (
         <p className="settings-msg settings-msg-success" role="alert">
@@ -140,6 +307,13 @@ export function McpSettingsView({
             onClick={onDismissCreated}
           >
             Done
+          </button>{" "}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => setGuideOpen(true)}
+          >
+            <IconBook2 size={14} /> How to connect
           </button>
         </p>
       )}
@@ -182,6 +356,14 @@ export function McpSettingsView({
           </p>
         )}
       </div>
+
+      <button
+        type="button"
+        className="btn mcp-guide-open"
+        onClick={() => setGuideOpen(true)}
+      >
+        <IconBook2 size={15} /> Guide to connect to MCP
+      </button>
 
       <div className="set-block">
         {loading ? (

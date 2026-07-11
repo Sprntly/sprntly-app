@@ -484,6 +484,120 @@ def update_issue(
     return {"key": issue_key, "url": url}
 
 
+def _text_from_adf(doc: Any) -> str:
+    """Extract plain text from an ADF document — the inverse of _adf_from_text
+    (paragraphs joined by blank lines, hard breaks as newlines, list items as
+    '- item' lines). Lossy for rich marks (bold/links render as bare text),
+    which is fine: the sync only needs comparable, editable text."""
+    def node_text(n: dict[str, Any]) -> str:
+        t = n.get("type")
+        if t == "text":
+            return n.get("text") or ""
+        if t == "hardBreak":
+            return "\n"
+        return "".join(node_text(c) for c in n.get("content") or [])
+
+    if not isinstance(doc, dict):
+        return str(doc or "")
+    blocks: list[str] = []
+    for block in doc.get("content") or []:
+        if block.get("type") in ("bulletList", "orderedList"):
+            items = [
+                "- " + node_text(li).strip() for li in block.get("content") or []
+            ]
+            blocks.append("\n".join(items))
+        else:
+            blocks.append(node_text(block))
+    return "\n\n".join(b for b in blocks if b.strip()).strip()
+
+
+def get_issue(
+    access_token: str,
+    cloud_id: str,
+    issue_key: str,
+    *,
+    site_url: str | None = None,
+) -> dict[str, Any]:
+    """Fetch an issue's current state and normalize the fields the two-way
+    sync reconciles: workflow state (status name, assignee display name,
+    browse url) plus the CONTENT side (title, description as plain text) and
+    Jira's last-update time (`updated_at`, ISO) so the sync can decide which
+    side of an edit is newer. Mirrors clickup_oauth.get_task — returns {} on
+    any failure so one stale/deleted issue never breaks a whole pull. Pass
+    `site_url` (from _site_url_for_cloud) when fetching many issues so each
+    call doesn't re-resolve accessible-resources."""
+    try:
+        resp = requests.get(
+            f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/issue/{issue_key}",
+            params={"fields": "status,assignee,summary,description,updated"},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+            },
+            timeout=_TIMEOUT,
+        )
+        if not resp.ok:
+            logger.warning(
+                "Jira get_issue failed for %s: %s", issue_key, resp.status_code
+            )
+            return {}
+        fields = (resp.json() or {}).get("fields") or {}
+    except Exception:  # noqa: BLE001 — a per-issue fetch failure is non-fatal
+        logger.warning("Jira get_issue failed for %s", issue_key)
+        return {}
+    assignee = fields.get("assignee") or {}
+    if site_url is None:
+        site_url = _site_url_for_cloud(access_token, cloud_id)
+    return {
+        "status": (fields.get("status") or {}).get("name"),
+        "assignee": assignee.get("displayName") or assignee.get("emailAddress"),
+        "url": f"{site_url}/browse/{issue_key}" if site_url else None,
+        "title": fields.get("summary"),
+        "description": _text_from_adf(fields.get("description")),
+        "updated_at": fields.get("updated"),
+    }
+
+
+def transition_issue(
+    access_token: str, cloud_id: str, issue_key: str, target_status: str
+) -> bool:
+    """Move an issue to the workflow status named `target_status` (the
+    Sprntly→tracker half of two-way status sync). Jira statuses change via
+    TRANSITIONS, not a field write: list the available transitions and apply
+    the one landing on the wanted status (case-insensitive). Returns False —
+    never raises — when no matching transition exists or any call fails;
+    workflows vary per project so this is inherently best-effort."""
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
+    base = f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/issue/{issue_key}/transitions"
+    try:
+        resp = requests.get(base, headers=headers, timeout=_TIMEOUT)
+        if not resp.ok:
+            return False
+        want = target_status.strip().lower()
+        transition_id = next(
+            (
+                t.get("id")
+                for t in (resp.json() or {}).get("transitions") or []
+                if ((t.get("to") or {}).get("name") or "").strip().lower() == want
+            ),
+            None,
+        )
+        if not transition_id:
+            return False
+        done = requests.post(
+            base, json={"transition": {"id": transition_id}},
+            headers=headers, timeout=_TIMEOUT,
+        )
+        return done.ok
+    except Exception:  # noqa: BLE001 — status push is best-effort by design
+        logger.warning("Jira transition failed for %s → %s", issue_key, target_status)
+        return False
+
+
 def _site_url_for_cloud(access_token: str, cloud_id: str) -> str | None:
     """Best-effort lookup of a site's browse base URL (e.g.
     https://acme.atlassian.net) from accessible-resources, for building issue

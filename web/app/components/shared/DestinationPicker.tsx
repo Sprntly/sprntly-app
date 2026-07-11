@@ -4,11 +4,12 @@ import { IconCheck } from "@tabler/icons-react"
 import type { ClickUpList } from "../../lib/api"
 
 /** The push destination picker — a compact popover listing the tracker's
- *  lists/spaces (with their path), a "remember for this PRD" toggle, and a
- *  "Push N tickets" action. Matches the locked reference
- *  (backend/skills/user-stories/examples/sprntly-ticket-views.html): the
- *  destination is chosen here, persisted per PRD, and the field-mapped sync then
- *  runs on the backend. Styled with the shared `.tkv2-picker` classes. */
+ *  lists/projects (with their path) and a "Push N tickets" action. Matches the
+ *  locked reference (backend/skills/user-stories/examples/sprntly-ticket-views.html):
+ *  the destination is chosen here, registered server-side per PRD, and the
+ *  field-mapped sync then runs (and keeps running) on the backend. The
+ *  remember toggle is legacy-optional — destinations now always persist.
+ *  Styled with the shared `.tkv2-picker` classes. */
 export function DestinationPicker({
   tool, lists, selectedId, onSelect, remember, onToggleRemember, count, onPush, onCancel,
 }: {
@@ -16,8 +17,8 @@ export function DestinationPicker({
   lists: ClickUpList[]
   selectedId: string
   onSelect: (id: string) => void
-  remember: boolean
-  onToggleRemember: (v: boolean) => void
+  remember?: boolean
+  onToggleRemember?: (v: boolean) => void
   count: number
   onPush: () => void
   onCancel: () => void
@@ -51,15 +52,21 @@ export function DestinationPicker({
           })}
         </div>
         <div className="tkv2-pfoot">
-          <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-            <input
-              type="checkbox"
-              checked={remember}
-              onChange={(e) => onToggleRemember(e.target.checked)}
-              style={{ accentColor: "var(--green)" }}
-            />
-            Remember for this PRD
-          </label>
+          {onToggleRemember ? (
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
+              <input
+                type="checkbox"
+                checked={remember}
+                onChange={(e) => onToggleRemember(e.target.checked)}
+                style={{ accentColor: "var(--green)" }}
+              />
+              Remember for this PRD
+            </label>
+          ) : (
+            <span style={{ fontSize: 12, color: "var(--soft)" }}>
+              Stays in sync automatically after the first push
+            </span>
+          )}
           <button
             type="button"
             className="tkv2-btn2 tkv2-btn2--primary"

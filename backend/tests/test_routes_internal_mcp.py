@@ -353,6 +353,91 @@ def test_list_tickets_flattens_stories_company_scoped(isolated_settings, monkeyp
     assert {t["prd_id"] for t in body["tickets"]} == {1, 2}
 
 
+def _seed_sync_state(db, *, company_id: str, prd_id: int, statuses: dict) -> None:
+    db.table("prd_ticket_sync").insert(
+        {
+            "company_id": company_id,
+            "prd_id": prd_id,
+            "provider": "clickup",
+            "destination_id": "list-1",
+            "destination_name": "Sprint 12",
+            "last_synced_at": "2026-07-10T12:00:00+00:00",
+            "statuses": statuses,
+        }
+    ).execute()
+
+
+def test_list_tickets_carries_tracker_state(isolated_settings, monkeypatch):
+    """A PRD synced to a tracker exposes each ticket's pulled tracker
+    status/url on the list (passive read — the sync itself runs server-side)."""
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_tickets(db, company_id=cid, prd_id=1, stories=[
+        {"id": "tkt-1", "title": "Synced", "ticket_type": "feature"},
+        {"id": "tkt-2", "title": "Not pushed yet", "ticket_type": "bug"},
+    ])
+    _seed_sync_state(db, company_id=cid, prd_id=1, statuses={
+        "tkt-1": {"status": "in progress", "assignee": "Sam", "url": "https://cu/1"},
+    })
+
+    r = client.get("/internal/mcp/tickets", params={"company_id": cid}, headers=_headers())
+    assert r.status_code == 200, r.text
+    by_id = {t["id"]: t for t in r.json()["tickets"]}
+    assert by_id["prd-1-tkt-1"]["tracker_provider"] == "clickup"
+    assert by_id["prd-1-tkt-1"]["tracker_status"] == "in progress"
+    assert by_id["prd-1-tkt-1"]["tracker_url"] == "https://cu/1"
+    # A ticket the tracker hasn't seen yet: provider known, no status/url.
+    assert by_id["prd-1-tkt-2"]["tracker_provider"] == "clickup"
+    assert by_id["prd-1-tkt-2"]["tracker_status"] is None
+
+
+def test_get_ticket_carries_tracker_state(isolated_settings, monkeypatch):
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_tickets(db, company_id=cid, prd_id=7, stories=[
+        {"id": "tkt-1", "title": "Synced", "ticket_type": "feature"},
+    ])
+    _seed_sync_state(db, company_id=cid, prd_id=7, statuses={
+        "tkt-1": {"status": "Done", "assignee": "Ada", "url": "https://cu/1"},
+    })
+
+    r = client.get(
+        "/internal/mcp/tickets/prd-7-tkt-1/data",
+        params={"company_id": cid}, headers=_headers(),
+    )
+    assert r.status_code == 200, r.text
+    tracker = r.json()["tracker"]
+    assert tracker == {
+        "provider": "clickup",
+        "destination_name": "Sprint 12",
+        "status": "Done",
+        "assignee": "Ada",
+        "url": "https://cu/1",
+        "last_synced_at": "2026-07-10T12:00:00+00:00",
+        "last_error": None,
+    }
+
+
+def test_get_ticket_tracker_none_when_never_pushed(isolated_settings, monkeypatch):
+    client = _client(isolated_settings, monkeypatch)
+    db = isolated_settings["supabase"]
+    cid = uuid.uuid4().hex
+    _seed_company_and_member(db, company_id=cid, slug="acme", user_id="u-a")
+    _seed_prd_tickets(db, company_id=cid, prd_id=7, stories=[
+        {"id": "tkt-1", "title": "Local only", "ticket_type": "feature"},
+    ])
+    r = client.get(
+        "/internal/mcp/tickets/prd-7-tkt-1/data",
+        params={"company_id": cid}, headers=_headers(),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["tracker"] is None
+
+
 def test_list_tickets_empty_when_none(isolated_settings, monkeypatch):
     client = _client(isolated_settings, monkeypatch)
     cid = uuid.uuid4().hex

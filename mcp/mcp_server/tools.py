@@ -270,7 +270,14 @@ def register_tools(mcp: FastMCP) -> None:
         merged with any edits, plus its comments and attachments. This is what
         you read to implement a ticket. `ticket_key` is the exact `id`
         returned by list_tickets (it looks like "prd-42-a1b2c3d4e5f6") —
-        treat it as an opaque string and pass it back unchanged."""
+        treat it as an opaque string and pass it back unchanged. When the
+        ticket's PRD syncs with a task tracker (ClickUp/Jira), `tracker`
+        carries its state there (provider, status, assignee, url,
+        last_synced_at); null when the tickets were never pushed. The sync is
+        automatic, server-side, and TWO-WAY: edits made with the update tools
+        reach the tracker on the next pass, and edits/status moves made in
+        the tracker flow back into the ticket (newest edit wins) — so re-read
+        a ticket before making large edits."""
         return await _get_ticket_impl(ticket_key)
 
     @mcp.tool()
@@ -278,13 +285,15 @@ def register_tools(mcp: FastMCP) -> None:
         status: str | None = None, ticket_type: str | None = None
     ) -> dict:
         """List the tickets ASSIGNED TO YOU (the token owner) with each
-        ticket's current status (id, title, type, status, priority, prd_id).
-        Tickets assigned to teammates or not yet assigned to anyone are never
-        returned — assignment happens in the Sprntly app. Optionally filter by
-        `status` (e.g. "In progress") or `ticket_type`. Each ticket's `id`
-        (an opaque key like "prd-42-a1b2c3d4e5f6") is the ticket_key for
-        get_ticket and every update tool — pass it back exactly as returned,
-        never shorten or re-derive it."""
+        ticket's current status (id, title, type, status, priority, prd_id,
+        plus tracker_provider/tracker_status/tracker_url when the PRD syncs
+        with a task tracker). Tickets assigned to teammates or not yet
+        assigned to anyone are never returned — assignment happens in the
+        Sprntly app. Optionally filter by `status` (e.g. "In progress") or
+        `ticket_type`. Each ticket's `id` (an opaque key like
+        "prd-42-a1b2c3d4e5f6") is the ticket_key for get_ticket and every
+        update tool — pass it back exactly as returned, never shorten or
+        re-derive it."""
         return await _list_tickets_impl(status=status, ticket_type=ticket_type)
 
     @mcp.tool()

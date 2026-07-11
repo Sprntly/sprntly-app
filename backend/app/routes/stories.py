@@ -347,6 +347,120 @@ def push_jira(
     return result
 
 
+# ── Two-way tracker sync (per-PRD) ───────────────────────────────────────────
+#
+# The first manual push registers the PRD's destination (a prd_ticket_sync
+# row); from then on the scheduler auto-syncs it on an interval and the web's
+# sync button triggers the same pass ad-hoc. A pass reconciles BOTH directions
+# per ticket with last-writer-wins: local edits (web + MCP, from ticket_edits)
+# push out; tracker-side edits and status moves import back as overrides (see
+# app.stories.sync). Sync runs in the background: POST returns immediately
+# with {status: "syncing"} and the client polls GET until sync_status is back
+# to "idle".
+
+
+class SyncTriggerIn(BaseModel):
+    """Optional destination for the FIRST push (or a tool/destination switch).
+    Omit all fields to re-sync the already-configured destination."""
+
+    provider: str | None = Field(default=None)
+    destination_id: str | None = Field(default=None, min_length=1)
+    destination_name: str | None = None
+
+
+def _public_sync_state(cfg: dict | None) -> dict:
+    """The sync row as the web/MCP read it. A 'syncing' older than the stale
+    window reports as idle so a crashed run never wedges the button."""
+    from app.stories.sync import sync_in_flight
+
+    if cfg is None:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "provider": cfg.get("provider"),
+        "destination_id": cfg.get("destination_id"),
+        "destination_name": cfg.get("destination_name"),
+        "auto_sync": bool(cfg.get("auto_sync")),
+        "sync_status": "syncing" if sync_in_flight(cfg) else "idle",
+        "last_synced_at": cfg.get("last_synced_at"),
+        "last_error": cfg.get("last_error"),
+        "statuses": cfg.get("statuses") or {},
+    }
+
+
+@router.get("/sync/{prd_id}")
+def sync_state(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company),
+):
+    """This PRD's tracker-sync state: destination, whether a sync is running,
+    when it last completed, and the pulled per-ticket tracker statuses.
+    `configured: false` means the tickets were never pushed anywhere."""
+    from app.db.ticket_sync import get_sync_config
+
+    return _public_sync_state(get_sync_config(company.company_id, prd_id))
+
+
+@router.post("/sync/{prd_id}")
+async def trigger_sync(
+    prd_id: int,
+    body: SyncTriggerIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Run a two-way sync pass for this PRD's tickets, in the background.
+
+    First push: pass `provider` + `destination_id` (a ClickUp list / Jira
+    project) to register the destination — the same call also switches an
+    existing PRD to a different tool/destination. With no body fields the
+    already-configured destination re-syncs. 404 when nothing is configured
+    and no destination was given. Poll GET /sync/{prd_id} for completion.
+    """
+    from app.db.ticket_sync import get_sync_config, mark_syncing, upsert_sync_config
+    from app.stories.sync import (
+        run_prd_sync,
+        sync_in_flight,
+        ticket_sync_providers,
+    )
+
+    if (body.provider is None) != (body.destination_id is None):
+        raise HTTPException(400, "provider and destination_id go together")
+    if body.provider is not None:
+        # Eligibility is type-driven: the provider must be a task-tracking
+        # connector (app/connectors/catalog.py) the sync engine implements.
+        if body.provider not in ticket_sync_providers():
+            raise HTTPException(
+                400,
+                f"{body.provider!r} is not a task-tracking connector tickets can sync with",
+            )
+        upsert_sync_config(
+            company.company_id, prd_id,
+            provider=body.provider,
+            destination_id=body.destination_id,
+            destination_name=body.destination_name,
+        )
+
+    cfg = get_sync_config(company.company_id, prd_id)
+    if cfg is None:
+        raise HTTPException(404, "This PRD's tickets were never pushed — pick a destination first")
+    if sync_in_flight(cfg):
+        return {"status": "syncing"}
+
+    # Mark before spawning so a GET between this response and the thread
+    # starting already reads "syncing" (no idle flash in the UI).
+    mark_syncing(company.company_id, prd_id)
+
+    async def _run() -> None:
+        try:
+            await asyncio.to_thread(run_prd_sync, company.company_id, prd_id)
+        except Exception:  # noqa: BLE001 — recorded on the row by run_prd_sync
+            logger.exception("ad-hoc ticket sync failed for prd %s", prd_id)
+
+    task = asyncio.create_task(_run())
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return {"status": "syncing"}
+
+
 class PullStatusIn(BaseModel):
     list_id: str = Field(..., min_length=1)
     ticket_ids: list[str] = Field(..., min_length=1)

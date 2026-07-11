@@ -79,6 +79,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "enterprise_config": {"overrides"},
     "ticket_edits":      {"acceptance_criteria", "assignee", "subtasks"},
     "prd_tickets":       {"stories"},
+    "prd_ticket_sync":   {"statuses"},
     "prd_input_questions": {"options"},
     "design_agent_map_cache": {"payload"},
     "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
@@ -178,6 +179,14 @@ class _Query:
         """Case-insensitive match. SQLite's LIKE is ASCII case-insensitive,
         which mirrors PostgREST `.ilike` for the GitHub-login lookup that uses
         it (logins carry no %/_ wildcards)."""
+        self._raw_where.append(f"{col} LIKE ?")
+        self._raw_args.append(val)
+        return self
+
+    def like(self, col: str, val: Any) -> "_Query":
+        """Pattern match (PostgREST `.like`). SQLite LIKE is ASCII
+        case-insensitive where Postgres LIKE is sensitive — fine for our
+        callers (prefix matches on lowercase ticket keys)."""
         self._raw_where.append(f"{col} LIKE ?")
         self._raw_args.append(val)
         return self

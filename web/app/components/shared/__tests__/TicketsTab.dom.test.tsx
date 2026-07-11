@@ -2,9 +2,11 @@
 //
 // TicketsTab is the "Create ticket" surface: it breaks the current PRD into
 // real tickets via the user-stories skill (POST /v1/stories/generate) and
-// pushes the reviewed set into ClickUp (POST /v1/stories/push). These tests
-// mock the api client + context hooks and assert the generate→render→push wiring
-// (replacing the old hardcoded mock tickets).
+// syncs the reviewed set with the workspace's tracker through ONE button:
+// Connect (nothing connected) → Push to <tool> (first push registers the
+// destination) → Syncing…/Synced Xm ago (backend auto-syncs; click = sync
+// now). These tests mock the api client + context hooks and assert the
+// generate→render→sync wiring.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -16,19 +18,23 @@ vi.hoisted(() => {
   ;(globalThis as Record<string, unknown>).React = require("react")
 })
 
-// Defensive stub: nothing in the TicketsTab tree drives navigation now, but
-// keep next/navigation mocked so any incidental useRouter() call is harmless.
+// The connect-a-tracker button routes to Settings → Connectors; capture pushes.
+const routerPush = vi.hoisted(() => vi.fn())
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push: routerPush, replace: vi.fn(), prefetch: vi.fn() }),
 }))
 
-const { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus, getData, teamList } = vi.hoisted(() => ({
+const {
+  getForPrd, generate, getJob, listClickUpLists, listJiraProjects,
+  getSyncState, triggerSync, getData, teamList,
+} = vi.hoisted(() => ({
   getForPrd: vi.fn(),
   generate: vi.fn(),
   getJob: vi.fn(),
   listClickUpLists: vi.fn(),
-  pushToClickUp: vi.fn(),
-  pullClickUpStatus: vi.fn(),
+  listJiraProjects: vi.fn(),
+  getSyncState: vi.fn(),
+  triggerSync: vi.fn(),
   getData: vi.fn(),
   teamList: vi.fn(),
 }))
@@ -36,16 +42,21 @@ vi.mock("../../../lib/api", async (orig) => {
   const actual = await orig<typeof import("../../../lib/api")>()
   return {
     ...actual,
-    storiesApi: { getForPrd, generate, getJob, listClickUpLists, pushToClickUp, pullClickUpStatus },
+    storiesApi: {
+      getForPrd, generate, getJob, listClickUpLists, listJiraProjects,
+      getSyncState, triggerSync,
+    },
     ticketDataApi: { ...actual.ticketDataApi, getData },
     teamApi: { list: teamList },
   }
 })
 
-// Default: no persisted tickets → the tab regenerates (matches first-open).
-// Individual tests override getForPrd to exercise the cache-hit path.
+// Default: no persisted tickets → the tab regenerates (matches first-open);
+// no sync destination yet. Individual tests override these.
 beforeEach(() => {
   getForPrd.mockResolvedValue({ status: "none", fresh: false, stories: [] })
+  getSyncState.mockResolvedValue({ configured: false })
+  triggerSync.mockResolvedValue({ status: "syncing" })
   getData.mockResolvedValue({
     description: null, acceptance_criteria: null, title: null, priority: null,
     status: null, sprint: null, assignee: null, attachments: [], comments: [],
@@ -186,7 +197,7 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     expect(screen.queryByTestId("tickets-error")).toBeNull()
   })
 
-  it("shows a connect-ClickUp toast (no auto-push) when ClickUp isn't connected", async () => {
+  it("with no tracker connected, the button routes to Settings → Connectors", async () => {
     content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: [] }
     generate.mockResolvedValue({ job_id: 3, status: "generating" })
     getJob.mockResolvedValue({ job_id: 3, status: "ready", stories: [
@@ -198,13 +209,12 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     })
     await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
 
-    // The Push button is shown at the top even when not connected…
+    // No tool connected → the tracker button becomes the connect entry point.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /push to clickup/i }))
+      fireEvent.click(screen.getByRole("button", { name: /connect a tracker/i }))
     })
-    // …but it points to Settings instead of pushing.
     expect(listClickUpLists).not.toHaveBeenCalled()
-    expect(showToast).toHaveBeenCalledWith("ClickUp not connected", expect.stringMatching(/Settings/i))
+    expect(routerPush).toHaveBeenCalledWith("/settings?section=connectors")
   })
 
   it("clicking a ticket opens the editable detail; Back returns to the list", async () => {
@@ -242,77 +252,147 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     expect(screen.getByText(/generate a PRD first/i)).toBeTruthy()
   })
 
-  it("pushing fetches ClickUp lists, opens the destination picker, then creates the tickets", async () => {
-    window.localStorage.clear()
+  it("first push: fetches ClickUp lists, opens the picker, registers the destination via triggerSync", async () => {
     content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
     const stories = [{ title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
     generate.mockResolvedValue({ job_id: 12, status: "generating" })
     getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
     listClickUpLists.mockResolvedValue({ lists: [{ id: "list-1", name: "Sprint", space: "Product", folder: null }] })
-    pushToClickUp.mockResolvedValue({ created: [{ story: "T1", task_id: "cu-1", url: "http://x" }], errors: [] })
 
     await act(async () => {
       render(React.createElement(TicketsTab))
     })
     await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
 
-    // First push click (top-bar button) → fetch lists and open the picker.
+    // One connected tool → the button is labeled for it; click opens the picker.
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /push to clickup/i }))
     })
     expect(listClickUpLists).toHaveBeenCalled()
     await waitFor(() => expect(screen.getByText(/select a project/i)).toBeTruthy())
 
-    // The picker's "Push N tickets" action → push the reviewed stories.
+    // The picker's "Push N tickets" action → register the destination and run
+    // the first sync (the backend keeps it synced automatically after this).
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /push 1 ticket/i }))
     })
-    expect(pushToClickUp).toHaveBeenCalledWith("list-1", stories)
-    // "Remember for this PRD" is on by default → the destination is persisted.
-    expect(window.localStorage.getItem("sprntly_ticket_dest_7")).toBe("list-1")
+    expect(triggerSync).toHaveBeenCalledWith(7, {
+      provider: "clickup", destination_id: "list-1", destination_name: "Sprint",
+    })
   })
 
-  it("a remembered destination pushes straight through without re-opening the picker", async () => {
-    window.localStorage.clear()
-    window.localStorage.setItem("sprntly_ticket_dest_7", "list-1")
+  it("a configured PRD shows Synced-ago and an ad-hoc click re-syncs (no picker)", async () => {
     content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
     const stories = [{ title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
     generate.mockResolvedValue({ job_id: 12, status: "generating" })
     getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
-    listClickUpLists.mockResolvedValue({ lists: [{ id: "list-1", name: "Sprint", space: "Product", folder: null }] })
-    pushToClickUp.mockResolvedValue({ created: [{ story: "T1", task_id: "cu-1", url: "http://x" }], errors: [] })
+    getSyncState.mockResolvedValue({
+      configured: true, provider: "clickup", destination_id: "list-1",
+      destination_name: "Sprint", sync_status: "idle",
+      last_synced_at: new Date(Date.now() - 5 * 60_000).toISOString(),
+      last_error: null, statuses: {},
+    })
 
     await act(async () => {
       render(React.createElement(TicketsTab))
     })
     await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
+    const btn = await screen.findByRole("button", { name: /synced 5m ago/i })
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /push to clickup/i }))
-    })
-    // No picker — pushed directly to the remembered list.
+    await act(async () => { fireEvent.click(btn) })
+    // Ad-hoc sync of the registered destination — no destination re-pick.
+    expect(triggerSync).toHaveBeenCalledWith(7)
     expect(screen.queryByText(/select a project/i)).toBeNull()
-    expect(pushToClickUp).toHaveBeenCalledWith("list-1", stories)
   })
 
-  it("Sync from ClickUp pulls status back and shows it on the ticket card", async () => {
-    window.localStorage.clear()
-    window.localStorage.setItem("sprntly_ticket_dest_7", "list-1")  // already pushed
+  it("shows Syncing… (disabled) while the backend reports a run in flight", async () => {
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories: [
+      { title: "T1", body: "", acceptance_criteria: [], priority: null, route: null },
+    ] })
+    getSyncState.mockResolvedValue({
+      configured: true, provider: "clickup", destination_id: "list-1",
+      destination_name: "Sprint", sync_status: "syncing",
+      last_synced_at: null, last_error: null, statuses: {},
+    })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    const btn = await screen.findByRole("button", { name: /syncing/i })
+    expect((btn as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText(/Syncing 1 ticket with ClickUp/i)).toBeTruthy()
+  })
+
+  it("persisted tracker statuses from the sync state render on the ticket cards", async () => {
     content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
     const stories = [{ id: "tk-1", title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
     generate.mockResolvedValue({ job_id: 12, status: "generating" })
     getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
-    pullClickUpStatus.mockResolvedValue({ statuses: { "tk-1": { status: "in progress", assignee: "nadia", url: "u" } } })
+    getSyncState.mockResolvedValue({
+      configured: true, provider: "clickup", destination_id: "list-1",
+      destination_name: "Sprint", sync_status: "idle",
+      last_synced_at: new Date().toISOString(), last_error: null,
+      statuses: { "tk-1": { status: "in progress", assignee: "nadia", url: "u" } },
+    })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    // No click needed — the persisted pull renders directly.
+    await waitFor(() => expect(screen.getByText(/ClickUp: in progress/i)).toBeTruthy())
+  })
+
+  it("with several tools connected, the button opens a tool menu (Jira push flows through it)", async () => {
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup", "jira"] }
+    const stories = [{ title: "T1", body: "", acceptance_criteria: [], priority: "P0", route: null }]
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories })
+    listJiraProjects.mockResolvedValue({ projects: [{ id: "10001", key: "SPR", name: "Sprntly Core" }] })
 
     await act(async () => {
       render(React.createElement(TicketsTab))
     })
     await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
 
+    // Multiple trackers → generic label opening the tool menu.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /sync from clickup/i }))
+      fireEvent.click(screen.getByRole("button", { name: /push to tracker/i }))
     })
-    expect(pullClickUpStatus).toHaveBeenCalledWith("list-1", ["tk-1"])
-    await waitFor(() => expect(screen.getByText(/ClickUp: in progress/i)).toBeTruthy())
+    expect(screen.getByText(/sync these tickets with/i)).toBeTruthy()
+
+    // Pick Jira → its projects load into the destination picker.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^jira$/i }))
+    })
+    expect(listJiraProjects).toHaveBeenCalled()
+    await waitFor(() => expect(screen.getByText("Sprntly Core")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /push 1 ticket/i }))
+    })
+    // Jira pushes with the project KEY as the destination id.
+    expect(triggerSync).toHaveBeenCalledWith(7, {
+      provider: "jira", destination_id: "SPR", destination_name: "Sprntly Core",
+    })
+  })
+
+  it("surfaces the last sync error under the header when idle", async () => {
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories: [
+      { title: "T1", body: "", acceptance_criteria: [], priority: null, route: null },
+    ] })
+    getSyncState.mockResolvedValue({
+      configured: true, provider: "clickup", destination_id: "list-1",
+      destination_name: "Sprint", sync_status: "idle",
+      last_synced_at: null, last_error: "ClickUp is not connected", statuses: {},
+    })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByText(/Last sync had problems/i)).toBeTruthy())
   })
 })

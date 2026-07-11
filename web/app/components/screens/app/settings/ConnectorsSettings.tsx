@@ -25,6 +25,7 @@ import { useNavigation } from "../../../../context/NavigationContext"
 import {
   CONNECTOR_CATALOG,
   CONNECTOR_IDS_WITH_OAUTH,
+  CONNECTOR_TYPE_LABELS,
   connectableCatalog,
 } from "../../../../lib/connectorsCatalog"
 import {
@@ -233,6 +234,16 @@ export function ConnectorsSettingsView({
                 <div className={`s${state.disconnected ? " is-disconnected" : ""}`}>
                   {state.statsString}
                 </div>
+              </div>
+              {/* Middle column: what this tool IS (multi-valued) — the same
+                  types that drive feature availability (e.g. task-tracking →
+                  the tickets sync button). */}
+              <div className="set-conn-types">
+                {(item.types ?? []).map((tp) => (
+                  <span key={tp} className="set-conn-type">
+                    {CONNECTOR_TYPE_LABELS[tp]}
+                  </span>
+                ))}
               </div>
               <span
                 className={`st ${

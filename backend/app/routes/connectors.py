@@ -141,10 +141,16 @@ def _public_connection(row: dict) -> dict:
     # "@octocat" for GitHub, the user's email for Google). google_email
     # is preserved for the existing Drive frontend; new providers should
     # read account_label.
+    from app.connectors.catalog import types_for
+
     return {
         "id": row["id"],
         "provider": row["provider"],
         "status": row["status"],
+        # What this provider IS (multi-valued, e.g. ["task-tracking"]) — the
+        # web derives feature availability (ticket sync, …) from these
+        # instead of hardcoding provider names. See app/connectors/catalog.py.
+        "types": types_for(row["provider"]),
         "google_email": row.get("google_email"),
         "account_label": row.get("account_label") or row.get("google_email"),
         "scopes": row.get("scopes") or "",
@@ -214,6 +220,7 @@ def connector_status(
     Backs the Settings status indicators: per provider, whether it has a
     background ingest puller and its last_sync_at / last_sync_error stamp
     (set by the auto-sync-on-connect kickoff and by manual /v1/ingest runs)."""
+    from app.connectors.catalog import types_for
     from app.kg_ingest.runner import PULLERS
 
     rows = _visible_connection_rows(company)
@@ -223,6 +230,7 @@ def connector_status(
         out.append({
             "provider": provider,
             "status": r["status"],
+            "types": types_for(provider),
             "account_label": r.get("account_label") or r.get("google_email"),
             "ingestable": provider in PULLERS,
             "last_sync_at": r.get("last_sync_at"),

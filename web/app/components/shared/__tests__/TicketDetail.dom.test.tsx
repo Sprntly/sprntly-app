@@ -249,6 +249,32 @@ describe("TicketDetail", () => {
     })
   })
 
+  it("Send shows Sending… and locks until the comment request settles", async () => {
+    // Deferred promise: hold the request open to observe the in-flight state.
+    let resolveAdd: (c: unknown) => void = () => {}
+    api.addComment.mockReturnValue(new Promise((res) => { resolveAdd = res }))
+    await renderDetail()
+
+    await act(async () => {
+      fireEvent.change(screen.getByPlaceholderText("Ask about this ticket…"), {
+        target: { value: "First!" },
+      })
+      fireEvent.click(screen.getByRole("button", { name: /send/i }))
+    })
+    // In flight: label swaps, button + input lock, re-clicks can't double-post.
+    const btn = screen.getByRole("button", { name: /sending…/i }) as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    fireEvent.click(btn)
+    expect(api.addComment).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      resolveAdd({ id: 9, author: "Ada", body: "First!", time: "2026-07-11 12:00:00+00" })
+    })
+    // Settled: back to Send, input cleared for the next comment.
+    expect(screen.getByRole("button", { name: /^send$/i })).toBeTruthy()
+    expect((screen.getByPlaceholderText("Ask about this ticket…") as HTMLInputElement).value).toBe("")
+  })
+
   it("posting a comment persists via addComment and shows the server-resolved author", async () => {
     // The backend attributes the comment to the signed-in user and echoes it
     // back; the client sends only the body.
