@@ -7,16 +7,19 @@ name: Deploy backend (staging + prod)
 #                                     sprintly.service on :8000)
 # The target environment is resolved from github.ref (see the job-level `env`
 # block) and passed into the on-box script via appleboy's `envs:`. Both stacks
-# live on the SAME EC2 box and (for now) share ONE backend/.env — the staging
-# clone's backend/.env is a symlink to the prod one, so secrets/DB are identical
-# until we split envs. See branch/deploy design notes in the PR.
+# live on the SAME EC2 box. The staging clone (~/Sprntly-staging) has its OWN
+# real backend/.env (staging FRONTEND_URL/ALLOWED_ORIGINS), but its Supabase
+# URL/keys are repointed at the PROD project so connectors (rows + encrypted
+# OAuth tokens) are shared with prod and OAuth callbacks work on staging without
+# separate app registration. See BRANCHING.md.
 #
 # Schema safety: a `migrate` job applies any pending Supabase migrations BEFORE
 # the backend restarts, so code never goes live against a schema missing its
-# tables. Because staging and prod share ONE Supabase project (same .env), the
-# migrate job hits the same DB from either branch — it's idempotent (db push
-# only applies migrations not yet recorded), so a staging deploy applying a new
-# migration is a no-op when prod later deploys the same commit.
+# tables. Because staging and prod now share ONE Supabase project (staging
+# repointed at prod), the migrate job hits the same DB from either branch — it's
+# idempotent (db push only applies migrations not yet recorded), so a staging
+# deploy applying a new migration is a no-op when prod later deploys the same
+# commit.
 #
 # Full docs (SUPABASE_DB_URL secret, scripts/apply_migrations.py, backfill):
 # supabase/MIGRATIONS.md
@@ -58,10 +61,14 @@ jobs:
           # Session-mode pooler connection string from the Supabase dashboard
           # (Settings -> Database -> Connection pooling -> Mode: Session). The
           # GitHub runner is IPv4-only, so the IPv6 direct host can't be used —
-          # the pooler is the IPv4 path. Per-branch: prod migrates the prod DB,
-          # staging (main) migrates the SEPARATE dev project (sprntly-dev) via
-          # SUPABASE_DB_URL_DEV — so staging schema changes never touch prod.
-          SUPABASE_DB_URL: ${{ github.ref == 'refs/heads/production' && secrets.SUPABASE_DB_URL || secrets.SUPABASE_DB_URL_DEV }}
+          # the pooler is the IPv4 path. SHARED DB: staging is repointed at the
+          # prod Supabase project, so BOTH branches migrate the prod DB via
+          # SUPABASE_DB_URL. `db push` is idempotent (only applies migrations not
+          # yet recorded), so staging applying a new migration is a no-op when
+          # prod later deploys the same commit. Restore the
+          # `production && SUPABASE_DB_URL || SUPABASE_DB_URL_DEV` split to
+          # re-isolate staging's schema later.
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           if [ -z "$SUPABASE_DB_URL" ]; then
             echo "::warning title=Migrations skipped::SUPABASE_DB_URL secret is not set — pending migrations were NOT applied. Add the Session-mode pooler connection string from the Supabase dashboard to enable auto-apply. Until then, prod schema can drift."
