@@ -1,0 +1,18 @@
+[Unit]
+Description=Sprntly STAGING MCP server (api.staging.sprntly.ai/mcp)
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/Sprntly-staging/mcp
+# Own mcp/.env (BACKEND_URL -> :8010 staging backend, MCP_ALLOWED_HOSTS ->
+# api.staging.sprntly.ai). Bootstrapped by deploy-mcp.yml. BACKEND_INTERNAL_KEY
+# is read from the (symlinked) staging backend/.env so it matches prod's.
+EnvironmentFile=/home/ec2-user/Sprntly-staging/mcp/.env
+ExecStart=/home/ec2-user/Sprntly-staging/mcp/.venv/bin/uvicorn mcp_server.__main__:app --host 127.0.0.1 --port 8013
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

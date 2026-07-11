@@ -1,23 +1,29 @@
-name: Deploy backend to api.sprntly.ai
+name: Deploy backend (staging + prod)
 
-# SSHes to EC2, fast-forwards ~/Sprntly to origin/main (the on-box clone
-# tracks Sprntly/sprntly-app, where the canonical backend lives), pip-installs,
-# and restarts sprintly.service. Demo backend changes do NOT go through here —
-# only sprntly-app deploys the backend.
+# Dual-target backend deploy.
+#   push to main        -> STAGING  (api.staging.sprntly.ai, ~/Sprntly-staging,
+#                                     sprintly-staging.service on :8010)
+#   push to production  -> PROD     (api.sprntly.ai,        ~/Sprntly,
+#                                     sprintly.service on :8000)
+# The target environment is resolved from github.ref (see the job-level `env`
+# block) and passed into the on-box script via appleboy's `envs:`. Both stacks
+# live on the SAME EC2 box and (for now) share ONE backend/.env — the staging
+# clone's backend/.env is a symlink to the prod one, so secrets/DB are identical
+# until we split envs. See branch/deploy design notes in the PR.
 #
-# Schema safety (added after a prod incident): a `migrate` job applies any
-# pending Supabase migrations BEFORE the backend restarts, so code can never go
-# live against a schema that's missing its tables. Prod migrations used to be
-# applied by hand, which silently drifted and broke a feature (multi_agent_docs
-# / ticket / drip tables were missing). The migration history was baselined
-# (all existing migrations marked applied) so `db push` only applies NEW ones.
+# Schema safety: a `migrate` job applies any pending Supabase migrations BEFORE
+# the backend restarts, so code never goes live against a schema missing its
+# tables. Because staging and prod share ONE Supabase project (same .env), the
+# migrate job hits the same DB from either branch — it's idempotent (db push
+# only applies migrations not yet recorded), so a staging deploy applying a new
+# migration is a no-op when prod later deploys the same commit.
 #
-# Full docs (how to set the SUPABASE_DB_URL secret, the standalone
-# scripts/apply_migrations.py runner, and the backfill): supabase/MIGRATIONS.md
+# Full docs (SUPABASE_DB_URL secret, scripts/apply_migrations.py, backfill):
+# supabase/MIGRATIONS.md
 
 on:
   push:
-    branches: [main]
+    branches: [main, production]
     paths:
       - 'backend/**'
       - 'supabase/migrations/**'
@@ -25,8 +31,17 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: deploy-backend
+  # Separate lanes per environment so a staging deploy never cancels/queues
+  # behind a prod deploy (and vice versa).
+  group: deploy-backend-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  IS_PROD: ${{ github.ref == 'refs/heads/production' }}
+  DEPLOY_BRANCH: ${{ github.ref == 'refs/heads/production' && 'production' || 'main' }}
+  CLONE_DIR:     ${{ github.ref == 'refs/heads/production' && 'Sprntly' || 'Sprntly-staging' }}
+  SERVICE:       ${{ github.ref == 'refs/heads/production' && 'sprintly' || 'sprintly-staging' }}
+  PORT:          ${{ github.ref == 'refs/heads/production' && '8000' || '8010' }}
 
 jobs:
   # Apply pending DB migrations first. Gates the deploy: if a migration fails,
@@ -41,10 +56,12 @@ jobs:
       - name: Apply pending Supabase migrations (db push)
         env:
           # Session-mode pooler connection string from the Supabase dashboard
-          # (Settings → Database → Connection pooling → Mode: Session). The
+          # (Settings -> Database -> Connection pooling -> Mode: Session). The
           # GitHub runner is IPv4-only, so the IPv6 direct host can't be used —
-          # the pooler is the IPv4 path. Stored as a repo/org secret.
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # the pooler is the IPv4 path. Per-branch: prod migrates the prod DB,
+          # staging (main) migrates the SEPARATE dev project (sprntly-dev) via
+          # SUPABASE_DB_URL_DEV — so staging schema changes never touch prod.
+          SUPABASE_DB_URL: ${{ github.ref == 'refs/heads/production' && secrets.SUPABASE_DB_URL || secrets.SUPABASE_DB_URL_DEV }}
         run: |
           if [ -z "$SUPABASE_DB_URL" ]; then
             echo "::warning title=Migrations skipped::SUPABASE_DB_URL secret is not set — pending migrations were NOT applied. Add the Session-mode pooler connection string from the Supabase dashboard to enable auto-apply. Until then, prod schema can drift."
@@ -58,7 +75,7 @@ jobs:
           # PRs land close together) is "out of order" and `db push` aborts with
           # "Found local migration files to be inserted before the last migration
           # on remote database", blocking the whole deploy. All migration files
-          # in main are intended to apply, so include-all is the safe default.
+          # in the branch are intended to apply, so include-all is the safe default.
           supabase db push --db-url "$SUPABASE_DB_URL" --yes --include-all
 
   deploy:
@@ -72,31 +89,28 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script_stop: true
+          envs: IS_PROD,DEPLOY_BRANCH,CLONE_DIR,SERVICE,PORT
           script: |
             set -e
-            cd ~/Sprntly
-            git fetch --quiet origin main
-            git reset --hard origin/main
+            echo "Deploying branch=$DEPLOY_BRANCH -> ~/$CLONE_DIR ($SERVICE on :$PORT, prod=$IS_PROD)"
+            cd ~/$CLONE_DIR
+            git fetch --quiet origin $DEPLOY_BRANCH
+            git reset --hard origin/$DEPLOY_BRANCH
             # Persistent uploads dir lives outside the repo so git resets don't
-            # wipe user data. First deploy after the dynamic-datasets PR
-            # migrates the existing asurion corpus into place.
+            # wipe user data. Shared with staging under the same .env for now.
             sudo mkdir -p /var/lib/sprntly/data
             sudo chown -R $(whoami):$(whoami) /var/lib/sprntly
-            if [ -d ~/Sprntly/backend/data/asurion ] && [ ! -d /var/lib/sprntly/data/asurion ]; then
-              cp -R ~/Sprntly/backend/data/asurion /var/lib/sprntly/data/asurion
+            if [ -d ~/$CLONE_DIR/backend/data/asurion ] && [ ! -d /var/lib/sprntly/data/asurion ]; then
+              cp -R ~/$CLONE_DIR/backend/data/asurion /var/lib/sprntly/data/asurion
               echo "Migrated asurion dataset into /var/lib/sprntly/data/"
             fi
             cd backend
             ./.venv/bin/pip install -q -r requirements.txt
             # Provision Playwright's headless Chromium + its OS libraries for the
-            # design-agent "Website" design-source extractor. `pip install
-            # playwright` ships the package but NOT the browser; the Dockerfile
-            # installs it, but prod runs bare systemd (not the image), so without
-            # this every Website-source prototype fell back to low-confidence
-            # styling. Idempotent + guarded on the browser binary so it only runs
-            # on first provision / after a Chromium version bump — a no-op
-            # (instant) on normal deploys. AL2023 uses dnf (Playwright's
-            # install-deps is Debian-only), so the libs are listed explicitly.
+            # design-agent "Website" design-source extractor. Idempotent + guarded
+            # on the browser binary so it only runs on first provision / after a
+            # Chromium version bump — a no-op (instant) on normal deploys. The
+            # ms-playwright cache is per-user, so staging and prod share it.
             if ! ls ~/.cache/ms-playwright/chromium-*/chrome-linux/chrome >/dev/null 2>&1; then
               echo "Provisioning Chromium for Playwright…"
               sudo dnf install -y -q \
@@ -106,32 +120,29 @@ jobs:
                 libXtst libXi libxshmfence
               ./.venv/bin/python -m playwright install chromium
             fi
-            # Keep the shared nginx.conf in sync — the /_da-bundle bundle-proxy
-            # (and /agent) locations live in the same file as the main backend,
-            # so re-apply it on every backend deploy (mirrors deploy-agent.yml).
-            # Validate (nginx -t) BEFORE restarting the backend so a bad config
-            # fails the deploy here, without leaving backend-restarted-but-nginx-
-            # unreloaded. script_stop:true aborts the job on any failure below.
-            sudo cp ~/Sprntly/backend/deploy/nginx.conf /etc/nginx/conf.d/sprintly.conf
+            # Keep the shared nginx.conf in sync — it holds the server blocks for
+            # BOTH environments (api./app. + api.staging./staging.) plus the
+            # /_da-bundle, /agent and /mcp locations, so re-apply it on every
+            # backend deploy from whichever branch deployed. main and production
+            # carry an identical nginx.conf (it flows main->production like all
+            # code), so either branch cp'ing it is safe. Validate BEFORE
+            # restarting so a bad config fails the deploy here.
+            sudo cp ~/$CLONE_DIR/backend/deploy/nginx.conf /etc/nginx/conf.d/sprintly.conf
             sudo nginx -t
             sudo systemctl reload nginx
             # Install a systemd drop-in that extends the stop timeout (graceful
-            # drain on deploy). It OVERLAYS only TimeoutStopSec onto whatever base
-            # unit the box runs — it does NOT replace the unit — so the live
-            # [Service] config (data dir, db path, env file) is untouched.
-            # daemon-reload before restart so the overlay takes effect.
-            sudo mkdir -p /etc/systemd/system/sprintly.service.d
-            sudo cp ~/Sprntly/backend/deploy/sprintly.service.d/timeout.conf /etc/systemd/system/sprintly.service.d/timeout.conf
+            # drain on deploy). It OVERLAYS only TimeoutStopSec onto the live unit.
+            sudo mkdir -p /etc/systemd/system/$SERVICE.service.d
+            sudo cp ~/$CLONE_DIR/backend/deploy/sprintly.service.d/timeout.conf /etc/systemd/system/$SERVICE.service.d/timeout.conf
             sudo systemctl daemon-reload
-            sudo /bin/systemctl restart sprintly
-            # Wait up to 15s for FastAPI to bind. Avoids races when two deploys
-            # restart the service close together.
+            sudo /bin/systemctl restart $SERVICE
+            # Wait up to 15s for FastAPI to bind on the env's port.
             for i in $(seq 1 15); do
-              if curl -fsS http://127.0.0.1:8000/healthz >/dev/null 2>&1; then
-                echo "sprintly.service healthy after ${i}s"
+              if curl -fsS http://127.0.0.1:$PORT/healthz >/dev/null 2>&1; then
+                echo "$SERVICE healthy after ${i}s"
                 break
               fi
               sleep 1
             done
-            curl -fsS http://127.0.0.1:8000/healthz
-            echo "Deploy OK: $(git -C ~/Sprntly rev-parse --short HEAD)"
+            curl -fsS http://127.0.0.1:$PORT/healthz
+            echo "Deploy OK ($SERVICE): $(git -C ~/$CLONE_DIR rev-parse --short HEAD)"

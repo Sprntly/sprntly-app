@@ -1,0 +1,18 @@
+[Unit]
+Description=Sprntly STAGING FastAPI backend (api.staging.sprntly.ai)
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/home/ec2-user/Sprntly-staging/backend
+# Shares prod's env for now: this path is a symlink to
+# /home/ec2-user/Sprntly/backend/.env (same Supabase project, same secrets).
+# Split into a real staging .env when the environments diverge.
+EnvironmentFile=/home/ec2-user/Sprntly-staging/backend/.env
+ExecStart=/home/ec2-user/Sprntly-staging/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8010
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
