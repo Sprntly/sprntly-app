@@ -1723,30 +1723,6 @@ export function ChatScreen() {
                 there's never a double composer. */}
             {showThreadView ? (
               <div className="bc-dock">
-                {/* Floating "Create ticket" chip — only when the PRD rail is open
-                    (it generates tickets from that PRD), else it's a hanging button. */}
-                {thread.length > 0 && thread[thread.length - 1].reply && !busy && contentPanelTab === "prd" ? (
-                  <div className="bc-suggest">
-                    <div className="bc-suggest-list">
-                      <button
-                        type="button"
-                        className="bc-suggest-btn bc-suggest-btn--primary"
-                        disabled={!!activeTab?.prdGenerating || !activeTab?.prd}
-                        onClick={() => {
-                          if (activeTab?.prd) {
-                            setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-                            openContentPanel("tickets")
-                          } else {
-                            handleOpenPrd()
-                          }
-                        }}
-                      >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1a2 2 0 0 0 0 4v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 0 0-4z" /><path d="M13 7v10" /></svg>
-                        {activeTab?.prd ? "Create ticket" : "Generate PRD first"}
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
                 {/* Slash command dropdown */}
                 {showSlash && filteredSkills.length > 0 && (
                   <div style={{
