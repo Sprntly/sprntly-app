@@ -69,7 +69,10 @@ def test_run_sync_happy_path_completes_with_html_brief(
 
     row = db_mod.get_evidence(evidence_id)
     assert row["status"] == "ready"
-    assert row["payload_md"] == '<div class="wrap"><h1>Corpus brief</h1></div>'
+    # Model body preserved; canonical stylesheet injected server-side (Phase 2).
+    assert '<div class="wrap"><h1>Corpus brief</h1></div>' in row["payload_md"]
+    assert "--problem:#dd4b32" in row["payload_md"]
+    assert row["payload_md"].count("<style>") == 1
     assert row["title"] == "Insight A"
     assert ":::" not in row["payload_md"]   # HTML, not the retired :::block doc
 

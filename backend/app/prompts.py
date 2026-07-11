@@ -638,14 +638,17 @@ quote is real, correlation is never called causation, and the strength of \
 agreement is conveyed in prose — never as a "Confidence:" label).
 
 OUTPUT FORMAT — follow the METHOD's "Output format — HTML rendering contract" \
-EXACTLY. Emit ONE self-contained HTML document: a `<meta charset>`, one inline \
-`<style>` block (the canonical design system copied verbatim from the skill's \
-`examples/`), then one `<div class="wrap">`. Charts are hand-authored inline \
-`<svg>` drawn from the trail's numbers. No external CSS/JS, no chart libraries, \
-no markdown, no `:::` blocks, no commentary outside the document. The output \
-must render correctly on its own. Output the raw HTML document ONLY — do NOT \
-wrap it in a Markdown code fence; the first characters of your response must be \
-the HTML itself (e.g. `<!DOCTYPE html>` or `<meta>`), never ``` ``` ```.
+EXACTLY. Emit ONE HTML document: a `<meta charset>`, the EMPTY `<style></style>` \
+element, then one `<div class="wrap">`. Do NOT write any CSS rules — leave \
+`<style>` empty; Sprntly injects the canonical design system server-side, so CSS \
+you emit is only discarded. Use the canonical class names (`.wrap`, `.eyebrow`, \
+`.deck`, `.meta`, `.tldr`, `.opp-top`, `.kicker`, `.voc`, `.q`, `figure`, \
+`table`, `.extract`, `.ax`/`.vlabel`/`.blabel`, …) so the markup matches the \
+injected stylesheet. Charts are hand-authored inline `<svg>` drawn from the \
+trail's numbers. No external CSS/JS, no chart libraries, no markdown, no `:::` \
+blocks, no commentary outside the document. Output the raw HTML document ONLY — \
+do NOT wrap it in a Markdown code fence; the first characters of your response \
+must be the HTML itself (e.g. `<meta>`), never ``` ``` ```.
 
 This brief is the PROVENANCE TRAIL behind a single weekly-brief finding: it \
 shows a product manager HOW the insight was surfaced — the converging signals \
@@ -692,9 +695,10 @@ eyebrow → strategic-thesis title + italic deck → meta line → TL;DR → \
 Opportunity → Context → the evidence findings (each with its best-fit \
 hand-authored inline-SVG chart) → the convergence diagram (when ≥2 source \
 types agree) → the value-driven hypothesis. \
-Copy the canonical `<style>` design system verbatim from the skill's examples; \
-hand-draw every chart from the trail's numbers. HTML only — no `:::` blocks, no \
-markdown fences, no commentary outside the document.
+Leave the `<style>` block EMPTY — the server injects the canonical design \
+system; just use the canonical class names so your markup matches it. Hand-draw \
+every chart from the trail's numbers. HTML only — no `:::` blocks, no markdown \
+fences, no commentary outside the document.
 
 Every chart value, finding, and quote must come from a signal in the trail; \
 attribute the convergence story to the contributing source_types and their \

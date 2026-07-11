@@ -43,12 +43,14 @@ from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.types import Entity, Signal
+from app.html_style import inject_canonical_css
 from app.llm import strip_code_fence
 from app.prompts import (
     EVIDENCE_KG_PROMPT_VERSION,
     EVIDENCE_KG_SYSTEM,
     EVIDENCE_KG_USER_TEMPLATE,
 )
+from app.skills.loader import get_skill
 from app.synthesis_brief import resolve_company
 
 logger = logging.getLogger(__name__)
@@ -214,6 +216,10 @@ def build_evidence_kg(
     # The model occasionally wraps the document in a ```html code fence despite
     # the prompt; strip it so the stored payload is raw HTML the UI can iframe.
     html = strip_code_fence(raw)
+    # The model emits an EMPTY `<style>`; inject the canonical stylesheet here so
+    # the stored brief is self-contained and every brief shares one design system
+    # (see app.html_style) — the model no longer re-emits ~90 lines of CSS.
+    html = inject_canonical_css(html, get_skill("evidence-brief").assets["evidence.css"])
 
     signal_ids = [t["signal_id"] for t in trail]
     kg_refs = list(signal_ids)

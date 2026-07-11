@@ -153,8 +153,10 @@ def test_human_prd_carries_html_page_contract(isolated_settings, monkeypatch):
     # …in the v4.1 section order (eyebrows)…
     for label in (">Context", ">Problem", ">Evidence", ">Requirements", ">Appendix"):
         assert label in a_prefix, f"human PRD template missing section {label!r}"
-    # …the directive (the dynamic tail) steers to a self-contained HTML page…
-    assert "self-contained HTML page" in a_input
+    # …the directive (the dynamic tail) steers to an HTML page whose <style> the
+    # model leaves EMPTY (the server injects the canonical stylesheet)…
+    assert "HTML page" in a_input
+    assert "EMPTY" in a_input and "<style>" in a_input
     assert ":::" not in a_input, "HTML human PRD must not impose `:::` blocks"
     assert ":::" not in a_prefix
     assert "Start your output at `<!DOCTYPE html>`" in a_input
@@ -233,7 +235,10 @@ def test_run_sync_part_a_renders_as_before(isolated_settings, monkeypatch):
     prd_runner._run_sync(prd_id, brief_id, 0)
 
     payload = db_mod.get_prd(prd_id)["payload_md"]
-    assert payload.startswith("# Surface")
+    # The human PRD body is preserved; the canonical stylesheet is injected
+    # server-side at finalize (Phase 2), so the stored doc is self-contained.
+    assert "# Surface — Ship the thing" in payload
+    assert ":root{--green:#1A6B47" in payload
     assert not payload.rstrip().endswith("---")
     rendered = db_mod.get_prd_rendered(prd_id)
     assert rendered["payload_md"] == payload

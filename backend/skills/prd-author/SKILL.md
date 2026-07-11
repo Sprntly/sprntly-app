@@ -75,7 +75,7 @@ Every Part A renders as a single-file HTML editable page using these tokens. All
 **Accessibility/quality floor:** responsive to mobile, type labels never color-only (pill text carries the meaning), print-clean.
 
 ## Output contract (what to emit)
-Emit ONE self-contained HTML document — a `<meta charset>`, one inline `<style>` block (the canonical design system above; copy the `<style>` and skeleton from `templates/prd-template.html`, keeping the `:root` tokens unchanged), then the document page. Fill every `{{placeholder}}` with concrete, grounded content; never leave a placeholder or a `[bracketed]` example in place; flag a missing number `[NEED: …]` rather than inventing it. Output the raw HTML document ONLY — do NOT wrap it in a Markdown code fence and do NOT emit any commentary outside the document.
+Emit ONE HTML document — a `<meta charset>`, the empty `<style></style>` element, then the document page — copying the skeleton from `templates/prd-template.html`. **Leave the `<style>` block EMPTY exactly as the template shows it — do NOT write any CSS rules.** Sprntly injects the canonical stylesheet (`assets/prd.css`) into that block server-side at save time, so the stored document is self-contained; emitting CSS yourself only wastes output and is discarded. Fill every `{{placeholder}}` with concrete, grounded content; never leave a placeholder or a `[bracketed]` example in place; flag a missing number `[NEED: …]` rather than inventing it. Output the raw HTML document ONLY — do NOT wrap it in a Markdown code fence and do NOT emit any commentary outside the document.
 
 ## Degradation table
 | Input available | Behavior |
