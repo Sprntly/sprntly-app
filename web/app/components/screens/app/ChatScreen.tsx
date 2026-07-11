@@ -280,6 +280,11 @@ export function ChatScreen() {
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
   // composer even while another tab is still loading.
   const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
+  // PRD ids known to already have persisted tickets in the DB — flips the chat
+  // action's "Create tickets" label to "View tickets". Populated per active PRD
+  // via storiesApi.getForPrd (see effect below).
+  const [prdsWithTickets, setPrdsWithTickets] = useState<ReadonlySet<number>>(new Set())
+  const checkedTicketPrdsRef = useRef<Set<number>>(new Set())
   // Composer busy/disabled + "thinking" indicator reflect ONLY the active tab's
   // in-flight status. Another tab being mid-ask must not disable this composer.
   const busy = isComposerBusy(busyTabs, activeTabId)
@@ -1337,6 +1342,26 @@ export function ChatScreen() {
   // know — but only for an insight-bound tab that has no PRD loaded on it yet
   // (a tab already carrying its prd is authoritative, no wait needed).
   const chatPrdCtaWaiting = !chatPrdExists && !!activeTab?.briefMeta && chatMapLoading
+  // Does the active tab's PRD already have persisted tickets? Check once per PRD
+  // (cache-read only, no generation) so the action reads "View tickets" for a PRD
+  // that's already been broken into stories, else "Create tickets".
+  const activeTicketPrdId = activeTab?.prdId ?? null
+  useEffect(() => {
+    if (activeTicketPrdId == null || checkedTicketPrdsRef.current.has(activeTicketPrdId)) return
+    checkedTicketPrdsRef.current.add(activeTicketPrdId)
+    let cancelled = false
+    void (async () => {
+      try {
+        const { storiesApi } = await import("../../../lib/api")
+        const cache = await storiesApi.getForPrd(activeTicketPrdId)
+        if (!cancelled && cache.status === "ready" && cache.stories.length > 0) {
+          setPrdsWithTickets((prev) => new Set(prev).add(activeTicketPrdId))
+        }
+      } catch { /* non-fatal: default to "Create tickets" */ }
+    })()
+    return () => { cancelled = true }
+  }, [activeTicketPrdId])
+  const chatTicketsExist = activeTicketPrdId != null && prdsWithTickets.has(activeTicketPrdId)
   const displayChips = useMemo(() => {
     const chips = buildHomeChips(homeCards, starters)
     return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
@@ -1685,7 +1710,7 @@ export function ChatScreen() {
                                 }}
                                 title={!activeTab?.prd ? "Generate a PRD first" : undefined}
                               >
-                                Create tickets
+                                {chatTicketsExist ? "View tickets" : "Create tickets"}
                               </button>
                               <button
                                 type="button"
