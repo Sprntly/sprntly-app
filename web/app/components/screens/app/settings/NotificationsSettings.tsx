@@ -145,8 +145,7 @@ export function NotificationsSettings() {
     }
   }, [loadSlack])
 
-  async function onSave(e: React.FormEvent) {
-    e.preventDefault()
+  const persist = useCallback(async (enabled: boolean) => {
     if (!workspace) return
     setSaving(true)
     setError(null)
@@ -158,7 +157,7 @@ export function NotificationsSettings() {
       await updateWorkspace(workspace.id, {
         notification_settings: {
           ...existing,
-          email_enabled: emailDigest,
+          email_enabled: enabled,
           brief_weekday: weekday,
           brief_hour: hour,
           brief_minute: 0,
@@ -172,7 +171,16 @@ export function NotificationsSettings() {
     } finally {
       setSaving(false)
     }
+  }, [workspace, weekday, hour, timezone, refresh])
+
+  async function onSave(e: React.FormEvent) {
+    e.preventDefault()
+    await persist(emailDigest)
   }
+
+  // The toggle only SHOWS/HIDES the schedule form — persisting (including
+  // the digest flag itself) is the Save button's job.
+  const onToggleDigest = () => setEmailDigest((v) => !v)
 
   if (loading) return <p className="settings-loading">Loading…</p>
   if (!workspace) {
@@ -218,24 +226,29 @@ export function NotificationsSettings() {
           </>
         ) : (
           <>
-            <p className="ob-slack-sub">
-              Connect Slack to get your weekly brief in a channel or a DM.
-            </p>
-            <button
-              type="button"
-              className="btn btn-primary btn-block"
-              disabled={connecting}
-              onClick={onConnectSlack}
-            >
-              {connecting ? "Opening Slack…" : "Connect Slack"}
-            </button>
+            {/* One row: description left, action right (was a full-width
+                btn-block bar under the text). */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+              <p className="ob-slack-sub" style={{ margin: 0 }}>
+                Connect Slack to get your weekly brief in a channel or a DM.
+              </p>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ flexShrink: 0 }}
+                disabled={connecting}
+                onClick={onConnectSlack}
+              >
+                {connecting ? "Opening Slack…" : "Connect Slack"}
+              </button>
+            </div>
           </>
         )}
         {slackError && <SettingsMessage kind="error">{slackError}</SettingsMessage>}
       </div>
 
       {/* ───────── WHERE: Email + WHEN: schedule (company-wide) ───────── */}
-      <form onSubmit={onSave} style={{ marginTop: 16 }}>
+      <form onSubmit={onSave} style={{ marginTop: 16, marginLeft: 20, marginRight: 20 }}>
         <div className="settings-row">
           <div>
             <div className="settings-row-label">Email digest</div>
@@ -246,55 +259,64 @@ export function NotificationsSettings() {
           <button
             type="button"
             className={`toggle ${emailDigest ? "on" : ""}`}
-            onClick={() => setEmailDigest((v) => !v)}
+            onClick={onToggleDigest}
             aria-pressed={emailDigest}
+            aria-label="Email digest"
           />
         </div>
 
-        <div className="field">
-          <label className="field-label">Delivery day</label>
-          <select
-            className="input"
-            value={weekday}
-            onChange={(e) => setWeekday(Number(e.target.value))}
-          >
-            {DAYS.map((d) => (
-              <option key={d.value} value={d.value}>{d.label}</option>
-            ))}
-          </select>
-        </div>
+        {/* The schedule only matters when the digest is ON — hidden (not
+            just disabled) otherwise; the toggle itself auto-saves. */}
+        {emailDigest && (
+          <>
+            <div className="field">
+              <label className="field-label">Delivery day</label>
+              <select
+                className="input"
+                value={weekday}
+                onChange={(e) => setWeekday(Number(e.target.value))}
+              >
+                {DAYS.map((d) => (
+                  <option key={d.value} value={d.value}>{d.label}</option>
+                ))}
+              </select>
+            </div>
 
-        <div className="field">
-          <label className="field-label">Delivery time</label>
-          <select
-            className="input"
-            value={hour}
-            onChange={(e) => setHour(Number(e.target.value))}
-          >
-            {HOURS.map((h) => (
-              <option key={h.value} value={h.value}>{h.label}</option>
-            ))}
-          </select>
-        </div>
+            <div className="field">
+              <label className="field-label">Delivery time</label>
+              <select
+                className="input"
+                value={hour}
+                onChange={(e) => setHour(Number(e.target.value))}
+              >
+                {HOURS.map((h) => (
+                  <option key={h.value} value={h.value}>{h.label}</option>
+                ))}
+              </select>
+            </div>
 
-        <div className="field">
-          <label className="field-label">Timezone</label>
-          <select
-            className="input"
-            value={timezone}
-            onChange={(e) => setTimezone(e.target.value)}
-          >
-            {timezones().map((tz) => (
-              <option key={tz} value={tz}>{tz}</option>
-            ))}
-          </select>
-        </div>
+            <div className="field">
+              <label className="field-label">Timezone</label>
+              <select
+                className="input"
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+              >
+                {timezones().map((tz) => (
+                  <option key={tz} value={tz}>{tz}</option>
+                ))}
+              </select>
+            </div>
+          </>
+        )}
 
         {error && <SettingsMessage kind="error">{error}</SettingsMessage>}
         {saved && <SettingsMessage kind="success">Notification settings saved.</SettingsMessage>}
-        <button type="submit" className="btn btn-primary" disabled={saving} style={{ marginTop: 16 }}>
-          {saving ? "Saving…" : "Save notifications"}
-        </button>
+        {emailDigest && (
+          <button type="submit" className="btn btn-primary" disabled={saving} style={{ marginTop: 16 }}>
+            {saving ? "Saving…" : "Save notifications"}
+          </button>
+        )}
       </form>
     </SettingsSection>
   )

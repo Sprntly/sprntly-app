@@ -226,14 +226,14 @@
   }
 
   .btn-primary {
-    background: var(--ink);
-    color: var(--nav-text-hover);
-    border-color: var(--ink);
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
   }
 
   .btn-primary:hover:not(:disabled) {
-    background: #000;
-    border-color: #000;
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
   }
 
   .btn:disabled {
@@ -242,9 +242,9 @@
   }
 
   .btn-primary:disabled {
-    background: var(--ink);
-    color: var(--nav-text-hover);
-    border-color: var(--ink);
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
   }
 
   .btn-accent {
@@ -9186,19 +9186,46 @@
     margin-top: 2px;
   }
 
+  /* Rendered on a <button>, so reset the browser chrome (border/padding/
+     appearance) — without this the pill shows a default border ring. */
   .toggle {
-    width: 34px;
-    height: 20px;
-    background: var(--surface-3);
+    appearance: none;
+    -webkit-appearance: none;
+    display: inline-block;
+    box-sizing: border-box;
+    width: 38px;
+    height: 22px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: #d8d8d3;
     border-radius: 999px;
     position: relative;
     cursor: pointer;
-    transition: background 0.2s;
+    transition: background 0.18s ease;
     flex-shrink: 0;
+  }
+
+  .toggle:hover {
+    background: #c9c9c3;
+  }
+
+  .toggle:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 2px;
   }
 
   .toggle.on {
     background: var(--accent);
+  }
+
+  .toggle.on:hover {
+    background: var(--accent-hover);
+  }
+
+  .toggle:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
 
   .toggle::after {
@@ -9206,15 +9233,16 @@
     position: absolute;
     top: 2px;
     left: 2px;
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
-    background: var(--surface);
-    transition: left 0.2s;
+    background: #fff;
+    box-shadow: 0 1px 2.5px rgba(0, 0, 0, 0.25);
+    transition: transform 0.18s ease;
   }
 
   .toggle.on::after {
-    left: 16px;
+    transform: translateX(16px);
   }
 
   /* ---------- TEAM ---------- */
@@ -17360,21 +17388,21 @@
   border: none; font-family: var(--font-body);
 }
 .tkv2-btn:disabled { opacity: .55; cursor: default; }
-.tkv2-btn--push { background: var(--green); color: #fff; }
+.tkv2-btn--push { background: var(--accent); color: #fff; }
 .tkv2-btn--push:hover:not(:disabled) { filter: brightness(1.05); }
 /* Ghost action (Regenerate, tracker switch): quiet until hovered. */
 .tkv2-btn--regen {
   background: transparent; color: var(--ink2); padding: 10px 14px;
   border: 1px solid var(--line); transition: border-color .15s, color .15s, background .15s;
 }
-.tkv2-btn--regen:hover:not(:disabled) { border-color: var(--green); color: var(--green-d); background: var(--green-s); }
+.tkv2-btn--regen:hover:not(:disabled) { border-color: var(--accent); color: var(--green-d); background: var(--green-s); }
 /* The configured sync button: a state chip more than a call-to-action —
    shows Syncing… / Synced Xm ago, click = sync now. */
 .tkv2-btn--sync {
   background: var(--paper); color: var(--green-d); border: 1px solid var(--green-b);
   transition: border-color .15s, background .15s;
 }
-.tkv2-btn--sync:hover:not(:disabled) { background: var(--green-s); border-color: var(--green); }
+.tkv2-btn--sync:hover:not(:disabled) { background: var(--green-s); border-color: var(--accent); }
 .tkv2-spin { display: inline-flex; animation: tkv2-rotate 1s linear infinite; }
 @keyframes tkv2-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .tkv2-intro {
@@ -17584,7 +17612,7 @@
 .tkv2-propose b { color: var(--green-d); }
 .tkv2-actions2 { display: flex; gap: 9px; margin-top: 11px; }
 .tkv2-btn2 { font-size: 12.5px; font-weight: 600; border-radius: 9px; padding: 7px 14px; cursor: pointer; border: 1px solid transparent; font-family: var(--font-body); }
-.tkv2-btn2--primary { background: var(--green); color: #fff; }
+.tkv2-btn2--primary { background: var(--accent); color: #fff; }
 .tkv2-btn2--ghost { background: var(--paper); border-color: var(--line); color: var(--ink2); }
 .tkv2-cmt { display: flex; gap: 11px; margin-bottom: 13px; }
 .tkv2-av {
