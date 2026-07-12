@@ -36,6 +36,11 @@ def _pypdf():
     return pypdf
 
 
+def _pptx():
+    from pptx import Presentation  # python-pptx
+    return Presentation
+
+
 def docx_to_md(data: bytes) -> str:
     doc = _docx().Document(io.BytesIO(data))
     parts: list[str] = []
@@ -93,6 +98,36 @@ def pdf_to_md(data: bytes) -> str:
     return "\n\n".join(parts)
 
 
+def pptx_to_md(data: bytes) -> str:
+    """Extract slide text from a .pptx deck as markdown, one section per slide.
+
+    Mirrors `pdf_to_md`: a `## Slide N` header per slide, then every shape's
+    text (title, body bullets, text boxes) and any tables rendered as pipe
+    rows. Diagram/image semantics are NOT recovered — decks are lossy, only the
+    text layer is extracted (documented in the PRD-import contract). Empty
+    slides are skipped so the output has no blank sections.
+    """
+    prs = _pptx()(io.BytesIO(data))
+    parts: list[str] = []
+    for i, slide in enumerate(prs.slides):
+        lines: list[str] = []
+        for shape in slide.shapes:
+            if shape.has_table:
+                table = shape.table
+                for row in table.rows:
+                    cells = [c.text.replace("\n", " ").strip() for c in row.cells]
+                    lines.append("| " + " | ".join(cells) + " |")
+                continue
+            if not shape.has_text_frame:
+                continue
+            text = shape.text_frame.text.strip()
+            if text:
+                lines.append(text)
+        if lines:
+            parts.append(f"## Slide {i + 1}\n\n" + "\n".join(lines))
+    return "\n\n".join(parts)
+
+
 def txt_to_md(data: bytes) -> str:
     # plain text already qualifies as markdown for our LLM pipeline
     return data.decode("utf-8", errors="replace")
@@ -133,6 +168,7 @@ _SUFFIX_TO_CONVERTER = {
     ".xlsx": xlsx_to_md,
     ".csv": csv_to_md,
     ".pdf": pdf_to_md,
+    ".pptx": pptx_to_md,
     ".txt": txt_to_md,
     ".md": txt_to_md,  # already markdown, passthrough
 }
