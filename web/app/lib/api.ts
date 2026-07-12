@@ -1278,6 +1278,17 @@ export const prdApi = {
       backlog_item_id: backlogItemId,
       force,
     }),
+  /** Import an existing PRD from an uploaded file (PDF/PPT/DOCX/…). The backend
+   *  parses it to text and re-lays-it-out into our format via the prd-author
+   *  skill. Same fire-and-forget contract as `generate`: returns a prd_id to
+   *  poll via prdApi.get(id) until status === 'ready'. `dataset` is the company
+   *  slug the PRD belongs to. */
+  importDoc: (file: File, dataset: string) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    form.append("dataset", dataset)
+    return api.post<PrdStartResponse>("/v1/prd/import", form)
+  },
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
   get: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
   /** Fetch the latest ready PRD for a dataset/company slug. 404 if none. */
