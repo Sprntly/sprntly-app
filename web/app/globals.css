@@ -9186,19 +9186,46 @@
     margin-top: 2px;
   }
 
+  /* Rendered on a <button>, so reset the browser chrome (border/padding/
+     appearance) — without this the pill shows a default border ring. */
   .toggle {
-    width: 34px;
-    height: 20px;
-    background: var(--surface-3);
+    appearance: none;
+    -webkit-appearance: none;
+    display: inline-block;
+    box-sizing: border-box;
+    width: 38px;
+    height: 22px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: #d8d8d3;
     border-radius: 999px;
     position: relative;
     cursor: pointer;
-    transition: background 0.2s;
+    transition: background 0.18s ease;
     flex-shrink: 0;
+  }
+
+  .toggle:hover {
+    background: #c9c9c3;
+  }
+
+  .toggle:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 2px;
   }
 
   .toggle.on {
     background: var(--accent);
+  }
+
+  .toggle.on:hover {
+    background: var(--accent-hover);
+  }
+
+  .toggle:disabled {
+    opacity: 0.55;
+    cursor: default;
   }
 
   .toggle::after {
@@ -9206,15 +9233,16 @@
     position: absolute;
     top: 2px;
     left: 2px;
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
     border-radius: 50%;
-    background: var(--surface);
-    transition: left 0.2s;
+    background: #fff;
+    box-shadow: 0 1px 2.5px rgba(0, 0, 0, 0.25);
+    transition: transform 0.18s ease;
   }
 
   .toggle.on::after {
-    left: 16px;
+    transform: translateX(16px);
   }
 
   /* ---------- TEAM ---------- */
