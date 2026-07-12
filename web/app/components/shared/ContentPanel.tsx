@@ -12,7 +12,8 @@ import { useRouter } from "next/navigation"
 import {
   ApiError, storiesApi,
   type ClickUpList, type ClickUpTicketState, type GeneratedStory,
-  type JiraProject, type TicketSyncState, type TrackerProvider,
+  type JiraProject, type TicketSyncState, type TrackerMeta,
+  type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
 import { TicketDetail } from "./TicketDetail"
@@ -28,8 +29,8 @@ import { printCombined } from "../../lib/combinedExport"
 import type { PrdState, PrdContent } from "../../types/content"
 
 const TABS = [
-  { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
   { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
+  { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
 ] as const
 
@@ -407,6 +408,10 @@ function StoryRow({ story, index, onOpen, synced, tool }: {
           <div className="tkv2-row">
             <span
               className="tkv2-synced"
+              // Completion is category-driven (tracker metadata), so ANY
+              // workspace's "done" status — "Shipped", "Released", … — reads
+              // as complete without name matching.
+              style={synced.status_category === "done" ? { color: "var(--green-d)" } : undefined}
               title={`${tool || "Tracker"} status${synced.assignee ? ` · Assignee: ${synced.assignee}` : ""}`}
             >
               {synced.status}
@@ -663,6 +668,28 @@ export function TicketsTab() {
 
   const syncing = syncState?.sync_status === "syncing"
 
+  // ── Tracker metadata: the connected tracker's REAL vocabulary ────────────
+  // Loaded per PRD and passed into the ticket detail so tickets render the
+  // workspace's own statuses/priorities/fields instead of the canned lists.
+  // Works from the moment a tracker is CONNECTED (the backend serves the
+  // connect-time-warmed cache even before any push binds a destination).
+  // Best-effort: no meta → the detail falls back to defaults.
+  const [trackerMeta, setTrackerMeta] =
+    useState<{ provider: TrackerProvider; meta: TrackerMeta } | null>(null)
+  useEffect(() => {
+    if (prdId == null) { setTrackerMeta(null); return }
+    let cancelled = false
+    storiesApi.getTrackerMeta(prdId)
+      .then((r) => {
+        if (cancelled) return
+        setTrackerMeta(r.meta && r.provider ? { provider: r.provider, meta: r.meta } : null)
+      })
+      .catch(() => { /* metadata is an enhancement, never a blocker */ })
+    return () => { cancelled = true }
+    // last_synced_at: every completed sync also re-pulled the vocabulary
+    // server-side — re-read the cache so the UI shows workspace changes.
+  }, [prdId, syncState?.configured, syncState?.destination_id, syncState?.last_synced_at])
+
   /** Ad-hoc sync of the already-configured destination (the button click). */
   const syncNow = async () => {
     if (prdId == null || syncing || !syncState?.configured) return
@@ -819,6 +846,13 @@ export function TicketsTab() {
   // push (connected, never pushed) → syncing/synced (configured; click = sync
   // now). With several tools connected the button opens a tool menu instead.
   const currentTool = trackerLabel(syncState?.provider)
+  // A binding to a DISCONNECTED tool (e.g. Jira unplugged after binding) must
+  // not keep showing "Sync with Jira" — fall through to the push flow so the
+  // user can rebind to a connected tracker (the first push replaces the
+  // binding and pulls the new destination's metadata).
+  const boundProviderConnected =
+    syncState?.configured === true &&
+    connectedTrackers.some((t) => t.id === syncState.provider)
   const trackerBtn = (() => {
     if (connectedTrackers.length === 0) {
       return {
@@ -827,13 +861,13 @@ export function TicketsTab() {
         onClick: goToConnectors, disabled: false,
       }
     }
-    if (syncState?.configured) {
-      const when = syncState.last_synced_at ? relTime(syncState.last_synced_at) : null
+    if (boundProviderConnected) {
+      const when = syncState?.last_synced_at ? relTime(syncState.last_synced_at) : null
       return {
         label: syncing
           ? <><span className="tkv2-spin" aria-hidden><IconRefresh size={15} /></span> Syncing with {currentTool}…</>
           : <><IconRefresh size={15} /> {when ? `Synced with ${currentTool} ${when}` : `Sync with ${currentTool} now`}</>,
-        title: `Synced with ${currentTool}${syncState.destination_name ? ` · ${syncState.destination_name}` : ""} — auto-syncs in the background; click to sync now`,
+        title: `Synced with ${currentTool}${syncState?.destination_name ? ` · ${syncState.destination_name}` : ""} — auto-syncs in the background; click to sync now`,
         onClick: syncNow, disabled: syncing || syncState == null,
       }
     }
@@ -841,7 +875,9 @@ export function TicketsTab() {
       const t = connectedTrackers[0]
       return {
         label: <>✓ {pickState.kind === "fetching" ? "Loading…" : `Push to ${t.label}`}</>,
-        title: `Push these tickets to ${t.label} — after the first push they stay in sync automatically`,
+        title: syncState?.configured
+          ? `Push these tickets to ${t.label} — replaces the ${currentTool} binding and keeps them in sync automatically`
+          : `Push these tickets to ${t.label} — after the first push they stay in sync automatically`,
         onClick: () => void startPush(t.id), disabled: pickState.kind === "fetching" || syncState == null,
       }
     }
@@ -875,6 +911,11 @@ export function TicketsTab() {
           prdId={prdId}
           onBack={() => setSelectedIndex(null)}
           onOpenLinked={openLinked}
+          tracker={trackerMeta ? {
+            provider: trackerMeta.provider,
+            meta: trackerMeta.meta,
+            synced: selectedStory.id ? syncState?.statuses?.[selectedStory.id] : undefined,
+          } : undefined}
         />
       </div>
     )
@@ -912,7 +953,9 @@ export function TicketsTab() {
               {pickState.kind === "menu" && (
                 <>
                   <div onClick={() => setPickState({ kind: "idle" })} style={{ position: "fixed", inset: 0, zIndex: 30 }} aria-hidden />
-                  <div className="tkv2-picker" style={{ position: "absolute", top: "100%", right: 0, zIndex: 31, minWidth: 220 }} role="menu">
+                  {/* Left-anchored like the destination picker — the trigger
+                      sits at the panel's left, so right-anchoring clips. */}
+                  <div className="tkv2-picker" style={{ position: "absolute", top: "100%", left: 0, zIndex: 31, minWidth: 220, maxWidth: "min(340px, calc(100vw - 32px))" }} role="menu">
                     <div className="ph2">Sync these tickets with…</div>
                     {connectedTrackers.map((t) => (
                       <button key={t.id} type="button" className={`tkv2-pitem${syncState?.provider === t.id ? " tkv2-pitem--sel" : ""}`}
@@ -974,6 +1017,14 @@ export function TicketsTab() {
       {!syncing && syncState?.last_error && (
         <div className="tkt-push-status tkt-push-status--err">
           Last sync had problems: {syncState.last_error} — click the sync button to retry.
+        </div>
+      )}
+      {/* Bound tool got disconnected (e.g. Jira unplugged, ClickUp now
+          connected) — say why the button flipped back to Push. */}
+      {syncState?.configured && !boundProviderConnected && connectedTrackers.length > 0 && (
+        <div className="tkt-push-status">
+          These tickets were syncing with {currentTool}, which is no longer
+          connected — push to {connectedTrackers[0].label} to switch trackers.
         </div>
       )}
 

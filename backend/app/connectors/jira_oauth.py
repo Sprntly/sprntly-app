@@ -333,6 +333,154 @@ def list_assignable_users(
     return out
 
 
+# ── Project metadata (tracker-native vocabulary) ────────────────────────────
+#
+# Read side for the TrackerMeta cache (app/connectors/tracker_meta.py): a
+# customer's REAL statuses / priorities / issue types / custom fields, so the
+# ticket UI can mirror their workspace instead of Sprntly's canned vocabulary.
+# All best-effort ([] / {} on failure) — metadata staleness must never break
+# a push or sync pass.
+
+
+def list_priorities(access_token: str, cloud_id: str) -> list[dict[str, Any]]:
+    """Return the site's priorities as `{id, name, color}` dicts (Jira
+    priorities are site-wide, not per-project). Returns [] on any non-2xx."""
+    resp = requests.get(
+        f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/priority",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        timeout=_TIMEOUT,
+    )
+    if not resp.ok:
+        logger.warning(
+            "Jira list_priorities failed: %s %s", resp.status_code, resp.text[:200]
+        )
+        return []
+    return [
+        {"id": p.get("id"), "name": p.get("name"), "color": p.get("statusColor")}
+        for p in (resp.json() or [])
+        if p.get("name")
+    ]
+
+
+def get_project_statuses(
+    access_token: str, cloud_id: str, project_key: str
+) -> list[dict[str, Any]]:
+    """Return the DISTINCT workflow statuses used anywhere in `project_key`, as
+    `{id, name, category}` dicts (category = Jira's statusCategory key: "new" /
+    "indeterminate" / "done").
+
+    `GET /project/{key}/statuses` groups statuses by issue type; we union +
+    dedupe by status id because the ticket UI shows one vocabulary per
+    destination. Returns [] on any non-2xx."""
+    resp = requests.get(
+        f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/project/{project_key}/statuses",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        timeout=_TIMEOUT,
+    )
+    if not resp.ok:
+        logger.warning(
+            "Jira project statuses failed for %s: %s %s",
+            project_key, resp.status_code, resp.text[:200],
+        )
+        return []
+    seen: dict[str, dict[str, Any]] = {}
+    for issue_type in resp.json() or []:
+        for st in issue_type.get("statuses") or []:
+            sid = st.get("id")
+            if not sid or sid in seen:
+                continue
+            seen[sid] = {
+                "id": sid,
+                "name": st.get("name"),
+                "category": ((st.get("statusCategory") or {}).get("key")),
+            }
+    return [s for s in seen.values() if s.get("name")]
+
+
+def get_create_meta(
+    access_token: str, cloud_id: str, project_key: str
+) -> dict[str, Any]:
+    """Return the project's createmeta node — issue types, each with its field
+    definitions (`fields`: {fieldId: {name, required, schema, allowedValues}}),
+    the authority on which custom fields exist and their option values.
+
+    `GET /issue/createmeta?projectKeys=K&expand=projects.issuetypes.fields`.
+    Returns {} on any non-2xx or when the project isn't visible."""
+    resp = requests.get(
+        f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/issue/createmeta",
+        params={
+            "projectKeys": project_key,
+            "expand": "projects.issuetypes.fields",
+        },
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        timeout=_TIMEOUT,
+    )
+    if not resp.ok:
+        logger.warning(
+            "Jira createmeta failed for %s: %s %s",
+            project_key, resp.status_code, resp.text[:200],
+        )
+        return {}
+    projects = (resp.json() or {}).get("projects") or []
+    return projects[0] if projects else {}
+
+
+def list_transitions(
+    access_token: str, cloud_id: str, issue_key: str
+) -> list[dict[str, Any]]:
+    """Return the workflow transitions LEGAL for this issue right now, as
+    `{id, name, to_status_id, to_status_name, category}` dicts — what the
+    status picker may offer (Jira statuses change via transitions, and the
+    legal set depends on the issue's current state). Returns [] on failure."""
+    resp = requests.get(
+        f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/issue/{issue_key}/transitions",
+        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+        timeout=_TIMEOUT,
+    )
+    if not resp.ok:
+        logger.warning(
+            "Jira list_transitions failed for %s: %s", issue_key, resp.status_code
+        )
+        return []
+    out: list[dict[str, Any]] = []
+    for t in (resp.json() or {}).get("transitions") or []:
+        to = t.get("to") or {}
+        if not t.get("id") or not to.get("name"):
+            continue
+        out.append({
+            "id": t.get("id"),
+            "name": t.get("name"),
+            "to_status_id": to.get("id"),
+            "to_status_name": to.get("name"),
+            "category": ((to.get("statusCategory") or {}).get("key")),
+        })
+    return out
+
+
+def transition_issue_by_id(
+    access_token: str, cloud_id: str, issue_key: str, transition_id: str
+) -> bool:
+    """Execute one specific transition (id from list_transitions). Returns
+    False — never raises — on any failure; status pushes are best-effort."""
+    try:
+        resp = requests.post(
+            f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/issue/{issue_key}/transitions",
+            json={"transition": {"id": transition_id}},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=_TIMEOUT,
+        )
+        return resp.ok
+    except Exception:  # noqa: BLE001 — status push is best-effort by design
+        logger.warning(
+            "Jira transition %s failed for %s", transition_id, issue_key
+        )
+        return False
+
+
 def _adf_from_text(text: str) -> dict[str, Any]:
     """Wrap plain text in a minimal Atlassian Document Format (ADF) doc.
 
@@ -433,15 +581,18 @@ def update_issue(
     description: str | None = None,
     priority_name: str | None = None,
     assignee_account_id: str | None = None,
+    extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Update an existing Jira issue's editable fields. Returns `{key, url}`.
 
     Backs idempotent re-push: a ticket already mapped to an issue is UPDATEd in
     place rather than duplicated. Only summary/description/priority/assignee are
     touched (project + issuetype are immutable post-create). `assignee_account_id`
-    reassigns the issue (pass an empty string to explicitly unassign). Same
-    auth/error contract as create_issue: 401/403 → JiraAuthExpiredError, other
-    non-OK → HTTPException.
+    reassigns the issue (pass an empty string to explicitly unassign).
+    `extra_fields` merges provider-encoded custom-field writes (e.g.
+    {"customfield_10031": {"id": "opt1"}}, from tracker_meta.encode_field_value)
+    into the same PUT. Same auth/error contract as create_issue: 401/403 →
+    JiraAuthExpiredError, other non-OK → HTTPException.
     """
     fields: dict[str, Any] = {}
     if summary is not None:
@@ -453,6 +604,8 @@ def update_issue(
     if assignee_account_id is not None:
         # accountId=None is Jira's "unassign" sentinel; "" from our API maps to it.
         fields["assignee"] = {"accountId": assignee_account_id or None}
+    if extra_fields:
+        fields.update(extra_fields)
     if not fields:
         return {"key": issue_key, "url": None}
 
@@ -517,19 +670,28 @@ def get_issue(
     issue_key: str,
     *,
     site_url: str | None = None,
+    extra_fields: list[str] | None = None,
 ) -> dict[str, Any]:
     """Fetch an issue's current state and normalize the fields the two-way
     sync reconciles: workflow state (status name, assignee display name,
-    browse url) plus the CONTENT side (title, description as plain text) and
-    Jira's last-update time (`updated_at`, ISO) so the sync can decide which
-    side of an edit is newer. Mirrors clickup_oauth.get_task — returns {} on
-    any failure so one stale/deleted issue never breaks a whole pull. Pass
-    `site_url` (from _site_url_for_cloud) when fetching many issues so each
-    call doesn't re-resolve accessible-resources."""
+    browse url) plus the CONTENT side (title, description as plain text),
+    the priority name, and Jira's last-update time (`updated_at`, ISO) so the
+    sync can decide which side of an edit is newer. Mirrors
+    clickup_oauth.get_task — returns {} on any failure so one stale/deleted
+    issue never breaks a whole pull. Pass `site_url` (from
+    _site_url_for_cloud) when fetching many issues so each call doesn't
+    re-resolve accessible-resources.
+
+    `extra_fields` (custom field ids, e.g. ["customfield_10031"]) are added to
+    the request and returned RAW under `custom_fields` keyed by field id —
+    decoding to the normalized value shapes is tracker_meta's job."""
+    wanted = "status,assignee,summary,description,priority,issuetype,duedate,labels,updated"
+    if extra_fields:
+        wanted += "," + ",".join(extra_fields)
     try:
         resp = requests.get(
             f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/issue/{issue_key}",
-            params={"fields": "status,assignee,summary,description,updated"},
+            params={"fields": wanted},
             headers={
                 "Authorization": f"Bearer {access_token}",
                 "Accept": "application/json",
@@ -548,14 +710,22 @@ def get_issue(
     assignee = fields.get("assignee") or {}
     if site_url is None:
         site_url = _site_url_for_cloud(access_token, cloud_id)
-    return {
+    out = {
         "status": (fields.get("status") or {}).get("name"),
         "assignee": assignee.get("displayName") or assignee.get("emailAddress"),
         "url": f"{site_url}/browse/{issue_key}" if site_url else None,
         "title": fields.get("summary"),
         "description": _text_from_adf(fields.get("description")),
+        "priority": (fields.get("priority") or {}).get("name"),
+        "issue_type": (fields.get("issuetype") or {}).get("name"),
+        # Built-in fields surfaced as tracker_meta `builtin:` entries.
+        "due_date": fields.get("duedate"),
+        "labels": fields.get("labels") or [],
         "updated_at": fields.get("updated"),
     }
+    if extra_fields:
+        out["custom_fields"] = {fid: fields.get(fid) for fid in extra_fields}
+    return out
 
 
 def transition_issue(
@@ -567,35 +737,52 @@ def transition_issue(
     the one landing on the wanted status (case-insensitive). Returns False —
     never raises — when no matching transition exists or any call fails;
     workflows vary per project so this is inherently best-effort."""
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    }
-    base = f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/issue/{issue_key}/transitions"
     try:
-        resp = requests.get(base, headers=headers, timeout=_TIMEOUT)
-        if not resp.ok:
-            return False
         want = target_status.strip().lower()
         transition_id = next(
             (
-                t.get("id")
-                for t in (resp.json() or {}).get("transitions") or []
-                if ((t.get("to") or {}).get("name") or "").strip().lower() == want
+                t["id"]
+                for t in list_transitions(access_token, cloud_id, issue_key)
+                if (t.get("to_status_name") or "").strip().lower() == want
             ),
             None,
         )
         if not transition_id:
             return False
-        done = requests.post(
-            base, json={"transition": {"id": transition_id}},
-            headers=headers, timeout=_TIMEOUT,
-        )
-        return done.ok
+        return transition_issue_by_id(access_token, cloud_id, issue_key, transition_id)
     except Exception:  # noqa: BLE001 — status push is best-effort by design
         logger.warning("Jira transition failed for %s → %s", issue_key, target_status)
         return False
+
+
+def add_issue_comment(
+    access_token: str, cloud_id: str, issue_key: str, text: str
+) -> str | None:
+    """Post one comment on an issue (`POST /issue/{key}/comment`, ADF body —
+    the Sprntly→Jira half of comment push). Returns the created comment's id,
+    or None on any failure — comment push is best-effort; the sync pass
+    retries unpushed comments."""
+    try:
+        resp = requests.post(
+            f"{JIRA_API_BASE}/{cloud_id}/rest/api/3/issue/{issue_key}/comment",
+            json={"body": _adf_from_text(text)},
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            timeout=_TIMEOUT,
+        )
+        if not resp.ok:
+            logger.warning(
+                "Jira add_issue_comment failed for %s: %s %s",
+                issue_key, resp.status_code, resp.text[:200],
+            )
+            return None
+        return (resp.json() or {}).get("id")
+    except Exception:  # noqa: BLE001 — comment push is best-effort by design
+        logger.warning("Jira add_issue_comment failed for %s", issue_key)
+        return None
 
 
 def _site_url_for_cloud(access_token: str, cloud_id: str) -> str | None:

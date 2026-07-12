@@ -1523,6 +1523,12 @@ def clickup_callback(code: str, state: str):
 
     kickoff_sync(company_id, clickup_oauth.CLICKUP_PROVIDER)
 
+    # Connect-time vocabulary pull: cache every list's statuses/fields NOW so
+    # the ticket detail is ClickUp-native immediately — no push/binding first.
+    from app.connectors.tracker_meta import kick_company_meta_warm
+
+    kick_company_meta_warm(company_id, clickup_oauth.CLICKUP_PROVIDER)
+
     return _build_post_oauth_redirect(payload, clickup_oauth.CLICKUP_PROVIDER)
 
 
@@ -1576,6 +1582,13 @@ def jira_callback(code: str, state: str):
     )
 
     kickoff_sync(company_id, jira_oauth.JIRA_PROVIDER)
+
+    # Connect-time vocabulary pull: cache every project's statuses/priorities/
+    # custom fields NOW so the ticket detail is Jira-native immediately — no
+    # push/binding first.
+    from app.connectors.tracker_meta import kick_company_meta_warm
+
+    kick_company_meta_warm(company_id, jira_oauth.JIRA_PROVIDER)
 
     return _build_post_oauth_redirect(payload, jira_oauth.JIRA_PROVIDER)
 

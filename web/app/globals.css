@@ -17527,3 +17527,29 @@
 }
 .tkv2-select:disabled { opacity: .55; cursor: default; }
 
+/* ── detail: tracker custom-field editors (bound tickets) ──
+   Same click-to-edit language as the rest of the detail: the VALUE is the
+   affordance (renders exactly like the other bar fields); clicking swaps in
+   a compact input that commits on blur/Enter, or opens a tkv2-picker for
+   option fields. No chunky form controls inside the properties grid. */
+.tkv2-cfval {
+  display: inline-flex; align-items: center; gap: 4px; background: none; border: none;
+  padding: 0; cursor: pointer; font-family: var(--font-body); text-align: left;
+  font-size: 13px; font-weight: 600; color: var(--ink); overflow-wrap: anywhere;
+}
+.tkv2-cfval:hover { text-decoration: underline dashed; text-underline-offset: 3px; text-decoration-color: var(--soft); }
+.tkv2-cfval--empty { color: var(--soft); font-weight: 500; }
+.tkv2-cfval .tkv2-cfcaret { color: var(--soft); flex-shrink: 0; }
+.tkv2-cfinput {
+  font-family: var(--font-body); font-size: 13px; font-weight: 600; color: var(--ink);
+  background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
+  padding: 4px 9px; width: 100%; max-width: 180px; outline: none;
+}
+.tkv2-cfinput:focus { border-color: var(--green); box-shadow: 0 0 0 2.5px var(--green-s); }
+.tkv2-cfinput::placeholder { color: var(--soft); font-weight: 500; }
+/* Native date inputs get the same compact treatment. */
+.tkv2-cfinput[type="date"] { max-width: 150px; padding: 3px 8px; }
+.tkv2-cfcheck { width: 15px; height: 15px; accent-color: var(--green); cursor: pointer; display: block; margin-top: 3px; }
+/* Option dot inside pickers + values (status/priority colors reuse this). */
+.tkv2-cfdot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+

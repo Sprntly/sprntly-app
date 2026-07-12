@@ -453,10 +453,15 @@ function JiraTicketForm({ onClose }: { onClose: () => void }) {
   const [members, setMembers] = useState<{ accountId: string; displayName: string | null; email: string | null }[]>([])
   const [assigneeAccountId, setAssigneeAccountId] = useState("")
   const [title, setTitle] = useState(content.prd?.title ?? "")
-  const [priority, setPriority] = useState<"P0" | "P1" | "P2" | "P3">("P1")
+  const [priority, setPriority] = useState<string>("P1")
   const [description, setDescription] = useState(() => prdDescription(content.prd))
   const [creating, setCreating] = useState(false)
   const [projectsState, setProjectsState] = useState<"loading" | "idle" | "error">("loading")
+  // The picked project's REAL vocabulary (priorities + issue types) from
+  // tracker metadata — replaces the hardcoded P0–P3 / Task-Story-Bug-Epic
+  // lists so the picker mirrors the customer's Jira. null = not loaded
+  // (fetch failed / still loading) → keep the default lists.
+  const [meta, setMeta] = useState<import("../../lib/api").TrackerMeta | null>(null)
 
   // Load the Jira projects once (target picker).
   useEffect(() => {
@@ -488,20 +493,54 @@ function JiraTicketForm({ onClose }: { onClose: () => void }) {
     return () => { cancelled = true }
   }, [projectKey])
 
+  // Load the project's vocabulary whenever the project changes: real
+  // priorities + issue types drive the pickers below (best-effort — a miss
+  // keeps the default lists). Also resets the picks so a stale value from
+  // another project's scheme can't be submitted.
+  useEffect(() => {
+    if (!projectKey) return
+    let cancelled = false
+    setMeta(null)
+    import("../../lib/api").then(({ ticketDataApi }) => {
+      ticketDataApi.trackerMetaForDestination("jira", projectKey)
+        .then((r) => {
+          if (cancelled) return
+          setMeta(r.meta)
+          const types = (r.meta.issue_types ?? []).filter((t) => !t.subtask)
+          if (types.length && !types.some((t) => t.name === "Task")) {
+            setIssueType(types[0].name)
+          }
+          const mid = Math.max(0, Math.ceil(r.meta.priorities.length / 2) - 1)
+          if (r.meta.priorities.length) setPriority(r.meta.priorities[mid].name)
+        })
+        .catch(() => { /* default pickers remain */ })
+    })
+    return () => { cancelled = true }
+  }, [projectKey])
+
+  const issueTypeOptions = (meta?.issue_types ?? []).filter((t) => !t.subtask).map((t) => t.name)
+  const priorityOptions = (meta?.priorities ?? []).map((p) => p.name)
+
   const handleCreate = async () => {
     if (!projectKey) return
     setCreating(true)
     // Save internally too (parity with the ClickUp path) so the ticket shows in
-    // the Tickets screen and can be tracked back.
+    // the Tickets screen and can be tracked back. The local store speaks
+    // P-codes; a tracker-native priority name buckets to the nearest one —
+    // the REAL name still goes to Jira verbatim below.
     const assigneeName = members.find((m) => m.accountId === assigneeAccountId)?.displayName ?? ""
-    const ticket = saveTicket({ title, priority, category: "Product", assignee: assigneeName, description })
+    const v = priority.toLowerCase()
+    const localPriority = (["P0", "P1", "P2", "P3"] as const).find((p) => p === priority)
+      ?? (v.includes("highest") || v.includes("urgent") || v.includes("blocker") ? "P0"
+        : v.includes("high") ? "P1" : v.includes("low") ? "P3" : "P2")
+    const ticket = saveTicket({ title, priority: localPriority, category: "Product", assignee: assigneeName, description })
     try {
       const { ticketPushApi } = await import("../../lib/api")
       const result = await ticketPushApi.pushToJira(projectKey, [{
         task_id: ticket.id,
         title: ticket.title,
         description: ticket.description,
-        priority: ticket.priority,
+        priority,
         assignee_account_id: assigneeAccountId || null,
       }], issueType)
       onClose()
@@ -546,7 +585,8 @@ function JiraTicketForm({ onClose }: { onClose: () => void }) {
         <div className="ticket-row">
           <div className="ticket-row-label">Issue type</div>
           <select className="ticket-select" value={issueType} onChange={(e) => setIssueType(e.target.value)} disabled={creating}>
-            {["Task", "Story", "Bug", "Epic"].map((t) => <option key={t} value={t}>{t}</option>)}
+            {(issueTypeOptions.length ? issueTypeOptions : ["Task", "Story", "Bug", "Epic"])
+              .map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </div>
 
@@ -557,11 +597,20 @@ function JiraTicketForm({ onClose }: { onClose: () => void }) {
 
         <div className="ticket-row">
           <div className="ticket-row-label">Priority</div>
-          <select className="ticket-select" value={priority} onChange={(e) => setPriority(e.target.value as typeof priority)} disabled={creating}>
-            <option value="P0">P0 — Highest</option>
-            <option value="P1">P1 — High</option>
-            <option value="P2">P2 — Medium</option>
-            <option value="P3">P3 — Low</option>
+          {/* The project's real priority scheme when metadata loaded (values
+              are the tracker's own names, pushed verbatim); the legacy P0–P3
+              labels only as the fallback. */}
+          <select className="ticket-select" value={priority} onChange={(e) => setPriority(e.target.value)} disabled={creating}>
+            {priorityOptions.length ? (
+              priorityOptions.map((p) => <option key={p} value={p}>{p}</option>)
+            ) : (
+              <>
+                <option value="P0">P0 — Highest</option>
+                <option value="P1">P1 — High</option>
+                <option value="P2">P2 — Medium</option>
+                <option value="P3">P3 — Low</option>
+              </>
+            )}
           </select>
         </div>
 

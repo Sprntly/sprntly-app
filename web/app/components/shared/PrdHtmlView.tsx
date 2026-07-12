@@ -127,11 +127,11 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       style={{
         width: "100%",
         height,
-        border: "1px solid var(--line, #E8E6E0)",
+        border: "none",
         borderRadius: 10,
         display: "block",
         colorScheme: "light",
-        background: "#FFFFFF",
+        background: "#fbfaf6",
       }}
     />
   )

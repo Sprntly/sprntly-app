@@ -26,7 +26,8 @@ vi.mock("next/navigation", () => ({
 
 const {
   getForPrd, generate, getJob, listClickUpLists, listJiraProjects,
-  listJiraMembers, pushToJira, getSyncState, triggerSync, getData, teamList,
+  listJiraMembers, pushToJira, getSyncState, triggerSync, getTrackerMeta,
+  getData, teamList,
 } = vi.hoisted(() => ({
   getForPrd: vi.fn(),
   generate: vi.fn(),
@@ -37,6 +38,7 @@ const {
   pushToJira: vi.fn(),
   getSyncState: vi.fn(),
   triggerSync: vi.fn(),
+  getTrackerMeta: vi.fn(),
   getData: vi.fn(),
   teamList: vi.fn(),
 }))
@@ -46,7 +48,7 @@ vi.mock("../../../lib/api", async (orig) => {
     ...actual,
     storiesApi: {
       getForPrd, generate, getJob, listClickUpLists, listJiraProjects,
-      listJiraMembers, pushToJira, getSyncState, triggerSync,
+      listJiraMembers, pushToJira, getSyncState, triggerSync, getTrackerMeta,
     },
     ticketDataApi: { ...actual.ticketDataApi, getData },
     teamApi: { list: teamList },
@@ -59,6 +61,11 @@ beforeEach(() => {
   getForPrd.mockResolvedValue({ status: "none", fresh: false, stories: [] })
   getSyncState.mockResolvedValue({ configured: false })
   triggerSync.mockResolvedValue({ status: "syncing" })
+  // No cached tracker metadata by default — bound-vocabulary rendering is
+  // covered in TicketDetail.tracker.dom.test.tsx.
+  getTrackerMeta.mockResolvedValue({
+    configured: false, provider: null, destination_id: null, meta: null,
+  })
   getData.mockResolvedValue({
     description: null, acceptance_criteria: null, title: null, priority: null,
     status: null, sprint: null, assignee: null, attachments: [], comments: [],
@@ -354,6 +361,30 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     // Ad-hoc sync of the registered destination — no destination re-pick.
     expect(triggerSync).toHaveBeenCalledWith(7)
     expect(screen.queryByText(/select a project/i)).toBeNull()
+  })
+
+  it("a binding to a DISCONNECTED tool falls back to Push-to-<connected> (rebind flow)", async () => {
+    // Bound to Jira, but Jira got disconnected and ClickUp connected instead:
+    // no "Sync with Jira" dead-end — offer the push flow (which replaces the
+    // binding and pulls the new destination's metadata server-side).
+    content = { prd: { prd_id: 7, title: "PRD" }, connectedConnectorIds: ["clickup"] }
+    generate.mockResolvedValue({ job_id: 12, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 12, status: "ready", stories: [
+      { title: "T1", body: "", acceptance_criteria: [], priority: null, route: null },
+    ] })
+    getSyncState.mockResolvedValue({
+      configured: true, provider: "jira", destination_id: "KAN",
+      destination_name: "Kanban", sync_status: "idle",
+      last_synced_at: null, last_error: null, statuses: {},
+    })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
+    expect(screen.queryByRole("button", { name: /sync with jira/i })).toBeNull()
+    expect(screen.getByRole("button", { name: /push to clickup/i })).toBeTruthy()
+    expect(screen.getByText(/no longer connected — push to clickup to switch/i)).toBeTruthy()
   })
 
   it("shows Syncing… (disabled) while the backend reports a run in flight", async () => {

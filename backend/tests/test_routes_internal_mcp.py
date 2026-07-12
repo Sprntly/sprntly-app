@@ -419,6 +419,9 @@ def test_get_ticket_carries_tracker_state(isolated_settings, monkeypatch):
         "url": "https://cu/1",
         "last_synced_at": "2026-07-10T12:00:00+00:00",
         "last_error": None,
+        # No pulled custom-field values in this seed (tracker-native fields
+        # ship meta-gated; None until a sync pass stores a snapshot).
+        "custom_fields": None,
     }
 
 

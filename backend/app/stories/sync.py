@@ -121,6 +121,10 @@ def _apply_edit(story: Story, edit: dict[str, Any]) -> Story:
         story.priority = edit["priority"]
     if edit.get("subtasks") is not None:
         story.subtasks = [str(x) for x in edit["subtasks"]]
+    if edit.get("issue_type") is not None:
+        # Dynamic attr (same pattern as assignee_account_id): the Jira push
+        # reads it per story for issuetype; ClickUp has no issue types.
+        story.jira_issue_type = edit["issue_type"]
     return story
 
 
@@ -152,7 +156,7 @@ def _ticket_contexts(company_id: str, prd_id: int) -> list[dict[str, Any]]:
 
     edits = (
         require_client().table("ticket_edits")
-        .select("ticket_key, title, description, acceptance_criteria, priority, subtasks, status, updated_at")
+        .select("ticket_key, title, description, acceptance_criteria, priority, subtasks, status, custom_fields, issue_type, updated_at")
         .eq("company_id", company_id)
         .like("ticket_key", f"prd-{prd_id}-%")
         .execute()
@@ -325,6 +329,35 @@ class _Tracker:
             self._site = jira_oauth._site_url_for_cloud(self._token, self._cloud)
         else:
             raise ValueError(f"unknown sync provider {provider!r}")
+        # The destination's cached vocabulary (statuses/priorities/fields).
+        # With meta, status + priority sync goes TRACKER-NATIVE (verbatim
+        # names, no heuristics); without it (never fetched, cache down) every
+        # path below falls back to the legacy Sprntly-vocabulary behavior.
+        # Cache-only read: a metadata gap must never add latency or failure
+        # modes to a sync pass.
+        try:
+            from app.db.tracker_meta import get_cached_meta
+            self.meta = get_cached_meta(company_id, provider, destination)
+        except Exception:  # noqa: BLE001 — meta is an enhancement, never a gate
+            self.meta = None
+
+    def meta_status(self, name: str | None) -> dict[str, Any] | None:
+        """The meta's status entry matching `name` (case-insensitive), or None
+        when unknown/no meta — the gate for tracker-native status handling."""
+        if not self.meta or not name:
+            return None
+        want = name.strip().lower()
+        for s in self.meta.get("statuses") or []:
+            if (s.get("name") or "").strip().lower() == want:
+                return s
+        return None
+
+    def editable_fields(self) -> list[dict[str, Any]]:
+        """The destination's custom fields Sprntly can edit (meta whitelist).
+        Empty without meta — custom-field sync is meta-gated end to end."""
+        return [
+            f for f in (self.meta or {}).get("fields") or [] if f.get("editable")
+        ]
 
     def task_ref(self, ticket_id: str) -> str | None:
         """The tracker-side id previously created for this ticket, or None."""
@@ -334,35 +367,190 @@ class _Tracker:
 
     def remote(self, ref: str) -> dict[str, Any] | None:
         """The task/issue's current state (see get_task/get_issue), or None
-        when the fetch fails (deleted task, transient error)."""
+        when the fetch fails (deleted task, transient error). Jira fetches the
+        editable custom fields in the same call; ClickUp's get_task already
+        returns them."""
         if self.provider == "clickup":
             state = clickup_oauth.get_task(self._token, ref)
         else:
-            state = jira_oauth.get_issue(self._token, self._cloud, ref, site_url=self._site)
+            state = jira_oauth.get_issue(
+                self._token, self._cloud, ref, site_url=self._site,
+                extra_fields=[f["id"] for f in self.editable_fields()] or None,
+            )
         return state or None
 
+    #: builtin field id → the get_task/get_issue key carrying its raw value.
+    _BUILTIN_REMOTE_KEYS = {
+        "builtin:start_date": "start_date",
+        "builtin:due_date": "due_date",
+        "builtin:points": "points",
+        "builtin:tags": "tags",
+        "builtin:labels": "labels",
+    }
+
+    def remote_custom_fields(self, remote: dict[str, Any]) -> dict[str, Any]:
+        """The remote state's custom-field values (built-ins included),
+        decoded to the normalized shapes and keyed by field id (every
+        editable field present; unset → None). Undecodable values read as
+        unset — never crash a pass."""
+        from app.connectors.tracker_meta import decode_field_value
+
+        out: dict[str, Any] = {}
+        by_id = {
+            r.get("id"): r
+            for r in remote.get("custom_fields") or [] if isinstance(r, dict)
+        } if self.provider == "clickup" else None
+        raw_map = remote.get("custom_fields") or {} if by_id is None else {}
+        for f in self.editable_fields():
+            fid = f["id"]
+            if fid.startswith("builtin:"):
+                raw = remote.get(self._BUILTIN_REMOTE_KEYS.get(fid, ""))
+                # Tag/label lists are already normalized [str] shapes.
+                if f.get("type") == "labels":
+                    out[fid] = [str(x) for x in raw] if raw else None
+                else:
+                    out[fid] = decode_field_value(self.provider, f, raw)
+            elif self.provider == "clickup":
+                out[fid] = decode_field_value(
+                    "clickup", f, (by_id.get(fid) or {}).get("value")
+                )
+            else:
+                out[fid] = decode_field_value("jira", f, raw_map.get(fid))
+        return out
+
+    #: builtin field id → the provider's write key (Jira update fields{} /
+    #: ClickUp task-PUT body).
+    _BUILTIN_WRITE_KEYS = {
+        "builtin:start_date": "start_date",
+        "builtin:due_date": {"jira": "duedate", "clickup": "due_date"},
+        "builtin:points": "points",
+    }
+
+    def push_custom_fields(self, ref: str, values: dict[str, Any]) -> None:
+        """Write normalized custom-field values out (Jira: one PUT batching
+        every changed field, built-ins included; ClickUp: task PUT for
+        built-ins + one field-endpoint call per custom field)."""
+        from app.connectors.tracker_meta import encode_field_value, field_def
+
+        if self.provider == "jira":
+            extra: dict[str, Any] = {}
+            for fid, v in values.items():
+                fdef = field_def(self.meta, fid)
+                if not fdef:
+                    continue
+                if fid == "builtin:labels":
+                    extra["labels"] = [str(x) for x in v] if v else []
+                elif fid == "builtin:due_date":
+                    extra["duedate"] = str(v)[:10] if v else None
+                else:
+                    extra[fid] = encode_field_value("jira", fdef, v)
+            if extra:
+                jira_oauth.update_issue(
+                    self._token, self._cloud, ref, extra_fields=extra
+                )
+            return
+
+        task_patch: dict[str, Any] = {}
+        for fid, v in values.items():
+            fdef = field_def(self.meta, fid)
+            if not fdef:
+                continue
+            if fid == "builtin:tags":
+                # Add-only (ClickUp removal is a separate per-tag endpoint).
+                for tag in v or []:
+                    clickup_oauth.add_task_tag(self._token, ref, str(tag))
+            elif fid.startswith("builtin:"):
+                key = self._BUILTIN_WRITE_KEYS.get(fid)
+                key = key["clickup"] if isinstance(key, dict) else key
+                if key:
+                    task_patch[key] = (
+                        encode_field_value("clickup", fdef, v)
+                        if v is not None else None
+                    )
+            elif v is not None:
+                # ClickUp's field endpoint sets values; clearing (None) has
+                # no uniform API — a cleared override just stops pushing.
+                clickup_oauth.set_custom_field(
+                    self._token, ref, fid, encode_field_value("clickup", fdef, v)
+                )
+        if task_patch:
+            clickup_oauth.update_task(self._token, ref, extra=task_patch)
+
+    def _priority_out(self, story: Story) -> Any:
+        """The provider's priority write value for the story's priority.
+
+        Tracker-native first: a priority matching the destination's REAL
+        scheme (meta) pushes by its own name/id — so a workspace with e.g.
+        "Blocker/Expedite" priorities round-trips exactly. Legacy Sprntly
+        values (urgent/high/normal/low) keep flowing through the generator's
+        fixed maps when meta doesn't know them."""
+        if self.meta:
+            from app.connectors.tracker_meta import priority_by_name
+
+            hit = priority_by_name(self.meta, story.priority)
+            if hit:
+                if self.provider == "clickup":
+                    try:
+                        return int(hit["id"])
+                    except (TypeError, ValueError):
+                        pass
+                else:
+                    return hit.get("name")
+        if self.provider == "clickup":
+            return story.clickup_priority()
+        return story.jira_priority()
+
     def push(self, ref: str, story: Story) -> None:
-        """Update the tracker task from the merged local story (content out)."""
+        """Update the tracker task from the merged local story (content out).
+
+        Jira: when the project has a sub-task type, the story's child issues
+        sync as REAL sub-tasks (missing ones created, add-only) and the
+        description drops its Child issues text section."""
         if self.provider == "clickup":
             clickup_oauth.update_task(
                 self._token, ref,
                 name=story.title,
                 markdown_description=story.to_description(),
-                priority=story.clickup_priority(),
+                priority=self._priority_out(story),
             )
-        else:
-            jira_oauth.update_issue(
-                self._token, self._cloud, ref,
-                summary=story.title,
-                description=story.to_description(),
-                priority_name=story.jira_priority(),
-            )
+            return
+        from app.stories.push import jira_subtask_type, push_jira_subtasks
 
-    def set_status(self, ref: str, sprntly_status: str) -> bool:
+        subtask_type = jira_subtask_type(self.company_id, self.destination)
+        jira_oauth.update_issue(
+            self._token, self._cloud, ref,
+            summary=story.title,
+            description=story.to_description(include_subtasks=subtask_type is None),
+            priority_name=self._priority_out(story),
+        )
+        if subtask_type and story.subtasks:
+            try:
+                push_jira_subtasks(
+                    self.company_id, self.destination, ref, story.stable_id(),
+                    story.subtasks,
+                    access_token=self._token, cloud_id=self._cloud,
+                    subtask_type=subtask_type,
+                )
+            except Exception:  # noqa: BLE001 — children never fail the pass
+                logger.warning("Jira sub-task sync failed for %s", ref)
+
+    def set_status(self, ref: str, status: str) -> bool:
         """Best-effort Sprntly→tracker status write. Tracker workflows are
-        custom per workspace/project, so failure is expected and non-fatal."""
-        key = sprntly_status.strip().lower()
+        custom per workspace/project, so failure is expected and non-fatal.
+
+        Tracker-native first: a status that IS one of the destination's real
+        statuses (meta) is written verbatim — for Jira via whatever transition
+        lands on it. Legacy Sprntly-vocabulary values (from old edits, or when
+        meta was never fetched) keep flowing through the fixed maps."""
         try:
+            if self.meta_status(status):
+                if self.provider == "clickup":
+                    clickup_oauth.set_task_status(self._token, ref, status)
+                    return True
+                return jira_oauth.transition_issue(
+                    self._token, self._cloud, ref, status
+                )
+            key = status.strip().lower()
             if self.provider == "clickup":
                 mapped = _SPRNTLY_TO_CLICKUP_STATUS.get(key)
                 if not mapped:
@@ -374,8 +562,40 @@ class _Tracker:
                 return False
             return jira_oauth.transition_issue(self._token, self._cloud, ref, mapped)
         except Exception:  # noqa: BLE001 — status push never fails the pass
-            logger.info("status push failed for %s (%s)", ref, sprntly_status)
+            logger.info("status push failed for %s (%s)", ref, status)
             return False
+
+    def add_comment(self, ref: str, text: str) -> str | None:
+        """Post one comment on the tracker task/issue. Returns the tracker's
+        comment id, or None on failure (best-effort — retried by the pass)."""
+        if self.provider == "clickup":
+            return clickup_oauth.add_task_comment(self._token, ref, text)
+        return jira_oauth.add_issue_comment(self._token, self._cloud, ref, text)
+
+    def set_issue_type(self, ref: str, issue_type: str) -> bool:
+        """Best-effort Sprntly→Jira issue-type write. Jira may refuse a type
+        change (cross-workflow moves need its Move wizard), so failure is
+        expected and non-fatal. ClickUp has no issue types → always False."""
+        if self.provider != "jira":
+            return False
+        try:
+            jira_oauth.update_issue(
+                self._token, self._cloud, ref,
+                extra_fields={"issuetype": {"name": issue_type}},
+            )
+            return True
+        except Exception:  # noqa: BLE001 — type push never fails the pass
+            logger.info("issue-type push failed for %s (%s)", ref, issue_type)
+            return False
+
+    def meta_issue_type(self, name: str | None) -> str | None:
+        """The meta issue-type name matching `name` (case-insensitive,
+        non-subtask), or None — the gate for issue-type sync."""
+        if not self.meta or not name:
+            return None
+        from app.connectors.tracker_meta import resolve_issue_type
+
+        return resolve_issue_type(self.meta, name)
 
     def bulk_create(self, stories: list[Story]) -> dict[str, Any]:
         """First push for never-created tickets — the manual push path, which
@@ -392,7 +612,22 @@ def _write_import(
     company_id: str, ticket_key: str, fields: dict[str, Any], now: str
 ) -> None:
     """Record tracker-side edits as a ticket_edits override — the same row the
-    web panel and MCP tools write, so every surface sees the imported change."""
+    web panel and MCP tools write, so every surface sees the imported change.
+
+    `custom_fields` is MERGED over the row's existing value, never replaced:
+    the one jsonb column holds many fields, so importing one remote field
+    change must not clobber sibling local overrides."""
+    if fields.get("custom_fields"):
+        existing = (
+            require_client().table("ticket_edits")
+            .select("custom_fields")
+            .eq("company_id", company_id).eq("ticket_key", ticket_key)
+            .limit(1).execute().data
+            or []
+        )
+        merged = dict((existing[0].get("custom_fields") if existing else None) or {})
+        merged.update(fields["custom_fields"])
+        fields = {**fields, "custom_fields": merged}
     require_client().table("ticket_edits").upsert(
         {
             "company_id": company_id,
@@ -404,6 +639,133 @@ def _write_import(
         },
         on_conflict="company_id,ticket_key",
     ).execute()
+
+
+# ── Instant push (edit → tracker, no waiting for the scheduler) ─────────────
+
+
+def kick_prd_sync_from_key(company_id: str, ticket_key: str) -> bool:
+    """Fire-and-forget a sync pass for the PRD a just-saved ticket belongs to,
+    so a Sprntly-side edit (status, priority, custom fields, description, …)
+    lands in the tracker IMMEDIATELY instead of at the next scheduler tick.
+
+    Safe to call after EVERY save: unbound PRDs and malformed keys are a
+    no-op, and a pass already in flight is skipped (single-flight — the
+    running pass or the next tick picks the edit up; rapid autosaves don't
+    stampede the tracker API). Runs in a daemon thread because the save
+    routes are sync-def (threadpool) with no event loop to schedule on.
+    Returns True when a pass was actually started."""
+    parts = ticket_key.split("-", 2)
+    if not (len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit()):
+        return False
+    prd_id = int(parts[1])
+    try:
+        cfg = get_sync_config(company_id, prd_id)
+        if cfg is None or sync_in_flight(cfg):
+            return False
+        # Mark before spawning so a second save in the same instant reads
+        # "syncing" and skips (mirrors the trigger_sync route).
+        mark_syncing(company_id, prd_id)
+    except Exception:  # noqa: BLE001 — instant push is an enhancement only
+        logger.warning("instant sync kick failed for %s", ticket_key)
+        return False
+
+    import threading
+
+    def _run() -> None:
+        try:
+            run_prd_sync(company_id, prd_id)
+        except Exception:  # noqa: BLE001 — recorded on the row by run_prd_sync
+            logger.exception("instant ticket sync failed for prd %s", prd_id)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f"ticket-sync-{prd_id}"
+    ).start()
+    return True
+
+
+# ── Comment push (Sprntly → tracker, one-way) ────────────────────────────────
+#
+# A Sprntly comment on a bound ticket becomes a REAL tracker comment
+# ("Author: body"), pushed instantly at comment time; the sync pass catches
+# up any comment that failed. One-way by product decision — tracker-side
+# comments are not imported. `ticket_comments.tracker_comment_id` records the
+# pushed id (the dedupe: NULL = not pushed yet).
+
+
+def _mark_comment_pushed(comment_id: int, tracker_comment_id: str) -> None:
+    require_client().table("ticket_comments").update(
+        {"tracker_comment_id": tracker_comment_id}
+    ).eq("id", comment_id).execute()
+
+
+def _comment_text(author: str | None, body: str | None) -> str:
+    return f"{author or 'Sprntly'}: {body or ''}".strip()
+
+
+def kick_comment_push(
+    company_id: str, ticket_key: str, comment_id: int, author: str, body: str
+) -> bool:
+    """Fire-and-forget push of one fresh comment to the bound tracker.
+    No-op (False) for unbound PRDs, malformed keys, or never-pushed tickets;
+    a failed push stays unmarked and the next sync pass retries it."""
+    parts = ticket_key.split("-", 2)
+    if not (len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit()):
+        return False
+    try:
+        cfg = get_sync_config(company_id, int(parts[1]))
+    except Exception:  # noqa: BLE001 — comment push is an enhancement only
+        return False
+    if cfg is None:
+        return False
+
+    import threading
+
+    def _run() -> None:
+        try:
+            tracker = _Tracker(
+                cfg["provider"], company_id, cfg["destination_id"]
+            )
+            ref = tracker.task_ref(parts[2])
+            if ref is None:
+                return  # never pushed — the pass creates it, then catches up
+            tracker_cid = tracker.add_comment(ref, _comment_text(author, body))
+            if tracker_cid:
+                _mark_comment_pushed(comment_id, tracker_cid)
+        except Exception:  # noqa: BLE001 — best-effort; the pass retries
+            logger.warning("instant comment push failed for %s", ticket_key)
+
+    threading.Thread(
+        target=_run, daemon=True, name=f"comment-push-{comment_id}"
+    ).start()
+    return True
+
+
+def _unpushed_comments(
+    company_id: str, prd_id: int, bound_since: Any
+) -> dict[str, list[dict[str, Any]]]:
+    """Unpushed comments per ticket_key, restricted to comments created AFTER
+    the PRD was bound — pre-binding history must never flood the tracker
+    (it already travels in the pushed description's Notes section)."""
+    rows = (
+        require_client().table("ticket_comments")
+        .select("id, ticket_key, author, body, tracker_comment_id, created_at")
+        .eq("company_id", company_id)
+        .like("ticket_key", f"prd-{prd_id}-%")
+        .order("created_at")
+        .execute().data
+        or []
+    )
+    since = parse_ts(bound_since)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        if r.get("tracker_comment_id") is not None:
+            continue
+        created = parse_ts(r.get("created_at"))
+        if since and created and created <= since:
+            continue
+        out.setdefault(r["ticket_key"], []).append(r)
+    return out
 
 
 # ── The pass ─────────────────────────────────────────────────────────────────
@@ -427,6 +789,7 @@ def run_prd_sync(company_id: str, prd_id: int) -> dict[str, Any]:
         result = _two_way_pass(
             company_id, prd_id, provider, destination,
             prev_statuses=cfg.get("statuses") or {},
+            bound_since=cfg.get("created_at"),
         )
         error = (
             f"{result['push_errors']} ticket(s) failed to push"
@@ -453,6 +816,7 @@ def _two_way_pass(
     destination: str,
     *,
     prev_statuses: dict[str, Any],
+    bound_since: Any = None,
 ) -> dict[str, Any]:
     ctxs = _ticket_contexts(company_id, prd_id)
     if not ctxs:
@@ -460,6 +824,12 @@ def _two_way_pass(
 
     tracker = _Tracker(provider, company_id, destination)
     now = utc_now()
+    # Comments not yet pushed (instant push failed / made while the pass ran),
+    # post-binding only — see _unpushed_comments.
+    try:
+        pending_comments = _unpushed_comments(company_id, prd_id, bound_since)
+    except Exception:  # noqa: BLE001 — comment catch-up never blocks a pass
+        pending_comments = {}
     statuses: dict[str, Any] = {}
     pushed = imported = push_errors = 0
 
@@ -539,9 +909,15 @@ def _two_way_pass(
         # ── Status, reconciled independently of content ──
         # Tracker moved it since last pass → import (devs work in the tracker).
         # Else Sprntly moved it since last pass → best-effort push out.
+        # With meta the imported value is the tracker's own status name,
+        # VERBATIM — the whole point of tracker-native vocabulary; the old
+        # substring heuristics remain only as the no-meta fallback.
         remote_status = remote.get("status")
         if prev.get("status") is not None and remote_status != prev.get("status"):
-            mapped = tracker_status_to_sprntly(remote_status)
+            if tracker.meta_status(remote_status):
+                mapped = remote_status
+            else:
+                mapped = tracker_status_to_sprntly(remote_status)
             if mapped and mapped != (sprntly_status or "Backlog"):
                 import_fields["status"] = mapped
                 sprntly_status = mapped
@@ -551,6 +927,104 @@ def _two_way_pass(
             and sprntly_status != prev.get("sprntly_status")
         ):
             tracker.set_status(ref, sprntly_status)
+
+        # ── Priority, tracker-native only (meta present) ──
+        # Same shape as status: tracker moved it since last pass → import the
+        # tracker's own priority name into the edit row (the Sprntly-side edit
+        # already pushes via _priority_out). No meta → no priority import,
+        # exactly the pre-meta behavior.
+        remote_priority = remote.get("priority")
+        if (
+            tracker.meta
+            and prev.get("priority") is not None
+            and remote_priority != prev.get("priority")
+            and remote_priority
+            and remote_priority != (c["edit"] or {}).get("priority")
+        ):
+            import_fields["priority"] = remote_priority
+
+        # ── Issue type (Jira), tracker-native only (meta present) ──
+        # Same reconcile shape: changed in Jira since last pass → import the
+        # real type name; a local edit that differs from an UNCHANGED remote
+        # pushes out best-effort with no freshness gate (Jira may refuse
+        # cross-workflow changes — non-fatal; an accepted change stops the
+        # retry because the next pull returns the new type).
+        remote_type = remote.get("issue_type")
+        local_type = (c["edit"] or {}).get("issue_type")
+        if (
+            tracker.meta
+            and prev.get("issue_type") is not None
+            and remote_type != prev.get("issue_type")
+            and remote_type
+            and remote_type != local_type
+        ):
+            import_fields["issue_type"] = remote_type
+        elif (
+            local_type
+            and remote_type
+            and tracker.meta_issue_type(local_type)
+            and local_type.strip().lower() != remote_type.strip().lower()
+            and (prev.get("issue_type") is None or remote_type == prev.get("issue_type"))
+        ):
+            tracker.set_issue_type(ref, tracker.meta_issue_type(local_type))
+
+        # ── Custom fields, tracker-native only (meta present) ──
+        # Field-by-field: the tracker changed a field since last pass →
+        # import (merged into the edit row). A LOCAL OVERRIDE that differs
+        # from an UNCHANGED remote value always pushes — no freshness gate:
+        # remote hasn't moved, so writing Sprntly's value can't clobber
+        # anything (and a value that predates the first snapshot isn't
+        # silently swallowed). Both moved since last pass → the tracker wins
+        # (devs work there). First pass with fields (no prev snapshot):
+        # existing local overrides push once — Sprntly is the record when
+        # history is unknowable — and everything else just baselines.
+        remote_cf: dict[str, Any] = {}
+        if tracker.editable_fields():
+            remote_cf = tracker.remote_custom_fields(remote)
+            prev_cf = prev.get("custom_fields")
+            local_cf = (c["edit"] or {}).get("custom_fields") or {}
+            baseline_cf = not isinstance(prev_cf, dict)
+            import_cf: dict[str, Any] = {}
+            push_cf: dict[str, Any] = {}
+            for fid, rv in remote_cf.items():
+                pv = (prev_cf or {}).get(fid)
+                lv = local_cf.get(fid, pv)
+                if baseline_cf:
+                    if fid in local_cf and local_cf[fid] is not None and local_cf[fid] != rv:
+                        push_cf[fid] = local_cf[fid]
+                elif rv != pv and rv != lv:
+                    import_cf[fid] = rv
+                elif fid in local_cf and lv is not None and lv != rv and rv == pv:
+                    push_cf[fid] = lv
+            if push_cf:
+                try:
+                    tracker.push_custom_fields(ref, push_cf)
+                    # Snapshot what we just wrote so the next pass doesn't
+                    # read our own push back as a remote change.
+                    remote_cf.update(push_cf)
+                    pushed += 1
+                except Exception as e:  # noqa: BLE001 — never fails the pass
+                    logger.warning(
+                        "custom-field push failed for %s: %s", c["merged"].title, e
+                    )
+                    push_errors += 1
+            if import_cf:
+                import_fields["custom_fields"] = import_cf
+
+        # ── Comment catch-up (one-way, Sprntly → tracker) ──
+        # Post-binding comments whose instant push didn't land. Best-effort
+        # per comment; an unmarked comment simply retries next pass.
+        for cm in pending_comments.get(c["key"], []):
+            try:
+                tracker_cid = tracker.add_comment(
+                    ref, _comment_text(cm.get("author"), cm.get("body"))
+                )
+                if tracker_cid:
+                    _mark_comment_pushed(cm["id"], tracker_cid)
+            except Exception:  # noqa: BLE001 — never fails the pass
+                logger.warning(
+                    "comment catch-up push failed for %s", c["key"]
+                )
 
         if import_fields:
             _write_import(company_id, c["key"], import_fields, now)
@@ -563,6 +1037,15 @@ def _two_way_pass(
             "content_hash": remote_hash,
             "synced_at": now,
             "sprntly_status": sprntly_status,
+            "priority": remote_priority,
+            "issue_type": remote_type,
+            # The canonical open/in_progress/done projection (from meta's
+            # statusCategory / status type) — what Sprntly reads for
+            # completion semantics regardless of the workspace's vocabulary.
+            "status_category": (tracker.meta_status(remote_status) or {}).get("category"),
+            # Pulled custom-field values (normalized, keyed by field id) —
+            # the detail screen's read-side value when there's no override.
+            "custom_fields": remote_cf,
         }
 
     return {

@@ -404,6 +404,62 @@ def sync_state(
     return _public_sync_state(get_sync_config(company.company_id, prd_id))
 
 
+@router.get("/sync/{prd_id}/tracker-meta")
+def tracker_meta(
+    prd_id: int,
+    refresh: bool = False,
+    company: CompanyContext = Depends(require_company),
+):
+    """The tracker vocabulary (statuses / priorities / issue types / custom
+    fields) the ticket detail renders instead of Sprntly's canned lists.
+
+    Bound PRD → the bound destination's meta (cache; `?refresh=1` forces a
+    live re-fetch). UNBOUND PRD with a connected tracker → the freshest meta
+    the connect-time warm cached for that tracker (`configured: false` but
+    `provider`/`meta` set) — the detail speaks the customer's vocabulary from
+    the moment they connect, before any push. No tracker at all → all-null,
+    the web keeps its defaults."""
+    from app import db
+    from app.db.ticket_sync import get_sync_config
+    from app.db.tracker_meta import get_newest_cached_meta, get_or_fetch_meta
+    from app.stories.sync import ticket_sync_providers
+
+    cfg = get_sync_config(company.company_id, prd_id)
+    if cfg is not None:
+        meta = get_or_fetch_meta(
+            company.company_id, cfg["provider"], cfg["destination_id"],
+            refresh=refresh,
+        )
+        return {
+            "configured": True,
+            "provider": cfg.get("provider"),
+            "destination_id": cfg.get("destination_id"),
+            "meta": meta,
+        }
+
+    for provider in ticket_sync_providers():
+        try:
+            if not db.get_connection(company.company_id, provider):
+                continue
+            meta = get_newest_cached_meta(company.company_id, provider)
+        except Exception:  # noqa: BLE001 — fallback vocabulary is best-effort
+            continue
+        if meta:
+            return {
+                "configured": False,
+                "provider": provider,
+                "destination_id": meta.get("destination_id"),
+                "meta": meta,
+            }
+        # Connected but never warmed (connection predates the connect-time
+        # pull) — self-heal: warm in the background; the next open serves it.
+        from app.connectors.tracker_meta import kick_company_meta_warm
+
+        kick_company_meta_warm(company.company_id, provider)
+    return {"configured": False, "provider": None,
+            "destination_id": None, "meta": None}
+
+
 @router.post("/sync/{prd_id}")
 async def trigger_sync(
     prd_id: int,
@@ -445,6 +501,27 @@ async def trigger_sync(
     cfg = get_sync_config(company.company_id, prd_id)
     if cfg is None:
         raise HTTPException(404, "This PRD's tickets were never pushed — pick a destination first")
+
+    # EVERY sync trigger (first bind AND the ad-hoc Sync button) refreshes
+    # the destination's vocabulary cache — statuses / priorities / custom
+    # fields / built-ins re-pulled from the tracker so tracker_meta reflects
+    # workspace changes now, not at the 6h TTL. Best-effort in the
+    # background — a metadata failure must never block the sync itself.
+    async def _warm_meta(provider: str = cfg["provider"],
+                         destination_id: str = cfg["destination_id"]) -> None:
+        from app.db.tracker_meta import get_or_fetch_meta
+        try:
+            await asyncio.to_thread(
+                get_or_fetch_meta, company.company_id, provider,
+                destination_id, refresh=True,
+            )
+        except Exception:  # noqa: BLE001 — cache warming is best-effort
+            logger.warning("tracker-meta warm failed for prd %s", prd_id)
+
+    meta_task = asyncio.create_task(_warm_meta())
+    _inflight_tasks.add(meta_task)
+    meta_task.add_done_callback(_inflight_tasks.discard)
+
     if sync_in_flight(cfg):
         return {"status": "syncing"}
 

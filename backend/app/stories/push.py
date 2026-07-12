@@ -252,6 +252,67 @@ def _jira_creds(company_id: str) -> tuple[str, str]:
     return access_token, cloud_id
 
 
+def jira_subtask_type(company_id: str, project_key: str) -> str | None:
+    """The project's REAL sub-task issue type name (from cached tracker
+    metadata), or None when the project has none / meta was never pulled —
+    the gate for creating Sprntly child issues as real Jira sub-tasks."""
+    try:
+        from app.db.tracker_meta import get_cached_meta
+
+        meta = get_cached_meta(company_id, "jira", project_key)
+    except Exception:  # noqa: BLE001 — meta is an enhancement, never a gate
+        return None
+    for t in (meta or {}).get("issue_types") or []:
+        if t.get("subtask") and t.get("name"):
+            return t["name"]
+    return None
+
+
+def push_jira_subtasks(
+    company_id: str,
+    project_key: str,
+    parent_key: str,
+    ticket_id: str,
+    subtasks: Iterable[str],
+    *,
+    access_token: str,
+    cloud_id: str,
+    subtask_type: str,
+) -> None:
+    """Create the MISSING child issues as real Jira sub-tasks under
+    `parent_key`. Idempotent by content: each subtask maps to a
+    `{ticket_id}#sub#{hash}` row in jira_issue_map, so a re-push/sync skips
+    ones that exist; a renamed item creates a new sub-task (the old one stays
+    — add-only, like tags). Per-item failures are isolated + logged."""
+    import hashlib
+    import re as _re
+
+    for raw in subtasks or []:
+        label = _re.sub(r"^\s*\[P\]\s*", "", str(raw)).strip()
+        if not label:
+            continue
+        sub_id = (
+            f"{ticket_id}#sub#"
+            f"{hashlib.sha256(label.encode('utf-8')).hexdigest()[:12]}"
+        )
+        try:
+            if get_jira_issue_key(company_id, project_key, sub_id):
+                continue
+            issue = jira_oauth.create_issue(
+                access_token, cloud_id,
+                project_key=project_key,
+                summary=label[:255],
+                issue_type=subtask_type,
+                extra_fields={"parent": {"key": parent_key}},
+            )
+            if issue.get("key"):
+                save_jira_issue_key(company_id, project_key, sub_id, issue["key"])
+        except Exception as e:  # noqa: BLE001 — one child failing is isolated
+            logger.warning(
+                "Jira sub-task push failed under %s (%r): %s", parent_key, label, e
+            )
+
+
 def push_stories_to_jira(
     company_id: str,
     project_key: str,
@@ -265,8 +326,14 @@ def push_stories_to_jira(
     Error-isolated per story. Raises JiraNotConnectedError up-front if Jira
     isn't connected. Mirrors push_stories_to_clickup's create-or-update-by-map
     behavior so a re-push doesn't duplicate issues.
+
+    Child issues: when the project has a sub-task type (tracker metadata),
+    each story's subtasks become REAL Jira sub-tasks under the issue — and
+    the description drops its Child issues text section (no duplication).
+    Without a sub-task type the legacy description section stays.
     """
     access_token, cloud_id = _jira_creds(company_id)
+    subtask_type = jira_subtask_type(company_id, project_key)
 
     created: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -275,11 +342,12 @@ def push_stories_to_jira(
             ticket_id = story.stable_id()
             existing = get_jira_issue_key(company_id, project_key, ticket_id)
             assignee = getattr(story, "assignee_account_id", None) or None
+            description = story.to_description(include_subtasks=subtask_type is None)
             if existing:
                 issue = jira_oauth.update_issue(
                     access_token, cloud_id, existing,
                     summary=story.title,
-                    description=story.to_description(),
+                    description=description,
                     priority_name=story.jira_priority(),
                     assignee_account_id=assignee,
                 )
@@ -289,14 +357,24 @@ def push_stories_to_jira(
                     access_token, cloud_id,
                     project_key=project_key,
                     summary=story.title,
-                    description=story.to_description(),
-                    issue_type=issue_type,
+                    description=description,
+                    # A per-ticket issue-type edit (ticket_edits.issue_type,
+                    # set from tracker metadata's real types) wins over the
+                    # batch default.
+                    issue_type=getattr(story, "jira_issue_type", None) or issue_type,
                     priority_name=story.jira_priority(),
                     assignee_account_id=assignee,
                 )
                 issue_key = issue.get("key")
                 if issue_key:
                     save_jira_issue_key(company_id, project_key, ticket_id, issue_key)
+            if issue_key and subtask_type and story.subtasks:
+                push_jira_subtasks(
+                    company_id, project_key, issue_key, ticket_id,
+                    story.subtasks,
+                    access_token=access_token, cloud_id=cloud_id,
+                    subtask_type=subtask_type,
+                )
             created.append({
                 "story": story.title,
                 "task_id": issue_key,
