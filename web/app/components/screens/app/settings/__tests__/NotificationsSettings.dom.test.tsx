@@ -128,6 +128,7 @@ describe("NotificationsSettings — email toggle round-trip", () => {
 describe("NotificationsSettings — schedule (when)", () => {
   it("loads saved day/hour/timezone and persists them + merges existing keys", async () => {
     mountWith({
+      email_enabled: true, // schedule form only renders when the digest is ON
       brief_weekday: 2,
       brief_hour: 14,
       timezone: "America/New_York",
