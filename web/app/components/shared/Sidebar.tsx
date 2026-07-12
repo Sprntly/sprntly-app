@@ -16,7 +16,7 @@ interface SidebarProps {
 }
 
 export function Sidebar(_props: SidebarProps = {}) {
-  const { currentScreen, goTo, goToNewChat } = useNavigation()
+  const { currentScreen, goTo, goToNewChat, sidebarCollapsed, toggleSidebar } = useNavigation()
   const { content } = useContent()
   const auth = useAuth()
   const { profile, workspace } = useWorkspace()
@@ -53,6 +53,7 @@ export function Sidebar(_props: SidebarProps = {}) {
       aria-label={label}
     >
       {icon}
+      <span className="sb-rail-label">{label}</span>
       <span className="nav-tooltip">{label}</span>
     </button>
   )
@@ -71,10 +72,11 @@ export function Sidebar(_props: SidebarProps = {}) {
       .toUpperCase()
 
   const companyInitial = (workspace?.display_name ?? workspace?.product?.name ?? "S").charAt(0).toUpperCase()
+  const brandName = workspace?.display_name ?? workspace?.product?.name ?? content.homeHeadline ?? "Sprntly"
 
   return (
-    <aside className="sidebar sidebar--collapsed">
-      {/* Logo */}
+    <aside className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : "sidebar--expanded"}`}>
+      {/* Logo + expand/collapse toggle */}
       <div className="sb-rail-header">
         <div
           className="sb-rail-logo"
@@ -87,6 +89,17 @@ export function Sidebar(_props: SidebarProps = {}) {
             <span className="sb-rail-logo-dot">.</span>
           </span>
         </div>
+        <span className="sb-rail-brand-name">{brandName}</span>
+        <button
+          type="button"
+          className="sb-rail-expand"
+          onClick={toggleSidebar}
+          title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-expanded={!sidebarCollapsed}
+        >
+          <ChevronIcon collapsed={sidebarCollapsed} />
+        </button>
       </div>
 
       {/* New chat */}
@@ -101,6 +114,7 @@ export function Sidebar(_props: SidebarProps = {}) {
           <line x1="12" y1="5" x2="12" y2="19" />
           <line x1="5" y1="12" x2="19" y2="12" />
         </svg>
+        <span className="sb-rail-label">New chat</span>
       </button>
 
       {/* Main nav icons */}
@@ -129,6 +143,7 @@ export function Sidebar(_props: SidebarProps = {}) {
           onClick={() => setFeedbackOpen(true)}
         >
           <IconMessagePlus size={18} />
+          <span className="sb-rail-label">Feedback</span>
           <span className="nav-tooltip">Feedback</span>
         </button>
       </div>
@@ -145,6 +160,7 @@ export function Sidebar(_props: SidebarProps = {}) {
         >
           {initials}
         </button>
+        <span className="sb-rail-username">{displayName}</span>
         <button
           type="button"
           className="sb-rail-signout"
@@ -159,6 +175,26 @@ export function Sidebar(_props: SidebarProps = {}) {
 
       <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
     </aside>
+  )
+}
+
+function ChevronIcon({ collapsed }: { collapsed: boolean }) {
+  // Points right (»/›) when collapsed to invite expansion, left when expanded.
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ transform: collapsed ? "none" : "rotate(180deg)" }}
+      aria-hidden
+    >
+      <polyline points="9 18 15 12 9 6" />
+    </svg>
   )
 }
 

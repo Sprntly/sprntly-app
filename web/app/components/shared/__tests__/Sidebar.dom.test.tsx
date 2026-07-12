@@ -18,9 +18,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 const goTo = vi.fn()
 const goToNewChat = vi.fn()
+const toggleSidebar = vi.fn()
+let sidebarCollapsed = true
 
 vi.mock("../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ currentScreen: "brief", goTo, goToNewChat }),
+  useNavigation: () => ({ currentScreen: "brief", goTo, goToNewChat, sidebarCollapsed, toggleSidebar }),
 }))
 
 vi.mock("../../../context/ContentContext", () => ({
@@ -41,6 +43,8 @@ import { Sidebar } from "../Sidebar"
 beforeEach(() => {
   goTo.mockClear()
   goToNewChat.mockClear()
+  toggleSidebar.mockClear()
+  sidebarCollapsed = true
 })
 afterEach(() => cleanup())
 
@@ -99,5 +103,24 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
   it("renders the brand mark with its accent dot", () => {
     const { container } = render(React.createElement(Sidebar))
     expect(container.querySelector(".sb-rail-logo-dot")).toBeTruthy()
+  })
+})
+
+// ── Expand / collapse toggle ──────────────────────────────────────────────────
+describe("Sidebar — expand/collapse toggle", () => {
+  it("renders the collapsed rail and an Expand control that fires toggleSidebar", () => {
+    sidebarCollapsed = true
+    const { container } = render(React.createElement(Sidebar))
+    expect(container.querySelector(".sidebar--collapsed")).toBeTruthy()
+    fireEvent.click(screen.getByLabelText("Expand sidebar"))
+    expect(toggleSidebar).toHaveBeenCalledTimes(1)
+  })
+
+  it("renders the expanded rail with a Collapse control when not collapsed", () => {
+    sidebarCollapsed = false
+    const { container } = render(React.createElement(Sidebar))
+    expect(container.querySelector(".sidebar--expanded")).toBeTruthy()
+    fireEvent.click(screen.getByLabelText("Collapse sidebar"))
+    expect(toggleSidebar).toHaveBeenCalledTimes(1)
   })
 })

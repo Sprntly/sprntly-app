@@ -1072,31 +1072,26 @@
   }
 
   /* ---------- App shell ---------- */
+  /* The Sidebar is position: fixed, so the app shell is a plain block and the
+     content column simply reserves space via padding-left equal to the rail
+     width. That reservation follows the sidebar's collapsed/expanded width so
+     no phantom gutter appears and the content slides as the rail animates. */
   .app {
-    display: grid;
-    grid-template-columns: minmax(var(--sidebar-rail-expanded-min), max-content) 1fr;
+    display: block;
     min-height: 100vh;
     height: 100vh;
     max-height: 100vh;
     overflow: hidden;
     background: var(--surface);
-    transition: grid-template-columns 0.2s ease;
   }
 
-  .app.app--sidebar-collapsed {
-    padding-left: 60px;
-    display: block;
-  }
-
-  .app:not(.app--sidebar-collapsed) {
-    display: block;
-  }
-
-  /* The Sidebar always renders as the 60px icon rail (sidebar--collapsed is
-     hardcoded), so the content column's left reservation must equal that rail
-     width. A larger value leaves a phantom gutter between the rail and the
-     tab/content area. Matches the .app--sidebar-collapsed path below. */
+  /* Expanded (default): content clears the 220px rail. */
   .app:not(.app--sidebar-collapsed) .main-column {
+    padding-left: var(--sidebar-rail-expanded-min);
+  }
+
+  /* Collapsed: content clears the 60px icon rail. */
+  .app.app--sidebar-collapsed .main-column {
     padding-left: 60px;
   }
 
@@ -1109,6 +1104,7 @@
     overflow-x: hidden;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    transition: padding-left 0.2s ease;
   }
 
   .main-column>.main {
@@ -1335,7 +1331,7 @@
     height: 100%;
     min-height: 0;
     /* overflow: hidden; */
-    transition: none;
+    transition: width 0.2s ease;
     position: fixed;
     top: 0;
     left: 0;
@@ -1353,6 +1349,123 @@
     /* New design: nav rail vertical padding 14px (was 12px/8px). */
     padding: 14px 0;
     gap: 0;
+  }
+
+  /* ── Rail layout (expanded) ── shares the .sb-rail-* markup with the collapsed
+     rail; widening to 220px and left-aligning the items reveals inline labels. */
+  .sidebar.sidebar--expanded {
+    width: var(--sidebar-rail-expanded-min);
+    min-width: var(--sidebar-rail-expanded-min);
+    max-width: var(--sidebar-rail-expanded-min);
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    padding: 14px 12px;
+    gap: 0;
+  }
+
+  /* Header: logo left, brand wordmark, collapse toggle pinned right. */
+  .sidebar--expanded .sb-rail-header {
+    justify-content: flex-start;
+    gap: 9px;
+    padding: 0 2px;
+  }
+
+  .sb-rail-brand-name {
+    font-family: var(--font-serif);
+    font-size: 15px;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+    color: var(--nav-text-hover);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .sidebar--collapsed .sb-rail-brand-name {
+    display: none;
+  }
+
+  /* Inline label shown beside each icon only when expanded. */
+  .sb-rail-label {
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .sidebar--collapsed .sb-rail-label {
+    display: none;
+  }
+
+  /* No hover tooltips when labels are already visible. */
+  .sidebar--expanded .nav-tooltip {
+    display: none;
+  }
+
+  /* Collapse toggle sits inline in the header (overrides the floating tab). */
+  .sidebar--expanded .sb-rail-expand {
+    position: static;
+    top: auto;
+    right: auto;
+    flex-shrink: 0;
+  }
+
+  /* New chat + nav items become full-width rows with a left-aligned icon. */
+  .sidebar--expanded .sb-rail-new {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 0 12px;
+    height: 40px;
+  }
+
+  .sidebar--expanded .sb-rail-nav,
+  .sidebar--expanded .sb-rail-bottom {
+    align-items: stretch;
+  }
+
+  .sidebar--expanded .sb-rail-item {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 0 12px;
+  }
+
+  .sidebar--expanded .sb-rail-item.active::before {
+    left: -12px;
+  }
+
+  .sidebar--expanded .divider-nav {
+    width: auto;
+    margin: 8px 6px;
+  }
+
+  /* User row: avatar + name + sign-out laid out horizontally. */
+  .sidebar--expanded .sb-rail-user {
+    flex-direction: row;
+    align-items: center;
+    gap: 9px;
+    padding: 6px 6px;
+  }
+
+  .sb-rail-username {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--nav-text-hover);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .sidebar--collapsed .sb-rail-username {
+    display: none;
   }
 
   /* ── Rail layout (collapsed) ── */
@@ -10675,6 +10788,12 @@
     .main-column {
       height: auto;
       overflow: visible;
+    }
+
+    /* Sidebar is hidden on mobile — drop the rail reservation so content is flush. */
+    .app .main-column,
+    .app.app--sidebar-collapsed .main-column {
+      padding-left: 0;
     }
 
     .sidebar {
