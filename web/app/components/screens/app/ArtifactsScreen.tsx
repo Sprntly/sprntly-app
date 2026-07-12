@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
@@ -323,18 +323,25 @@ export function ArtifactsScreen() {
   const [artifactsLoading, setArtifactsLoading] = useState(false)
   const [artifactFilter, setArtifactFilter] = useState<ArtifactFilter>("all")
 
+  // Upload-a-PRD state (the Import flow).
+  const [importing, setImporting] = useState(false)
+  const [importError, setImportError] = useState<string | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  const refreshArtifacts = useCallback(() => {
+    if (!activeCompany) return
+    setArtifactsLoading(true)
+    artifactsApi.list(activeCompany)
+      .then(setArtifacts)
+      .catch(() => setArtifacts([]))
+      .finally(() => setArtifactsLoading(false))
+  }, [activeCompany])
+
   // Refetch artifacts on mount and whenever the company changes (the required
   // refetch-on-open baseline — no real-time wiring).
   useEffect(() => {
-    if (!activeCompany) return
-    let cancelled = false
-    setArtifactsLoading(true)
-    artifactsApi.list(activeCompany)
-      .then((rows) => { if (!cancelled) setArtifacts(rows) })
-      .catch(() => { if (!cancelled) setArtifacts([]) })
-      .finally(() => { if (!cancelled) setArtifactsLoading(false) })
-    return () => { cancelled = true }
-  }, [activeCompany])
+    refreshArtifacts()
+  }, [refreshArtifacts])
 
   // Row click → OPEN the existing viewer, reusing the brief's exact mechanisms:
   //  - prd      → load by id, setContent({prd, prdMeta}) + openContentPanel("prd")
@@ -366,9 +373,91 @@ export function ArtifactsScreen() {
     }
   }, [setContent, openContentPanel, router])
 
+  // Import a PRD from an uploaded file. The backend parses + re-lays-it-out into
+  // our format (fire-and-forget → a 'generating' prd_id). We poll until ready,
+  // then open it in the standard PRD page (same mechanism as opening a PRD
+  // artifact) and refresh the list so the new PRD appears.
+  const handleImport = useCallback(async (file: File) => {
+    if (!activeCompany || importing) return
+    setImporting(true)
+    setImportError(null)
+    try {
+      const { prd_id } = await prdApi.importDoc(file, activeCompany)
+      // Poll until ready (generation is a few LLM calls; cap ~3 min).
+      const deadline = Date.now() + 180_000
+      let rec = await prdApi.get(prd_id)
+      while (rec.status === "generating" && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2500))
+        rec = await prdApi.get(prd_id)
+      }
+      if (rec.status !== "ready") {
+        throw new Error(
+          rec.status === "failed"
+            ? "PRD generation failed. Please try again."
+            : "Timed out generating the PRD. It may still finish — check back shortly.",
+        )
+      }
+      setContent({
+        prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined },
+        prdMeta: null,
+      })
+      openContentPanel("prd")
+      refreshArtifacts()
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : "Import failed. Please try again.")
+    } finally {
+      setImporting(false)
+    }
+  }, [activeCompany, importing, setContent, openContentPanel, refreshArtifacts])
+
   return (
     <AppLayout>
       <div style={{ maxWidth: 780, margin: "0 auto", padding: "0 4px" }}>
+        {/* Upload a PRD → parsed + converted into our format server-side. */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginBottom: 16 }}>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.pptx,.docx,.md,.txt"
+            data-testid="prd-import-input"
+            style={{ display: "none" }}
+            onChange={(e) => {
+              const f = e.target.files?.[0]
+              e.target.value = "" // allow re-selecting the same file
+              if (f) void handleImport(f)
+            }}
+          />
+          <button
+            type="button"
+            data-testid="prd-import-button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importing || !activeCompany}
+            style={{
+              fontSize: 13, fontWeight: 600, padding: "7px 16px", borderRadius: 8,
+              border: "none", whiteSpace: "nowrap",
+              cursor: importing || !activeCompany ? "default" : "pointer",
+              background: "var(--accent, #179463)", color: "#fff",
+              opacity: importing || !activeCompany ? 0.6 : 1,
+              display: "flex", alignItems: "center", gap: 6,
+            }}
+          >
+            {importing ? "Importing…" : "+ Upload PRD"}
+          </button>
+        </div>
+
+        {importError && (
+          <div
+            data-testid="prd-import-error"
+            style={{
+              marginBottom: 14, padding: "10px 12px", borderRadius: 8, fontSize: 12.5,
+              background: "var(--danger-bg, #FEF2F2)", color: "var(--danger, #DC2626)",
+              border: "1px solid var(--danger-line, #FCA5A5)",
+            }}
+          >
+            {importError}
+          </div>
+        )}
+
         <ArtifactsView
           items={artifacts}
           filter={artifactFilter}
