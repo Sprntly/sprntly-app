@@ -26,8 +26,22 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from types import SimpleNamespace
 from typing import Any, Iterable
+
+
+# Serializes every fake-DB access (and the per-test reset that closes the
+# connection). The single :memory: connection is shared across threads
+# (check_same_thread=False), and background work — e.g. the PRD Part-B
+# pre-warm's `asyncio.to_thread(ensure_impl_spec, ...)` — can outlive the
+# request/test that spawned it and race a concurrently-running query or the
+# next test's reset_fake_db() close. Concurrent use of one sqlite3 connection
+# raises "sqlite3.InterfaceError: bad parameter or other API misuse" (an
+# order-dependent pytest-integration flake). This lock makes the
+# "we serialize writes ourselves" contract real, so cross-thread access can
+# never overlap and reset never closes a connection mid-query.
+_LOCK = threading.RLock()
 
 
 # Module-level singleton so the same fake survives within one test.
@@ -48,14 +62,18 @@ def get_fake_db() -> sqlite3.Connection:
 def reset_fake_db(ddl: str) -> None:
     """Wipe the in-memory DB and re-create from DDL. Called per-test."""
     global _DB, _DDL
-    _DDL = ddl
-    if _DB is not None:
-        _DB.close()
-    # check_same_thread=False — FastAPI TestClient hops threads;
-    # we serialize writes ourselves so it's safe.
-    _DB = sqlite3.connect(":memory:", check_same_thread=False)
-    _DB.row_factory = sqlite3.Row
-    _DB.executescript(ddl)
+    # Hold _LOCK across close+reopen so a still-running background query (which
+    # takes _LOCK for its full execute()) finishes before we close the old
+    # connection — never closing it mid-statement.
+    with _LOCK:
+        _DDL = ddl
+        if _DB is not None:
+            _DB.close()
+        # check_same_thread=False — FastAPI TestClient hops threads;
+        # we serialize writes ourselves (via _LOCK) so it's safe.
+        _DB = sqlite3.connect(":memory:", check_same_thread=False)
+        _DB.row_factory = sqlite3.Row
+        _DB.executescript(ddl)
 
 
 # Postgres jsonb columns return Python dicts/lists in supabase-py. We
@@ -249,6 +267,14 @@ class _Query:
         return " WHERE " + " AND ".join(parts), args
 
     def execute(self) -> SimpleNamespace:
+        # Serialize the whole operation: get_fake_db() + every db.execute/commit
+        # here runs under one lock so a background thread's query can never
+        # interleave with another thread's (concurrent use of a single sqlite3
+        # connection is "API misuse") nor with reset_fake_db() closing it.
+        with _LOCK:
+            return self._execute_locked()
+
+    def _execute_locked(self) -> SimpleNamespace:
         db = get_fake_db()
         if self._kind == "select":
             where, args = self._where_clause()
