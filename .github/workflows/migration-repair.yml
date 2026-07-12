@@ -1,0 +1,65 @@
+# Manual, audited admin tool for repairing the Supabase migration-history table
+# (supabase_migrations.schema_migrations) when it drifts from the repo — e.g.
+# phantom versions recorded on the DB with no matching local migration file,
+# which makes `supabase db push` abort with "Remote migration versions not
+# found in local migrations directory" and blocks every backend deploy.
+#
+# It touches ONLY the bookkeeping table (marks the given versions applied /
+# reverted); it never runs DDL or alters real schema. Uses the SAME
+# secrets.SUPABASE_DB_URL the deploy pipeline migrates against, so it always
+# targets the same database `db push` sees. Dispatch-only (no push trigger),
+# and prints the remote migration list before and after so the change is fully
+# logged.
+name: Repair Supabase migration history (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      versions:
+        description: 'Space-separated migration versions to repair (e.g. "20260712150000 20260712160000")'
+        required: true
+        type: string
+      status:
+        description: 'Mark the versions as this status in the history table'
+        required: true
+        default: reverted
+        type: choice
+        options:
+          - reverted
+          - applied
+
+concurrency:
+  group: deploy-backend  # share the deploy lane so a repair never races a db push
+  cancel-in-progress: false
+
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Remote migration history (BEFORE)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error title=No DB URL::SUPABASE_DB_URL secret is not set."
+            exit 1
+          fi
+          supabase migration list --db-url "$SUPABASE_DB_URL"
+
+      - name: Repair migration history
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          echo "Marking versions [${{ inputs.versions }}] as '${{ inputs.status }}'"
+          supabase migration repair --status "${{ inputs.status }}" ${{ inputs.versions }} --db-url "$SUPABASE_DB_URL"
+
+      - name: Remote migration history (AFTER)
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          supabase migration list --db-url "$SUPABASE_DB_URL"
