@@ -147,7 +147,8 @@ def _public_connection(row: dict) -> dict:
         "id": row["id"],
         "provider": row["provider"],
         "status": row["status"],
-        # What this provider IS (multi-valued, e.g. ["task-tracking"]) — the
+        # What this provider IS (one type for now, list-shaped for the future,
+        # e.g. ["task-management"]) — the
         # web derives feature availability (ticket sync, …) from these
         # instead of hardcoding provider names. See app/connectors/catalog.py.
         "types": types_for(row["provider"]),

@@ -1,12 +1,15 @@
 """Connector TYPE classification (app/connectors/catalog.py): what each
-provider IS (multi-valued), surfaced on the connectors API and consumed by
-type-driven features (the ticket sync's eligible-provider set).
+provider IS, surfaced on the connectors API and consumed by type-driven
+features (the ticket sync's eligible-provider set).
+
+Cardinality is a product decision: exactly ONE type per connector for now,
+kept list-shaped so multi-type support later is a data change only.
 """
 from __future__ import annotations
 
 from app.connectors.catalog import (
     CONNECTOR_TYPES,
-    TASK_TRACKING,
+    TASK_MANAGEMENT,
     has_type,
     providers_with_type,
     types_for,
@@ -14,8 +17,8 @@ from app.connectors.catalog import (
 
 
 def test_every_connectable_provider_is_classified():
-    """Every provider with a real auth backend carries at least one type —
-    a new connector must be classified before it ships."""
+    """Every provider with a real auth backend carries a type — a new
+    connector must be classified before it ships."""
     connectable = [
         "jira", "clickup", "google_drive", "hubspot",
         "github", "figma", "slack", "fireflies",
@@ -24,24 +27,30 @@ def test_every_connectable_provider_is_classified():
         assert types_for(provider), f"{provider} has no types"
 
 
-def test_types_are_multi_valued_and_provider_specific():
-    assert types_for("clickup") == [TASK_TRACKING]
-    assert types_for("jira") == [TASK_TRACKING]
+def test_exactly_one_type_per_connector_for_now():
+    """Product decision (2026-07): one type per connector. The list shape is
+    future-proofing, not an invitation — this test is the guardrail."""
+    for provider, types in CONNECTOR_TYPES.items():
+        assert len(types) == 1, f"{provider} has {len(types)} types: {types}"
+
+
+def test_types_are_provider_specific():
+    assert types_for("clickup") == [TASK_MANAGEMENT]
+    assert types_for("jira") == [TASK_MANAGEMENT]
     assert types_for("slack") == ["communication"]
-    # Multi-valued: one tool can be several things.
-    assert set(types_for("hubspot")) == {"crm", "revenue"}
-    assert set(types_for("fireflies")) == {"meetings", "customer-voice"}
+    assert types_for("hubspot") == ["crm"]
+    assert types_for("fireflies") == ["meetings"]
     # Unknown providers are just untyped — never an error.
     assert types_for("not-a-provider") == []
     assert types_for(None) == []
 
 
 def test_providers_with_type_and_has_type():
-    trackers = providers_with_type(TASK_TRACKING)
+    trackers = providers_with_type(TASK_MANAGEMENT)
     assert {"jira", "clickup", "linear", "asana"} <= set(trackers)
     assert "slack" not in trackers
-    assert has_type("clickup", TASK_TRACKING)
-    assert not has_type("slack", TASK_TRACKING)
+    assert has_type("clickup", TASK_MANAGEMENT)
+    assert not has_type("slack", TASK_MANAGEMENT)
 
 
 def test_every_type_value_is_kebab_case():
@@ -51,8 +60,8 @@ def test_every_type_value_is_kebab_case():
 
 
 def test_ticket_sync_providers_is_typed_and_implemented():
-    """Sync eligibility = typed task-tracking ∩ engine-implemented. Linear is
-    typed as a tracker but not implemented, so it must NOT be eligible."""
+    """Sync eligibility = typed task-management ∩ engine-implemented. Linear
+    is typed as a tracker but not implemented, so it must NOT be eligible."""
     from app.stories.sync import SYNC_PROVIDERS, ticket_sync_providers
 
     eligible = ticket_sync_providers()
@@ -70,5 +79,5 @@ def test_public_connection_carries_types():
         "id": 1, "provider": "clickup", "status": "active",
         "config_json": None,
     }
-    assert _public_connection(row)["types"] == [TASK_TRACKING]
+    assert _public_connection(row)["types"] == [TASK_MANAGEMENT]
     assert _public_connection({**row, "provider": "slack"})["types"] == ["communication"]

@@ -59,20 +59,20 @@ logger = logging.getLogger(__name__)
 
 #: Providers this ENGINE implements (a _Tracker branch + a push pair in
 #: app.stories.push). Eligibility for the product feature is narrower — see
-#: ticket_sync_providers(): a provider must also be TYPED task-tracking in
+#: ticket_sync_providers(): a provider must also be TYPED task-management in
 #: app/connectors/catalog.py. Adding a tool = catalog type + an entry here +
 #: the engine branches (+ the web's TRACKERS catalog).
 SYNC_PROVIDERS = ("clickup", "jira")
 
 
 def ticket_sync_providers() -> tuple[str, ...]:
-    """Providers tickets may sync with: typed `task-tracking` in the connector
-    catalog AND implemented by this engine. Types drive discovery; the engine
-    is the authority on capability."""
-    from app.connectors.catalog import TASK_TRACKING, providers_with_type
+    """Providers tickets may sync with: typed `task-management` in the
+    connector catalog AND implemented by this engine. Types drive discovery;
+    the engine is the authority on capability."""
+    from app.connectors.catalog import TASK_MANAGEMENT, providers_with_type
 
     return tuple(
-        p for p in providers_with_type(TASK_TRACKING) if p in SYNC_PROVIDERS
+        p for p in providers_with_type(TASK_MANAGEMENT) if p in SYNC_PROVIDERS
     )
 
 

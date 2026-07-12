@@ -909,7 +909,8 @@ export type ConnectionSummary = {
   id: string
   provider: "google_drive" | "figma" | "github" | string
   status: "active" | "error" | "revoked" | string
-  /** What this provider IS, multi-valued (e.g. ["task-tracking"]) — mirrors
+  /** What this provider IS — one type for now, list-shaped for the future
+   *  (e.g. ["task-management"]). Mirrors
    *  backend/app/connectors/catalog.py; features derive availability from
    *  these rather than hardcoding provider ids. */
   types?: string[]

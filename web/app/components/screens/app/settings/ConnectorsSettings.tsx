@@ -236,7 +236,7 @@ export function ConnectorsSettingsView({
                 </div>
               </div>
               {/* Middle column: what this tool IS (multi-valued) — the same
-                  types that drive feature availability (e.g. task-tracking →
+                  types that drive feature availability (e.g. task-management →
                   the tickets sync button). */}
               <div className="set-conn-types">
                 {(item.types ?? []).map((tp) => (
