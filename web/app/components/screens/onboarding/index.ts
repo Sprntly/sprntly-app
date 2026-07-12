@@ -3,6 +3,7 @@ export { BusinessInfo } from "./BusinessInfo"
 // Metrics is no longer a standalone numbered route — its pick-3 view + helpers
 // are reused inline by BusinessInfo (onb1). Kept exported for that reuse + tests.
 export { Metrics } from "./Metrics"
+export { ApiKey } from "./ApiKey"
 export { Connectors } from "./Connectors"
 export { BusinessContext } from "./BusinessContext"
 // Strategy is the FINAL numbered step (onbstrat) — it completes onboarding +

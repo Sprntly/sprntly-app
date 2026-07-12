@@ -70,13 +70,27 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
     corpus = load_corpus(dataset)
     cacheable = f"Source material:\n\n{corpus.joined()}"
     user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
-    return call_json(
-        system=ASK_SYSTEM,
-        user=user,
-        user_cacheable_prefix=cacheable,
-        schema=_ASK_RESPONSE_SCHEMA,
-        max_tokens=12000,
-    )
+    # Warm/predefined asks carry only a dataset slug (no enterprise_id). The slug
+    # IS the company slug (see deps.ownership), so resolve it to bind the
+    # company's own Claude key when configured. Best-effort: an unresolvable slug
+    # falls through to the platform key.
+    from app.llm_keys import company_llm_key
+
+    company_id = None
+    try:
+        from app.deps.ownership import company_id_for_dataset
+
+        company_id = company_id_for_dataset(dataset)
+    except Exception:  # noqa: BLE001 — key binding must never break warming
+        company_id = None
+    with company_llm_key(company_id):
+        return call_json(
+            system=ASK_SYSTEM,
+            user=user,
+            user_cacheable_prefix=cacheable,
+            schema=_ASK_RESPONSE_SCHEMA,
+            max_tokens=12000,
+        )
 
 
 def _retrieve_kg_bundle(enterprise_id: str | None, question: str) -> dict | None:
@@ -139,13 +153,18 @@ def compose_ask_answer(
         system = ASK_SYSTEM
         user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
-    payload = call_json(
-        system=system,
-        user=user,
-        user_cacheable_prefix=cacheable,
-        schema=_ASK_RESPONSE_SCHEMA,
-        max_tokens=12000,
-    )
+    # Bind the tenant's own Claude key (when configured) for this direct
+    # (non-gateway) answer call. See app.llm_keys.
+    from app.llm_keys import company_llm_key
+
+    with company_llm_key(enterprise_id):
+        payload = call_json(
+            system=system,
+            user=user,
+            user_cacheable_prefix=cacheable,
+            schema=_ASK_RESPONSE_SCHEMA,
+            max_tokens=12000,
+        )
 
     # Decision-log the ask onto the §4d audit spine. Best-effort + tenant-
     # scoped — only when a tenant resolved (legacy cookie sessions have none).

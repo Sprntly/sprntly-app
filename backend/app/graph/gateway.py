@@ -174,27 +174,38 @@ def llm_call(
     timeout = LONG_REQUEST_TIMEOUT_S if use_long_output else None
     meta: dict = {}
     t0 = time.monotonic()
-    if json_schema is not None:
-        # The method (if any) is already merged into user_cacheable_prefix above,
-        # so it stays cache-friendly across calls; the agent system prompt is the
-        # layer after it.
-        output: Any = call_json(
-            system=system, user=input, model=chosen_model, max_tokens=max_tokens,
-            schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
-            meta_out=meta, stream=stream, timeout=timeout, background=background,
-            temperature=temperature,
-        )
-    else:
-        # call_md now supports the same cacheable prefix, so the method (merged
-        # above) rides the prefix — a cache read on repeat calls — instead of
-        # being concatenated uncached into `system`. The agent `system` prompt is
-        # cached too when substantial (see _build_base_kwargs).
-        output = call_md(
-            system=system, user=input, model=chosen_model, max_tokens=max_tokens,
-            user_cacheable_prefix=user_cacheable_prefix,
-            meta_out=meta, stream=stream, timeout=timeout, background=background,
-            temperature=temperature,
-        )
+    # Bind the tenant's own Claude key (when configured) for this call. This is
+    # the single chokepoint every KG-agent / brief / PRD / evidence / ticket call
+    # flows through, and `enterprise_id` is the company id — so binding here
+    # routes the whole gateway to the customer's key. Set-and-used in this
+    # synchronous stack (the call below reaches app.llm.get_client), so it
+    # propagates even when the primitive runs the Anthropic call on a worker
+    # thread. See app.llm_keys.
+    from app.llm_keys import company_llm_key
+
+    with company_llm_key(enterprise_id):
+        if json_schema is not None:
+            # The method (if any) is already merged into user_cacheable_prefix
+            # above, so it stays cache-friendly across calls; the agent system
+            # prompt is the layer after it.
+            output: Any = call_json(
+                system=system, user=input, model=chosen_model, max_tokens=max_tokens,
+                schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
+                meta_out=meta, stream=stream, timeout=timeout, background=background,
+                temperature=temperature,
+            )
+        else:
+            # call_md now supports the same cacheable prefix, so the method
+            # (merged above) rides the prefix — a cache read on repeat calls —
+            # instead of being concatenated uncached into `system`. The agent
+            # `system` prompt is cached too when substantial (see
+            # _build_base_kwargs).
+            output = call_md(
+                system=system, user=input, model=chosen_model, max_tokens=max_tokens,
+                user_cacheable_prefix=user_cacheable_prefix,
+                meta_out=meta, stream=stream, timeout=timeout, background=background,
+                temperature=temperature,
+            )
     latency_ms = int((time.monotonic() - t0) * 1000)
 
     result = LLMResult(

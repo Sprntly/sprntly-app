@@ -92,7 +92,7 @@ describe("Workspace (onboarding step 02 — name-only)", () => {
       onboarding_step: 3,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
   })
 
   it("Continue with an unchanged name only advances the step (no name write)", async () => {
@@ -109,7 +109,7 @@ describe("Workspace (onboarding step 02 — name-only)", () => {
 
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
   })
 
   it("Back routes to the business-info page", () => {

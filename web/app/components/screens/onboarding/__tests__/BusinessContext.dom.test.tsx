@@ -203,7 +203,7 @@ describe("BusinessContext (onboarding step 04 — onbctx)", () => {
 
     // Company-shape is NOT persisted from this step anymore.
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
   })
 
@@ -225,7 +225,7 @@ describe("BusinessContext (onboarding step 04 — onbctx)", () => {
       nextBtn.click()
     })
     expect(bcUpdateMock).not.toHaveBeenCalled()
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
   })
 
   it("Skip for now advances without PUTting any edits", async () => {
@@ -244,7 +244,7 @@ describe("BusinessContext (onboarding step 04 — onbctx)", () => {
       skip.click()
     })
     expect(bcUpdateMock).not.toHaveBeenCalled()
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
   })
 })

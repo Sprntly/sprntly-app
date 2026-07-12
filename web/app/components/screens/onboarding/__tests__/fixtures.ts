@@ -38,6 +38,7 @@ export function makeWorkspace(
     design_source: null,
     onboarding_step: 1,
     onboarding_completed_at: null,
+    use_platform_key: false,
     ...over,
   }
 }

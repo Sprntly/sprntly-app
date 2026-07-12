@@ -2253,6 +2253,25 @@ export const teamApi = {
   list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
 }
 
+// ── Admin (owner/admin only): per-company Claude API key ──
+// When configured, ALL of the company's Claude LLM calls use THIS key instead
+// of the platform key. The full key is never returned — reads carry a masked
+// preview only.
+
+export type LlmKeyStatus = { configured: boolean; masked: string | null }
+
+export const adminApi = {
+  /** Current key status (masked preview, never the full key). */
+  getLlmKey: () => api.get<LlmKeyStatus>("/v1/admin/llm-key"),
+  /** Store / replace the company Claude key. */
+  setLlmKey: (apiKey: string) =>
+    api.put<LlmKeyStatus>("/v1/admin/llm-key", { api_key: apiKey }),
+  /** Remove the key (revert to the platform key). */
+  deleteLlmKey: () => api.delete<LlmKeyStatus>("/v1/admin/llm-key"),
+  /** Explicit, opt-in live validation of the stored key (one cheap call). */
+  testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
+}
+
 // ── Feedback / feature-request (June 20 #13 + #A) ──
 // Users submit a short message + an optional type from the left nav. The
 // backend stores it and emails it to the team. type defaults to "other".

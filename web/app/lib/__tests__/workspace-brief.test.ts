@@ -31,6 +31,7 @@ const workspace: WorkspaceCompany = {
   design_source: null,
   onboarding_step: 8,
   onboarding_completed_at: null,
+  use_platform_key: false,
 }
 
 describe("buildWorkspaceContextMarkdown", () => {

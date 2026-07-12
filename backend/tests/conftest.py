@@ -343,6 +343,15 @@ CREATE TABLE companies (
     -- Per-company config incl. drip-email cadence/opt-out (mirrors
     -- 20260525150000_onboarding_workspace.sql). Read by app.db.drip.
     notification_settings TEXT NOT NULL DEFAULT '{}',
+    -- Fernet-encrypted per-company Claude key (mirrors
+    -- 20260711120000_company_llm_api_key.sql). Read by app.llm_keys.
+    llm_api_key_encrypted TEXT,
+    -- Platform-key fallback flag + onboarding-completion marker. Read by
+    -- app.llm_keys to decide whether a keyless company may use the platform key
+    -- (mirrors 20260712120000_company_use_platform_key.sql +
+    -- 20260525150000_onboarding_workspace.sql).
+    use_platform_key    INTEGER NOT NULL DEFAULT 0,
+    onboarding_completed_at TEXT,
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
