@@ -10,6 +10,10 @@ export type ScreenId =
   | "ob-strategy"
   | "chat"
   | "chats"
+  // The Artifacts library — a dedicated left-nav surface listing durable outputs
+  // (PRDs, prototypes, evidence). Previously a tab inside History; now stands on
+  // its own so History holds only chats.
+  | "artifacts"
   | "brief"
   | "detail"
   | "ondemand"
@@ -41,6 +45,7 @@ export const ONBOARDING_SCREENS: ScreenId[] = [
 export const APP_SCREENS: ScreenId[] = [
   "chat",
   "chats",
+  "artifacts",
   "brief",
   "detail",
   "ondemand",
@@ -68,6 +73,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   "ob-strategy": "Setup · Step 6 of 6",
   chat: "Home",
   chats: "History",
+  artifacts: "Artifacts",
   brief: "Weekly brief",
   detail: "Evidence",
   ondemand: "Home",
