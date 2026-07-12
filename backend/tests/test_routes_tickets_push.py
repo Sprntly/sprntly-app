@@ -198,7 +198,9 @@ def test_push_appends_saved_comments_as_notes(clickup_env, monkeypatch):
     md = mock_create.call_args.kwargs["markdown_description"]
     assert "## Notes" in md
     assert "Watch the rate limit here" in md
-    assert "**sarah:**" in md
+    # Per #719, a normal comment's author is resolved from the session (not the
+    # request body), so it renders as the signed-in identity — "user" here.
+    assert "**user:**" in md
 
 
 def test_push_uses_base_fields_when_no_overrides(clickup_env, monkeypatch):
