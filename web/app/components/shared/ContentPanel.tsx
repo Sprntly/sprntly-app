@@ -15,7 +15,7 @@ import {
   type JiraProject, type TicketSyncState, type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
-import { TicketDetail, priorityPill } from "./TicketDetail"
+import { TicketDetail } from "./TicketDetail"
 import { DestinationPicker } from "./DestinationPicker"
 import { JiraPushModal, type JiraPushChoice } from "./JiraPushModal"
 import { ticketSyncTrackers } from "../../lib/connectorsCatalog"
@@ -388,9 +388,7 @@ function EvidenceTab() {
 function StoryRow({ story, index, onOpen, synced, tool }: {
   story: GeneratedStory; index: number; onOpen: () => void; synced?: ClickUpTicketState; tool?: string
 }) {
-  const pill = priorityPill(story.priority)
   const preview = story.user_story || story.body
-  const acCount = story.acceptance_criteria.length
   return (
     <button type="button" className="tkv2-card" onClick={onOpen}>
       <span className="tkv2-key">{`T-${index + 1}`}</span>
@@ -402,15 +400,19 @@ function StoryRow({ story, index, onOpen, synced, tool }: {
             {story.prd_section ? <span className="ctx"> Context: {story.prd_section}</span> : null}
           </div>
         ) : null}
-        <div className="tkv2-row">
-          <span className={`tkv2-pill tkv2-pill--${pill.variant}`}>{pill.label}</span>
-          {acCount > 0 ? <span className="tkv2-acchip">{acCount} AC</span> : null}
-          {synced?.status ? (
-            <span className="tkv2-synced" title={synced.assignee ? `Assignee: ${synced.assignee}` : undefined}>
-              ⟳ {tool || "Tracker"}: {synced.status}
+        {/* The row carries ONLY the ticket's tracker stage (priority + AC
+            count live in the detail view). The chip shows the bare stage —
+            the tool name sits in the tooltip. */}
+        {synced?.status ? (
+          <div className="tkv2-row">
+            <span
+              className="tkv2-synced"
+              title={`${tool || "Tracker"} status${synced.assignee ? ` · Assignee: ${synced.assignee}` : ""}`}
+            >
+              {synced.status}
             </span>
-          ) : null}
-        </div>
+          </div>
+        ) : null}
       </div>
     </button>
   )
@@ -418,7 +420,7 @@ function StoryRow({ story, index, onOpen, synced, tool }: {
 
 // ── Ticket trackers ──────────────────────────────────────────────────────────
 // The task-management tools tickets can sync with — derived from the
-// connector catalog's TYPES (connectors typed "task-tracking" that the
+// connector catalog's TYPES (connectors typed "task-management" that the
 // backend sync engine implements), so the sync button follows the catalog
 // instead of hardcoding providers. Adding a tool = type it in the catalog +
 // a backend push/pull pair (app/stories/push.py) + a provider branch in
@@ -429,7 +431,7 @@ const trackerLabel = (id: string | undefined | null): string =>
   TRACKERS.find((t) => t.id === id)?.label ?? "tracker"
 
 
-/** "2026-07-10T12:00:00+00:00" → "just now" / "5m ago" / "3h ago" / "Jul 8". */
+/** "2026-07-10T12:00:00+00:00" → "just now" / "11 mins ago" / "3 hrs ago" / "Jul 8". */
 export function relTime(iso: string | null | undefined): string {
   if (!iso) return ""
   const d = new Date(iso)
@@ -437,9 +439,9 @@ export function relTime(iso: string | null | undefined): string {
   const secs = Math.max(0, (Date.now() - d.getTime()) / 1000)
   if (secs < 60) return "just now"
   const m = Math.floor(secs / 60)
-  if (m < 60) return `${m}m ago`
+  if (m < 60) return `${m} min${m !== 1 ? "s" : ""} ago`
   const h = Math.floor(m / 60)
-  if (h < 24) return `${h}h ago`
+  if (h < 24) return `${h} hr${h !== 1 ? "s" : ""} ago`
   return d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
 }
 
@@ -458,11 +460,21 @@ export function TicketsTab() {
   // ── Generation (PRD → tickets via the user-stories skill) ──────────────
   type GenState =
     | { kind: "idle" }
-    | { kind: "generating" }
-    | { kind: "ready"; stories: GeneratedStory[] }
+    | { kind: "generating" } // first-ever generation — nothing older to show
+    | {
+        kind: "ready"
+        stories: GeneratedStory[]
+        /** The PRD was edited: these are the PREVIOUS tickets, shown while
+         *  the replacement set generates in the background. */
+        refreshing?: boolean
+        /** A background refresh failed — the old set stays, with this note. */
+        refreshError?: string | null
+      }
     | { kind: "error"; message: string }
   const [genState, setGenState] = useState<GenState>({ kind: "idle" })
   const stories = genState.kind === "ready" ? genState.stories : []
+  const refreshing = genState.kind === "ready" && Boolean(genState.refreshing)
+  const refreshError = genState.kind === "ready" ? genState.refreshError ?? null : null
 
   // Which ticket (if any) is open in the in-panel editable detail view.
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
@@ -485,10 +497,10 @@ export function TicketsTab() {
   // null = not loaded yet for this PRD.
   const [syncState, setSyncState] = useState<TicketSyncState | null>(null)
 
-  // Manual regenerate: tickets are cached per PRD and only auto-regenerate when
-  // the PRD changes, so give the user an explicit way to force a fresh set. A
-  // nonce re-runs the generation effect; the ref tells it to SKIP the cache read
-  // and regenerate (vs the normal cache-first path on PRD change).
+  // Retry for a run that came back empty (a transient LLM failure): a nonce
+  // re-runs the generation effect and the ref tells it to SKIP the cache read.
+  // This is NOT a user-facing "regenerate" — PRD edits trigger regeneration
+  // automatically via the stale-cache check below.
   const [regenNonce, setRegenNonce] = useState(0)
   const forceRegenRef = useRef(false)
   const regenerate = () => {
@@ -498,13 +510,14 @@ export function TicketsTab() {
 
   // Tickets are persisted per PRD (keyed by a content hash of the rendered PRD).
   // On open / PRD change we READ the stored set first: if it's fresh (generated
-  // from the PRD's current content) we render it instantly with no LLM call. Only
-  // when there's no row, or the PRD has changed since (stale), or a prior run
-  // failed, do we (re)generate — fire-and-forget on the backend (a multi-minute
-  // call), so we kick it off, get a job id, then POLL until ready/failed. The
-  // backend re-persists on completion, so the next open is a cache hit.
+  // from the PRD's current content) we render it instantly with no LLM call.
+  // When the PRD has been EDITED since (stale), we keep showing the previous
+  // set and regenerate in the background (stale-while-revalidate) — the new
+  // set replaces it atomically when the job completes; a failure keeps the old
+  // set with a quiet note. The full-screen spinner is reserved for the FIRST
+  // generation, when there is nothing older to show.
   useEffect(() => {
-    // A new PRD (or a regenerate) invalidates the open detail.
+    // A new PRD invalidates the open detail.
     setSelectedIndex(null)
     if (prdId == null) {
       setGenState({ kind: "idle" })
@@ -512,6 +525,8 @@ export function TicketsTab() {
     }
     let cancelled = false
     let timer: ReturnType<typeof setTimeout> | null = null
+    // The previous (stale) set shown while regenerating; null = nothing older.
+    let prevStories: GeneratedStory[] | null = null
     // A deploy/restart can drop an in-flight (not-yet-persisted) job → the poll
     // 404s. Treat that as "work was lost" and re-kick generation (bounded)
     // rather than surfacing an error.
@@ -519,10 +534,13 @@ export function TicketsTab() {
 
     const fail = (e: unknown) => {
       if (cancelled) return
-      setGenState({
-        kind: "error",
-        message: e instanceof Error ? e.message : "Couldn't generate tickets",
-      })
+      const message = e instanceof Error ? e.message : "Couldn't generate tickets"
+      // With a previous set on screen, a failed refresh must not nuke it.
+      if (prevStories?.length) {
+        setGenState({ kind: "ready", stories: prevStories, refreshError: message })
+      } else {
+        setGenState({ kind: "error", message })
+      }
     }
 
     const poll = (jobId: number) => {
@@ -531,9 +549,12 @@ export function TicketsTab() {
         .then((j) => {
           if (cancelled) return
           if (j.status === "ready") {
+            // Swap in the fresh set; close any stale detail so an open ticket
+            // can't point at the wrong story in the replaced list.
+            if (prevStories?.length) setSelectedIndex(null)
             setGenState({ kind: "ready", stories: j.stories ?? [] })
           } else if (j.status === "failed") {
-            setGenState({ kind: "error", message: j.error || "Couldn't generate tickets" })
+            fail(new Error(j.error || "Couldn't generate tickets"))
           } else {
             timer = setTimeout(() => poll(jobId), 2000)
           }
@@ -550,7 +571,11 @@ export function TicketsTab() {
 
     const start = () => {
       if (cancelled) return
-      setGenState({ kind: "generating" })
+      if (prevStories?.length) {
+        setGenState({ kind: "ready", stories: prevStories, refreshing: true })
+      } else {
+        setGenState({ kind: "generating" })
+      }
       storiesApi
         .generate(prdId)
         .then((r) => {
@@ -560,12 +585,12 @@ export function TicketsTab() {
     }
 
     setPickState({ kind: "idle" })
-    setGenState({ kind: "generating" })
 
-    // Manual "Regenerate" forces a fresh set; skip the cache read entirely.
+    // Empty-run retry forces a fresh set; skip the cache read entirely.
     const force = forceRegenRef.current
     forceRegenRef.current = false
     if (force) {
+      setGenState({ kind: "generating" })
       start()
       return () => {
         cancelled = true
@@ -573,7 +598,10 @@ export function TicketsTab() {
       }
     }
 
-    // Cache-first: serve the persisted set if it's still fresh, else regenerate.
+    setGenState({ kind: "generating" })
+
+    // Cache-first: serve the persisted set if it's still fresh; a STALE set
+    // (the PRD was edited) stays on screen while the replacement generates.
     storiesApi
       .getForPrd(prdId)
       .then((cache) => {
@@ -581,6 +609,7 @@ export function TicketsTab() {
         if (cache.status === "ready" && cache.fresh) {
           setGenState({ kind: "ready", stories: cache.stories })
         } else {
+          if (cache.stories?.length) prevStories = cache.stories
           start()
         }
       })
@@ -802,8 +831,8 @@ export function TicketsTab() {
       const when = syncState.last_synced_at ? relTime(syncState.last_synced_at) : null
       return {
         label: syncing
-          ? <><span className="tkv2-spin" aria-hidden><IconRefresh size={15} /></span> Syncing…</>
-          : <><IconRefresh size={15} /> {when ? `Synced ${when}` : "Sync now"}</>,
+          ? <><span className="tkv2-spin" aria-hidden><IconRefresh size={15} /></span> Syncing with {currentTool}…</>
+          : <><IconRefresh size={15} /> {when ? `Synced with ${currentTool} ${when}` : `Sync with ${currentTool} now`}</>,
         title: `Synced with ${currentTool}${syncState.destination_name ? ` · ${syncState.destination_name}` : ""} — auto-syncs in the background; click to sync now`,
         onClick: syncNow, disabled: syncing || syncState == null,
       }
@@ -853,10 +882,11 @@ export function TicketsTab() {
 
   return (
     <div className="tkv2 tkt-list-wrap">
-      {/* Header block — serif title, subline, then a Regenerate + tracker
-          actions row. ONE tracker button covers connect → first push → synced
-          (see trackerBtn above); the first push registers the destination and
-          the backend keeps it synced automatically from then on. */}
+      {/* Header block — serif title, subline, then the tracker action. ONE
+          button covers connect → first push → synced (see trackerBtn above);
+          the first push registers the destination and the backend keeps it
+          synced automatically from then on. Regeneration has no button — a
+          PRD edit triggers it automatically (stale-while-revalidate above). */}
       <div className="tkv2-topbar">
         <h2>Tickets from <em>{prdTitle}</em></h2>
         <div className="tkv2-sub">
@@ -864,16 +894,16 @@ export function TicketsTab() {
         </div>
         {stories.length > 0 && (
           <div className="tkv2-hactions">
-            <button type="button" className="tkv2-btn tkv2-btn--regen" onClick={regenerate} title="Regenerate tickets from the current PRD">
-              <IconRefresh size={15} /> Regenerate
-            </button>
             <div style={{ position: "relative", display: "inline-flex" }}>
               <button
                 type="button"
                 className={`tkv2-btn ${syncState?.configured && connectedTrackers.length > 0 ? "tkv2-btn--sync" : "tkv2-btn--push"}`}
                 onClick={trackerBtn.onClick}
-                disabled={trackerBtn.disabled}
-                title={trackerBtn.title}
+                // Also locked while a PRD edit is regenerating the set —
+                // pushing tickets that are about to be replaced would orphan
+                // their tracker mappings.
+                disabled={trackerBtn.disabled || refreshing}
+                title={refreshing ? "Tickets are updating from the edited PRD…" : trackerBtn.title}
               >
                 {trackerBtn.label}
               </button>
@@ -919,19 +949,22 @@ export function TicketsTab() {
                 />
               )}
             </div>
-            {/* A configured PRD with several tools connected can still switch. */}
-            {syncState?.configured && connectedTrackers.length > 1 && (
-              <button type="button" className="tkv2-btn tkv2-btn--regen" style={{ paddingLeft: 6 }}
-                onClick={() => setPickState((p) => (p.kind === "menu" ? { kind: "idle" } : { kind: "menu" }))}
-                title="Sync with a different tool" aria-label="Switch tracker">
-                <IconChevronDown size={14} />
-              </button>
-            )}
           </div>
         )}
       </div>
 
-      {/* Sync status line (under the header). */}
+      {/* Regeneration + sync status lines (under the header). */}
+      {refreshing && (
+        <div className="tkt-push-status">
+          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
+          The PRD changed — updating these tickets. Showing the previous set until the new one is ready.
+        </div>
+      )}
+      {!refreshing && refreshError && (
+        <div className="tkt-push-status tkt-push-status--err">
+          Couldn&apos;t update the tickets from the edited PRD ({refreshError}) — still showing the previous set; reopen the tab to retry.
+        </div>
+      )}
       {syncing && (
         <div className="tkt-push-status">
           Syncing {stories.length} ticket{stories.length !== 1 ? "s" : ""} with {currentTool}

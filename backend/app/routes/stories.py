@@ -428,12 +428,12 @@ async def trigger_sync(
     if (body.provider is None) != (body.destination_id is None):
         raise HTTPException(400, "provider and destination_id go together")
     if body.provider is not None:
-        # Eligibility is type-driven: the provider must be a task-tracking
+        # Eligibility is type-driven: the provider must be a task-management
         # connector (app/connectors/catalog.py) the sync engine implements.
         if body.provider not in ticket_sync_providers():
             raise HTTPException(
                 400,
-                f"{body.provider!r} is not a task-tracking connector tickets can sync with",
+                f"{body.provider!r} is not a task-management connector tickets can sync with",
             )
         upsert_sync_config(
             company.company_id, prd_id,

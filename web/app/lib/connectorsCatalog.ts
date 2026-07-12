@@ -33,10 +33,10 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", logoSvg: "/connectors/linear.svg", oauth: false, types: ["task-tracking"] },
-      { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", logoSvg: "/connectors/jira.svg", oauth: true, types: ["task-tracking"] },
-      { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoSvg: "/connectors/clickup.svg", oauth: true, types: ["task-tracking"] },
-      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: false, types: ["task-tracking"] },
+      { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", logoSvg: "/connectors/linear.svg", oauth: false, types: ["task-management"] },
+      { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", logoSvg: "/connectors/jira.svg", oauth: true, types: ["task-management"] },
+      { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoSvg: "/connectors/clickup.svg", oauth: true, types: ["task-management"] },
+      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: false, types: ["task-management"] },
     ],
   },
   {
@@ -60,14 +60,14 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
-      { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false, types: ["customer-voice", "communication"] },
+      { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false, types: ["communication"] },
       { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", logoSvg: "/connectors/zendesk.svg", oauth: false, types: ["customer-voice"] },
       // Fireflies has no official SVG mark we could bundle, so it keeps the
       // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
-      { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings", "customer-voice"] },
-      { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, types: ["meetings", "customer-voice"] },
+      { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings"] },
+      { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, types: ["meetings"] },
       { id: "dovetail",   name: "Dovetail",   logo: "D", logoText: "D", logoColor: "#9B59B6", oauth: false, types: ["customer-voice"] },
-      { id: "salesforce", name: "Salesforce", logo: "S", logoText: "S", logoColor: "#00A1E0", logoSvg: "/connectors/salesforce.svg", oauth: false, types: ["crm", "customer-voice"] },
+      { id: "salesforce", name: "Salesforce", logo: "S", logoText: "S", logoColor: "#00A1E0", logoSvg: "/connectors/salesforce.svg", oauth: false, types: ["crm"] },
     ],
   },
   {
@@ -77,8 +77,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
       { id: "stripe",     name: "Stripe",     logo: "S", logoText: "S", logoColor: "#635BFF", logoSvg: "/connectors/stripe.svg", oauth: false, types: ["revenue"] },
-      { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false, types: ["revenue", "analytics"] },
-      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", logoSvg: "/connectors/hubspot.svg", oauth: true, types: ["crm", "revenue"] },
+      { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false, types: ["revenue"] },
+      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", logoSvg: "/connectors/hubspot.svg", oauth: true, types: ["crm"] },
     ],
   },
   {
@@ -187,13 +187,14 @@ export function connectableCatalog(
 
 // ── Connector types ──────────────────────────────────────────────────────────
 //
-// Every catalog item carries `types` (multi-valued — what the tool IS), the
-// mirror of the backend authority (backend/app/connectors/catalog.py).
-// Features read these instead of hardcoding provider ids.
+// Every catalog item carries its type (what the tool IS), the mirror of the
+// backend authority (backend/app/connectors/catalog.py). Features read these
+// instead of hardcoding provider ids. ONE type per connector for now (product
+// decision) — the list shape is future-proofing for multi-type.
 
 /** Human labels for the type chips shown on connector cards. */
 export const CONNECTOR_TYPE_LABELS: Record<ConnectorType, string> = {
-  "task-tracking": "Task tracking",
+  "task-management": "Task management",
   communication: "Communication",
   documents: "Documents",
   "customer-voice": "Customer voice",
@@ -213,7 +214,7 @@ export function connectorTypes(id: string): ConnectorType[] {
   return ALL_ITEMS.find((i) => i.id === id)?.types ?? []
 }
 
-/** Every catalog connector carrying `type` (e.g. all task trackers). */
+/** Every catalog connector carrying `type` (e.g. all task-management tools). */
 export function connectorsWithType(type: ConnectorType): ConnectorItemRow[] {
   return ALL_ITEMS.filter((i) => (i.types ?? []).includes(type))
 }
@@ -221,15 +222,15 @@ export function connectorsWithType(type: ConnectorType): ConnectorItemRow[] {
 /**
  * Providers the backend's ticket-sync engine implements (mirror of
  * app/stories/sync.py SYNC_PROVIDERS). A connector must be typed
- * `task-tracking` AND be in this set to appear on the sync button — the type
- * declares what a tool is, the engine declares what we can do with it.
+ * `task-management` AND be in this set to appear on the sync button — the
+ * type declares what a tool is, the engine declares what we can do with it.
  */
 export const TICKET_SYNC_IMPLEMENTED = new Set<string>(["clickup", "jira"])
 
-/** The task trackers tickets can actually sync with: {id, label} for the
- *  sync button, its tool menu, and its labels. */
+/** The task-management tools tickets can actually sync with: {id, label} for
+ *  the sync button, its tool menu, and its labels. */
 export function ticketSyncTrackers(): { id: string; label: string }[] {
-  return connectorsWithType("task-tracking")
+  return connectorsWithType("task-management")
     .filter((i) => TICKET_SYNC_IMPLEMENTED.has(i.id))
     .map((i) => ({ id: i.id, label: i.name }))
 }

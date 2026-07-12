@@ -562,7 +562,7 @@ def test_trigger_sync_rejects_half_destinations_and_unknown_providers(isolated_s
                 _ctx(),
             )
         assert getattr(ei2.value, "status_code", None) == 400
-        # Connected-but-wrong-TYPE (communication, not task-tracking) → rejected.
+        # Connected-but-wrong-TYPE (communication, not task-management) → rejected.
         with pytest.raises(Exception) as ei3:
             await routes.trigger_sync(
                 7,
@@ -570,7 +570,7 @@ def test_trigger_sync_rejects_half_destinations_and_unknown_providers(isolated_s
                 _ctx(),
             )
         assert getattr(ei3.value, "status_code", None) == 400
-        assert "task-tracking" in str(getattr(ei3.value, "detail", ""))
+        assert "task-management" in str(getattr(ei3.value, "detail", ""))
 
     asyncio.run(_flow())
 

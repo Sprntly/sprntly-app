@@ -109,8 +109,9 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     await waitFor(() => expect(getJob).toHaveBeenCalledWith(11))
     await waitFor(() => expect(screen.getByText("Instrument wizard steps")).toBeTruthy())
     expect(screen.getByText("Resume on re-login")).toBeTruthy()
-    // Acceptance-criteria count surfaces on the row.
-    expect(screen.getByText("2 AC")).toBeTruthy()
+    // Rows stay lean: no priority/AC chips (those live in the detail view).
+    expect(screen.queryByText("2 AC")).toBeNull()
+    expect(screen.queryByText("P1")).toBeNull()
   })
 
   it("serves persisted tickets without regenerating when the PRD is unchanged", async () => {
@@ -131,50 +132,98 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     expect(generate).not.toHaveBeenCalled()
   })
 
-  it("regenerates when the cache is stale (PRD changed)", async () => {
+  it("a PRD edit regenerates automatically, showing the previous tickets until the new set lands", async () => {
     content = { prd: { prd_id: 42, title: "PRD" }, connectedConnectorIds: [] }
-    // Stale: stored stories exist but fresh=false → must regenerate.
+    // Stale: stored stories exist but fresh=false (the PRD was edited).
     getForPrd.mockResolvedValue({
       status: "ready",
       fresh: false,
       stories: [{ title: "Old ticket", body: "", acceptance_criteria: [], priority: null, route: null }],
     })
     generate.mockResolvedValue({ job_id: 9, status: "generating" })
-    getJob.mockResolvedValue({ job_id: 9, status: "ready", stories: [
-      { title: "Fresh ticket", body: "", acceptance_criteria: [], priority: null, route: null },
-    ] })
+    // Hold the poll open so the in-between state is observable.
+    let resolveJob: (j: unknown) => void = () => {}
+    getJob.mockReturnValue(new Promise((res) => { resolveJob = res }))
 
     await act(async () => {
       render(React.createElement(TicketsTab))
     })
 
+    // Regeneration kicked off automatically — no button, no full-screen
+    // spinner: the PREVIOUS set stays visible with an updating note.
     await waitFor(() => expect(generate).toHaveBeenCalledWith(42))
+    expect(screen.getByText("Old ticket")).toBeTruthy()
+    expect(screen.queryByTestId("tickets-generating")).toBeNull()
+    expect(screen.getByText(/updating these tickets/i)).toBeTruthy()
+    expect(screen.queryByRole("button", { name: /^regenerate$/i })).toBeNull()
+
+    // The job completes → the new set replaces the old one atomically.
+    await act(async () => {
+      resolveJob({ job_id: 9, status: "ready", stories: [
+        { title: "Fresh ticket", body: "", acceptance_criteria: [], priority: null, route: null },
+      ] })
+    })
     await waitFor(() => expect(screen.getByText("Fresh ticket")).toBeTruthy())
+    expect(screen.queryByText("Old ticket")).toBeNull()
+    expect(screen.queryByText(/updating these tickets/i)).toBeNull()
   })
 
-  it("Regenerate button forces a fresh generation even on a fresh cache", async () => {
+  it("a failed background refresh keeps the previous tickets with a note", async () => {
+    content = { prd: { prd_id: 42, title: "PRD" }, connectedConnectorIds: [] }
+    getForPrd.mockResolvedValue({
+      status: "ready",
+      fresh: false,
+      stories: [{ title: "Old ticket", body: "", acceptance_criteria: [], priority: null, route: null }],
+    })
+    generate.mockResolvedValue({ job_id: 9, status: "generating" })
+    getJob.mockResolvedValue({ job_id: 9, status: "failed", error: "model timeout" })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+
+    // The old set survives; the failure is a quiet note, not an error screen.
+    await waitFor(() => expect(screen.getByText(/couldn't update the tickets/i)).toBeTruthy())
+    expect(screen.getByText("Old ticket")).toBeTruthy()
+    expect(screen.queryByTestId("tickets-error")).toBeNull()
+  })
+
+  it("there is no header Regenerate button on a fresh cache", async () => {
     content = { prd: { prd_id: 42, title: "PRD" }, connectedConnectorIds: [] }
     getForPrd.mockResolvedValue({
       status: "ready",
       fresh: true,
       stories: [{ title: "Cached ticket", body: "", acceptance_criteria: [], priority: null, route: null }],
     })
-    generate.mockResolvedValue({ job_id: 5, status: "generating" })
-    getJob.mockResolvedValue({ job_id: 5, status: "ready", stories: [
-      { title: "Regenerated ticket", body: "", acceptance_criteria: [], priority: null, route: null },
-    ] })
 
     await act(async () => {
       render(React.createElement(TicketsTab))
     })
     await waitFor(() => expect(screen.getByText("Cached ticket")).toBeTruthy())
     expect(generate).not.toHaveBeenCalled()
+    expect(screen.queryByRole("button", { name: /regenerate/i })).toBeNull()
+  })
+
+  it("an empty run still offers the retry button, which forces a fresh generation", async () => {
+    content = { prd: { prd_id: 42, title: "PRD" }, connectedConnectorIds: [] }
+    generate.mockResolvedValue({ job_id: 5, status: "generating" })
+    // First run returns zero tickets (transient) → retry regenerates.
+    getJob
+      .mockResolvedValueOnce({ job_id: 5, status: "ready", stories: [] })
+      .mockResolvedValue({ job_id: 5, status: "ready", stories: [
+        { title: "Recovered ticket", body: "", acceptance_criteria: [], priority: null, route: null },
+      ] })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+    await waitFor(() => expect(screen.getByTestId("tickets-empty")).toBeTruthy())
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /regenerate/i }))
     })
-    await waitFor(() => expect(generate).toHaveBeenCalledWith(42))
-    await waitFor(() => expect(screen.getByText("Regenerated ticket")).toBeTruthy())
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.getByText("Recovered ticket")).toBeTruthy())
   })
 
   it("re-generates when the poll 404s (backend restart dropped the in-memory job)", async () => {
@@ -238,11 +287,11 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     await waitFor(() => expect(getData).toHaveBeenCalledWith("prd-42-instrument-wizard-steps"))
     expect(screen.getByRole("button", { name: /all tickets/i })).toBeTruthy()
 
-    // Back → list returns, regen button is visible again.
+    // Back → list returns (the header's tracker action is visible again).
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /all tickets/i }))
     })
-    await waitFor(() => expect(screen.getByRole("button", { name: /regenerate/i })).toBeTruthy())
+    await waitFor(() => expect(screen.getByRole("button", { name: /connect a tracker/i })).toBeTruthy())
   })
 
   it("does not generate when there is no PRD yet", async () => {
@@ -299,7 +348,7 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
       render(React.createElement(TicketsTab))
     })
     await waitFor(() => expect(screen.getByText("T1")).toBeTruthy())
-    const btn = await screen.findByRole("button", { name: /synced 5m ago/i })
+    const btn = await screen.findByRole("button", { name: /synced with clickup 5 mins ago/i })
 
     await act(async () => { fireEvent.click(btn) })
     // Ad-hoc sync of the registered destination — no destination re-pick.
@@ -389,8 +438,10 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     await act(async () => {
       render(React.createElement(TicketsTab))
     })
-    // No click needed — the persisted pull renders directly.
-    await waitFor(() => expect(screen.getByText(/ClickUp: in progress/i)).toBeTruthy())
+    // No click needed — the persisted pull renders directly, as the bare
+    // stage (the tool name lives in the tooltip, not the chip).
+    await waitFor(() => expect(screen.getByText(/^in progress$/i)).toBeTruthy())
+    expect(screen.queryByText(/ClickUp: in progress/i)).toBeNull()
   })
 
   it("with several tools connected, the button opens a tool menu (Jira flows into its modal)", async () => {
