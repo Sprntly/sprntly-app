@@ -23,6 +23,7 @@ export type SettingsSectionId =
   | "mcp"
   | "billing"
   | "security"
+  | "admin"
   // Dormant (kept for component-file compatibility, not linked)
   | "strategic"
   | "flags"
@@ -71,6 +72,10 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     items: [
       { id: "billing", label: "Billing", available: true },
       { id: "security", label: "Security", available: true },
+      // Owner/admin-only pane; the pane itself gates non-admins (the backend
+      // enforces the 403). Shown to all so admins can find it without a
+      // separate role fetch in the nav.
+      { id: "admin", label: "Admin", available: true },
     ],
   },
 ]

@@ -24,6 +24,7 @@ vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 // without dragging in their hooks/contexts.
 vi.mock("../../screens/onboarding", () => ({
   BusinessInfo: () => React.createElement("div", { "data-screen": "business-info" }),
+  ApiKey: () => React.createElement("div", { "data-screen": "api-key" }),
   Connectors: () => React.createElement("div", { "data-screen": "connectors" }),
   BusinessContext: () => React.createElement("div", { "data-screen": "business-context" }),
   Strategy: () => React.createElement("div", { "data-screen": "strategy" }),
@@ -48,14 +49,15 @@ afterEach(() => {
 const EXPECTED_ORDER = [
   "business-info",
   "workspace",
+  "api-key",
   "connectors",
   "business-context",
   "strategy",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 5 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(5)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 6 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(6)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 

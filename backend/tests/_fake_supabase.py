@@ -87,6 +87,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
 
 # Postgres bool columns surface as bool in supabase-py; SQLite stores 0/1.
 _BOOL_COLUMNS: dict[str, set[str]] = {
+    "companies":            {"use_platform_key"},
     "briefs":               {"is_current"},
     "github_installations": {"suspended"},
     "github_pull_requests": {"is_draft"},

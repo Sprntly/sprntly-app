@@ -62,6 +62,10 @@ export type WorkspaceCompany = {
   design_source: DesignSourcePreference | null
   onboarding_step: number
   onboarding_completed_at: string | null
+  /** DB-only flag (Sprntly sets it for contracted customers): when true the
+   *  workspace may run on the platform key, so the onboarding Claude-key step is
+   *  skippable. Default false ⇒ the key is required. */
+  use_platform_key: boolean
 }
 
 export type UserProfile = {
@@ -158,6 +162,9 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
 export const ONBOARDING_STEP_SLUGS = [
   "business-info",
   "workspace",
+  // Claude API key — collected BEFORE connectors so the token-heavy KG build
+  // (which runs after sources connect) uses the company's own key, not ours.
+  "api-key",
   "connectors",
   "business-context",
   "strategy",

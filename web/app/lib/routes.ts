@@ -46,6 +46,7 @@ export function prdIdFromPrototypeSearch(raw: string | null): number | null {
 export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-business-info": "/onboarding/business-info",
   "ob-workspace": "/onboarding/workspace",
+  "ob-api-key": "/onboarding/api-key",
   "ob-connectors": "/onboarding/connectors",
   "ob-business-context": "/onboarding/business-context",
   "ob-strategy": "/onboarding/strategy",

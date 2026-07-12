@@ -1336,6 +1336,48 @@ async def generate_prototype(
     located_screen: LocatedScreen | None = None,
     shell_map: MapResult | None = None,
 ) -> tuple[RunResult, dict[str, str]]:
+    """Bind the company's own Claude key (when configured) for the entire
+    generation — both the design-system resolution and the agent tool loop use
+    `get_design_agent_client`, so the whole run must see the company key. The
+    bind propagates across every `await` and `asyncio.to_thread` in the impl
+    (see app.llm_keys). `workspace_id` is the company id."""
+    from app.llm_keys import company_llm_key
+
+    with company_llm_key(workspace_id):
+        return await _generate_prototype_impl(
+            prototype_id,
+            workspace_id,
+            system_blocks,
+            user_message,
+            figma_file_key,
+            figma_node_id=figma_node_id,
+            scenario=scenario,
+            github_repo=github_repo,
+            github_installation_id=github_installation_id,
+            website_url=website_url,
+            website_sample=website_sample,
+            design_source=design_source,
+            located_screen=located_screen,
+            shell_map=shell_map,
+        )
+
+
+async def _generate_prototype_impl(
+    prototype_id: int,
+    workspace_id: str,
+    system_blocks: list[dict[str, Any]],
+    user_message: dict[str, Any],
+    figma_file_key: str | None,
+    figma_node_id: str | None = None,
+    scenario: str = "A",
+    github_repo: str | None = None,
+    github_installation_id: int | None = None,
+    website_url: str | None = None,
+    website_sample: dict | None = None,
+    design_source: str | None = None,
+    located_screen: LocatedScreen | None = None,
+    shell_map: MapResult | None = None,
+) -> tuple[RunResult, dict[str, str]]:
     """Public entrypoint: run agent_loop with a fresh ToolContext, emit the
     cost-summary log line, and return `(result, virtual_fs)` for P1-07 + P1-08
     to persist + stage.
@@ -1795,13 +1837,18 @@ async def iterate_prototype(
         if approved_plan and approved_plan.strip()
         else system_blocks
     )
-    result = await agent_loop(
-        system_blocks=effective_system_blocks,
-        user_message=user_message,
-        ctx=ctx,
-        scenario=scenario,
-        mode=mode,
-    )
+    # Bind the company's own Claude key (when configured) for the edit loop, same
+    # as the scaffold path (generate_prototype). `workspace_id` is the company id.
+    from app.llm_keys import company_llm_key
+
+    with company_llm_key(workspace_id):
+        result = await agent_loop(
+            system_blocks=effective_system_blocks,
+            user_message=user_message,
+            ctx=ctx,
+            scenario=scenario,
+            mode=mode,
+        )
     # F12 (P3-08): on an awaiting_clarification pause, persist the question on the
     # prototype's pending_question sidecar and stage NO checkpoint (no bundle was
     # built). iterate_prototype itself never stages checkpoints (the route's

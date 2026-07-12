@@ -36,6 +36,7 @@ from app.prompts import (
     PRD_VARIANT,
 )
 from app.routes import (
+    admin,
     agent_chat,
     artifacts,
     ask,
@@ -265,6 +266,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Bind the acting company for per-request Claude-key resolution/enforcement.
+# Pure-ASGI (propagates contextvars to sync/async endpoints + spawned tasks).
+from app.middleware_llm_key import CompanyLLMKeyMiddleware  # noqa: E402
+
+app.add_middleware(CompanyLLMKeyMiddleware)
+
 app.include_router(health.router)
 app.include_router(auth.router)
 app.include_router(connectors.router)
@@ -304,6 +311,7 @@ app.include_router(tickets.router)
 app.include_router(conversations.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
+app.include_router(admin.router)
 app.include_router(feedback.router)
 app.include_router(mcp_tokens.router)
 app.include_router(internal_mcp.resolve_router)
