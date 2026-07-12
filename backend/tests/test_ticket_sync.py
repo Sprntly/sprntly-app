@@ -157,19 +157,72 @@ def test_tracker_status_mapping():
 
 class FakeTracker:
     """In-memory tracker double: `remotes` maps ticket_id → remote state; a
-    missing entry = never created (bulk_create then registers it)."""
+    missing entry = never created (bulk_create then registers it). `meta_seed`
+    (a normalized TrackerMeta dict) turns on the tracker-native paths, exactly
+    like a cached tracker_meta row does on the real _Tracker."""
 
     instances: list["FakeTracker"] = []
 
     def __init__(self, provider, company_id, destination):
         self.provider, self.company_id, self.destination = provider, company_id, destination
         self.remotes = dict(FakeTracker.seed)
+        self.meta = FakeTracker.meta_seed
         self.pushed: list[tuple[str, str]] = []       # (ref, title)
         self.created: list[str] = []                   # titles
         self.status_sets: list[tuple[str, str]] = []   # (ref, status)
+        self.field_pushes: list[tuple[str, dict]] = [] # (ref, {fid: value})
+        self.type_sets: list[tuple[str, str]] = []     # (ref, issue_type)
+        self.comments: list[tuple[str, str]] = []      # (ref, text)
         FakeTracker.instances.append(self)
 
     seed: dict = {}
+    meta_seed: dict | None = None
+
+    # Mirrors of the real _Tracker's meta surface (same semantics).
+    def meta_status(self, name):
+        if not self.meta or not name:
+            return None
+        want = name.strip().lower()
+        for s in self.meta.get("statuses") or []:
+            if (s.get("name") or "").strip().lower() == want:
+                return s
+        return None
+
+    def editable_fields(self):
+        return [
+            f for f in (self.meta or {}).get("fields") or [] if f.get("editable")
+        ]
+
+    def meta_issue_type(self, name):
+        if not self.meta or not name:
+            return None
+        want = name.strip().lower()
+        for t in self.meta.get("issue_types") or []:
+            if not t.get("subtask") and (t.get("name") or "").strip().lower() == want:
+                return t.get("name")
+        return None
+
+    def set_issue_type(self, ref, issue_type):
+        self.type_sets.append((ref, issue_type))
+        return True
+
+    def add_comment(self, ref, text):
+        self.comments.append((ref, text))
+        return f"tc-{len(self.comments)}"
+
+    def remote_custom_fields(self, remote):
+        # Tests seed already-normalized values directly on the remote state.
+        return {
+            f["id"]: (remote.get("custom_fields") or {}).get(f["id"])
+            for f in self.editable_fields()
+        }
+
+    def push_custom_fields(self, ref, values):
+        self.field_pushes.append((ref, dict(values)))
+        tid = ref.removeprefix("ref-")
+        cf = dict((self.remotes.get(tid) or {}).get("custom_fields") or {})
+        cf.update(values)
+        self.remotes[tid] = {**(self.remotes.get(tid) or {}), "custom_fields": cf}
 
     def task_ref(self, tid):
         return f"ref-{tid}" if tid in self.remotes else None
@@ -206,6 +259,7 @@ class FakeTracker:
 def fake_tracker(monkeypatch):
     FakeTracker.instances = []
     FakeTracker.seed = {}
+    FakeTracker.meta_seed = None
     from app.stories import sync as sync_mod
 
     monkeypatch.setattr(sync_mod, "_Tracker", FakeTracker)

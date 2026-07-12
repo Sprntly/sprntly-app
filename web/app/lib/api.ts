@@ -1988,6 +1988,16 @@ export type TicketAssignee = {
 }
 
 /** Editable ticket metadata. All optional — a partial save only writes what's set. */
+/** A normalized tracker custom-field value (see backend tracker_meta.py):
+ *  scalars as themselves, select/user → {id, name}, multiselect/users →
+ *  [{id, name}], labels → string[]. */
+export type TrackerFieldValue =
+  | string | number | boolean
+  | { id: string | null; name: string | null }
+  | { id: string | null; name: string | null }[]
+  | string[]
+  | null
+
 export type TicketFields = {
   title?: string | null
   priority?: string | null
@@ -1996,6 +2006,12 @@ export type TicketFields = {
   assignee?: TicketAssignee | null
   /** Child issues override. Omit = keep generated; a list (incl. []) replaces. */
   subtasks?: string[] | null
+  /** Tracker custom-field overrides keyed by field id — MERGED server-side
+   *  (send only the fields being changed; null clears one override). */
+  custom_fields?: Record<string, TrackerFieldValue> | null
+  /** Tracker issue type (Jira Task/Story/… — the destination's real types).
+   *  Pushed on create; changes sync best-effort. */
+  issue_type?: string | null
 }
 
 export type TicketDataResponse = {
@@ -2007,6 +2023,8 @@ export type TicketDataResponse = {
   sprint: string | null
   assignee: TicketAssignee | null
   subtasks: string[] | null
+  custom_fields: Record<string, TrackerFieldValue> | null
+  issue_type: string | null
   attachments: { id: number; label: string; sub: string }[]
   comments: { id: number; author: string; body: string; time: string }[]
 }
@@ -2047,6 +2065,20 @@ export const ticketDataApi = {
   summarizeComments: (ticketKey: string) =>
     api.get<{ summary: string | null; proposed_criterion?: string | null }>(
       `/v1/tickets/${encodeURIComponent(ticketKey)}/comments/summary`,
+    ),
+  /** The status moves LEGAL for this ticket right now (tracker-bound tickets'
+   *  status dropdown). 404 when the PRD is unbound or the ticket was never
+   *  pushed — callers fall back to the default status options. */
+  getTransitions: (ticketKey: string) =>
+    api.get<{ provider: TrackerProvider; transitions: TrackerTransition[] }>(
+      `/v1/tickets/${encodeURIComponent(ticketKey)}/transitions`,
+    ),
+  /** A destination's vocabulary BEFORE any PRD is bound to it (the create
+   *  drawer's pickers right after the user picks a project/list). 404 when
+   *  nothing can be fetched — callers keep their default pickers. */
+  trackerMetaForDestination: (provider: TrackerProvider, destinationId: string) =>
+    api.post<{ provider: TrackerProvider; destination_id: string; meta: TrackerMeta }>(
+      "/v1/tickets/tracker-meta", { provider, destination_id: destinationId },
     ),
 }
 
@@ -2216,9 +2248,85 @@ export const storiesApi = {
     provider: TrackerProvider; destination_id: string; destination_name?: string
   }) =>
     api.post<{ status: "syncing" }>(`/v1/stories/sync/${prdId}`, dest ?? {}),
+  /** The bound destination's vocabulary (statuses/priorities/issue types/
+   *  custom fields) — what bound tickets render instead of the canned lists.
+   *  `configured: false` (never an error) when the PRD has no destination;
+   *  `meta` may be null when metadata couldn't be fetched yet. */
+  getTrackerMeta: (prdId: number, refresh = false) =>
+    api.get<{
+      configured: boolean
+      provider: TrackerProvider | null
+      destination_id: string | null
+      meta: TrackerMeta | null
+    }>(`/v1/stories/sync/${prdId}/tracker-meta${refresh ? "?refresh=1" : ""}`),
 }
 
-export type ClickUpTicketState = { status: string | null; assignee: string | null; url: string | null }
+export type ClickUpTicketState = {
+  status: string | null
+  assignee: string | null
+  url: string | null
+  /** The tracker's priority name for this ticket, pulled each sync pass. */
+  priority?: string | null
+  /** Canonical open/in_progress/done projection of `status` (from tracker
+   *  metadata) — vocabulary-independent completion semantics. */
+  status_category?: TrackerStatusCategory | null
+  /** Pulled custom-field values (normalized, keyed by field id) — the detail
+   *  screen's read-side value when there's no local override. */
+  custom_fields?: Record<string, TrackerFieldValue> | null
+  /** The tracker-side issue type (Jira), pulled each sync pass. */
+  issue_type?: string | null
+}
+
+// ── Tracker metadata (tracker-native vocabulary) ────────────────────────────
+// The bound destination's REAL statuses / priorities / issue types / custom
+// fields, normalized by the backend (app/connectors/tracker_meta.py) and
+// cached per destination. Bound tickets render THESE instead of Sprntly's
+// canned lists; unbound tickets keep the defaults.
+
+export type TrackerStatusCategory = "open" | "in_progress" | "done"
+
+export type TrackerStatus = {
+  id: string | null
+  name: string
+  color: string | null
+  category: TrackerStatusCategory
+}
+
+export type TrackerPriority = { id: string; name: string; color: string | null }
+
+export type TrackerIssueType = { id: string; name: string; subtask: boolean }
+
+export type TrackerFieldDef = {
+  id: string
+  name: string
+  /** Editor type (text/select/user/…), or "unsupported" — render read-only. */
+  type: string
+  raw_type: string
+  required: boolean
+  editable: boolean
+  options: { id: string | null; name: string; color: string | null }[] | null
+}
+
+export type TrackerMeta = {
+  provider: TrackerProvider
+  destination_id: string
+  fetched_at?: string
+  statuses: TrackerStatus[]
+  priorities: TrackerPriority[]
+  issue_types: TrackerIssueType[] | null
+  fields: TrackerFieldDef[]
+}
+
+/** One legal status move for a ticket (GET /v1/tickets/{key}/transitions).
+ *  Jira: the issue's live workflow transitions; ClickUp: every list status
+ *  (no workflow restrictions) in the same shape. */
+export type TrackerTransition = {
+  id: string | null
+  name: string
+  to_status_id: string | null
+  to_status_name: string
+  category: TrackerStatusCategory | null
+}
 
 // ── Ticket tracker sync (per-PRD) ────────────────────────────────────────────
 

@@ -8,15 +8,31 @@ import {
 import { useNavigation } from "../../context/NavigationContext"
 import {
   ticketDataApi, teamApi,
-  type GeneratedStory, type TicketAssignee, type TeamMemberRecord,
+  type ClickUpTicketState, type GeneratedStory, type TicketAssignee,
+  type TeamMemberRecord, type TrackerFieldValue, type TrackerMeta,
+  type TrackerProvider, type TrackerTransition,
 } from "../../lib/api"
+import { TrackerFieldEditor } from "./TrackerFieldEditor"
 
+// The DEFAULT vocabularies — what unbound tickets (no tracker destination)
+// render. A PRD bound to a Jira project / ClickUp list renders the
+// destination's REAL statuses/priorities from tracker metadata instead
+// (see the `tracker` prop).
 const STATUS_OPTIONS = ["Backlog", "To do", "In progress", "Review", "Done"]
 
 // The generator's priority enum — what actually lands in the database. The
 // pill shows the STORED value verbatim (see priorityPill callers); these are
 // the values the picker writes.
 const PRIORITY_OPTIONS = ["urgent", "high", "normal", "low"]
+
+/** Tracker context for a bound ticket: the destination's vocabulary (meta)
+ *  and this ticket's last-pulled tracker state. Absent = unbound → default
+ *  vocabulary + free-text saves, exactly the legacy behavior. */
+export type TicketTrackerCtx = {
+  provider: TrackerProvider
+  meta: TrackerMeta
+  synced?: ClickUpTicketState | null
+}
 
 /** "2026-07-08 18:23:45.123+00" (backend str(created_at)) → "Jul 8, 2026 · 6:23 PM".
  *  Falls back to the raw string when unparseable so nothing renders blank. */
@@ -322,21 +338,34 @@ function InlineEditList({ items, commit, addLabel, itemLabel, renderRow }: {
  *  anatomy): full-width five-section description over a two-column zone (main
  *  story column + Details rail). Structured fields drive it; legacy/thin
  *  tickets fall back to the plain description + a generated-AC flag. */
-export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
+export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracker }: {
   story: GeneratedStory; index: number; prdId: number; onBack: () => void
   /** Open a sibling ticket by its title (linked issues are title references). */
   onOpenLinked?: (title: string) => void
+  /** Bound-tracker context — switches status/priority to the destination's
+   *  real vocabulary. Omit for unbound tickets (default vocabulary). */
+  tracker?: TicketTrackerCtx | null
 }) {
   const { showToast } = useNavigation()
   const key = useMemo(() => ticketKeyFor(prdId, story), [prdId, story])
 
   const [title, setTitle] = useState(story.title)
   const [status, setStatus] = useState("Backlog")
+  // Whether `status` came from a saved edit or a user pick (vs the default
+  // seed) — gates the tracker-status seed below so it never overwrites a
+  // deliberate local value.
+  const [statusIsOverride, setStatusIsOverride] = useState(false)
   const [assignee, setAssignee] = useState<TicketAssignee | null>(null)
   const [description, setDescription] = useState(story.body)
   const [criteria, setCriteria] = useState<string[]>(story.acceptance_criteria)
   const [priority, setPriority] = useState<string>(story.priority || "")
   const [subtasks, setSubtasks] = useState<string[]>(story.subtasks || [])
+  // Local tracker custom-field overrides (keyed by field id). Display falls
+  // back to the last-pulled tracker value when a field has no override.
+  const [customFields, setCustomFields] = useState<Record<string, TrackerFieldValue>>({})
+  // Tracker issue type (Jira Task/Story/…) — null until an edit or a pulled
+  // tracker value provides one.
+  const [issueType, setIssueType] = useState<string | null>(null)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [comments, setComments] = useState<Comment[]>([])
   const [summary, setSummary] = useState<string | null>(null)
@@ -345,7 +374,7 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
   const [proposedCriterion, setProposedCriterion] = useState<string | null>(null)
 
   const [members, setMembers] = useState<TeamMemberRecord[] | null>(null)
-  const [openMenu, setOpenMenu] = useState<null | "status" | "reassign" | "priority">(null)
+  const [openMenu, setOpenMenu] = useState<null | "status" | "reassign" | "priority" | "issuetype">(null)
   const [commentText, setCommentText] = useState("")
   // Posting is in flight — the Send button shows "Sending…" and locks so a
   // slow request can't double-post.
@@ -378,12 +407,14 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
     ticketDataApi.getData(key).then((d) => {
       if (cancelled) return
       if (d.title != null) setTitle(d.title)
-      if (d.status != null) setStatus(d.status)
+      if (d.status != null) { setStatus(d.status); setStatusIsOverride(true) }
       if (d.assignee != null) setAssignee(d.assignee)
       if (d.description != null) { setDescription(d.description); setHasDescOverride(true) }
       if (d.acceptance_criteria != null) setCriteria(d.acceptance_criteria)
       if (d.priority != null) setPriority(d.priority)
       if (d.subtasks != null) setSubtasks(d.subtasks)
+      if (d.custom_fields != null) setCustomFields(d.custom_fields)
+      if (d.issue_type != null) setIssueType(d.issue_type)
       setAttachments(d.attachments)
       setComments(d.comments)
       setLoaded(true)
@@ -412,8 +443,72 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
     ticketDataApi.saveDescription(key, desc, acs).catch(() => showToast("Couldn't save", "Your change may not persist."))
   }
 
-  const pickStatus = (v: string) => { setStatus(v); setOpenMenu(null); saveFields({ status: v }) }
+  const pickStatus = (v: string) => {
+    setStatus(v); setStatusIsOverride(true); setOpenMenu(null); saveFields({ status: v })
+  }
   const pickPriority = (v: string) => { setPriority(v); setOpenMenu(null); saveFields({ priority: v }) }
+
+  // ── Tracker-native vocabulary (bound tickets) ──
+  // Status seed: with no saved local status, a bound ticket shows the
+  // tracker's pulled status (their vocabulary) instead of "Backlog".
+  useEffect(() => {
+    if (loaded && !statusIsOverride && tracker?.synced?.status) {
+      setStatus(tracker.synced.status)
+    }
+  }, [loaded, statusIsOverride, tracker?.synced?.status])
+
+  // Legal status moves, fetched lazily the first time the dropdown opens
+  // (Jira: the issue's live workflow transitions; ClickUp: the full list
+  // vocabulary in the same shape). Failure → fall back to meta.statuses.
+  const [transitions, setTransitions] = useState<TrackerTransition[] | null>(null)
+  const [transitionsFailed, setTransitionsFailed] = useState(false)
+  const openStatusMenu = () => {
+    setOpenMenu((m) => (m === "status" ? null : "status"))
+    if (tracker && transitions == null && !transitionsFailed) {
+      ticketDataApi.getTransitions(key)
+        .then((r) => setTransitions(r.transitions))
+        .catch(() => setTransitionsFailed(true))
+    }
+  }
+  // What the status dropdown offers: legal transitions when bound (fallback:
+  // the destination's full status list), else the default vocabulary.
+  // null = still loading (bound only).
+  const statusOptions: { name: string; color: string | null }[] | null = !tracker
+    ? STATUS_OPTIONS.map((name) => ({ name, color: null }))
+    : transitions != null
+      ? transitions.map((t) => ({
+          name: t.to_status_name,
+          color: tracker.meta.statuses.find(
+            (s) => s.name.toLowerCase() === t.to_status_name.toLowerCase(),
+          )?.color ?? null,
+        }))
+      : transitionsFailed
+        ? tracker.meta.statuses.map((s) => ({ name: s.name, color: s.color }))
+        : null
+  const priorityOptions: { name: string; color: string | null }[] = tracker
+    ? tracker.meta.priorities.map((p) => ({ name: p.name, color: p.color }))
+    : PRIORITY_OPTIONS.map((name) => ({ name, color: null }))
+
+  // Custom-field save: merge locally, send only the changed field (the
+  // backend merges too — sibling overrides survive). null clears an override.
+  const saveCustomField = (fieldId: string, v: TrackerFieldValue) => {
+    setCustomFields((m) => {
+      const next = { ...m }
+      if (v == null) delete next[fieldId]
+      else next[fieldId] = v
+      return next
+    })
+    saveFields({ custom_fields: { [fieldId]: v } })
+  }
+  const providerLabel = tracker?.provider === "jira" ? "Jira" : "ClickUp"
+
+  // Issue type (Jira-bound tickets): the destination's real non-subtask
+  // types. Displayed value = local edit ?? pulled tracker type ?? "Task".
+  const issueTypeOptions = (tracker?.meta.issue_types ?? []).filter((t) => !t.subtask)
+  const shownIssueType = issueType ?? tracker?.synced?.issue_type ?? "Task"
+  const pickIssueType = (v: string) => {
+    setIssueType(v); setOpenMenu(null); saveFields({ issue_type: v })
+  }
 
   // ── Description editing (contenteditable in place, autosave) ──
   // What the display currently represents as text: the saved override when
@@ -590,16 +685,24 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
           column; a rail only works at the reference's full page width.) */}
       <div className="tkv2-detailbar">
         <div style={{ position: "relative" }}>
-          <button type="button" className="tkv2-statusbtn" onClick={() => setOpenMenu((m) => (m === "status" ? null : "status"))}>
+          <button type="button" className="tkv2-statusbtn" onClick={openStatusMenu}>
             {status} <IconChevronDown size={12} />
           </button>
           {openMenu === "status" ? (
             <div className="tkv2-picker" style={{ position: "absolute", zIndex: 20 }}>
-              {STATUS_OPTIONS.map((o) => (
-                <button key={o} type="button" className={`tkv2-pitem${o === status ? " tkv2-pitem--sel" : ""}`} onClick={() => pickStatus(o)}>
-                  {o === status ? <IconCheck size={12} /> : <span style={{ width: 12 }} />}{o}
-                </button>
-              ))}
+              {statusOptions == null ? (
+                <div className="tkv2-pitem">Loading…</div>
+              ) : statusOptions.length === 0 ? (
+                <div className="tkv2-pitem">No moves available</div>
+              ) : (
+                statusOptions.map((o) => (
+                  <button key={o.name} type="button" className={`tkv2-pitem${o.name === status ? " tkv2-pitem--sel" : ""}`} onClick={() => pickStatus(o.name)}>
+                    {o.name === status ? <IconCheck size={12} /> : <span style={{ width: 12 }} />}
+                    {o.color ? <span aria-hidden style={{ width: 8, height: 8, borderRadius: "50%", background: o.color, display: "inline-block", marginRight: 6 }} /> : null}
+                    {o.name}
+                  </button>
+                ))
+              )}
             </div>
           ) : null}
         </div>
@@ -626,7 +729,40 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
               </div>
             ) : null}
           </div>
-          <div className="tkv2-field"><span className="tkv2-fl">Reporter</span><span className="tkv2-fv tkv2-fv--muted">Sprntly PM Agent</span></div>
+          {/* Bound tickets show ONLY the tracker's own properties (status /
+              assignee / type / priority + the meta custom fields below) —
+              Sprntly's generated metadata rows (Reporter, Labels, Provenance,
+              Story points, Route, Traces) are hidden so the panel mirrors the
+              customer's Jira/ClickUp. Unbound tickets keep the full layout. */}
+          {!tracker ? (
+            <div className="tkv2-field"><span className="tkv2-fl">Reporter</span><span className="tkv2-fv tkv2-fv--muted">Sprntly PM Agent</span></div>
+          ) : null}
+          {/* Issue type — Jira-bound tickets only (the destination's real
+              types from metadata). Set on create; changes sync best-effort. */}
+          {issueTypeOptions.length > 0 ? (
+            <div className="tkv2-field" style={{ position: "relative" }}>
+              <span className="tkv2-fl">Type</span>
+              <button
+                type="button"
+                aria-label="Change issue type"
+                className="tkv2-fv"
+                style={{ display: "inline-flex", alignItems: "center", gap: 4, background: "none", border: "none", cursor: "pointer", padding: 0 }}
+                onClick={() => setOpenMenu((m) => (m === "issuetype" ? null : "issuetype"))}
+              >
+                {shownIssueType}
+                <IconChevronDown size={12} />
+              </button>
+              {openMenu === "issuetype" ? (
+                <div className="tkv2-picker" style={{ position: "absolute", left: 0, zIndex: 20 }}>
+                  {issueTypeOptions.map((t) => (
+                    <button key={t.id} type="button" className={`tkv2-pitem${t.name === shownIssueType ? " tkv2-pitem--sel" : ""}`} onClick={() => pickIssueType(t.name)}>
+                      {t.name === shownIssueType ? <IconCheck size={12} /> : <span style={{ width: 12 }} />}{t.name}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
           <div className="tkv2-field" style={{ position: "relative" }}>
             <span className="tkv2-fl">Priority</span>
             <button
@@ -641,28 +777,51 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked }: {
             </button>
             {openMenu === "priority" ? (
               <div className="tkv2-picker" style={{ position: "absolute", left: 0, zIndex: 20 }}>
-                {PRIORITY_OPTIONS.map((o) => (
-                  <button key={o} type="button" className={`tkv2-pitem${o === priority ? " tkv2-pitem--sel" : ""}`} onClick={() => pickPriority(o)}>
-                    {o === priority ? <IconCheck size={12} /> : <span style={{ width: 12 }} />}{o}
+                {priorityOptions.map((o) => (
+                  <button key={o.name} type="button" className={`tkv2-pitem${o.name === priority ? " tkv2-pitem--sel" : ""}`} onClick={() => pickPriority(o.name)}>
+                    {o.name === priority ? <IconCheck size={12} /> : <span style={{ width: 12 }} />}
+                    {o.color ? <span aria-hidden style={{ width: 8, height: 8, borderRadius: "50%", background: o.color, display: "inline-block", marginRight: 6 }} /> : null}
+                    {o.name}
                   </button>
                 ))}
               </div>
             ) : null}
           </div>
-          {story.labels && story.labels.length ? (
+          {!tracker && story.labels && story.labels.length ? (
             <div className="tkv2-field"><span className="tkv2-fl">Labels</span><span className="tkv2-fv tkv2-fv--muted">{story.labels.join(" · ")}</span></div>
           ) : null}
-          {story.prd_section ? (
+          {!tracker && story.prd_section ? (
             <div className="tkv2-field"><span className="tkv2-fl">Provenance</span><span className="tkv2-fv">{story.prd_section}</span></div>
           ) : null}
-          {story.story_points != null ? (
+          {!tracker && story.story_points != null ? (
             <div className="tkv2-field"><span className="tkv2-fl">Story points</span><span className="tkv2-fv">{story.story_points}</span></div>
           ) : null}
-          {story.route ? (
+          {!tracker && story.route ? (
             <div className="tkv2-field"><span className="tkv2-fl">Route</span><span className="tkv2-fv" style={{ color: routeAgentReady ? "var(--green-d)" : undefined }}>{story.route}</span></div>
           ) : null}
-          {story.ears_ids && story.ears_ids.length ? (
+          {!tracker && story.ears_ids && story.ears_ids.length ? (
             <div className="tkv2-field"><span className="tkv2-fl">Traces</span><span className="tkv2-fv tkv2-fv--muted">{story.ears_ids.join(" · ")}</span></div>
+          ) : null}
+          {/* Tracker custom fields — the destination's own properties (from
+              tracker metadata), synced both ways, IN the same properties bar
+              as the native fields (one seamless panel). EDITABLE fields only:
+              exotic read-only types live in the tracker. Bound tickets only.
+              display:contents keeps the entries laying out as direct children
+              of tkv2-fields. */}
+          {tracker && tracker.meta.fields.some((f) => f.editable) ? (
+            <div style={{ display: "contents" }} data-testid="tracker-fields">
+              {tracker.meta.fields.filter((f) => f.editable).map((f) => (
+                <div key={f.id} className="tkv2-field" style={{ position: "relative" }}>
+                  <span className="tkv2-fl">{f.name}</span>
+                  <TrackerFieldEditor
+                    field={f}
+                    providerLabel={providerLabel}
+                    value={customFields[f.id] ?? tracker.synced?.custom_fields?.[f.id]}
+                    onSave={(v) => saveCustomField(f.id, v)}
+                  />
+                </div>
+              ))}
+            </div>
           ) : null}
         </div>
       </div>

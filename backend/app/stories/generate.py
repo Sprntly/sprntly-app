@@ -309,10 +309,12 @@ class Story:
             return None
         return _PRIORITY_TO_JIRA.get(self.priority.lower())
 
-    def to_description(self) -> str:
+    def to_description(self, *, include_subtasks: bool = True) -> str:
         """Render the ticket as a tracker task description (markdown). Uses the
         five-section body when present, falling back to the legacy story body.
-        Used by the push step."""
+        Used by the push step. `include_subtasks=False` drops the Child issues
+        section — the Jira push uses it when the children are created as REAL
+        sub-tasks (listing them twice would read as duplication)."""
         parts: list[str] = []
         if self.what:
             parts += ["**What**", self.what, ""]
@@ -333,7 +335,7 @@ class Story:
             parts += ["**Acceptance criteria**"]
             parts += [f"- {ac}" for ac in self.acceptance_criteria]
             parts += [""]
-        if self.subtasks:
+        if self.subtasks and include_subtasks:
             parts += ["**Child issues**"]
             parts += [f"- {t}" for t in self.subtasks]
             parts += [""]

@@ -356,6 +356,48 @@ def add_dependency(access_token: str, task_id: str, *, depends_on: str) -> None:
     _write("POST", f"/task/{task_id}/dependency", access_token, {"depends_on": depends_on})
 
 
+# ── List metadata (tracker-native vocabulary) ────────────────────────────────
+#
+# Read side for the TrackerMeta cache (app/connectors/tracker_meta.py): a
+# list's REAL statuses and custom fields, so the ticket UI can mirror the
+# customer's workspace. Best-effort ({} / [] on failure) — metadata staleness
+# must never break a push or sync pass.
+
+
+def get_list(access_token: str, list_id: str) -> dict[str, Any]:
+    """Fetch a list's raw payload — the interesting part is `statuses`:
+    `[{id, status, type, color, orderindex}]` (statuses are LIST-SPECIFIC
+    custom names in ClickUp). Returns {} on any failure."""
+    try:
+        return _get(access_token, f"/list/{list_id}")
+    except Exception:  # noqa: BLE001 — metadata reads are best-effort
+        logger.warning("ClickUp get_list failed for %s", list_id)
+        return {}
+
+
+def get_list_custom_fields(access_token: str, list_id: str) -> list[dict[str, Any]]:
+    """The custom fields accessible on a list's tasks, raw from
+    `GET /list/{id}/field`: `[{id, name, type, type_config, ...}]` (option
+    values for drop_down/labels live in type_config.options). Returns [] on
+    any failure."""
+    try:
+        return _get(access_token, f"/list/{list_id}/field").get("fields") or []
+    except Exception:  # noqa: BLE001 — metadata reads are best-effort
+        logger.warning("ClickUp get_list_custom_fields failed for %s", list_id)
+        return []
+
+
+def set_custom_field(
+    access_token: str, task_id: str, field_id: str, value: Any
+) -> None:
+    """Write one custom-field value on a task
+    (`POST /task/{task_id}/field/{field_id}`, body `{"value": ...}`). The
+    value must already be provider-encoded (tracker_meta.encode_field_value):
+    option id for drop_down, ms-epoch for date, `{"add": [ids]}` for users."""
+    _write("POST", f"/task/{task_id}/field/{field_id}", access_token,
+           {"value": value})
+
+
 def get_task(access_token: str, task_id: str) -> dict[str, Any]:
     """Fetch a task's current state from ClickUp and normalize the fields the
     two-way sync reconciles: workflow state (status, first assignee's display
@@ -390,8 +432,46 @@ def get_task(access_token: str, task_id: str) -> dict[str, Any]:
         "url": data.get("url"),
         "title": data.get("name"),
         "description": data.get("markdown_description") or data.get("description") or "",
+        # Priority name ("urgent"/"high"/...) — ClickUp's fixed 1–4 scale.
+        "priority": (data.get("priority") or {}).get("priority"),
+        # Raw custom-field values ([{id, type, value, type_config}, ...]);
+        # decoding to normalized shapes is tracker_meta's job.
+        "custom_fields": data.get("custom_fields") or [],
+        # Built-in task properties (tracker_meta's `builtin:` fields).
+        "start_date": data.get("start_date"),
+        "due_date": data.get("due_date"),
+        "points": data.get("points"),
+        "tags": [
+            t.get("name") for t in data.get("tags") or [] if t.get("name")
+        ],
         "updated_at": updated_at,
     }
+
+
+def add_task_tag(access_token: str, task_id: str, tag_name: str) -> None:
+    """Attach one workspace tag to a task (`POST /task/{id}/tag/{name}` —
+    creates the tag when new). ClickUp models tag REMOVAL as a separate
+    endpoint per tag; Sprntly-side tag edits are add-only by design."""
+    from urllib.parse import quote
+
+    _write("POST", f"/task/{task_id}/tag/{quote(tag_name, safe='')}", access_token)
+
+
+def add_task_comment(access_token: str, task_id: str, text: str) -> str | None:
+    """Post one comment on a task (`POST /task/{id}/comment` — the
+    Sprntly→ClickUp half of comment push). Returns the created comment's id,
+    or None on any failure — comment push is best-effort; the sync pass
+    retries unpushed comments."""
+    try:
+        data = _write(
+            "POST", f"/task/{task_id}/comment", access_token,
+            {"comment_text": text, "notify_all": False},
+        )
+        cid = data.get("id")
+        return str(cid) if cid is not None else None
+    except Exception:  # noqa: BLE001 — comment push is best-effort by design
+        logger.warning("ClickUp add_task_comment failed for %s", task_id)
+        return None
 
 
 def set_task_status(access_token: str, task_id: str, status: str) -> None:

@@ -58,6 +58,14 @@ class FieldsIn(BaseModel):
     # Child issues. None (omitted) = keep the generated subtasks; a list
     # (incl. []) = an explicit override, same semantics as the other fields.
     subtasks: list[str] | None = None
+    # Tracker custom-field overrides, keyed by field id, values in the
+    # normalized shapes (see app/connectors/tracker_meta.py). MERGED over the
+    # stored map (a one-field save keeps sibling fields); a null value clears
+    # that one field's override.
+    custom_fields: dict[str, Any] | None = None
+    # Tracker issue type (Jira Task/Story/Bug/… — the destination's real
+    # types from metadata). Pushed on create; type CHANGES sync best-effort.
+    issue_type: str | None = None
 
 
 class AttachmentIn(BaseModel):
@@ -119,6 +127,8 @@ def get_ticket_data(
         "sprint": edit.get("sprint") if edit else None,
         "assignee": edit.get("assignee") if edit else None,
         "subtasks": edit.get("subtasks") if edit else None,
+        "custom_fields": edit.get("custom_fields") if edit else None,
+        "issue_type": edit.get("issue_type") if edit else None,
         "attachments": [
             {"id": a["id"], "label": a["label"], "sub": a["sub"]}
             for a in (attach_resp.data or [])
@@ -137,7 +147,10 @@ def save_description(
     body: DescriptionIn,
     company: CompanyContext = Depends(require_company),
 ):
-    """Save/update description and acceptance criteria for a ticket."""
+    """Save/update description and acceptance criteria for a ticket. A
+    tracker-bound ticket pushes the change out immediately (instant sync)."""
+    from app.stories.sync import kick_prd_sync_from_key
+
     c = require_client()
     cid = company.company_id
     payload = {
@@ -150,6 +163,7 @@ def save_description(
     c.table("ticket_edits").upsert(
         payload, on_conflict="company_id,ticket_key"
     ).execute()
+    kick_prd_sync_from_key(cid, ticket_key)
     return {"ok": True}
 
 
@@ -161,9 +175,34 @@ def save_fields(
 ):
     """Save title/priority/status/sprint/assignee. Only the fields actually sent
     are written (exclude_unset), so a partial save preserves the description and
-    the other fields on the same ticket_edits row."""
+    the other fields on the same ticket_edits row.
+
+    Tracker-bound tickets speak the tracker's vocabulary: status/priority are
+    validated (and legacy names resolved) against the destination's cached
+    meta — unknown values 422 with the allowed names. Unbound tickets keep
+    the legacy free-text behavior."""
+    from app.connectors.tracker_meta import validate_fields_against_meta
+
     fields = body.model_dump(exclude_unset=True)
+    fields = validate_fields_against_meta(company.company_id, ticket_key, fields)
     c = require_client()
+    # custom_fields MERGES over the stored map (one jsonb column holds many
+    # fields — a single-field save must not clobber siblings; null clears
+    # that one field's override).
+    if fields.get("custom_fields") is not None:
+        existing = (
+            c.table("ticket_edits").select("custom_fields")
+            .eq("company_id", company.company_id).eq("ticket_key", ticket_key)
+            .limit(1).execute().data
+            or []
+        )
+        merged = dict((existing[0].get("custom_fields") if existing else None) or {})
+        for fid, value in fields["custom_fields"].items():
+            if value is None:
+                merged.pop(fid, None)
+            else:
+                merged[fid] = value
+        fields["custom_fields"] = merged
     payload = {
         "company_id": company.company_id,
         "ticket_key": ticket_key,
@@ -173,6 +212,11 @@ def save_fields(
     c.table("ticket_edits").upsert(
         payload, on_conflict="company_id,ticket_key"
     ).execute()
+    # Instant push: a bound ticket's edit lands in the tracker now, not at
+    # the next scheduler tick. No-op when unbound / a pass is running.
+    from app.stories.sync import kick_prd_sync_from_key
+
+    kick_prd_sync_from_key(company.company_id, ticket_key)
     return {"ok": True}
 
 
@@ -233,6 +277,13 @@ def add_comment(
         "body": body.body,
     }).execute()
     row = resp.data[0]
+    # Instant one-way push: a bound ticket's comment lands in the tracker as
+    # a real comment now (no-op when unbound; the sync pass retries failures).
+    from app.stories.sync import kick_comment_push
+
+    kick_comment_push(
+        company.company_id, ticket_key, row["id"], author, body.body
+    )
     return {"id": row["id"], "author": row["author"], "body": row["body"],
             "time": str(row["created_at"])}
 
@@ -307,6 +358,116 @@ def summarize_comments(
     return {"summary": summary, "proposed_criterion": proposed}
 
 
+# ── Tracker metadata (tracker-native vocabulary) ────────────────────────
+
+
+class TrackerMetaIn(BaseModel):
+    """Identify a destination whose vocabulary the UI needs BEFORE a PRD is
+    bound to it — e.g. the create drawer's priority / issue-type pickers right
+    after the user picks a Jira project. PRD-bound reads use
+    GET /v1/stories/sync/{prd_id}/tracker-meta instead."""
+    provider: str = Field(..., pattern="^(clickup|jira)$")
+    destination_id: str = Field(..., min_length=1)
+
+
+@router.post("/tracker-meta")
+def tracker_meta_for_destination(
+    body: TrackerMetaIn,
+    refresh: bool = False,
+    company: CompanyContext = Depends(require_company),
+):
+    """A destination's normalized vocabulary (statuses / priorities / issue
+    types / custom fields), cached per destination. 404 when the provider
+    isn't connected or metadata can't be fetched (and none is cached) — the
+    UI keeps its default pickers."""
+    from app.db.tracker_meta import get_or_fetch_meta
+
+    # get_or_fetch_meta degrades (stale cache → None) instead of raising, so
+    # "not connected" and "fetch failed" both surface as the 404 below.
+    meta = get_or_fetch_meta(
+        company.company_id, body.provider, body.destination_id,
+        refresh=refresh,
+    )
+    if meta is None:
+        raise HTTPException(
+            404, f"No metadata available for {body.provider} destination "
+                 f"{body.destination_id!r}"
+        )
+    return {"provider": body.provider, "destination_id": body.destination_id,
+            "meta": meta}
+
+
+def _parse_ticket_key(ticket_key: str) -> tuple[int, str]:
+    """Split a ticket key ("prd-{prd_id}-{ticket_id}") into its parts. The
+    ticket_id half is the story's stable id — the key jira_issue_map and
+    prd_ticket_sync.statuses are keyed by. 400 on a malformed key."""
+    parts = ticket_key.split("-", 2)
+    if len(parts) == 3 and parts[0] == "prd" and parts[1].isdigit() and parts[2]:
+        return int(parts[1]), parts[2]
+    raise HTTPException(400, f"Malformed ticket key {ticket_key!r}")
+
+
+@router.get("/{ticket_key}/transitions")
+def ticket_transitions(
+    ticket_key: str,
+    company: CompanyContext = Depends(require_company),
+):
+    """The status moves LEGAL for this ticket right now — what the status
+    dropdown offers when the PRD is tracker-bound.
+
+    Jira: statuses change via workflow transitions and the legal set depends
+    on the issue's current state, so this proxies the issue's live
+    transitions. ClickUp: any list status is always legal, so the full list
+    vocabulary is returned in the SAME shape (one web contract). 404 when the
+    PRD is unbound or the ticket was never pushed — the web falls back to the
+    default status options."""
+    from app.connectors.tracker_meta import jira_category_key_to_canonical
+    from app.db.jira_sync import get_jira_issue_key
+    from app.db.ticket_sync import get_sync_config
+    from app.db.tracker_meta import get_or_fetch_meta
+
+    prd_id, ticket_id = _parse_ticket_key(ticket_key)
+    cfg = get_sync_config(company.company_id, prd_id)
+    if cfg is None:
+        raise HTTPException(404, "This PRD's tickets are not bound to a tracker")
+
+    provider = cfg.get("provider")
+    if provider == "jira":
+        issue_key = get_jira_issue_key(
+            company.company_id, cfg["destination_id"], ticket_id
+        )
+        if not issue_key:
+            raise HTTPException(404, "This ticket was never pushed to Jira")
+        try:
+            access_token, cloud_id = _jira_creds(company.company_id)
+        except JiraNotConnectedError as e:
+            raise HTTPException(404, str(e)) from e
+        transitions = [
+            {**t, "category": jira_category_key_to_canonical(t.get("category"))}
+            for t in jira_oauth.list_transitions(access_token, cloud_id, issue_key)
+        ]
+        return {"provider": provider, "transitions": transitions}
+
+    # ClickUp (and any future workflow-free tracker): every list status is a
+    # legal target — serve the cached vocabulary in the transitions shape.
+    meta = get_or_fetch_meta(
+        company.company_id, provider, cfg["destination_id"]
+    )
+    if not meta:
+        raise HTTPException(404, "No metadata available for this destination")
+    transitions = [
+        {
+            "id": None,
+            "name": s.get("name"),
+            "to_status_id": s.get("id"),
+            "to_status_name": s.get("name"),
+            "category": s.get("category"),
+        }
+        for s in meta.get("statuses") or []
+    ]
+    return {"provider": provider, "transitions": transitions}
+
+
 # ── Priority mapping ────────────────────────────────────────────────────
 # Internal ticket priorities (P0–P3) → ClickUp's 1–4 scale.
 # ClickUp: 1=urgent, 2=high, 3=normal, 4=low. The generator also emits
@@ -340,11 +501,17 @@ _JIRA_PRIORITY_MAP: dict[str, str] = {
 
 
 def _jira_priority(value: str | None) -> str | None:
-    """Map an internal priority to a Jira named priority; None when
-    unset/unknown so the field is omitted (projects may lack a priority field)."""
+    """Map an internal priority to a Jira named priority. A value outside the
+    legacy vocab passes through AS-IS: the drawer's picker now sends the
+    project's real priority names (from tracker metadata), which Jira accepts
+    verbatim — only an unset value omits the field."""
     if not value:
         return None
-    return _JIRA_PRIORITY_MAP.get(value) or _JIRA_PRIORITY_MAP.get(value.lower())
+    return (
+        _JIRA_PRIORITY_MAP.get(value)
+        or _JIRA_PRIORITY_MAP.get(value.lower())
+        or value
+    )
 
 
 class TaskIn(BaseModel):

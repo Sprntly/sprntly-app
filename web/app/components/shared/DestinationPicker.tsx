@@ -31,7 +31,10 @@ export function DestinationPicker({
         style={{ position: "fixed", inset: 0, zIndex: 30 }}
         aria-hidden
       />
-      <div className="tkv2-picker" style={{ position: "absolute", top: "100%", right: 0, zIndex: 31, minWidth: 300 }} role="dialog" aria-label={`Push to ${tool}`}>
+      {/* Anchored LEFT so the 300px body grows INTO the panel (the trigger
+          button sits at the panel's left edge — right-anchoring pushed the
+          popover off-panel and clipped it). Width clamps to the viewport. */}
+      <div className="tkv2-picker" style={{ position: "absolute", top: "100%", left: 0, zIndex: 31, minWidth: 300, maxWidth: "min(340px, calc(100vw - 32px))" }} role="dialog" aria-label={`Push to ${tool}`}>
         <div className="ph2">Push to {tool} — select a project</div>
         <div style={{ maxHeight: 240, overflowY: "auto" }}>
           {lists.map((l) => {

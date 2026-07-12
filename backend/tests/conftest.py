@@ -693,6 +693,11 @@ CREATE TABLE ticket_edits (
     assignee            TEXT,
     -- Mirrors supabase/migrations/20260709120000_ticket_edits_subtasks.sql
     subtasks            TEXT,
+    -- Mirrors supabase/migrations/20260712160000_ticket_edits_custom_fields.sql:
+    -- tracker custom-field overrides keyed by field id (jsonb → TEXT here).
+    custom_fields       TEXT,
+    -- Mirrors supabase/migrations/20260712170000_ticket_edits_issue_type.sql
+    issue_type          TEXT,
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, ticket_key)
 );
@@ -711,6 +716,9 @@ CREATE TABLE ticket_comments (
     ticket_key  TEXT NOT NULL,
     author      TEXT NOT NULL DEFAULT 'user',
     body        TEXT NOT NULL,
+    -- Mirrors 20260712180000_ticket_comments_tracker_id.sql: the tracker-side
+    -- comment id once pushed (NULL = not pushed).
+    tracker_comment_id TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_ticket_comments_key ON ticket_comments (company_id, ticket_key);
@@ -752,6 +760,35 @@ CREATE TABLE prd_ticket_sync (
     created_at       TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, prd_id)
+);
+
+-- Idempotent Jira push mapping (mirrors 20260708120000_jira_issue_map.sql).
+-- One row per (company, project, ticket) → the Jira issue a push created,
+-- read by re-pushes and the ticket transitions route.
+CREATE TABLE jira_issue_map (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id     TEXT NOT NULL,
+    project_key    TEXT NOT NULL,
+    ticket_id      TEXT NOT NULL,
+    jira_issue_key TEXT NOT NULL,
+    updated_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, project_key, ticket_id)
+);
+
+-- Cached per-destination tracker vocabulary (mirrors
+-- 20260712150000_tracker_meta.sql). One row per (company, provider,
+-- destination): the normalized TrackerMeta snapshot (statuses / priorities /
+-- issue types / custom fields) the ticket UI + sync engine read instead of
+-- hitting the tracker live (jsonb → TEXT here).
+CREATE TABLE tracker_meta (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id     TEXT NOT NULL,
+    provider       TEXT NOT NULL,
+    destination_id TEXT NOT NULL,
+    meta           TEXT NOT NULL DEFAULT '{}',
+    fetched_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, provider, destination_id)
 );
 
 -- Roadmap doc storage (mirrors 20260623120000_roadmap_doc.sql, SQLite-ized).

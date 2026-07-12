@@ -361,7 +361,30 @@ def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
                 "url": st.get("url"),
                 "last_synced_at": cfg.get("last_synced_at"),
                 "last_error": cfg.get("last_error"),
+                # Pulled custom-field values (normalized, keyed by field id);
+                # a local override in ticket_edits.custom_fields wins over
+                # these — see the top-level `custom_fields` key below.
+                "custom_fields": st.get("custom_fields") or None,
             }
+            # The destination's REAL status vocabulary (tracker-native), so an
+            # AI client sets statuses this workspace actually has. Absent when
+            # metadata was never fetched — canonical open/in progress/done
+            # still resolve on write either way.
+            try:
+                from app.db.tracker_meta import get_cached_meta
+
+                meta = get_cached_meta(
+                    company_id, cfg["provider"], cfg["destination_id"]
+                )
+                if meta:
+                    tracker["allowed_statuses"] = [
+                        s.get("name") for s in meta.get("statuses") or []
+                    ]
+                    tracker["allowed_priorities"] = [
+                        p.get("name") for p in meta.get("priorities") or []
+                    ]
+            except Exception:  # noqa: BLE001 — vocabulary hints are best-effort
+                pass
 
     return {
         "tracker": tracker,
@@ -390,6 +413,10 @@ def ticket_data(ticket_key: str, company_id: str) -> dict[str, Any]:
         # Subtasks are editable in the web panel (ticket_edits.subtasks) —
         # override wins, same merge as title/priority.
         "subtasks": _merged("subtasks"),
+        # Local custom-field overrides (tracker vocabulary; the tracker block
+        # above carries the last-pulled values for fields without overrides).
+        "custom_fields": edit.get("custom_fields"),
+        "issue_type": edit.get("issue_type"),
         "labels": story.get("labels"),
         "attachments": [
             {"id": a["id"], "label": a["label"], "sub": a["sub"]}
@@ -537,6 +564,13 @@ class TicketFieldsIn(BaseModel):
     priority: str | None = None
     status: str | None = None
     sprint: str | None = None
+    # Tracker custom-field overrides, keyed by field id (normalized value
+    # shapes — see app/connectors/tracker_meta.py; get_ticket's tracker block
+    # lists the editable fields). Merged over the stored map; null clears one
+    # field's override.
+    custom_fields: dict[str, Any] | None = None
+    # Tracker issue type (validated against the destination's issue_types).
+    issue_type: str | None = None
 
 
 class TicketCommentIn(BaseModel):
@@ -571,6 +605,11 @@ def save_ticket_description(
     require_client().table("ticket_edits").upsert(
         payload, on_conflict="company_id,ticket_key"
     ).execute()
+    # Instant push: a bound ticket's edit lands in the tracker now (no-op
+    # when unbound / a pass is already running).
+    from app.stories.sync import kick_prd_sync_from_key
+
+    kick_prd_sync_from_key(company_id, ticket_key)
     return {"ok": True}
 
 
@@ -582,10 +621,35 @@ def save_ticket_fields(
 ) -> dict[str, Any]:
     """Upsert only the sent fields (title/priority/status/sprint/assignee),
     preserving the description + other fields (mirrors
-    routes/tickets.py:save_fields)."""
+    routes/tickets.py:save_fields).
+
+    Tracker-bound tickets speak the tracker's vocabulary: status/priority
+    validate against the destination's cached meta. Canonical/legacy names
+    ("In progress", "Done", "high", …) resolve to the workspace's real status
+    of the same category — so agents following the server instructions keep
+    working on ANY workspace; a truly unknown value 422s with the allowed
+    names so the agent can self-correct."""
+    from app.connectors.tracker_meta import validate_fields_against_meta
     from app.db.client import require_client, utc_now
 
     fields = body.model_dump(exclude_unset=True)
+    fields = validate_fields_against_meta(company_id, ticket_key, fields)
+    # custom_fields merges over the stored map (mirrors routes/tickets.py —
+    # one jsonb column holds many fields; null clears one field's override).
+    if fields.get("custom_fields") is not None:
+        existing = (
+            require_client().table("ticket_edits").select("custom_fields")
+            .eq("company_id", company_id).eq("ticket_key", ticket_key)
+            .limit(1).execute().data
+            or []
+        )
+        merged = dict((existing[0].get("custom_fields") if existing else None) or {})
+        for fid, value in fields["custom_fields"].items():
+            if value is None:
+                merged.pop(fid, None)
+            else:
+                merged[fid] = value
+        fields["custom_fields"] = merged
     require_client().table("ticket_edits").upsert(
         {
             "company_id": company_id,
@@ -595,6 +659,11 @@ def save_ticket_fields(
         },
         on_conflict="company_id,ticket_key",
     ).execute()
+    # Instant push: a bound ticket's edit lands in the tracker now (no-op
+    # when unbound / a pass is already running).
+    from app.stories.sync import kick_prd_sync_from_key
+
+    kick_prd_sync_from_key(company_id, ticket_key)
     return {"ok": True}
 
 
@@ -628,6 +697,11 @@ def add_ticket_comment(
         .execute()
     )
     row = resp.data[0]
+    # Instant one-way push: a bound ticket's comment lands in the tracker as
+    # a real comment now (no-op when unbound; the sync pass retries failures).
+    from app.stories.sync import kick_comment_push
+
+    kick_comment_push(company_id, ticket_key, row["id"], author, body.body)
     return {
         "id": row["id"],
         "author": row["author"],
