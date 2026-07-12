@@ -335,6 +335,125 @@ def test_generate_via_prd_author_skill_through_canonical_path(
     assert (row["llm_part"] or "") == ""
 
 
+# ---- POST /v1/prd/import (upload an existing PRD) ---------------------------
+
+def _record_generate(monkeypatch) -> dict:
+    """Replace the scheduled generator with a synchronous recorder so the import
+    endpoint's wiring (source, insight_override, import_source_md) can be asserted
+    without running the LLM. Records at CALL time (the coroutine may never be
+    awaited under TestClient) and returns a completed coroutine for create_task."""
+    from app.routes import prd as prd_routes
+
+    seen: dict = {}
+
+    def _fake(*args, **kwargs):
+        seen["args"] = args
+        seen["kwargs"] = kwargs
+
+        async def _noop():
+            return None
+
+        return _noop()
+
+    monkeypatch.setattr(prd_routes, "generate_prd_and_warm", _fake)
+    return seen
+
+
+def test_import_without_auth_returns_401(unauth_client, isolated_settings):
+    resp = unauth_client.post(
+        "/v1/prd/import",
+        files={"file": ("prd.md", b"# hi", "text/markdown")},
+        data={"dataset": "acme"},
+    )
+    assert resp.status_code == 401
+
+
+def test_import_cross_tenant_dataset_returns_404(tenant_client, isolated_settings):
+    """A caller must not import into a dataset owned by another company."""
+    tenant_client.make(slug="company-a")
+    b = tenant_client.make(slug="company-b")
+    resp = b.client.post(
+        "/v1/prd/import",
+        files={"file": ("prd.md", b"# hi", "text/markdown")},
+        data={"dataset": "company-a"},
+    )
+    assert resp.status_code == 404
+
+
+def test_import_empty_file_returns_400(tenant_client, isolated_settings, monkeypatch):
+    _record_generate(monkeypatch)
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/prd/import",
+        files={"file": ("prd.md", b"", "text/markdown")},
+        data={"dataset": "acme"},
+    )
+    assert resp.status_code == 400
+
+
+def test_import_no_extractable_text_returns_422(
+    tenant_client, isolated_settings, monkeypatch
+):
+    _record_generate(monkeypatch)
+    t = tenant_client.make(slug="acme")
+    # Non-empty bytes that extract to whitespace only (a .txt of blanks).
+    resp = t.client.post(
+        "/v1/prd/import",
+        files={"file": ("prd.txt", b"   \n  \t\n", "text/plain")},
+        data={"dataset": "acme"},
+    )
+    assert resp.status_code == 422
+
+
+def test_import_happy_path_creates_upload_prd(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """A valid upload creates a source='upload' PRD row, anchored to the
+    per-company uploads brief, and schedules generation in FAITHFUL RE-LAYOUT
+    mode (the doc text is threaded through as import_source_md)."""
+    seen = _record_generate(monkeypatch)
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+
+    doc = b"# Roadmap PRD\n\nGoal: cut churn 20%. Ship SSO. Launch mobile.\n"
+    resp = t.client.post(
+        "/v1/prd/import",
+        files={"file": ("My Great PRD.md", doc, "text/markdown")},
+        data={"dataset": "acme"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "generating"
+    assert body["title"] == "My Great PRD"  # extension stripped
+    prd_id = body["prd_id"]
+
+    # The PRD row is source='upload'.
+    row = db_mod.get_prd(prd_id)
+    assert row is not None
+    assert row["source"] == "upload"
+
+    # It anchored to a NON-current "Uploaded PRDs" brief for this dataset.
+    anchor_brief_id = seen["args"][1]
+    anchor = db_mod.get_brief_by_id(anchor_brief_id)
+    assert anchor is not None
+    assert anchor["week_label"] == "Uploaded PRDs"
+
+    # The scheduled generation carries the extracted doc as import_source_md and
+    # a synthetic insight titled from the filename.
+    kwargs = seen["kwargs"]
+    assert "Goal: cut churn 20%" in kwargs["import_source_md"]
+    assert kwargs["insight_override"]["title"] == "My Great PRD"
+
+    # Idempotent anchor: a second import for the same dataset reuses the brief.
+    resp2 = t.client.post(
+        "/v1/prd/import",
+        files={"file": ("Another.md", b"# Another\n\nbody", "text/markdown")},
+        data={"dataset": "acme"},
+    )
+    assert resp2.status_code == 200
+    assert seen["args"][1] == anchor_brief_id
+
+
 # ---- POST /v1/prd/{id}/impl-spec (Send to Claude Code) ----------------------
 
 def _ready_prd_for_send(tenant_client, isolated_settings, slug="acme"):

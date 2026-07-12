@@ -18,7 +18,9 @@ resolving.
 import asyncio
 import logging
 
-from fastapi import Depends, APIRouter, HTTPException
+from pathlib import Path
+
+from fastapi import Depends, APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
@@ -28,7 +30,8 @@ from app.db import (
     start_prd,
 )
 from app.db.backlog import get_backlog_item
-from app.db.briefs import get_current_brief
+from app.db.briefs import ensure_uploads_brief, get_current_brief
+from app.ingest import convert
 from app.db.companies import slug_for_company_id
 from app.db.prd_input_questions import (
     answer_question,
@@ -234,6 +237,89 @@ async def generate_from_backlog(
         generate_prd_and_warm(
             prd_id, brief_id, _BACKLOG_INSIGHT_INDEX, insight_override=insight,
             author=company.user_name,
+        )
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return {
+        "prd_id": prd_id,
+        "status": "generating",
+        "title": title,
+        "variant": PRD_VARIANT,
+    }
+
+
+# Uploaded PRDs don't index a brief (they have no KG lineage). insight_index is a
+# storage sentinel only — the synthetic insight is passed via insight_override.
+_IMPORT_INSIGHT_INDEX = 0
+
+# Guard: reject absurdly large uploads before reading into memory. A text PRD or
+# a slide deck is comfortably under this; bigger is almost certainly not a PRD.
+_MAX_IMPORT_BYTES = 25 * 1024 * 1024  # 25 MB
+
+
+@router.post("/import")
+async def import_prd(
+    file: UploadFile = File(...),
+    dataset: str = Form(...),
+    company: CompanyContext = Depends(require_company),
+):
+    """Import an existing PRD the customer uploaded (PDF/PPT/DOCX/…).
+
+    Parses the file to text (no LLM — `app.ingest.convert`), then generates a
+    normal PRD from it via the prd-author skill in FAITHFUL RE-LAYOUT mode
+    (`import_source_md`): the doc's content is restructured into our format,
+    inventing nothing. The result is a standard `prds` row (source='upload') so
+    it lands in Artifacts and drives Tickets → Jira exactly like any other PRD —
+    no KG/brief required (it anchors to the per-company uploads brief).
+
+    Fire-and-forget: inserts a 'generating' row and schedules generation; poll
+    GET /v1/prd/{prd_id} until status == 'ready'.
+    """
+    # Tenant gate: the dataset (company slug) must belong to the caller (404).
+    require_owned_dataset(dataset, company.company_id)
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Uploaded file is empty.")
+    if len(data) > _MAX_IMPORT_BYTES:
+        raise HTTPException(413, "File too large (max 25 MB).")
+
+    # Parse to text in a worker thread — pypdf/python-pptx are blocking.
+    extracted = await asyncio.to_thread(convert, file.filename or "upload", data)
+    if not extracted.strip():
+        raise HTTPException(
+            422,
+            "Could not extract any text from the uploaded file. Scanned/image-only "
+            "PDFs and legacy .ppt are not supported — export to PDF or .pptx.",
+        )
+
+    title = (Path(file.filename or "").stem or "Imported PRD").strip()
+
+    # Anchor to the per-company uploads brief (prds.brief_id is NOT NULL).
+    brief_id = ensure_uploads_brief(dataset)
+
+    # Synthetic insight — carries the title so the PRD prompt + decision log
+    # resolve identically to the brief/backlog paths (no theme_id: no KG trail).
+    insight = {"title": title, "summary": "Imported from an uploaded document."}
+
+    prd_id = start_prd(
+        brief_id=brief_id,
+        insight_index=_IMPORT_INSIGHT_INDEX,
+        title=title,
+        template_version=PRD_TEMPLATE_VERSION,
+        variant=PRD_VARIANT,
+        source="upload",
+    )
+
+    task = asyncio.create_task(
+        generate_prd_and_warm(
+            prd_id,
+            brief_id,
+            _IMPORT_INSIGHT_INDEX,
+            insight_override=insight,
+            author=company.user_name,
+            import_source_md=extracted,
         )
     )
     _inflight_tasks.add(task)

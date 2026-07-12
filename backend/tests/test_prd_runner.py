@@ -716,3 +716,46 @@ def test_generated_prompt_carries_no_evidence_link(isolated_settings, monkeypatc
     assert "app.sprntly.ai/evidence" not in prompt
     # The Evidence section itself is still present (just link-free).
     assert "Evidence" in prompt
+
+
+# ── PRD import: faithful re-layout from an uploaded doc ───────────────────────
+
+def test_import_mode_feeds_doc_as_source_and_skips_grounding(
+    isolated_settings, monkeypatch
+):
+    """`import_source_md` routes the faithful-re-layout path: the uploaded doc IS
+    the evidence/source (KG/corpus grounding is skipped), fed through one Part-A
+    call with the faithful-re-layout instruction."""
+    # A corpus exists for the dataset — the import path must NOT read it.
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id, title="Imported")
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+
+    doc = "# Uploaded PRD\n\nMUST support SSO. Target churn 8%. Unique-marker-XYZ."
+    insight = {"title": "Imported", "summary": "from upload"}
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            prd_runner.generate_prd(
+                prd_id, brief_id, 0,
+                insight_override=insight, import_source_md=doc,
+            )
+        )
+    finally:
+        loop.close()
+
+    # Exactly one (Part A) call; the doc text + faithful-relayout framing ride the
+    # prompt, and the corpus body does NOT (grounding was skipped).
+    assert len(captured) == 1
+    user_input = captured[0]["input"]
+    assert "Unique-marker-XYZ" in user_input
+    assert "FAITHFUL RE-LAYOUT" in user_input
+    assert "corpus body" not in user_input
+
+    row = db_mod.get_prd(prd_id)
+    assert row["status"] == "ready"
+    assert row["title"] == "Imported"
