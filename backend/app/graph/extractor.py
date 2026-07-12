@@ -102,7 +102,8 @@ def extract_document(
 
     # Batch-embed signal contents + theme labels.
     theme_labels = sorted({i["theme"].strip() for i in items if i.get("theme")})
-    vectors = embed_texts([i["content"] for i in items] + theme_labels)
+    vectors = embed_texts([i["content"] for i in items] + theme_labels,
+                          enterprise_id=enterprise_id, purpose="kg_extract")
     sig_vecs = vectors[: len(items)]
     theme_vecs = dict(zip(theme_labels, vectors[len(items):]))
 

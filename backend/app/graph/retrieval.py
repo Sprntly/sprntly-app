@@ -135,7 +135,8 @@ def retrieve_context(
     try:
         from app.graph.embeddings import embed_texts
 
-        vecs = embed_texts([question])
+        vecs = embed_texts([question], enterprise_id=enterprise_id,
+                           purpose="kg_retrieval")
         qvec = vecs[0] if vecs else None
     except Exception as exc:  # noqa: BLE001 — retrieval must not hard-fail Ask
         logger.info("Ask KG retrieval: embedding unavailable (%s); recent-only", exc)
