@@ -133,6 +133,54 @@ def test_pdf_to_md():
     assert isinstance(out, str)
 
 
+def _build_pptx() -> bytes:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    prs = Presentation()
+    # Slide 1: title + bullet body (Title and Content layout)
+    s1 = prs.slides.add_slide(prs.slide_layouts[1])
+    s1.shapes.title.text = "Q3 Roadmap PRD"
+    s1.placeholders[1].text = "Cut churn 20%\nShip SSO"
+    # Slide 2: title only + a 2x2 table (Title Only layout)
+    s2 = prs.slides.add_slide(prs.slide_layouts[5])
+    s2.shapes.title.text = "Metrics"
+    tbl = s2.shapes.add_table(2, 2, Inches(1), Inches(2), Inches(4), Inches(1)).table
+    tbl.cell(0, 0).text = "Metric"
+    tbl.cell(0, 1).text = "Target"
+    tbl.cell(1, 0).text = "Churn"
+    tbl.cell(1, 1).text = "8%"
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def test_pptx_to_md_slides_and_tables():
+    try:
+        import pptx  # noqa: F401
+    except ImportError:
+        pytest.skip("python-pptx not installed")
+    out = ingest.pptx_to_md(_build_pptx())
+    # One section per slide, title + bullets preserved
+    assert "## Slide 1" in out
+    assert "Q3 Roadmap PRD" in out
+    assert "Ship SSO" in out
+    # Table rendered as pipe rows on slide 2
+    assert "## Slide 2" in out
+    assert "| Metric | Target |" in out
+    assert "| Churn | 8% |" in out
+
+
+def test_convert_routes_pptx():
+    try:
+        import pptx  # noqa: F401
+    except ImportError:
+        pytest.skip("python-pptx not installed")
+    out = ingest.convert("deck.PPTX", _build_pptx())  # case-insensitive suffix
+    assert "Q3 Roadmap PRD" in out
+    assert ".pptx" in ingest.SUPPORTED_SUFFIXES
+
+
 def test_convert_md_passthrough():
     out = ingest.convert("notes.md", b"# heading\n\nbody")
     assert out.startswith("# heading")
