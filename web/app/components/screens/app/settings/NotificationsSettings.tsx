@@ -218,17 +218,22 @@ export function NotificationsSettings() {
           </>
         ) : (
           <>
-            <p className="ob-slack-sub">
-              Connect Slack to get your weekly brief in a channel or a DM.
-            </p>
-            <button
-              type="button"
-              className="btn btn-primary btn-block"
-              disabled={connecting}
-              onClick={onConnectSlack}
-            >
-              {connecting ? "Opening Slack…" : "Connect Slack"}
-            </button>
+            {/* One row: description left, action right (was a full-width
+                btn-block bar under the text). */}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+              <p className="ob-slack-sub" style={{ margin: 0 }}>
+                Connect Slack to get your weekly brief in a channel or a DM.
+              </p>
+              <button
+                type="button"
+                className="btn btn-primary"
+                style={{ flexShrink: 0 }}
+                disabled={connecting}
+                onClick={onConnectSlack}
+              >
+                {connecting ? "Opening Slack…" : "Connect Slack"}
+              </button>
+            </div>
           </>
         )}
         {slackError && <SettingsMessage kind="error">{slackError}</SettingsMessage>}
