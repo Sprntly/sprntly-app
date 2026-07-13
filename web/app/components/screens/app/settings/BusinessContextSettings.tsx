@@ -16,7 +16,11 @@ import {
   type BcLeaf,
   type BcSrc,
 } from "../../../../lib/api"
-import { SettingsMessage, SettingsSection } from "./SettingsLayout"
+import { profileDisplayName } from "../../../../context/WorkspaceContext"
+import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
+
+/** The doc form's id — the pane bar's Save submits it from outside the form. */
+export const BC_FORM_ID = "pset-bc-form"
 
 /**
  * Settings → Business Context pane.
@@ -205,14 +209,14 @@ export type BusinessContextSettingsViewProps = {
 }
 
 export function BusinessContextSettingsView(props: BusinessContextSettingsViewProps) {
+  // `saving`/`saved` stay in the props type for the container's bar wiring,
+  // but the View no longer renders them — the pane bar owns those states.
   const {
     loading,
     loadError,
     doc,
     values,
     canEdit,
-    saving,
-    saved,
     saveError,
     refreshing,
     refreshError,
@@ -225,7 +229,7 @@ export function BusinessContextSettingsView(props: BusinessContextSettingsViewPr
 
   if (loadError) {
     return (
-      <SettingsSection title="Business Context" sub="Your company's structured lens.">
+      <SettingsSection title="Company lens" sub="Your company's structured lens.">
         <SettingsMessage kind="error">Could not load business context: {loadError}</SettingsMessage>
       </SettingsSection>
     )
@@ -235,7 +239,7 @@ export function BusinessContextSettingsView(props: BusinessContextSettingsViewPr
   if (!doc) {
     return (
       <SettingsSection
-        title="Business Context"
+        title="Company lens"
         sub="The structured lens every Sprntly agent reads your company through."
       >
         <p className="settings-placeholder">
@@ -268,14 +272,14 @@ export function BusinessContextSettingsView(props: BusinessContextSettingsViewPr
   return (
     <>
       <SettingsSection
-        title="Business Context"
+        title="Company lens"
         sub={
           canEdit
             ? "Edit any field below — your edits are marked as authoritative and won't be overwritten by the agent. Regenerate to re-run the research agent."
             : "Read-only. Only admins can edit or regenerate the business context."
         }
       >
-        <form onSubmit={onSave}>
+        <form id={BC_FORM_ID} onSubmit={onSave}>
           {refreshError && <SettingsMessage kind="error">{refreshError}</SettingsMessage>}
 
           {layers.map((layer) => (
@@ -334,13 +338,8 @@ export function BusinessContextSettingsView(props: BusinessContextSettingsViewPr
           ))}
 
           {saveError && <SettingsMessage kind="error">{saveError}</SettingsMessage>}
-          {saved && <SettingsMessage kind="success">Business context saved.</SettingsMessage>}
-
-          {canEdit && (
-            <button type="submit" className="btn btn-primary" disabled={saving || refreshing}>
-              {saving ? "Saving…" : "Save business context"}
-            </button>
-          )}
+          {/* Save/Saved live in the pane's top bar (SettingsPaneBar) — the bar
+              submits this form via BC_FORM_ID; no inline save button. */}
         </form>
       </SettingsSection>
     </>
@@ -582,10 +581,14 @@ function valuesFromDoc(doc: BusinessContextDoc): Record<string, string> {
 
 export function BusinessContextSettings() {
   const auth = useAuth()
+  const { profile } = useWorkspace()
   const [doc, setDoc] = useState<BusinessContextDoc | null>(null)
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [values, setValues] = useState<Record<string, string>>({})
+  // The last loaded/saved doc values — "Discard" restores these; deviation
+  // from them arms the pane bar's Save/Discard.
+  const [snapshot, setSnapshot] = useState<Record<string, string>>({})
 
   const [canEdit, setCanEdit] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -620,7 +623,9 @@ export function BusinessContextSettings() {
     try {
       const d = await businessContextApi.get()
       setDoc(d)
-      setValues(d ? valuesFromDoc(d) : {})
+      const seeded = d ? valuesFromDoc(d) : {}
+      setValues(seeded)
+      setSnapshot(seeded)
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -679,26 +684,63 @@ export function BusinessContextSettings() {
     [doc, values, canEdit],
   )
 
+  const dirty = useMemo(
+    () =>
+      doc != null &&
+      Object.entries(values).some(([k, v]) => (snapshot[k] ?? "") !== v),
+    [doc, values, snapshot],
+  )
+
+  function onDiscard() {
+    setValues(snapshot)
+    setSaveError(null)
+  }
+
+  const identityMeta =
+    [profileDisplayName(profile ?? null, profile?.email), profile?.email]
+      .filter(Boolean)
+      .join(" · ") || null
+
   return (
-    <>
-      <BusinessContextSettingsView
-        loading={loading}
-        loadError={loadError}
-        doc={view.doc}
-        values={view.values}
-        canEdit={view.canEdit}
-        saving={saving}
+    <div className="pset">
+      <SettingsPaneBar
+        title="Business Context"
+        meta={identityMeta}
         saved={saved}
-        saveError={saveError}
-        refreshing={refreshing}
-        refreshError={refreshError}
-        onChangeField={onChangeField}
-        onSave={onSave}
-        onRefresh={onRefresh}
+        dirty={dirty}
+        saving={saving || refreshing}
+        onDiscard={onDiscard}
+        // Save only exists once there's an editable doc; otherwise the bar is
+        // title-only (empty/404 state has its own inline Generate button).
+        formId={doc && canEdit ? BC_FORM_ID : undefined}
       />
-      {/* Company-shape fields (Industry / Business type / Tech stack) — moved
-          here from the onboarding business-context step (now narrative-only). */}
-      <CompanyShapeSettings canEdit={view.canEdit} />
-    </>
+
+      <div className="pset-body">
+        <h2 className="pset-title">Business Context</h2>
+        <p className="pset-sub">
+          The structured lens every Sprntly agent reads your company through.
+        </p>
+
+        <BusinessContextSettingsView
+          loading={loading}
+          loadError={loadError}
+          doc={view.doc}
+          values={view.values}
+          canEdit={view.canEdit}
+          saving={saving}
+          saved={saved}
+          saveError={saveError}
+          refreshing={refreshing}
+          refreshError={refreshError}
+          onChangeField={onChangeField}
+          onSave={onSave}
+          onRefresh={onRefresh}
+        />
+        {/* Company-shape fields (Industry / Business type / Tech stack) — moved
+            here from the onboarding business-context step (now narrative-only).
+            Keeps its own inline save: it persists separately from the doc. */}
+        <CompanyShapeSettings canEdit={view.canEdit} />
+      </div>
+    </div>
   )
 }

@@ -85,6 +85,27 @@ function AgentIcon({ agent }: { agent: AgentType }) {
 
 // ── Helpers ──
 
+/** Pushpin glyph (not a map marker): filled green when pinned, plain
+ *  outline when not. Shared by the brief pin row and the row pin toggle. */
+function PinGlyph({ filled, size = 13 }: { filled: boolean; size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill={filled ? "var(--accent, #179463)" : "none"}
+      stroke={filled ? "var(--accent, #179463)" : "var(--ink-4, #B0AEA6)"}
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M12 17v5" />
+      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+    </svg>
+  )
+}
+
 function dateGroup(timeStr: string): "Pinned" | "Today" | "Yesterday" | "This week" | "Earlier" {
   const now = new Date()
   const date = new Date(timeStr)
@@ -231,9 +252,7 @@ function BriefPinRow({ entry, onOpen }: { entry: BriefEntry; onOpen: () => void 
       </div>
       {/* Pinned indicator (filled, always-on — this row can't be unpinned). */}
       <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0, paddingTop: 2 }}>
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="var(--accent, #179463)" stroke="none" aria-hidden>
-          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
-        </svg>
+        <PinGlyph filled />
       </div>
     </div>
   )
@@ -371,9 +390,7 @@ export function ChatsListView({
                         onClick={(e) => { e.stopPropagation(); onPin(row) }}
                         style={{ background: "none", border: "none", cursor: "pointer", padding: 2, lineHeight: 1 }}
                       >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill={isPinned ? "var(--accent, #179463)" : "none"} stroke={isPinned ? "none" : "var(--ink-4, #B0AEA6)"} strokeWidth="2">
-                          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z" />
-                        </svg>
+                        <PinGlyph filled={isPinned} />
                       </button>
                       {/* Delete */}
                       {(row as any)._dbId && (
@@ -400,25 +417,46 @@ export function ChatsListView({
 
 // ── Screen ──
 
+// Session-scoped stale-while-revalidate cache (module-level, keyed by
+// company): a return visit to All chats renders the LAST loaded list
+// instantly while the refetch runs in the background and swaps in fresh
+// data. In-memory only — a full page reload starts clean with the skeleton.
+const chatsListCache = new Map<string, ConversationRecord[]>()
+const briefEntryCache = new Map<string, BriefEntry | null>()
+
 export function ChatsScreen() {
   const { goTo } = useNavigation()
   const { content } = useContent()
   const { activeCompany } = useCompany()
   const [search, setSearch] = useState("")
-  const [dbChats, setDbChats] = useState<ConversationRecord[]>([])
-  const [loaded, setLoaded] = useState(false)
+  const cacheKey = activeCompany ?? "__none__"
+  const [dbChats, setDbChats] = useState<ConversationRecord[]>(
+    () => chatsListCache.get(cacheKey) ?? [],
+  )
+  const [loaded, setLoaded] = useState(() => chatsListCache.has(cacheKey))
 
   // ── Current weekly brief (drives the always-pinned top entry) ──
-  const [briefEntry, setBriefEntry] = useState<BriefEntry | null>(null)
+  const [briefEntry, setBriefEntry] = useState<BriefEntry | null>(
+    () => briefEntryCache.get(cacheKey) ?? null,
+  )
 
-  // Load from Supabase on mount
+  // Load from Supabase — stale-while-revalidate: the cached list (if any) is
+  // already on screen from the state initializers; this refetch replaces it
+  // when fresh data lands. Re-runs when the company changes.
   useEffect(() => {
     let cancelled = false
+    if (chatsListCache.has(cacheKey)) {
+      setDbChats(chatsListCache.get(cacheKey)!)
+      setLoaded(true)
+    }
     conversationsApi.list().then((res) => {
-      if (!cancelled) { setDbChats(res.conversations); setLoaded(true) }
+      if (cancelled) return
+      chatsListCache.set(cacheKey, res.conversations)
+      setDbChats(res.conversations)
+      setLoaded(true)
     }).catch(() => { if (!cancelled) setLoaded(true) })
     return () => { cancelled = true }
-  }, [])
+  }, [cacheKey])
 
   // Fetch the latest weekly brief and pin it to the top of the list. We always
   // surface the most recent brief regardless of how old it is — it holds the
@@ -429,19 +467,27 @@ export function ChatsScreen() {
   useEffect(() => {
     if (!activeCompany) return
     let cancelled = false
+    // Cached entry renders instantly; the fetch below refreshes it.
+    if (briefEntryCache.has(activeCompany)) {
+      setBriefEntry(briefEntryCache.get(activeCompany)!)
+    }
     briefApi.current(activeCompany)
       .then((brief) => {
         if (cancelled) return
-        setBriefEntry({
+        const entry: BriefEntry = {
           id: brief.id,
           weekLabel: brief.week_label || "Weekly brief",
           headline: brief.summary_headline || "Your weekly brief is ready.",
           generatedAt: brief.generated_at,
-        })
+        }
+        briefEntryCache.set(activeCompany, entry)
+        setBriefEntry(entry)
       })
       .catch(() => {
         // 404 = no brief yet this week; any other error → just omit the entry.
-        if (!cancelled) setBriefEntry(null)
+        if (cancelled) return
+        briefEntryCache.set(activeCompany, null)
+        setBriefEntry(null)
       })
     return () => { cancelled = true }
   }, [activeCompany])
@@ -485,18 +531,26 @@ export function ChatsScreen() {
     const dbId = (row as any)._dbId
     if (dbId) {
       conversationsApi.remove(dbId).catch(() => {})
-      setDbChats((prev) => prev.filter((c) => c.id !== dbId))
+      setDbChats((prev) => {
+        const next = prev.filter((c) => c.id !== dbId)
+        chatsListCache.set(cacheKey, next)
+        return next
+      })
     }
-  }, [])
+  }, [cacheKey])
 
   const handlePin = useCallback((row: ConversationRow) => {
     const dbId = (row as any)._dbId
     const current = (row as any)._pinned ?? false
     if (dbId) {
       conversationsApi.update(dbId, { pinned: !current }).catch(() => {})
-      setDbChats((prev) => prev.map((c) => c.id === dbId ? { ...c, pinned: !current } : c))
+      setDbChats((prev) => {
+        const next = prev.map((c) => c.id === dbId ? { ...c, pinned: !current } : c)
+        chatsListCache.set(cacheKey, next)
+        return next
+      })
     }
-  }, [])
+  }, [cacheKey])
 
   const filtered = useMemo(() => {
     if (!search.trim()) return allChats
@@ -511,22 +565,30 @@ export function ChatsScreen() {
   // Opening the pinned weekly-brief entry → the brief surface (`/brief`).
   const openBrief = useCallback(() => { goTo("brief") }, [goTo])
 
-  const handleRowClick = async (row: ConversationRow) => {
+  const handleRowClick = (row: ConversationRow) => {
     const dbId = (row as any)._dbId as number | undefined
 
     if (dbId) {
-      try {
-        const res = await conversationsApi.listTurns(dbId)
-        if (res.turns && res.turns.length > 0) {
-          localStorage.setItem("sprntly_resume_conv", JSON.stringify({
-            dbId,
-            title: row.title,
-            turns: res.turns,
-          }))
-          goTo("chat")
-          return
-        }
-      } catch { /* fallback below */ }
+      // Navigate IMMEDIATELY — no blocking fetch here. The chat tab opens in
+      // a loading state and hydrates its own turns (ChatScreen.checkResume),
+      // so the click is instant and double-clicks are harmless. The saved
+      // preview rides along as the fallback thread should the fetch come back
+      // empty or fail.
+      const fallbackTurns: { role: string; content: string }[] = []
+      if (row.savedTurn?.query) {
+        fallbackTurns.push({ role: "user", content: row.savedTurn.query })
+        const replyText = typeof row.savedTurn.reply === "string"
+          ? row.savedTurn.reply
+          : (row.savedTurn.reply as any)?.answer ?? ""
+        if (replyText) fallbackTurns.push({ role: "assistant", content: replyText })
+      }
+      localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+        dbId,
+        title: row.title,
+        fallbackTurns,
+      }))
+      goTo("chat")
+      return
     }
 
     // Fallback: build a thread from the saved turn
@@ -551,14 +613,27 @@ export function ChatsScreen() {
   }
 
   return (
-    <AppLayout>
-      <div style={{ maxWidth: 780, margin: "0 auto", padding: "0 4px" }}>
-        {/* Top bar */}
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+    <AppLayout
+      // The screen owns its top bar ("All chats" · search · New chat), so the
+      // app-wide chrome strip is redundant here — same pattern as Settings.
+      hideChromeStrip
+      mainStyle={{
+        maxWidth: "none",
+        padding: 0,
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+        flex: "1 1 auto",
+      }}
+    >
+      {/* Sticky top bar — full width, matching the settings pane bars. */}
+      <div className="pset-bar">
+        <div style={{ display: "flex", alignItems: "center", gap: 18, flex: 1, minWidth: 0 }}>
+          <span className="pset-bar-title" style={{ whiteSpace: "nowrap" }}>History</span>
           {/* Search */}
-          <div style={{ flex: 1, position: "relative" }}>
+          <div style={{ position: "relative", flex: 1, maxWidth: 440 }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8C8A84" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
-              style={{ position: "absolute", left: 11, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}>
+              style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", pointerEvents: "none" }}>
               <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
             <input
@@ -567,34 +642,40 @@ export function ChatsScreen() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               style={{
-                fontSize: 13, padding: "7px 12px 7px 32px", borderRadius: 8, width: "100%",
+                fontSize: 13, padding: "8px 40px 8px 34px", borderRadius: 999, width: "100%",
                 border: "1px solid var(--line, #E8E6E0)", outline: "none",
-                background: "var(--surface, #fff)", color: "var(--ink, #1A1A17)",
+                background: "var(--surface-3, #EEF0EE)", color: "var(--ink, #1A1A17)",
               }}
             />
             <span style={{
-              position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+              position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)",
               fontSize: 10, color: "var(--ink-4, #B0AEA6)", border: "1px solid var(--line, #E8E6E0)",
               borderRadius: 4, padding: "1px 5px", fontFamily: "var(--font-mono, monospace)",
+              background: "var(--surface-2, #fff)",
             }}>
               ⌘K
             </span>
           </div>
-
-          {/* New chat */}
-          <button
-            type="button"
-            onClick={() => goTo("chat")}
-            style={{
-              fontSize: 13, padding: "7px 16px", borderRadius: 8,
-              background: "var(--accent, #179463)", color: "#fff", border: "none",
-              fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
-              whiteSpace: "nowrap",
-            }}
-          >
-            + New chat
-          </button>
         </div>
+
+        {/* New chat — green pill, far right. */}
+        <button
+          type="button"
+          onClick={() => goTo("chat")}
+          style={{
+            fontSize: 13, padding: "8px 18px", borderRadius: 999,
+            background: "var(--accent, #179463)", color: "#fff", border: "none",
+            fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
+            whiteSpace: "nowrap", flexShrink: 0,
+          }}
+        >
+          <span style={{ fontSize: 15, lineHeight: 1 }}>+</span> New chat
+        </button>
+      </div>
+
+      {/* Scrolling list area — centered column below the bar. */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto" }}>
+      <div style={{ maxWidth: 820, margin: "0 auto", padding: "8px 28px 56px" }}>
 
         {/* Loading state */}
         {!loaded && (
@@ -644,6 +725,7 @@ export function ChatsScreen() {
             onOpenBrief={openBrief}
           />
         )}
+      </div>
       </div>
     </AppLayout>
   )

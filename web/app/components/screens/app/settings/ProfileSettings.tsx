@@ -6,27 +6,123 @@ import { detectBrowserTimezone, useAuth } from "../../../../lib/auth"
 import { fetchUserProfile, updateUserProfile } from "../../../../lib/onboarding/store"
 import { ROLE_OPTIONS } from "../../../../lib/onboarding/types"
 import { getSupabase } from "../../../../lib/supabase/client"
-import {
-  SettingsRow,
-  SettingsSection,
-  SettingsMessage,
-} from "./SettingsLayout"
+import { SettingsMessage, SettingsPaneBar } from "./SettingsLayout"
+
+const PROFILE_FORM_ID = "pset-profile-form"
+
+/** "America/Los_Angeles" → "America/Los Angeles (UTC−7)". Offset lookup is
+ *  cached per zone — the full IANA list is ~400 entries and this runs once. */
+const tzOffsetCache = new Map<string, string | null>()
+function tzLabel(tz: string): string {
+  let off = tzOffsetCache.get(tz)
+  if (off === undefined) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: tz,
+        timeZoneName: "shortOffset",
+      }).formatToParts(new Date())
+      const name = parts.find((p) => p.type === "timeZoneName")?.value ?? null
+      off = name ? name.replace("GMT", "UTC") : null
+    } catch {
+      off = null
+    }
+    tzOffsetCache.set(tz, off)
+  }
+  const pretty = tz.replace(/_/g, " ")
+  return off ? `${pretty} (${off})` : pretty
+}
+
+function roleDisplay(role: string, roleOther: string): string {
+  if (role === "PM") return "Product Manager"
+  if (role === "Other") return roleOther.trim() || "Other"
+  return role
+}
+
+type ProfileFields = {
+  firstName: string
+  lastName: string
+  role: string
+  roleOther: string
+  timezone: string
+}
+
+/** Editable field values from a profile row (role split into the select value
+ *  + the free-text "Other" input; timezone falls back to the browser's). */
+function fieldsFromProfile(p: {
+  first_name: string | null
+  last_name: string | null
+  role: string | null
+  timezone: string | null
+}): ProfileFields {
+  const fields: ProfileFields = {
+    firstName: p.first_name ?? "",
+    lastName: p.last_name ?? "",
+    // Seed from the saved zone; if none stored yet, prefill the browser's so
+    // the field is never blank and a Save persists a sensible default.
+    timezone: p.timezone ?? detectBrowserTimezone() ?? "",
+    role: "",
+    roleOther: "",
+  }
+  const r = p.role ?? ""
+  if (r && !ROLE_OPTIONS.includes(r as (typeof ROLE_OPTIONS)[number])) {
+    fields.role = "Other"
+    fields.roleOther = r
+  } else {
+    fields.role = r
+  }
+  return fields
+}
 
 export function ProfileSettings() {
   const auth = useAuth()
-  const { refresh: refreshWorkspace } = useWorkspace()
-  const [loading, setLoading] = useState(true)
+  const {
+    workspace,
+    profile: ctxProfile,
+    loading: workspaceLoading,
+    refresh: refreshWorkspace,
+  } = useWorkspace()
+
+  // Hydrate INSTANTLY from WorkspaceContext's profile — the app already
+  // fetched it once at sign-in (it's what the sidebar name renders from), so
+  // opening this pane needs NO network fetch and never flashes
+  // "Loading profile…" on a warm session. The fetch-or-insert path (`load`)
+  // only runs for brand-new accounts with no profile row yet.
+  const seeded = ctxProfile ? fieldsFromProfile(ctxProfile) : null
+  // The last loaded/saved values — "Discard" restores these, and any deviation
+  // from them is what arms the Save/Discard actions in the top bar. Also the
+  // "already hydrated" latch: background context refreshes never re-seed (and
+  // so can never clobber in-progress edits).
+  const [snapshot, setSnapshot] = useState<ProfileFields | null>(seeded)
+  const [loading, setLoading] = useState(seeded == null)
   const [saving, setSaving] = useState(false)
   const [profileSaved, setProfileSaved] = useState(false)
   const [profileError, setProfileError] = useState<string | null>(null)
 
-  const [firstName, setFirstName] = useState("")
-  const [lastName, setLastName] = useState("")
-  const [role, setRole] = useState("")
-  const [roleOther, setRoleOther] = useState("")
-  const [timezone, setTimezone] = useState("")
+  const [firstName, setFirstName] = useState(seeded?.firstName ?? "")
+  const [lastName, setLastName] = useState(seeded?.lastName ?? "")
+  const [role, setRole] = useState(seeded?.role ?? "")
+  const [roleOther, setRoleOther] = useState(seeded?.roleOther ?? "")
+  const [timezone, setTimezone] = useState(seeded?.timezone ?? "")
+
+  const applyFields = useCallback((loaded: ProfileFields) => {
+    setFirstName(loaded.firstName)
+    setLastName(loaded.lastName)
+    setRole(loaded.role)
+    setRoleOther(loaded.roleOther)
+    setTimezone(loaded.timezone)
+    setSnapshot(loaded)
+  }, [])
 
   const email = auth.kind === "authed" ? auth.user.email ?? "" : ""
+  const joinedAt = auth.kind === "authed" ? auth.user.created_at : null
+
+  const dirty =
+    snapshot != null &&
+    (firstName !== snapshot.firstName ||
+      lastName !== snapshot.lastName ||
+      role !== snapshot.role ||
+      roleOther !== snapshot.roleOther ||
+      timezone !== snapshot.timezone)
 
   // Full IANA zone list from the browser (modern engines). The current saved
   // value is always included even if the engine omits it, so we never silently
@@ -86,30 +182,42 @@ export function ProfileSettings() {
         }
       }
       if (p) {
-        setFirstName(p.first_name ?? "")
-        setLastName(p.last_name ?? "")
-        // Seed from the saved zone; if none stored yet, prefill the browser's so
-        // the field is never blank and a Save persists a sensible default.
-        setTimezone(p.timezone ?? detectBrowserTimezone() ?? "")
-        const r = p.role ?? ""
-        if (r && !ROLE_OPTIONS.includes(r as (typeof ROLE_OPTIONS)[number])) {
-          setRole("Other")
-          setRoleOther(r)
-        } else {
-          setRole(r)
-          setRoleOther("")
-        }
+        applyFields(fieldsFromProfile(p))
+        // Sync the context so the sidebar name + later visits pick the row up
+        // without re-running this path.
+        void refreshWorkspace()
       }
     } catch (e) {
       setProfileError(e instanceof Error ? e.message : "Could not load profile")
     } finally {
       setLoading(false)
     }
-  }, [auth])
+  }, [auth, applyFields, refreshWorkspace])
 
+  // Late hydration — only when the mount-time seed found nothing: either the
+  // context's initial fetch is still in flight (seed when it lands) or the
+  // account truly has no profile row yet (fetch-or-insert via load()). The
+  // `snapshot != null` latch keeps this from ever re-seeding over edits.
   useEffect(() => {
+    if (auth.kind !== "authed" || snapshot != null) return
+    if (ctxProfile) {
+      applyFields(fieldsFromProfile(ctxProfile))
+      setLoading(false)
+      return
+    }
+    if (workspaceLoading) return
     void load()
-  }, [load])
+  }, [auth.kind, snapshot, ctxProfile, workspaceLoading, applyFields, load])
+
+  function onDiscard() {
+    if (!snapshot) return
+    setFirstName(snapshot.firstName)
+    setLastName(snapshot.lastName)
+    setRole(snapshot.role)
+    setRoleOther(snapshot.roleOther)
+    setTimezone(snapshot.timezone)
+    setProfileError(null)
+  }
 
   async function onSaveProfile(e: React.FormEvent) {
     e.preventDefault()
@@ -130,6 +238,7 @@ export function ProfileSettings() {
         role: resolvedRole,
         timezone: timezone.trim() || null,
       })
+      setSnapshot({ firstName, lastName, role, roleOther, timezone })
       setProfileSaved(true)
       await refreshWorkspace()
     } catch (e) {
@@ -140,44 +249,138 @@ export function ProfileSettings() {
   }
 
   if (loading) {
-    return <p className="settings-loading">Loading profile…</p>
+    return (
+      <div className="pset">
+        <div className="pset-body">
+          <p className="settings-loading">Loading profile…</p>
+        </div>
+      </div>
+    )
   }
 
+  const fullName = [firstName.trim(), lastName.trim()].filter(Boolean).join(" ")
+  const initials =
+    ((firstName.trim()[0] ?? "") + (lastName.trim()[0] ?? "")).toUpperCase() ||
+    (email[0] ?? "?").toUpperCase()
+  const joinedLabel = (() => {
+    if (!joinedAt) return null
+    const d = new Date(joinedAt)
+    if (Number.isNaN(d.getTime())) return null
+    return `joined ${d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`
+  })()
+  const identityMeta = [
+    role ? roleDisplay(role, roleOther) : null,
+    workspace?.display_name ?? null,
+    joinedLabel,
+  ]
+    .filter(Boolean)
+    .join(" · ")
+
   return (
-    <>
-      <SettingsSection
+    <div className="pset">
+      {/* Sticky action bar — save/discard live here, not at the card's foot. */}
+      <SettingsPaneBar
         title="Profile"
-        sub="Your name and role appear across Sprntly and in team views."
-      >
-        <form onSubmit={onSaveProfile}>
-          <SettingsRow label="Work email" sub="Contact support to change your login email.">
-            <span className="settings-readonly">{email || "—"}</span>
-          </SettingsRow>
-          <div className="settings-field-row">
-            <div className="field">
-              <label className="field-label">First name</label>
-              <input
-                className="input"
-                value={firstName}
-                onChange={(e) => setFirstName(e.target.value)}
-                maxLength={50}
-                required
-              />
-            </div>
-            <div className="field">
-              <label className="field-label">Last name</label>
-              <input
-                className="input"
-                value={lastName}
-                onChange={(e) => setLastName(e.target.value)}
-                maxLength={50}
-                required
-              />
-            </div>
+        meta={[fullName, email].filter(Boolean).join(" · ") || null}
+        saved={profileSaved}
+        dirty={dirty}
+        saving={saving}
+        onDiscard={onDiscard}
+        formId={PROFILE_FORM_ID}
+      />
+
+      <div className="pset-body">
+      <h2 className="pset-title">Profile</h2>
+      <p className="pset-sub">
+        How Sprntly addresses you and tunes Briefs to your role. Visible only
+        inside your workspace.
+      </p>
+
+      <form id={PROFILE_FORM_ID} className="pset-card" onSubmit={onSaveProfile}>
+        <div className="pset-identity">
+          <div className="pset-avatar" aria-hidden>{initials}</div>
+          <div className="pset-identity-text">
+            <div className="pset-name">{fullName || "Your name"}</div>
+            {identityMeta && <div className="pset-identity-meta">{identityMeta}</div>}
           </div>
-          <div className="field" style={{ marginBottom: 14 }}>
-            <label className="field-label">Your role</label>
+          <button
+            type="button"
+            className="pset-avatar-btn"
+            disabled
+            title="Avatar upload is coming soon"
+          >
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+              <circle cx="12" cy="13" r="4" />
+            </svg>
+            Change avatar
+          </button>
+        </div>
+
+        <div className="pset-grid">
+          <div className="pset-field">
+            <label className="pset-label" htmlFor="pset-first-name">First name</label>
+            <input
+              id="pset-first-name"
+              className="input"
+              value={firstName}
+              onChange={(e) => setFirstName(e.target.value)}
+              maxLength={50}
+              required
+            />
+          </div>
+          <div className="pset-field">
+            <label className="pset-label" htmlFor="pset-last-name">Last name</label>
+            <input
+              id="pset-last-name"
+              className="input"
+              value={lastName}
+              onChange={(e) => setLastName(e.target.value)}
+              maxLength={50}
+              required
+            />
+          </div>
+          <div className="pset-field">
+            <label className="pset-label" htmlFor="pset-email">Work email</label>
+            <input
+              id="pset-email"
+              className="input"
+              value={email || "—"}
+              readOnly
+              title="Contact support to change your login email."
+            />
+          </div>
+          <div className="pset-field">
+            <label className="pset-label" htmlFor="pset-timezone">Timezone</label>
+            {tzOptions.length > 0 ? (
+              <select
+                id="pset-timezone"
+                className="input"
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+              >
+                <option value="">Select a timezone</option>
+                {tzOptions.map((tz) => (
+                  <option key={tz} value={tz}>
+                    {tzLabel(tz)}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                id="pset-timezone"
+                className="input"
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+                placeholder="e.g. America/New_York"
+                maxLength={64}
+              />
+            )}
+          </div>
+          <div className="pset-field pset-field--full">
+            <label className="pset-label" htmlFor="pset-role">Your role</label>
             <select
+              id="pset-role"
               className="input"
               value={role}
               onChange={(e) => setRole(e.target.value)}
@@ -200,53 +403,11 @@ export function ProfileSettings() {
               />
             )}
           </div>
-          <div className="field" style={{ marginBottom: 14 }}>
-            <label className="field-label">Timezone</label>
-            {tzOptions.length > 0 ? (
-              <select
-                className="input"
-                value={timezone}
-                onChange={(e) => setTimezone(e.target.value)}
-              >
-                <option value="">Select a timezone</option>
-                {tzOptions.map((tz) => (
-                  <option key={tz} value={tz}>
-                    {tz.replace(/_/g, " ")}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <input
-                className="input"
-                value={timezone}
-                onChange={(e) => setTimezone(e.target.value)}
-                placeholder="e.g. America/New_York"
-                maxLength={64}
-              />
-            )}
-            <p className="field-hint">
-              Your weekly brief is delivered Monday 6:00 AM in this timezone.
-            </p>
-          </div>
-          {profileError && <SettingsMessage kind="error">{profileError}</SettingsMessage>}
-          {profileSaved && (
-            <SettingsMessage kind="success">Profile saved.</SettingsMessage>
-          )}
-          <button type="submit" className="btn btn-primary" disabled={saving}>
-            {saving ? "Saving…" : "Save profile"}
-          </button>
-        </form>
-      </SettingsSection>
+        </div>
 
-      <SettingsSection
-        title="Notifications"
-        sub="Email digest and in-app alerts — full controls coming soon."
-      >
-        <p className="settings-placeholder">
-          Configure notification preferences in a future update. Brief delivery
-          settings remain under workspace notifications.
-        </p>
-      </SettingsSection>
-    </>
+        {profileError && <SettingsMessage kind="error">{profileError}</SettingsMessage>}
+      </form>
+      </div>
+    </div>
   )
 }

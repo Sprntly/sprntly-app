@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useRef, useState } from "react"
+import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
@@ -20,21 +20,7 @@ export function Sidebar(_props: SidebarProps = {}) {
   const { content } = useContent()
   const auth = useAuth()
   const { profile, workspace } = useWorkspace()
-  const signingOutRef = useRef(false)
-  const [signingOut, setSigningOut] = useState(false)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
-
-  const handleSignOut = useCallback(async () => {
-    if (signingOutRef.current) return
-    signingOutRef.current = true
-    setSigningOut(true)
-    try {
-      await auth.signOut()
-    } finally {
-      signingOutRef.current = false
-      setSigningOut(false)
-    }
-  }, [auth])
 
   const RailItem = ({
     screen,
@@ -124,17 +110,16 @@ export function Sidebar(_props: SidebarProps = {}) {
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
         {/* <RailItem screen="backlog" icon={<IconBulb size={18} />} label="Backlog Projects" /> */}
         <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates · what good looks like" />
+        <RailItem screen="sources" icon={<IconSources />} label="Sources" />
         {/* <RailItem screen="prototype" icon={<IconPrompt size={18} />} label="Prototype" /> */}
         {/* <RailItem screen="tickets" icon={<IconLayoutKanban size={18} />} label="Project Management" /> */}
       </div>
 
       <div className="sb-rail-spacer" />
 
-      {/* Bottom icons */}
+      {/* Bottom icons — Settings + Feedback only (Sign out lives in Settings → Account). */}
       <div className="sb-rail-bottom">
-        <RailItem screen="sources" icon={<IconSources />} label="Sources" />
         <RailItem screen="settings" icon={<IconSettings size={18} />} label="Settings" />
-        {/* Feedback / feature request — sits at the bottom next to sign-out. */}
         <button
           type="button"
           className="sb-rail-item"
@@ -149,28 +134,13 @@ export function Sidebar(_props: SidebarProps = {}) {
       </div>
       <div className="divider-nav" />
 
-      {/* User avatar */}
+      {/* User identity row — display only. Signing out moved to Settings →
+          Account, so no sign-out affordance here (icon or avatar click). */}
       <div className="sb-rail-user">
-        <button
-          type="button"
-          className="sb-rail-avatar"
-          title={`${displayName} · Sign out`}
-          onClick={() => void handleSignOut()}
-          disabled={signingOut}
-        >
+        <span className="sb-rail-avatar" title={displayName}>
           {initials}
-        </button>
+        </span>
         <span className="sb-rail-username">{displayName}</span>
-        <button
-          type="button"
-          className="sb-rail-signout"
-          onClick={() => void handleSignOut()}
-          disabled={signingOut}
-          title="Sign out"
-          aria-label="Sign out"
-        >
-          <SignOutIcon />
-        </button>
       </div>
 
       <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
@@ -198,23 +168,3 @@ function ChevronIcon({ collapsed }: { collapsed: boolean }) {
   )
 }
 
-function SignOutIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
-      <path
-        d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M16 17l5-5-5-5M21 12H9"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-}

@@ -69,10 +69,11 @@ describe("Sidebar — New chat wiring", () => {
 
 // ── Shell restyle: every nav affordance is preserved ──────────────────────────
 // The visual restyle of the rail must NOT drop any nav entry. This guards the
-// full set — especially the Feedback action that sits next to sign-out — so a
-// future CSS/markup change can't silently remove one.
+// full set so a future CSS/markup change can't silently remove one. Sign out
+// deliberately does NOT appear here: it moved to Settings → Account, and the
+// rail's user row is display-only.
 describe("Sidebar — nav affordances preserved after restyle", () => {
-  it("renders New chat, Weekly brief, All chats, Sources, Settings, Feedback + Sign out", () => {
+  it("renders New chat, Weekly brief, All chats, Sources, Settings + Feedback", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
@@ -81,10 +82,14 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
       "Sources",
       "Settings",
       "Feedback",
-      "Sign out",
     ]) {
       expect(screen.getByLabelText(label)).toBeTruthy()
     }
+  })
+
+  it("no longer renders a Sign out affordance (it lives in Settings → Account)", () => {
+    render(React.createElement(Sidebar))
+    expect(screen.queryByLabelText("Sign out")).toBeNull()
   })
 
   it("no longer renders the Backlog rail icon (functionality kept, icon removed)", () => {

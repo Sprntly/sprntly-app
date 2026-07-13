@@ -3,8 +3,8 @@
 // Feedback / feature-request DOM tests (June 20 #13 + #A).
 //
 // Two things matter for the slice:
-//   1. The "Feedback" nav item renders in the sidebar's bottom group, next to
-//      the sign-out control.
+//   1. The "Feedback" nav item renders in the sidebar's bottom group (next to
+//      Settings — sign-out moved to Settings → Account and is NOT in the rail).
 //   2. Clicking it opens the lightweight form; filling the message + submitting
 //      calls feedbackApi.submit with the message + selected type.
 //
@@ -41,14 +41,14 @@ beforeEach(() => submit.mockClear())
 afterEach(() => cleanup())
 
 describe("Sidebar — Feedback entry", () => {
-  it("renders a Feedback nav item next to the sign-out control", () => {
+  it("renders a Feedback nav item in the bottom rail group (no sign-out — it moved to Settings)", () => {
     render(React.createElement(Sidebar))
     const feedback = screen.getByLabelText("Feedback")
     expect(feedback).toBeTruthy()
-    // It lives in the bottom rail group alongside the other bottom items, and
-    // the sign-out control is present in the same sidebar.
+    // It lives in the bottom rail group alongside Settings. Sign out is
+    // deliberately absent from the rail — it lives in Settings → Account.
     expect(feedback.closest(".sb-rail-bottom")).toBeTruthy()
-    expect(screen.getByLabelText("Sign out")).toBeTruthy()
+    expect(screen.queryByLabelText("Sign out")).toBeNull()
   })
 
   it("clicking Feedback opens the form; submit calls feedbackApi.submit", async () => {

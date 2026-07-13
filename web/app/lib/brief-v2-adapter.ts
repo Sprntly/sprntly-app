@@ -111,6 +111,10 @@ export interface BriefV2KpiTile {
 export interface BriefV2State {
   headline: string | null
   weekOf: string | null
+  /** Raw ISO timestamp of when the brief was generated — drives the
+   *  "Monday brief · 7:01 AM" line in the chat head. Optional so test
+   *  fixtures built before it existed stay valid. */
+  generatedAt?: string | null
   company: string
   productArea: string
   kpiTiles: BriefV2KpiTile[]
@@ -494,6 +498,7 @@ export function briefToBriefV2State(brief: Brief): BriefV2State {
   const empty: BriefV2State = {
     headline: null,
     weekOf: null,
+    generatedAt: brief.generated_at ?? null,
     company: companyLabel(brief),
     productArea: "",
     kpiTiles: [],
@@ -528,6 +533,7 @@ export function briefToBriefV2State(brief: Brief): BriefV2State {
   return {
     headline: brief.summary_headline?.trim() || null,
     weekOf: brief.week_label || brief.generated_at?.slice(0, 10) || null,
+    generatedAt: brief.generated_at ?? null,
     company: companyLabel(brief),
     productArea,
     kpiTiles: buildKpiTiles(insights),

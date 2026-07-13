@@ -27,6 +27,7 @@ const refreshMock = vi.fn(() => Promise.resolve())
 
 vi.mock("../../../../../context/WorkspaceContext", () => ({
   useWorkspace: () => useWorkspaceMock(),
+  profileDisplayName: () => null,
 }))
 vi.mock("../../../../../lib/onboarding/store", () => ({
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
@@ -102,13 +103,13 @@ describe("NotificationsSettings — email toggle round-trip", () => {
     const toggle = emailToggle()
     expect(toggle.getAttribute("aria-pressed")).toBe("false")
 
-    // User turns the digest ON, then clicks Save.
+    // User turns the digest ON (arming the top bar's Save), then clicks Save.
     await act(async () => {
       fireEvent.click(toggle)
     })
     expect(emailToggle().getAttribute("aria-pressed")).toBe("true")
 
-    const saveBtn = screen.getByRole("button", { name: /save notifications/i })
+    const saveBtn = screen.getByRole("button", { name: /save changes/i })
     await act(async () => {
       fireEvent.click(saveBtn)
     })
@@ -135,7 +136,8 @@ describe("NotificationsSettings — schedule (when)", () => {
       email_recipients: ["a@co.com"], // must be preserved on save
     })
 
-    // Selects reflect the saved values (Wednesday / 2:00 PM / NY).
+    // The Schedule card is always visible now (no longer gated behind the
+    // email toggle) — selects reflect the saved values (Wednesday / 2 PM / NY).
     const selects = Array.from(
       document.querySelectorAll("select.input"),
     ) as HTMLSelectElement[]
@@ -144,14 +146,18 @@ describe("NotificationsSettings — schedule (when)", () => {
     expect(hourSel.value).toBe("14")
     expect(tzSel.value).toBe("America/New_York")
 
-    const saveBtn = screen.getByRole("button", { name: /save notifications/i })
+    // Save is dirty-gated in the top bar, so change the day first (Wed → Thu).
+    await act(async () => {
+      fireEvent.change(daySel, { target: { value: "3" } })
+    })
+    const saveBtn = screen.getByRole("button", { name: /save changes/i })
     await act(async () => {
       fireEvent.click(saveBtn)
     })
     await waitFor(() => expect(updateWorkspaceMock).toHaveBeenCalledTimes(1))
     const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Notif]
     const ns = patch.notification_settings as Notif
-    expect(ns.brief_weekday).toBe(2)
+    expect(ns.brief_weekday).toBe(3)
     expect(ns.brief_hour).toBe(14)
     expect(ns.brief_minute).toBe(0)
     expect(ns.timezone).toBe("America/New_York")
