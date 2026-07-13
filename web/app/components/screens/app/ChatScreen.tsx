@@ -89,14 +89,15 @@ export const NEW_CHAT_TITLE = "New chat"
 // explains what the spinning panel on the right is doing and how to get back to
 // it (the PRD card above the thread hosts the View PRD button).
 function commandAckReply(req: PrdTabRequest): AskResponse {
-  const importing = req.source.kind === "resume"
-  const withTickets = importing && !!req.source.openTickets
+  const source = req.source
+  const importing = source.kind === "resume"
+  const withTickets = source.kind === "resume" && !!source.openTickets
   const answer = withTickets
     ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready. Use the View PRD button above to reopen the panel anytime."
     : importing
       ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
       : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-  return { answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" }
+  return { answer, key_points: [], citations: [], confidence: 1, unanswered: "" }
 }
 
 // Attached-file chips shown under a composer. Rendered by BOTH the landing and
