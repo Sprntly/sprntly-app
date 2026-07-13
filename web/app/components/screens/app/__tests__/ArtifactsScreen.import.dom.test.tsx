@@ -68,30 +68,28 @@ describe("ArtifactsScreen — Upload PRD", () => {
     expect(screen.getByTestId("prd-import-button").textContent).toContain("Upload PRD")
   })
 
-  it("uploads → polls until ready → opens the PRD page", async () => {
+  it("uploads → opens the chat window immediately (kind:resume), no blocking poll", async () => {
     importDoc.mockResolvedValue({ prd_id: 7, status: "generating", title: "My Great PRD" })
-    // Ready on the first poll (the 2.5s inter-poll wait is only hit while still
-    // generating; covering that path would need fake timers — not worth it here).
-    prdGet.mockResolvedValue({ id: 7, status: "ready", payload_md: "<h1>PRD</h1>" })
 
     await act(async () => { render(<ArtifactsScreen />) })
     const file = selectFile()
 
     await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
-    // Opens a chat window with the PRD in the right panel (openPrdTab, kind:"ready")
-    // — the same surface as the weekly brief's PRD button.
+    // Opens a chat window immediately with kind:"resume" — the PRD panel polls to
+    // ready in-tab, so a slow generation never looks like a hung upload.
     await waitFor(() => expect(openPrdTab).toHaveBeenCalled())
     const arg = openPrdTab.mock.calls.at(-1)![0]
-    expect(arg.source.kind).toBe("ready")
-    expect(arg.source.prd.prd_id).toBe(7)
+    expect(arg.source.kind).toBe("resume")
+    expect(arg.source.prdId).toBe(7)
     expect(arg.title).toContain("PRD ·")
+    // The screen never polls prdApi.get itself — that's the tab's job now.
+    expect(prdGet).not.toHaveBeenCalled()
     // Refreshes the artifacts list after import (initial mount + post-import).
     expect(artifactsList.mock.calls.length).toBeGreaterThanOrEqual(2)
-  }, 15000)
+  })
 
-  it("surfaces an error when generation fails", async () => {
-    importDoc.mockResolvedValue({ prd_id: 9, status: "generating", title: "x" })
-    prdGet.mockResolvedValue({ id: 9, status: "failed", payload_md: "" })
+  it("surfaces an error when the import request itself fails", async () => {
+    importDoc.mockRejectedValue(new Error("network boom"))
 
     await act(async () => { render(<ArtifactsScreen />) })
     selectFile()

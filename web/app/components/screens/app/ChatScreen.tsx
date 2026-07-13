@@ -21,6 +21,7 @@ import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "..
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
+// resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError } from "../../../lib/runAskGeneration"
@@ -457,6 +458,7 @@ export function ChatScreen() {
     // prior conversation, so we skip — their prd_id is stamped on first send.
     const knownPrdId = source.kind === "ready" ? source.prd.prd_id
       : source.kind === "load" ? source.prdId
+      : source.kind === "resume" ? source.prdId
       : null
     if (knownPrdId != null) void hydratePrdThread(tabId, knownPrdId)
 
@@ -481,6 +483,7 @@ export function ChatScreen() {
         const result =
           source.kind === "generate" ? await runPrdGeneration(source.meta)
           : source.kind === "generateBacklog" ? await runPrdGenerationFromBacklog(source.backlogItemId)
+          : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined)
           : await loadPrdById(source.prdId)
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
