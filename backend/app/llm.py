@@ -210,7 +210,8 @@ def _attempt_delay(attempt: int) -> float:
 
 
 def _create_with_retries(
-    client: Anthropic, *, stream: bool = False, background: bool = False, **kwargs
+    client: Anthropic, *, stream: bool = False, background: bool = False,
+    on_delta=None, **kwargs
 ):
     """`messages.create` with exponential backoff on transient failures.
 
@@ -220,6 +221,14 @@ def _create_with_retries(
     big non-streamed response would hit. The return value is the same final
     Message object either way, so callers (`_capture_meta`, content extraction)
     are unchanged.
+
+    `on_delta(text)` — optional. When given AND streaming, each TEXT delta is
+    passed to it as it arrives (for token-streaming a doc to the client). It
+    never fires for tool-use/JSON responses (their deltas are partial JSON, not
+    text) or on the non-streamed path. A transient failure mid-stream restarts
+    the stream, so on_delta may re-emit from the beginning; the caller treats
+    the persisted final result as authoritative and uses on_delta only for
+    progressive display. Callback exceptions are swallowed.
 
     The whole call (including its retries) holds ONE process-wide concurrency
     slot (`_llm_gate`) for its full duration, so the box never runs more
@@ -250,6 +259,14 @@ def _create_with_retries(
                     with client.messages.stream(**kwargs) as s:
                         # Drain the stream so deltas are consumed, then return
                         # the assembled final message (same shape as create).
+                        # With on_delta, forward each text delta as it lands
+                        # (progressive display) before assembling the final.
+                        if on_delta is not None:
+                            for _text in s.text_stream:
+                                try:
+                                    on_delta(_text)
+                                except Exception:  # noqa: BLE001 — display only
+                                    logger.exception("on_delta callback failed (continuing)")
                         return s.get_final_message()
                 return client.messages.create(**kwargs)
             except Exception as exc:  # noqa: BLE001 — classified below
@@ -455,12 +472,16 @@ def call_md(
     timeout: float | None = None,
     background: bool = False,
     temperature: float | None = None,
+    on_delta=None,
 ) -> str:
     """Call Claude expecting plain markdown output.
 
     `stream=True` streams the response (required for long/large outputs; avoids
     the read timeout) and `timeout` overrides the per-request read timeout for
     a single slow call. Both default off, so existing callers are unchanged.
+
+    `on_delta(text)` — optional; forwards each text delta as it streams (for
+    token-streaming the doc to the client). Requires stream=True to fire.
 
     `user_cacheable_prefix` mirrors `call_json`: when supplied it is sent as a
     separate `cache_control: ephemeral` text block before `user` (and the system
@@ -480,7 +501,9 @@ def call_md(
     )
     if timeout is not None:
         kwargs["timeout"] = timeout
-    msg = _create_with_retries(get_client(), stream=stream, background=background, **kwargs)
+    msg = _create_with_retries(
+        get_client(), stream=stream, background=background, on_delta=on_delta, **kwargs
+    )
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()
 
