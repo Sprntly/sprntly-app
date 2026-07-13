@@ -177,6 +177,19 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     expect(briefCurrent).not.toHaveBeenCalled()
   })
 
+  it.each(["spec.pdf", "spec.docx", "spec.pptx"])(
+    "imports %s — every document format takes the same doc → PRD → tickets path",
+    async (name) => {
+      renderChat()
+      const file = await attachDoc(name)
+      await typeAndSend("convert this PRD into tickets")
+
+      await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
+      await waitFor(() => expect(panelTab()).toBe("tickets"))
+      expect(runAskGeneration).not.toHaveBeenCalled()
+    },
+  )
+
   it("'create tickets from this PRD' matches the tickets rule, not the PRD rule", async () => {
     renderChat()
     const file = await attachDoc()
