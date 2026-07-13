@@ -29,8 +29,9 @@ vi.mock("../../../../lib/api", () => ({
 
 const setContent = vi.fn()
 const openContentPanel = vi.fn()
+const openPrdTab = vi.fn()
 vi.mock("../../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ openContentPanel }),
+  useNavigation: () => ({ openContentPanel, openPrdTab }),
 }))
 vi.mock("../../../../context/ContentContext", () => ({
   useContent: () => ({ setContent }),
@@ -77,11 +78,13 @@ describe("ArtifactsScreen — Upload PRD", () => {
     const file = selectFile()
 
     await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
-    // Opens the standard PRD page once ready.
-    await waitFor(() => expect(openContentPanel).toHaveBeenCalledWith("prd"))
-    expect(setContent).toHaveBeenCalled()
-    const arg = setContent.mock.calls.at(-1)![0]
-    expect(arg.prd.prd_id).toBe(7)
+    // Opens a chat window with the PRD in the right panel (openPrdTab, kind:"ready")
+    // — the same surface as the weekly brief's PRD button.
+    await waitFor(() => expect(openPrdTab).toHaveBeenCalled())
+    const arg = openPrdTab.mock.calls.at(-1)![0]
+    expect(arg.source.kind).toBe("ready")
+    expect(arg.source.prd.prd_id).toBe(7)
+    expect(arg.title).toContain("PRD ·")
     // Refreshes the artifacts list after import (initial mount + post-import).
     expect(artifactsList.mock.calls.length).toBeGreaterThanOrEqual(2)
   }, 15000)
@@ -96,6 +99,6 @@ describe("ArtifactsScreen — Upload PRD", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("prd-import-error")).not.toBeNull(),
     )
-    expect(openContentPanel).not.toHaveBeenCalled()
+    expect(openPrdTab).not.toHaveBeenCalled()
   })
 })
