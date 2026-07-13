@@ -1,10 +1,12 @@
 /**
- * Settings → Connectors pane (commit D).
+ * Settings → Connectors pane.
  *
- * Renders a single flat list of connectors (no category grouping — that
- * returns once the connector count grows). Only connectors with a working
- * integration (OAuth / API key) are shown (`connectableCatalog`) — "Coming
- * soon" connectors are hidden so we don't surface things the user can't use.
+ * Renders connectors GROUPED BY CATEGORY — one card per catalog category
+ * (Analytics · required, Project Management, …), each with its connector
+ * rows and a per-category upload strip at the card's foot. Only connectors
+ * with a working integration (OAuth / API key) are shown
+ * (`connectableCatalog`) — "Coming soon" connectors are hidden so we don't
+ * surface things the user can't use.
  * Each row shows the connector's real brand logo (a locally bundled SVG via
  * the shared ConnectorLogo), falling back to a single-letter glyph if it
  * can't load.
@@ -116,6 +118,36 @@ export function connectStartErrorMessage(
   return `Could not start ${providerId} connect: ${msg}`
 }
 
+/**
+ * Filter the grouped catalog by a search query. Matching rules:
+ *  - CATEGORY title matches (e.g. "management", "analytics") → the whole
+ *    category is kept with all its connectors;
+ *  - otherwise each category keeps only connectors whose NAME, id, or type
+ *    label matches (e.g. "jira", "clickup", "task management");
+ *  - categories left with no matches are dropped.
+ * Empty/whitespace query returns the catalog unchanged. Pure — unit-testable.
+ */
+export function filterConnectorCategories(
+  categories: ConnectorCategoryRow[],
+  query: string,
+): ConnectorCategoryRow[] {
+  const q = query.trim().toLowerCase()
+  if (!q) return categories
+  return categories
+    .map((cat) => {
+      if (cat.title.toLowerCase().includes(q)) return cat
+      const items = cat.items.filter((i) => {
+        if (i.name.toLowerCase().includes(q)) return true
+        if (i.id.toLowerCase().includes(q)) return true
+        return (i.types ?? []).some((tp) =>
+          CONNECTOR_TYPE_LABELS[tp].toLowerCase().includes(q),
+        )
+      })
+      return { ...cat, items }
+    })
+    .filter((cat) => cat.items.length > 0)
+}
+
 // ─────────────────────────── Pure View ───────────────────────────
 
 export type ConnectorsSettingsViewProps = {
@@ -151,6 +183,10 @@ export type ConnectorsSettingsViewProps = {
   regenerating: boolean
   /** Inline error from the regenerate trigger, or null. */
   regenerateError: string | null
+  /** Live search query — filters categories/connectors (see
+   *  filterConnectorCategories). Optional so existing callers stay valid. */
+  searchQuery?: string
+  onSearchChange?: (value: string) => void
   /**
    * All files uploaded to the active company. The backend stores uploads at
    * the company level with no per-category attribution, so this is a single
@@ -172,15 +208,31 @@ export function ConnectorsSettingsView({
   onRegenerateBrief,
   regenerating,
   regenerateError,
+  searchQuery = "",
+  onSearchChange,
 }: ConnectorsSettingsViewProps) {
-  // Flat list for now — with only a handful of live connectors, category
-  // grouping is noise. Re-introduce category sections once the list grows.
-  const connectors = categories.flatMap((c) => c.items)
+  const visibleCategories = filterConnectorCategories(categories, searchQuery)
   return (
     <div className="set-pane sp-connectors">
       <div className="set-h">Connectors</div>
       <div className="set-sub">
-        Every source feeding your agents. Connect a tool or upload files.
+        Every source feeding your agents, grouped by category. Connect a tool
+        or upload files directly to any category.
+      </div>
+
+      {/* Search — matches a category name (shows the whole group) or a
+          connector name/type (shows just those rows in their groups). */}
+      <div className="set-conn-search">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+        <input
+          type="search"
+          value={searchQuery}
+          onChange={(e) => onSearchChange?.(e.target.value)}
+          placeholder="Search connectors or categories — e.g. Jira, analytics…"
+          aria-label="Search connectors"
+        />
       </div>
 
       {/* Rebuild the weekly brief (and its PRDs + evidence) from the latest
@@ -222,94 +274,105 @@ export function ConnectorsSettingsView({
       ) : null}
       {loading ? <p className="settings-loading">Loading connectors…</p> : null}
 
-      <div className="set-block">
-        {connectors.map((item) => {
-          const conn = connectionByProvider.get(item.id) ?? null
-          const state = getConnectorRowState(item, conn)
-          return (
-            <div key={item.id} className="set-conn-row">
-              <ConnectorLogo item={item} className="logo" />
-              <div className="nm">
-                <div className="t">{item.name}</div>
-                <div className={`s${state.disconnected ? " is-disconnected" : ""}`}>
-                  {state.statsString}
-                </div>
-              </div>
-              {/* Middle column: what this tool IS (multi-valued) — the same
-                  types that drive feature availability (e.g. task-management →
-                  the tickets sync button). */}
-              <div className="set-conn-types">
-                {(item.types ?? []).map((tp) => (
-                  <span key={tp} className="set-conn-type">
-                    {CONNECTOR_TYPE_LABELS[tp]}
-                  </span>
-                ))}
-              </div>
-              <span
-                className={`st ${
-                  state.disconnected
-                    ? "down"
-                    : state.status === "active"
-                      ? "on"
-                      : "off"
-                }`}
-              >
-                {state.disconnected
-                  ? "Disconnected"
-                  : state.status === "active"
-                    ? "Active"
-                    : "Off"}
-              </span>
-              <button
-                type="button"
-                className="ac"
-                disabled={!state.canClick}
-                title={
-                  state.canClick
-                    ? undefined
-                    : "Coming soon — no integration available yet"
-                }
-                onClick={() => {
-                  if (!state.canClick) return
-                  if (state.actionLabel === "Configure") onConfigure(item.id)
-                  else if (state.actionLabel === "Connect") onConnect(item.id)
-                }}
-              >
-                {state.actionLabel}
-              </button>
-            </div>
-          )
-        })}
+      {/* One card per category (the design's grouped layout): serif category
+          title + optional "· required" hint, the category's connector rows,
+          and a per-category upload strip at the card's foot. Uploads are still
+          stored company-wide server-side — the category key just labels the
+          gesture. */}
+      {/* No matches for the active search — say so instead of a blank pane. */}
+      {searchQuery.trim() !== "" && visibleCategories.length === 0 ? (
+        <p className="settings-placeholder" data-testid="conn-search-empty">
+          No connectors or categories match &quot;{searchQuery.trim()}&quot;.
+        </p>
+      ) : null}
 
-        <label
-          className={`set-conn-upload${uploading ? " is-uploading" : ""}`}
-          title={uploading ? "Uploading…" : "Upload files"}
-          aria-busy={uploading}
-        >
-          <i
-            className={`ti ${uploading ? "ti-loader-2 ti-spin" : "ti-cloud-upload"}`}
-            aria-hidden
-          />
-          {uploading ? "Uploading…" : "Upload files"}
-          <span className="muted">{UPLOAD_ACCEPT_HINT}</span>
-          <input
-            type="file"
-            multiple
-            accept={UPLOAD_EXTENSIONS.join(",")}
-            // Block re-selection while a previous batch is still ingesting so
-            // the user can't fire overlapping uploads mid-flight.
-            disabled={uploading}
-            style={{ display: "none" }}
-            onChange={(e) => {
-              if (e.target.files && e.target.files.length > 0) {
-                onUpload("all", e.target.files)
-                // Reset so the same file can be picked again after a failed run.
-                e.target.value = ""
-              }
-            }}
-          />
-        </label>
-      </div>
+      {visibleCategories.map((cat) => (
+        <section key={cat.key} className="set-block sp-conn-cat" data-category={cat.key}>
+          <div className="pset-card-head">
+            <h3 className="pset-card-title">{cat.title}</h3>
+            {cat.subLabel ? (
+              <span className="pset-card-hint">· {cat.subLabel}</span>
+            ) : null}
+          </div>
+
+          {cat.items.map((item) => {
+            const conn = connectionByProvider.get(item.id) ?? null
+            const state = getConnectorRowState(item, conn)
+            return (
+              <div key={item.id} className="set-conn-row">
+                <ConnectorLogo item={item} className="logo" />
+                <div className="nm">
+                  <div className="t">{item.name}</div>
+                  <div className={`s${state.disconnected ? " is-disconnected" : ""}`}>
+                    {state.statsString}
+                  </div>
+                </div>
+                <span
+                  className={`st ${
+                    state.disconnected
+                      ? "down"
+                      : state.status === "active"
+                        ? "on"
+                        : "off"
+                  }`}
+                >
+                  {state.disconnected
+                    ? "Disconnected"
+                    : state.status === "active"
+                      ? "Active"
+                      : "Off"}
+                </span>
+                <button
+                  type="button"
+                  className="ac"
+                  disabled={!state.canClick}
+                  title={
+                    state.canClick
+                      ? undefined
+                      : "Coming soon — no integration available yet"
+                  }
+                  onClick={() => {
+                    if (!state.canClick) return
+                    if (state.actionLabel === "Configure") onConfigure(item.id)
+                    else if (state.actionLabel === "Connect") onConnect(item.id)
+                  }}
+                >
+                  {state.actionLabel}
+                </button>
+              </div>
+            )
+          })}
+
+          <label
+            className={`set-conn-upload${uploading ? " is-uploading" : ""}`}
+            title={uploading ? "Uploading…" : `Upload ${cat.title.toLowerCase()} files`}
+            aria-busy={uploading}
+          >
+            <i
+              className={`ti ${uploading ? "ti-loader-2 ti-spin" : "ti-cloud-upload"}`}
+              aria-hidden
+            />
+            {uploading ? "Uploading…" : `Upload ${cat.title.toLowerCase()} export`}
+            <span className="muted">{cat.uploadAccept ?? UPLOAD_ACCEPT_HINT}</span>
+            <input
+              type="file"
+              multiple
+              accept={(cat.uploadExtensions ?? UPLOAD_EXTENSIONS).join(",")}
+              // Block re-selection while a previous batch is still ingesting so
+              // the user can't fire overlapping uploads mid-flight.
+              disabled={uploading}
+              style={{ display: "none" }}
+              onChange={(e) => {
+                if (e.target.files && e.target.files.length > 0) {
+                  onUpload(cat.key, e.target.files)
+                  // Reset so the same file can be picked again after a failed run.
+                  e.target.value = ""
+                }
+              }}
+            />
+          </label>
+        </section>
+      ))}
 
       {files.length > 0 ? (
         <div className="set-block sp-conn-files">
@@ -353,6 +416,7 @@ export function ConnectorsSettings() {
 
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [files, setFiles] = useState<SourceFile[]>([])
+  const [searchQuery, setSearchQuery] = useState("")
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
@@ -604,6 +668,8 @@ export function ConnectorsSettings() {
         onRegenerateBrief={handleRegenerateBrief}
         regenerating={regenerating}
         regenerateError={regenerateError}
+        searchQuery={searchQuery}
+        onSearchChange={setSearchQuery}
       />
       <ConfigureConnectorDrawer
         providerId={configuringProviderId}
