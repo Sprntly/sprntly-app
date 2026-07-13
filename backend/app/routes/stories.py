@@ -178,11 +178,18 @@ async def generate(
     }
     _prune_jobs()
 
+    from app.config import settings
+
+    strategy = "fanout" if settings.ticket_gen_fanout else "single"
+
     async def _run() -> None:
         try:
             stories = await asyncio.to_thread(
                 generate_user_stories,
                 company.company_id, prd_id=body.prd_id, insight=body.insight,
+                strategy=strategy,
+                batch_size=settings.ticket_gen_batch_size,
+                max_parallel=settings.ticket_gen_max_parallel,
             )
             job = _jobs.get(job_id)
             if job is not None:
