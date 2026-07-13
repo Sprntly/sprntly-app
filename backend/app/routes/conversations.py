@@ -1,9 +1,17 @@
 """Conversation history endpoints — persist chat threads to Supabase.
 
-  GET    /v1/conversations               -> list all for this company
-  POST   /v1/conversations               -> create a new conversation
+  GET    /v1/conversations               -> list the CALLER'S conversations
+  POST   /v1/conversations               -> create a new conversation (stamped with the caller)
   PATCH  /v1/conversations/{id}          -> update title/reply/pinned
   DELETE /v1/conversations/{id}          -> delete a conversation
+
+Chats are PER-USER: every row is stamped with the creating member's user_id
+and only that member can list/read/update/delete it — teammates in the same
+workspace never see each other's chats (PRD chats included). Only artifacts
+(PRDs, prototypes, evidence) are workspace-shared.
+
+Legacy rows created before stamping (user_id IS NULL) cannot be attributed to
+an owner, so they remain visible to (and manageable by) the whole company.
 """
 from __future__ import annotations
 
@@ -41,21 +49,47 @@ class ConversationUpdate(BaseModel):
     pinned: bool | None = None
 
 
+def _visible_to(row: dict[str, Any], user_id: str) -> bool:
+    """Per-user visibility: the owner's rows plus unattributable legacy rows
+    (user_id NULL, written before stamping existed)."""
+    return row.get("user_id") in (None, user_id)
+
+
+def _get_owned_conversation(
+    c: Any, conversation_id: int, company: CompanyContext
+) -> dict[str, Any] | None:
+    """The conversation iff it belongs to this company AND is visible to the
+    caller (owner or legacy-unowned). None otherwise — callers 404."""
+    resp = (
+        c.table("conversations")
+        .select("*")
+        .eq("id", conversation_id)
+        .eq("company_id", company.company_id)
+        .limit(1)
+        .execute()
+    )
+    row = resp.data[0] if resp.data else None
+    if row is None or not _visible_to(row, company.user_id):
+        return None
+    return row
+
+
 @router.get("")
 def list_conversations(
     company: CompanyContext = Depends(require_company),
 ):
-    """List all conversations for this company, newest first."""
+    """List the CALLER'S conversations (plus legacy unowned rows), newest first."""
     c = require_client()
     resp = (
         c.table("conversations")
         .select("*")
         .eq("company_id", company.company_id)
         .order("created_at", desc=True)
-        .limit(100)
+        .limit(300)
         .execute()
     )
-    return {"conversations": resp.data or []}
+    rows = [r for r in (resp.data or []) if _visible_to(r, company.user_id)]
+    return {"conversations": rows[:100]}
 
 
 @router.post("")
@@ -63,10 +97,12 @@ def create_conversation(
     body: ConversationIn,
     company: CompanyContext = Depends(require_company),
 ):
-    """Create a new conversation."""
+    """Create a new conversation, owned by the calling user."""
     c = require_client()
     row: dict[str, Any] = {
         "company_id": company.company_id,
+        # Chats are per-user: stamp the creator so list/read stay private.
+        "user_id": company.user_id,
         "title": body.title,
         "preview": body.preview,
         "agent_type": body.agent_type,
@@ -85,9 +121,11 @@ def get_conversation_by_prd(
     prd_id: int,
     company: CompanyContext = Depends(require_company),
 ):
-    """Return the most recent conversation for a PRD (plus its turns), so a
-    reopened PRD tab can rehydrate its prior chat. Empty (not 404) when the PRD
-    has no saved conversation yet."""
+    """Return the CALLER'S most recent conversation for a PRD (plus its turns),
+    so a reopened PRD tab can rehydrate their prior chat. PRD chats are
+    per-user — a teammate reopening the same PRD gets their own (or no)
+    conversation, never someone else's. Empty (not 404) when the caller has no
+    saved conversation for the PRD yet."""
     c = require_client()
     conv = (
         c.table("conversations")
@@ -95,12 +133,15 @@ def get_conversation_by_prd(
         .eq("company_id", company.company_id)
         .eq("prd_id", prd_id)
         .order("updated_at", desc=True)
-        .limit(1)
+        .limit(20)
         .execute()
     )
-    if not conv.data:
+    conversation = next(
+        (r for r in (conv.data or []) if _visible_to(r, company.user_id)),
+        None,
+    )
+    if conversation is None:
         return {"conversation": None, "turns": []}
-    conversation = conv.data[0]
     turns = (
         c.table("conversation_turns")
         .select("*")
@@ -117,8 +158,10 @@ def update_conversation(
     body: ConversationUpdate,
     company: CompanyContext = Depends(require_company),
 ):
-    """Update a conversation (title, reply, pinned, etc.)."""
+    """Update a conversation (title, reply, pinned, etc.) — owner only."""
     c = require_client()
+    if _get_owned_conversation(c, conversation_id, company) is None:
+        raise HTTPException(404, "Conversation not found")
     patch: dict[str, Any] = {"updated_at": utc_now()}
     if body.title is not None:
         patch["title"] = body.title
@@ -147,8 +190,10 @@ def delete_conversation(
     conversation_id: int,
     company: CompanyContext = Depends(require_company),
 ):
-    """Delete a conversation (turns cascade-delete via FK)."""
+    """Delete a conversation (turns cascade-delete via FK) — owner only."""
     c = require_client()
+    if _get_owned_conversation(c, conversation_id, company) is None:
+        raise HTTPException(404, "Conversation not found")
     c.table("conversations").delete().eq(
         "id", conversation_id
     ).eq("company_id", company.company_id).execute()
@@ -168,13 +213,9 @@ def list_turns(
     conversation_id: int,
     company: CompanyContext = Depends(require_company),
 ):
-    """List all turns in a conversation, oldest first."""
+    """List all turns in a conversation, oldest first — owner only."""
     c = require_client()
-    # Verify ownership
-    conv = c.table("conversations").select("id").eq(
-        "id", conversation_id
-    ).eq("company_id", company.company_id).limit(1).execute()
-    if not conv.data:
+    if _get_owned_conversation(c, conversation_id, company) is None:
         raise HTTPException(404, "Conversation not found")
     resp = (
         c.table("conversation_turns")
@@ -192,13 +233,9 @@ def add_turn(
     body: TurnIn,
     company: CompanyContext = Depends(require_company),
 ):
-    """Add a turn (message) to a conversation."""
+    """Add a turn (message) to a conversation — owner only."""
     c = require_client()
-    # Verify ownership
-    conv = c.table("conversations").select("id").eq(
-        "id", conversation_id
-    ).eq("company_id", company.company_id).limit(1).execute()
-    if not conv.data:
+    if _get_owned_conversation(c, conversation_id, company) is None:
         raise HTTPException(404, "Conversation not found")
     resp = c.table("conversation_turns").insert({
         "conversation_id": conversation_id,

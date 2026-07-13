@@ -11,7 +11,6 @@ import {
   evidenceApi,
   type ArtifactItem,
 } from "../../../lib/api"
-import { markdownToPrdState } from "../../../lib/prd-adapter"
 import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
 import { prototypePath } from "../../../lib/routes"
 import { AppLayout } from "./AppLayout"
@@ -364,35 +363,32 @@ export function ArtifactsScreen() {
   }, [refreshArtifacts])
 
   // Row click → OPEN the existing viewer, reusing the brief's exact mechanisms:
-  //  - prd      → load by id, setContent({prd, prdMeta}) + openContentPanel("prd")
+  //  - prd      → openPrdTab (kind:"load") — a chat tab + the PRD panel over
+  //               it, exactly like the brief's "View PRD" (never a bare panel
+  //               floating over the artifacts list)
   //  - evidence → load by id, setContent({evidence}) + openContentPanel("evidence")
   //  - prototype→ router.push(/prototype?prd=<prd_id>) (the in-tab canvas surface)
   //
-  // The panel opens IMMEDIATELY in its loading state (prdGenerating /
-  // evidenceGenerating drive the rail's spinner) and the record fetch fills it
-  // in — the click never sits silent while the network round-trip runs.
-  // prdGenerating also suppresses PrdPanelContent's own "load latest PRD"
-  // fetch, which would otherwise race this one with the wrong record.
+  // For evidence, the panel opens IMMEDIATELY in its loading state
+  // (evidenceGenerating drives the rail's spinner) and the record fetch fills
+  // it in — the click never sits silent while the network round-trip runs.
   const openArtifact = useCallback(async (a: ArtifactItem) => {
     try {
-      if (a.type === "prd" || a.type === "evidence") {
-        setActiveArtifactKey(`${a.type}-${a.id}`)
-      }
       if (a.type === "prd") {
-        setContent({
-          prd: null,
-          prdGenerating: true,
-          prdMeta: { briefId: a.open.brief_id, insightIndex: a.open.insight_index ?? 0 },
-        })
-        openContentPanel("prd")
-        const rec = await prdApi.get(a.open.prd_id)
-        setContent({
-          prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, source: rec.source },
-          prdGenerating: false,
+        // ChatScreen consumes the request: spawns the chat tab, loads the PRD
+        // by id (with its own loading state), and slides the panel open.
+        openPrdTab({
+          title: `PRD · ${a.title}`,
+          source: {
+            kind: "load",
+            prdId: a.open.prd_id,
+            meta: { briefId: a.open.brief_id, insightIndex: a.open.insight_index ?? 0 },
+          },
         })
         return
       }
       if (a.type === "evidence") {
+        setActiveArtifactKey(`${a.type}-${a.id}`)
         setContent({ evidence: null, evidenceGenerating: true })
         openContentPanel("evidence")
         const rec = await evidenceApi.get(a.open.evidence_id)
@@ -404,12 +400,12 @@ export function ArtifactsScreen() {
       // prototype — open the in-tab canvas for its parent PRD.
       router.push(prototypePath(a.open.prd_id))
     } catch {
-      // Failed load: drop the loading flags (the rail shows its empty state
+      // Failed load: drop the loading flag (the rail shows its empty state
       // rather than spinning forever) and say what happened.
-      setContent({ prdGenerating: false, evidenceGenerating: false })
+      setContent({ evidenceGenerating: false })
       showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
-  }, [setContent, openContentPanel, router, showToast])
+  }, [setContent, openContentPanel, openPrdTab, router, showToast])
 
   // Import a PRD from an uploaded file. The backend parses + re-lays-it-out into
   // our format. The endpoint parses the file and kicks off generation, returning

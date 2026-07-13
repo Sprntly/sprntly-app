@@ -34,12 +34,29 @@ export function EvidenceHtmlBrief({ html }: { html: string }) {
     if (h > 0) setHeight(h)
   }
 
+  const onLoad = () => {
+    // Viewer-only presentation override: white document background (the
+    // generated brief ships its own off-white). Read-only surface — nothing
+    // here is ever persisted, so no strip-on-save dance is needed.
+    const cdoc = ref.current?.contentDocument
+    if (cdoc && !cdoc.getElementById("sprntly-evidence-overrides")) {
+      const style = cdoc.createElement("style")
+      style.id = "sprntly-evidence-overrides"
+      style.textContent = `
+        body { background: #ffffff !important; }
+        .wrap { max-width: 940px !important; padding: 15px 0px 57px !important; }
+      `
+      ;(cdoc.head ?? cdoc.documentElement).appendChild(style)
+    }
+    resize()
+  }
+
   return (
     <iframe
       ref={ref}
       title="Evidence brief"
       srcDoc={doc}
-      onLoad={resize}
+      onLoad={onLoad}
       sandbox="allow-same-origin"
       style={{
         width: "100%",
@@ -48,7 +65,7 @@ export function EvidenceHtmlBrief({ html }: { html: string }) {
         borderRadius: 10,
         display: "block",
         colorScheme: "light",
-        background: "#fbfaf6",
+        background: "#ffffff",
       }}
     />
   )

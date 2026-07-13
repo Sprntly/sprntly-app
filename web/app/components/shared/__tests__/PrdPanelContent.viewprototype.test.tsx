@@ -1,11 +1,14 @@
 // @vitest-environment jsdom
 //
-// The PRD footer's "View/Generate Prototype" and "Send to Claude Code" actions
-// were removed from PrdPanelContent: the prototype CTA already lives on the chat
-// page, and Send to Claude Code will return as part of the Tickets surface. This
-// file is the regression guard that the PRD panel no longer renders either of
-// those footer actions (the SendToClaudeCode component itself still exists and is
-// covered by SendToClaudeCode.dom.test.tsx — it is simply no longer mounted here).
+// The PRD panel footer's prototype CTA is BACK: the weekly brief no longer
+// offers "Generate prototype" on its finding cards, so the PRD panel footer is
+// the canonical home for the affordance — mounted via the shared
+// <GeneratePrototypeCTA> (existence check inside the hook decides
+// "Generate Prototype" vs "View Prototype"; its behavior is covered by
+// GeneratePrototypeCTA.test.tsx + useGeneratePrototype tests, so it is mocked
+// here and we assert the WIRING: mounted in the footer, keyed to the open
+// PRD). "Send to Claude Code" remains removed from this surface (it lives with
+// the Tickets flow; SendToClaudeCode.dom.test.tsx covers the component).
 import * as React from "react"
 import { cleanup, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -38,6 +41,32 @@ vi.mock("../../../context/ContentContext", () => ({
 
 vi.mock("../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme" }),
+}))
+
+// The CTA composite (hook + GenerateModal + loading overlay) is exercised by
+// its own suites — here it's a lightweight stand-in that records its prdId and
+// drives the host's render prop, so these tests assert the panel's wiring.
+vi.mock("../../design-agent/GeneratePrototypeCTA", () => ({
+  GeneratePrototypeCTA: (props: {
+    prdId: number | null
+    render: (state: {
+      label: string
+      onClick: () => void
+      disabled: boolean
+      cta: string
+      existing: null
+    }) => React.ReactNode
+  }) => (
+    <div data-testid="prd-proto-cta-mount" data-prd-id={String(props.prdId)}>
+      {props.render({
+        label: "Generate Prototype",
+        onClick: () => {},
+        disabled: false,
+        cta: "generate",
+        existing: null,
+      })}
+    </div>
+  ),
 }))
 
 vi.mock("../../../lib/api", () => {
@@ -82,27 +111,38 @@ beforeEach(() => {
 
 afterEach(cleanup)
 
-describe("PrdPanelContent — prototype + Send to Claude Code footer removed", () => {
-  it("renders no View/Generate Prototype button in the PRD panel", () => {
+describe("PrdPanelContent — footer prototype CTA", () => {
+  it("mounts the shared prototype CTA in the bottom bar, wired to the open PRD", () => {
     const { container } = render(<PrdPanelContent />)
-    expect(container.querySelector(".prd-bottom-actions")).toBeNull()
-    expect(screen.queryByRole("button", { name: "View Prototype" })).toBeNull()
-    expect(screen.queryByRole("button", { name: "Generate Prototype" })).toBeNull()
-    expect(container.querySelector(".fc-btn-secondary")).toBeNull()
+    const mount = screen.getByTestId("prd-proto-cta-mount")
+    // Keyed to THIS PRD's id, not a hardcoded/latest one.
+    expect(mount.getAttribute("data-prd-id")).toBe("42")
+    // The host renders the trigger via the render prop, inside the bottom bar.
+    const btn = screen.getByTestId("prd-footer-prototype-cta")
+    expect(btn.textContent).toContain("Generate Prototype")
+    expect(btn.closest(".prd-bottom-bar")).not.toBeNull()
+    expect(container.querySelector(".prd-bottom-bar")).not.toBeNull()
   })
 
-  it("renders no Send to Claude Code button in the PRD panel", () => {
+  it("renders no CTA at all when no PRD is loaded (empty panel)", () => {
+    content = { prd: null, prdGenerating: false }
+    render(<PrdPanelContent />)
+    expect(screen.queryByTestId("prd-proto-cta-mount")).toBeNull()
+    expect(screen.queryByTestId("prd-footer-prototype-cta")).toBeNull()
+  })
+
+  it("still renders no Send to Claude Code button in the PRD panel", () => {
     render(<PrdPanelContent />)
     expect(screen.queryByTestId("prd-send-claude")).toBeNull()
     expect(screen.queryByText(/Send to Claude Code/i)).toBeNull()
   })
 
-  it("no longer imports the prototype CTA or Send to Claude Code into this surface", () => {
+  it("imports the canonical GeneratePrototypeCTA (never a hand-rolled copy) and still no Send to Claude Code", () => {
     const src = readFileSync(
       resolve(process.cwd(), "app/components/shared/PrdPanelContent.tsx"),
       "utf8",
     )
-    expect(src).not.toContain("GeneratePrototypeCTA")
+    expect(src).toContain("GeneratePrototypeCTA")
     expect(src).not.toContain("SendToClaudeCode")
     expect(src).not.toContain("ViewPrototypeButton")
     expect(src).not.toMatch(/pid=/)

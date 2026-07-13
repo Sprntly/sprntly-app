@@ -18,6 +18,18 @@ export interface PrdHtmlHandle {
   save: () => Promise<void>
 }
 
+/** Panel-only presentation overrides injected into the iframe document.
+ *  NEVER persisted: readDoc strips this tag before serializing, so the stored
+ *  PRD stays byte-clean of viewer styling. Keep in sync with the panel's
+ *  `.cpanel-prd-wrap .prd-title` sizing in globals.css. */
+const PANEL_STYLE_ID = "sprntly-panel-overrides"
+const PANEL_OVERRIDE_CSS = `
+  h1 { font-size: 20px !important; line-height: 1.25 !important; }
+  body { padding: 0 0 80px !important; }
+  .frame { max-width: 990px !important; }
+  .page { padding: 25px 25px !important; border-radius: 12px !important; }
+`
+
 const HTML_DRAFT_KEY = (prdId: number) => `sprntly_prd_html_draft_${prdId}`
 function loadHtmlDraft(prdId: number): string | null {
   try { return localStorage.getItem(HTML_DRAFT_KEY(prdId)) } catch { return null }
@@ -71,8 +83,12 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
   const readDoc = useCallback((): string | null => {
     const cdoc = frameRef.current?.contentDocument
     if (!cdoc?.documentElement) return null
+    // Serialize a CLONE with the panel's injected presentation overrides
+    // removed — viewer styling must never leak into the persisted document.
+    const root = cdoc.documentElement.cloneNode(true) as HTMLElement
+    root.querySelector(`#${PANEL_STYLE_ID}`)?.remove()
     // Preserve the doctype the srcDoc rendered from — outerHTML drops it.
-    return `<!DOCTYPE html>\n${cdoc.documentElement.outerHTML}`
+    return `<!DOCTYPE html>\n${root.outerHTML}`
   }, [])
 
   const persist = useCallback(async () => {
@@ -101,9 +117,17 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
   // On load, wire an input listener on the (same-origin) iframe document so
   // native contenteditable edits debounce-persist through `persist`.
   const onLoad = useCallback(() => {
-    resize()
     const cdoc = frameRef.current?.contentDocument
     if (!cdoc) return
+    // Inject the panel presentation overrides (idempotent), BEFORE the first
+    // resize so the measured height reflects the final layout.
+    if (!cdoc.getElementById(PANEL_STYLE_ID)) {
+      const style = cdoc.createElement("style")
+      style.id = PANEL_STYLE_ID
+      style.textContent = PANEL_OVERRIDE_CSS
+      ;(cdoc.head ?? cdoc.documentElement).appendChild(style)
+    }
+    resize()
     const onInput = () => {
       onStatus?.("unsaved")
       resize()

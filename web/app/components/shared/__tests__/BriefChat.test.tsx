@@ -347,11 +347,11 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     const card = cardFor(HERO.title)
     expect(card.className).not.toContain("fc--dismissed")
     // Full card shows the source row, the body copy, and the action buttons.
+    // (The PRD skill button is the action-row proxy — the prototype CTA is
+    // view-only now and absent without a built prototype.)
     expect(card.querySelector(".fc-from")).not.toBeNull()
     expect(within(card).queryByText(/Body copy for First-handoff/)).not.toBeNull()
-    // No prototype built yet (empty map) → the prototype CTA reads "Generate
-    // prototype"; locate it by role so the presence check is label-agnostic.
-    expect(within(card).queryByRole("button", { name: /prototype/i })).not.toBeNull()
+    expect(card.querySelector(".fc-actions")).not.toBeNull()
 
     // Click the per-card Dismiss control.
     fireEvent.click(within(card).getByLabelText("Dismiss finding"))
@@ -362,7 +362,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     expect(within(dismissed).getByText(HERO.title)).not.toBeNull()
     expect(dismissed.querySelector(".fc-from")).toBeNull()
     expect(within(dismissed).queryByText(/Body copy for First-handoff/)).toBeNull()
-    expect(within(dismissed).queryByRole("button", { name: /prototype/i })).toBeNull()
+    expect(dismissed.querySelector(".fc-actions")).toBeNull()
     // The restore affordance is shown.
     expect(within(dismissed).getByText(/click to restore/i)).not.toBeNull()
   })
@@ -382,7 +382,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     const restored = cardFor(HERO.title)
     expect(restored.className).not.toContain("fc--dismissed")
     expect(restored.querySelector(".fc-from")).not.toBeNull()
-    expect(within(restored).queryByRole("button", { name: /prototype/i })).not.toBeNull()
+    expect(restored.querySelector(".fc-actions")).not.toBeNull()
   })
 
   it("test_dismiss_is_per_card: dismissing one finding leaves the other untouched", async () => {
@@ -396,7 +396,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     // The supporting card is unaffected — still a full card.
     const other = cardFor(SUPPORTING.title)
     expect(other.className).not.toContain("fc--dismissed")
-    expect(within(other).queryByRole("button", { name: /prototype/i })).not.toBeNull()
+    expect(other.querySelector(".fc-actions")).not.toBeNull()
   })
 
   it("test_dismiss_persists_to_localstorage_across_remount: a dismissal survives a fresh mount", async () => {
@@ -470,7 +470,7 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
     )
   }
 
-  it("hides 'View prototype' on a finding the fix can't be visualized (prototypeable=false)", async () => {
+  it("offers NO prototype affordance without a built prototype — Generate prototype is removed from the brief", async () => {
     const brief: BriefV2State = {
       ...BRIEF,
       hero: { ...HERO, prototypeable: false },
@@ -479,10 +479,11 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
     await act(async () => {
       renderBriefWith(brief)
     })
-    // Non-visualizable finding → no prototype affordance.
+    // No prototype exists for either insight → neither card renders a
+    // prototype button, prototypeable or not (generation moved to the PRD flow).
     expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
-    // A sibling visualizable finding still offers it.
-    expect(within(cardFor(SUPPORTING.title)).queryByRole("button", { name: /prototype/i })).not.toBeNull()
+    expect(within(cardFor(SUPPORTING.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
+    expect(screen.queryByText("Generate prototype")).toBeNull()
   })
 
   it("still lets you OPEN an existing prototype on a non-prototypeable finding (view, not generate)", async () => {
@@ -722,15 +723,16 @@ describe("BriefChat finding card — no prototype preview thumbnail", () => {
 // prototype map's prototypeReady), mirroring the chat surface: "Generate
 // prototype" until one is built, "View prototype" once it's saved. Previously the
 // label was a static adapter CTA string that never flipped.
-describe("BriefChat finding card — prototype CTA relabels on built prototype", () => {
-  it("reads 'Generate prototype' with no prototype, then 'View prototype' once ready in the DB", async () => {
-    // Empty map → no prototype built yet for this insight.
+describe("BriefChat finding card — prototype affordance is view-only (generate removed)", () => {
+  it("renders NO prototype button with no built prototype, then 'View prototype' once ready in the DB", async () => {
+    // Empty map → no prototype built yet for this insight → no button at all
+    // (Generate prototype was removed from the brief; generation lives in the
+    // PRD panel footer).
     await act(async () => { renderBrief() })
-    expect(within(cardFor(HERO.title)).getByRole("button", { name: "Generate prototype" })).toBeTruthy()
-    expect(within(cardFor(HERO.title)).queryByRole("button", { name: "View prototype" })).toBeNull()
+    expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
 
     cleanup()
-    // Seed a READY prototype for insight 0 (HERO's insightIndex) → CTA flips.
+    // Seed a READY prototype for insight 0 (HERO's insightIndex) → View appears.
     mapEntries.set(0, {
       insight_index: 0,
       prd_id: 42,
