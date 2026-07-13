@@ -84,6 +84,33 @@ const BRIEF_TAB_ID = "brief"
 // first message on send (see submitAsk's first-send rename).
 export const NEW_CHAT_TITLE = "New chat"
 
+// Attached-file chips shown under a composer. Rendered by BOTH the landing and
+// thread composers — attachments live in shared state, so a file attached on
+// the landing screen must be visible right there (the toast alone disappears in
+// seconds, which read as "the upload didn't work"), not only after first send.
+function AttachmentChips({ attachments, onRemove }: {
+  attachments: { name: string }[]
+  onRemove: (index: number) => void
+}) {
+  if (attachments.length === 0) return null
+  return (
+    <div style={{ display: "flex", gap: 6, padding: "4px 24px 0", flexWrap: "wrap" }}>
+      {attachments.map((a, i) => (
+        <span key={i} data-testid="attachment-chip" style={{
+          display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11,
+          padding: "2px 8px", borderRadius: 5, background: "var(--surface-2, #F4F1EA)",
+          color: "var(--ink-2, #5A5853)", border: "1px solid var(--line, #E8E6E0)",
+        }}>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          {a.name}
+          <button type="button" aria-label={`Remove ${a.name}`} onClick={() => onRemove(i)}
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "var(--ink-4)", padding: 0, lineHeight: 1 }}>×</button>
+        </span>
+      ))}
+    </div>
+  )
+}
+
 const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
   { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View weekly brief", desc: "", target: "brief" } },
   { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
@@ -1618,6 +1645,9 @@ export function ChatScreen() {
                             <IconSendUp size={16} />
                           </button>
                         </div>
+                        {/* Attached files preview — the landing composer must show
+                            what's attached too, not rely on the transient toast */}
+                        <AttachmentChips attachments={attachments} onRemove={(i) => setAttachments((p) => p.filter((_, idx) => idx !== i))} />
                       </div>
                       {showChipRow ? (
                         <div className="home-chip-row home-chip-row--under-chat" role="list">
@@ -1890,22 +1920,7 @@ export function ChatScreen() {
                   </div>
                 </div>
                 {/* Attached files preview */}
-                {attachments.length > 0 && (
-                  <div style={{ display: "flex", gap: 6, padding: "4px 24px 0", flexWrap: "wrap" }}>
-                    {attachments.map((a, i) => (
-                      <span key={i} style={{
-                        display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11,
-                        padding: "2px 8px", borderRadius: 5, background: "var(--surface-2, #F4F1EA)",
-                        color: "var(--ink-2, #5A5853)", border: "1px solid var(--line, #E8E6E0)",
-                      }}>
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                        {a.name}
-                        <button type="button" onClick={() => setAttachments((p) => p.filter((_, idx) => idx !== i))}
-                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "var(--ink-4)", padding: 0, lineHeight: 1 }}>×</button>
-                      </span>
-                    ))}
-                  </div>
-                )}
+                <AttachmentChips attachments={attachments} onRemove={(i) => setAttachments((p) => p.filter((_, idx) => idx !== i))} />
               </div>
             ) : null}
           </main>
