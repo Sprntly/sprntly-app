@@ -194,12 +194,16 @@ export function ArtifactsView({
   items,
   filter,
   loading,
+  activeKey = null,
   onFilterChange,
   onOpen,
 }: {
   items: ArtifactItem[]
   filter: ArtifactFilter
   loading: boolean
+  /** `${type}-${id}` of the artifact whose panel is currently open — that row
+   *  renders in its selected (green) state. Null = nothing selected. */
+  activeKey?: string | null
   onFilterChange: (f: ArtifactFilter) => void
   onOpen: (a: ArtifactItem) => void
 }) {
@@ -262,11 +266,17 @@ export function ArtifactsView({
         // hover affordance, default cursor. Every other row stays clickable.
         const isBuilding = a.type === "prototype" && a.status === "generating"
         const clickable = !isBuilding
+        // The row whose panel is open renders selected: green tint + ring so
+        // it's obvious which item the side panel belongs to.
+        const isActive = activeKey === `${a.type}-${a.id}`
+        const restBg = isActive ? "var(--accent-alpha-08, rgba(23,148,99,0.08))" : "transparent"
         return (
         <div
           key={`${a.type}-${a.id}`}
           data-artifact-type={a.type}
           data-clickable={clickable ? "true" : "false"}
+          data-active={isActive ? "true" : undefined}
+          aria-current={isActive ? "true" : undefined}
           onClick={clickable ? () => onOpen(a) : undefined}
           role={clickable ? "button" : undefined}
           aria-disabled={clickable ? undefined : true}
@@ -276,10 +286,12 @@ export function ArtifactsView({
             display: "flex", alignItems: "center", gap: 14,
             padding: "14px 10px", borderRadius: 10,
             cursor: clickable ? "pointer" : "default",
-            transition: "background 0.12s",
+            transition: "background 0.12s, box-shadow 0.12s",
+            background: restBg,
+            boxShadow: isActive ? "inset 0 0 0 1px var(--accent-alpha-28, rgba(23,148,99,0.28))" : "none",
           }}
-          onMouseEnter={clickable ? (e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--surface-2, #F4F1EA)" } : undefined}
-          onMouseLeave={clickable ? (e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent" } : undefined}
+          onMouseEnter={clickable ? (e) => { (e.currentTarget as HTMLDivElement).style.background = isActive ? "var(--accent-alpha-10, rgba(23,148,99,0.10))" : "var(--surface-2, #F4F1EA)" } : undefined}
+          onMouseLeave={clickable ? (e) => { (e.currentTarget as HTMLDivElement).style.background = restBg } : undefined}
         >
           {a.type === "prototype"
             ? <ArtifactPrototypeThumb proto={a} />
@@ -314,7 +326,7 @@ export function ArtifactsView({
 // ── Screen ──
 
 export function ArtifactsScreen() {
-  const { openContentPanel, openPrdTab } = useNavigation()
+  const { openContentPanel, openPrdTab, showToast, contentPanelTab } = useNavigation()
   const { setContent } = useContent()
   const { activeCompany } = useCompany()
   const router = useRouter()
@@ -322,6 +334,14 @@ export function ArtifactsScreen() {
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([])
   const [artifactsLoading, setArtifactsLoading] = useState(false)
   const [artifactFilter, setArtifactFilter] = useState<ArtifactFilter>("all")
+  // `${type}-${id}` of the row whose panel is open — that row renders selected.
+  const [activeArtifactKey, setActiveArtifactKey] = useState<string | null>(null)
+
+  // Closing the side panel deselects the row (the selection exists to tie the
+  // open panel to its list item, so it has no meaning once the panel is gone).
+  useEffect(() => {
+    if (contentPanelTab == null) setActiveArtifactKey(null)
+  }, [contentPanelTab])
 
   // Upload-a-PRD state (the Import flow).
   const [importing, setImporting] = useState(false)
@@ -347,31 +367,49 @@ export function ArtifactsScreen() {
   //  - prd      → load by id, setContent({prd, prdMeta}) + openContentPanel("prd")
   //  - evidence → load by id, setContent({evidence}) + openContentPanel("evidence")
   //  - prototype→ router.push(/prototype?prd=<prd_id>) (the in-tab canvas surface)
+  //
+  // The panel opens IMMEDIATELY in its loading state (prdGenerating /
+  // evidenceGenerating drive the rail's spinner) and the record fetch fills it
+  // in — the click never sits silent while the network round-trip runs.
+  // prdGenerating also suppresses PrdPanelContent's own "load latest PRD"
+  // fetch, which would otherwise race this one with the wrong record.
   const openArtifact = useCallback(async (a: ArtifactItem) => {
     try {
+      if (a.type === "prd" || a.type === "evidence") {
+        setActiveArtifactKey(`${a.type}-${a.id}`)
+      }
       if (a.type === "prd") {
-        const rec = await prdApi.get(a.open.prd_id)
         setContent({
-          prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, source: rec.source },
+          prd: null,
+          prdGenerating: true,
           prdMeta: { briefId: a.open.brief_id, insightIndex: a.open.insight_index ?? 0 },
         })
         openContentPanel("prd")
+        const rec = await prdApi.get(a.open.prd_id)
+        setContent({
+          prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, source: rec.source },
+          prdGenerating: false,
+        })
         return
       }
       if (a.type === "evidence") {
+        setContent({ evidence: null, evidenceGenerating: true })
+        openContentPanel("evidence")
         const rec = await evidenceApi.get(a.open.evidence_id)
         // Set evidence content directly (no detail.meta), so the EvidenceTab
         // renders the loaded doc without re-generating.
         setContent({ evidence: markdownToEvidenceState(rec.payload_md), evidenceGenerating: false })
-        openContentPanel("evidence")
         return
       }
       // prototype — open the in-tab canvas for its parent PRD.
       router.push(prototypePath(a.open.prd_id))
     } catch {
-      /* Best-effort open; a failed load leaves the list in place. */
+      // Failed load: drop the loading flags (the rail shows its empty state
+      // rather than spinning forever) and say what happened.
+      setContent({ prdGenerating: false, evidenceGenerating: false })
+      showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
-  }, [setContent, openContentPanel, router])
+  }, [setContent, openContentPanel, router, showToast])
 
   // Import a PRD from an uploaded file. The backend parses + re-lays-it-out into
   // our format. The endpoint parses the file and kicks off generation, returning
@@ -449,6 +487,7 @@ export function ArtifactsScreen() {
           items={artifacts}
           filter={artifactFilter}
           loading={artifactsLoading}
+          activeKey={activeArtifactKey}
           onFilterChange={setArtifactFilter}
           onOpen={openArtifact}
         />

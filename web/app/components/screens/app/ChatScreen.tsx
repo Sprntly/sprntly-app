@@ -69,6 +69,10 @@ type ChatTab = {
   evidence: PrdContent | null
   prdGenerating: boolean
   evidenceGenerating: boolean
+  /** True while a resumed conversation's turns are being fetched in the
+   *  background (row click in All chats navigates instantly; the tab shows a
+   *  loading state until the history lands). Transient — never persisted. */
+  hydrating?: boolean
 }
 
 // The Weekly Brief is a pinned, non-closable FIRST tab on this surface.
@@ -253,7 +257,7 @@ export function ChatScreen() {
   // Persist tabs to localStorage — strip large/transient fields (prd, evidence, *Generating)
   useEffect(() => {
     try {
-      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, ...rest }) => rest)
+      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, hydrating: _h, ...rest }) => rest)
       localStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
   }, [tabs, tabsKey])
@@ -849,30 +853,81 @@ export function ChatScreen() {
   }
   const persistence = persistenceRef.current
 
-  // Resume a conversation from ChatsScreen or BacklogScreen (loads turns)
+  // Resume a conversation from ChatsScreen or BacklogScreen. Two payload
+  // shapes: with `turns` (built locally / legacy) the tab opens pre-filled;
+  // with only a `dbId` (All-chats row click) the tab opens INSTANTLY in a
+  // `hydrating` state and the turns are fetched here in the background — the
+  // click never blocks on the network.
   const checkResume = useCallback(() => {
     try {
       const raw = localStorage.getItem("sprntly_resume_conv")
       if (!raw) return
       localStorage.removeItem("sprntly_resume_conv")
-      const data = JSON.parse(raw) as { dbId: number; title: string; turns: { role: string; content: string }[] }
-      if (!data.turns || data.turns.length === 0) return
-      // The resumed tab's dbConvId is set via openTab(..., data.dbId) below —
-      // per-tab now, no shared ref.
-      const restored: ThreadTurn[] = []
-      for (let i = 0; i < data.turns.length; i++) {
-        const t = data.turns[i]
-        if (t.role === "user") {
-          const next = data.turns[i + 1]
-          const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
-          restored.push({ id: `resumed-${i}`, query: t.content, reply })
-          if (reply) i++
+      const data = JSON.parse(raw) as {
+        dbId: number
+        title: string
+        turns?: { role: string; content: string }[]
+        /** Preview-derived thread used when the background fetch yields nothing. */
+        fallbackTurns?: { role: string; content: string }[]
+      }
+      const buildRestored = (
+        turns: { role: string; content: string }[],
+        keyPrefix: string,
+      ): ThreadTurn[] => {
+        const restored: ThreadTurn[] = []
+        for (let i = 0; i < turns.length; i++) {
+          const t = turns[i]
+          if (t.role === "user") {
+            const next = turns[i + 1]
+            const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
+            restored.push({ id: `${keyPrefix}-${i}`, query: t.content, reply })
+            if (reply) i++
+          }
         }
+        return restored
       }
-      if (restored.length > 0) {
-        openTab(data.title || "Resumed chat", restored, data.dbId)
+
+      // Pre-fetched turns → open filled (BacklogScreen + no-dbId fallback).
+      const preloaded = buildRestored(data.turns ?? [], "resumed")
+      if (preloaded.length > 0) {
+        // The resumed tab's dbConvId is set via openTab(..., data.dbId) —
+        // per-tab now, no shared ref.
+        openTab(data.title || "Resumed chat", preloaded, data.dbId)
         setActiveConv(0)
+        return
       }
+
+      // dbId only → open the tab NOW, fetch its history in the background.
+      if (!data.dbId) return
+      const tabId = openTab(data.title || "Resumed chat", [], data.dbId)
+      setActiveConv(0)
+      // openTab reuses an existing same-title tab; if it already carries a
+      // thread there's nothing to hydrate.
+      const existing = tabsRef.current.find((t) => t.id === tabId)
+      if (existing && existing.thread.length > 0) return
+      setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, hydrating: true } : t)))
+      const fallback = buildRestored(data.fallbackTurns ?? [], `resumed-fb-${data.dbId}`)
+      void (async () => {
+        try {
+          const { conversationsApi } = await import("../../../lib/api")
+          const res = await conversationsApi.listTurns(data.dbId)
+          const restored = buildRestored(res.turns ?? [], `resumed-${data.dbId}`)
+          // Empty server history → the preview-derived fallback thread.
+          const finalThread = restored.length > 0 ? restored : fallback
+          // Guarded fill: never clobber a thread the user started meanwhile.
+          setTabs((prev) => prev.map((t) =>
+            t.id === tabId
+              ? { ...t, hydrating: false, thread: t.thread.length === 0 ? finalThread : t.thread }
+              : t))
+        } catch {
+          // Non-fatal: drop the loading state; show the fallback preview
+          // thread (or an empty, still-usable tab when there isn't one).
+          setTabs((prev) => prev.map((t) =>
+            t.id === tabId
+              ? { ...t, hydrating: false, thread: t.thread.length === 0 ? fallback : t.thread }
+              : t))
+        }
+      })()
     } catch { /* ignore corrupt data */ }
   }, [openTab])
   // Check on mount + whenever we navigate to this screen
@@ -1468,7 +1523,9 @@ export function ChatScreen() {
   // briefMeta and no prd yet) — the card's button reads "Generating PRD…" and
   // flips to "View PRD" on landing, so the panel is always reopenable from chat.
   const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta || activeTab?.prdGenerating)
-  const showThreadView = hasThread || showInsightMsg
+  // A resumed tab whose history is still fetching shows the thread view (with
+  // a loading skeleton) — never the "Welcome back" landing.
+  const showThreadView = hasThread || showInsightMsg || !!activeTab?.hydrating
   // The tab title is "PRD · <insight>"; the message shows the insight sentence on
   // its own (the "PRD" kind is already a chip), so strip the redundant prefix.
   const insightText = (activeTab?.prd?.title ?? activeTab?.title ?? "").replace(/^PRD · /, "")
@@ -1810,6 +1867,22 @@ export function ChatScreen() {
                         prdId={activeTab.prd.prd_id}
                         onPrdUpdated={handleInputPrdUpdated}
                       />
+                    ) : null}
+                    {/* Resumed-conversation loading state: the tab opened
+                        instantly on row click; its history is still in flight. */}
+                    {activeTab?.hydrating && thread.length === 0 ? (
+                      <div className="bc-turn" aria-busy="true">
+                        <div className="bc-agent-head">
+                          <span className="bc-agent-mark">
+                            <IconSparkle size={14} />
+                          </span>
+                          <span className="bc-agent-name">{AGENT_NAME}</span>
+                          <span className="bc-agent-status">loading conversation…</span>
+                        </div>
+                        <div className="bc-agent-body">
+                          <AssistantThinkingSkeleton compact />
+                        </div>
+                      </div>
                     ) : null}
                     {thread.map((turn, idx) => {
                       const isLast = idx === thread.length - 1

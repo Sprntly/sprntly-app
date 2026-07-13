@@ -1678,6 +1678,8 @@
   }
 
   /* New design av-nav: 32px, soft brand fill with a light brand border. */
+  /* Display-only identity chip (sign-out moved to Settings → Account), so no
+     pointer/hover affordances. */
   .sb-rail-avatar {
     width: 32px;
     height: 32px;
@@ -1690,44 +1692,6 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    cursor: pointer;
-    transition: opacity 0.15s;
-  }
-
-  .sb-rail-avatar:hover {
-    opacity: 0.8;
-  }
-
-  .sb-rail-avatar:disabled {
-    opacity: 0.5;
-    cursor: not-allowed;
-  }
-
-  .sb-rail-signout {
-    background: none;
-    border: none;
-    color: var(--nav-text);
-    cursor: pointer;
-    padding: 2px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    opacity: 0.6;
-    transition: opacity 0.15s;
-  }
-
-  .sb-rail-signout:hover {
-    opacity: 1;
-  }
-
-  .sb-rail-signout:disabled {
-    opacity: 0.3;
-    cursor: not-allowed;
-  }
-
-  .sb-rail-signout svg {
-    width: 14px;
-    height: 14px;
   }
 
   /* Hide expanded-only elements when collapsed */

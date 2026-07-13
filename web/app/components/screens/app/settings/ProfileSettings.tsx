@@ -46,22 +46,72 @@ type ProfileFields = {
   timezone: string
 }
 
+/** Editable field values from a profile row (role split into the select value
+ *  + the free-text "Other" input; timezone falls back to the browser's). */
+function fieldsFromProfile(p: {
+  first_name: string | null
+  last_name: string | null
+  role: string | null
+  timezone: string | null
+}): ProfileFields {
+  const fields: ProfileFields = {
+    firstName: p.first_name ?? "",
+    lastName: p.last_name ?? "",
+    // Seed from the saved zone; if none stored yet, prefill the browser's so
+    // the field is never blank and a Save persists a sensible default.
+    timezone: p.timezone ?? detectBrowserTimezone() ?? "",
+    role: "",
+    roleOther: "",
+  }
+  const r = p.role ?? ""
+  if (r && !ROLE_OPTIONS.includes(r as (typeof ROLE_OPTIONS)[number])) {
+    fields.role = "Other"
+    fields.roleOther = r
+  } else {
+    fields.role = r
+  }
+  return fields
+}
+
 export function ProfileSettings() {
   const auth = useAuth()
-  const { workspace, refresh: refreshWorkspace } = useWorkspace()
-  const [loading, setLoading] = useState(true)
+  const {
+    workspace,
+    profile: ctxProfile,
+    loading: workspaceLoading,
+    refresh: refreshWorkspace,
+  } = useWorkspace()
+
+  // Hydrate INSTANTLY from WorkspaceContext's profile — the app already
+  // fetched it once at sign-in (it's what the sidebar name renders from), so
+  // opening this pane needs NO network fetch and never flashes
+  // "Loading profile…" on a warm session. The fetch-or-insert path (`load`)
+  // only runs for brand-new accounts with no profile row yet.
+  const seeded = ctxProfile ? fieldsFromProfile(ctxProfile) : null
+  // The last loaded/saved values — "Discard" restores these, and any deviation
+  // from them is what arms the Save/Discard actions in the top bar. Also the
+  // "already hydrated" latch: background context refreshes never re-seed (and
+  // so can never clobber in-progress edits).
+  const [snapshot, setSnapshot] = useState<ProfileFields | null>(seeded)
+  const [loading, setLoading] = useState(seeded == null)
   const [saving, setSaving] = useState(false)
   const [profileSaved, setProfileSaved] = useState(false)
   const [profileError, setProfileError] = useState<string | null>(null)
 
-  const [firstName, setFirstName] = useState("")
-  const [lastName, setLastName] = useState("")
-  const [role, setRole] = useState("")
-  const [roleOther, setRoleOther] = useState("")
-  const [timezone, setTimezone] = useState("")
-  // The last loaded/saved values — "Discard" restores these, and any deviation
-  // from them is what arms the Save/Discard actions in the top bar.
-  const [snapshot, setSnapshot] = useState<ProfileFields | null>(null)
+  const [firstName, setFirstName] = useState(seeded?.firstName ?? "")
+  const [lastName, setLastName] = useState(seeded?.lastName ?? "")
+  const [role, setRole] = useState(seeded?.role ?? "")
+  const [roleOther, setRoleOther] = useState(seeded?.roleOther ?? "")
+  const [timezone, setTimezone] = useState(seeded?.timezone ?? "")
+
+  const applyFields = useCallback((loaded: ProfileFields) => {
+    setFirstName(loaded.firstName)
+    setLastName(loaded.lastName)
+    setRole(loaded.role)
+    setRoleOther(loaded.roleOther)
+    setTimezone(loaded.timezone)
+    setSnapshot(loaded)
+  }, [])
 
   const email = auth.kind === "authed" ? auth.user.email ?? "" : ""
   const joinedAt = auth.kind === "authed" ? auth.user.created_at : null
@@ -132,39 +182,32 @@ export function ProfileSettings() {
         }
       }
       if (p) {
-        const loaded: ProfileFields = {
-          firstName: p.first_name ?? "",
-          lastName: p.last_name ?? "",
-          // Seed from the saved zone; if none stored yet, prefill the browser's
-          // so the field is never blank and a Save persists a sensible default.
-          timezone: p.timezone ?? detectBrowserTimezone() ?? "",
-          role: "",
-          roleOther: "",
-        }
-        const r = p.role ?? ""
-        if (r && !ROLE_OPTIONS.includes(r as (typeof ROLE_OPTIONS)[number])) {
-          loaded.role = "Other"
-          loaded.roleOther = r
-        } else {
-          loaded.role = r
-        }
-        setFirstName(loaded.firstName)
-        setLastName(loaded.lastName)
-        setTimezone(loaded.timezone)
-        setRole(loaded.role)
-        setRoleOther(loaded.roleOther)
-        setSnapshot(loaded)
+        applyFields(fieldsFromProfile(p))
+        // Sync the context so the sidebar name + later visits pick the row up
+        // without re-running this path.
+        void refreshWorkspace()
       }
     } catch (e) {
       setProfileError(e instanceof Error ? e.message : "Could not load profile")
     } finally {
       setLoading(false)
     }
-  }, [auth])
+  }, [auth, applyFields, refreshWorkspace])
 
+  // Late hydration — only when the mount-time seed found nothing: either the
+  // context's initial fetch is still in flight (seed when it lands) or the
+  // account truly has no profile row yet (fetch-or-insert via load()). The
+  // `snapshot != null` latch keeps this from ever re-seeding over edits.
   useEffect(() => {
+    if (auth.kind !== "authed" || snapshot != null) return
+    if (ctxProfile) {
+      applyFields(fieldsFromProfile(ctxProfile))
+      setLoading(false)
+      return
+    }
+    if (workspaceLoading) return
     void load()
-  }, [load])
+  }, [auth.kind, snapshot, ctxProfile, workspaceLoading, applyFields, load])
 
   function onDiscard() {
     if (!snapshot) return
