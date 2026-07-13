@@ -415,6 +415,11 @@ export type PrdRecord = {
   status: "generating" | "ready" | "failed"
   error?: string | null
   variant?: string
+  /** How this PRD was created — returned by the GET routes' `select("*")`.
+   *  Only `'brief'` PRDs carry their own research Evidence (keyed at
+   *  `(brief_id, insight_index)`); `'backlog'` and `'upload'` PRDs have none.
+   *  Absent on legacy rows — treat missing as `'brief'` (the DB default). */
+  source?: "brief" | "backlog" | "upload"
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable

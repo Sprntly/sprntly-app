@@ -352,7 +352,7 @@ export function ArtifactsScreen() {
       if (a.type === "prd") {
         const rec = await prdApi.get(a.open.prd_id)
         setContent({
-          prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined },
+          prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, source: rec.source },
           prdMeta: { briefId: a.open.brief_id, insightIndex: a.open.insight_index ?? 0 },
         })
         openContentPanel("prd")
