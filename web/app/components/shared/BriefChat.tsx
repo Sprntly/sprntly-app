@@ -80,8 +80,11 @@ function nowTime(): string {
 export const isPrdCommand = (q: string) => /\b(generate|create|write|draft|make)\b.*\bprd\b/i.test(q)
 const isPrototypeCommand = (q: string) =>
   /\b(generate|create|make|build|spin\s*up)\b.*\b(prototype|proto|mock\s*up|mockup)\b/i.test(q)
-const isTicketsCommand = (q: string) =>
-  /\b(create|generate|make|draft|break)\b.*\btickets?\b/i.test(q)
+// Exported for the same reason as isPrdCommand: ChatScreen intercepts tickets
+// phrasings (incl. "convert this PRD into tickets" over an attached document)
+// with the SAME rule instead of letting the ask agent answer with markdown.
+export const isTicketsCommand = (q: string) =>
+  /\b(create|generate|make|draft|break|convert|turn|split)\b.*\btickets?\b/i.test(q)
 
 // The fixed capability sentence — what the agent continuously does for the user.
 // Lower-cased so it flows after the "Good day, {name} - " salutation in a single

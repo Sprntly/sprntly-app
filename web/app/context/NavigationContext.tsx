@@ -39,7 +39,9 @@ export type PrdTabMeta = { briefId: number; insightIndex: number }
  *   - `ready`          — the caller already holds the PrdState (just show it)
  *   - `generate`       — kick off brief-insight PRD generation (runPrdGeneration)
  *   - `generateBacklog`— kick off backlog PRD generation (runPrdGenerationFromBacklog)
- *   - `load`           — fetch an already-generated PRD by id (loadPrdById) */
+ *   - `load`           — fetch an already-generated PRD by id (loadPrdById)
+ *   - `resume`         — poll a PRD whose generation was already kicked off
+ *                        elsewhere (Artifacts upload, chat PRD-import command) */
 export type PrdTabRequest = {
   title: string
   /** The insight's body/description text (from the originating brief finding),
@@ -56,7 +58,9 @@ export type PrdTabRequest = {
     // Generation was ALREADY kicked off elsewhere (e.g. the PRD-import endpoint
     // returns a 'generating' prd_id): open the tab immediately and re-enter
     // polling in-panel until ready, rather than blocking the caller first.
-    | { kind: "resume"; prdId: number; meta: PrdTabMeta | null }
+    // `openTickets` (chat "convert this PRD into tickets" over an attached
+    // document) lands the panel on the Tickets tab once the PRD is ready.
+    | { kind: "resume"; prdId: number; meta: PrdTabMeta | null; openTickets?: boolean }
 }
 
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
