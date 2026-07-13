@@ -11,6 +11,7 @@ import {
   ConnectorsSettingsView,
   apiKeyHelp,
   connectStartErrorMessage,
+  filterConnectorCategories,
   isAdminGateError,
 } from "../ConnectorsSettings"
 import {
@@ -122,15 +123,78 @@ describe("ConnectorsSettingsView — Regenerate brief", () => {
   })
 })
 
-describe("ConnectorsSettingsView — flat list (no category grouping)", () => {
-  it("does not render category section headers or sub-labels", () => {
+describe("ConnectorsSettingsView — grouped by category", () => {
+  it("renders one card per catalog category with its title", () => {
     const html = render()
-    // The only `set-block-h` is the uploaded-files header, which isn't shown
-    // when files is empty — so with no files there are no section headers.
-    expect(html).not.toContain("set-block-h")
-    expect(html).not.toContain("powers On-Call Agent")
-    expect(html).not.toContain("Project Management")
-    expect(html).not.toContain("Customer Voice")
+    for (const cat of CONNECTOR_CATALOG) {
+      expect(html).toContain(`data-category="${cat.key}"`)
+      // `&` in titles (e.g. "Customer Voice & Support") is HTML-encoded.
+      expect(html).toContain(cat.title.replace(/&/g, "&amp;"))
+    }
+    expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
+      CONNECTOR_CATALOG.length,
+    )
+  })
+
+  it("shows category sub-labels as the card-head hint", () => {
+    const html = render()
+    expect(html).toContain("· required") // Analytics
+    expect(html).toContain("· powers On-Call Agent") // Monitoring
+  })
+})
+
+describe("filterConnectorCategories — search matching", () => {
+  it("returns the catalog unchanged for an empty/whitespace query", () => {
+    expect(filterConnectorCategories(CONNECTOR_CATALOG, "")).toBe(CONNECTOR_CATALOG)
+    expect(filterConnectorCategories(CONNECTOR_CATALOG, "   ")).toBe(CONNECTOR_CATALOG)
+  })
+
+  it("a category-title match keeps the WHOLE category (all its connectors)", () => {
+    const out = filterConnectorCategories(CONNECTOR_CATALOG, "project management")
+    expect(out.length).toBe(1)
+    expect(out[0].key).toBe("pm")
+    // Every PM connector survives, not just name matches.
+    expect(out[0].items.map((i) => i.id)).toEqual(["linear", "jira", "clickup", "asana"])
+  })
+
+  it("a connector-name match keeps just those rows inside their category", () => {
+    const out = filterConnectorCategories(CONNECTOR_CATALOG, "jira")
+    expect(out.length).toBe(1)
+    expect(out[0].key).toBe("pm")
+    expect(out[0].items.map((i) => i.id)).toEqual(["jira"])
+  })
+
+  it("matches connector TYPE labels too (e.g. 'task management' → the PM tools)", () => {
+    const out = filterConnectorCategories(CONNECTOR_CATALOG, "task management")
+    expect(out.some((c) => c.items.some((i) => i.id === "clickup"))).toBe(true)
+  })
+
+  it("is case-insensitive and drops categories with no matches", () => {
+    const out = filterConnectorCategories(CONNECTOR_CATALOG, "JIRA")
+    expect(out.length).toBe(1)
+    expect(filterConnectorCategories(CONNECTOR_CATALOG, "zzz-nope")).toEqual([])
+  })
+})
+
+describe("ConnectorsSettingsView — search box", () => {
+  it("renders the search input", () => {
+    const html = render()
+    expect(html).toContain('aria-label="Search connectors"')
+    expect(html).toContain("Search connectors or categories")
+  })
+
+  it("with a query, renders only matching groups/rows", () => {
+    const html = render({ searchQuery: "jira" })
+    expect(html).toContain("Jira")
+    expect(html).not.toContain("Figma")
+    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(1)
+  })
+
+  it("shows a no-results message for a query matching nothing", () => {
+    const html = render({ searchQuery: "zzz-nope" })
+    expect(html).toContain('data-testid="conn-search-empty"')
+    expect(html).toContain("No connectors or categories match")
+    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(0)
   })
 })
 
@@ -200,11 +264,17 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
   })
 })
 
-describe("ConnectorsSettingsView — single upload control", () => {
-  it("renders exactly one upload control (uploads are company-wide)", () => {
+describe("ConnectorsSettingsView — per-category upload strips", () => {
+  it("renders one upload strip per category card", () => {
     const html = render()
     const matches = html.match(/class="set-conn-upload"/g) ?? []
-    expect(matches.length).toBe(1)
+    expect(matches.length).toBe(CONNECTOR_CATALOG.length)
+  })
+
+  it("labels each strip with its category (e.g. 'Upload analytics export')", () => {
+    const html = render()
+    expect(html).toContain("Upload analytics export")
+    expect(html).toContain("Upload project management export")
   })
 
   it("advertises the shared accepted-types hint", () => {
@@ -218,24 +288,23 @@ describe("ConnectorsSettingsView — single upload control", () => {
     expect(html).toContain(`accept="${UPLOAD_EXTENSIONS.join(",")}"`)
   })
 
-  it("shows the idle 'Upload files' label and an enabled input by default", () => {
+  it("shows the idle upload labels and enabled inputs by default", () => {
     const html = render()
-    expect(html).toContain("Upload files")
     expect(html).toContain("ti-cloud-upload")
-    // Idle: no busy markers, input is selectable.
+    // Idle: no busy markers, inputs are selectable.
     expect(html).not.toContain("Uploading…")
     expect(html).not.toContain("is-uploading")
     expect(html).not.toMatch(/<input[^>]*disabled/)
   })
 
-  it("shows an in-flight busy state (spinner + 'Uploading…') and disables the input while uploading", () => {
+  it("shows an in-flight busy state (spinner + 'Uploading…') and disables the inputs while uploading", () => {
     const html = render({ uploading: true })
     expect(html).toContain("Uploading…")
     // Spinner icon swaps in; busy class + aria-busy drive the visible state.
     expect(html).toContain("ti-spin")
     expect(html).toContain("is-uploading")
     expect(html).toMatch(/aria-busy="true"/)
-    // The file input is blocked so overlapping uploads can't be fired mid-flight.
+    // The file inputs are blocked so overlapping uploads can't be fired mid-flight.
     expect(html).toMatch(/<input[^>]*disabled/)
   })
 })
@@ -288,12 +357,20 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     }
   })
 
-  it("renders a flat list (no category headers) with one shared upload control", () => {
+  it("groups the wired connectors into their categories (empty categories dropped)", () => {
     const html = render({ categories: connectableCatalog() })
-    expect(html).not.toContain("set-block-h")
-    // 8 wired connector rows + one company-wide upload control.
+    const keptCategories = connectableCatalog()
+    // 8 wired connector rows across the surviving categories, one upload
+    // strip per surviving category.
     expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(8)
-    expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(1)
+    expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
+      keptCategories.length,
+    )
+    expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(
+      keptCategories.length,
+    )
+    // Categories with no wired connectors (e.g. Monitoring) are dropped.
+    expect(html).not.toContain("powers On-Call Agent")
   })
 
   it("renders each connector's real brand logo from a locally bundled SVG", () => {

@@ -13571,6 +13571,38 @@
 
   /* ─── Connector rows ─── */
 
+  /* Connectors search — pill input matching the History screen's search. */
+  .set-conn-search {
+    position: relative;
+    margin-bottom: 18px;
+    max-width: 460px;
+  }
+
+  .set-conn-search svg {
+    position: absolute;
+    left: 13px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--ink-3);
+    pointer-events: none;
+  }
+
+  .set-conn-search input {
+    width: 100%;
+    font-size: 13px;
+    padding: 8px 14px 8px 35px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--surface-3, #EEF0EE);
+    color: var(--ink);
+    outline: none;
+  }
+
+  .set-conn-search input:focus {
+    border-color: var(--accent-alpha-40);
+    background: var(--surface-2, #fff);
+  }
+
   .set-conn-row {
     display: flex;
     align-items: center;
