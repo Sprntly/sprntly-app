@@ -314,7 +314,7 @@ export function ArtifactsView({
 // ── Screen ──
 
 export function ArtifactsScreen() {
-  const { openContentPanel } = useNavigation()
+  const { openContentPanel, openPrdTab } = useNavigation()
   const { setContent } = useContent()
   const { activeCompany } = useCompany()
   const router = useRouter()
@@ -397,18 +397,23 @@ export function ArtifactsScreen() {
             : "Timed out generating the PRD. It may still finish — check back shortly.",
         )
       }
-      setContent({
-        prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined },
-        prdMeta: null,
+      // Open a chat window with the PRD in the right panel — same surface as the
+      // weekly brief's "PRD" button (openPrdTab → ChatScreen, kind:"ready").
+      openPrdTab({
+        title: `PRD · ${rec.title}`,
+        source: {
+          kind: "ready",
+          prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined },
+          meta: null,
+        },
       })
-      openContentPanel("prd")
       refreshArtifacts()
     } catch (e) {
       setImportError(e instanceof Error ? e.message : "Import failed. Please try again.")
     } finally {
       setImporting(false)
     }
-  }, [activeCompany, importing, setContent, openContentPanel, refreshArtifacts])
+  }, [activeCompany, importing, openPrdTab, refreshArtifacts])
 
   return (
     <AppLayout>
