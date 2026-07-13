@@ -2196,6 +2196,9 @@ export type StoryJob = {
   job_id: number
   status: "generating" | "ready" | "failed"
   stories?: GeneratedStory[]
+  // Fan-out streams tickets batch-by-batch: while `generating`, `stories` may
+  // hold the partial set landed so far and `progress` the batch counter.
+  progress?: { done: number; total: number }
   error?: string
 }
 

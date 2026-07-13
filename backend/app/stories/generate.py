@@ -31,7 +31,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from app.db.prds import get_prd_rendered
 from app.graph.gateway import llm_call
@@ -687,12 +687,20 @@ def _generate_fanout(
     batch_size: int,
     max_parallel: int,
     stats_out: Optional[dict] = None,
+    on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
 ) -> list[Story]:
     """Fan-out: plan the ticket set, then expand batches in parallel.
 
     Falls back to the single path on an empty plan so we never regress to zero
     tickets (a real PRD always yields some). Dependency links stay correct
     because every batch is given the full title roster.
+
+    `on_batch(stories_so_far, done, total)` — when given, fires once per enrich
+    batch as it completes (on THIS orchestrating thread, in the as_completed
+    loop — never from the enrich sub-threads), carrying the deduped tickets
+    accumulated so far. Lets the caller stream partial results to the UI instead
+    of blocking on the whole set. Exceptions from the callback are swallowed so
+    a display hiccup never breaks generation.
     """
     t0 = time.monotonic()
     stubs, plan_result = _plan_tickets(
@@ -708,9 +716,14 @@ def _generate_fanout(
     bs = max(1, batch_size)
     batches = [stubs[i : i + bs] for i in range(0, len(stubs), bs)]
     all_titles = [str(s.get("title")).strip() for s in stubs]
+    total = len(batches)
 
     enriched: list[tuple[list[Story], Any]] = []
-    workers = max(1, min(max_parallel, len(batches)))
+    # Dedup by content id (stable_id) as batches land — batches are disjoint by
+    # design, but a stub restated across batches would otherwise double-count.
+    seen: set[str] = set()
+    stories: list[Story] = []
+    workers = max(1, min(max_parallel, total))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [
             ex.submit(
@@ -724,20 +737,22 @@ def _generate_fanout(
             )
             for b in batches
         ]
+        done = 0
         for f in as_completed(futs):
-            enriched.append(f.result())
-
-    # Merge, dedup by content id (stable_id) — batches are disjoint by design,
-    # but a stub restated across batches would otherwise double-count.
-    seen: set[str] = set()
-    stories: list[Story] = []
-    for batch_stories, _ in enriched:
-        for s in batch_stories:
-            key = s.stable_id()
-            if key in seen:
-                continue
-            seen.add(key)
-            stories.append(s)
+            batch_stories, _ = result = f.result()
+            enriched.append(result)
+            for s in batch_stories:
+                key = s.stable_id()
+                if key in seen:
+                    continue
+                seen.add(key)
+                stories.append(s)
+            done += 1
+            if on_batch is not None:
+                try:
+                    on_batch(list(stories), done, total)
+                except Exception:  # noqa: BLE001 — a display hiccup never breaks gen
+                    logger.exception("ticket on_batch callback failed (continuing)")
 
     if stats_out is not None:
         stats_out.update(
@@ -766,18 +781,21 @@ def generate_from_input(
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_parallel: int = DEFAULT_MAX_PARALLEL,
     stats_out: Optional[dict] = None,
+    on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
 ) -> list[Story]:
     """Generate tickets from an already-assembled model input string.
 
     The strategy-dispatch core shared by the DB-backed `generate_user_stories`
     and the benchmark harness (which feeds a PRD markdown fixture directly, no
     DB). `strategy` is "single" (one big call, the baseline) or "fanout" (plan →
-    parallel enrich). Never persists — callers own persistence.
+    parallel enrich). `on_batch` streams partial results (fanout only). Never
+    persists — callers own persistence.
     """
     if strategy == "fanout":
         return _generate_fanout(
             enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
             batch_size=batch_size, max_parallel=max_parallel, stats_out=stats_out,
+            on_batch=on_batch,
         )
     return _generate_single(
         enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
@@ -795,6 +813,7 @@ def generate_user_stories(
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_parallel: int = DEFAULT_MAX_PARALLEL,
     stats_out: Optional[dict] = None,
+    on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
 ) -> list[Story]:
     """Generate tickets for a company from a PRD or a free-form insight.
 
@@ -804,7 +823,8 @@ def generate_user_stories(
 
     `strategy` selects the generation path: "single" (baseline, one big call) or
     "fanout" (decompose then enrich batches in parallel). Output contract is
-    identical; only latency differs.
+    identical; only latency differs. `on_batch` (fanout only) streams partial
+    tickets as each batch completes.
     """
     if (prd_id is None) == (insight is None):
         raise ValueError("provide exactly one of prd_id or insight")
@@ -827,6 +847,7 @@ def generate_user_stories(
         batch_size=batch_size,
         max_parallel=max_parallel,
         stats_out=stats,
+        on_batch=on_batch,
     )
     # Resolved model / prompt-version for the decision log come from the last
     # underlying call (both paths populate `stats["calls"]`).
