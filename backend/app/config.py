@@ -127,6 +127,10 @@ class Settings(BaseSettings):
 
     # Internal service-to-service API (DS Agent → Backend)
     internal_api_key: str = ""
+    # Sprntly staff — comma-separated email allowlist for the /v1/staff admin
+    # surface (org invites + per-company entitlements). Empty ⇒ the staff
+    # panel is disabled everywhere (routes 404).
+    staff_emails: str = ""
     # Design Agent bundle staging. Supabase Storage is the PRIMARY
     # destination (bucket named by the SUPABASE_STORAGE_BUCKET env var, read
     # directly in design_agent/storage.py). These two settings drive the

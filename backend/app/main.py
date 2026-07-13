@@ -59,6 +59,7 @@ from app.routes import (
     onboarding,
     oncall,
     research,
+    staff_admin,
     stories,
     synthesis,
     team,
@@ -312,6 +313,8 @@ app.include_router(conversations.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
 app.include_router(admin.router)
+app.include_router(staff_admin.router)
+app.include_router(staff_admin.claim_router)
 app.include_router(feedback.router)
 app.include_router(mcp_tokens.router)
 app.include_router(internal_mcp.resolve_router)
