@@ -16,14 +16,17 @@ it returns any row by id regardless of variant so old bookmarks keep
 resolving.
 """
 import asyncio
+import json
 import logging
 
 from pathlib import Path
 
 from fastapi import Depends, APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company
+from app.auth import CompanyContext, require_company, require_company_from_query
+from app.graph import token_stream
 from app.db import (
     find_existing_prd,
     get_prd_rendered,
@@ -361,6 +364,37 @@ def get(
     if not row:
         raise HTTPException(404, "PRD not found")
     return row
+
+
+@router.get("/{prd_id}/stream")
+async def stream_prd_generation(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company_from_query),
+) -> StreamingResponse:
+    """SSE token stream of a PRD's Part A generation, so the client renders the
+    PRD as it's written instead of waiting for the whole document.
+
+    EventSource can't send headers, so the bearer rides as `?token=`
+    (require_company_from_query). Frames: `{"kind":"delta","text":…}` as the HTML
+    streams, then a terminal `{"kind":"done"|"error"}`. PROGRESSIVE DISPLAY ONLY
+    — the client keeps polling GET /{prd_id}, which stays the authoritative
+    source for the finished, persisted PRD. Single-worker transport (see
+    app.graph.token_stream); on multi-worker this yields nothing and the poll
+    still carries the result. Opening late (generation already finished) simply
+    receives no frames — the poll shows the completed PRD.
+    """
+    require_owned_prd(prd_id, company.company_id)  # 404 on cross-tenant/missing
+    channel = f"prd:{prd_id}"
+
+    async def _gen():
+        async for event in token_stream.subscribe(channel):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── Send to Claude Code: on-demand Implementation Spec ─────────────────

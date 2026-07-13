@@ -1274,6 +1274,12 @@ export const prdApi = {
       insight_index: insightIndex,
       force,
     }),
+  /** SSE URL to token-stream a PRD's generation as it's written. The bearer
+   *  rides as ?token= (EventSource can't set headers). Frames:
+   *  {kind:'delta',text} then a terminal {kind:'done'|'error'}. Progressive
+   *  display only — prdApi.get(id) stays the authoritative finished PRD. */
+  streamUrl: (prdId: number, token: string): string =>
+    `${API_URL}/v1/prd/${prdId}/stream?token=${encodeURIComponent(token)}`,
   /** Kick off PRD generation for a BACKLOG item (a theme ranked ≥ 4, not in the
    *  brief's top-3). Same fire-and-forget contract as `generate`: returns a
    *  prd_id to poll via prdApi.get(id). The backend synthesizes the insight from
