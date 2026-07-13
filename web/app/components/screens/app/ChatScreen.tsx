@@ -11,7 +11,7 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, prototypeCtaLabel } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isTicketsCommand, prototypeCtaLabel } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
@@ -292,18 +292,27 @@ export function ChatScreen() {
   const [showSlash, setShowSlash] = useState(false)
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
-  const [attachments, setAttachments] = useState<{ name: string; content: string }[]>([])
+  // `file` is set for document formats (.pdf/.pptx/.docx/.doc): those can't be
+  // inlined as text, so the original File is kept for the PRD-import command
+  // ("convert this PRD into tickets" → POST /v1/prd/import parses it server-side).
+  const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Attach: read file as text and add to context
+  // Attach: documents keep the real File (for the PRD-import command); plain-text
+  // formats are read as text and inlined into the next ask as context.
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files) return
     Array.from(files).forEach((file) => {
+      if (/\.(pdf|pptx|docx|doc)$/i.test(file.name)) {
+        setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
+        showToast("Attached", `"${file.name}" ready — say "convert this PRD into tickets" to import it.`)
+        return
+      }
       const reader = new FileReader()
       reader.onload = () => {
         const content = reader.result as string
@@ -474,8 +483,8 @@ export function ChatScreen() {
       setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
       return
     }
-    // generate | generateBacklog | load — kick off, show the panel's spinner,
-    // then land the result on the tab (and shared content while it's active).
+    // generate | generateBacklog | load | resume — kick off, show the panel's
+    // spinner, then land the result on the tab (and shared content while active).
     setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, briefMeta: meta, prdGenerating: true } : t))
     setContent({ prd: null, prdMeta: meta, prdGenerating: true })
     void (async () => {
@@ -488,6 +497,13 @@ export function ChatScreen() {
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+          // "convert this PRD into tickets": the user asked for TICKETS — once the
+          // imported PRD is ready, switch the panel to the Tickets tab (which
+          // kicks off user-stories generation for it). Only while this tab is
+          // still active — never yank the panel out from under another tab.
+          if (source.kind === "resume" && source.openTickets && activeTabIdRef.current === tabId) {
+            openContentPanel("tickets")
+          }
           // The prd_id was UNKNOWN upfront (generate | generateBacklog — including
           // "View PRD" find-or-create, which resolves an EXISTING PRD). Now that we
           // have it, rehydrate the tab's chat by prd_id. New PRDs return no
@@ -505,7 +521,7 @@ export function ChatScreen() {
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
-  }, [setContent, showToast, hydratePrdThread])
+  }, [setContent, showToast, hydratePrdThread, openContentPanel])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
@@ -894,22 +910,70 @@ export function ChatScreen() {
     }
   }, [activeCompany, openPrdTab, showToast])
 
+  // A command phrasing over an ATTACHED DOCUMENT is the chat entry to the
+  // PRD-import flow: upload the doc to POST /v1/prd/import — the same conversion
+  // the Artifacts "Upload PRD" button uses (parse to text, faithful re-layout
+  // into the chat-PRD format) — then open the imported PRD as its own chat tab.
+  // With `openTickets` ("convert this PRD into tickets") the panel lands on the
+  // Tickets tab once the PRD is ready, which generates user stories for it.
+  const importPrdCommandFlow = useCallback(async (file: File, opts: { openTickets: boolean }) => {
+    try {
+      const { prdApi } = await import("../../../lib/api")
+      const start = await prdApi.importDoc(file, activeCompany)
+      openPrdTab({
+        title: start.title || file.name,
+        source: { kind: "resume", prdId: start.prd_id, meta: null, openTickets: opts.openTickets },
+      })
+    } catch (e) {
+      showToast("PRD import failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+    }
+  }, [activeCompany, openPrdTab, showToast])
+
   const submitAsk = useCallback(
     async (rawQuery: string) => {
-      // A "generate a PRD" phrasing is a command — open the PRD tab from the
-      // brief's top insight instead of sending it to the ask agent (which would
-      // answer with a raw prd-author HTML dump). Intercept before any tab/ask work.
-      if (isPrdCommand(rawQuery.trim())) {
+      const trimmed = rawQuery.trim()
+      // Command phrasings are COMMANDS, not questions for the ask agent —
+      // intercept before any tab/ask work. Tickets is checked FIRST: "create
+      // tickets from this PRD" matches the PRD rule too, but the user asked for
+      // tickets. With a document attached, either phrasing imports the doc as a
+      // PRD; "…tickets" additionally lands on the Tickets tab when it's ready.
+      const docFile = attachments.find((a) => a.file)?.file ?? null
+      if (isTicketsCommand(trimmed)) {
+        if (docFile) {
+          setAttachments([])
+          void importPrdCommandFlow(docFile, { openTickets: true })
+          return
+        }
+        // No document: mirror the reply-footer "Create tickets" action when this
+        // tab already carries a PRD. Otherwise fall through to the ask agent
+        // (the user-stories skill answers in markdown, as before).
+        const tab = activeTabId ? tabsRef.current.find((t) => t.id === activeTabId) : undefined
+        if (tab?.prd) {
+          setContent({ prd: tab.prd, prdMeta: tab.briefMeta })
+          openContentPanel("tickets")
+          return
+        }
+      } else if (isPrdCommand(trimmed)) {
+        if (docFile) {
+          setAttachments([])
+          void importPrdCommandFlow(docFile, { openTickets: false })
+          return
+        }
+        // No document — open the PRD tab from the brief's top insight instead of
+        // sending it to the ask agent (which would answer with a raw prd-author
+        // HTML dump).
         void prdCommandFlow()
         return
       }
-      // Append attached file content as context
-      let query = rawQuery.trim()
-      if (attachments.length > 0) {
-        const ctx = attachments.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n")
+      // Append attached file content as context (text attachments only —
+      // document attachments exist for the import command and have no text form)
+      let query = trimmed
+      const textAttachments = attachments.filter((a) => !a.file)
+      if (textAttachments.length > 0) {
+        const ctx = textAttachments.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n")
         query = `${query}\n\n[Attached files]\n${ctx}`
-        setAttachments([]) // clear after sending
       }
+      if (attachments.length > 0) setAttachments([]) // clear after sending
       if (query.length < 1) return
       // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
       // before doing any work. (Authoritative per-tab guard happens once
@@ -996,7 +1060,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, finalizeConversationTurn, openTab, prdCommandFlow, pushPendingConversation, showToast],
+    [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdCommandFlow, pushPendingConversation, setContent, showToast],
   )
 
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
@@ -1536,7 +1600,7 @@ export function ChatScreen() {
                         />
                         <div className="chat-home-composer-footer">
                           <div className="chat-home-composer-actions">
-                            <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx" style={{ display: "none" }} onChange={handleFileSelect} />
+                            <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx" style={{ display: "none" }} onChange={handleFileSelect} />
                             <button type="button" className="chat-home-action-btn" aria-label="Attach file" onClick={() => fileInputRef.current?.click()}>
                               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
@@ -1802,7 +1866,7 @@ export function ChatScreen() {
                   />
                   <div className="bc-composer-bar">
                     <div className="bc-composer-tools">
-                      <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx" style={{ display: "none" }} onChange={handleFileSelect} />
+                      <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx" style={{ display: "none" }} onChange={handleFileSelect} />
                       <button type="button" className="bc-tool" onClick={() => fileInputRef.current?.click()}>
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                           <path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" />
