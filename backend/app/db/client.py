@@ -73,27 +73,47 @@ def reset_client() -> None:
     _supabase_client = None
 
 
+def _is_stale_connection_error(exc: Exception) -> bool:
+    """A dead/stale HTTP/2 connection to Supabase, fixable by reconnecting.
+
+    Two shapes in production:
+      * `httpx.RemoteProtocolError: Server disconnected` — Supabase closed the
+        idle connection and the next request noticed.
+      * `httpcore.LocalProtocolError: Invalid input ... in state
+        ConnectionState.CLOSED` — the h2 state machine already knows the
+        connection is closed but the pooled client tried to use it anyway
+        (seen under concurrent use, e.g. the ticket fan-out threads).
+    Matched by name so we don't import httpx/httpcore here.
+    """
+    exc_type = type(exc).__name__
+    exc_msg = str(exc)
+    return (
+        "RemoteProtocolError" in exc_type
+        or "LocalProtocolError" in exc_type
+        or "Server disconnected" in exc_msg
+        or "ConnectionState.CLOSED" in exc_msg
+    )
+
+
 def retry_on_disconnect(fn):
-    """Decorator: retry a db helper once on HTTP/2 idle-timeout disconnect.
+    """Decorator: retry a db helper once on a stale-connection error.
 
     Supabase's PostgREST client uses httpx with HTTP/2. After a long idle
-    period Supabase closes the server-side connection; the next request
-    receives an `httpx.RemoteProtocolError: Server disconnected`. httpx
-    reconnects automatically on the *second* attempt, so one retry is
-    sufficient.  We reset `_supabase_client` between attempts so the new
-    call gets a fresh supabase-py Client with a clean httpx session.
+    period (or a connection-pool race) the connection is dead and the next
+    request fails with a protocol error — see `_is_stale_connection_error`.
+    One retry is sufficient: we reset `_supabase_client` between attempts so
+    the new call gets a fresh supabase-py Client with a clean httpx session.
     """
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
-            exc_type = type(exc).__name__
-            exc_msg = str(exc)
-            if "RemoteProtocolError" in exc_type or "Server disconnected" in exc_msg:
+            if _is_stale_connection_error(exc):
                 logger.warning(
-                    "Supabase HTTP/2 disconnect in %s — resetting client and retrying once",
+                    "Supabase stale connection in %s (%s) — resetting client and retrying once",
                     fn.__qualname__,
+                    type(exc).__name__,
                 )
                 reset_client()
                 return fn(*args, **kwargs)
