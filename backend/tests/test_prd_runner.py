@@ -222,6 +222,46 @@ def test_generate_prd_and_warm_pre_warms_part_b(isolated_settings, monkeypatch):
     assert (row["llm_part"] or "") != ""  # spec cached in the background
 
 
+def test_generate_prd_and_warm_streams_part_a_over_channel(isolated_settings, monkeypatch):
+    """Part A deltas are published to the prd:<id> channel as the HTML streams,
+    then a terminal 'done' — the SSE route relays these to the client."""
+    from app.graph import token_stream
+
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    async def _flow():
+        chan = f"prd:{prd_id}"
+        collected: list[dict] = []
+
+        async def _sub():
+            async for f in token_stream.subscribe(chan):
+                collected.append(f)
+
+        sub_task = asyncio.ensure_future(_sub())
+        await asyncio.sleep(0)  # let the subscriber register its queue
+
+        def _call(**kwargs):
+            od = kwargs.get("on_delta")
+            if kwargs.get("purpose") == "generate_prd_part_a" and od:
+                od("<h1>Streaming")
+                od(" PRD</h1>")
+            return _llm_result(_PART_A)
+
+        monkeypatch.setattr(prd_runner, "llm_call", _call)
+        await prd_runner.generate_prd_and_warm(prd_id, brief_id, 0)
+        await asyncio.sleep(0)  # flush the scheduled publishes + terminal close
+        await sub_task
+        return collected
+
+    frames = asyncio.run(_flow())
+    deltas = [f["text"] for f in frames if f["kind"] == "delta"]
+    assert "".join(deltas) == "<h1>Streaming PRD</h1>"
+    assert frames[-1]["kind"] == "done", "terminal frame closes the stream"
+
+
 def test_run_sync_part_a_renders_as_before(isolated_settings, monkeypatch):
     """Frontend-compat: payload_md is the human PRD only, no separator artifacts;
     get_prd_rendered returns the same."""

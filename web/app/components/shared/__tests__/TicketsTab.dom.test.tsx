@@ -121,6 +121,29 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     expect(screen.queryByText("P1")).toBeNull()
   })
 
+  it("streams partial ticket batches (with progress) while still generating", async () => {
+    content = { prd: { prd_id: 42, title: "Workspaces PRD" }, connectedConnectorIds: [] }
+    generate.mockResolvedValue({ job_id: 7, status: "generating" })
+    // A fan-out poll mid-run: one batch has landed, more to come.
+    getJob.mockResolvedValue({
+      job_id: 7,
+      status: "generating",
+      stories: [{ title: "Create workspace", body: "", acceptance_criteria: [], priority: null, route: null }],
+      progress: { done: 1, total: 3 },
+    })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+
+    // The partial ticket renders in the list (not behind the full-screen spinner),
+    // with a batch-progress banner.
+    await waitFor(() => expect(screen.getByText("Create workspace")).toBeTruthy())
+    expect(screen.getByTestId("tickets-streaming")).toBeTruthy()
+    expect(screen.getByText(/batch 1 of 3/i)).toBeTruthy()
+    expect(screen.queryByTestId("tickets-generating")).toBeNull()
+  })
+
   it("serves persisted tickets without regenerating when the PRD is unchanged", async () => {
     content = { prd: { prd_id: 42, title: "Onboarding PRD" }, connectedConnectorIds: [] }
     // Fresh cache hit → render the stored stories, never call generate.

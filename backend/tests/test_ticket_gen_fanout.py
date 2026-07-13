@@ -159,6 +159,39 @@ def test_single_strategy_makes_one_call(isolated_settings, monkeypatch):
     assert stats["strategy"] == "single"
 
 
+def test_fanout_on_batch_streams_growing_partial_sets(isolated_settings, monkeypatch):
+    titles = [f"T{i}" for i in range(9)]  # 3 batches of 3
+    monkeypatch.setattr(gen, "llm_call", _fake_llm(titles))
+    updates: list[tuple[int, int, int]] = []  # (n_stories_so_far, done, total)
+
+    def _on_batch(stories, done, total):
+        updates.append((len(stories), done, total))
+
+    result = generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=3, max_parallel=3, on_batch=_on_batch,
+    )
+
+    assert len(result) == 9
+    assert len(updates) == 3, "one callback per batch"
+    # Progress counter is monotonic and terminates at total.
+    assert [u[1] for u in updates] == [1, 2, 3]
+    assert all(u[2] == 3 for u in updates)
+    # Accumulated ticket count only grows and ends at the full set.
+    counts = [u[0] for u in updates]
+    assert counts == sorted(counts)
+    assert counts[-1] == 9
+
+
+def test_single_strategy_never_calls_on_batch(isolated_settings, monkeypatch):
+    monkeypatch.setattr(gen, "llm_call",
+                        lambda **kw: _result({"stories": [_story("Only")]}))
+    fired = []
+    generate_from_input("ent-A", prd_input="PRD", strategy="single",
+                        on_batch=lambda *a: fired.append(a))
+    assert fired == [], "the single path has no batches to stream"
+
+
 def test_generate_user_stories_honors_strategy(isolated_settings, monkeypatch):
     """The public entry threads strategy through to the dispatch core."""
     seen: list[str] = []
