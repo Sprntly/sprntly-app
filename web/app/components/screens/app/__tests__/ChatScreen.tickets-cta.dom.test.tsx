@@ -75,13 +75,16 @@ import { ChatScreen } from "../ChatScreen"
 
 // A restored PRD tab (prd stripped, prdId + a replied thread turn kept) — the
 // reload state that renders the post-reply action row with the ticket CTA.
+// briefMeta is null (a backlog/import-style tab): with briefMeta or a cached
+// prd, the insight card at the top hosts the actions and the post-reply row
+// is suppressed as duplicate noise.
 function seedTabWithReply(prdId: number) {
   localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([
     {
       id: "tab-reload",
       title: "PRD · Bulk onboarding",
       dbConvId: null,
-      briefMeta: { briefId: 7, insightIndex: 0 },
+      briefMeta: null,
       prdId,
       thread: [{
         id: "t1", query: "what's the goal?",
