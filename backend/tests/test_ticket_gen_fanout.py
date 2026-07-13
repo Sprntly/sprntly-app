@@ -192,6 +192,55 @@ def test_single_strategy_never_calls_on_batch(isolated_settings, monkeypatch):
     assert fired == [], "the single path has no batches to stream"
 
 
+def test_enrich_tolerates_string_items_in_stories(isolated_settings, monkeypatch):
+    """Regression: a real PRD made the enrich model return a bare string inside
+    `stories`; `s.get('title')` then raised 'str has no attribute get' and failed
+    the whole run. Malformed items must be skipped, valid ones kept."""
+    def _call(**kw):
+        if kw["prompt_version"] == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}]})
+        # One good ticket + a stray string + a None the model slipped in.
+        return _result({"stories": [_story("A"), "just a title string", None]})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                                  batch_size=2, max_parallel=2)
+
+    assert [s.title for s in stories] == ["A"], "valid ticket survives, junk dropped"
+
+
+def test_fanout_all_batches_empty_falls_back_to_single(isolated_settings, monkeypatch):
+    """If every enrich batch yields 0 usable tickets, fall back to the single
+    call rather than returning an empty set for a PRD that did plan stubs."""
+    calls: list[str] = []
+
+    def _call(**kw):
+        pv = kw["prompt_version"]
+        calls.append(pv)
+        if pv == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}]})
+        if pv == ENRICH_PROMPT_VERSION:
+            return _result({"stories": ["garbage", None]})  # all malformed
+        return _result({"stories": [_story("Recovered via single")]})  # PROMPT_VERSION
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                                  batch_size=2, max_parallel=2)
+
+    assert [s.title for s in stories] == ["Recovered via single"]
+    assert PROMPT_VERSION in calls, "fell back to the single-call path"
+
+
+def test_stories_from_output_handles_non_list(isolated_settings, monkeypatch):
+    """Guard the shape where `stories` itself isn't a list."""
+    def _call(**kw):
+        return _result({"stories": "not a list at all"})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="single")
+    assert stories == []
+
+
 def test_generate_user_stories_honors_strategy(isolated_settings, monkeypatch):
     """The public entry threads strategy through to the dispatch core."""
     seen: list[str] = []
