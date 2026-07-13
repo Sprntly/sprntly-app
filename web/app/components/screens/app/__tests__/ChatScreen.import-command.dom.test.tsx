@@ -227,6 +227,22 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     expect(resumePrdGeneration).not.toHaveBeenCalled()
   })
 
+  it("shows the attached file as a chip on the LANDING composer (not just a toast)", async () => {
+    renderChat()
+    await attachDoc("Fraznet Enhancements.pptx")
+
+    // The chip is the persistent evidence the attach worked — the toast alone
+    // disappears in seconds, which read as "the upload didn't work".
+    const chip = document.querySelector('[data-testid="attachment-chip"]')
+    expect(chip).toBeTruthy()
+    expect(chip!.textContent).toContain("Fraznet Enhancements.pptx")
+
+    // The × removes it again.
+    const remove = chip!.querySelector("button") as HTMLButtonElement
+    await act(async () => { fireEvent.click(remove) })
+    expect(document.querySelector('[data-testid="attachment-chip"]')).toBeNull()
+  })
+
   it("a normal ask with a document attached does NOT inline binary content", async () => {
     renderChat()
     await attachDoc()
