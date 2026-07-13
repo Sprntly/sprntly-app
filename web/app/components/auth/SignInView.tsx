@@ -87,8 +87,15 @@ export function SignInView(props: SignInViewProps) {
           className="btn btn-brand btn-block"
           style={{ marginTop: 8 }}
           disabled={props.submitting || props.lockoutMs > 0}
+          aria-busy={props.submitting}
         >
-          {props.submitting ? "…" : forgotMode ? "Send reset link" : "Sign in"}
+          {props.submitting
+            ? forgotMode
+              ? "Sending…"
+              : "Signing in…"
+            : forgotMode
+              ? "Send reset link"
+              : "Sign in"}
           {!props.submitting && !forgotMode && <ArrowRight width={14} height={14} />}
         </button>
       </form>

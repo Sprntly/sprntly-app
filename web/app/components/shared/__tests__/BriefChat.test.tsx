@@ -242,6 +242,7 @@ const SUPPORTING: BriefV2CompactFinding = {
 const BRIEF: BriefV2State = {
   headline: "This week",
   weekOf: "2026-06-08",
+  generatedAt: "2026-06-08T07:01:00",
   company: "Acme Health",
   productArea: "Onboarding",
   kpiTiles: [],
@@ -670,11 +671,18 @@ describe("BriefChat — greeting paragraph", () => {
     expect((greeting.match(/Good day/g) ?? []).length).toBe(1)
   })
 
-  it("no longer renders the redundant 'Monday brief · …' secondary status line", async () => {
+  it("renders the 'Monday brief · <time>' timestamp in the agent head", async () => {
     await act(async () => {
       renderBrief()
     })
-    expect(screen.queryByText(/Monday brief ·/)).toBeNull()
+    // The head carries the brief timestamp, formatted from the fixture's
+    // generatedAt (2026-06-08T07:01:00 → "7:01" in any hour-cycle locale).
+    const head = document.querySelector(".bc-agent-head") as HTMLElement | null
+    expect(head).not.toBeNull()
+    const status = head!.querySelector(".bc-agent-status") as HTMLElement | null
+    expect(status).not.toBeNull()
+    expect(status!.textContent).toMatch(/Monday brief · /)
+    expect(status!.textContent).toContain("7:01")
   })
 })
 

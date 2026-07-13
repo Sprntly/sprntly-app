@@ -347,14 +347,15 @@ export function ChatScreen() {
   }, [])
 
   const closeTab = useCallback((tabId: string) => {
-    setTabs((prev) => {
-      const next = prev.filter((t) => t.id !== tabId)
-      if (activeTabId === tabId) {
-        setActiveTabId(next.length > 0 ? next[next.length - 1].id : null)
-      }
-      return next
-    })
-  }, [activeTabId])
+    const next = tabsRef.current.filter((t) => t.id !== tabId)
+    setTabs(next)
+    // Closing the ACTIVE tab hands focus to the last surviving chat tab; when
+    // none remain, the pinned Weekly-brief tab becomes active — never the
+    // tab-less landing (which left NO tab looking active in the strip).
+    if (activeTabIdRef.current === tabId) {
+      setActiveTabId(next.length > 0 ? next[next.length - 1].id : BRIEF_TAB_ID)
+    }
+  }, [])
 
   // Rehydrate a PRD tab's chat thread from its saved conversation. A PRD's chat
   // is keyed by prd_id in Supabase (conversationsApi.byPrd), so reopening a PRD —
@@ -1173,8 +1174,14 @@ export function ChatScreen() {
 
   const handleComposerSubmit = () => {
     const q = draft.trim()
+    // Backend rejects questions under 3 chars — match BriefChat's guard (the
+    // send buttons are also disabled below 3, this covers Enter-to-send).
+    if (q.length < 3) {
+      if (q.length > 0) showToast("Question too short", "Use at least 3 characters.")
+      return
+    }
     // Cheap active-tab guard; submitAsk re-checks per the resolved target tab.
-    if (q.length < 1 || (activeTabId != null && askingTabsRef.current.has(activeTabId))) return
+    if (activeTabId != null && askingTabsRef.current.has(activeTabId)) return
     setDraft("")
     void submitAsk(q)
     const ta = composerRef.current
@@ -1258,24 +1265,27 @@ export function ChatScreen() {
       t.thread.length === 0 &&
       !t.briefMeta && !t.prd && !t.prdId && !t.evidence &&
       !t.prdGenerating && !t.evidenceGenerating
-    let targetId: string | null = null
-    setTabs((prev) => {
-      const existingEmpty = prev.find((t) => disposable(t) && t.title === NEW_CHAT_TITLE)
-      if (existingEmpty) {
-        targetId = existingEmpty.id
-        // Drop any OTHER disposable tabs, keep the one we're reusing.
-        return prev.filter((t) => !disposable(t) || t.id === existingEmpty.id)
-      }
+    // Compute the next tabs from the ref (not inside the setTabs updater):
+    // updater callbacks run later, during React's render, so an id assigned
+    // inside one is still null when setActiveTabId below reads it — which left
+    // the fresh "+" tab created but never activated.
+    const prev = tabsRef.current
+    const existingEmpty = prev.find((t) => disposable(t) && t.title === NEW_CHAT_TITLE)
+    let targetId: string
+    if (existingEmpty) {
+      targetId = existingEmpty.id
+      // Drop any OTHER disposable tabs, keep the one we're reusing.
+      setTabs(prev.filter((t) => !disposable(t) || t.id === existingEmpty.id))
+    } else {
       const id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
       targetId = id
       // Prune other disposable tabs, then append the fresh "New chat" tab.
-      const kept = prev.filter((t) => !disposable(t))
-      return [...kept, {
+      setTabs([...prev.filter((t) => !disposable(t)), {
         id, title: NEW_CHAT_TITLE, thread: [], dbConvId: null, briefMeta: null,
         insightBody: null, prdId: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
-      }]
-    })
+      }])
+    }
     setActiveTabId(targetId)
     setDraft("")
     setActiveConv(null)
@@ -1359,11 +1369,14 @@ export function ChatScreen() {
       <div className="home-chat-root">
         <div className={`od-layout ${railExpanded ? "rail-expanded" : ""}`}>
 
-          {/* Tab bar — always visible */}
+          {/* Tab bar — always visible. Browser-style: grey strip, the ACTIVE tab
+              is a white card (side+top borders, rounded top corners) that merges
+              with the white content area below by overlapping the strip's bottom
+              border; inactive tabs are plain grey labels on the strip. */}
           <div data-testid="chat-tab-bar" style={{
             display: "flex", alignItems: "stretch", gap: 0,
-            borderBottom: "1px solid var(--line, #E8E6E0)", background: "var(--surface, #fff)",
-            height: 40, overflowX: "auto", overflowY: "visible", flexShrink: 0,
+            borderBottom: "1px solid var(--line, #E8E6E0)", background: "var(--surface-2, #F7F5F0)",
+            height: 44, paddingLeft: 8, overflowX: "auto", overflowY: "visible", flexShrink: 0,
           }}>
             {/* Pinned brief tab — always first, never closable (synthesized, not
                 in `tabs`/localStorage). Selecting it renders <BriefChat/> below. */}
@@ -1375,9 +1388,13 @@ export function ChatScreen() {
                 padding: "0 14px", fontSize: 13, cursor: "pointer",
                 color: isBriefTab ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
                 fontWeight: isBriefTab ? 500 : 400,
-                borderBottom: isBriefTab ? "2px solid var(--ink, #1A1A17)" : "2px solid transparent",
-                marginBottom: -1,
-                whiteSpace: "nowrap", transition: "color 0.12s, border-color 0.12s",
+                background: isBriefTab ? "var(--surface, #fff)" : "transparent",
+                borderTop: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                borderLeft: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                borderRight: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                borderRadius: "8px 8px 0 0",
+                marginTop: 8, marginBottom: -1,
+                whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
                 userSelect: "none", flexShrink: 0,
               }}
             >
@@ -1394,9 +1411,13 @@ export function ChatScreen() {
                     padding: "0 10px 0 14px", fontSize: 13, cursor: "pointer",
                     color: isActive ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
                     fontWeight: isActive ? 500 : 400,
-                    borderBottom: isActive ? "2px solid var(--ink, #1A1A17)" : "2px solid transparent",
-                    marginBottom: -1,
-                    whiteSpace: "nowrap", transition: "color 0.12s, border-color 0.12s",
+                    background: isActive ? "var(--surface, #fff)" : "transparent",
+                    borderTop: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                    borderLeft: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                    borderRight: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                    borderRadius: "8px 8px 0 0",
+                    marginTop: 8, marginBottom: -1,
+                    whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
                     userSelect: "none", flexShrink: 0,
                   }}
                 >
@@ -1426,11 +1447,11 @@ export function ChatScreen() {
               onClick={startNewThread}
               aria-label="New chat"
               title="New chat"
-              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F1EFEA)" }}
+              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--line, #E8E6E0)" }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent" }}
               style={{
                 display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 28, margin: "6px 4px 0 6px", padding: 0,
+                width: 28, height: 28, margin: "8px 4px 0 6px", padding: 0,
                 background: "transparent", border: "none", cursor: "pointer",
                 borderRadius: "50%", fontSize: 18, lineHeight: 1,
                 color: "var(--ink-3, #8C8A84)", flexShrink: 0,
@@ -1520,7 +1541,7 @@ export function ChatScreen() {
                             type="button"
                             className="chat-home-composer-send"
                             aria-label="Send"
-                            disabled={busy || draft.trim().length < 1}
+                            disabled={busy || draft.trim().length < 3}
                             onClick={handleComposerSubmit}
                           >
                             <IconSendUp size={16} />
@@ -1814,7 +1835,7 @@ export function ChatScreen() {
                       type="button"
                       className="bc-send"
                       aria-label="Send"
-                      disabled={busy || draft.trim().length < 1}
+                      disabled={busy || draft.trim().length < 3}
                       onClick={handleComposerSubmit}
                     >
                       <IconSendUp size={18} />

@@ -52,6 +52,8 @@ export default function SignInPage() {
       await auth.signInWithPassword(email, password)
       clearSignInAttempts()
       router.replace(await auth.postLoginPath())
+      // Stay in the submitting state — the button keeps its loading label
+      // until navigation unmounts this page.
     } catch (e) {
       const { message, countsAsFailedAttempt } = describeSignInError(e)
       if (countsAsFailedAttempt) {
@@ -59,7 +61,6 @@ export default function SignInPage() {
         setLockoutMs(authLockoutRemainingMs())
       }
       setError(message)
-    } finally {
       setSubmitting(false)
     }
   }
@@ -92,7 +93,10 @@ export default function SignInPage() {
     }
   }
 
-  if (auth.kind === "loading" || auth.kind === "authed") {
+  // While a password submit is in flight, keep the form on screen (button in
+  // its loading state) even after auth flips to "authed" — the full-screen
+  // "Loading…" swap is only for visitors who arrive already signed in.
+  if ((auth.kind === "loading" || auth.kind === "authed") && !submitting) {
     return (
       <AuthShell tag="Sign in">
         <div className="auth-sub">Loading…</div>

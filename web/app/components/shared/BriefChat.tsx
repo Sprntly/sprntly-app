@@ -1018,6 +1018,14 @@ export function BriefChat() {
 
   const userInitials = content.userInitials ?? (content.userName ? content.userName.slice(0, 2).toUpperCase() : "You")
   const userName = content.userName ?? "You"
+  // "Monday brief · 7:01 AM" line in the agent head, from the brief's
+  // generated_at. Hidden when there's no brief (or no timestamp on it).
+  const briefTimeLabel = useMemo(() => {
+    if (!v2?.generatedAt) return null
+    const d = new Date(v2.generatedAt)
+    if (Number.isNaN(d.getTime())) return null
+    return d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+  }, [v2?.generatedAt])
   // The brief is being generated when hydration reports "generating" AND we
   // don't yet have a brief to show. Once findings arrive (ready), the WIP
   // indicator is replaced by the real brief. The failed state never trips this.
@@ -1043,6 +1051,9 @@ export function BriefChat() {
                   <IconSparkle size={10} />
                   PM COWORKER
                 </span>
+                {briefTimeLabel ? (
+                  <span className="bc-agent-status">Monday brief · {briefTimeLabel}</span>
+                ) : null}
               </div>
               <div className="bc-agent-body">
                 {generatingBrief ? (

@@ -133,16 +133,17 @@ describe("BusinessContextSettingsView — loaded doc", () => {
 })
 
 describe("BusinessContextSettingsView — admin vs read-only", () => {
-  it("admin sees Save", () => {
+  it("admin gets the editable form; Save lives in the pane bar (no inline button)", () => {
     const html = render({ canEdit: true })
-    expect(html).toContain("Save business context")
+    // The pane bar submits this form from outside via its id.
+    expect(html).toContain('id="pset-bc-form"')
+    expect(html).not.toContain("Save business context")
     // The Version/Regenerate toolbar was removed; no Regenerate button is rendered.
     expect(html).not.toContain(">Regenerate<")
   })
 
-  it("non-admin gets a read-only view (no Save, no Regenerate)", () => {
+  it("non-admin gets a read-only view (no Regenerate)", () => {
     const html = render({ canEdit: false })
-    expect(html).not.toContain("Save business context")
     expect(html).not.toContain(">Regenerate<")
     expect(html).toContain("Only admins can edit")
     // fields are present but disabled for non-admins
@@ -174,12 +175,9 @@ describe("BusinessContextSettingsView — chrome states", () => {
     expect(render({ loadError: "API 500" })).toContain("API 500")
   })
 
-  it("shows save success message", () => {
-    expect(render({ saved: true })).toContain("Business context saved")
-  })
-
-  it("disables Save while saving", () => {
-    expect(render({ saving: true })).toContain("Saving…")
+  it("no inline saved/saving chrome — the pane bar owns those states", () => {
+    expect(render({ saved: true })).not.toContain("Business context saved")
+    expect(render({ saving: true })).not.toContain("Saving…")
   })
 })
 

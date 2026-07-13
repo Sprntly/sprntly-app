@@ -84,12 +84,16 @@ export function SettingsSection({
   sub?: string
   children: ReactNode
 }) {
+  // v4 card pattern (matches the redesigned Profile / Comms & Brief panes):
+  // the section IS the card — serif title + "· hint" head, content below.
   return (
-    <div className="settings-sec">
-      <h2 className="settings-sec-title">{title}</h2>
-      {sub && <p className="settings-sec-sub">{sub}</p>}
-      <div className="settings-card">{children}</div>
-    </div>
+    <section className="pset-card settings-sec">
+      <div className="pset-card-head">
+        <h3 className="pset-card-title">{title}</h3>
+        {sub && <span className="pset-card-hint">· {sub}</span>}
+      </div>
+      {children}
+    </section>
   )
 }
 
@@ -109,6 +113,79 @@ export function SettingsRow({
         <div className="settings-row-sub">{sub}</div>
       </div>
       {children}
+    </div>
+  )
+}
+
+/**
+ * Sticky action bar for the v4 full-bleed settings panes (Profile, Comms &
+ * Brief, …): pane title + identity meta on the left; Saved chip, Discard and
+ * the green Save-changes pill on the right. Save submits `formId`'s form when
+ * given (native validation applies), otherwise fires `onSave` directly.
+ */
+export function SettingsPaneBar({
+  title,
+  meta,
+  saved = false,
+  dirty = false,
+  saving = false,
+  onDiscard,
+  formId,
+  onSave,
+}: {
+  title: string
+  meta?: string | null
+  saved?: boolean
+  dirty?: boolean
+  saving?: boolean
+  onDiscard?: () => void
+  formId?: string
+  onSave?: () => void
+}) {
+  // Panes whose save affordances live inline (or that have none) get a
+  // title-only bar: no Discard/Save unless a save target is wired in.
+  const hasActions = Boolean(formId || onSave)
+  return (
+    <div className="pset-bar">
+      <div className="pset-bar-id">
+        <span className="pset-bar-title">{title}</span>
+        {meta && <span className="pset-bar-meta">· {meta}</span>}
+      </div>
+      {hasActions && (
+      <div className="pset-bar-actions">
+        {saved && !dirty && (
+          <span className="pset-saved-chip" role="status">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <circle cx="12" cy="12" r="9" />
+              <path d="M8.5 12.2l2.3 2.3 4.7-4.8" />
+            </svg>
+            Saved
+          </span>
+        )}
+        <button
+          type="button"
+          className="pset-discard"
+          onClick={onDiscard}
+          disabled={!dirty || saving}
+        >
+          Discard
+        </button>
+        <button
+          type={formId ? "submit" : "button"}
+          form={formId}
+          onClick={formId ? undefined : onSave}
+          className="btn btn-primary pset-save"
+          disabled={saving || !dirty}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+            <path d="M17 21v-8H7v8" />
+            <path d="M7 3v5h8" />
+          </svg>
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+      </div>
+      )}
     </div>
   )
 }
