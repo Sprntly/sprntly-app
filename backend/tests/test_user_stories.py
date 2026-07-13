@@ -198,6 +198,57 @@ def test_generate_empty_result_is_not_cached(isolated_settings, monkeypatch):
     assert saved == []  # nothing cached for an empty run
 
 
+def test_generate_hashes_the_row_at_save_time_not_the_snapshot(isolated_settings, monkeypatch):
+    """The impl-spec pre-warm fills llm_part WHILE the multi-minute ticket call
+    runs. Hashing the pre-call snapshot stored a hash that never matched a later
+    read, so every Tickets-tab open spuriously regenerated ("The PRD changed"
+    with no actual edit). The persisted hash must reflect the row at save time."""
+    import app.stories.generate as gen
+    import app.db.prd_tickets as pt
+
+    before = {"title": "T", "payload_md": "Part A prose", "llm_part": ""}
+    after = {"title": "T", "payload_md": "Part A prose", "llm_part": "WARMED-SPEC"}
+    reads: list = []
+
+    def _rendered(pid):
+        reads.append(pid)
+        return before if len(reads) == 1 else after
+
+    monkeypatch.setattr(gen, "get_prd_rendered", _rendered)
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result(_TWO_STORIES))
+    saved: list = []
+    monkeypatch.setattr(pt, "save_tickets", lambda *a, **k: saved.append(a))
+
+    generate_user_stories("ent-A", prd_id=7)
+    assert len(saved) == 1
+    assert saved[0][2] == pt.hash_prd_row(after)
+
+
+def test_generate_keeps_snapshot_hash_when_prd_body_changed_mid_run(isolated_settings, monkeypatch):
+    """If the PRD BODY (title/Part A) genuinely changed while tickets generated,
+    the set is truly stale — keep the snapshot hash so the freshness check fails
+    and the next open regenerates against the new content."""
+    import app.stories.generate as gen
+    import app.db.prd_tickets as pt
+
+    before = {"title": "T", "payload_md": "Part A prose", "llm_part": ""}
+    after = {"title": "T", "payload_md": "Part A REWRITTEN", "llm_part": "WARMED-SPEC"}
+    reads: list = []
+
+    def _rendered(pid):
+        reads.append(pid)
+        return before if len(reads) == 1 else after
+
+    monkeypatch.setattr(gen, "get_prd_rendered", _rendered)
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result(_TWO_STORIES))
+    saved: list = []
+    monkeypatch.setattr(pt, "save_tickets", lambda *a, **k: saved.append(a))
+
+    generate_user_stories("ent-A", prd_id=7)
+    assert len(saved) == 1
+    assert saved[0][2] == pt.hash_prd_row(before)
+
+
 def test_generate_unknown_prd_raises(isolated_settings, monkeypatch):
     import app.stories.generate as gen
     from app.stories.generate import PRDNotFoundError

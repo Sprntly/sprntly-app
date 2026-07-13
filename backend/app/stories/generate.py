@@ -508,10 +508,22 @@ def generate_user_stories(
         try:
             from app.db.prd_tickets import hash_prd_row, save_tickets
 
+            # Hash the row AS IT STANDS NOW, not the pre-call snapshot: the
+            # impl-spec pre-warm kicked off with this job fills `llm_part`
+            # while the (multi-minute) ticket call runs, so the snapshot's
+            # hash never matches a later read and every panel open spuriously
+            # regenerated ("The PRD changed" with no actual edit). If the PRD
+            # BODY (title / Part A) genuinely changed mid-run, keep the
+            # snapshot hash — the set is truly stale and must regenerate.
+            current = get_prd_rendered(prd_id)
+            body_changed = current is None or (
+                (current.get("title"), current.get("payload_md"))
+                != (prd.get("title"), prd.get("payload_md"))
+            )
             save_tickets(
                 enterprise_id,
                 prd_id,
-                hash_prd_row(prd),  # hash the row we already rendered above
+                hash_prd_row(prd if body_changed or current is None else current),
                 [s.to_dict() for s in stories],
             )
         except Exception:  # noqa: BLE001
