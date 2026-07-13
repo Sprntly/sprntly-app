@@ -237,6 +237,9 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     await waitFor(() => expect(document.body.textContent).toContain("Convert this PRD into tickets"))
     // …answered by an acknowledgment that says what's happening.
     await waitFor(() => expect(document.body.textContent).toContain("Importing your document as a PRD"))
+    // No duplicate action row under the reply — the PRD card at the top of the
+    // thread already hosts the actions.
+    expect(document.querySelector(".bc-turn:not(.bc-turn--insight) .bc-actions")).toBeNull()
   })
 
   it("shows the PRD card (panel re-opener) while the import is still generating", async () => {

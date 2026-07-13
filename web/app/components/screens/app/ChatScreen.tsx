@@ -1825,7 +1825,10 @@ export function ChatScreen() {
                               />
                             ) : null}
                           </div>
-                          {isLast && turn.reply ? (
+                          {/* Skip the row when the insight/PRD card is shown at the
+                              top of the thread — it already hosts these actions, and
+                              rendering both reads as duplicate button noise. */}
+                          {isLast && turn.reply && !showInsightMsg ? (
                             <div className="bc-actions">
                               <button
                                 type="button"
