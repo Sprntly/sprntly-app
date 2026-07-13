@@ -51,6 +51,7 @@ async function pollPrdToResult(
       llmPart: prd.llm_part,
       briefId: prd.brief_id,
       insightIndex: prd.insight_index,
+      source: prd.source,
     },
   }
 }
@@ -126,6 +127,7 @@ export async function loadPrdById(prdId: number): Promise<PrdLoadResult> {
       llmPart: prd.llm_part,
       briefId: prd.brief_id,
       insightIndex: prd.insight_index,
+      source: prd.source,
     },
   }
 }
@@ -153,6 +155,7 @@ export async function loadLatestPrd(dataset: string): Promise<PrdLoadResult> {
       llmPart: prd.llm_part,
       briefId: prd.brief_id,
       insightIndex: prd.insight_index,
+      source: prd.source,
     },
   }
 }

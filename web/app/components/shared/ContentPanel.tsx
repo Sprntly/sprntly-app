@@ -26,7 +26,7 @@ import {
 } from "@tabler/icons-react"
 import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
 import { printCombined } from "../../lib/combinedExport"
-import type { PrdState, PrdContent } from "../../types/content"
+import type { PrdState, PrdContent, AppContentState } from "../../types/content"
 
 const TABS = [
   { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
@@ -130,9 +130,44 @@ function ShareMenu({
   )
 }
 
+/**
+ * Whether to hide the right-panel Evidence tab for the current content.
+ *
+ * Only brief-insight PRDs carry their own research Evidence (keyed at
+ * `(brief_id, insight_index)`). Backlog and uploaded PRDs have none — an
+ * uploaded PRD may genuinely have no evidence at all — so the Evidence tab is
+ * hidden for them. We still show it while evidence is loaded/generating into
+ * context (e.g. a brief-finding flow), and a missing `source` (legacy rows) is
+ * treated as brief. Only gates once a PRD is actually loaded.
+ */
+export function isEvidenceTabHidden(
+  content: Pick<AppContentState, "prd" | "evidence" | "evidenceGenerating">,
+): boolean {
+  const prd = content.prd
+  return (
+    prd != null &&
+    prd.source != null &&
+    prd.source !== "brief" &&
+    !content.evidence &&
+    !content.evidenceGenerating
+  )
+}
+
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
   const { content } = useContent()
+
+  const evidenceHidden = isEvidenceTabHidden(content)
+  const visibleTabs = evidenceHidden ? TABS.filter((t) => t.id !== "evidence") : TABS
+
+  // If the panel is parked on Evidence but that tab just became hidden (a
+  // backlog/upload PRD loaded), render the PRD tab instead of a stranded body.
+  const activeTab = evidenceHidden && contentPanelTab === "evidence" ? "prd" : contentPanelTab
+
+  // Persist that fallback into navigation state so re-opens land on a real tab.
+  useEffect(() => {
+    if (evidenceHidden && contentPanelTab === "evidence") openContentPanel("prd")
+  }, [evidenceHidden, contentPanelTab, openContentPanel])
 
   // Tracks the live pixel width; null = use the CSS default (60vw).
   const widthRef = useRef<number | null>(null)
@@ -208,11 +243,11 @@ export function ContentPanel() {
         <div className="cpanel-head">
           <div>
             <div className="cpanel-tabs">
-              {TABS.map((t) => (
+              {visibleTabs.map((t) => (
                 <button
                   key={t.id}
                   type="button"
-                  className={`cpanel-tab${contentPanelTab === t.id ? " cpanel-tab--active" : ""}`}
+                  className={`cpanel-tab${activeTab === t.id ? " cpanel-tab--active" : ""}`}
                   onClick={() => openContentPanel(t.id)}
                 >
                   {t.icon} {t.label}
@@ -230,9 +265,9 @@ export function ContentPanel() {
         </div>
 
         <div className="cpanel-body">
-          {contentPanelTab === "evidence" && <EvidenceTab />}
-          {contentPanelTab === "prd" && <PrdPanelContent />}
-          {contentPanelTab === "tickets" && <TicketsTab />}
+          {activeTab === "evidence" && <EvidenceTab />}
+          {activeTab === "prd" && <PrdPanelContent />}
+          {activeTab === "tickets" && <TicketsTab />}
         </div>
       </aside>
     </>
