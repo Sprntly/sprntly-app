@@ -53,6 +53,10 @@ export type PrdTabRequest = {
     | { kind: "generate"; meta: PrdTabMeta }
     | { kind: "generateBacklog"; backlogItemId: string }
     | { kind: "load"; prdId: number; meta: PrdTabMeta | null }
+    // Generation was ALREADY kicked off elsewhere (e.g. the PRD-import endpoint
+    // returns a 'generating' prd_id): open the tab immediately and re-enter
+    // polling in-panel until ready, rather than blocking the caller first.
+    | { kind: "resume"; prdId: number; meta: PrdTabMeta | null }
 }
 
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"

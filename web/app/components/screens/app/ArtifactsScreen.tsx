@@ -374,38 +374,20 @@ export function ArtifactsScreen() {
   }, [setContent, openContentPanel, router])
 
   // Import a PRD from an uploaded file. The backend parses + re-lays-it-out into
-  // our format (fire-and-forget → a 'generating' prd_id). We poll until ready,
-  // then open it in the standard PRD page (same mechanism as opening a PRD
-  // artifact) and refresh the list so the new PRD appears.
+  // our format. The endpoint parses the file and kicks off generation, returning
+  // a 'generating' prd_id fast — so we open the chat window IMMEDIATELY and let
+  // the PRD panel poll to ready in-tab (kind:"resume"), the same surface + feel
+  // as the weekly brief's "generate PRD" flow. No blocking wait behind the
+  // button, so a slow generation never looks like a hung upload.
   const handleImport = useCallback(async (file: File) => {
     if (!activeCompany || importing) return
     setImporting(true)
     setImportError(null)
     try {
-      const { prd_id } = await prdApi.importDoc(file, activeCompany)
-      // Poll until ready (generation is a few LLM calls; cap ~3 min).
-      const deadline = Date.now() + 180_000
-      let rec = await prdApi.get(prd_id)
-      while (rec.status === "generating" && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2500))
-        rec = await prdApi.get(prd_id)
-      }
-      if (rec.status !== "ready") {
-        throw new Error(
-          rec.status === "failed"
-            ? "PRD generation failed. Please try again."
-            : "Timed out generating the PRD. It may still finish — check back shortly.",
-        )
-      }
-      // Open a chat window with the PRD in the right panel — same surface as the
-      // weekly brief's "PRD" button (openPrdTab → ChatScreen, kind:"ready").
+      const { prd_id, title } = await prdApi.importDoc(file, activeCompany)
       openPrdTab({
-        title: `PRD · ${rec.title}`,
-        source: {
-          kind: "ready",
-          prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined },
-          meta: null,
-        },
+        title: `PRD · ${title}`,
+        source: { kind: "resume", prdId: prd_id, meta: null },
       })
       refreshArtifacts()
     } catch (e) {
