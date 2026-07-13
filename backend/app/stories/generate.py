@@ -674,7 +674,13 @@ def _enrich_input(prd_input: str, all_titles: list[str], batch: list[dict]) -> s
     )
 
 
-def _enrich_batch(
+# Temperature for the enrich RETRY only. The first pass runs at 0 (deterministic
+# structured extraction); a retry at 0 would return the identical output, so the
+# retry samples at a small non-zero temperature to escape a malformed response.
+_ENRICH_RETRY_TEMPERATURE = 0.4
+
+
+def _enrich_once(
     enterprise_id: str,
     *,
     prd_input: str,
@@ -682,8 +688,9 @@ def _enrich_batch(
     batch: list[dict],
     purpose: str,
     model: Optional[str],
+    temperature: float,
 ) -> tuple[list[Story], Any]:
-    """Phase 2 (one batch): expand a subset of stubs into full canonical tickets."""
+    """One enrich call over a batch of stubs → parsed tickets + the raw result."""
     result = llm_call(
         enterprise_id=enterprise_id,
         agent="user_stories",
@@ -694,13 +701,56 @@ def _enrich_batch(
         json_schema=_SCHEMA,
         skill="user-stories",
         model=model,
-        temperature=0,
+        temperature=temperature,
         # A batch is a few tickets, not the whole PRD — a smaller budget than the
         # single path, still generous enough that a batch never truncates.
         max_tokens=16000,
         long_output=True,
     )
     return _stories_from_output(result.output), result
+
+
+def _enrich_batch(
+    enterprise_id: str,
+    *,
+    prd_input: str,
+    all_titles: list[str],
+    batch: list[dict],
+    purpose: str,
+    model: Optional[str],
+) -> tuple[list[Story], Any]:
+    """Phase 2 (one batch): expand a subset of stubs into full canonical tickets.
+
+    Retries the batch ONCE when the first pass returns fewer tickets than it has
+    stubs — the enrich contract is one ticket per stub, so a shortfall means the
+    model returned malformed items that `_stories_from_output` dropped (the class
+    of bug that failed a live generation). The retry samples at a non-zero
+    temperature (a temperature-0 retry would just repeat the bad output) and we
+    keep whichever attempt produced more tickets. Bounded to one retry so a
+    persistently-short batch never loops; a batch that still yields nothing is
+    backstopped by the whole-run single fallback in `_generate_fanout`. Each
+    batch retries on its OWN worker thread, so a retry never blocks sibling
+    batches — they keep generating in parallel."""
+    expected = len(batch)
+    stories, result = _enrich_once(
+        enterprise_id, prd_input=prd_input, all_titles=all_titles, batch=batch,
+        purpose=purpose, model=model, temperature=0,
+    )
+    if len(stories) >= expected:
+        return stories, result
+
+    logger.warning(
+        "enrich batch returned %d/%d tickets — retrying once with a fresh sample",
+        len(stories), expected,
+    )
+    retry_stories, retry_result = _enrich_once(
+        enterprise_id, prd_input=prd_input, all_titles=all_titles, batch=batch,
+        purpose=purpose, model=model, temperature=_ENRICH_RETRY_TEMPERATURE,
+    )
+    # Keep the better attempt (more tickets); a tie keeps the first (temp-0) run.
+    if len(retry_stories) > len(stories):
+        return retry_stories, retry_result
+    return stories, result
 
 
 def _generate_fanout(
