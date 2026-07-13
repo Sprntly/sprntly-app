@@ -43,6 +43,17 @@ class Settings(BaseSettings):
     # behind warming. Default 1 (warm serialized); raise via LLM_BG_CAP to
     # parallelize the per-insight PRD/evidence warm (clamped to capacity-1).
     llm_bg_cap: int = 1
+    # Ticket generation strategy. "single" (default) is one big streamed call
+    # for the whole set; when ticket_gen_fanout is true the route uses the
+    # fan-out path (plan → parallel enrich) which shards the big generation into
+    # concurrent shorter streams. Fan-out shards contend for the SAME
+    # llm_max_concurrency slots, so raising ticket_gen_max_parallel without also
+    # raising llm_max_concurrency just makes shards queue on the gate. Kept off
+    # by default until the benchmark confirms the win on the target box.
+    # Env: TICKET_GEN_FANOUT / TICKET_GEN_BATCH_SIZE / TICKET_GEN_MAX_PARALLEL.
+    ticket_gen_fanout: bool = False
+    ticket_gen_batch_size: int = 4
+    ticket_gen_max_parallel: int = 4
     # Tier 1 — process-wide cap on how many Design Agent generations may run
     # their HEAVY section (LLM recreate loop + vite build + screenshot) at once.
     # Default 1: on the 2-vCPU prod box, one generation already pins both cores
