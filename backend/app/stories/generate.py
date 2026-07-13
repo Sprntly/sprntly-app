@@ -321,6 +321,34 @@ def _clean_str_list(value: Any) -> list[str]:
     return [s for s in (str(x).strip() for x in value) if s]
 
 
+def _stories_from_output(output: Any) -> list[Story]:
+    """Parse the `stories` array from an LLM tool-call output into `Story`s,
+    tolerating a non-conforming shape.
+
+    Forced tool-use validates against the schema loosely — the model can still
+    return `stories` as a non-list, or a list with stray string/None items
+    (observed on some real PRDs). Iterating those into `Story.from_dict` blew up
+    with `'str' object has no attribute 'get'`. Skip anything that isn't a
+    titled dict (logging how many were dropped) so a malformed batch degrades to
+    fewer tickets instead of failing the whole generation."""
+    raw = (output or {}).get("stories", []) if isinstance(output, dict) else []
+    if not isinstance(raw, list):
+        logger.warning("ticket output.stories was %s, not a list — dropping",
+                       type(raw).__name__)
+        return []
+    stories: list[Story] = []
+    dropped = 0
+    for s in raw:
+        if isinstance(s, dict) and str(s.get("title") or "").strip():
+            stories.append(Story.from_dict(s))
+        else:
+            dropped += 1
+    if dropped:
+        logger.warning("dropped %d malformed ticket item(s) from a model response",
+                       dropped)
+    return stories
+
+
 @dataclass
 class Story:
     """One generated ticket — the skill's canonical ticket, tracker-agnostic
@@ -580,8 +608,7 @@ def _generate_single(
         max_tokens=32000,
         long_output=True,
     )
-    raw = (result.output or {}).get("stories", []) if result.output else []
-    stories = [Story.from_dict(s) for s in raw if s.get("title")]
+    stories = _stories_from_output(result.output)
     if stats_out is not None:
         stats_out.update(
             strategy="single",
@@ -673,9 +700,7 @@ def _enrich_batch(
         max_tokens=16000,
         long_output=True,
     )
-    raw = (result.output or {}).get("stories", []) if result.output else []
-    stories = [Story.from_dict(s) for s in raw if s.get("title")]
-    return stories, result
+    return _stories_from_output(result.output), result
 
 
 def _generate_fanout(
@@ -753,6 +778,19 @@ def _generate_fanout(
                     on_batch(list(stories), done, total)
                 except Exception:  # noqa: BLE001 — a display hiccup never breaks gen
                     logger.exception("ticket on_batch callback failed (continuing)")
+
+    # Safety net: if every enrich batch came back empty/malformed (0 tickets from
+    # a real PRD that DID plan stubs), don't hand back an empty set — fall back to
+    # the single call, which reliably returns objects. Never caches empty upstream.
+    if not stories:
+        logger.warning(
+            "fan-out enrich produced 0 tickets across %d batch(es) — falling back "
+            "to single call", len(batches),
+        )
+        return _generate_single(
+            enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
+            stats_out=stats_out,
+        )
 
     if stats_out is not None:
         stats_out.update(
