@@ -381,6 +381,38 @@ def require_company(
     )
 
 
+def company_id_for_request(
+    authorization: str | None,
+    sprntly_app_session: str | None,
+    sprntly_demo_session: str | None,
+) -> str | None:
+    """Best-effort tenant id from raw request credentials — for the LLM-key
+    binding middleware (app.middleware_llm_key). No profile lookup, never raises:
+    any non-resolvable case (no/invalid token, legacy cookie session, no or
+    ambiguous membership) returns None, leaving the request unbound (platform
+    key). Not a FastAPI dependency."""
+    try:
+        session = require_session(
+            authorization=authorization,
+            sprntly_app_session=sprntly_app_session,
+            sprntly_demo_session=sprntly_demo_session,
+        )
+    except HTTPException:
+        return None
+    user_id = session.get("sub")
+    if session.get("aud") != "supabase" or not user_id:
+        return None
+    try:
+        from app.db.companies import memberships_for_user
+
+        memberships = memberships_for_user(user_id)
+    except Exception:  # noqa: BLE001 — never break a request on a lookup error
+        return None
+    if len(memberships) == 1:
+        return memberships[0].get("company_id")
+    return None
+
+
 def require_company_from_query(
     token: str | None = Query(default=None),
 ) -> CompanyContext:

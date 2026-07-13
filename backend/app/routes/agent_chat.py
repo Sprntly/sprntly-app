@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+from functools import lru_cache
 from typing import Any
 
 from anthropic import Anthropic
@@ -60,17 +61,21 @@ _SYSTEM_PROMPT = (
 
 # Lazy-init the Anthropic client so importing this module doesn't 500 in
 # test environments without ANTHROPIC_API_KEY set.
-_client: Anthropic | None = None
+@lru_cache(maxsize=16)
+def _client_for_key(api_key: str) -> Anthropic:
+    return Anthropic(api_key=api_key, max_retries=0)
 
 
 def get_llm_client() -> Anthropic:
-    """Return the Anthropic client (lazy-initialised). Tests patch this."""
-    global _client
-    if _client is None:
-        if not settings.anthropic_api_key:
-            raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
-        _client = Anthropic(api_key=settings.anthropic_api_key, max_retries=0)
-    return _client
+    """Return the Anthropic client for the acting company (see app.llm_keys):
+    the company's own key when configured, the platform key only when allowed,
+    else raise. Tests patch this."""
+    from app.llm_keys import resolve_llm_api_key
+
+    key = resolve_llm_api_key(settings.anthropic_api_key or None)
+    if not key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
+    return _client_for_key(key)
 
 
 class ChatWithToolsIn(BaseModel):
@@ -98,7 +103,13 @@ def chat_with_tools(
         body.installation_id, company.company_id
     ):
         raise HTTPException(404, "GitHub installation not found")
-    client = get_llm_client()
+    # Bind the company's own Claude key (if configured) so this factory returns a
+    # client keyed to it; the returned client stays bound to that key for the
+    # whole tool loop below.
+    from app.llm_keys import company_llm_key
+
+    with company_llm_key(company.company_id):
+        client = get_llm_client()
     tools = registry.list_tools()
 
     messages: list[dict[str, Any]] = [

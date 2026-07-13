@@ -25,6 +25,21 @@ describe("routes — standalone connectors removed (commit A)", () => {
   })
 })
 
+describe("routes — Artifacts is its own left-nav surface", () => {
+  it("maps the artifacts screen to /artifacts", () => {
+    expect(pathForScreen("artifacts")).toBe("/artifacts")
+  })
+
+  it("resolves /artifacts back to the artifacts screen", () => {
+    expect(screenIdFromPathname("/artifacts")).toBe("artifacts")
+  })
+
+  it("keeps History (/history) as its own chats-only screen", () => {
+    expect(pathForScreen("chats")).toBe("/history")
+    expect(screenIdFromPathname("/history")).toBe("chats")
+  })
+})
+
 describe("routes — prototypePath generate-intent option", () => {
   it("appends &generate=1 after the prd param when generate intent is set", () => {
     expect(prototypePath(42, { generate: true })).toBe("/prototype?prd=42&generate=1")

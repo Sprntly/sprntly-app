@@ -12,12 +12,13 @@ import { screenIdFromPathname, SCREEN_PATH } from "../../routes"
 import { ONBOARDING_SCREENS } from "../../../types"
 
 describe("onboarding slug routing", () => {
-  it("has exactly 5 numbered steps in flow order (redesign)", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(5)
-    expect(ONBOARDING_SCREENS).toHaveLength(5)
+  it("has exactly 6 numbered steps in flow order (redesign)", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(6)
+    expect(ONBOARDING_SCREENS).toHaveLength(6)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
       "business-info",
       "workspace",
+      "api-key",
       "connectors",
       "business-context",
       "strategy",

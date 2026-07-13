@@ -39,7 +39,9 @@ export type PrdTabMeta = { briefId: number; insightIndex: number }
  *   - `ready`          — the caller already holds the PrdState (just show it)
  *   - `generate`       — kick off brief-insight PRD generation (runPrdGeneration)
  *   - `generateBacklog`— kick off backlog PRD generation (runPrdGenerationFromBacklog)
- *   - `load`           — fetch an already-generated PRD by id (loadPrdById) */
+ *   - `load`           — fetch an already-generated PRD by id (loadPrdById)
+ *   - `resume`         — poll a PRD whose generation was already kicked off
+ *                        elsewhere (Artifacts upload, chat PRD-import command) */
 export type PrdTabRequest = {
   title: string
   /** The insight's body/description text (from the originating brief finding),
@@ -48,11 +50,22 @@ export type PrdTabRequest = {
    *  brief-card paths (view/generate PRD) carry it; backlog / ready-from-content
    *  paths omit it and the body simply isn't rendered. */
   insightBody?: string
+  /** The user's typed command that opened this PRD tab (e.g. "convert this PRD
+   *  into tickets"). When set, ChatScreen seeds the new tab's thread with it +
+   *  an acknowledgment turn, so the chat shows WHY the generation started
+   *  instead of opening empty next to a spinning panel. */
+  seedQuery?: string
   source:
     | { kind: "ready"; prd: PrdState; meta: PrdTabMeta | null }
     | { kind: "generate"; meta: PrdTabMeta }
     | { kind: "generateBacklog"; backlogItemId: string }
     | { kind: "load"; prdId: number; meta: PrdTabMeta | null }
+    // Generation was ALREADY kicked off elsewhere (e.g. the PRD-import endpoint
+    // returns a 'generating' prd_id): open the tab immediately and re-enter
+    // polling in-panel until ready, rather than blocking the caller first.
+    // `openTickets` (chat "convert this PRD into tickets" over an attached
+    // document) lands the panel on the Tickets tab once the PRD is ready.
+    | { kind: "resume"; prdId: number; meta: PrdTabMeta | null; openTickets?: boolean }
 }
 
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"

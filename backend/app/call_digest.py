@@ -23,9 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
-from app.graph.gateway import llm_call
 from app.kg_ingest.pullers.fireflies import CallTranscript, fetch_calls
-from app.prompts import ASK_SYSTEM
 
 logger = logging.getLogger(__name__)
 
@@ -218,9 +216,6 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     Parses the window, fetches the calls live, and — when there are calls — runs
     voice-of-customer-report over the complete corpus. Connection/empty/error
     cases return a helpful plain message instead."""
-    # Imported lazily to avoid a module-load cycle (ask_runner → qa_agent → ...).
-    from app.ask_runner import _ASK_RESPONSE_SCHEMA
-
     window = parse_window(question)
     corpus = build_corpus(enterprise_id, window)
 
@@ -244,50 +239,36 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             "your meetings are syncing to Fireflies."
         )
 
-    # status == ok → run the VoC skill over the complete corpus.
-    system = (
-        ASK_SYSTEM
-        + "\n\nThe user asked you to summarize their customer calls. Follow the "
-        f"'{_VOC_SKILL}' skill's method over the call transcripts provided below "
-        "to produce a voice-of-customer report. These are curated, first-party "
-        "recorded calls (direct access to the user). Use ONLY the calls provided; "
-        "every quote must be real and sourced to a call; never invent counts or "
-        f"quotes. The window is {window.label} and there are {corpus.count} call(s)."
-    )
-    user = (
-        (_render_history(history))
-        + f"Question: {question}\n\n"
-        f"=== CUSTOMER CALLS — {window.label} ({corpus.count} calls) ===\n"
-        + corpus.text
+    # status == ok → run the VoC skill over the complete corpus and render the
+    # report as the pinned HTML template (structured data → fixed template; the
+    # frontend renders it in a sandboxed iframe). See app.voc_report.
+    from app import voc_report
+
+    source_line = (
+        f"=== CUSTOMER CALLS — {window.label} ({corpus.count} calls) ==="
     )
     try:
-        result = llm_call(
+        html = voc_report.build(
             enterprise_id=enterprise_id,
-            agent="qa",
-            purpose="call_digest",
+            question=(_render_history(history)) + question,
+            corpus_text=corpus.text,
+            source_line=source_line,
             model=ANSWER_MODEL,
-            system=system,
-            input=user,
-            prompt_version="qa-call-digest-v1",
-            json_schema=_ASK_RESPONSE_SCHEMA,
-            skill=_VOC_SKILL,
-            max_tokens=12000,
-        )
-        payload = (
-            result.output if isinstance(result.output, dict)
-            else {"answer": str(result.output), "key_points": [], "citations": [],
-                  "confidence": 0.5, "unanswered": ""}
         )
     except Exception:  # noqa: BLE001 — never break the chat
-        logger.exception("call-digest: VoC skill run failed for %s", enterprise_id)
+        logger.exception("call-digest: VoC report run failed for %s", enterprise_id)
         return _plain_payload(
             f"I pulled {corpus.count} call(s) for {window.label} but hit an error "
             "synthesizing the report. Please retry."
         )
 
-    payload["_skill"] = _VOC_SKILL
-    payload["_skill_action"] = f"Voice of customer · {corpus.count} calls · {window.label}"
-    payload["_skill_source"] = "call-digest"
+    payload = {
+        "answer": html, "key_points": [], "citations": [],
+        "confidence": 0.6, "unanswered": "",
+        "_skill": _VOC_SKILL,
+        "_skill_action": f"Voice of customer · {corpus.count} calls · {window.label}",
+        "_skill_source": "call-digest",
+    }
     return payload
 
 

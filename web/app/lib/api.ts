@@ -415,6 +415,11 @@ export type PrdRecord = {
   status: "generating" | "ready" | "failed"
   error?: string | null
   variant?: string
+  /** How this PRD was created — returned by the GET routes' `select("*")`.
+   *  Only `'brief'` PRDs carry their own research Evidence (keyed at
+   *  `(brief_id, insight_index)`); `'backlog'` and `'upload'` PRDs have none.
+   *  Absent on legacy rows — treat missing as `'brief'` (the DB default). */
+  source?: "brief" | "backlog" | "upload"
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable
@@ -1278,6 +1283,17 @@ export const prdApi = {
       backlog_item_id: backlogItemId,
       force,
     }),
+  /** Import an existing PRD from an uploaded file (PDF/PPT/DOCX/…). The backend
+   *  parses it to text and re-lays-it-out into our format via the prd-author
+   *  skill. Same fire-and-forget contract as `generate`: returns a prd_id to
+   *  poll via prdApi.get(id) until status === 'ready'. `dataset` is the company
+   *  slug the PRD belongs to. */
+  importDoc: (file: File, dataset: string) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    form.append("dataset", dataset)
+    return api.post<PrdStartResponse>("/v1/prd/import", form)
+  },
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
   get: (id: number) => api.get<PrdRecord>(`/v1/prd/${id}`),
   /** Fetch the latest ready PRD for a dataset/company slug. 404 if none. */
@@ -2360,6 +2376,25 @@ export type TeamMemberRecord = {
 export const teamApi = {
   /** Fetch all company members enriched with profile data. */
   list: () => api.get<{ members: TeamMemberRecord[] }>("/v1/team/members"),
+}
+
+// ── Admin (owner/admin only): per-company Claude API key ──
+// When configured, ALL of the company's Claude LLM calls use THIS key instead
+// of the platform key. The full key is never returned — reads carry a masked
+// preview only.
+
+export type LlmKeyStatus = { configured: boolean; masked: string | null }
+
+export const adminApi = {
+  /** Current key status (masked preview, never the full key). */
+  getLlmKey: () => api.get<LlmKeyStatus>("/v1/admin/llm-key"),
+  /** Store / replace the company Claude key. */
+  setLlmKey: (apiKey: string) =>
+    api.put<LlmKeyStatus>("/v1/admin/llm-key", { api_key: apiKey }),
+  /** Remove the key (revert to the platform key). */
+  deleteLlmKey: () => api.delete<LlmKeyStatus>("/v1/admin/llm-key"),
+  /** Explicit, opt-in live validation of the stored key (one cheap call). */
+  testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
 }
 
 // ── Feedback / feature-request (June 20 #13 + #A) ──

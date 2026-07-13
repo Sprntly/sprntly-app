@@ -11,7 +11,7 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, prototypeCtaLabel } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isTicketsCommand, prototypeCtaLabel } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
@@ -21,6 +21,7 @@ import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "..
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
+// resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
 import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError } from "../../../lib/runAskGeneration"
@@ -82,6 +83,49 @@ const BRIEF_TAB_ID = "brief"
 // can see they're on a new tab and switch back), and gets its real title from the
 // first message on send (see submitAsk's first-send rename).
 export const NEW_CHAT_TITLE = "New chat"
+
+// The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
+// request). Shown as the reply to the user's seeded command turn, so the chat
+// explains what the spinning panel on the right is doing and how to get back to
+// it (the PRD card above the thread hosts the View PRD button).
+function commandAckReply(req: PrdTabRequest): AskResponse {
+  const source = req.source
+  const importing = source.kind === "resume"
+  const withTickets = source.kind === "resume" && !!source.openTickets
+  const answer = withTickets
+    ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready. Use the View PRD button above to reopen the panel anytime."
+    : importing
+      ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+      : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+  return { answer, key_points: [], citations: [], confidence: 1, unanswered: "" }
+}
+
+// Attached-file chips shown under a composer. Rendered by BOTH the landing and
+// thread composers — attachments live in shared state, so a file attached on
+// the landing screen must be visible right there (the toast alone disappears in
+// seconds, which read as "the upload didn't work"), not only after first send.
+function AttachmentChips({ attachments, onRemove }: {
+  attachments: { name: string }[]
+  onRemove: (index: number) => void
+}) {
+  if (attachments.length === 0) return null
+  return (
+    <div style={{ display: "flex", gap: 6, padding: "4px 24px 0", flexWrap: "wrap" }}>
+      {attachments.map((a, i) => (
+        <span key={i} data-testid="attachment-chip" style={{
+          display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11,
+          padding: "2px 8px", borderRadius: 5, background: "var(--surface-2, #F4F1EA)",
+          color: "var(--ink-2, #5A5853)", border: "1px solid var(--line, #E8E6E0)",
+        }}>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          {a.name}
+          <button type="button" aria-label={`Remove ${a.name}`} onClick={() => onRemove(i)}
+            style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "var(--ink-4)", padding: 0, lineHeight: 1 }}>×</button>
+        </span>
+      ))}
+    </div>
+  )
+}
 
 const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
   { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View weekly brief", desc: "", target: "brief" } },
@@ -280,24 +324,38 @@ export function ChatScreen() {
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
   // composer even while another tab is still loading.
   const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
+  // PRD ids known to already have persisted tickets in the DB — flips the chat
+  // action's "Create tickets" label to "View tickets". Populated per active PRD
+  // via storiesApi.getForPrd (see effect below).
+  const [prdsWithTickets, setPrdsWithTickets] = useState<ReadonlySet<number>>(new Set())
+  const checkedTicketPrdsRef = useRef<Set<number>>(new Set())
   // Composer busy/disabled + "thinking" indicator reflect ONLY the active tab's
   // in-flight status. Another tab being mid-ask must not disable this composer.
   const busy = isComposerBusy(busyTabs, activeTabId)
   const [showSlash, setShowSlash] = useState(false)
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
-  const [attachments, setAttachments] = useState<{ name: string; content: string }[]>([])
+  // `file` is set for document formats (.pdf/.pptx/.docx/.doc): those can't be
+  // inlined as text, so the original File is kept for the PRD-import command
+  // ("convert this PRD into tickets" → POST /v1/prd/import parses it server-side).
+  const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Attach: read file as text and add to context
+  // Attach: documents keep the real File (for the PRD-import command); plain-text
+  // formats are read as text and inlined into the next ask as context.
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files) return
     Array.from(files).forEach((file) => {
+      if (/\.(pdf|pptx|docx|doc)$/i.test(file.name)) {
+        setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
+        showToast("Attached", `"${file.name}" ready — say "convert this PRD into tickets" to import it.`)
+        return
+      }
       const reader = new FileReader()
       reader.onload = () => {
         const content = reader.result as string
@@ -423,23 +481,36 @@ export function ChatScreen() {
   // its cached PRD + the shared ContentContext, and flag the content panel to
   // slide open (deferred a commit so the route-change close can't swallow it).
   // The PRD/Evidence/Tickets all render in that panel — the tab itself is a
-  // normal chat the user can keep talking in.
-  const openPrdInTab = useCallback((req: PrdTabRequest) => {
+  // normal chat the user can keep talking in. Returns the target tab's id so
+  // the consumer can persist a seeded command turn against it.
+  const openPrdInTab = useCallback((req: PrdTabRequest): string => {
     const { title, source } = req
     const meta = source.kind === "generateBacklog" ? null : source.meta
     const existing = tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    // A command phrasing opened this tab ("convert this PRD into tickets",
+    // "generate a PRD"): seed the thread with the user's message + an
+    // acknowledgment, so the chat shows WHY a generation is running instead of
+    // sitting empty next to the spinning panel.
+    const seedTurn: ThreadTurn | null = req.seedQuery
+      ? { id: `seed-${Date.now()}`, query: req.seedQuery, reply: commandAckReply(req) }
+      : null
     if (existing) {
       setActiveTabId(existing.id)
       // Backfill the insight body onto an already-open tab that lacks one (e.g. a
       // tab created before this field existed, or opened via a path that didn't
       // carry it) so reopening the insight surfaces its content, not just a title.
-      if (req.insightBody && !existing.insightBody) {
-        setTabs((prev) => prev.map((t) => t.id === existing.id ? { ...t, insightBody: req.insightBody ?? null } : t))
+      // A re-issued command appends its turn to the existing thread.
+      if ((req.insightBody && !existing.insightBody) || seedTurn) {
+        setTabs((prev) => prev.map((t) => t.id === existing.id ? {
+          ...t,
+          insightBody: t.insightBody ?? req.insightBody ?? null,
+          thread: seedTurn ? [...t.thread, seedTurn] : t.thread,
+        } : t))
       }
     } else {
       setTabs((prev) => [...prev, {
-        id: tabId, title, thread: [], dbConvId: null, briefMeta: meta,
+        id: tabId, title, thread: seedTurn ? [seedTurn] : [], dbConvId: null, briefMeta: meta,
         insightBody: req.insightBody ?? null, prdId: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
       }])
@@ -453,6 +524,7 @@ export function ChatScreen() {
     // prior conversation, so we skip — their prd_id is stamped on first send.
     const knownPrdId = source.kind === "ready" ? source.prd.prd_id
       : source.kind === "load" ? source.prdId
+      : source.kind === "resume" ? source.prdId
       : null
     if (knownPrdId != null) void hydratePrdThread(tabId, knownPrdId)
 
@@ -460,16 +532,16 @@ export function ChatScreen() {
     // one) — don't regenerate/re-fetch an already-open PRD.
     if (existing?.prd && source.kind !== "ready") {
       setContent({ prd: existing.prd, prdMeta: existing.briefMeta, prdGenerating: false })
-      return
+      return tabId
     }
     // Caller already holds the PRD — show it immediately, no async work.
     if (source.kind === "ready") {
       setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: source.prd, prdId: source.prd.prd_id, briefMeta: source.meta } : t))
       setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
-      return
+      return tabId
     }
-    // generate | generateBacklog | load — kick off, show the panel's spinner,
-    // then land the result on the tab (and shared content while it's active).
+    // generate | generateBacklog | load | resume — kick off, show the panel's
+    // spinner, then land the result on the tab (and shared content while active).
     setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, briefMeta: meta, prdGenerating: true } : t))
     setContent({ prd: null, prdMeta: meta, prdGenerating: true })
     void (async () => {
@@ -477,10 +549,18 @@ export function ChatScreen() {
         const result =
           source.kind === "generate" ? await runPrdGeneration(source.meta)
           : source.kind === "generateBacklog" ? await runPrdGenerationFromBacklog(source.backlogItemId)
+          : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined)
           : await loadPrdById(source.prdId)
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+          // "convert this PRD into tickets": the user asked for TICKETS — once the
+          // imported PRD is ready, switch the panel to the Tickets tab (which
+          // kicks off user-stories generation for it). Only while this tab is
+          // still active — never yank the panel out from under another tab.
+          if (source.kind === "resume" && source.openTickets && activeTabIdRef.current === tabId) {
+            openContentPanel("tickets")
+          }
           // The prd_id was UNKNOWN upfront (generate | generateBacklog — including
           // "View PRD" find-or-create, which resolves an EXISTING PRD). Now that we
           // have it, rehydrate the tab's chat by prd_id. New PRDs return no
@@ -498,7 +578,8 @@ export function ChatScreen() {
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
-  }, [setContent, showToast, hydratePrdThread])
+    return tabId
+  }, [setContent, showToast, hydratePrdThread, openContentPanel])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
@@ -870,7 +951,7 @@ export function ChatScreen() {
   // openPrdTab's generate path is find-or-create (POST /v1/prd/generate reuses an
   // existing DB PRD when one exists), so an already-generated PRD is served from
   // the DB rather than regenerated.
-  const prdCommandFlow = useCallback(async () => {
+  const prdCommandFlow = useCallback(async (seedQuery?: string) => {
     try {
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
@@ -880,6 +961,7 @@ export function ChatScreen() {
       }
       openPrdTab({
         title: "PRD · Weekly brief",
+        seedQuery,
         source: { kind: "generate", meta: { briefId: brief.id, insightIndex: 0 } },
       })
     } catch (e) {
@@ -887,22 +969,71 @@ export function ChatScreen() {
     }
   }, [activeCompany, openPrdTab, showToast])
 
+  // A command phrasing over an ATTACHED DOCUMENT is the chat entry to the
+  // PRD-import flow: upload the doc to POST /v1/prd/import — the same conversion
+  // the Artifacts "Upload PRD" button uses (parse to text, faithful re-layout
+  // into the chat-PRD format) — then open the imported PRD as its own chat tab.
+  // With `openTickets` ("convert this PRD into tickets") the panel lands on the
+  // Tickets tab once the PRD is ready, which generates user stories for it.
+  const importPrdCommandFlow = useCallback(async (file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
+    try {
+      const { prdApi } = await import("../../../lib/api")
+      const start = await prdApi.importDoc(file, activeCompany)
+      openPrdTab({
+        title: start.title || file.name,
+        seedQuery: opts.seedQuery,
+        source: { kind: "resume", prdId: start.prd_id, meta: null, openTickets: opts.openTickets },
+      })
+    } catch (e) {
+      showToast("PRD import failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+    }
+  }, [activeCompany, openPrdTab, showToast])
+
   const submitAsk = useCallback(
     async (rawQuery: string) => {
-      // A "generate a PRD" phrasing is a command — open the PRD tab from the
-      // brief's top insight instead of sending it to the ask agent (which would
-      // answer with a raw prd-author HTML dump). Intercept before any tab/ask work.
-      if (isPrdCommand(rawQuery.trim())) {
-        void prdCommandFlow()
+      const trimmed = rawQuery.trim()
+      // Command phrasings are COMMANDS, not questions for the ask agent —
+      // intercept before any tab/ask work. Tickets is checked FIRST: "create
+      // tickets from this PRD" matches the PRD rule too, but the user asked for
+      // tickets. With a document attached, either phrasing imports the doc as a
+      // PRD; "…tickets" additionally lands on the Tickets tab when it's ready.
+      const docFile = attachments.find((a) => a.file)?.file ?? null
+      if (isTicketsCommand(trimmed)) {
+        if (docFile) {
+          setAttachments([])
+          void importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+          return
+        }
+        // No document: mirror the reply-footer "Create tickets" action when this
+        // tab already carries a PRD. Otherwise fall through to the ask agent
+        // (the user-stories skill answers in markdown, as before).
+        const tab = activeTabId ? tabsRef.current.find((t) => t.id === activeTabId) : undefined
+        if (tab?.prd) {
+          setContent({ prd: tab.prd, prdMeta: tab.briefMeta })
+          openContentPanel("tickets")
+          return
+        }
+      } else if (isPrdCommand(trimmed)) {
+        if (docFile) {
+          setAttachments([])
+          void importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+          return
+        }
+        // No document — open the PRD tab from the brief's top insight instead of
+        // sending it to the ask agent (which would answer with a raw prd-author
+        // HTML dump).
+        void prdCommandFlow(trimmed)
         return
       }
-      // Append attached file content as context
-      let query = rawQuery.trim()
-      if (attachments.length > 0) {
-        const ctx = attachments.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n")
+      // Append attached file content as context (text attachments only —
+      // document attachments exist for the import command and have no text form)
+      let query = trimmed
+      const textAttachments = attachments.filter((a) => !a.file)
+      if (textAttachments.length > 0) {
+        const ctx = textAttachments.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n")
         query = `${query}\n\n[Attached files]\n${ctx}`
-        setAttachments([]) // clear after sending
       }
+      if (attachments.length > 0) setAttachments([]) // clear after sending
       if (query.length < 1) return
       // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
       // before doing any work. (Authoritative per-tab guard happens once
@@ -989,7 +1120,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, finalizeConversationTurn, openTab, prdCommandFlow, pushPendingConversation, showToast],
+    [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdCommandFlow, pushPendingConversation, setContent, showToast],
   )
 
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
@@ -1014,8 +1145,16 @@ export function ChatScreen() {
     if (!pendingPrdTab) return
     const req = pendingPrdTab
     setPendingPrdTab(null)
-    openPrdInTab(req)
-  }, [pendingPrdTab, setPendingPrdTab, openPrdInTab])
+    const tabId = openPrdInTab(req)
+    // A command-seeded turn (already rendered in the tab's thread by
+    // openPrdInTab) also lands in the conversations rail + Supabase, so the
+    // exchange survives a reload like any other chat turn.
+    if (req.seedQuery) {
+      const turnId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      pushPendingConversation(turnId, req.seedQuery, tabId)
+      finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
+    }
+  }, [pendingPrdTab, setPendingPrdTab, openPrdInTab, pushPendingConversation, finalizeConversationTurn])
 
   // Slide the content panel open on the commit AFTER openPrdInTab flags it. The
   // deferral matters when the PRD was opened from another surface: openPrdTab
@@ -1325,7 +1464,10 @@ export function ChatScreen() {
   // anchors the chat to its insight and hosts the Generate/View PRD + prototype
   // actions, so an insight-bound tab always shows the thread view (never the
   // generic "Welcome back" landing) even before the user has sent anything.
-  const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta)
+  // Also shown while a PRD is still GENERATING (import/resume tabs carry no
+  // briefMeta and no prd yet) — the card's button reads "Generating PRD…" and
+  // flips to "View PRD" on landing, so the panel is always reopenable from chat.
+  const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta || activeTab?.prdGenerating)
   const showThreadView = hasThread || showInsightMsg
   // The tab title is "PRD · <insight>"; the message shows the insight sentence on
   // its own (the "PRD" kind is already a chip), so strip the redundant prefix.
@@ -1347,6 +1489,26 @@ export function ChatScreen() {
   // know — but only for an insight-bound tab that has no PRD loaded on it yet
   // (a tab already carrying its prd is authoritative, no wait needed).
   const chatPrdCtaWaiting = !chatPrdExists && !!activeTab?.briefMeta && chatMapLoading
+  // Does the active tab's PRD already have persisted tickets? Check once per PRD
+  // (cache-read only, no generation) so the action reads "View tickets" for a PRD
+  // that's already been broken into stories, else "Create tickets".
+  const activeTicketPrdId = activeTab?.prdId ?? null
+  useEffect(() => {
+    if (activeTicketPrdId == null || checkedTicketPrdsRef.current.has(activeTicketPrdId)) return
+    checkedTicketPrdsRef.current.add(activeTicketPrdId)
+    let cancelled = false
+    void (async () => {
+      try {
+        const { storiesApi } = await import("../../../lib/api")
+        const cache = await storiesApi.getForPrd(activeTicketPrdId)
+        if (!cancelled && cache.status === "ready" && cache.stories.length > 0) {
+          setPrdsWithTickets((prev) => new Set(prev).add(activeTicketPrdId))
+        }
+      } catch { /* non-fatal: default to "Create tickets" */ }
+    })()
+    return () => { cancelled = true }
+  }, [activeTicketPrdId])
+  const chatTicketsExist = activeTicketPrdId != null && prdsWithTickets.has(activeTicketPrdId)
   const displayChips = useMemo(() => {
     const chips = buildHomeChips(homeCards, starters)
     return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
@@ -1529,7 +1691,7 @@ export function ChatScreen() {
                         />
                         <div className="chat-home-composer-footer">
                           <div className="chat-home-composer-actions">
-                            <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx" style={{ display: "none" }} onChange={handleFileSelect} />
+                            <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx" style={{ display: "none" }} onChange={handleFileSelect} />
                             <button type="button" className="chat-home-action-btn" aria-label="Attach file" onClick={() => fileInputRef.current?.click()}>
                               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                                 <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
@@ -1547,6 +1709,9 @@ export function ChatScreen() {
                             <IconSendUp size={16} />
                           </button>
                         </div>
+                        {/* Attached files preview — the landing composer must show
+                            what's attached too, not rely on the transient toast */}
+                        <AttachmentChips attachments={attachments} onRemove={(i) => setAttachments((p) => p.filter((_, idx) => idx !== i))} />
                       </div>
                       {showChipRow ? (
                         <div className="home-chip-row home-chip-row--under-chat" role="list">
@@ -1681,7 +1846,10 @@ export function ChatScreen() {
                               />
                             ) : null}
                           </div>
-                          {isLast && turn.reply ? (
+                          {/* Skip the row when the insight/PRD card is shown at the
+                              top of the thread — it already hosts these actions, and
+                              rendering both reads as duplicate button noise. */}
+                          {isLast && turn.reply && !showInsightMsg ? (
                             <div className="bc-actions">
                               <button
                                 type="button"
@@ -1706,7 +1874,7 @@ export function ChatScreen() {
                                 }}
                                 title={!activeTab?.prd ? "Generate a PRD first" : undefined}
                               >
-                                Create tickets
+                                {chatTicketsExist ? "View tickets" : "Create tickets"}
                               </button>
                               <button
                                 type="button"
@@ -1744,30 +1912,6 @@ export function ChatScreen() {
                 there's never a double composer. */}
             {showThreadView ? (
               <div className="bc-dock">
-                {/* Floating "Create ticket" chip — only when the PRD rail is open
-                    (it generates tickets from that PRD), else it's a hanging button. */}
-                {thread.length > 0 && thread[thread.length - 1].reply && !busy && contentPanelTab === "prd" ? (
-                  <div className="bc-suggest">
-                    <div className="bc-suggest-list">
-                      <button
-                        type="button"
-                        className="bc-suggest-btn bc-suggest-btn--primary"
-                        disabled={!!activeTab?.prdGenerating || !activeTab?.prd}
-                        onClick={() => {
-                          if (activeTab?.prd) {
-                            setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-                            openContentPanel("tickets")
-                          } else {
-                            handleOpenPrd()
-                          }
-                        }}
-                      >
-                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><path d="M3 9a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v1a2 2 0 0 0 0 4v1a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-1a2 2 0 0 0 0-4z" /><path d="M13 7v10" /></svg>
-                        {activeTab?.prd ? "Create ticket" : "Generate PRD first"}
-                      </button>
-                    </div>
-                  </div>
-                ) : null}
                 {/* Slash command dropdown */}
                 {showSlash && filteredSkills.length > 0 && (
                   <div style={{
@@ -1819,7 +1963,7 @@ export function ChatScreen() {
                   />
                   <div className="bc-composer-bar">
                     <div className="bc-composer-tools">
-                      <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx" style={{ display: "none" }} onChange={handleFileSelect} />
+                      <input ref={fileInputRef} type="file" multiple accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx" style={{ display: "none" }} onChange={handleFileSelect} />
                       <button type="button" className="bc-tool" onClick={() => fileInputRef.current?.click()}>
                         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
                           <path d="M21 11.5l-8.6 8.6a5 5 0 0 1-7-7l8.5-8.5a3.3 3.3 0 0 1 4.7 4.7l-8.5 8.5a1.7 1.7 0 0 1-2.4-2.4l7.8-7.8" />
@@ -1843,22 +1987,7 @@ export function ChatScreen() {
                   </div>
                 </div>
                 {/* Attached files preview */}
-                {attachments.length > 0 && (
-                  <div style={{ display: "flex", gap: 6, padding: "4px 24px 0", flexWrap: "wrap" }}>
-                    {attachments.map((a, i) => (
-                      <span key={i} style={{
-                        display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11,
-                        padding: "2px 8px", borderRadius: 5, background: "var(--surface-2, #F4F1EA)",
-                        color: "var(--ink-2, #5A5853)", border: "1px solid var(--line, #E8E6E0)",
-                      }}>
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                        {a.name}
-                        <button type="button" onClick={() => setAttachments((p) => p.filter((_, idx) => idx !== i))}
-                          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "var(--ink-4)", padding: 0, lineHeight: 1 }}>×</button>
-                      </span>
-                    ))}
-                  </div>
-                )}
+                <AttachmentChips attachments={attachments} onRemove={(i) => setAttachments((p) => p.filter((_, idx) => idx !== i))} />
               </div>
             ) : null}
           </main>

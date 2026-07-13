@@ -291,7 +291,7 @@ export function BusinessContext() {
           applyNarratives(doc, whatItDoes, whatItCares),
         )
       }
-      await advanceOnboardingStep(workspace.id, 5)
+      await advanceOnboardingStep(workspace.id, 6)
       router.push("/onboarding/strategy")
     } catch (e) {
       setSaveError(
@@ -305,7 +305,7 @@ export function BusinessContext() {
     if (!workspace) return
     setSaving(true)
     try {
-      await advanceOnboardingStep(workspace.id, 5)
+      await advanceOnboardingStep(workspace.id, 6)
       router.push("/onboarding/strategy")
     } finally {
       setSaving(false)
@@ -316,7 +316,7 @@ export function BusinessContext() {
 
   return (
     <OnboardingChrome
-      step={4}
+      step={5}
       wideCard
       saveLabel="Saved · auto-saves"
       title={

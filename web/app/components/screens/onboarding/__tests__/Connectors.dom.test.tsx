@@ -260,7 +260,7 @@ describe("Connectors (container) — design-v4 accordion", () => {
     mountLoaded()
     fireEvent.click(screen.getByText("Continue").closest("button") as HTMLElement)
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/business-context")
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
@@ -271,7 +271,7 @@ describe("Connectors (container) — design-v4 accordion", () => {
     fireEvent.click(screen.getByText("Connect later"))
     await waitFor(() => {
       expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/business-context")
     })
   })
@@ -285,7 +285,7 @@ describe("Connectors (container) — design-v4 accordion", () => {
   it("Back routes to the workspace page", () => {
     mountLoaded()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

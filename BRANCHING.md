@@ -33,38 +33,45 @@ The four deploy workflows (`deploy-backend`, `deploy-app`, `deploy-agent`,
 `deploy-mcp`) each trigger on both branches and resolve the target env from
 `github.ref`.
 
-## Environments (DB is isolated; most secrets still shared)
+## Environments (DB SHARED with prod; app URL per-env)
 
-Staging runs against its **own Supabase project** — `sprntly-dev`
-(`ghcpqurzykyymtwtngtx`, us-east-2) — separate from prod
-(`vnfnmiauoblodxmjmaqw`). `~/Sprntly-staging/backend/.env` is a **real file**
-(prod's `.env` with the Supabase/DB/DATA_DIR/FRONTEND_URL/ALLOWED_ORIGINS keys
-overridden for dev). The workflows pick the project per branch:
+**Staging is repointed at the PROD Supabase project** (`vnfnmiauoblodxmjmaqw`) —
+same DB, same encrypted connector tokens, same OAuth callbacks — so connectors
+Just Work on staging without registering separate OAuth apps. Speed of iteration
+is the priority over environment isolation right now. The separate `sprntly-dev`
+project (`ghcpqurzykyymtwtngtx`, us-east-2) still exists but is **no longer wired
+in** (the `*_DEV` secrets are dormant).
+
+`~/Sprntly-staging/backend/.env` is a **real file**: prod's Supabase URL/keys
+(`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
+`SUPABASE_DB_PASSWORD`) with only the app-facing keys kept staging-specific
+(`FRONTEND_URL=https://staging.sprntly.ai`, `ALLOWED_ORIGINS=staging...`). The
+workflows use the prod project on BOTH branches:
 
 - **deploy-app** builds the static bundle with `NEXT_PUBLIC_SUPABASE_URL/ANON_KEY`
-  = prod on `production`, `*_DEV` on `main`.
-- **deploy-backend** migrate job runs `db push` against `SUPABASE_DB_URL` on
-  `production`, `SUPABASE_DB_URL_DEV` on `main` — staging migrations never touch
-  the prod schema.
+  = the prod project on both `main` and `production` (only `NEXT_PUBLIC_API_URL`
+  differs per env — staging points at `api.staging.sprntly.ai`).
+- **deploy-backend** migrate job runs `db push` against `SUPABASE_DB_URL` (prod)
+  on both branches; idempotent, so a staging deploy applying a migration is a
+  no-op when prod later ships the same commit.
 
-What this buys us: no prod-data pollution, no cross-env migration bleed, and
-background schedulers (weekly brief, connector refresh) run against the empty
-dev DB instead of double-firing on prod.
+What this buys us: connectors, PRDs, and all data are shared, so anything
+connected on prod is immediately usable on staging (and vice versa).
 
-Still **shared** for now (the "other secrets shared" scope): Anthropic/OpenAI
-keys, connector OAuth apps, Resend, `TOKEN_ENCRYPTION_KEY`, `JWT_SECRET`. So:
+Trade-offs (accepted for now): **no prod-data isolation** — staging writes land
+in the prod DB, and background schedulers (weekly brief, connector refresh) run
+against prod data from whichever env has `SCHEDULER_ENABLED`. Shared too:
+Anthropic/OpenAI keys, connector OAuth apps, Resend, `TOKEN_ENCRYPTION_KEY`,
+`JWT_SECRET`, `COOKIE_DOMAIN=.sprntly.ai`.
 
-- **Connector-connect (OAuth) is not staging-correct yet** — the OAuth apps'
-  redirect URIs are registered for prod hosts. `FRONTEND_URL=https://staging.sprntly.ai`
-  in the staging `.env` fixes dev *auth* email/redirect links (dev Supabase auth),
-  but third-party connector OAuth needs its own apps to be fully isolated.
-- `ALLOWED_ORIGINS` in the staging `.env` = `staging.sprntly.ai` + localhost;
-  `COOKIE_DOMAIN=.sprntly.ai` covers it.
-
-### Phase 3 (full isolation) — later
-Give staging its own connector OAuth apps + Resend + `TOKEN_ENCRYPTION_KEY`.
-Also configure the dev Supabase project's Auth (Site URL, redirect allow-list,
-SMTP) so signup/login emails work on staging.
+### Re-isolating staging (full isolation) — later
+Point the staging `.env` + the deploy workflows back at the `sprntly-dev`
+project (restore the `github.ref == production && prod || *_DEV` split in
+deploy-app / deploy-backend, and swap the four Supabase keys in
+`~/Sprntly-staging/backend/.env` back to the dev values — backups saved as
+`~/Sprntly-staging/backend/.env.bak-repoint-*`). Then give staging its own
+connector OAuth apps + Resend + `TOKEN_ENCRYPTION_KEY`, and configure the dev
+Supabase project's Auth (Site URL, redirect allow-list, SMTP).
 
 ## Prod safety
 Never deploy `production` or touch prod services/DB/DNS without explicit sign-off.

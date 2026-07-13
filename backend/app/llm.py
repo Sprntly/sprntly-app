@@ -12,6 +12,7 @@ import random
 import re
 import threading
 import time as _time
+from functools import lru_cache
 
 import anthropic
 from anthropic import Anthropic
@@ -175,22 +176,24 @@ def strip_code_fence(text: str) -> str:
     return m.group(1).strip() if m else text
 
 
-_client: Anthropic | None = None
+@lru_cache(maxsize=16)
+def _client_for_key(api_key: str) -> Anthropic:
+    """Cached Anthropic client keyed by the API key. max_retries=0: the SDK's own
+    retry layer is disabled so ours is the single source of truth."""
+    return Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=0)
 
 
 def get_client() -> Anthropic:
-    global _client
-    if _client is None:
-        if not settings.anthropic_api_key:
-            raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
-        # max_retries=0: the SDK's own retry layer is disabled so ours is the
-        # single source of truth (uniform logging + backoff policy).
-        _client = Anthropic(
-            api_key=settings.anthropic_api_key,
-            timeout=_REQUEST_TIMEOUT_S,
-            max_retries=0,
-        )
-    return _client
+    # Resolve the key for the acting company (see app.llm_keys): the company's own
+    # key when configured, the platform key only when allowed (unbound / still
+    # onboarding / contracted `use_platform_key`), else raise. Embeddings go
+    # through OpenAI and never call this factory.
+    from app.llm_keys import resolve_llm_api_key
+
+    key = resolve_llm_api_key(settings.anthropic_api_key or None)
+    if not key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
+    return _client_for_key(key)
 
 
 def _is_retryable(exc: Exception) -> bool:

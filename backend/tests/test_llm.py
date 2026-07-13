@@ -161,7 +161,8 @@ def test_call_json_cacheable_prefix_builds_content_list(stub_client):
 def test_get_client_raises_without_api_key(monkeypatch, isolated_settings):
     """If the key is unset, get_client must 500 instead of constructing a
     broken Anthropic() — that error is much harder to debug downstream."""
-    monkeypatch.setattr(llm, "_client", None)
+    # No company is bound → resolve_llm_api_key falls back to the platform key,
+    # which is empty here, so get_client must raise (see app.llm_keys).
     monkeypatch.setattr(
         isolated_settings["config"].settings, "anthropic_api_key", ""
     )

@@ -264,6 +264,69 @@ def get_notification_settings(company_id: str) -> dict:
 
 
 @retry_on_disconnect
+def get_company_llm_config(company_id: str) -> tuple[str | None, bool, bool]:
+    """Everything the key resolver (app.llm_keys) needs in one read:
+
+      (encrypted_key_or_None, use_platform_key, onboarding_complete)
+
+    `onboarding_complete` is `companies.onboarding_completed_at IS NOT NULL`. A
+    missing company row returns (None, False, False) — treated as still
+    onboarding (lenient: platform allowed) by the resolver."""
+    client = require_client()
+    result = (
+        client.table("companies")
+        .select("llm_api_key_encrypted, use_platform_key, onboarding_completed_at")
+        .eq("id", company_id)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return (None, False, False)
+    row = result.data[0]
+    cipher = row.get("llm_api_key_encrypted") or None
+    use_platform = bool(row.get("use_platform_key"))
+    onboarding_complete = row.get("onboarding_completed_at") is not None
+    return (cipher, use_platform, onboarding_complete)
+
+
+@retry_on_disconnect
+def get_llm_api_key_encrypted(company_id: str) -> str | None:
+    """Read a company's Fernet-encrypted Claude API key ciphertext, or None when
+    unset. Decryption happens at the point of use (app.llm_keys); this returns
+    the raw ciphertext exactly as stored."""
+    client = require_client()
+    result = (
+        client.table("companies")
+        .select("llm_api_key_encrypted")
+        .eq("id", company_id)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        return None
+    return result.data[0].get("llm_api_key_encrypted") or None
+
+
+@retry_on_disconnect
+def set_llm_api_key_encrypted(company_id: str, cipher: str) -> None:
+    """Store a company's Fernet-encrypted Claude API key (ciphertext only — the
+    column never holds plaintext)."""
+    client = require_client()
+    client.table("companies").update(
+        {"llm_api_key_encrypted": cipher}
+    ).eq("id", company_id).execute()
+
+
+@retry_on_disconnect
+def clear_llm_api_key(company_id: str) -> None:
+    """Remove a company's Claude API key (revert to the platform key)."""
+    client = require_client()
+    client.table("companies").update(
+        {"llm_api_key_encrypted": None}
+    ).eq("id", company_id).execute()
+
+
+@retry_on_disconnect
 def memberships_for_user(user_id: str) -> list[dict]:
     """All company memberships for a Supabase user id.
 

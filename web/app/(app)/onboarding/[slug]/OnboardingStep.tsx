@@ -3,6 +3,7 @@
 import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import {
+  ApiKey,
   BusinessInfo,
   Connectors,
   BusinessContext,
@@ -16,15 +17,17 @@ import {
 
 /**
  * The ordered onboarding step list — the single source of truth pairing each
- * semantic slug with its screen component, in flow order (5-step redesign):
+ * semantic slug with its screen component, in flow order (6-step redesign):
  *
  *   1. business-info     → BusinessInfo    (onb1: product + pick-3 metrics;
  *                                           kicks off the website analysis in the
  *                                           background on Continue)
  *   2. workspace         → Workspace       (onbws: slim, name-only — continues)
- *   3. connectors        → Connectors      (onb4: connect your tools)
- *   4. business-context  → BusinessContext (onbctx: auto-drafted, editable)
- *   5. strategy          → Strategy        (onbstrat: priorities + roadmap doc;
+ *   3. api-key           → ApiKey          (company Claude key, BEFORE connectors
+ *                                           so the KG build runs on their key)
+ *   4. connectors        → Connectors      (onb4: connect your tools)
+ *   5. business-context  → BusinessContext (onbctx: auto-drafted, editable)
+ *   6. strategy          → Strategy        (onbstrat: priorities + roadmap doc;
  *                                           the FINAL step — completes onboarding)
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
@@ -36,6 +39,7 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
 }> = [
   { slug: "business-info", Component: BusinessInfo },
   { slug: "workspace", Component: Workspace },
+  { slug: "api-key", Component: ApiKey },
   { slug: "connectors", Component: Connectors },
   { slug: "business-context", Component: BusinessContext },
   { slug: "strategy", Component: Strategy },

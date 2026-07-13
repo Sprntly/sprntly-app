@@ -55,6 +55,7 @@ export function prdStateFromRecord(rec: PrdRecord): PrdState {
     llmPart: rec.llm_part,
     briefId: rec.brief_id,
     insightIndex: rec.insight_index,
+    source: rec.source,
   }
 }
 

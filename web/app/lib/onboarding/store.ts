@@ -61,6 +61,7 @@ function rowToCompany(
     // valid step instead of crashing.
     onboarding_step: clampStep(Number(row.onboarding_step) || 1),
     onboarding_completed_at: (row.onboarding_completed_at as string | null) ?? null,
+    use_platform_key: row.use_platform_key === true,
   }
 }
 

@@ -13,6 +13,7 @@ import { FeatureFlagsSettings } from "./settings/FeatureFlagsSettings"
 import { NotificationsSettings } from "./settings/NotificationsSettings"
 import { BillingSettings } from "./settings/BillingSettings"
 import { SecuritySettings } from "./settings/SecuritySettings"
+import { AdminSettings } from "./settings/AdminSettings"
 import { ConnectorsSettings } from "./settings/ConnectorsSettings"
 import { McpSettings } from "./settings/McpSettings"
 import { TeamSettings } from "./settings/TeamSettings"
@@ -41,6 +42,8 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
       return <BillingSettings />
     case "security":
       return <SecuritySettings />
+    case "admin":
+      return <AdminSettings />
     // Dormant — reachable by URL only; nav entries removed (commit B).
     case "strategic":
       return <StrategicSettings />

@@ -88,46 +88,47 @@ The report never ships a long recommendation list.
   `PRIORITIZATION GATE PASSED ✓ — N candidates identified · K selected · cap
   5–7 unless impacts tie at the cut · N−K routed to monitor/backlog`.
 
-## Output spec (section order is fixed)
+## Output spec (structured data → fixed template)
 
-Delivered as a document (HTML/Word style). Sections in order:
+Return the report as **structured data only** — you do NOT author HTML or CSS. A
+fixed template (`app/voc_report.py`) renders your data into the pinned design
+(`example-output.html`) and the app shows it in a sandboxed iframe. This keeps the
+design pixel-identical and the output fast to generate. Emit exactly these fields
+(schema-validated); the template supplies all layout, chips, pills, the disc
+numbering (#1/#2/#3), the `R1…` ranks, the gate line, and the CTA buttons.
 
-1. **Title + header chips** — skill name, scope note ("curated, direct-access
-   sources only"), basis chip ("volume + impact + commercial").
-2. **TL;DR panel** (designed block, not plain prose):
-   - Header strip in a light tint with the label and the **sources as chips**
-     (each source type + count, plus the time window). Light backgrounds only —
-     never a dark/heavy block.
-   - A one-sentence serif lede naming the arc of the quarter.
-   - The top findings (**#1/#2/#3**) as rows: numbered disc · **user problem in
-     bold** · one plain-language sentence · an `IMPACTS →` mono line (metric +
-     quantified delta + tier) · **VOL and SEV mini-pills right-aligned** on the
-     shared low/med/high scale. Silent killers carry 🔇 in the row.
-3. **User problems at a glance** — table with this exact column contract:
-   `User problem | Volume | Severity | Metric it impacts | By how much`
-   - Volume and Severity are **adjacent columns** with the same low/med/high
-     pill scale; the raw count sits beneath the volume pill, the justification
-     beneath the severity pill.
-   - "Metric it impacts" and "By how much" are **separate columns**. "By how
-   much" holds the quantified delta + tier, and the always-present revenue
-   line.
-   - A final long-tail row aggregates items below the reporting threshold
-     ("monitor — no metric movement claimed").
-4. **Themes — in the customer's words.** Card grid, 2 per row: user-problem
-   title · counts + persistence tag (persistent / new) · short description ·
-   2–3 **verbatim** quotes with source + date attribution · an impact box
-   restating metric + delta.
-5. **Recommendations.** Gate line first (see above), then 5–7 cards:
-   - rank (R1…) · **title = the action**
-   - **description: 1–2 plain sentences that let a reader with no context
-     understand what the recommendation actually is** — what gets built or
-     done, and what changes for the user. Never lead with ranking rationale;
-     the "why it ranks" sentence comes after the description.
-   - `IMPACTS →` mono line: metric + expected/current delta + tier.
-   - CTAs: **Generate PRD** (primary) · **Move to backlog** (ghost).
-     Investigation-only items carry backlog CTA only.
-6. **No footer.** There is no recommendation-basis block; scope and basis live
-   in the header chips, tiers are legended inline on first use.
+- **`title`** — report title naming the window (e.g. "Voice of Customer — Q2 2026").
+- **`lede`** — one sentence naming the arc of the quarter. `**bold**` spans are
+  honoured (the only markup); keep it short.
+- **`sources`** — the source chips: each source type + count, plus the time window
+  (e.g. `"17 CSM calls · ~15 accounts"`, `"42 support tickets"`, `"Apr–Jun 2026"`).
+- **`coverage`** — classification coverage note (e.g. "coverage: 94% of items tagged").
+- **`top_findings`** — the TL;DR #1/#2/#3 rows, most important first. Each:
+  `problem` (user-problem framing), `sentence` (one plain line), `impact_line`
+  (the `IMPACTS →` metric + quantified delta + tier), `vol{level,count}`,
+  `sev{level}`, `silent_killer`. `level` ∈ `low|med|high`.
+- **`problems`** — the "at a glance" table rows: `problem`, `vol{level,count}`,
+  `sev{level,note}` (note = 2–4 word justification), `metric` (the one metric it
+  impacts), `by_how_much` (quantified delta + tier), `revenue_line` +
+  `revenue_unknown` (set `true` and `revenue_line:"revenue: 🅘 unknown"` when no
+  sourced figure — never estimate), `silent_killer`.
+- **`long_tail`** — `{label, count_note}` for the aggregate row of items below the
+  reporting threshold (rendered as "monitor — no metric movement claimed").
+- **`themes`** — quote-led cards: `title` (user problem), `size_line` (counts +
+  persistence: persistent / new), `description`, `quotes[]{text, attr}` (2–3
+  **verbatim** quotes with source + date), `impact_line`, `impact_warn` (true tints
+  it amber for an at-risk metric), `silent_killer`.
+- **`gate`** — `{candidates, selected, routed}`: the true counts behind the
+  prioritization gate. The template renders the `PRIORITIZATION GATE PASSED ✓` line.
+- **`goals_note`** — the goals the recommendations were selected against (e.g.
+  "activation · NRR"), shown in the Recommendations header.
+- **`recommendations`** — ONLY the selected 5–7, ranked: `title` (= the action),
+  `description` (1–2 plain sentences a reader with no context understands — what
+  gets built and what changes for the user; ranking rationale comes AFTER),
+  `impact_line`, `investigation_only` (true → the card shows only "Move to
+  backlog"; false → "Generate PRD" + "Move to backlog").
+
+No footer: scope and basis live in the header chips; tiers are legended inline.
 
 ## Hard rules
 

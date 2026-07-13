@@ -8,7 +8,8 @@ name: Deploy app (staging + prod)
 #                                     built against https://api.sprntly.ai)
 # The app is a STATIC export, so NEXT_PUBLIC_API_URL is baked in at build time —
 # staging and prod are genuinely different bundles pointing at different API
-# hosts. The Supabase URL/anon key are shared (same project) for now.
+# hosts. The Supabase URL/anon key are SHARED (staging repointed at the prod
+# project) so connectors work on staging without separate OAuth registration.
 # Backend deploys are in deploy-backend.yml; this workflow only touches the
 # frontend bundle.
 
@@ -28,11 +29,15 @@ env:
   API_URL:  ${{ github.ref == 'refs/heads/production' && 'https://api.sprntly.ai' || 'https://api.staging.sprntly.ai' }}
   DEST_DIR: ${{ github.ref == 'refs/heads/production' && '/var/www/sprntly-app/' || '/var/www/sprntly-app-staging/' }}
   APP_HOST: ${{ github.ref == 'refs/heads/production' && 'app.sprntly.ai' || 'staging.sprntly.ai' }}
-  # Per-branch Supabase project: prod builds against the prod project, staging
-  # (main) against the separate dev project (sprntly-dev). The *_DEV secrets hold
-  # the dev project's URL + publishable anon key.
-  SUPA_URL:  ${{ github.ref == 'refs/heads/production' && secrets.NEXT_PUBLIC_SUPABASE_URL || secrets.NEXT_PUBLIC_SUPABASE_URL_DEV }}
-  SUPA_ANON: ${{ github.ref == 'refs/heads/production' && secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY || secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY_DEV }}
+  # SHARED Supabase project (staging repointed at prod): both main (staging) and
+  # production build against the SAME prod Supabase project so connectors (rows +
+  # encrypted OAuth tokens) are shared and OAuth callbacks Just Work on staging
+  # without separate app registration. Speed of iteration over env isolation for
+  # now. The *_DEV secrets (sprntly-dev project) are intentionally no longer used
+  # here — restore the `github.ref == production && prod || *_DEV` split to
+  # re-isolate staging's DB later.
+  SUPA_URL:  ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+  SUPA_ANON: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
 
 jobs:
   deploy:

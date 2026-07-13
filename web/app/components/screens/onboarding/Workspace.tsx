@@ -47,7 +47,7 @@ export function Workspace() {
     setSaving(true)
     try {
       // Persist the (optional) workspace name when it changed, advancing the
-      // resume marker to connectors (index 3 in ONBOARDING_STEP_SLUGS) in the
+      // resume marker to api-key (index 3 in ONBOARDING_STEP_SLUGS) in the
       // same write. When it's unchanged we only advance the step.
       const trimmed = name.trim()
       if (trimmed && trimmed !== workspace.display_name) {
@@ -60,7 +60,7 @@ export function Workspace() {
         const ws = await advanceOnboardingStep(workspace.id, 3)
         setWorkspace(ws)
       }
-      router.push("/onboarding/connectors")
+      router.push("/onboarding/api-key")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your workspace.")
       setSaving(false)

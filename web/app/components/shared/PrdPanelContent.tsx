@@ -110,7 +110,7 @@ export function PrdPanelContent() {
     setPrdLoading(true)
     prdApi.latest(activeCompany).then((record) => {
       if (cancelled || !record.payload_md) return
-      setContent({ prd: { ...markdownToPrdState(record.payload_md), prd_id: record.id, figma_file_key: undefined, llmPart: record.llm_part, briefId: record.brief_id, insightIndex: record.insight_index } })
+      setContent({ prd: { ...markdownToPrdState(record.payload_md), prd_id: record.id, figma_file_key: undefined, llmPart: record.llm_part, briefId: record.brief_id, insightIndex: record.insight_index, source: record.source } })
     }).catch((e) => {
       if (e instanceof ApiError && e.status === 404) return
     }).finally(() => { if (!cancelled) setPrdLoading(false) })
@@ -158,7 +158,7 @@ export function PrdPanelContent() {
   const openGeneration = useCallback(async (genId: number) => {
     try {
       const rec = await prdApi.get(genId)
-      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, llmPart: rec.llm_part, briefId: rec.brief_id, insightIndex: rec.insight_index } })
+      setContent({ prd: { ...markdownToPrdState(rec.payload_md), prd_id: rec.id, figma_file_key: undefined, llmPart: rec.llm_part, briefId: rec.brief_id, insightIndex: rec.insight_index, source: rec.source } })
       setShowVersions(false)
     } catch {
       showToast("Couldn't open version", "Failed to load that generation.")

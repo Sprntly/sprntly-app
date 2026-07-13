@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import { ArtifactsView } from "../ChatsScreen"
+import { ArtifactsView } from "../ArtifactsScreen"
 import type { ArtifactItem } from "../../../../lib/api"
 
 const PRD: ArtifactItem = {

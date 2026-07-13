@@ -30,9 +30,9 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
     expect(dat.items.map((i) => i.id)).toEqual(["connectors", "mcp"])
   })
 
-  it("Account group contains Billing and Security", () => {
+  it("Account group contains Billing, Security, and Admin", () => {
     const acct = SETTINGS_NAV.find((g) => g.groupLabel === "Account")!
-    expect(acct.items.map((i) => i.id)).toEqual(["billing", "security"])
+    expect(acct.items.map((i) => i.id)).toEqual(["billing", "security", "admin"])
   })
 
   it("uses the design-3 human labels", () => {
@@ -48,6 +48,7 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       mcp: "MCP Access",
       billing: "Billing",
       security: "Security",
+      admin: "Admin",
     })
   })
 

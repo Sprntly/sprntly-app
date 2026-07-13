@@ -7,7 +7,7 @@ import { useAuth } from "../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles } from "@tabler/icons-react"
 import { FeedbackModal } from "./FeedbackModal"
 
 interface SidebarProps {
@@ -121,6 +121,7 @@ export function Sidebar(_props: SidebarProps = {}) {
       <div className="sb-rail-nav">
         <RailItem screen="brief" icon={<IconMessageCircle size={18} />} label="Weekly brief" />
         <RailItem screen="chats" icon={<IconHistory size={18} />} label="History" />
+        <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
         {/* <RailItem screen="backlog" icon={<IconBulb size={18} />} label="Backlog Projects" /> */}
         <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates · what good looks like" />
         {/* <RailItem screen="prototype" icon={<IconPrompt size={18} />} label="Prototype" /> */}

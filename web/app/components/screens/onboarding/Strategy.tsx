@@ -216,7 +216,7 @@ export function Strategy() {
 
   return (
     <OnboardingChrome
-      step={5}
+      step={6}
       saveLabel="Saved · auto-saves"
       title={
         <>

@@ -265,8 +265,45 @@ def _resolve_grounding(
     return _corpus_grounding(dataset), None
 
 
+# PRD-import framing. The uploaded PRD text is fed as the evidence/source block
+# with an explicit FAITHFUL RE-LAYOUT instruction: the prd-author skill normally
+# authors from signals, but for an import it must restructure existing content,
+# preserving every requirement and inventing nothing. This keeps the whole
+# generation pipeline (skill, template, finalize) unchanged — only the source
+# material and its instruction differ.
+_IMPORT_SOURCE_FRAMING = """\
+IMPORTED PRD — FAITHFUL RE-LAYOUT TASK
+
+The block below is the customer's EXISTING product requirements document, \
+already written by their team and converted to text from an uploaded PDF/PPT. \
+Your job is NOT to invent a new PRD — it is to FAITHFULLY RE-LAY-OUT this \
+existing content into the template's structure and house style:
+
+- Preserve EVERY requirement, decision, metric, scope item, and constraint in \
+the source. Keep the team's own wording where it fits a section.
+- Reorganize content only so it maps onto the template's sections.
+- Do NOT fabricate requirements, evidence, metrics, or scope not present in the \
+source. If a template section has no corresponding source content, say so \
+briefly (e.g. "Not specified in the source PRD") rather than inventing.
+- The source is authoritative; where it is silent, the PRD is silent.
+
+--- BEGIN IMPORTED PRD ---
+{source}
+--- END IMPORTED PRD ---
+"""
+
+
+def _render_import_source(md: str) -> str:
+    """Wrap the uploaded PRD text in the faithful-re-layout framing used as the
+    evidence/source block on the import path."""
+    return _IMPORT_SOURCE_FRAMING.format(source=md.strip())
+
+
 def _build_context(
-    brief_id: int, insight_index: int, insight_override: dict | None = None
+    brief_id: int,
+    insight_index: int,
+    insight_override: dict | None = None,
+    import_source_md: str | None = None,
 ) -> dict:
     """Resolve everything a generation call needs, exactly once.
 
@@ -279,6 +316,12 @@ def _build_context(
     theme is NOT in brief.insights, so there is no valid insight_index to read).
     When given, insight_index is only a storage sentinel and is NOT used to index
     the brief. When None, the insight is read from brief.insights[insight_index].
+
+    `import_source_md` is the PRD-import path: the customer uploaded an existing
+    PRD (PDF/PPT) that we converted to text. When set, the source material IS
+    that text — the model faithfully re-lays-it-out into the template — so we
+    skip KG/corpus grounding entirely (trail=None, empty kg_refs). This pairs
+    with an `insight_override` carrying the uploaded title.
     """
     brief = get_brief_by_id(brief_id)
     if not brief:
@@ -305,7 +348,12 @@ def _build_context(
     # brief at insight_index); the backlog path passes the synthesized insight so
     # the trail resolves the right theme. Splitting the call keeps existing
     # monkeypatches of _resolve_grounding (3-arg) working.
-    if insight_override is not None:
+    if import_source_md is not None:
+        # PRD-import path: the customer's uploaded PRD text IS the source. Frame
+        # it for faithful re-layout and skip KG/corpus grounding (trail=None →
+        # empty kg_refs in the decision log).
+        evidence, trail = _render_import_source(import_source_md), None
+    elif insight_override is not None:
         evidence, trail = _resolve_grounding(dataset, brief, insight_index, insight)
     else:
         evidence, trail = _resolve_grounding(dataset, brief, insight_index)
@@ -464,6 +512,7 @@ def _finalize_part_a(
 async def _generate_human_prd(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
     insight_override: dict | None = None, author: str | None = None,
+    import_source_md: str | None = None,
 ) -> dict:
     """Build context, generate the human PRD (Part A only), persist + log.
 
@@ -480,7 +529,7 @@ async def _generate_human_prd(
     exact context Part A used, including the backlog `insight_override` case.
     """
     ctx = await asyncio.to_thread(
-        _build_context, brief_id, insight_index, insight_override
+        _build_context, brief_id, insight_index, insight_override, import_source_md
     )
     result_a = await asyncio.to_thread(_call_part_a, ctx, author, background)
     await asyncio.to_thread(
@@ -526,6 +575,7 @@ async def extract_input_questions_task(prd_id: int) -> None:
 async def generate_prd_and_warm(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
     insight_override: dict | None = None, author: str | None = None,
+    import_source_md: str | None = None,
 ) -> None:
     """Generate the human PRD, extract its input questions, THEN pre-warm the
     Implementation Spec (Part B).
@@ -551,7 +601,8 @@ async def generate_prd_and_warm(
     (KG retrieval + corpus load + exemplar render). None (on a failed Part A)
     lets the warm self-resolve as before."""
     ctx = await generate_prd(
-        prd_id, brief_id, insight_index, background, insight_override, author
+        prd_id, brief_id, insight_index, background, insight_override, author,
+        import_source_md,
     )
     await asyncio.gather(
         extract_input_questions_task(prd_id),
@@ -570,6 +621,7 @@ def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
 async def generate_prd(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
     insight_override: dict | None = None, author: str | None = None,
+    import_source_md: str | None = None,
 ) -> dict | None:
     """Run the human-PRD generation; update DB with result.
 
@@ -598,7 +650,8 @@ async def generate_prd(
     )
     try:
         ctx = await _generate_human_prd(
-            prd_id, brief_id, insight_index, background, insight_override, author
+            prd_id, brief_id, insight_index, background, insight_override, author,
+            import_source_md,
         )
         logger.info("PRD generation succeeded prd_id=%s", prd_id)
         return ctx

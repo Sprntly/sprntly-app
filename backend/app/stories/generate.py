@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -37,6 +39,18 @@ from app.graph.gateway import llm_call
 logger = logging.getLogger(__name__)
 
 PROMPT_VERSION = "user-stories-v4"
+# The fan-out path decomposes then enriches in parallel; version its two legs
+# distinctly so the decision log pins which method produced a given batch.
+PLAN_PROMPT_VERSION = "user-stories-plan-v1"
+ENRICH_PROMPT_VERSION = "user-stories-enrich-v1"
+
+# Fan-out defaults. A batch is one enrich call; batches run concurrently up to
+# max_parallel, itself bounded by the process-wide LLM concurrency gate
+# (app.llm._llm_gate) — so raising TICKET_GEN_MAX_PARALLEL without also raising
+# LLM_MAX_CONCURRENCY just makes batches queue on the gate. Kept small so a
+# typical PRD (≈8-16 tickets) splits into 2-4 concurrent calls.
+DEFAULT_BATCH_SIZE = 4
+DEFAULT_MAX_PARALLEL = 4
 
 # Output contract for the gateway — the skill's canonical ticket. `title`,
 # `body`, and `acceptance_criteria` stay required for backward compatibility
@@ -215,6 +229,79 @@ _SYSTEM = (
     "spike tickets. Preserve [NEED] markers verbatim in data_gaps — never invent "
     "numbers, owners, or criteria. Also mirror the user story into `body`. Return "
     "only the structured tickets."
+)
+
+# ── Fan-out: plan (decompose) then enrich (expand batches in parallel) ──
+# Phase 1 asks the SAME bound skill to enumerate the full ticket set as
+# lightweight stubs only (title + provenance anchor + one-line summary), never
+# the heavy five-section body. Small output ⇒ fast. Phase 2 expands stubs in
+# parallel batches into the full canonical ticket (_SCHEMA). Splitting the big
+# 32k-token single generation this way turns most of the wall-clock (output
+# tokens, which stream serially) into K concurrent shorter streams.
+_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "part_b_detected": {
+            "type": "boolean",
+            "description": (
+                "True when a machine-readable Part B (Implementation Spec) was "
+                "provided; enrichment will inherit acceptance criteria from it."
+            ),
+        },
+        "stubs": {
+            "type": "array",
+            "description": (
+                "The COMPLETE set of BUILD tickets for this PRD — one or more per "
+                "Part A §5 requirement row. Exhaustive: every §5 row is covered."
+            ),
+            "items": {
+                "type": "object",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "description": "Short ticket title (no key prefix). Unique within the set.",
+                    },
+                    "summary": {
+                        "type": "string",
+                        "description": "One line naming the deliverable — enough to expand later.",
+                    },
+                    "prd_section": {
+                        "type": "string",
+                        "description": "Provenance anchor, e.g. 'Part A §5 R3' (empty if none).",
+                    },
+                    "ears_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Part B EARS ids this ticket traces to (e.g. ['E1']).",
+                    },
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    "required": ["stubs"],
+}
+
+_PLAN_SYSTEM = (
+    "You are the Ticket planner. Apply the bound skill (the METHOD above) to "
+    "decompose the given PRD (or insight) into the COMPLETE list of BUILD "
+    "tickets — one or more per Part A §5 requirement row. Output ONLY a "
+    "lightweight STUB for each: title, one-line summary, the provenance anchor "
+    "(prd_section like 'Part A §5 R3'), and any Part B EARS ids it traces to. "
+    "Do NOT write descriptions, acceptance criteria, scope, or subtasks yet — "
+    "that happens in a later step. Be EXHAUSTIVE: every §5 requirement must be "
+    "covered by at least one stub, and titles must be unique. Every ticket is a "
+    "BUILD ticket. Return only the stubs."
+)
+
+_ENRICH_SYSTEM = (
+    _SYSTEM
+    + "\n\nSCOPE FOR THIS CALL: expand ONLY the tickets listed under 'Tickets to "
+    "expand in THIS batch' into full canonical tickets. The COMPLETE roster of "
+    "ticket titles across the whole PRD is given under 'Full ticket roster' so "
+    "your blocked_by / blocks reference REAL sibling titles from that roster "
+    "(never invent a dependency on a title not in the roster). Emit exactly one "
+    "ticket per stub in this batch — do not add, drop, or merge tickets."
 )
 
 # ClickUp priority is an int 1-4 (1=urgent ... 4=low). Map the skill's
@@ -444,37 +531,38 @@ def _build_input(*, prd: Optional[dict], insight: Optional[str]) -> str:
     return f"# Insight\n\n{insight or ''}"
 
 
-def generate_user_stories(
+def _call_stat(label: str, result: Any) -> dict:
+    """Per-call timing/token line for the benchmark, drawn from the LLMResult."""
+    return {
+        "label": label,
+        "latency_ms": getattr(result, "latency_ms", 0),
+        "input_tokens": getattr(result, "input_tokens", 0),
+        "output_tokens": getattr(result, "output_tokens", 0),
+        "cache_read_input_tokens": getattr(result, "cache_read_input_tokens", 0),
+        "cost_usd": getattr(result, "cost_usd", 0.0),
+        "model": getattr(result, "model", ""),
+        "prompt_version": getattr(result, "prompt_version", ""),
+        "stop_reason": getattr(result, "stop_reason", None),
+    }
+
+
+def _generate_single(
     enterprise_id: str,
     *,
-    prd_id: Optional[int] = None,
-    insight: Optional[str] = None,
-    model: Optional[str] = None,
+    prd_input: str,
+    purpose: str,
+    model: Optional[str],
+    stats_out: Optional[dict] = None,
 ) -> list[Story]:
-    """Generate tickets for a company from a PRD or a free-form insight.
-
-    Exactly one of `prd_id` / `insight` must be given. The call is bound to the
-    ticket skill and logged (agent="user_stories"). Returns a list of
-    `Story`; this NEVER writes to a tracker — that's app.stories.push.
-    """
-    if (prd_id is None) == (insight is None):
-        raise ValueError("provide exactly one of prd_id or insight")
-
-    prd: Optional[dict] = None
-    purpose = "from_insight"
-    if prd_id is not None:
-        prd = get_prd_rendered(prd_id)
-        if prd is None:
-            raise PRDNotFoundError(f"PRD {prd_id} not found")
-        purpose = "from_prd"
-
+    """Baseline: one big streamed call produces the whole ticket set."""
+    t0 = time.monotonic()
     result = llm_call(
         enterprise_id=enterprise_id,
         agent="user_stories",
         purpose=purpose,
         prompt_version=PROMPT_VERSION,
         system=_SYSTEM,
-        input=_build_input(prd=prd, insight=insight),
+        input=prd_input,
         json_schema=_SCHEMA,
         skill="user-stories",
         model=model,
@@ -494,6 +582,256 @@ def generate_user_stories(
     )
     raw = (result.output or {}).get("stories", []) if result.output else []
     stories = [Story.from_dict(s) for s in raw if s.get("title")]
+    if stats_out is not None:
+        stats_out.update(
+            strategy="single",
+            wall_ms=int((time.monotonic() - t0) * 1000),
+            n_stories=len(stories),
+            calls=[_call_stat("generate", result)],
+        )
+    return stories
+
+
+def _plan_tickets(
+    enterprise_id: str,
+    *,
+    prd_input: str,
+    purpose: str,
+    model: Optional[str],
+) -> tuple[list[dict], Any]:
+    """Phase 1: enumerate the full ticket set as lightweight stubs (fast)."""
+    result = llm_call(
+        enterprise_id=enterprise_id,
+        agent="user_stories",
+        purpose=f"{purpose}_plan",
+        prompt_version=PLAN_PROMPT_VERSION,
+        system=_PLAN_SYSTEM,
+        input=prd_input,
+        json_schema=_PLAN_SCHEMA,
+        skill="user-stories",
+        model=model,
+        temperature=0,
+        # Stubs are small; a normal budget is plenty and keeps this leg fast.
+        max_tokens=8000,
+    )
+    stubs = (result.output or {}).get("stubs", []) if result.output else []
+    clean = [
+        s for s in stubs
+        if isinstance(s, dict) and str(s.get("title") or "").strip()
+    ]
+    return clean, result
+
+
+def _enrich_input(prd_input: str, all_titles: list[str], batch: list[dict]) -> str:
+    """Assemble the enrich-batch input: the full PRD, the complete title roster
+    (for cross-ticket dependency linking), and the stubs to expand now."""
+    roster = "\n".join(f"- {t}" for t in all_titles)
+    lines: list[str] = []
+    for s in batch:
+        anchor = str(s.get("prd_section") or "").strip()
+        ears = ", ".join(str(e) for e in (s.get("ears_ids") or []))
+        summary = str(s.get("summary") or "").strip()
+        meta = " | ".join(x for x in (anchor, f"EARS: {ears}" if ears else "") if x)
+        head = f"- {s.get('title')}"
+        if summary:
+            head += f" — {summary}"
+        if meta:
+            head += f"  ({meta})"
+        lines.append(head)
+    return (
+        f"{prd_input}\n\n"
+        f"## Full ticket roster (for dependency linking; do not expand these here)\n"
+        f"{roster}\n\n"
+        f"## Tickets to expand in THIS batch\n"
+        + "\n".join(lines)
+    )
+
+
+def _enrich_batch(
+    enterprise_id: str,
+    *,
+    prd_input: str,
+    all_titles: list[str],
+    batch: list[dict],
+    purpose: str,
+    model: Optional[str],
+) -> tuple[list[Story], Any]:
+    """Phase 2 (one batch): expand a subset of stubs into full canonical tickets."""
+    result = llm_call(
+        enterprise_id=enterprise_id,
+        agent="user_stories",
+        purpose=f"{purpose}_enrich",
+        prompt_version=ENRICH_PROMPT_VERSION,
+        system=_ENRICH_SYSTEM,
+        input=_enrich_input(prd_input, all_titles, batch),
+        json_schema=_SCHEMA,
+        skill="user-stories",
+        model=model,
+        temperature=0,
+        # A batch is a few tickets, not the whole PRD — a smaller budget than the
+        # single path, still generous enough that a batch never truncates.
+        max_tokens=16000,
+        long_output=True,
+    )
+    raw = (result.output or {}).get("stories", []) if result.output else []
+    stories = [Story.from_dict(s) for s in raw if s.get("title")]
+    return stories, result
+
+
+def _generate_fanout(
+    enterprise_id: str,
+    *,
+    prd_input: str,
+    purpose: str,
+    model: Optional[str],
+    batch_size: int,
+    max_parallel: int,
+    stats_out: Optional[dict] = None,
+) -> list[Story]:
+    """Fan-out: plan the ticket set, then expand batches in parallel.
+
+    Falls back to the single path on an empty plan so we never regress to zero
+    tickets (a real PRD always yields some). Dependency links stay correct
+    because every batch is given the full title roster.
+    """
+    t0 = time.monotonic()
+    stubs, plan_result = _plan_tickets(
+        enterprise_id, prd_input=prd_input, purpose=purpose, model=model
+    )
+    if not stubs:
+        logger.warning("fan-out plan returned 0 stubs — falling back to single call")
+        return _generate_single(
+            enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
+            stats_out=stats_out,
+        )
+
+    bs = max(1, batch_size)
+    batches = [stubs[i : i + bs] for i in range(0, len(stubs), bs)]
+    all_titles = [str(s.get("title")).strip() for s in stubs]
+
+    enriched: list[tuple[list[Story], Any]] = []
+    workers = max(1, min(max_parallel, len(batches)))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [
+            ex.submit(
+                _enrich_batch,
+                enterprise_id,
+                prd_input=prd_input,
+                all_titles=all_titles,
+                batch=b,
+                purpose=purpose,
+                model=model,
+            )
+            for b in batches
+        ]
+        for f in as_completed(futs):
+            enriched.append(f.result())
+
+    # Merge, dedup by content id (stable_id) — batches are disjoint by design,
+    # but a stub restated across batches would otherwise double-count.
+    seen: set[str] = set()
+    stories: list[Story] = []
+    for batch_stories, _ in enriched:
+        for s in batch_stories:
+            key = s.stable_id()
+            if key in seen:
+                continue
+            seen.add(key)
+            stories.append(s)
+
+    if stats_out is not None:
+        stats_out.update(
+            strategy="fanout",
+            wall_ms=int((time.monotonic() - t0) * 1000),
+            n_stubs=len(stubs),
+            n_batches=len(batches),
+            batch_size=bs,
+            max_parallel=workers,
+            n_stories=len(stories),
+            calls=(
+                [_call_stat("plan", plan_result)]
+                + [_call_stat(f"enrich[{i}]", r) for i, (_, r) in enumerate(enriched)]
+            ),
+        )
+    return stories
+
+
+def generate_from_input(
+    enterprise_id: str,
+    *,
+    prd_input: str,
+    purpose: str = "from_prd",
+    model: Optional[str] = None,
+    strategy: str = "single",
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    max_parallel: int = DEFAULT_MAX_PARALLEL,
+    stats_out: Optional[dict] = None,
+) -> list[Story]:
+    """Generate tickets from an already-assembled model input string.
+
+    The strategy-dispatch core shared by the DB-backed `generate_user_stories`
+    and the benchmark harness (which feeds a PRD markdown fixture directly, no
+    DB). `strategy` is "single" (one big call, the baseline) or "fanout" (plan →
+    parallel enrich). Never persists — callers own persistence.
+    """
+    if strategy == "fanout":
+        return _generate_fanout(
+            enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
+            batch_size=batch_size, max_parallel=max_parallel, stats_out=stats_out,
+        )
+    return _generate_single(
+        enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
+        stats_out=stats_out,
+    )
+
+
+def generate_user_stories(
+    enterprise_id: str,
+    *,
+    prd_id: Optional[int] = None,
+    insight: Optional[str] = None,
+    model: Optional[str] = None,
+    strategy: str = "single",
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    max_parallel: int = DEFAULT_MAX_PARALLEL,
+    stats_out: Optional[dict] = None,
+) -> list[Story]:
+    """Generate tickets for a company from a PRD or a free-form insight.
+
+    Exactly one of `prd_id` / `insight` must be given. The call is bound to the
+    ticket skill and logged (agent="user_stories"). Returns a list of
+    `Story`; this NEVER writes to a tracker — that's app.stories.push.
+
+    `strategy` selects the generation path: "single" (baseline, one big call) or
+    "fanout" (decompose then enrich batches in parallel). Output contract is
+    identical; only latency differs.
+    """
+    if (prd_id is None) == (insight is None):
+        raise ValueError("provide exactly one of prd_id or insight")
+
+    prd: Optional[dict] = None
+    purpose = "from_insight"
+    if prd_id is not None:
+        prd = get_prd_rendered(prd_id)
+        if prd is None:
+            raise PRDNotFoundError(f"PRD {prd_id} not found")
+        purpose = "from_prd"
+
+    stats: dict = {} if stats_out is None else stats_out
+    stories = generate_from_input(
+        enterprise_id,
+        prd_input=_build_input(prd=prd, insight=insight),
+        purpose=purpose,
+        model=model,
+        strategy=strategy,
+        batch_size=batch_size,
+        max_parallel=max_parallel,
+        stats_out=stats,
+    )
+    # Resolved model / prompt-version for the decision log come from the last
+    # underlying call (both paths populate `stats["calls"]`).
+    _calls = stats.get("calls") or [{}]
+    _last = _calls[-1]
 
     # Persist the generated set for a PRD so the Tickets tab can serve it without
     # re-running this multi-minute call until the PRD content actually changes.
@@ -508,10 +846,22 @@ def generate_user_stories(
         try:
             from app.db.prd_tickets import hash_prd_row, save_tickets
 
+            # Hash the row AS IT STANDS NOW, not the pre-call snapshot: the
+            # impl-spec pre-warm kicked off with this job fills `llm_part`
+            # while the (multi-minute) ticket call runs, so the snapshot's
+            # hash never matches a later read and every panel open spuriously
+            # regenerated ("The PRD changed" with no actual edit). If the PRD
+            # BODY (title / Part A) genuinely changed mid-run, keep the
+            # snapshot hash — the set is truly stale and must regenerate.
+            current = get_prd_rendered(prd_id)
+            body_changed = current is None or (
+                (current.get("title"), current.get("payload_md"))
+                != (prd.get("title"), prd.get("payload_md"))
+            )
             save_tickets(
                 enterprise_id,
                 prd_id,
-                hash_prd_row(prd),  # hash the row we already rendered above
+                hash_prd_row(prd if body_changed or current is None else current),
                 [s.to_dict() for s in stories],
             )
         except Exception:  # noqa: BLE001
@@ -531,11 +881,12 @@ def generate_user_stories(
             enterprise_id=enterprise_id,
             agent="user_stories",
             decision_type="generate_user_stories",
-            factors={"prd_id": prd_id, "from_insight": insight is not None},
+            factors={"prd_id": prd_id, "from_insight": insight is not None,
+                     "strategy": stats.get("strategy", strategy)},
             output={"count": len(stories),
                     "titles": [s.title for s in stories]},
-            model=result.model,
-            prompt_version=result.prompt_version,
+            model=_last.get("model", model),
+            prompt_version=_last.get("prompt_version", PROMPT_VERSION),
         )
     except Exception:  # noqa: BLE001
         logger.exception("user_stories decision log write failed (continuing)")

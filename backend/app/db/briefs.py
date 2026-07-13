@@ -71,6 +71,52 @@ def save_brief(
     return resp.data[0]["id"]
 
 
+# The fixed week_label that identifies the per-dataset anchor brief uploaded PRDs
+# hang off. Uploaded PRDs have no weekly brief / KG lineage, but prds.brief_id is
+# NOT NULL — rather than make it nullable (a schema decoupling), every uploaded
+# PRD for a company anchors to ONE synthetic brief. payload._uploads_anchor also
+# marks it for humans reading the row; the get-or-create keys on the plain
+# (dataset, week_label, is_current=false) columns so it works on both PostgREST
+# and the in-memory test client.
+_UPLOADS_BRIEF_LABEL = "Uploaded PRDs"
+_UPLOADS_ANCHOR_KEY = "_uploads_anchor"
+
+
+@retry_on_disconnect
+def ensure_uploads_brief(dataset: str) -> int:
+    """Get-or-create the per-dataset placeholder brief that uploaded PRDs anchor to.
+
+    The anchor is `is_current=false` so it NEVER shadows the real weekly brief or
+    shows in the brief UI. Idempotent: keyed on (dataset, week_label, is_current)
+    so exactly one exists per dataset. Its `dataset` slug matches the company's so
+    the uploaded PRD still lists under Artifacts (which scopes PRDs by the brief's
+    dataset).
+    """
+    c = require_client()
+    resp = (
+        c.table("briefs")
+        .select("id")
+        .eq("dataset", dataset)
+        .eq("week_label", _UPLOADS_BRIEF_LABEL)
+        .eq("is_current", False)
+        .limit(1)
+        .execute()
+    )
+    if resp.data:
+        return resp.data[0]["id"]
+    ins = (
+        c.table("briefs")
+        .insert({
+            "dataset": dataset,
+            "week_label": _UPLOADS_BRIEF_LABEL,
+            "payload": {_UPLOADS_ANCHOR_KEY: True, "insights": []},
+            "is_current": False,
+        })
+        .execute()
+    )
+    return ins.data[0]["id"]
+
+
 def invalidate_stale_briefs(current_version: int) -> int:
     """Demote any is_current brief whose `_schema_version` differs from
     `current_version`. Returns the count of rows invalidated.
