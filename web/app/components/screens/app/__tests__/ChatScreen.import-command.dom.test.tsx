@@ -227,6 +227,31 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     expect(resumePrdGeneration).not.toHaveBeenCalled()
   })
 
+  it("seeds the new tab's thread with the user's command + an acknowledgment", async () => {
+    renderChat()
+    await attachDoc()
+    await typeAndSend("Convert this PRD into tickets")
+
+    // The command is visible as a normal user turn in the chat (not an empty
+    // thread next to a spinning panel)…
+    await waitFor(() => expect(document.body.textContent).toContain("Convert this PRD into tickets"))
+    // …answered by an acknowledgment that says what's happening.
+    await waitFor(() => expect(document.body.textContent).toContain("Importing your document as a PRD"))
+  })
+
+  it("shows the PRD card (panel re-opener) while the import is still generating", async () => {
+    // A never-resolving poll keeps the tab in its 'generating' state.
+    resumePrdGeneration.mockReturnValueOnce(new Promise(() => {}))
+    renderChat()
+    await attachDoc()
+    await typeAndSend("Convert this PRD into tickets")
+
+    // The insight/PRD card renders DURING generation, with its action button in
+    // the generating state — this is what lets the user reopen the panel.
+    await waitFor(() => expect(document.querySelector('[data-testid="chat-insight-msg"]')).toBeTruthy())
+    await waitFor(() => expect(document.body.textContent).toContain("Generating PRD…"))
+  })
+
   it("shows the attached file as a chip on the LANDING composer (not just a toast)", async () => {
     renderChat()
     await attachDoc("Fraznet Enhancements.pptx")

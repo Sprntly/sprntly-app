@@ -84,6 +84,21 @@ const BRIEF_TAB_ID = "brief"
 // first message on send (see submitAsk's first-send rename).
 export const NEW_CHAT_TITLE = "New chat"
 
+// The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
+// request). Shown as the reply to the user's seeded command turn, so the chat
+// explains what the spinning panel on the right is doing and how to get back to
+// it (the PRD card above the thread hosts the View PRD button).
+function commandAckReply(req: PrdTabRequest): AskResponse {
+  const importing = req.source.kind === "resume"
+  const withTickets = importing && !!req.source.openTickets
+  const answer = withTickets
+    ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready. Use the View PRD button above to reopen the panel anytime."
+    : importing
+      ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+      : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+  return { answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" }
+}
+
 // Attached-file chips shown under a composer. Rendered by BOTH the landing and
 // thread composers — attachments live in shared state, so a file attached on
 // the landing screen must be visible right there (the toast alone disappears in
@@ -464,23 +479,36 @@ export function ChatScreen() {
   // its cached PRD + the shared ContentContext, and flag the content panel to
   // slide open (deferred a commit so the route-change close can't swallow it).
   // The PRD/Evidence/Tickets all render in that panel — the tab itself is a
-  // normal chat the user can keep talking in.
-  const openPrdInTab = useCallback((req: PrdTabRequest) => {
+  // normal chat the user can keep talking in. Returns the target tab's id so
+  // the consumer can persist a seeded command turn against it.
+  const openPrdInTab = useCallback((req: PrdTabRequest): string => {
     const { title, source } = req
     const meta = source.kind === "generateBacklog" ? null : source.meta
     const existing = tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    // A command phrasing opened this tab ("convert this PRD into tickets",
+    // "generate a PRD"): seed the thread with the user's message + an
+    // acknowledgment, so the chat shows WHY a generation is running instead of
+    // sitting empty next to the spinning panel.
+    const seedTurn: ThreadTurn | null = req.seedQuery
+      ? { id: `seed-${Date.now()}`, query: req.seedQuery, reply: commandAckReply(req) }
+      : null
     if (existing) {
       setActiveTabId(existing.id)
       // Backfill the insight body onto an already-open tab that lacks one (e.g. a
       // tab created before this field existed, or opened via a path that didn't
       // carry it) so reopening the insight surfaces its content, not just a title.
-      if (req.insightBody && !existing.insightBody) {
-        setTabs((prev) => prev.map((t) => t.id === existing.id ? { ...t, insightBody: req.insightBody ?? null } : t))
+      // A re-issued command appends its turn to the existing thread.
+      if ((req.insightBody && !existing.insightBody) || seedTurn) {
+        setTabs((prev) => prev.map((t) => t.id === existing.id ? {
+          ...t,
+          insightBody: t.insightBody ?? req.insightBody ?? null,
+          thread: seedTurn ? [...t.thread, seedTurn] : t.thread,
+        } : t))
       }
     } else {
       setTabs((prev) => [...prev, {
-        id: tabId, title, thread: [], dbConvId: null, briefMeta: meta,
+        id: tabId, title, thread: seedTurn ? [seedTurn] : [], dbConvId: null, briefMeta: meta,
         insightBody: req.insightBody ?? null, prdId: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
       }])
@@ -502,13 +530,13 @@ export function ChatScreen() {
     // one) — don't regenerate/re-fetch an already-open PRD.
     if (existing?.prd && source.kind !== "ready") {
       setContent({ prd: existing.prd, prdMeta: existing.briefMeta, prdGenerating: false })
-      return
+      return tabId
     }
     // Caller already holds the PRD — show it immediately, no async work.
     if (source.kind === "ready") {
       setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: source.prd, prdId: source.prd.prd_id, briefMeta: source.meta } : t))
       setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
-      return
+      return tabId
     }
     // generate | generateBacklog | load | resume — kick off, show the panel's
     // spinner, then land the result on the tab (and shared content while active).
@@ -548,6 +576,7 @@ export function ChatScreen() {
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
+    return tabId
   }, [setContent, showToast, hydratePrdThread, openContentPanel])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
@@ -920,7 +949,7 @@ export function ChatScreen() {
   // openPrdTab's generate path is find-or-create (POST /v1/prd/generate reuses an
   // existing DB PRD when one exists), so an already-generated PRD is served from
   // the DB rather than regenerated.
-  const prdCommandFlow = useCallback(async () => {
+  const prdCommandFlow = useCallback(async (seedQuery?: string) => {
     try {
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
@@ -930,6 +959,7 @@ export function ChatScreen() {
       }
       openPrdTab({
         title: "PRD · Weekly brief",
+        seedQuery,
         source: { kind: "generate", meta: { briefId: brief.id, insightIndex: 0 } },
       })
     } catch (e) {
@@ -943,12 +973,13 @@ export function ChatScreen() {
   // into the chat-PRD format) — then open the imported PRD as its own chat tab.
   // With `openTickets` ("convert this PRD into tickets") the panel lands on the
   // Tickets tab once the PRD is ready, which generates user stories for it.
-  const importPrdCommandFlow = useCallback(async (file: File, opts: { openTickets: boolean }) => {
+  const importPrdCommandFlow = useCallback(async (file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
     try {
       const { prdApi } = await import("../../../lib/api")
       const start = await prdApi.importDoc(file, activeCompany)
       openPrdTab({
         title: start.title || file.name,
+        seedQuery: opts.seedQuery,
         source: { kind: "resume", prdId: start.prd_id, meta: null, openTickets: opts.openTickets },
       })
     } catch (e) {
@@ -968,7 +999,7 @@ export function ChatScreen() {
       if (isTicketsCommand(trimmed)) {
         if (docFile) {
           setAttachments([])
-          void importPrdCommandFlow(docFile, { openTickets: true })
+          void importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
           return
         }
         // No document: mirror the reply-footer "Create tickets" action when this
@@ -983,13 +1014,13 @@ export function ChatScreen() {
       } else if (isPrdCommand(trimmed)) {
         if (docFile) {
           setAttachments([])
-          void importPrdCommandFlow(docFile, { openTickets: false })
+          void importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
           return
         }
         // No document — open the PRD tab from the brief's top insight instead of
         // sending it to the ask agent (which would answer with a raw prd-author
         // HTML dump).
-        void prdCommandFlow()
+        void prdCommandFlow(trimmed)
         return
       }
       // Append attached file content as context (text attachments only —
@@ -1112,8 +1143,16 @@ export function ChatScreen() {
     if (!pendingPrdTab) return
     const req = pendingPrdTab
     setPendingPrdTab(null)
-    openPrdInTab(req)
-  }, [pendingPrdTab, setPendingPrdTab, openPrdInTab])
+    const tabId = openPrdInTab(req)
+    // A command-seeded turn (already rendered in the tab's thread by
+    // openPrdInTab) also lands in the conversations rail + Supabase, so the
+    // exchange survives a reload like any other chat turn.
+    if (req.seedQuery) {
+      const turnId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+      pushPendingConversation(turnId, req.seedQuery, tabId)
+      finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
+    }
+  }, [pendingPrdTab, setPendingPrdTab, openPrdInTab, pushPendingConversation, finalizeConversationTurn])
 
   // Slide the content panel open on the commit AFTER openPrdInTab flags it. The
   // deferral matters when the PRD was opened from another surface: openPrdTab
@@ -1414,7 +1453,10 @@ export function ChatScreen() {
   // anchors the chat to its insight and hosts the Generate/View PRD + prototype
   // actions, so an insight-bound tab always shows the thread view (never the
   // generic "Welcome back" landing) even before the user has sent anything.
-  const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta)
+  // Also shown while a PRD is still GENERATING (import/resume tabs carry no
+  // briefMeta and no prd yet) — the card's button reads "Generating PRD…" and
+  // flips to "View PRD" on landing, so the panel is always reopenable from chat.
+  const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta || activeTab?.prdGenerating)
   const showThreadView = hasThread || showInsightMsg
   // The tab title is "PRD · <insight>"; the message shows the insight sentence on
   // its own (the "PRD" kind is already a chip), so strip the redundant prefix.

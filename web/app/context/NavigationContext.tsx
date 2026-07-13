@@ -50,6 +50,11 @@ export type PrdTabRequest = {
    *  brief-card paths (view/generate PRD) carry it; backlog / ready-from-content
    *  paths omit it and the body simply isn't rendered. */
   insightBody?: string
+  /** The user's typed command that opened this PRD tab (e.g. "convert this PRD
+   *  into tickets"). When set, ChatScreen seeds the new tab's thread with it +
+   *  an acknowledgment turn, so the chat shows WHY the generation started
+   *  instead of opening empty next to a spinning panel. */
+  seedQuery?: string
   source:
     | { kind: "ready"; prd: PrdState; meta: PrdTabMeta | null }
     | { kind: "generate"; meta: PrdTabMeta }
