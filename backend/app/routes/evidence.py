@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from app.auth import CompanyContext, require_company
 from app.db import (
     find_existing_evidence,
+    find_latest_failed_evidence,
     start_evidence,
 )
 from app.deps.ownership import require_owned_brief, require_owned_evidence
@@ -78,6 +79,21 @@ async def generate(
                 "status": existing["status"],
                 "title": existing["title"],
                 "variant": _VARIANT,
+            }
+        # A prior generation FAILED: surface that failure (the client shows an
+        # error with an explicit retry that sends force=true) instead of
+        # silently kicking off a brand-new LLM run — failed rows aren't in
+        # find_existing_evidence, so every reopen used to regenerate forever.
+        failed = find_latest_failed_evidence(
+            body.brief_id, body.insight_index, variant=_VARIANT
+        )
+        if failed:
+            return {
+                "evidence_id": failed["id"],
+                "status": "failed",
+                "title": failed["title"],
+                "variant": _VARIANT,
+                "error": failed.get("error"),
             }
 
     insight = insights[body.insight_index]

@@ -312,9 +312,11 @@ def reset_prd_to_draft(prd_id: int) -> None:
 
 
 @retry_on_disconnect
-def list_prds_by_brief(brief_id: int, variant: str = "v1") -> list[dict]:
-    """Return the NEWEST ready PRD per insight for a (brief, variant), ordered
-    by insight_index ascending.
+def list_prds_by_brief(
+    brief_id: int, variant: str = "v1", newest_only: bool = True
+) -> list[dict]:
+    """Return the ready PRDs for a (brief, variant), ordered by insight_index
+    ascending — by default collapsed to the NEWEST ready PRD per insight.
 
     One query — not per-insight — returning at minimum `id` + `insight_index`.
     Used by GET /v1/design-agent/brief-prototype-map to build context-aware cards
@@ -324,12 +326,17 @@ def list_prds_by_brief(brief_id: int, variant: str = "v1") -> list[dict]:
     excluded so callers only see PRDs that can back a prototype.
 
     A regenerated PRD (force / a second generation) creates a NEW `prds` row while
-    the prior one stays ready, so an insight can have several ready rows. This
-    function collapses each insight to its newest (highest-id) row — the one the
-    user just generated — so the consumer (brief-prototype-map) binds exactly one
+    the prior one stays ready, so an insight can have several ready rows. With
+    `newest_only=True` (default) each insight collapses to its newest (highest-id)
+    row — the one the user just generated — so the consumer binds exactly one
     deterministic, freshest prd_id per insight. Without the collapse the route
     emitted duplicate per-insight entries and the frontend's last-wins map could
     land on a stale prd_id (the regenerated PRD silently never surfaced).
+
+    With `newest_only=False` ALL ready rows are returned (insight_index asc,
+    then id desc within an insight) — used by brief-prototype-map to fall back
+    to a ready prototype attached to an OLDER PRD of the same insight, which a
+    PRD regeneration would otherwise make invisible forever.
     """
     c = require_client()
     resp = (
@@ -340,16 +347,16 @@ def list_prds_by_brief(brief_id: int, variant: str = "v1") -> list[dict]:
         .eq("status", "ready")
         .execute()
     )
-    # Collapse to the newest (highest-id) ready PRD per insight, then return them
-    # in insight_index order. Done in Python rather than via SQL ordering so the
+    # Grouping/ordering done in Python rather than via SQL ordering so the
     # result is deterministic regardless of the driver's tie-break behaviour.
-    newest_by_insight: dict[int, dict] = {}
+    rows_by_insight: dict[int, list[dict]] = {}
     for row in resp.data or []:
-        idx = row["insight_index"]
-        kept = newest_by_insight.get(idx)
-        if kept is None or row["id"] > kept["id"]:
-            newest_by_insight[idx] = row
-    return [newest_by_insight[idx] for idx in sorted(newest_by_insight)]
+        rows_by_insight.setdefault(row["insight_index"], []).append(row)
+    for rows in rows_by_insight.values():
+        rows.sort(key=lambda r: r["id"], reverse=True)
+    if newest_only:
+        return [rows_by_insight[idx][0] for idx in sorted(rows_by_insight)]
+    return [row for idx in sorted(rows_by_insight) for row in rows_by_insight[idx]]
 
 
 # ── PRD version control ──────────────────────────────────────────────────

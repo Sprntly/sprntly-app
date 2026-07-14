@@ -1,0 +1,15 @@
+# Keeps the repo-root build context (backend/Dockerfile) small: only
+# backend/ + prototype-runtime/ sources are needed; node_modules are
+# installed INSIDE the image (linux binaries), never copied from the host.
+**/node_modules
+**/dist
+**/.next
+**/.venv
+**/__pycache__
+**/.pytest_cache
+.git
+web
+mcp
+ds-agent
+prototype-runtime/dist-fixture
+backend/data

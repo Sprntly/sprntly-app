@@ -20,13 +20,18 @@ from app.deps.ownership import require_owned_brief, require_owned_dataset
 from app.evidence_kg import generate_evidence_kg
 from app.kg_ingest.auto_sync import kickoff_corpus_seed
 from app.prd_runner import PRD_VARIANT, generate_prd
-from app.prompts import EVIDENCE_TEMPLATE_VERSION, PRD_TEMPLATE_VERSION
+from app.prompts import (
+    EVIDENCE_TEMPLATE_VERSION,
+    EVIDENCE_VARIANT,
+    PRD_TEMPLATE_VERSION,
+)
 from app.synthesis.agent import EmptyKnowledgeGraphError
 from app.synthesis_brief import generate_brief_for, resolve_company
 
-# Evidence rows are written with variant 'v2' (the current format) — mirrors
-# the local constant in routes/evidence.py, which doesn't export it.
-EVIDENCE_VARIANT = "v2"
+# EVIDENCE_VARIANT comes from app.prompts — the SAME constant routes/evidence.py
+# dedups against. This used to be a stale local "v2" copy, so brief-time
+# pre-generation wrote rows the Evidence tab could never reuse and every first
+# open regenerated the evidence from scratch at the current variant.
 
 logger = logging.getLogger(__name__)
 

@@ -6,6 +6,10 @@ export type InsightPrototypeState = {
   prototypeReady: boolean
   previewImageUrl: string | null
   prdTitle: string | null
+  /** The PRD id to open the READY prototype through (may be an OLDER PRD than
+   *  `prdId` when the PRD was regenerated after the prototype was built).
+   *  Null unless `prototypeReady`. */
+  prototypePrdId: number | null
 }
 
 /**
@@ -31,6 +35,7 @@ export function prototypeStateForInsight(
       prototypeReady: false,
       previewImageUrl: null,
       prdTitle: null,
+      prototypePrdId: null,
     }
   }
 
@@ -41,6 +46,7 @@ export function prototypeStateForInsight(
       prototypeReady: false,
       previewImageUrl: null,
       prdTitle: entry.prd_title || null,
+      prototypePrdId: null,
     }
   }
 
@@ -50,5 +56,7 @@ export function prototypeStateForInsight(
     prototypeReady: entry.prototype.ready,
     previewImageUrl: entry.prototype.preview_image_url,
     prdTitle: entry.prd_title || null,
+    // Older backends omit prototype.prd_id — fall back to the entry's PRD.
+    prototypePrdId: entry.prototype.prd_id ?? entry.prd_id,
   }
 }

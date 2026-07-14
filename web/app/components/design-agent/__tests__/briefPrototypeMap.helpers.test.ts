@@ -11,6 +11,7 @@ describe("prototypeStateForInsight", () => {
       prototypeReady: false,
       previewImageUrl: null,
       prdTitle: null,
+      prototypePrdId: null,
     })
   })
 
@@ -24,6 +25,7 @@ describe("prototypeStateForInsight", () => {
       prototypeReady: false,
       previewImageUrl: null,
       prdTitle: "Patient discharge flow",
+      prototypePrdId: null,
     })
   })
 
@@ -48,7 +50,26 @@ describe("prototypeStateForInsight", () => {
       prototypeReady: true,
       previewImageUrl: "https://cdn.example.com/thumb.png",
       prdTitle: "My Cool Prototype",
+      // No prototype.prd_id in the entry → falls back to the entry's prd_id.
+      prototypePrdId: 99,
     })
+  })
+
+  it("surfaces prototype.prd_id when the prototype lives on an OLDER PRD", () => {
+    const map = new Map<number, BriefPrototypeMapEntry>([
+      [
+        3,
+        {
+          insight_index: 3,
+          prd_id: 120, // the regenerated (newest) PRD
+          prd_title: "Regenerated PRD",
+          prototype: { ready: true, preview_image_url: null, prd_id: 101 },
+        },
+      ],
+    ])
+    const result = prototypeStateForInsight(map, 3)
+    expect(result.prdId).toBe(120)
+    expect(result.prototypePrdId).toBe(101)
   })
 
   it("returns previewImageUrl:null when prototype is ready but no thumbnail was captured", () => {

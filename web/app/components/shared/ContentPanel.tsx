@@ -274,6 +274,14 @@ export function ContentPanel() {
   )
 }
 
+// Which `(briefId:insightIndex)` the evidence currently in ContentContext was
+// loaded for. MODULE-level (not a ref) so it survives the EvidenceTab
+// unmount/remount that every panel tab switch causes — with a per-mount ref the
+// tab wiped `content.evidence` and refetched from scratch on every PRD ⇄
+// Evidence switch, making each switch wait on the network again.
+let evidenceLoadedKey: string | null = null
+let prdEvidenceLoadedKey: string | null = null
+
 function EvidenceTab() {
   const { expandAiPanel, setAIBarValue } = useNavigation()
   const { content, setContent } = useContent()
@@ -287,19 +295,18 @@ function EvidenceTab() {
     | { kind: "loading" }
     | { kind: "error"; message: string }
   >({ kind: "idle" })
-  const loadedKeyRef = useRef<string | null>(null)
-  const prdEvidenceKeyRef = useRef<string | null>(null)
 
   useEffect(() => {
     if (!detail?.meta) return
     const key = `${detail.meta.briefId}:${detail.meta.insightIndex}`
-    // Already loaded this exact insight — don't re-fetch.
-    if (loadedKeyRef.current === key && evidence) return
+    // Already loaded this exact insight (possibly by a previous mount of this
+    // tab) — the evidence in context is current, don't re-fetch.
+    if (evidenceLoadedKey === key && evidence) return
     // Switching to a different insight — clear stale evidence.
-    if (loadedKeyRef.current !== key) setContent({ evidence: null })
+    if (evidenceLoadedKey !== key) setContent({ evidence: null })
     let cancelled = false
     setLocalState({ kind: "loading" })
-    loadedKeyRef.current = key
+    evidenceLoadedKey = key
     runEvidenceGeneration(detail.meta)
       .then((result) => {
         if (cancelled) return
@@ -324,21 +331,45 @@ function EvidenceTab() {
     if (detail?.meta) return
     if (!prdMeta) return
     const key = `${prdMeta.briefId}:${prdMeta.insightIndex}`
-    if (prdEvidenceKeyRef.current === key && evidence) return
-    if (prdEvidenceKeyRef.current !== key) setContent({ evidence: null })
-    prdEvidenceKeyRef.current = key
+    if (prdEvidenceLoadedKey === key && evidence) return
+    if (prdEvidenceLoadedKey !== key) setContent({ evidence: null })
+    prdEvidenceLoadedKey = key
     let cancelled = false
+    // Show the loading skeleton (not "No evidence loaded yet") while the read
+    // is in flight — only on first load; a later remount hits the cache above.
+    setLocalState({ kind: "loading" })
     loadEvidenceByInsight(prdMeta.briefId, prdMeta.insightIndex)
       .then((ev) => {
-        if (!cancelled && ev) setContent({ evidence: ev })
+        if (cancelled) return
+        if (ev) setContent({ evidence: ev })
+        setLocalState({ kind: "idle" })
       })
       .catch(() => {
         /* read-only best effort — leave the panel's empty/generate state */
+        if (!cancelled) setLocalState({ kind: "idle" })
       })
     return () => {
       cancelled = true
     }
   }, [detail?.meta, prdMeta?.briefId, prdMeta?.insightIndex, evidence, setContent])
+
+  // Explicit retry after a FAILED generation. force=true skips the backend's
+  // failed-row short-circuit and its dedup, starting a genuinely fresh run —
+  // the ONLY path that re-generates after a failure (opens never auto-retry).
+  const retryEvidence = useCallback(() => {
+    const meta = detail?.meta
+    if (!meta) return
+    setLocalState({ kind: "loading" })
+    runEvidenceGeneration(meta, { force: true })
+      .then((result) => {
+        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); return }
+        setContent({ evidence: result.evidence })
+        setLocalState({ kind: "idle" })
+      })
+      .catch((e: unknown) => {
+        setLocalState({ kind: "error", message: e instanceof Error ? e.message : String(e) })
+      })
+  }, [detail?.meta, setContent])
 
   // Unified loading flag: either local (brief flow) or external (chat flow)
   const isLoading = localState.kind === "loading" || evidenceGenerating
@@ -404,11 +435,24 @@ function EvidenceTab() {
             placeholders={4}
           />
         ) : localState.kind === "error" ? (
-          <EmptyPane
-            title="Couldn't load full evidence"
-            hint={localState.message}
-            placeholders={0}
-          />
+          <>
+            <EmptyPane
+              title="Couldn't load full evidence"
+              hint={localState.message}
+              placeholders={0}
+            />
+            {detail?.meta ? (
+              <div style={{ display: "flex", justifyContent: "center", marginTop: 12 }}>
+                <button
+                  type="button"
+                  className="tkv2-btn tkv2-btn--regen"
+                  onClick={retryEvidence}
+                >
+                  <IconRefresh size={15} /> Try again
+                </button>
+              </div>
+            ) : null}
+          </>
         ) : null}
 
       </div>

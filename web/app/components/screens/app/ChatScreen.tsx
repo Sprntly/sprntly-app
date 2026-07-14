@@ -11,7 +11,7 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, isTicketsCommand, prototypeCtaLabel } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isTicketsCommand } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
@@ -32,9 +32,6 @@ import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
 import { prototypePath } from "../../../lib/routes"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
-import { GenerateModal } from "../../design-agent/GenerateModal"
-import { GenerationLoadingScreen } from "../../design-agent/GenerationLoadingScreen"
-import { useGeneratePrototype } from "../../design-agent/useGeneratePrototype"
 import { AGENT_NAME } from "../../../lib/agent"
 
 type ThreadTurn = {
@@ -278,39 +275,25 @@ export function ChatScreen() {
 
   // ── Prototype map for the active tab's brief (one fetch per briefId) ───────
   const chatBriefId = activeTab?.briefMeta?.briefId ?? null
-  const { entriesByInsight: chatEntriesByInsight, loading: chatMapLoading } = useBriefPrototypeMap(chatBriefId)
+  const { entriesByInsight: chatEntriesByInsight, loading: chatMapLoading } =
+    useBriefPrototypeMap(chatBriefId)
 
   const chatInsightState = useMemo(() => {
     if (!activeTab?.briefMeta) return null
     return prototypeStateForInsight(chatEntriesByInsight, activeTab.briefMeta.insightIndex)
   }, [activeTab?.briefMeta, chatEntriesByInsight])
 
-  // GenerateModal / LoadingScreen state for the chat surface — delegated to
-  // the shared generate/view-prototype hook so this surface's Cancel/Notify
-  // wiring is correct by construction rather than hand-rolled.
-  const [chatGenPrdId, setChatGenPrdId] = useState<number | null>(null)
-
-  // skipExistenceCheck: chatInsightState (from useBriefPrototypeMap's batch
-  // fetch, already mounted above) is ALREADY this tab's existence source of
-  // truth (see handleChatPrototype below) — a second, redundant getByPrd here
-  // would just re-derive the same answer. Mirrors BriefChat.tsx's identical
-  // genPrdId/gen pair — same structural shape (existence state driven by a
-  // batch map, not the hook's own `cta`), so the same hook options apply.
-  // listenForCrossSurfaceGenerating is intentionally omitted for the same
-  // reason BriefChat omits it: this tab's label comes from the batch map, not
-  // the hook's own `cta`.
-  const gen = useGeneratePrototype(chatGenPrdId, { skipExistenceCheck: true })
-
+  // VIEW-only prototype affordance. The chat surface never offers "Generate
+  // prototype" — generation lives in the PRD panel — so this button only
+  // renders once the batch map confirms a ready prototype, and clicking it
+  // always navigates. prototypePrdId: the PRD the prototype is actually
+  // attached to (may be an older PRD than the insight's newest after a PRD
+  // regeneration).
   const handleChatPrototype = useCallback(() => {
-    if (chatInsightState?.hasPrd && chatInsightState.prototypeReady && chatInsightState.prdId != null) {
-      router.push(prototypePath(chatInsightState.prdId))
-    } else if (chatInsightState?.hasPrd && !chatInsightState.prototypeReady && chatInsightState.prdId != null) {
-      setChatGenPrdId(chatInsightState.prdId)
-      gen.openGenerateModal()
-    } else {
-      goTo("prototype")
+    if (chatInsightState?.prototypeReady && chatInsightState.prdId != null) {
+      router.push(prototypePath(chatInsightState.prototypePrdId ?? chatInsightState.prdId))
     }
-  }, [chatInsightState, router, goTo, gen.openGenerateModal])
+  }, [chatInsightState, router])
 
   const setThread = useCallback((updater: ThreadTurn[] | ((prev: ThreadTurn[]) => ThreadTurn[])) => {
     setTabs((prev) => prev.map((t) => {
@@ -1877,13 +1860,20 @@ export function ChatScreen() {
                               : chatPrdCtaWaiting ? "Loading…"
                               : chatPrdExists ? "View PRD" : "Generate PRD"}
                           </button>
-                          <button
-                            type="button"
-                            className="bc-action-btn"
-                            onClick={handleChatPrototype}
-                          >
-                            {prototypeCtaLabel(chatInsightState)}
-                          </button>
+                          {/* View-only: rendered ONLY once a ready prototype is
+                              confirmed. Never "Generate prototype" here — the PRD
+                              panel already owns the generate affordance, and while
+                              the map is still loading we show nothing rather than
+                              a label that flips after the fetch lands. */}
+                          {chatInsightState?.prototypeReady ? (
+                            <button
+                              type="button"
+                              className="bc-action-btn"
+                              onClick={handleChatPrototype}
+                            >
+                              View prototype
+                            </button>
+                          ) : null}
                         </div>
                       </div>
                     ) : null}
@@ -1984,13 +1974,19 @@ export function ChatScreen() {
                                   ? "Generating…"
                                   : activeTab?.evidence ? "Open evidence" : "View evidence"}
                               </button>
-                              <button
-                                type="button"
-                                className="bc-action-btn"
-                                onClick={handleChatPrototype}
-                              >
-                                {prototypeCtaLabel(chatInsightState)}
-                              </button>
+                              {/* View-only — same rule as the insight header:
+                                  no "Generate prototype" on the chat surface,
+                                  and nothing at all until the map confirms a
+                                  ready prototype. */}
+                              {chatInsightState?.prototypeReady ? (
+                                <button
+                                  type="button"
+                                  className="bc-action-btn"
+                                  onClick={handleChatPrototype}
+                                >
+                                  View prototype
+                                </button>
+                              ) : null}
                             </div>
                           ) : null}
                         </div>
@@ -2092,10 +2088,6 @@ export function ChatScreen() {
           )}
         </div>
       </div>
-      {gen.generateModalProps.open && chatGenPrdId != null && (
-        <GenerateModal {...gen.generateModalProps} />
-      )}
-      <GenerationLoadingScreen {...gen.loadingScreenProps} />
     </AppLayout>
   )
 }

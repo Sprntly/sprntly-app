@@ -124,6 +124,13 @@ export type UseGeneratePrototypeOptions = {
    *  API surface). */
   open?: boolean
   onOpenChange?: (open: boolean) => void
+  /** Fires once per run when the background generation settles (success OR
+   *  failure), BEFORE the overlay dismiss/navigation logic. Unlike `existing`
+   *  (which skipExistenceCheck hosts deliberately ignore), this fires for ALL
+   *  hosts — it exists so a host whose CTA label comes from its OWN lookup
+   *  (BriefChat / ChatScreen via useBriefPrototypeMap) can refetch that lookup
+   *  and relabel "Generate prototype" → "View prototype" without a remount. */
+  onGenerationSettled?: (result?: DesignAgentGenResult) => void
   /** Fires when the user clicks "Notify me when ready" INSTEAD of the hook's
    *  default (dispatch `da:generating`, close the overlay, keep the mounted
    *  GenerateModal's onGenDone alive to fire a toast on completion — matches
@@ -200,7 +207,13 @@ export function useGeneratePrototype(
   const figmaFileKey = options?.figmaFileKey ?? null
   const skipExistenceCheck = options?.skipExistenceCheck ?? false
   const listenForCrossSurfaceGenerating = options?.listenForCrossSurfaceGenerating ?? false
-  const { onSuccess, open: controlledOpen, onOpenChange, onNotifyWhenReady } = options ?? {}
+  const {
+    onSuccess,
+    open: controlledOpen,
+    onOpenChange,
+    onNotifyWhenReady,
+    onGenerationSettled,
+  } = options ?? {}
 
   const router = useRouter()
   const { showToast } = useNavigation()
@@ -391,6 +404,9 @@ export function useGeneratePrototype(
     (result?: DesignAgentGenResult) => {
       if (resolvedRef.current) return
       resolvedRef.current = true
+      // Host-side settle hook (see the option's doc comment). Fires for every
+      // host, including skipExistenceCheck ones, on success AND failure.
+      onGenerationSettled?.(result)
       // The just-built prototype now EXISTS: reflect it in `existing` so a
       // host that stays mounted (notify / cancel paths, onSuccess hosts)
       // flips its CTA to "View Prototype" without waiting for a remount
@@ -447,7 +463,7 @@ export function useGeneratePrototype(
         minTimerRef.current = setTimeout(hideLoading, remaining)
       }
     },
-    [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId, skipExistenceCheck],
+    [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId, skipExistenceCheck, onGenerationSettled],
   )
 
   // Default "Notify me when ready" side effects — reproduces

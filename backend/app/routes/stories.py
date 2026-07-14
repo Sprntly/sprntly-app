@@ -269,17 +269,17 @@ def tickets_for_prd(
     LLM call. If the row is missing/stale/failed it kicks off /generate, which
     re-persists. `fresh` compares the stored content_hash to the live PRD hash.
     """
-    from app.db.prd_tickets import get_tickets, prd_content_hash
+    from app.db.prd_tickets import get_tickets, prd_hash_matches
 
     row = get_tickets(company.company_id, prd_id)
     if row is None:
         return {"status": "none", "fresh": False, "stories": []}
-    current = prd_content_hash(prd_id)
     fresh = (
         row.get("status") == "ready"
         and bool(row.get("stories"))  # an empty cached set is a failed run → retry
-        and current is not None
-        and current == row.get("content_hash")
+        # Accepts the pre-impl-spec-warm hash too — the background Part B warm
+        # racing save_tickets used to flip this false with no real PRD change.
+        and prd_hash_matches(prd_id, row.get("content_hash"))
     )
     return {
         "status": row.get("status") or "ready",

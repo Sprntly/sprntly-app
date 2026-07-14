@@ -536,6 +536,58 @@ def test_route_dispatches_to_kg(tenant_client, isolated_settings, monkeypatch):
     assert scheduled.get("runner") == "kg"
 
 
+def test_route_surfaces_failed_run_instead_of_regenerating(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """A FAILED prior generation must NOT silently re-run on the next open:
+    the route returns the failed row (status + error) so the client shows an
+    explicit retry. Only force=true starts a fresh generation. Regression —
+    failed rows were invisible to the dedup, so every reopen of a failing
+    insight kicked off a brand-new LLM run."""
+    from app.prompts import EVIDENCE_TEMPLATE_VERSION, EVIDENCE_VARIANT
+    from app.routes import evidence as evidence_route
+
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod, dataset="acme")
+    failed_id = db_mod.start_evidence(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=EVIDENCE_TEMPLATE_VERSION, variant=EVIDENCE_VARIANT,
+    )
+    db_mod.fail_evidence(failed_id, "gateway exploded")
+
+    scheduled = []
+    async def fake_kg(evidence_id, b_id, idx):
+        scheduled.append(evidence_id)
+    monkeypatch.setattr(evidence_route, "generate_evidence_kg", fake_kg)
+
+    # Plain open: the failure is surfaced, nothing is scheduled.
+    resp = t.client.post("/v1/evidence/generate",
+                         json={"brief_id": brief_id, "insight_index": 0})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "failed"
+    assert body["evidence_id"] == failed_id
+    assert "gateway exploded" in (body.get("error") or "")
+    import time
+    time.sleep(0.05)
+    assert scheduled == []
+
+    # Explicit retry: force=true starts a fresh run on a NEW row.
+    resp = t.client.post(
+        "/v1/evidence/generate",
+        json={"brief_id": brief_id, "insight_index": 0, "force": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "generating"
+    assert resp.json()["evidence_id"] != failed_id
+    for _ in range(20):
+        if scheduled:
+            break
+        time.sleep(0.01)
+    assert scheduled and scheduled[0] != failed_id
+
+
 def test_payload_md_shape_matches_ui_contract(isolated_settings, monkeypatch):
     """The KG path writes the row shape the UI reads: a ready row whose
     payload_md is the self-contained HTML brief (variant v3), which the
