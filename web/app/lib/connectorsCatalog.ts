@@ -36,7 +36,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", logoSvg: "/connectors/linear.svg", oauth: false, types: ["task-management"] },
       { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", logoSvg: "/connectors/jira.svg", oauth: true, types: ["task-management"] },
       { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoSvg: "/connectors/clickup.svg", oauth: true, types: ["task-management"] },
-      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: false, types: ["task-management"] },
+      // OAuth connect only for now — deliberately NOT in TICKET_SYNC_IMPLEMENTED
+      // (no backend sync-engine branch yet), so it never shows on the sync button.
+      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: true, types: ["task-management"] },
     ],
   },
   {

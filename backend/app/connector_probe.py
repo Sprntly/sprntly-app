@@ -25,6 +25,7 @@ import logging
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from app.connectors import (
+    asana_oauth,
     clickup_oauth,
     figma_oauth,
     fireflies_apikey,
@@ -178,6 +179,35 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
         # Canonical token-validity check: team.info returns {id, name, domain},
         # so the account_label resolves to the Slack workspace name.
         user_obj = slack_oauth.fetch_team_info(access_token) or {}
+    elif provider == asana_oauth.ASANA_PROVIDER:
+        # Asana access tokens live ~1h. Refresh (and persist) an expired
+        # token before probing so a connection stays healthy past the first
+        # hour. Refresh responses may omit the refresh_token — the stored
+        # one is carried forward (token_payload_to_store merge).
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = asana_oauth.refresh_access_token(refresh_token)
+                token_json = json.loads(
+                    asana_oauth.token_payload_to_store(
+                        new_json, keep_refresh_token=refresh_token,
+                    )
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    asana_oauth.ASANA_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except Exception:  # noqa: BLE001 — non-auth refresh error → soft; the users/me probe below decides
+                logger.warning("Asana probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        user_obj = asana_oauth.fetch_authenticated_user(access_token) or {}
     elif provider == sprinklr_oauth.SPRINKLR_PROVIDER:
         # Sprinklr access tokens live ~30 days. Refresh (and persist) near
         # expiry so a connection stays healthy past the first month —

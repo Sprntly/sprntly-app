@@ -1154,6 +1154,10 @@ export const connectorsApi = {
   disconnectSprinklr: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/sprinklr`),
 
+  // ---- Asana ---------------------------------------------------------------
+  disconnectAsana: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/asana`),
+
   // ---- Fireflies (API key, not OAuth) --------------------------------------
   connectFirefliesWithApiKey: (apiKey: string) =>
     api.post<{ ok: true; provider: string; account_label: string }>(

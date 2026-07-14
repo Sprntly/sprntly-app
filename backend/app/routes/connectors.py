@@ -52,6 +52,7 @@ from app import datasets as datasets_service
 from app.auth import CompanyContext, require_company
 from app.config import settings
 from app.connectors import (
+    asana_oauth,
     clickup_oauth,
     figma_oauth,
     fireflies_apikey,
@@ -393,6 +394,16 @@ def start_oauth(
             raise HTTPException(500, "Sprinklr OAuth is not configured on the server")
         url = sprinklr_oauth.authorize_url(
             state=sprinklr_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == asana_oauth.ASANA_PROVIDER:
+        if not asana_oauth.asana_configured():
+            raise HTTPException(500, "Asana OAuth is not configured on the server")
+        url = asana_oauth.authorize_url(
+            state=asana_oauth.sign_oauth_state(
                 company_id=company.company_id, return_to=return_to,
             )
         )
@@ -1725,6 +1736,63 @@ def sprinklr_disconnect(
         raise HTTPException(404, "Sprinklr is not connected")
     db.delete_connection(company.company_id, sprinklr_oauth.SPRINKLR_PROVIDER)
     return {"deleted": True, "provider": sprinklr_oauth.SPRINKLR_PROVIDER}
+
+
+# ─────────────────────── Asana ───────────────────────
+#
+# OAuth connect ONLY for now: no KG puller (kickoff_sync no-ops until an
+# `asana` entry lands in kg_ingest PULLERS) and no ticket-sync branch, so
+# Asana never appears on the sync button (stories/sync.py SYNC_PROVIDERS).
+
+
+@router.get("/asana/callback")
+def asana_callback(code: str, state: str):
+    payload = asana_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+    token_json = asana_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Asana did not return an access_token")
+
+    # The token response embeds the authorizing user ({gid, name, email});
+    # fall back to a users/me call only when it's absent. Best-effort — a
+    # missing label must not fail the connect.
+    info = token_json.get("data")
+    if not isinstance(info, dict) or not info:
+        info = asana_oauth.fetch_authenticated_user(access_token)
+    label = (info.get("email") or info.get("name") or "") if info else ""
+
+    try:
+        token_encrypted = encrypt_token_json(
+            asana_oauth.token_payload_to_store(token_json)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=asana_oauth.ASANA_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes=settings.asana_scopes,
+        account_label=label or None,
+        config_json=json.dumps({"info": info}) if info else "{}",
+    )
+
+    kickoff_sync(company_id, asana_oauth.ASANA_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, asana_oauth.ASANA_PROVIDER)
+
+
+@router.delete("/asana")
+def asana_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin_for_org_connector(company, asana_oauth.ASANA_PROVIDER)
+    row = db.get_connection(company.company_id, asana_oauth.ASANA_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Asana is not connected")
+    db.delete_connection(company.company_id, asana_oauth.ASANA_PROVIDER)
+    return {"deleted": True, "provider": asana_oauth.ASANA_PROVIDER}
 
 
 class HubSpotSyncCorpusIn(BaseModel):

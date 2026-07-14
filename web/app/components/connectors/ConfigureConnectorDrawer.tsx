@@ -382,6 +382,8 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectFireflies()
   } else if (providerId === "sprinklr") {
     await connectorsApi.disconnectSprinklr()
+  } else if (providerId === "asana") {
+    await connectorsApi.disconnectAsana()
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }
