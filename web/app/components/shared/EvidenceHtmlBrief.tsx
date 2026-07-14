@@ -62,7 +62,7 @@ export function EvidenceHtmlBrief({ html }: { html: string }) {
         width: "100%",
         height,
         border: "1px solid var(--line, #E8E6E0)",
-        borderRadius: 10,
+        borderRadius: 0,
         display: "block",
         colorScheme: "light",
         background: "#ffffff",
