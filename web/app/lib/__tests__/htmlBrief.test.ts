@@ -1,9 +1,30 @@
 import { describe, expect, it } from "vitest"
 import {
+  decodeHtmlEntities,
   looksLikeHtmlBrief,
   stripHtmlCodeFence,
   stripHypothesisSection,
 } from "../htmlBrief"
+
+describe("decodeHtmlEntities", () => {
+  it("decodes the named entities the PRD pages emit", () => {
+    expect(decodeHtmlEntities("A &amp; B &lt;tag&gt; &quot;q&quot; &apos;a&apos;&nbsp;end")).toBe(
+      "A & B <tag> \"q\" 'a' end",
+    )
+  })
+
+  it("decodes decimal and hex numeric entities", () => {
+    expect(decodeHtmlEntities("em&#8212;dash &#x2014; too")).toBe("em—dash — too")
+  })
+
+  it("resolves double-escaped input to the literal entity text", () => {
+    expect(decodeHtmlEntities("&amp;lt;")).toBe("&lt;")
+  })
+
+  it("leaves plain text untouched", () => {
+    expect(decodeHtmlEntities("no entities here")).toBe("no entities here")
+  })
+})
 
 describe("stripHtmlCodeFence", () => {
   it("strips a ```html fence around the document", () => {

@@ -21,6 +21,24 @@ export function stripHtmlCodeFence(s: string): string {
 }
 
 /**
+ * Decode HTML character entities into plain text: numeric forms
+ * (`&#8212;`/`&#x2014;`) plus the named set the PRD/brief pages actually emit.
+ * `&amp;` is decoded LAST so double-escaped input (`&amp;lt;`) resolves to the
+ * literal entity text (`&lt;`), not a `<`.
+ */
+export function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&apos;/gi, "'")
+    .replace(/&amp;/gi, "&")
+}
+
+/**
  * Does this payload look like the self-contained HTML brief (after unwrapping
  * any code fence) rather than the legacy `:::block` markdown?
  */
