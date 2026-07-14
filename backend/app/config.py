@@ -127,10 +127,17 @@ class Settings(BaseSettings):
 
     # Internal service-to-service API (DS Agent → Backend)
     internal_api_key: str = ""
-    # Sprntly staff — comma-separated email allowlist for the /v1/staff admin
-    # surface (org invites + per-company entitlements). Empty ⇒ the staff
-    # panel is disabled everywhere (routes 404).
-    staff_emails: str = ""
+    # Sprntly staff admin surface (/v1/staff + the /admin panel) — a DEDICATED
+    # owner-only credential, deliberately separate from normal Sprntly
+    # (Supabase) login. POST /v1/staff/login checks the id (constant-time) and
+    # the password against staff_admin_password_hash (argon2id — the password
+    # hasher already shipped for prototype share passcodes) and mints a
+    # short-lived staff JWT (aud=sprntly-staff, signed with jwt_secret).
+    # BOTH must be set or the whole surface — login included — 404s
+    # (fail closed, invisible), the same posture the old STAFF_EMAILS
+    # allowlist had when empty.
+    staff_admin_id: str = ""
+    staff_admin_password_hash: str = ""
     # Design Agent bundle staging. Supabase Storage is the PRIMARY
     # destination (bucket named by the SUPABASE_STORAGE_BUCKET env var, read
     # directly in design_agent/storage.py). These two settings drive the

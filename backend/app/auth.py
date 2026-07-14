@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import jwt
-from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from app.config import settings
@@ -171,15 +171,6 @@ def require_session(
     raise HTTPException(401, "Not signed in")
 
 
-def _staff_emails() -> set[str]:
-    """The STAFF_EMAILS allowlist, normalized. Empty ⇒ staff surface disabled."""
-    return {
-        e.strip().lower()
-        for e in (settings.staff_emails or "").split(",")
-        if e.strip()
-    }
-
-
 def session_email(session: dict) -> str:
     """The signed-in user's email, lowercased. Falls back to the stored
     profile row when the JWT omits `email` (Supabase user-context tokens
@@ -208,21 +199,96 @@ def session_email(session: dict) -> str:
         return ""
 
 
-def require_staff(session: dict = Depends(require_session)) -> dict:
+# ─────────────────────── Staff admin surface (/v1/staff) ───────────────────────
+#
+# The staff admin panel is for the company owner only and deliberately does
+# NOT use normal Sprntly (Supabase) login. POST /v1/staff/login (see
+# app.routes.staff_admin) checks a dedicated credential pair from env
+# (STAFF_ADMIN_ID + STAFF_ADMIN_PASSWORD_HASH) and mints a short-lived JWT
+# signed with the app's jwt_secret but with a DISTINCT claim set —
+# aud=sprntly-staff, sub=staff, role=staff_admin — so a staff token can never
+# pass a user gate and no user/demo/app token can ever pass require_staff
+# (Supabase tokens fail the signature; demo/app session tokens share the
+# secret but fail the audience check).
+
+STAFF_AUD = "sprntly-staff"
+STAFF_SUB = "staff"
+STAFF_ROLE = "staff_admin"
+STAFF_TOKEN_TTL_HOURS = 12
+
+
+def staff_surface_enabled() -> bool:
+    """True iff BOTH dedicated-credential env vars are set. Either missing ⇒
+    every /v1/staff route — login included — 404s (fail closed, invisible),
+    the same posture the old STAFF_EMAILS allowlist had when empty."""
+    return bool((settings.staff_admin_id or "").strip()) and bool(
+        (settings.staff_admin_password_hash or "").strip()
+    )
+
+
+def verify_staff_credentials(admin_id: str, password: str) -> bool:
+    """Check the dedicated staff credential pair. Never raises.
+
+    The id compare is constant-time (hmac.compare_digest) and the argon2id
+    password verify runs even when the id already failed, so a wrong id costs
+    the same as a wrong password — no early exit to time, no enumeration.
+    """
+    if not staff_surface_enabled():
+        return False
+    import hmac
+
+    from argon2 import PasswordHasher
+
+    id_ok = hmac.compare_digest(
+        (admin_id or "").encode(), settings.staff_admin_id.strip().encode()
+    )
+    try:
+        pw_ok = PasswordHasher().verify(
+            settings.staff_admin_password_hash.strip(), password or ""
+        )
+    except Exception:  # noqa: BLE001 — wrong password / malformed hash ⇒ False
+        pw_ok = False
+    return bool(id_ok and pw_ok)
+
+
+def make_staff_token() -> str:
+    """Mint the short-lived (12h) staff JWT after a successful login."""
+    now = int(time.time())
+    payload = {
+        "sub": STAFF_SUB,
+        "role": STAFF_ROLE,
+        "aud": STAFF_AUD,
+        "iat": now,
+        "exp": now + STAFF_TOKEN_TTL_HOURS * 3600,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALG)
+
+
+def require_staff(authorization: str | None = Header(default=None)) -> dict:
     """Gate for the Sprntly-staff admin surface (/v1/staff).
 
-    Supabase-authenticated users whose email is in the STAFF_EMAILS allowlist
-    only. Everyone else — including signed-in customers — gets a 404 (not 403)
-    so the staff surface is invisible, mirroring the design-agent feature
-    gate. Legacy demo/app cookie sessions carry no identity and are rejected.
+    Requires the dedicated staff JWT as `Authorization: Bearer …`. Anything
+    else — no token, an expired/garbage token, a Supabase user token, a
+    demo/app session token, or the surface being disabled via env — gets a
+    404 (not 401/403) so the staff surface is invisible, mirroring the
+    design-agent feature gate.
     """
-    if session.get("aud") != "supabase":
+    if not staff_surface_enabled():
         raise HTTPException(404, "Not found")
-    allowed = _staff_emails()
-    email = session_email(session) if allowed else ""
-    if not email or email not in allowed:
+    token = ""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ").strip()
+    if not token:
         raise HTTPException(404, "Not found")
-    return {**session, "email": email}
+    try:
+        payload = jwt.decode(
+            token, settings.jwt_secret, algorithms=[JWT_ALG], audience=STAFF_AUD
+        )
+    except jwt.PyJWTError as e:
+        raise HTTPException(404, "Not found") from e
+    if payload.get("sub") != STAFF_SUB or payload.get("role") != STAFF_ROLE:
+        raise HTTPException(404, "Not found")
+    return payload
 
 
 def require_app_session(
