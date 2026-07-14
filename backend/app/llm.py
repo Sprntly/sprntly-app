@@ -185,9 +185,8 @@ def _client_for_key(api_key: str) -> Anthropic:
 
 def get_client() -> Anthropic:
     # Resolve the key for the acting company (see app.llm_keys): the company's own
-    # key when configured, the platform key only when allowed (unbound / still
-    # onboarding / contracted `use_platform_key`), else raise. Embeddings go
-    # through OpenAI and never call this factory.
+    # key when configured, the platform (default account) key otherwise.
+    # Embeddings go through OpenAI and never call this factory.
     from app.llm_keys import resolve_llm_api_key
 
     key = resolve_llm_api_key(settings.anthropic_api_key or None)

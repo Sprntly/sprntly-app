@@ -1,12 +1,11 @@
 """Per-company Claude API key — resolution policy, factories, middleware, routes.
 
 Policy under test:
-  * company has its own key                              → use it (never platform)
-  * no key, still onboarding                             → platform (allowed)
-  * no key, onboarding complete, use_platform_key=false  → FAIL
-  * no key, onboarding complete, use_platform_key=true   → platform (allowed)
-  * unbound (no company in scope)                        → platform
-  * OpenAI embeddings                                    → never touched
+  * company has its own key          → use it (never platform)
+  * no key configured                → platform (default account) key
+  * unbound (no company in scope)    → platform
+  * resolution error                 → platform (fall back, never fail the call)
+  * OpenAI embeddings                → never touched
 """
 from __future__ import annotations
 
@@ -40,13 +39,13 @@ def _bind(company_id: str):
         llm_keys.invalidate(company_id)
 
 
-def _stub_config(monkeypatch, *, cipher=None, use_platform=False, onboarded=False):
+def _stub_config(monkeypatch, *, cipher=None):
     import app.db.companies as companies_mod
 
     monkeypatch.setattr(
         companies_mod,
-        "get_company_llm_config",
-        lambda _cid: (cipher, use_platform, onboarded),
+        "get_llm_api_key_encrypted",
+        lambda _cid: cipher,
     )
 
 
@@ -62,34 +61,50 @@ def test_company_key_wins(isolated_settings, monkeypatch, fernet_key):
     from app.connectors.tokens import encrypt_token_json
     from app.llm_keys import resolve_llm_api_key
 
-    _stub_config(monkeypatch, cipher=encrypt_token_json("sk-ant-COMPANY"), onboarded=True)
+    _stub_config(monkeypatch, cipher=encrypt_token_json("sk-ant-COMPANY"))
     with _bind("co-1"):
         assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-COMPANY"
 
 
-def test_no_key_while_onboarding_allows_platform(isolated_settings, monkeypatch):
+def test_no_key_falls_back_to_platform(isolated_settings, monkeypatch):
     from app.llm_keys import resolve_llm_api_key
 
-    _stub_config(monkeypatch, cipher=None, use_platform=False, onboarded=False)
+    _stub_config(monkeypatch, cipher=None)
     with _bind("co-1"):
         assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
 
 
-def test_no_key_after_onboarding_fails(isolated_settings, monkeypatch):
-    from app.llm_keys import CompanyKeyRequiredError, resolve_llm_api_key
-
-    _stub_config(monkeypatch, cipher=None, use_platform=False, onboarded=True)
-    with _bind("co-1"):
-        with pytest.raises(CompanyKeyRequiredError):
-            resolve_llm_api_key("sk-ant-platform")
-
-
-def test_use_platform_flag_allows_platform_after_onboarding(isolated_settings, monkeypatch):
+def test_blank_company_key_falls_back_to_platform(isolated_settings, monkeypatch, fernet_key):
+    from app.connectors.tokens import encrypt_token_json
     from app.llm_keys import resolve_llm_api_key
 
-    _stub_config(monkeypatch, cipher=None, use_platform=True, onboarded=True)
+    _stub_config(monkeypatch, cipher=encrypt_token_json("   "))
     with _bind("co-1"):
         assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
+
+
+def test_resolution_error_falls_back_to_platform_without_caching(
+    isolated_settings, monkeypatch, fernet_key
+):
+    """A transient DB error falls back to the platform key for that call only —
+    the error result is NOT cached, so the next call re-reads the BYOK key."""
+    import app.db.companies as companies_mod
+    from app.connectors.tokens import encrypt_token_json
+    from app.llm_keys import resolve_llm_api_key
+
+    calls = {"n": 0}
+    cipher = encrypt_token_json("sk-ant-COMPANY")
+
+    def _flaky(_cid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("db down")
+        return cipher
+
+    monkeypatch.setattr(companies_mod, "get_llm_api_key_encrypted", _flaky)
+    with _bind("co-1"):
+        assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
+        assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-COMPANY"
 
 
 # ── client factories go through the resolver ─────────────────────────────────
@@ -105,7 +120,7 @@ def test_all_three_factories_honor_company_key(isolated_settings, monkeypatch, f
     monkeypatch.setattr(da_client.settings, "design_agent_anthropic_api_key", "sk-ant-design")
     monkeypatch.setattr(agent_chat.settings, "anthropic_api_key", "sk-ant-platform")
 
-    _stub_config(monkeypatch, cipher=encrypt_token_json("sk-ant-COMPANY"), onboarded=True)
+    _stub_config(monkeypatch, cipher=encrypt_token_json("sk-ant-COMPANY"))
     with _bind("co-1"):
         assert llm.get_client().api_key == "sk-ant-COMPANY"
         # Company key overrides even the dedicated design-agent key.
@@ -120,15 +135,13 @@ def test_factory_uses_platform_when_unbound(isolated_settings, monkeypatch):
     assert llm.get_client().api_key == "sk-ant-platform"
 
 
-def test_factory_raises_after_onboarding_without_key(isolated_settings, monkeypatch):
+def test_factory_falls_back_to_platform_when_bound_without_key(isolated_settings, monkeypatch):
     import app.llm as llm
-    from app.llm_keys import CompanyKeyRequiredError
 
     monkeypatch.setattr(llm.settings, "anthropic_api_key", "sk-ant-platform")
-    _stub_config(monkeypatch, cipher=None, use_platform=False, onboarded=True)
+    _stub_config(monkeypatch, cipher=None)
     with _bind("co-1"):
-        with pytest.raises(CompanyKeyRequiredError):
-            llm.get_client()
+        assert llm.get_client().api_key == "sk-ant-platform"
 
 
 def test_embeddings_ignore_company_binding(isolated_settings, monkeypatch, fernet_key):
@@ -137,7 +150,7 @@ def test_embeddings_ignore_company_binding(isolated_settings, monkeypatch, ferne
     from app.connectors.tokens import encrypt_token_json
     from app.graph.embeddings import EMBEDDING_DIM, embed_texts
 
-    _stub_config(monkeypatch, cipher=encrypt_token_json("sk-ant-COMPANY"), onboarded=True)
+    _stub_config(monkeypatch, cipher=encrypt_token_json("sk-ant-COMPANY"))
     with _bind("co-1"):
         vecs = embed_texts(["hello"])
     assert len(vecs) == 1 and vecs[0] == [0.0] * EMBEDDING_DIM

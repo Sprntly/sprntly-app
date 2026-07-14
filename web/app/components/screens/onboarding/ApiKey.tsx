@@ -9,14 +9,14 @@ import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboardin
 import { adminApi, ApiError, apiErrorMessage } from "../../../lib/api"
 
 /**
- * Onboarding "api-key" step — collect the company's own Anthropic (Claude) API
- * key BEFORE connectors.
+ * Onboarding "api-key" step — optionally collect the company's own Anthropic
+ * (Claude) API key BEFORE connectors.
  *
  * Why here: once sources connect, Sprntly builds the knowledge graph, which is
  * token-heavy. Collecting the key first means that build (and everything after)
- * runs on the company's OWN key, not the platform key. The key is required to
- * continue UNLESS the workspace is flagged `use_platform_key` (a contracted
- * customer that runs on the platform key), in which case the step is skippable.
+ * runs on the company's OWN key. The step is always skippable — workspaces
+ * without a key run on Sprntly's default account key, and a key can be added
+ * any time later in Settings → Admin.
  *
  * The key is saved via the backend (PUT /v1/admin/llm-key) so it's
  * Fernet-encrypted server-side — never written to Supabase from the client.
@@ -52,9 +52,7 @@ export function ApiKey() {
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
-  const skippable = workspace.use_platform_key === true
   const key = keyInput.trim()
-  const canContinue = alreadyConfigured || key.length > 0 || skippable
 
   async function toNextStep(skipped: boolean) {
     if (!workspace || auth.kind !== "authed") return
@@ -67,17 +65,14 @@ export function ApiKey() {
 
   async function onContinue() {
     setError(null)
-    // No new key entered — proceed if one already exists or the plan allows it.
+    // No new key entered — continue on the existing key, or on Sprntly's
+    // default account key (BYOK is optional).
     if (!key) {
-      if (alreadyConfigured || skippable) {
-        setSaving(true)
-        try {
-          await toNextStep(false)
-        } finally {
-          setSaving(false)
-        }
-      } else {
-        setError("Enter your Anthropic API key to continue.")
+      setSaving(true)
+      try {
+        await toNextStep(!alreadyConfigured)
+      } finally {
+        setSaving(false)
       }
       return
     }
@@ -114,27 +109,23 @@ export function ApiKey() {
           Add your <em>Claude API key.</em>
         </>
       }
-      subtitle="Sprntly runs on your own Anthropic (Claude) key, billed to your account. We add it before connecting sources so building your knowledge graph runs on your key, not ours."
+      subtitle="Add your own Anthropic (Claude) key to run Sprntly on your account. No key? No problem — Sprntly runs on its built-in key until you add one."
       footerMeta={
-        skippable ? (
-          <>
-            Your plan includes platform usage —{" "}
-            <button
-              type="button"
-              className="onb-skip-link"
-              onClick={onSkip}
-              disabled={saving}
-            >
-              skip for now
-            </button>
-          </>
-        ) : (
-          <>Required — get a key at console.anthropic.com → API keys.</>
-        )
+        <>
+          Optional — get a key at console.anthropic.com → API keys, or{" "}
+          <button
+            type="button"
+            className="onb-skip-link"
+            onClick={onSkip}
+            disabled={saving}
+          >
+            skip for now
+          </button>
+        </>
       }
       onBack={() => router.push("/onboarding/workspace")}
       onContinue={onContinue}
-      continueDisabled={saving || !canContinue}
+      continueDisabled={saving}
       loading={saving}
     >
       <div className="field">

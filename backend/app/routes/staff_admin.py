@@ -5,7 +5,9 @@ organizations and configure their deal terms:
 
   * which modules they can access (companies.feature_flags),
   * default (platform) Claude key vs bring-your-own (companies.use_platform_key
-    — the BYOK key itself is set by the company's own admin in Settings),
+    — informational deal-terms flag; every company falls back to the platform
+    key when no BYOK key is set. The BYOK key itself is set by the company's
+    own admin in Settings),
   * how many members they can invite (companies.seat_limit),
   * whether the prototype (design-agent) feature is enabled
     (companies.prototype_enabled).
@@ -30,7 +32,6 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
-from app import llm_keys
 from app import team_email as team_email_mod
 from app.auth import CompanyContext, require_company, require_staff, session_email
 from app.db.companies import (
@@ -135,10 +136,6 @@ def staff_patch_company(
 
     if patch:
         update_company_entitlements(company_id, patch)
-        if "use_platform_key" in patch:
-            # The LLM-key resolver caches per-company posture (app.llm_keys);
-            # flush so the key-mode change takes effect immediately.
-            llm_keys.invalidate(company_id)
     return get_company_entitlements(company_id)
 
 
@@ -224,7 +221,6 @@ def claim_org_invite(company: CompanyContext = Depends(require_company)):
             "feature_flags": flags,
         },
     )
-    llm_keys.invalidate(company.company_id)
     mark_org_invite_accepted(invite["id"], company_id=company.company_id)
     return {
         "applied": True,
