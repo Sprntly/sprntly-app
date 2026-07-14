@@ -21,4 +21,5 @@ create table if not exists tracker_meta (
   unique (company_id, provider, destination_id)
 );
 alter table tracker_meta enable row level security;
+drop policy if exists "srv_tracker_meta" on tracker_meta;
 create policy "srv_tracker_meta" on tracker_meta for all using (true) with check (true);
