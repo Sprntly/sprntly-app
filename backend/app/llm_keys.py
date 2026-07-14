@@ -1,14 +1,12 @@
-"""Per-company Claude API key — resolution, enforcement, and ambient binding.
+"""Per-company Claude API key — resolution and ambient binding.
 
 Policy (product):
-  * A company MUST use its own Anthropic (Claude) API key. The key is collected
-    during onboarding (before the connectors step).
-  * If a company has no key configured, Claude calls FAIL — UNLESS platform
-    fallback is allowed for that company, which happens in exactly two cases:
-      1. `companies.use_platform_key` is true (a DB-only flag Sprntly sets for
-         specific contracted customers — there is no UI toggle), or
-      2. the company has not finished onboarding yet (pre-key onboarding LLM
-         work runs on the platform key).
+  * A company MAY bring its own Anthropic (Claude) API key — collected during
+    onboarding (before the connectors step) or later in Settings → Admin. When
+    set, ALL of that company's Claude calls use it.
+  * If a company has no key configured, Claude calls fall back to the platform
+    (default account) key. BYOK is optional; nothing ever hard-fails on a
+    missing company key.
   * OpenAI embeddings (`app/graph/embeddings.py`) are unaffected: they read
     `settings.openai_api_key` directly and never touch this module.
 
@@ -18,19 +16,20 @@ A `ContextVar` holds the acting company id for the current call stack. Two
 binders populate it:
 
   * `CompanyLLMKeyMiddleware` (app/main.py) binds it for the whole of every
-    authenticated HTTP request — so EVERY request-scoped Claude call is enforced
-    without each call site opting in. Request-spawned tasks (`create_task`,
-    BackgroundTasks) inherit the binding via the contextvars snapshot taken at
-    task creation.
+    authenticated HTTP request — so EVERY request-scoped Claude call resolves
+    the company key without each call site opting in. Request-spawned tasks
+    (`create_task`, BackgroundTasks) inherit the binding via the contextvars
+    snapshot taken at task creation.
   * `company_llm_key(company_id)` binds it explicitly for NON-request contexts
     that carry a company id — the KG gateway, the weekly-brief scheduler, warm
     Ask jobs, and the design-agent worker process (which runs outside any HTTP
     request).
 
 The three Anthropic client factories (app.llm, app.design_agent.client,
-app.routes.agent_chat) call `resolve_llm_api_key(platform_key)` to pick the key
-or raise. Truly-unbound calls (CLI, system startup, anything with no company in
-scope) get the platform key unchanged.
+app.routes.agent_chat) call `resolve_llm_api_key(platform_key)` to pick the
+company key when one is configured, the platform key otherwise. Truly-unbound
+calls (CLI, system startup, anything with no company in scope) get the
+platform key unchanged.
 """
 from __future__ import annotations
 
@@ -38,9 +37,6 @@ import contextlib
 import contextvars
 import logging
 import time
-from dataclasses import dataclass
-
-from fastapi import HTTPException
 
 from app.connectors.tokens import decrypt_token_json
 
@@ -52,87 +48,52 @@ _current_company_id: contextvars.ContextVar[str | None] = contextvars.ContextVar
 )
 
 
-@dataclass(frozen=True)
-class _Resolution:
-    """A company's resolved LLM-key posture."""
-
-    company_key: str | None
-    allow_platform: bool
-
-
-class CompanyKeyRequiredError(HTTPException):
-    """Raised when a bound company has no Claude key and platform fallback is not
-    allowed (no `use_platform_key` flag, onboarding complete). Surfaces as a 400
-    with an actionable message; not retried by the LLM retry layer."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            status_code=400,
-            detail=(
-                "This workspace has no Claude API key configured. Add your "
-                "Anthropic API key in Settings → Admin to use Sprntly."
-            ),
-        )
-
-
-# Small TTL cache of company_id → _Resolution. Keeps request-path binding from
-# hitting the DB on every call. The Admin routes call `invalidate()` on writes
-# for an immediate flush; the short TTL bounds staleness otherwise.
+# Small TTL cache of company_id → decrypted company key (or None when the
+# company hasn't configured one). Keeps request-path binding from hitting the
+# DB on every call. The Admin routes call `invalidate()` on writes for an
+# immediate flush; the short TTL bounds staleness otherwise.
 _CACHE_TTL_S = 30.0
-_cache: dict[str, tuple[float, _Resolution]] = {}
+_cache: dict[str, tuple[float, str | None]] = {}
 
 
 def invalidate(company_id: str) -> None:
-    """Drop the cached resolution for a company (call after a key save/remove)."""
+    """Drop the cached key for a company (call after a key save/remove)."""
     _cache.pop(company_id, None)
 
 
-def _resolve(company_id: str) -> _Resolution:
+def _resolve(company_id: str) -> str | None:
     now = time.monotonic()
     hit = _cache.get(company_id)
     if hit is not None and now - hit[0] < _CACHE_TTL_S:
         return hit[1]
 
     company_key: str | None = None
-    allow_platform = False
     try:
-        from app.db.companies import get_company_llm_config
+        from app.db.companies import get_llm_api_key_encrypted
 
-        cipher, use_platform_key, onboarding_complete = get_company_llm_config(company_id)
+        cipher = get_llm_api_key_encrypted(company_id)
         if cipher:
             company_key = decrypt_token_json(cipher).strip() or None
-        # Platform fallback is allowed for contracted customers (the DB flag), or
-        # while the company is still onboarding (pre-key setup work).
-        allow_platform = bool(use_platform_key) or not bool(onboarding_complete)
     except Exception:  # noqa: BLE001 — never break an LLM call on a resolution error
-        logger.exception("Failed to resolve company LLM config for %s", company_id)
-        # Fail safe toward NOT leaking the platform key: no key, no fallback.
-        company_key, allow_platform = None, False
+        logger.exception("Failed to resolve company LLM key for %s", company_id)
+        # Fall back to the platform key rather than failing the call.
+        company_key = None
 
-    res = _Resolution(company_key=company_key, allow_platform=allow_platform)
-    _cache[company_id] = (now, res)
-    return res
+    _cache[company_id] = (now, company_key)
+    return company_key
 
 
 def resolve_llm_api_key(platform_key: str | None) -> str | None:
     """Pick the API key an Anthropic client factory should use.
 
-    * No company bound (CLI / system / unauthenticated) → the platform key.
     * Company has its own key → that key (never the platform key).
-    * Company has no key but platform fallback is allowed (DB flag or still
-      onboarding) → the platform key.
-    * Company has no key and fallback is not allowed → raise
-      CompanyKeyRequiredError.
+    * Otherwise (no key configured, or no company bound at all) → the platform
+      key.
     """
     company_id = _current_company_id.get()
     if company_id is None:
         return platform_key
-    res = _resolve(company_id)
-    if res.company_key:
-        return res.company_key
-    if res.allow_platform:
-        return platform_key
-    raise CompanyKeyRequiredError()
+    return _resolve(company_id) or platform_key
 
 
 @contextlib.contextmanager

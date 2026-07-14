@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 //
-// Container mount test for the onboarding "api-key" step — collect the
-// company's own Claude key BEFORE connectors.
+// Container mount test for the onboarding "api-key" step — optionally collect
+// the company's own Claude key BEFORE connectors.
 //
 // Covers: a valid key saves via the backend then advances to connectors; a
-// non-anthropic key is rejected inline (no save); the step is REQUIRED by
-// default (no skip link, Continue disabled with an empty field) but SKIPPABLE
-// when the workspace is flagged use_platform_key.
+// non-anthropic key is rejected inline (no save); the step is always
+// SKIPPABLE (workspaces without a key run on Sprntly's default account key),
+// and Continue with an empty field advances while marking the step skipped.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -88,19 +88,9 @@ describe("ApiKey (onboarding step 03 — Claude key)", () => {
     expect(advanceStepMock).not.toHaveBeenCalled()
   })
 
-  it("is required by default — no skip link, and Continue is disabled while empty", () => {
+  it("is skippable for every workspace (no key → Sprntly's default account key)", async () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({ workspace: makeWorkspace({ use_platform_key: false }) }),
-    )
-    mount()
-    expect(screen.queryByText(/skip for now/i)).toBeNull()
-    const cont = screen.getByRole("button", { name: /continue/i }) as HTMLButtonElement
-    expect(cont.disabled).toBe(true)
-  })
-
-  it("is skippable for a use_platform_key workspace", async () => {
-    onboardingMock.mockReturnValue(
-      makeOnboardingCtx({ workspace: makeWorkspace({ use_platform_key: true }) }),
     )
     mount()
     const skip = screen.getByText(/skip for now/i)
@@ -110,6 +100,19 @@ describe("ApiKey (onboarding step 03 — Claude key)", () => {
     await waitFor(() => expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["api_key"]))
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+    expect(setLlmKeyMock).not.toHaveBeenCalled()
+  })
+
+  it("continues with an empty field, marking the step skipped", async () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: makeWorkspace() }))
+    mount()
+    const cont = screen.getByRole("button", { name: /continue/i }) as HTMLButtonElement
+    expect(cont.disabled).toBe(false)
+    await act(async () => {
+      fireEvent.click(cont)
+    })
+    await waitFor(() => expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["api_key"]))
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
     expect(setLlmKeyMock).not.toHaveBeenCalled()
   })
 })
