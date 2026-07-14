@@ -59,6 +59,7 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "google_analytics": [ANALYTICS],
     "heap": [ANALYTICS],
     "posthog": [ANALYTICS],
+    "superset": [ANALYTICS],
     # Revenue / CRM
     "stripe": [REVENUE],
     "chartmogul": [REVENUE],

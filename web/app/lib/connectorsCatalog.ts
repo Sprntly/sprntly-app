@@ -25,6 +25,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "google_analytics", name: "Google Analytics", logo: "G", logoText: "G", logoColor: "#F9AB00", logoSvg: "/connectors/google_analytics.svg", oauth: false, types: ["analytics"] },
       { id: "heap",             name: "Heap",             logo: "H", logoText: "H", logoColor: "#FF6E6E", oauth: false, types: ["analytics"] },
       { id: "posthog",          name: "PostHog",          logo: "P", logoText: "P", logoColor: "#0CC1AE", logoSvg: "/connectors/posthog.svg", oauth: false, types: ["analytics"] },
+      // Self-hosted BI — connects with instance URL + service-account login
+      // (authType "credentials"), the first wired Analytics connector.
+      { id: "superset",         name: "Superset",         logo: "S", logoText: "S", logoColor: "#20A7C9", oauth: false, authType: "credentials", types: ["analytics"] },
     ],
   },
   {
@@ -157,14 +160,19 @@ export const CONNECTOR_IDS_WITH_OAUTH = new Set<string>(
  */
 export const CONNECTOR_IDS_CONNECTABLE = new Set<string>(
   CONNECTOR_CATALOG.flatMap((c) => c.items)
-    .filter((i) => i.oauth || i.authType === "apikey")
+    .filter((i) => i.oauth || i.authType === "apikey" || i.authType === "credentials")
     .map((i) => i.id),
 )
 
 /** True iff this connector has a working integration the user can actually
- *  use today (OAuth or API key). Everything else is "Coming soon". */
+ *  use today (OAuth, API key, or a credentials form). Everything else is
+ *  "Coming soon". */
 export function isConnectableConnector(item: ConnectorItemRow): boolean {
-  return Boolean(item.oauth) || item.authType === "apikey"
+  return (
+    Boolean(item.oauth)
+    || item.authType === "apikey"
+    || item.authType === "credentials"
+  )
 }
 
 /**

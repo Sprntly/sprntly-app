@@ -13,7 +13,15 @@ from typing import Callable, Iterable
 
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
-from app.kg_ingest.pullers import clickup, fireflies, github, hubspot, jira, sprinklr
+from app.kg_ingest.pullers import (
+    clickup,
+    fireflies,
+    github,
+    hubspot,
+    jira,
+    sprinklr,
+    superset,
+)
 from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
@@ -28,6 +36,7 @@ PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     "fireflies": (fireflies.pull, "api_key",      "customer_voice / communication (meeting transcripts)"),
     "github":    (github.pull,    "access_token", "engineering activity (PRs + commit messages; distilled ship signals — classify feature/fix/refactor, surface what's being built)"),
     "sprinklr":  (sprinklr.pull,  "access_token", "customer_voice (CX cases: support pain/churn risk; inbound social messages/mentions: public voice-of-customer + market sentiment)"),
+    "superset":  (superset.pull,  "superset_credential", "analytics (BI metadata: dashboards/charts/datasets/saved queries — the company's metrics vocabulary, what is measured and how it's organized)"),
 }
 
 

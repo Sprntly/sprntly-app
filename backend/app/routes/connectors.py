@@ -45,7 +45,7 @@ import requests
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request as GoogleAuthRequest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import db
 from app import datasets as datasets_service
@@ -62,6 +62,7 @@ from app.connectors import (
     jira_oauth,
     slack_oauth,
     sprinklr_oauth,
+    superset_auth,
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
@@ -2446,6 +2447,80 @@ def fireflies_disconnect(
         raise HTTPException(404, "Fireflies is not connected")
     db.delete_connection(company.company_id, fireflies_apikey.FIREFLIES_PROVIDER)
     return {"deleted": True, "provider": fireflies_apikey.FIREFLIES_PROVIDER}
+
+
+# ─────────────────────── Superset (credentials, not OAuth) ───────────────────
+#
+# Self-hosted BI: the user supplies their instance URL + a service-account
+# login. We validate by logging in, store the triple encrypted, and every
+# consumer re-logs-in on use (no token persistence — see superset_auth).
+
+
+class SupersetConnectIn(BaseModel):
+    base_url: str = Field(..., min_length=1)
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+
+@router.post("/superset/connect")
+def superset_connect(
+    body: SupersetConnectIn,
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin_for_org_connector(company, superset_auth.SUPERSET_PROVIDER)
+    try:
+        base_url = superset_auth.normalize_base_url(body.base_url)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
+
+    username = body.username.strip()
+    try:
+        tokens = superset_auth.login(base_url, username, body.password)
+    except superset_auth.SupersetAuthError as e:
+        raise HTTPException(400, str(e)) from e
+
+    # Best-effort identity for the account label — /me failing must not
+    # fail the connect (the login above already proved the credential).
+    user = superset_auth.fetch_current_user(base_url, tokens["access_token"])
+    label = user.get("email") or user.get("username") or username
+
+    try:
+        token_encrypted = encrypt_token_json(
+            superset_auth.credential_to_store(base_url, username, body.password)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company.company_id,
+        provider=superset_auth.SUPERSET_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes="",
+        account_label=label,
+        # base_url is non-secret and handy for the UI; credentials stay
+        # exclusively in the encrypted token payload.
+        config_json=json.dumps({"base_url": base_url, "user": user or None}),
+    )
+
+    kickoff_sync(company.company_id, superset_auth.SUPERSET_PROVIDER)
+
+    return {
+        "ok": True,
+        "provider": superset_auth.SUPERSET_PROVIDER,
+        "account_label": label,
+    }
+
+
+@router.delete("/superset")
+def superset_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin_for_org_connector(company, superset_auth.SUPERSET_PROVIDER)
+    row = db.get_connection(company.company_id, superset_auth.SUPERSET_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Superset is not connected")
+    db.delete_connection(company.company_id, superset_auth.SUPERSET_PROVIDER)
+    return {"deleted": True, "provider": superset_auth.SUPERSET_PROVIDER}
 
 
 # ─────────────────────── GitHub webhook ───────────────────────

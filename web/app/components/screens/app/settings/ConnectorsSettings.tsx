@@ -58,6 +58,10 @@ import { openOauthTab } from "../../../../lib/connectorsOauth"
 import { useConnectorConnectedSignal } from "../../../../lib/useConnectorConnectedSignal"
 import { notifyBriefRegenerating } from "../../../../lib/useBriefHydration"
 import { ApiKeyPromptModal } from "../../../connectors/ApiKeyPromptModal"
+import {
+  CredentialsPromptModal,
+  type CredentialsValues,
+} from "../../../connectors/CredentialsPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
 
@@ -427,6 +431,8 @@ export function ConnectorsSettings() {
   >(null)
   const [apiKeyConnectingItem, setApiKeyConnectingItem] =
     useState<ConnectorItemRow | null>(null)
+  const [credentialsConnectingItem, setCredentialsConnectingItem] =
+    useState<ConnectorItemRow | null>(null)
   // Set when we send the user to a provider's OAuth page in a sibling tab —
   // tells the visibility listener to refresh connections when they switch back.
   const oauthInFlight = useRef(false)
@@ -527,6 +533,12 @@ export function ConnectorsSettings() {
         return
       }
 
+      if (item?.authType === "credentials") {
+        // Self-hosted tool: open the URL + username + password form.
+        setCredentialsConnectingItem(item)
+        return
+      }
+
       if (!CONNECTOR_IDS_WITH_OAUTH.has(providerId)) return
       // Open the provider in a new tab so the user keeps their place in
       // Settings. Pre-open synchronously (before the startOauth await) so the
@@ -572,6 +584,23 @@ export function ConnectorsSettings() {
       }
     },
     [apiKeyConnectingItem, reload],
+  )
+
+  const handleCredentialsConnect = useCallback(
+    async (values: CredentialsValues) => {
+      if (!credentialsConnectingItem) return
+      if (credentialsConnectingItem.id === "superset") {
+        await connectorsApi.connectSupersetWithCredentials(
+          values.baseUrl, values.username, values.password,
+        )
+        await reload()
+      } else {
+        throw new Error(
+          `Credentials connect not wired for provider: ${credentialsConnectingItem.id}`,
+        )
+      }
+    },
+    [credentialsConnectingItem, reload],
   )
 
   const onConfigure = useCallback((providerId: string) => {
@@ -688,6 +717,17 @@ export function ConnectorsSettings() {
         }
         onConnect={handleApiKeyConnect}
         onClose={() => setApiKeyConnectingItem(null)}
+      />
+      <CredentialsPromptModal
+        open={credentialsConnectingItem != null}
+        connectorName={credentialsConnectingItem?.name ?? ""}
+        helpText={
+          credentialsConnectingItem?.id === "superset"
+            ? "Enter your Superset instance URL and a service account — ideally a dedicated read-only (Gamma) user created just for Sprntly."
+            : null
+        }
+        onConnect={handleCredentialsConnect}
+        onClose={() => setCredentialsConnectingItem(null)}
       />
     </>
   )

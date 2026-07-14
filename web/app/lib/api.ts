@@ -1167,6 +1167,17 @@ export const connectorsApi = {
   disconnectFireflies: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
 
+  // ---- Superset (self-hosted; instance URL + service-account login) --------
+  connectSupersetWithCredentials: (
+    baseUrl: string, username: string, password: string,
+  ) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      `/v1/connectors/superset/connect`,
+      { base_url: baseUrl, username, password },
+    ),
+  disconnectSuperset: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/superset`),
+
   // ---- Generic test-connection --------------------------------------------
   /**
    * Re-validate a stored connection by re-running the provider's

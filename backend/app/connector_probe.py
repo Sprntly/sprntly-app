@@ -35,6 +35,7 @@ from app.connectors import (
     jira_oauth,
     slack_oauth,
     sprinklr_oauth,
+    superset_auth,
 )
 from app.connectors.tokens import (
     TokenEncryptionError,
@@ -248,6 +249,23 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
     elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
         api_key = token_json.get("api_key") or ""
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
+    elif provider == superset_auth.SUPERSET_PROVIDER:
+        # No stored tokens to validate — Superset consumers re-login on use
+        # (instance-configured JWT lifetimes), so the probe IS a fresh login.
+        credential = token_json.get(superset_auth.CREDENTIAL_KEY) or ""
+        try:
+            base_url, username, password = superset_auth.parse_credential(credential)
+        except (ValueError, KeyError, json.JSONDecodeError) as e:
+            raise ProbeError("Stored Superset credential unreadable",
+                             reason="unreadable") from e
+        try:
+            tokens = superset_auth.login(base_url, username, password)
+            user_obj = (
+                superset_auth.fetch_current_user(base_url, tokens["access_token"])
+                or {"username": username}
+            )
+        except superset_auth.SupersetAuthError:
+            user_obj = {}  # soft rejection → "reconnect required" below
     else:
         raise ProbeError(
             f"Probe not supported for provider {provider!r}", reason="unsupported"
