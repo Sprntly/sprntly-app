@@ -715,11 +715,22 @@ export function TicketsTab() {
   }, [prdId, regenNonce])
 
   // ── Sync state: load per PRD, poll while a sync runs ─────────────────────
+  // True while a push/registration flow is mid-flight (destination chosen but
+  // the backend may not have registered it yet). A poll landing in that window
+  // still describes the PREVIOUS binding (or none) and would clobber the
+  // optimistic "Syncing with …" state — the button would bounce back to
+  // "Push to Jira" and never flip to "Synced". Ignore those responses; the
+  // push flow refreshes itself once registration settles.
+  const registeringRef = useRef(false)
   const refreshSync = useCallback(() => {
     if (prdId == null) return
     storiesApi.getSyncState(prdId)
-      .then(setSyncState)
-      .catch(() => setSyncState({ configured: false }))
+      .then((s) => {
+        if (registeringRef.current) return
+        setSyncState(s)
+      })
+      // Transient fetch failure must not downgrade a known-configured state.
+      .catch(() => setSyncState((prev) => prev ?? { configured: false }))
   }, [prdId])
 
   useEffect(() => {
@@ -727,25 +738,41 @@ export function TicketsTab() {
     refreshSync()
   }, [prdId, refreshSync])
 
-  // While the backend reports "syncing", poll until it settles; surface the
-  // outcome once (success toast / error stays visible under the header).
+  const syncing = syncState?.sync_status === "syncing"
+
+  // While a sync runs, poll until it settles — the button then flips to
+  // "Synced with <tool> just now" within a couple of seconds of completion.
+  // Keyed on the BOOLEAN, not the state object: a failed poll (or an ignored
+  // response above) leaves the state reference unchanged, and an object-keyed
+  // effect would never re-arm — wedging the button on "Syncing…" forever.
+  useEffect(() => {
+    if (!syncing) return
+    const t = setInterval(refreshSync, 2000)
+    return () => clearInterval(t)
+  }, [syncing, refreshSync])
+
+  // Surface the outcome once when a sync settles (success toast / error
+  // stays visible under the header).
   const wasSyncing = useRef(false)
   useEffect(() => {
-    const syncingNow = syncState?.sync_status === "syncing"
-    if (wasSyncing.current && !syncingNow && syncState) {
+    if (wasSyncing.current && !syncing && syncState) {
       if (syncState.last_error) {
         showToast("Sync finished with problems", syncState.last_error.slice(0, 120))
       } else if (syncState.last_synced_at) {
         showToast(`Synced with ${trackerLabel(syncState.provider)}`, "Tickets and statuses are up to date.")
       }
     }
-    wasSyncing.current = Boolean(syncingNow)
-    if (!syncingNow) return
-    const t = setTimeout(refreshSync, 2500)
-    return () => clearTimeout(t)
-  }, [syncState, refreshSync, showToast])
+    wasSyncing.current = syncing
+  }, [syncing, syncState, showToast])
 
-  const syncing = syncState?.sync_status === "syncing"
+  // relTime() is computed at render, so without re-renders the button would
+  // freeze on "Synced with Jira just now" — tick each minute to age it.
+  const [, setAgeTick] = useState(0)
+  useEffect(() => {
+    if (!syncState?.last_synced_at || syncing) return
+    const t = setInterval(() => setAgeTick((n) => n + 1), 60_000)
+    return () => clearInterval(t)
+  }, [syncState?.last_synced_at, syncing])
 
   // ── Tracker metadata: the connected tracker's REAL vocabulary ────────────
   // Loaded per PRD and passed into the ticket detail so tickets render the
@@ -772,11 +799,16 @@ export function TicketsTab() {
   /** Ad-hoc sync of the already-configured destination (the button click). */
   const syncNow = async () => {
     if (prdId == null || syncing || !syncState?.configured) return
+    // Hold the optimistic "Syncing…" against polls until the backend has
+    // actually marked the run (triggerSync returning), then let polling own it.
+    registeringRef.current = true
     setSyncState((s) => (s ? { ...s, sync_status: "syncing" } : s))
     try {
       await storiesApi.triggerSync(prdId)
+      registeringRef.current = false
       refreshSync()
     } catch (e) {
+      registeringRef.current = false
       refreshSync()
       showToast("Couldn't sync", e instanceof Error ? e.message.slice(0, 120) : "Try again.")
     }
@@ -821,6 +853,7 @@ export function TicketsTab() {
     if (!list) return
     const provider = pickState.provider
     setPickState({ kind: "idle" })
+    registeringRef.current = true
     setSyncState((s) => ({
       ...(s ?? {}), configured: true, provider,
       destination_id: list.id, destination_name: list.name, sync_status: "syncing",
@@ -829,8 +862,10 @@ export function TicketsTab() {
       await storiesApi.triggerSync(prdId, {
         provider, destination_id: list.id, destination_name: list.name,
       })
+      registeringRef.current = false
       refreshSync()
     } catch (e) {
+      registeringRef.current = false
       refreshSync()
       showToast("Couldn't start the sync", e instanceof Error ? e.message.slice(0, 120) : "Try again.")
     }
@@ -850,6 +885,11 @@ export function TicketsTab() {
     const project = pickState.projects.find((p) => p.key === choice.projectKey)
     const destinationName = project?.name ?? choice.projectKey
     setPickState({ kind: "idle" })
+    // The push itself can take a while — hold the optimistic "Syncing with
+    // Jira…" state against mid-flight polls until the destination is
+    // registered (triggerSync below), so the button flips straight from
+    // Syncing → Synced instead of bouncing back to "Push to Jira".
+    registeringRef.current = true
     setSyncState((s) => ({
       ...(s ?? {}), configured: true, provider: "jira",
       destination_id: choice.projectKey, destination_name: destinationName,
@@ -867,8 +907,10 @@ export function TicketsTab() {
       await storiesApi.triggerSync(prdId, {
         provider: "jira", destination_id: choice.projectKey, destination_name: destinationName,
       })
+      registeringRef.current = false
       refreshSync()
     } catch (e) {
+      registeringRef.current = false
       refreshSync()
       showToast("Jira push failed", e instanceof Error ? e.message.slice(0, 120) : "Try again.")
     }

@@ -27,7 +27,7 @@ const PANEL_OVERRIDE_CSS = `
   h1 { font-size: 20px !important; line-height: 1.25 !important; }
   body { padding: 0 0 80px !important; }
   .frame { max-width: 990px !important; }
-  .page { padding: 25px 25px !important; border-radius: 12px !important; }
+  .page { padding: 25px 25px !important; border-radius: 0 !important; }
 `
 
 const HTML_DRAFT_KEY = (prdId: number) => `sprntly_prd_html_draft_${prdId}`
