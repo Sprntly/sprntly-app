@@ -5,11 +5,12 @@ import random
 import sys
 import time
 
-from fastapi import Depends, APIRouter, HTTPException
+from fastapi import Depends, APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.ask_job_runner import run_ask_job
 from app.auth import CompanyContext, require_company
+from app.ingest import convert
 from app.db import (
     complete_ask_job,
     find_cached_ask,
@@ -85,7 +86,11 @@ ASK_RESPONSE_SCHEMA: dict = {
 
 
 class AskIn(BaseModel):
-    question: str = Field(..., min_length=3, max_length=2000)
+    # The cap must fit a question PLUS an inlined `[Attached files]` block —
+    # the composer appends extracted document markdown (clamped to 100k there,
+    # see ChatScreen.submitAsk) to the question. 2000 was the pre-attachment
+    # sanity cap; keep a generous abuse ceiling, not a content limit.
+    question: str = Field(..., min_length=3, max_length=120_000)
     dataset: str
     # Optional multi-turn: when set, prior turns of this conversation are
     # loaded (ownership-checked) and fed to the router + answer for follow-ups.
@@ -264,6 +269,38 @@ async def ask(
 def get_skills():
     """Return the list of available skills for the chat composer UI."""
     return {"skills": list_available_skills()}
+
+
+# Same ceiling as PRD import — a slide deck or spec is comfortably under this.
+_MAX_EXTRACT_BYTES = 25 * 1024 * 1024  # 25 MB
+
+
+@router.post("/extract-file")
+async def extract_file(
+    file: UploadFile = File(...),
+    company: CompanyContext = Depends(require_company),  # noqa: ARG001 — auth gate only
+):
+    """Parse a chat attachment (pptx/pdf/docx/…) to markdown for ask context.
+
+    The composer can inline plain-text attachments itself, but binary document
+    formats need server-side parsing (`app.ingest.convert` — no LLM). Returns
+    `{name, markdown}`; the composer appends it to the question as an
+    `[Attached files]` block, so a deck attached to a plain question actually
+    reaches the agent instead of being silently dropped.
+    """
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Uploaded file is empty.")
+    if len(data) > _MAX_EXTRACT_BYTES:
+        raise HTTPException(413, "File too large (max 25 MB).")
+    markdown = await asyncio.to_thread(convert, file.filename or "upload", data)
+    if not markdown.strip():
+        raise HTTPException(
+            422,
+            "Could not extract any text from the file. Scanned/image-only PDFs "
+            "and legacy .ppt are not supported — export to PDF or .pptx.",
+        )
+    return {"name": file.filename or "upload", "markdown": markdown}
 
 
 @router.get("/usage")

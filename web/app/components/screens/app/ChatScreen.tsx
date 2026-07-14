@@ -327,8 +327,9 @@ export function ChatScreen() {
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
   // `file` is set for document formats (.pdf/.pptx/.docx/.doc): those can't be
-  // inlined as text, so the original File is kept for the PRD-import command
-  // ("convert this PRD into tickets" → POST /v1/prd/import parses it server-side).
+  // inlined as text client-side. The File feeds the PRD-import command
+  // ("import this as a PRD" → POST /v1/prd/import) or, for a plain question,
+  // server-side text extraction at send time (POST /v1/ask/extract-file).
   const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
@@ -344,7 +345,7 @@ export function ChatScreen() {
     Array.from(files).forEach((file) => {
       if (/\.(pdf|pptx|docx|doc)$/i.test(file.name)) {
         setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
-        showToast("Attached", `"${file.name}" ready — say "convert this PRD into tickets" to import it.`)
+        showToast("Attached", `"${file.name}" ready — ask about it, or say "import this as a PRD" / "convert this PRD into tickets".`)
         return
       }
       const reader = new FileReader()
@@ -1091,15 +1092,34 @@ export function ChatScreen() {
         void prdCommandFlow(trimmed)
         return
       }
-      // Append attached file content as context (text attachments only —
-      // document attachments exist for the import command and have no text form)
+      // Append attached file content as context. Text attachments inline
+      // directly; document attachments (.pdf/.pptx/.docx/.doc) are parsed to
+      // markdown server-side (POST /v1/ask/extract-file) so a deck attached to
+      // a plain question reaches the agent too — they used to be silently
+      // dropped here, which read as "no document was attached" replies.
       let query = trimmed
-      const textAttachments = attachments.filter((a) => !a.file)
-      if (textAttachments.length > 0) {
-        const ctx = textAttachments.map((a) => `--- ${a.name} ---\n${a.content}`).join("\n\n")
+      if (attachments.length > 0) {
+        let ctx: string
+        try {
+          const parts = await Promise.all(
+            attachments.map(async (a) => {
+              if (!a.file) return `--- ${a.name} ---\n${a.content}`
+              const r = await askApi.extractFile(a.file)
+              return `--- ${a.name} ---\n${r.markdown.slice(0, 50000)}`
+            }),
+          )
+          // Clamp the TOTAL context so question + attachments stay under the
+          // ask endpoint's 120k question cap even with several attachments.
+          ctx = parts.join("\n\n").slice(0, 100000)
+        } catch (e) {
+          // Keep the attachments so the user can retry or remove the bad one —
+          // a silent drop is exactly the failure mode this path exists to fix.
+          showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+          return
+        }
         query = `${query}\n\n[Attached files]\n${ctx}`
+        setAttachments([]) // clear after successful extraction only
       }
-      if (attachments.length > 0) setAttachments([]) // clear after sending
       if (query.length < 1) return
       // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
       // before doing any work. (Authoritative per-tab guard happens once
