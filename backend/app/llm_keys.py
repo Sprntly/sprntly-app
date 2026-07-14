@@ -76,8 +76,10 @@ def _resolve(company_id: str) -> str | None:
             company_key = decrypt_token_json(cipher).strip() or None
     except Exception:  # noqa: BLE001 — never break an LLM call on a resolution error
         logger.exception("Failed to resolve company LLM key for %s", company_id)
-        # Fall back to the platform key rather than failing the call.
-        company_key = None
+        # Fall back to the platform key for THIS call, but don't cache the
+        # error result — a company with a BYOK key shouldn't keep running on
+        # the platform key for the TTL because of one transient DB error.
+        return None
 
     _cache[company_id] = (now, company_key)
     return company_key

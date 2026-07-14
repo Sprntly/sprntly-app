@@ -83,16 +83,28 @@ def test_blank_company_key_falls_back_to_platform(isolated_settings, monkeypatch
         assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
 
 
-def test_resolution_error_falls_back_to_platform(isolated_settings, monkeypatch):
+def test_resolution_error_falls_back_to_platform_without_caching(
+    isolated_settings, monkeypatch, fernet_key
+):
+    """A transient DB error falls back to the platform key for that call only —
+    the error result is NOT cached, so the next call re-reads the BYOK key."""
     import app.db.companies as companies_mod
+    from app.connectors.tokens import encrypt_token_json
     from app.llm_keys import resolve_llm_api_key
 
-    def _boom(_cid):
-        raise RuntimeError("db down")
+    calls = {"n": 0}
+    cipher = encrypt_token_json("sk-ant-COMPANY")
 
-    monkeypatch.setattr(companies_mod, "get_llm_api_key_encrypted", _boom)
+    def _flaky(_cid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("db down")
+        return cipher
+
+    monkeypatch.setattr(companies_mod, "get_llm_api_key_encrypted", _flaky)
     with _bind("co-1"):
         assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
+        assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-COMPANY"
 
 
 # ── client factories go through the resolver ─────────────────────────────────
