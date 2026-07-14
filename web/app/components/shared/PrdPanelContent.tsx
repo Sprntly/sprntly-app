@@ -16,6 +16,7 @@ import { ApiError, multiAgentApi, prdApi } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
+import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import {
   IconGrid,
   IconLinkInsert,
@@ -226,6 +227,9 @@ export function PrdPanelContent() {
 
   return (
     <div className="cpanel-prd-wrap">
+      {/* Scrolling document area — the footer action bar below stays PINNED
+          to the panel's bottom edge (mirrors how the header holds the tabs). */}
+      <div className="prd-scroll">
       {prd && <PrdPatchBanner prdId={prd.prd_id} />}
 
       <div className="prd-frame">
@@ -292,47 +296,12 @@ export function PrdPanelContent() {
         )}
 
       </div>
+      </div>
 
-      {/* Bottom action row: autosave status (click = save now) + Version history
-          toggle. Replaces the old mid-page footer; version history lives here at
-          the very bottom and expands the panel below. */}
-      {prd && (
-        <div className="prd-bottom-bar" style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 16 }}>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            disabled={saveStatus === "saving"}
-            onClick={saveNow}
-            title="This PRD autosaves as you edit — click to save now"
-          >
-            {saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Save now" : "✓ Autosaved"}
-          </button>
-          <button
-            type="button"
-            className="btn btn-ghost btn-sm"
-            onClick={async () => {
-              setShowVersions(!showVersions)
-              if (!showVersions) {
-                setVersionsLoading(true)
-                try {
-                  const [v, g] = await Promise.all([prdApi.listVersions(prd.prd_id), prdApi.listGenerations(prd.prd_id)])
-                  setHistory(mergeHistory(v, g, prd.prd_id))
-                } catch { setHistory([]) }
-                setVersionsLoading(false)
-              }
-            }}
-            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-          >
-            Version history
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ transform: showVersions ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
-              <path d="M5 7L1 3h8z" />
-            </svg>
-          </button>
-        </div>
-      )}
-
+      {/* Version history dropdown — expands ABOVE the pinned footer bar
+          (its list has its own internal scroll cap). */}
       {showVersions && prd && (
-        <div style={{ marginTop: 12, borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface)", overflow: "hidden" }}>
+        <div style={{ margin: "0 24px 12px", borderRadius: 10, border: "1px solid var(--line)", background: "var(--surface)", overflow: "hidden", flexShrink: 0 }}>
           <div style={{ padding: "10px 16px", background: "var(--surface-2)", borderBottom: "1px solid var(--line)", fontSize: 12, fontWeight: 600, color: "var(--ink-2)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <span>Version History</span>
             <span style={{ fontSize: 11, fontWeight: 400, color: "var(--ink-4)" }}>{history.length} version{history.length !== 1 ? "s" : ""}</span>
@@ -378,6 +347,77 @@ export function PrdPanelContent() {
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Pinned footer action bar — fixed to the panel's bottom edge (the way
+          the header holds the tabs): autosave status, Version history toggle,
+          and the prototype CTA. */}
+      {prd && (
+        <div className="prd-bottom-bar prd-footer-bar">
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            disabled={saveStatus === "saving"}
+            onClick={saveNow}
+            title="This PRD autosaves as you edit — click to save now"
+          >
+            {saveStatus === "saving" ? "Saving…" : saveStatus === "unsaved" ? "Save now" : "✓ Autosaved"}
+          </button>
+          <button
+            type="button"
+            className="btn btn-ghost btn-sm"
+            onClick={async () => {
+              setShowVersions(!showVersions)
+              if (!showVersions) {
+                setVersionsLoading(true)
+                try {
+                  const [v, g] = await Promise.all([prdApi.listVersions(prd.prd_id), prdApi.listGenerations(prd.prd_id)])
+                  setHistory(mergeHistory(v, g, prd.prd_id))
+                } catch { setHistory([]) }
+                setVersionsLoading(false)
+              }
+            }}
+            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+          >
+            Version history
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" style={{ transform: showVersions ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+              <path d="M5 7L1 3h8z" />
+            </svg>
+          </button>
+
+          {/* Prototype CTA — the canonical shared affordance (existence check
+              lives inside the hook): reads "Generate Prototype" until one is
+              built for this PRD, then "View Prototype". The weekly brief no
+              longer offers generation on its cards; the PRD footer is the home
+              for this action per the design. */}
+          <div style={{ marginLeft: "auto" }}>
+            <GeneratePrototypeCTA
+              prdId={prd.prd_id}
+              figmaFileKey={prd.figma_file_key ?? null}
+              // Safe here: the panel shows ONE current PRD at a time (like
+              // ApproveModal), so the unscoped da:generating signal can't
+              // mislabel a different PRD's run. Gives the footer a live
+              // "Generating Prototype" state + a refetch on completion.
+              listenForCrossSurfaceGenerating
+              render={({ label, onClick, disabled }) => (
+                <button
+                  type="button"
+                  className="btn btn-primary btn-sm"
+                  data-testid="prd-footer-prototype-cta"
+                  disabled={disabled}
+                  onClick={onClick}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 999 }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                    <polyline points="16 18 22 12 16 6" />
+                    <polyline points="8 6 2 12 8 18" />
+                  </svg>
+                  {label}
+                </button>
+              )}
+            />
+          </div>
         </div>
       )}
     </div>

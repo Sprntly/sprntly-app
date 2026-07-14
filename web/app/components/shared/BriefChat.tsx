@@ -349,17 +349,16 @@ function BriefFindingCard({
                 </button>
               )
             })()}
-            {/* Prototype option when the fix can be visualized as a UI prototype
-                (LLM `prototypeable` flag) — OR when a prototype already exists for
-                this insight, so a prototype built earlier (e.g. from the PRD chat)
-                stays reachable as "View prototype" even if the LLM later marked the
-                finding non-prototypeable. We still never offer *generate* on a
-                non-prototypeable finding (backend/data/pricing/ops has nothing to
-                render): prototypeReady is only true once a prototype actually exists. */}
-            {finding.prototypeable || insightState?.prototypeReady ? (
+            {/* View-only prototype affordance. The weekly brief no longer
+                offers GENERATE prototype on finding cards — prototypes are
+                generated from the PRD flow. A prototype that already exists
+                (built earlier, e.g. from the PRD chat) stays reachable here as
+                "View prototype": prototypeReady is only true once one is
+                actually built and saved. */}
+            {insightState?.prototypeReady ? (
               <button type="button" className="fc-btn-secondary" onClick={onPreview}>
                 <IconTerminalPrompt size={13} />
-                {prototypeCtaLabel(insightState)}
+                View prototype
               </button>
             ) : null}
           </div>

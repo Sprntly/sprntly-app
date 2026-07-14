@@ -266,10 +266,10 @@ describe("ChatScreen — insight PRD CTA survives a reload (DB-backed)", () => {
 
   it("shows 'View PRD' and loads the existing PRD (no regeneration) when the DB has one", async () => {
     // Persisted tab (prd stripped, briefMeta kept) — exactly what a reload restores.
-    localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([
+    localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
       { id: "tab-reload", title: "PRD · Enterprise expansion is stalled", dbConvId: null, briefMeta: { briefId: 7, insightIndex: 0 } },
     ]))
-    localStorage.setItem("sprntly_chat_active_tab_acme", "tab-reload")
+    localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
     // The DB map says insight 0 already has PRD #796 (no prototype yet).
     protoMap.set(0, {
       insight_index: 0,
@@ -295,10 +295,10 @@ describe("ChatScreen — insight PRD CTA survives a reload (DB-backed)", () => {
     // Map still in flight → we don't yet know if a PRD exists. The CTA must not
     // flash "Generate PRD" (it would flip to "View PRD" the instant the map lands).
     mapState.loading = true
-    localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([
+    localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
       { id: "tab-reload", title: "PRD · Enterprise expansion is stalled", dbConvId: null, briefMeta: { briefId: 7, insightIndex: 0 } },
     ]))
-    localStorage.setItem("sprntly_chat_active_tab_acme", "tab-reload")
+    localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
 
     await act(async () => { renderRestored() })
 

@@ -79,7 +79,7 @@ import { ChatScreen } from "../ChatScreen"
 // prd, the insight card at the top hosts the actions and the post-reply row
 // is suppressed as duplicate noise.
 function seedTabWithReply(prdId: number) {
-  localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([
+  localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
     {
       id: "tab-reload",
       title: "PRD · Bulk onboarding",
@@ -92,7 +92,7 @@ function seedTabWithReply(prdId: number) {
       }],
     },
   ]))
-  localStorage.setItem("sprntly_chat_active_tab_acme", "tab-reload")
+  localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
 }
 
 function renderRestored() {

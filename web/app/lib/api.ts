@@ -2502,6 +2502,10 @@ export const feedbackApi = {
 export type ConversationRecord = {
   id: number
   company_id: string
+  /** The member who created (and exclusively owns) this chat. Chats are
+   *  per-user within a workspace — the backend only ever returns the
+   *  caller's own rows, so this always equals the logged-in user's id. */
+  user_id: string | null
   title: string
   preview: string
   agent_type: string

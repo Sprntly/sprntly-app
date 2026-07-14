@@ -4431,20 +4431,52 @@
   }
 
   /* -------- PRD sub-tabs (Human-readable / LLM-readable) -------- */
+  /* PRD tab owns its own scroll (mirrors the evidence tab) so the footer
+     action bar pins to the panel's bottom edge — the way the header holds
+     the tabs — instead of scrolling away with the document. */
+  .cpanel-body:has(.cpanel-prd-wrap) {
+    padding: 0;
+    overflow: hidden;
+  }
+
   .cpanel-prd-wrap {
     display: flex;
     flex-direction: column;
-    /* Grow with content (min-height, not a hard height) so trailing blocks like
-       the Version-history dropdown and prototype section scroll into view
-       instead of being pinned off the bottom of the panel. */
-    min-height: 100%;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .prd-scroll {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 24px;
+  }
+
+  .prd-footer-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+    padding: 12px 24px;
+    border-top: 1px solid var(--line);
+    background: var(--surface-2, #fff);
   }
 
   /* Inside the content panel the PRD fills the (now wide) panel instead of
      being capped at the 820px centered reading column. */
+  /* Cap the document width in the panel so wide viewports keep comfortable
+     side margins instead of stretching the PRD edge-to-edge. */
   .cpanel-prd-wrap .prd-frame {
-    max-width: none;
-    margin: 0;
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+
+  /* Panel-scoped: tighter document title (the full-page reading surface keeps
+     the larger 28px). The v3 HTML PRD's iframe title is matched to this via
+     PrdHtmlView's injected panel override. */
+  .cpanel-prd-wrap .prd-title {
+    font-size: 20px;
   }
   .cpanel-prd-wrap .prd-body:focus
   {
@@ -8204,13 +8236,42 @@
   }
 
   .assistant-thinking-label {
-    font-size: 12px;
+    font-size: 10px;
     line-height: 1.35;
+    /* Reserve one line so the label doesn't jump while a message types in */
+    min-height: 1.35em;
     color: var(--muted);
   }
 
   .assistant-thinking--compact .assistant-thinking-label {
-    font-size: 11px;
+    font-size: 10px;
+  }
+
+  .assistant-thinking-caret {
+    display: inline-block;
+    width: 1px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: currentColor;
+    animation: assistant-thinking-caret-blink 1s steps(2, start) infinite;
+  }
+
+  @keyframes assistant-thinking-caret-blink {
+    0%, 49% { opacity: 1; }
+    50%, 100% { opacity: 0; }
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    border: 0;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    overflow: hidden;
   }
 
   .ask-reply-body--enter {

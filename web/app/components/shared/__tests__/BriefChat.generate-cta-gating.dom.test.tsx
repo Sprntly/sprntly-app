@@ -176,9 +176,9 @@ function mountHarness() {
 }
 
 const GENERATE_PRD = /Generate PRD/
-// The prototype CTA reads "Generate prototype" until one is built, then flips to
-// "View prototype"; match either so the gating assertions test presence/absence,
-// not the (state-dependent) label.
+// The brief card offers a prototype button ONLY when one is already built
+// ("View prototype"); "Generate prototype" was removed from the brief — the
+// fixtures here seed no built prototypes, so no prototype CTA should render.
 const PROTOTYPE_CTA = /prototype/i
 const EMPTY_GREETING = "add and connect more sources"
 
@@ -188,7 +188,7 @@ afterEach(() => {
 })
 
 describe("BriefChat — Generate-PRD / Generate-Prototype CTA gating", () => {
-  it("test_ready_brief_shows_generate_ctas: a normal brief with findings still renders the Generate PRD + View prototype CTAs", () => {
+  it("test_ready_brief_shows_generate_ctas: a normal brief with findings renders the Generate PRD CTA (and no prototype CTA — generate removed, none built)", () => {
     mountHarness()
     act(() => {
       fireEvent.click(screen.getByTestId("set-ready"))
@@ -198,10 +198,12 @@ describe("BriefChat — Generate-PRD / Generate-Prototype CTA gating", () => {
     expect(document.querySelector(".fc-title")?.textContent).toBe(
       "Day-30 retention is slipping",
     )
-    // …with the Generate-PRD CTA and the View-prototype CTA (unchanged behavior).
+    // …with the Generate-PRD CTA…
     expect(document.querySelector(".fc-actions")).not.toBeNull()
     expect(screen.getByText(GENERATE_PRD)).not.toBeNull()
-    expect(screen.getByText(PROTOTYPE_CTA)).not.toBeNull()
+    // …and NO prototype CTA: "Generate prototype" is gone from the brief, and
+    // no prototype exists in this fixture so "View prototype" doesn't render.
+    expect(screen.queryByText(PROTOTYPE_CTA)).toBeNull()
   })
 
   it("test_insufficient_evidence_hides_generate_ctas: an insufficient-evidence empty brief renders NO Generate PRD / Generate Prototype CTA", () => {

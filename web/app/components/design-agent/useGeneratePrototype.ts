@@ -291,7 +291,14 @@ export function useGeneratePrototype(
   useEffect(() => {
     if (!listenForCrossSurfaceGenerating) return
     const onGeneratingEvt = () => setIsGenerating(true)
-    const onDoneEvt = () => setIsGenerating(false)
+    const onDoneEvt = () => {
+      setIsGenerating(false)
+      // A run just finished somewhere (possibly another surface for this same
+      // PRD) — re-check existence so the CTA flips to "View Prototype" without
+      // needing a remount. No-op for skipExistenceCheck hosts (the refetch
+      // effect early-returns for them).
+      setRefetchNonce((n) => n + 1)
+    }
     window.addEventListener("da:generating", onGeneratingEvt)
     window.addEventListener("da:generating-done", onDoneEvt)
     return () => {
@@ -384,6 +391,21 @@ export function useGeneratePrototype(
     (result?: DesignAgentGenResult) => {
       if (resolvedRef.current) return
       resolvedRef.current = true
+      // The just-built prototype now EXISTS: reflect it in `existing` so a
+      // host that stays mounted (notify / cancel paths, onSuccess hosts)
+      // flips its CTA to "View Prototype" without waiting for a remount
+      // refetch. Same readiness gate as the existence check. Skipped for
+      // skipExistenceCheck hosts, whose documented invariant is that
+      // `existing` stays permanently null (they own their own source of truth).
+      if (
+        !skipExistenceCheck &&
+        result?.ok &&
+        result.prototype &&
+        result.prototype.status === "ready" &&
+        result.prototype.bundle_url
+      ) {
+        setExisting(result.prototype)
+      }
       if (notifyModeRef.current) {
         // Notify mode already dismissed the overlay and handed off (default or
         // host override) — the overlay itself is gone, but the mounted
@@ -425,7 +447,7 @@ export function useGeneratePrototype(
         minTimerRef.current = setTimeout(hideLoading, remaining)
       }
     },
-    [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId],
+    [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId, skipExistenceCheck],
   )
 
   // Default "Notify me when ready" side effects — reproduces
