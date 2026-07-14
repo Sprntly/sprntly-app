@@ -76,13 +76,16 @@ def reset_client() -> None:
 def _is_stale_connection_error(exc: Exception) -> bool:
     """A dead/stale HTTP/2 connection to Supabase, fixable by reconnecting.
 
-    Two shapes in production:
+    Three shapes in production:
       * `httpx.RemoteProtocolError: Server disconnected` — Supabase closed the
         idle connection and the next request noticed.
       * `httpcore.LocalProtocolError: Invalid input ... in state
         ConnectionState.CLOSED` — the h2 state machine already knows the
         connection is closed but the pooled client tried to use it anyway
         (seen under concurrent use, e.g. the ticket fan-out threads).
+      * `httpx.ReadError: [Errno 11] Resource temporarily unavailable` — the
+        socket under the pooled connection is dead/contended and the read
+        fails (seen on staging 2026-07-14, /v1/team/members).
     Matched by name so we don't import httpx/httpcore here.
     """
     exc_type = type(exc).__name__
@@ -90,6 +93,7 @@ def _is_stale_connection_error(exc: Exception) -> bool:
     return (
         "RemoteProtocolError" in exc_type
         or "LocalProtocolError" in exc_type
+        or "ReadError" in exc_type
         or "Server disconnected" in exc_msg
         or "ConnectionState.CLOSED" in exc_msg
     )
