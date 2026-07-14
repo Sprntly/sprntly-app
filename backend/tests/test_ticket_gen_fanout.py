@@ -16,6 +16,7 @@ from app.stories.generate import (
     ENRICH_PROMPT_VERSION,
     PLAN_PROMPT_VERSION,
     PROMPT_VERSION,
+    _stories_from_output,
     generate_from_input,
     generate_user_stories,
 )
@@ -239,6 +240,99 @@ def test_stories_from_output_handles_non_list(isolated_settings, monkeypatch):
     monkeypatch.setattr(gen, "llm_call", _call)
     stories = generate_from_input("ent-A", prd_input="PRD", strategy="single")
     assert stories == []
+
+
+# ── per-batch enrich retry ───────────────────────────────────────────────────
+
+def test_enrich_batch_retries_on_shortfall_and_keeps_better(isolated_settings, monkeypatch):
+    """A batch whose first (temp-0) pass drops a malformed item is retried once
+    at a non-zero temperature; the fuller retry result is kept."""
+    enrich_calls: list[float] = []
+
+    def _call(**kw):
+        pv = kw["prompt_version"]
+        if pv == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}]})
+        if pv == ENRICH_PROMPT_VERSION:
+            temp = kw.get("temperature", 0)
+            enrich_calls.append(temp)
+            if temp == 0:
+                return _result({"stories": [_story("A"), "malformed-string"]})  # 1 usable
+            return _result({"stories": [_story("A"), _story("B")]})  # retry: both good
+        return _result({"stories": []})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                                  batch_size=2, max_parallel=1)
+
+    assert sorted(s.title for s in stories) == ["A", "B"], "retry recovered the lost ticket"
+    assert enrich_calls[0] == 0, "first pass is deterministic (temp 0)"
+    assert enrich_calls[1] > 0, "retry samples at a non-zero temperature"
+    assert len(enrich_calls) == 2, "exactly one retry"
+
+
+def test_enrich_batch_no_retry_when_complete(isolated_settings, monkeypatch):
+    """A batch that returns one ticket per stub on the first pass is not retried."""
+    enrich_calls = []
+
+    def _call(**kw):
+        pv = kw["prompt_version"]
+        if pv == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}]})
+        if pv == ENRICH_PROMPT_VERSION:
+            enrich_calls.append(kw.get("temperature", 0))
+            return _result({"stories": [_story("A"), _story("B")]})
+        return _result({"stories": []})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                        batch_size=2, max_parallel=1)
+    assert enrich_calls == [0], "no retry when the batch is already complete"
+
+
+def test_enrich_batch_retry_keeps_best_when_both_short(isolated_settings, monkeypatch):
+    """If the retry is also short, keep whichever attempt had more tickets."""
+    def _call(**kw):
+        pv = kw["prompt_version"]
+        if pv == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}, {"title": "C"}]})
+        if pv == ENRICH_PROMPT_VERSION:
+            if kw.get("temperature", 0) == 0:
+                return _result({"stories": [_story("A"), _story("B"), None]})  # 2 usable
+            return _result({"stories": [_story("A"), "junk", None]})  # retry: 1 usable
+        return _result({"stories": []})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                                  batch_size=3, max_parallel=1)
+    assert sorted(s.title for s in stories) == ["A", "B"], "kept the fuller first pass"
+
+
+# ── malformed model-output tolerance (regression net for the live failure) ────
+# forced tool-use validates the schema only loosely, so the model can hand back
+# stray strings/None/wrong types inside `stories`. This is the class of bug that
+# failed a live ticket generation ('str' object has no attribute 'get'); every
+# shape below must parse to the valid titles with NO exception.
+
+@pytest.mark.parametrize("output,expected", [
+    (None, []),
+    ({}, []),
+    ({"stories": None}, []),
+    ({"stories": "a bare string, not a list"}, []),
+    ({"stories": 42}, []),
+    ({"stories": {}}, []),
+    ({"not_stories": [{"title": "X"}]}, []),
+    ("output is a string, not a dict", []),
+    ([{"title": "X"}], []),                       # output is a list, not a dict
+    ({"stories": []}, []),
+    ({"stories": ["bare title", None, 123, {"no_title": 1}, {"title": ""}]}, []),
+    ({"stories": [{"title": "Good"}]}, ["Good"]),
+    ({"stories": [{"title": "Good"}, "junk", None, {"title": "Also"}]}, ["Good", "Also"]),
+    ({"stories": [{"title": "  Trimmed  "}]}, ["Trimmed"]),
+])
+def test_stories_from_output_tolerates_malformed_shapes(output, expected):
+    stories = _stories_from_output(output)
+    assert [s.title for s in stories] == expected
 
 
 def test_generate_user_stories_honors_strategy(isolated_settings, monkeypatch):
