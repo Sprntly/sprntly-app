@@ -1,10 +1,13 @@
 /**
  * Sprntly staff admin panel (/admin) — org invites + per-company entitlements.
  *
- * Staff-only: every /v1/staff route 404s for non-staff (STAFF_EMAILS
- * allowlist on the backend), so this screen probes the API on mount and
- * renders a plain "Not found" for anyone else — the page is invisible,
- * matching the backend gate.
+ * Auth is a DEDICATED credential login, fully separate from the normal app
+ * session: no staff token in sessionStorage ⇒ a standalone minimal ID +
+ * Password form (never a redirect to the normal login). A successful
+ * POST /v1/staff/login stores a short-lived staff JWT (sprntly_staff_token)
+ * and every staff API call sends it as the Bearer. Any 401/404 from the
+ * staff APIs — expired token, disabled surface, no credential — clears the
+ * token and drops back to the login form; Sign out does the same.
  *
  * Two sections:
  *   1. Organizations — every company with its entitlements (modules,
@@ -22,6 +25,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import {
   ApiError,
   staffApi,
+  staffAuth,
   type OrgInvite,
   type OrgInviteIn,
   type StaffCompany,
@@ -480,16 +484,86 @@ function InviteSection({
   )
 }
 
+// ── Standalone login form (dedicated credential — not the app login) ──
+
+function StaffLoginForm({ onSuccess }: { onSuccess: () => void }) {
+  const [id, setId] = useState("")
+  const [password, setPassword] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const submit = async () => {
+    setSubmitting(true)
+    setError(null)
+    try {
+      await staffAuth.login(id, password)
+      onSuccess()
+    } catch (e) {
+      // 401 = bad credentials (the backend's message is deliberately
+      // generic); 404 = the surface is disabled — same stealth posture.
+      if (e instanceof ApiError && e.status === 401) {
+        setError("Invalid credentials.")
+      } else if (e instanceof ApiError && e.status === 404) {
+        setError("Not found.")
+      } else {
+        setError("Sign-in failed — try again.")
+      }
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <form
+      className="sadm-login"
+      onSubmit={(e) => {
+        e.preventDefault()
+        void submit()
+      }}
+    >
+      <h1>Sprntly Admin</h1>
+      <label className="sadm-field">
+        <span className="sadm-field-label">ID</span>
+        <input
+          type="text"
+          autoComplete="username"
+          value={id}
+          onChange={(e) => setId(e.target.value)}
+        />
+      </label>
+      <label className="sadm-field">
+        <span className="sadm-field-label">Password</span>
+        <input
+          type="password"
+          autoComplete="current-password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+      </label>
+      {error && <p className="sadm-error">{error}</p>}
+      <div className="sadm-actions">
+        <button
+          type="submit"
+          className="sadm-btn primary"
+          disabled={submitting || !id.trim() || !password}
+        >
+          {submitting ? "Signing in…" : "Sign in"}
+        </button>
+      </div>
+    </form>
+  )
+}
+
 // ── Screen ──
 
-type LoadState = "loading" | "ready" | "forbidden" | "error"
+type LoadState = "checking" | "login" | "loading" | "ready" | "error"
 
 export function StaffAdminScreen() {
-  const [state, setState] = useState<LoadState>("loading")
+  const [state, setState] = useState<LoadState>("checking")
   const [companies, setCompanies] = useState<StaffCompany[]>([])
   const [invites, setInvites] = useState<OrgInvite[]>([])
 
   const load = useCallback(async () => {
+    setState("loading")
     try {
       const [c, i] = await Promise.all([
         staffApi.listCompanies(),
@@ -499,10 +573,12 @@ export function StaffAdminScreen() {
       setInvites(i.invites)
       setState("ready")
     } catch (e) {
-      // 404 = not staff (the backend hides the surface); 401 = not signed in.
-      // Both render the invisible "Not found" — everything else is a real error.
+      // 401/404 = the staff token is missing/expired/rejected (or the surface
+      // is disabled): clear it and drop back to the standalone login form.
+      // Everything else is a real error.
       if (e instanceof ApiError && [401, 403, 404].includes(e.status)) {
-        setState("forbidden")
+        staffAuth.logout()
+        setState("login")
       } else {
         setState("error")
       }
@@ -510,8 +586,21 @@ export function StaffAdminScreen() {
   }, [])
 
   useEffect(() => {
-    void load()
+    // sessionStorage is browser-only — decide login-vs-load after mount so
+    // the statically exported page hydrates cleanly.
+    if (staffAuth.hasToken()) {
+      void load()
+    } else {
+      setState("login")
+    }
   }, [load])
+
+  const signOut = () => {
+    staffAuth.logout()
+    setCompanies([])
+    setInvites([])
+    setState("login")
+  }
 
   const totals = useMemo(
     () => ({
@@ -521,12 +610,16 @@ export function StaffAdminScreen() {
     [companies, invites],
   )
 
-  if (state === "loading") {
+  if (state === "checking" || state === "loading") {
     return <div className="sadm-page"><ScopedStyle /><p className="sadm-empty">Loading…</p></div>
   }
-  if (state === "forbidden") {
-    // Deliberately indistinguishable from a missing route.
-    return <div className="sadm-page"><ScopedStyle /><p className="sadm-empty">Not found.</p></div>
+  if (state === "login") {
+    return (
+      <div className="sadm-page">
+        <ScopedStyle />
+        <StaffLoginForm onSuccess={() => void load()} />
+      </div>
+    )
   }
   if (state === "error") {
     return (
@@ -546,7 +639,12 @@ export function StaffAdminScreen() {
     <div className="sadm-page">
       <ScopedStyle />
       <header className="sadm-header">
-        <h1>Sprntly Admin</h1>
+        <div className="sadm-header-row">
+          <h1>Sprntly Admin</h1>
+          <button type="button" className="sadm-btn" onClick={signOut}>
+            Sign out
+          </button>
+        </div>
         <p className="sadm-sub">
           {totals.orgs} organization{totals.orgs === 1 ? "" : "s"} ·{" "}
           {totals.pending} pending invite{totals.pending === 1 ? "" : "s"}
@@ -592,7 +690,12 @@ function ScopedStyle() {
       font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       color: #111; }
     .sadm-header h1 { font-size: 22px; font-weight: 600; margin: 0; }
+    .sadm-header-row { display: flex; align-items: center;
+      justify-content: space-between; gap: 16px; }
     .sadm-sub { color: #666; font-size: 13px; margin: 4px 0 0; }
+    .sadm-login { max-width: 320px; margin: 96px auto 0; display: flex;
+      flex-direction: column; gap: 14px; }
+    .sadm-login h1 { font-size: 22px; font-weight: 600; margin: 0 0 6px; }
     .sadm-section { margin-top: 32px; }
     .sadm-section-head { display: flex; align-items: center;
       justify-content: space-between; margin-bottom: 12px; }

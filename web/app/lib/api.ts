@@ -2417,9 +2417,90 @@ export const adminApi = {
   testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
 }
 
-// ── Staff admin panel (Sprntly staff only — STAFF_EMAILS allowlist) ──
-// Org invites + per-company entitlements. Non-staff get 404 on every route
-// (the surface is invisible); the /admin page treats any error as "not staff".
+// ── Staff admin panel (dedicated owner-only credential) ──
+// Org invites + per-company entitlements. Auth is fully separate from the
+// normal app session: POST /v1/staff/login (id + password from env on the
+// backend) mints a short-lived staff JWT which we keep in sessionStorage and
+// send as the Bearer on every staff call — the Supabase token provider is
+// deliberately NOT used here. Anything but a live staff token gets 404 on
+// every route (the surface is invisible); the /admin page treats 401/404 as
+// "signed out" and drops back to its standalone login form.
+
+export const STAFF_TOKEN_KEY = "sprntly_staff_token"
+
+export function getStaffToken(): string | null {
+  if (typeof window === "undefined") return null
+  try {
+    return window.sessionStorage.getItem(STAFF_TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function setStaffToken(token: string): void {
+  if (typeof window === "undefined") return
+  try {
+    window.sessionStorage.setItem(STAFF_TOKEN_KEY, token)
+  } catch {
+    // Storage unavailable (e.g. blocked) — the panel just won't stay signed in.
+  }
+}
+
+export function clearStaffToken(): void {
+  if (typeof window === "undefined") return
+  try {
+    window.sessionStorage.removeItem(STAFF_TOKEN_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+/** Like `request`, but authed with the staff JWT from sessionStorage instead
+ *  of the app session (no cookies, no Supabase token provider). */
+async function staffRequest<T>(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const headers: Record<string, string> = body
+    ? { "Content-Type": "application/json", Accept: "application/json" }
+    : { Accept: "application/json" }
+  const token = getStaffToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  const res = await fetch(`${API_URL}${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  let parsed: unknown = null
+  const text = await res.text()
+  if (text) {
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      parsed = text
+    }
+  }
+  if (!res.ok) {
+    throw new ApiError(res.status, parsed)
+  }
+  return parsed as T
+}
+
+export const staffAuth = {
+  /** Dedicated staff login. Stores the returned token on success. */
+  login: async (id: string, password: string) => {
+    const out = await staffRequest<{
+      token: string
+      token_type: "bearer"
+      expires_in: number
+    }>("POST", "/v1/staff/login", { id, password })
+    setStaffToken(out.token)
+    return out
+  },
+  logout: () => clearStaffToken(),
+  hasToken: () => getStaffToken() != null,
+}
 
 export type StaffCompany = {
   id: string
@@ -2472,16 +2553,21 @@ export type OrgInviteIn = {
 
 export const staffApi = {
   listCompanies: () =>
-    api.get<{ companies: StaffCompany[] }>("/v1/staff/companies"),
+    staffRequest<{ companies: StaffCompany[] }>("GET", "/v1/staff/companies"),
   updateCompany: (companyId: string, patch: StaffEntitlementsPatch) =>
-    api.patch<StaffCompany>(`/v1/staff/companies/${companyId}`, patch),
-  listInvites: () => api.get<{ invites: OrgInvite[] }>("/v1/staff/invites"),
+    staffRequest<StaffCompany>(
+      "PATCH",
+      `/v1/staff/companies/${companyId}`,
+      patch,
+    ),
+  listInvites: () =>
+    staffRequest<{ invites: OrgInvite[] }>("GET", "/v1/staff/invites"),
   createInvite: (body: OrgInviteIn) =>
-    api.post<OrgInvite>("/v1/staff/invites", body),
+    staffRequest<OrgInvite>("POST", "/v1/staff/invites", body),
   revokeInvite: (inviteId: string) =>
-    api.delete<void>(`/v1/staff/invites/${inviteId}`),
+    staffRequest<void>("DELETE", `/v1/staff/invites/${inviteId}`),
   resendInvite: (inviteId: string) =>
-    api.post<OrgInvite>(`/v1/staff/invites/${inviteId}/resend`),
+    staffRequest<OrgInvite>("POST", `/v1/staff/invites/${inviteId}/resend`),
 }
 
 export const orgInviteApi = {

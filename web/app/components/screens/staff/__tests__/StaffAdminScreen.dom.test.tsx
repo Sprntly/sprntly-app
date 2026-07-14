@@ -1,9 +1,14 @@
 // @vitest-environment jsdom
 //
-// Staff admin panel (/admin) — org invites + per-company entitlements.
+// Staff admin panel (/admin) — dedicated-credential login + org invites +
+// per-company entitlements.
 // Covers:
-//   - the invisible gate: any 401/404 from /v1/staff renders a plain
-//     "Not found" (indistinguishable from a missing route),
+//   - the standalone login form: rendered when no staff token is stored
+//     (never redirects to the normal app login), submits id + password
+//     through staffAuth.login, and surfaces a generic error on 401,
+//   - the invisible gate: a 401/404 from /v1/staff with a stored token
+//     clears it (staffAuth.logout) and drops back to the login form,
+//   - Sign out: clears the token and returns to the login form,
 //   - the happy path: organizations render with member/seat counts, key-mode
 //     and prototype chips, and enabled-module summary,
 //   - the entitlement editor: saving PATCHes the staff API with seat_limit /
@@ -11,33 +16,44 @@
 //   - the invite flow: submitting the form POSTs the entitlement snapshot and
 //     the new invite appears in the pending list.
 //
-// staffApi is mocked at the lib/api boundary (the adjacent screens' mocking
-// convention) so mounting hits no network.
+// staffApi/staffAuth are mocked at the lib/api boundary (the adjacent
+// screens' mocking convention) so mounting hits no network or storage.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
-import { afterEach, describe, expect, it, vi } from "vitest"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-const { listCompanies, listInvites, updateCompany, createInvite, FakeApiError } =
-  vi.hoisted(() => {
-    class FakeApiError extends Error {
-      status: number
-      body: unknown
-      constructor(status: number) {
-        super(`Request failed (${status})`)
-        this.status = status
-        this.body = null
-      }
+const {
+  listCompanies,
+  listInvites,
+  updateCompany,
+  createInvite,
+  staffLogin,
+  staffLogout,
+  staffHasToken,
+  FakeApiError,
+} = vi.hoisted(() => {
+  class FakeApiError extends Error {
+    status: number
+    body: unknown
+    constructor(status: number) {
+      super(`Request failed (${status})`)
+      this.status = status
+      this.body = null
     }
-    return {
-      listCompanies: vi.fn(),
-      listInvites: vi.fn(),
-      updateCompany: vi.fn(),
-      createInvite: vi.fn(),
-      FakeApiError,
-    }
-  })
+  }
+  return {
+    listCompanies: vi.fn(),
+    listInvites: vi.fn(),
+    updateCompany: vi.fn(),
+    createInvite: vi.fn(),
+    staffLogin: vi.fn(),
+    staffLogout: vi.fn(),
+    staffHasToken: vi.fn(),
+    FakeApiError,
+  }
+})
 
 vi.mock("../../../../lib/api", () => ({
   ApiError: FakeApiError,
@@ -48,6 +64,11 @@ vi.mock("../../../../lib/api", () => ({
     createInvite,
     revokeInvite: vi.fn(),
     resendInvite: vi.fn(),
+  },
+  staffAuth: {
+    login: staffLogin,
+    logout: staffLogout,
+    hasToken: staffHasToken,
   },
 }))
 
@@ -67,6 +88,11 @@ const ACME = {
   pending_invite_count: 1,
 }
 
+beforeEach(() => {
+  // Most suites exercise the signed-in panel; the login suite overrides this.
+  staffHasToken.mockReturnValue(true)
+})
+
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
@@ -78,20 +104,75 @@ async function mount() {
   })
 }
 
+describe("StaffAdminScreen login", () => {
+  it("renders the standalone login form when no staff token is stored", async () => {
+    staffHasToken.mockReturnValue(false)
+    await mount()
+    expect(screen.getByText("Sign in")).toBeTruthy()
+    expect(screen.getByLabelText("ID")).toBeTruthy()
+    expect(screen.getByLabelText("Password")).toBeTruthy()
+    // No panel fetch happens while signed out.
+    expect(listCompanies).not.toHaveBeenCalled()
+    expect(listInvites).not.toHaveBeenCalled()
+  })
+
+  it("signs in through staffAuth.login and loads the panel", async () => {
+    staffHasToken.mockReturnValue(false)
+    staffLogin.mockResolvedValue({ token: "t", token_type: "bearer", expires_in: 43200 })
+    listCompanies.mockResolvedValue({ companies: [] })
+    listInvites.mockResolvedValue({ invites: [] })
+    await mount()
+
+    fireEvent.change(screen.getByLabelText("ID"), {
+      target: { value: "sprntly-owner" },
+    })
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: "hunter2!" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByText("Sign in"))
+    })
+
+    expect(staffLogin).toHaveBeenCalledWith("sprntly-owner", "hunter2!")
+    expect(screen.getByText("Sprntly Admin")).toBeTruthy()
+    expect(screen.getByText("Sign out")).toBeTruthy()
+  })
+
+  it("shows a generic error on bad credentials (401)", async () => {
+    staffHasToken.mockReturnValue(false)
+    staffLogin.mockRejectedValue(new FakeApiError(401))
+    await mount()
+
+    fireEvent.change(screen.getByLabelText("ID"), { target: { value: "x" } })
+    fireEvent.change(screen.getByLabelText("Password"), {
+      target: { value: "y" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByText("Sign in"))
+    })
+
+    expect(screen.getByText("Invalid credentials.")).toBeTruthy()
+    expect(listCompanies).not.toHaveBeenCalled()
+  })
+})
+
 describe("StaffAdminScreen gate", () => {
-  it("renders a plain Not found for non-staff (404)", async () => {
+  it("clears a rejected token (404) and drops to the login form", async () => {
     listCompanies.mockRejectedValue(new FakeApiError(404))
     listInvites.mockRejectedValue(new FakeApiError(404))
     await mount()
-    expect(screen.getByText("Not found.")).toBeTruthy()
-    expect(screen.queryByText("Sprntly Admin")).toBeNull()
+    expect(staffLogout).toHaveBeenCalled()
+    expect(screen.getByText("Sign in")).toBeTruthy()
+    // The signed-in panel (with its Sign out button) is gone.
+    expect(screen.queryByText("Sign out")).toBeNull()
   })
 
-  it("renders Not found when signed out (401)", async () => {
+  it("clears an expired token (401) and drops to the login form", async () => {
     listCompanies.mockRejectedValue(new FakeApiError(401))
     listInvites.mockRejectedValue(new FakeApiError(401))
     await mount()
-    expect(screen.getByText("Not found.")).toBeTruthy()
+    expect(staffLogout).toHaveBeenCalled()
+    expect(screen.getByText("Sign in")).toBeTruthy()
   })
 
   it("offers a retry on non-auth errors", async () => {
@@ -99,6 +180,19 @@ describe("StaffAdminScreen gate", () => {
     listInvites.mockRejectedValue(new FakeApiError(500))
     await mount()
     expect(screen.getByText("Retry")).toBeTruthy()
+    expect(staffLogout).not.toHaveBeenCalled()
+  })
+
+  it("Sign out clears the token and shows the login form", async () => {
+    listCompanies.mockResolvedValue({ companies: [] })
+    listInvites.mockResolvedValue({ invites: [] })
+    await mount()
+
+    fireEvent.click(screen.getByText("Sign out"))
+
+    expect(staffLogout).toHaveBeenCalled()
+    expect(screen.getByText("Sign in")).toBeTruthy()
+    expect(screen.queryByText("Sign out")).toBeNull()
   })
 })
 

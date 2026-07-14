@@ -1,7 +1,10 @@
 """Sprntly staff admin panel — org invites + per-company entitlements.
 
-Staff (STAFF_EMAILS allowlist, see app.auth.require_staff) invite customer
-organizations and configure their deal terms:
+The panel is for the company owner only and does NOT use normal Sprntly
+(Supabase) login: POST /v1/staff/login checks the dedicated credential pair
+from env (STAFF_ADMIN_ID + STAFF_ADMIN_PASSWORD_HASH, argon2id) and mints a
+short-lived staff JWT (aud=sprntly-staff — see app.auth.require_staff). With
+it, staff invite customer organizations and configure their deal terms:
 
   * which modules they can access (companies.feature_flags),
   * default (platform) Claude key vs bring-your-own (companies.use_platform_key
@@ -10,8 +13,10 @@ organizations and configure their deal terms:
   * whether the prototype (design-agent) feature is enabled
     (companies.prototype_enabled).
 
-Routes (all gated on require_staff — non-staff get 404, the surface is
-invisible):
+Routes (login is open when the surface is enabled; everything else is gated
+on require_staff — no/invalid/user tokens get 404, the surface is invisible;
+unset env disables the whole surface, login included, with 404):
+  POST   /v1/staff/login                    → dedicated-credential login → JWT
   GET    /v1/staff/companies                → orgs + entitlements + counts
   PATCH  /v1/staff/companies/{company_id}   → edit entitlements
   GET    /v1/staff/invites                  → org invites (all statuses)
@@ -32,7 +37,16 @@ from pydantic import BaseModel, Field, field_validator
 
 from app import llm_keys
 from app import team_email as team_email_mod
-from app.auth import CompanyContext, require_company, require_staff, session_email
+from app.auth import (
+    STAFF_TOKEN_TTL_HOURS,
+    CompanyContext,
+    make_staff_token,
+    require_company,
+    require_staff,
+    session_email,
+    staff_surface_enabled,
+    verify_staff_credentials,
+)
 from app.db.companies import (
     get_company_entitlements,
     list_companies_for_staff,
@@ -87,6 +101,30 @@ class OrgInviteIn(BaseModel):
         if not name:
             raise ValueError("company name is required")
         return name
+
+
+class StaffLoginIn(BaseModel):
+    id: str = Field(..., min_length=1, max_length=200)
+    password: str = Field(..., min_length=1, max_length=1000)
+
+
+@router.post("/login")
+def staff_login(body: StaffLoginIn):
+    """Dedicated staff login — completely separate from Supabase user auth.
+
+    404 (not 401) when the surface is disabled so an unconfigured box shows
+    nothing; 401 with a single generic message for ANY bad credential (wrong
+    id and wrong password are indistinguishable — no enumeration).
+    """
+    if not staff_surface_enabled():
+        raise HTTPException(404, "Not found")
+    if not verify_staff_credentials(body.id, body.password):
+        raise HTTPException(401, "Invalid credentials")
+    return {
+        "token": make_staff_token(),
+        "token_type": "bearer",
+        "expires_in": STAFF_TOKEN_TTL_HOURS * 3600,
+    }
 
 
 def _public_invite(row: dict, *, email_sent: bool | None = None) -> dict:
@@ -148,14 +186,17 @@ def staff_list_invites(_: dict = Depends(require_staff)):
 
 
 @router.post("/invites", status_code=status.HTTP_201_CREATED)
-def staff_post_invite(body: OrgInviteIn, session: dict = Depends(require_staff)):
+def staff_post_invite(body: OrgInviteIn, _: dict = Depends(require_staff)):
     if get_pending_org_invite_by_email(body.email):
         raise HTTPException(409, "An invite for that email is already pending")
 
     row = create_org_invite(
         email=body.email,
         company_name=body.company_name,
-        invited_by=session.get("sub"),
+        # The staff token's sub is the literal "staff" — not a Supabase user
+        # uuid, which is what org_invites.invited_by (uuid) stores. There is
+        # exactly one staff credential, so NULL loses nothing.
+        invited_by=None,
         seat_limit=body.seat_limit,
         prototype_enabled=body.prototype_enabled,
         use_platform_key=body.use_platform_key,

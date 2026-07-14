@@ -1,8 +1,14 @@
 """Staff admin panel — org invites + per-company entitlements.
 
 Covers:
-  * require_staff gate: 401 unauth; 404 for non-staff / empty allowlist;
-    200 for allowlisted staff (email resolved via profiles fallback).
+  * The dedicated-credential login (POST /v1/staff/login): success mints a
+    12h staff JWT that passes require_staff; wrong id / wrong password both
+    401 with the SAME generic message (no enumeration); unset
+    STAFF_ADMIN_ID / STAFF_ADMIN_PASSWORD_HASH ⇒ 404 everywhere, login
+    included (fail closed, invisible).
+  * require_staff gate: 404 for no token, a Supabase USER token, a demo/app
+    session token (same signing secret, wrong audience), and an expired
+    staff token — the surface is invisible to anything but a live staff JWT.
   * GET/PATCH /v1/staff/companies — entitlement snapshot + partial edits
     (feature_flags merge, explicit seat_limit null clears the limit).
   * /v1/staff/invites CRUD — create (email best-effort), duplicate-pending
@@ -16,15 +22,21 @@ Covers:
 """
 from __future__ import annotations
 
+import time
 import uuid
 
+import jwt as pyjwt
 import pytest
+from argon2 import PasswordHasher
 
 import app.auth  # noqa: F401 — ensure app.config/app.auth in sys.modules
 
 from tests._company_helpers import company_client
 
-STAFF_EMAIL = "staff@sprntly.ai"
+STAFF_ID = "sprntly-owner"
+STAFF_PASSWORD = "correct-horse-battery-staple"
+# argon2id is deliberately slow — hash once at import, reuse in every test.
+STAFF_PASSWORD_HASH = PasswordHasher().hash(STAFF_PASSWORD)
 
 
 def _db():
@@ -34,8 +46,8 @@ def _db():
 
 
 def _seed_profile_email(user_id: str, email: str) -> None:
-    """The minted test JWT carries no `email` claim, so require_staff resolves
-    the caller's email via the profiles fallback — seed it."""
+    """The minted test JWT carries no `email` claim, so the claim route
+    resolves the caller's email via the profiles fallback — seed it."""
     db = _db()
     if db.table("profiles").select("id").eq("id", user_id).execute().data:
         db.table("profiles").update({"email": email}).eq("id", user_id).execute()
@@ -43,15 +55,37 @@ def _seed_profile_email(user_id: str, email: str) -> None:
         db.table("profiles").insert({"id": user_id, "email": email}).execute()
 
 
-def _staff_ctx(monkeypatch, *, email: str = STAFF_EMAIL, allowlist: str | None = None):
-    """A bearer-authed client whose user is on the STAFF_EMAILS allowlist."""
-    ctx = company_client(monkeypatch)
-    _seed_profile_email(ctx.user_id, email)
+def _enable_staff_surface(
+    monkeypatch,
+    *,
+    admin_id: str = STAFF_ID,
+    password_hash: str = STAFF_PASSWORD_HASH,
+):
+    """Configure the dedicated staff credential (STAFF_ADMIN_ID/…_HASH).
+
+    Must run AFTER company_client() — that helper reloads app.config/app.auth,
+    which would discard an earlier settings patch."""
     import app.auth as auth_mod
 
+    monkeypatch.setattr(auth_mod.settings, "staff_admin_id", admin_id)
     monkeypatch.setattr(
-        auth_mod.settings, "staff_emails", allowlist if allowlist is not None else STAFF_EMAIL
+        auth_mod.settings, "staff_admin_password_hash", password_hash
     )
+
+
+def _login(ctx, *, admin_id: str = STAFF_ID, password: str = STAFF_PASSWORD):
+    return ctx.client.post(
+        "/v1/staff/login", json={"id": admin_id, "password": password}
+    )
+
+
+def _staff_ctx(monkeypatch):
+    """A client authed with a freshly minted staff JWT (dedicated login)."""
+    ctx = company_client(monkeypatch)
+    _enable_staff_surface(monkeypatch)
+    r = _login(ctx)
+    assert r.status_code == 200, r.text
+    ctx.client.headers["Authorization"] = f"Bearer {r.json()['token']}"
     return ctx
 
 
@@ -68,22 +102,65 @@ def _no_email_sends(monkeypatch):
     return sent
 
 
+# ─────────────────────── dedicated login ───────────────────────
+
+
+def test_staff_login_token_passes_staff_gate(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _enable_staff_surface(monkeypatch)
+
+    r = _login(ctx)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["token_type"] == "bearer"
+    assert body["expires_in"] == 12 * 3600
+
+    ctx.client.headers["Authorization"] = f"Bearer {body['token']}"
+    assert ctx.client.get("/v1/staff/companies").status_code == 200
+
+
+def test_staff_login_bad_credentials_401_generic(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    _enable_staff_surface(monkeypatch)
+
+    wrong_id = _login(ctx, admin_id="somebody-else")
+    wrong_pw = _login(ctx, password="nope")
+    assert wrong_id.status_code == 401
+    assert wrong_pw.status_code == 401
+    # Same generic message either way — no way to enumerate the id.
+    assert wrong_id.json()["detail"] == wrong_pw.json()["detail"]
+
+
+def test_staff_surface_404_when_env_unset(isolated_settings, monkeypatch):
+    """Either env var missing ⇒ 404 everywhere, login included (fail closed)."""
+    ctx = company_client(monkeypatch)
+
+    for admin_id, pw_hash in (
+        ("", ""),
+        (STAFF_ID, ""),
+        ("", STAFF_PASSWORD_HASH),
+    ):
+        _enable_staff_surface(monkeypatch, admin_id=admin_id, password_hash=pw_hash)
+        assert _login(ctx).status_code == 404
+        assert ctx.client.get("/v1/staff/companies").status_code == 404
+        assert ctx.client.get("/v1/staff/invites").status_code == 404
+
+
 # ─────────────────────── require_staff gate ───────────────────────
 
 
-def test_staff_routes_require_auth(isolated_settings, monkeypatch):
+def test_staff_routes_404_without_token(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
+    _enable_staff_surface(monkeypatch)
     ctx.client.headers.pop("Authorization")
-    assert ctx.client.get("/v1/staff/companies").status_code == 401
-
-
-def test_staff_routes_404_when_allowlist_empty(isolated_settings, monkeypatch):
-    ctx = _staff_ctx(monkeypatch, allowlist="")
     assert ctx.client.get("/v1/staff/companies").status_code == 404
 
 
-def test_staff_routes_404_for_non_staff(isolated_settings, monkeypatch):
-    ctx = _staff_ctx(monkeypatch, email="customer@acme.com")
+def test_staff_routes_404_for_supabase_user_token(isolated_settings, monkeypatch):
+    """A signed-in customer's Supabase JWT never passes the staff gate —
+    the surface stays invisible to every normal user."""
+    ctx = company_client(monkeypatch)  # client carries a valid Supabase bearer
+    _enable_staff_surface(monkeypatch)
     assert ctx.client.get("/v1/staff/companies").status_code == 404
     assert ctx.client.get("/v1/staff/invites").status_code == 404
     assert (
@@ -95,13 +172,50 @@ def test_staff_routes_404_for_non_staff(isolated_settings, monkeypatch):
     )
 
 
-def test_staff_allowlist_is_case_insensitive_and_multi(isolated_settings, monkeypatch):
-    ctx = _staff_ctx(
-        monkeypatch,
-        email=STAFF_EMAIL,
-        allowlist=f"Other@sprntly.ai,  {STAFF_EMAIL.upper()} ",
+def test_staff_routes_404_for_wrong_audience_token(isolated_settings, monkeypatch):
+    """A token signed with the SAME jwt_secret but a different audience (the
+    demo/app session shape) must not pass — the aud claim is the isolation."""
+    import app.auth as auth_mod
+
+    ctx = company_client(monkeypatch)
+    _enable_staff_surface(monkeypatch)
+    now = int(time.time())
+    imposter = pyjwt.encode(
+        {"iat": now, "exp": now + 3600, "aud": "app", "scope": "app"},
+        auth_mod.settings.jwt_secret,
+        algorithm="HS256",
     )
-    assert ctx.client.get("/v1/staff/companies").status_code == 200
+    ctx.client.headers["Authorization"] = f"Bearer {imposter}"
+    assert ctx.client.get("/v1/staff/companies").status_code == 404
+
+
+def test_staff_routes_404_for_expired_staff_token(isolated_settings, monkeypatch):
+    import app.auth as auth_mod
+
+    ctx = company_client(monkeypatch)
+    _enable_staff_surface(monkeypatch)
+    now = int(time.time())
+    expired = pyjwt.encode(
+        {
+            "sub": "staff",
+            "role": "staff_admin",
+            "aud": "sprntly-staff",
+            "iat": now - 13 * 3600,
+            "exp": now - 3600,
+        },
+        auth_mod.settings.jwt_secret,
+        algorithm="HS256",
+    )
+    ctx.client.headers["Authorization"] = f"Bearer {expired}"
+    assert ctx.client.get("/v1/staff/companies").status_code == 404
+
+
+def test_staff_token_never_passes_user_gates(isolated_settings, monkeypatch):
+    """The staff JWT must not be usable as a normal user session: aud and
+    signing path differ from Supabase tokens, so require_session rejects it."""
+    ctx = _staff_ctx(monkeypatch)
+    # A tenant-scoped user route: the staff token is not a Supabase session.
+    assert ctx.client.post("/v1/org-invites/claim").status_code in (401, 403)
 
 
 # ─────────────────────── companies list + entitlement edits ───────────────────────
