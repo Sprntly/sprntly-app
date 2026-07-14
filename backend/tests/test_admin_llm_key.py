@@ -92,6 +92,17 @@ def test_use_platform_flag_allows_platform_after_onboarding(isolated_settings, m
         assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
 
 
+def test_non_uuid_company_id_is_missing_row_not_an_error(isolated_settings):
+    # An older gateway caller can bind a legacy dataset slug or other telemetry
+    # tag as the acting "company". That is definitionally not an onboarded
+    # company — it must resolve like a missing row (lenient, platform allowed),
+    # not blow up the uuid-typed DB lookup and fail the whole LLM call.
+    from app.db.companies import get_company_llm_config
+
+    assert get_company_llm_config("313") == (None, False, False)
+    assert get_company_llm_config("legacy-dataset-slug") == (None, False, False)
+
+
 def test_config_read_failure_raises_unavailable_not_key_required(
     isolated_settings, monkeypatch
 ):

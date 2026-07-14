@@ -7,7 +7,12 @@ authenticated user's active company (the tenant everything else scopes by).
 """
 from __future__ import annotations
 
+import logging
+import uuid
+
 from app.db.client import require_client, retry_on_disconnect
+
+logger = logging.getLogger(__name__)
 
 
 @retry_on_disconnect
@@ -271,7 +276,21 @@ def get_company_llm_config(company_id: str) -> tuple[str | None, bool, bool]:
 
     `onboarding_complete` is `companies.onboarding_completed_at IS NOT NULL`. A
     missing company row returns (None, False, False) — treated as still
-    onboarding (lenient: platform allowed) by the resolver."""
+    onboarding (lenient: platform allowed) by the resolver. An id that isn't
+    even a valid UUID (a legacy dataset slug or telemetry tag bound by an older
+    gateway caller) is definitionally not a company: it gets the same lenient
+    missing-row answer instead of erroring the uuid-typed query below — the
+    error would otherwise fail the caller's whole LLM call (this is exactly
+    what silently killed PRD input-question extraction)."""
+    try:
+        uuid.UUID(company_id)
+    except (ValueError, TypeError):
+        logger.warning(
+            "get_company_llm_config: non-company id %r — treating as missing "
+            "(platform-key posture). Fix the caller to bind a company id.",
+            company_id,
+        )
+        return (None, False, False)
     client = require_client()
     result = (
         client.table("companies")

@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import logging
 
+from app.db.briefs import get_brief_by_id
+from app.db.companies import company_id_for_slug
 from app.db.prd_input_questions import replace_questions
 from app.db.prds import get_prd
 from app.graph.gateway import llm_call
@@ -153,11 +155,17 @@ def extract_input_questions(prd_id: int) -> list[dict]:
         prd_html = (row.get("payload_md") or "").strip()
         if not prd_html:
             return []
-        # Same enterprise attribution the PRD generation used: the brief's company
-        # isn't threaded here, so attribute to the brief_id-scoped dataset via the
-        # gateway's enterprise_id (a string tag). Using the PRD's brief keeps the
-        # telemetry grouped with the rest of that PRD's calls.
+        # Same enterprise attribution the PRD generation used: resolve the PRD's
+        # brief → dataset → company id, so the gateway routes this call on the
+        # company's own Claude key (app.llm_keys binds enterprise_id as the acting
+        # company). A brief-id string here breaks that binding — the key resolver
+        # rejects non-company ids — and silently kills extraction. Legacy datasets
+        # that own no company fall back to the dataset slug (telemetry-only tag).
         enterprise_id = str(row.get("brief_id") or prd_id)
+        brief = get_brief_by_id(row["brief_id"]) if row.get("brief_id") else None
+        dataset = (brief or {}).get("dataset") or ""
+        if dataset:
+            enterprise_id = company_id_for_slug(dataset) or dataset
         questions = _run_extract(prd_html, enterprise_id)
         return replace_questions(prd_id, questions)
     except Exception:  # noqa: BLE001 — extraction must never break generation

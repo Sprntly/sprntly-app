@@ -131,6 +131,44 @@ def test_extract_persists_questions(isolated_settings, monkeypatch):
     assert [o["label"] for o in stored[0]["options"]] == ["Gated", "Open"]
 
 
+def test_extract_attributes_the_prds_company(isolated_settings, monkeypatch):
+    # The gateway binds enterprise_id as the acting company for per-company key
+    # routing (app.llm_keys), so extraction must pass the COMPANY id resolved
+    # from the PRD's brief → dataset — not the brief id (a non-company id makes
+    # the key resolver reject the call and silently kills extraction).
+    company_id = "11111111-2222-4333-8444-555555555555"
+    _, prd_id = _seed_prd(isolated_settings["db"], dataset="acme")
+    seen: dict = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result({"questions": []})
+
+    monkeypatch.setattr(prd_questions, "llm_call", _capture)
+    monkeypatch.setattr(
+        prd_questions, "company_id_for_slug",
+        lambda slug: company_id if slug == "acme" else None,
+    )
+    prd_questions.extract_input_questions(prd_id)
+    assert seen["enterprise_id"] == company_id
+
+
+def test_extract_falls_back_to_dataset_slug_without_company(isolated_settings, monkeypatch):
+    # Legacy corpus datasets own no company row: keep the slug as a
+    # telemetry-only tag (the key resolver treats non-company ids leniently).
+    _, prd_id = _seed_prd(isolated_settings["db"], dataset="legacy-corpus")
+    seen: dict = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result({"questions": []})
+
+    monkeypatch.setattr(prd_questions, "llm_call", _capture)
+    monkeypatch.setattr(prd_questions, "company_id_for_slug", lambda slug: None)
+    prd_questions.extract_input_questions(prd_id)
+    assert seen["enterprise_id"] == "legacy-corpus"
+
+
 def test_extract_is_best_effort_on_error(isolated_settings, monkeypatch):
     _, prd_id = _seed_prd(isolated_settings["db"])
 
