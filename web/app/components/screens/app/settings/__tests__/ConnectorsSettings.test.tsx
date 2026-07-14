@@ -214,10 +214,10 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders 31 connector rows total (29 design + ClickUp + Fireflies)", () => {
+  it("renders 32 connector rows total (29 design + ClickUp + Fireflies + Sprinklr)", () => {
     const html = render()
     const matches = html.match(/class="set-conn-row"/g) ?? []
-    expect(matches.length).toBe(31)
+    expect(matches.length).toBe(32)
   })
 
   it("shows 'Off' pill + 'Connect' action for an apikey-supported connector with no connection", () => {
@@ -360,9 +360,9 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
   it("groups the wired connectors into their categories (empty categories dropped)", () => {
     const html = render({ categories: connectableCatalog() })
     const keptCategories = connectableCatalog()
-    // 8 wired connector rows across the surviving categories, one upload
+    // 9 wired connector rows across the surviving categories, one upload
     // strip per surviving category.
-    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(8)
+    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(9)
     expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
       keptCategories.length,
     )

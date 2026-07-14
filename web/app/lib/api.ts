@@ -1150,6 +1150,10 @@ export const connectorsApi = {
       history_days: historyDays,
     }),
 
+  // ---- Sprinklr ------------------------------------------------------------
+  disconnectSprinklr: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/sprinklr`),
+
   // ---- Fireflies (API key, not OAuth) --------------------------------------
   connectFirefliesWithApiKey: (apiKey: string) =>
     api.post<{ ok: true; provider: string; account_label: string }>(

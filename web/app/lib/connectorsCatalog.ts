@@ -62,6 +62,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     items: [
       { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false, types: ["communication"] },
       { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", logoSvg: "/connectors/zendesk.svg", oauth: false, types: ["customer-voice"] },
+      // No bundled SVG mark yet — brand-color letter glyph like Fireflies.
+      { id: "sprinklr",   name: "Sprinklr",   logo: "S", logoText: "S", logoColor: "#107EFF", oauth: true, types: ["customer-voice"] },
       // Fireflies has no official SVG mark we could bundle, so it keeps the
       // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
       { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings"] },

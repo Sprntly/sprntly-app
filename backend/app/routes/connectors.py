@@ -60,6 +60,7 @@ from app.connectors import (
     hubspot_oauth,
     jira_oauth,
     slack_oauth,
+    sprinklr_oauth,
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
@@ -382,6 +383,16 @@ def start_oauth(
             raise HTTPException(500, "Jira OAuth is not configured on the server")
         url = jira_oauth.authorize_url(
             state=jira_oauth.sign_oauth_state(
+                company_id=company.company_id, return_to=return_to,
+            )
+        )
+        return {"authorize_url": url}
+
+    if provider == sprinklr_oauth.SPRINKLR_PROVIDER:
+        if not sprinklr_oauth.sprinklr_configured():
+            raise HTTPException(500, "Sprinklr OAuth is not configured on the server")
+        url = sprinklr_oauth.authorize_url(
+            state=sprinklr_oauth.sign_oauth_state(
                 company_id=company.company_id, return_to=return_to,
             )
         )
@@ -1655,6 +1666,65 @@ def hubspot_disconnect(
         raise HTTPException(404, "HubSpot is not connected")
     db.delete_connection(company.company_id, hubspot_oauth.HUBSPOT_PROVIDER)
     return {"deleted": True, "provider": hubspot_oauth.HUBSPOT_PROVIDER}
+
+
+# ─────────────────────── Sprinklr ───────────────────────
+#
+# Customer-voice connector: OAuth + KG ingestion (cases + inbound social
+# messages via app/kg_ingest/pullers/sprinklr.py). No corpus sync.
+
+
+@router.get("/sprinklr/callback")
+def sprinklr_callback(code: str, state: str):
+    payload = sprinklr_oauth.verify_oauth_state(state)
+    company_id = payload["company_id"]
+    token_json = sprinklr_oauth.exchange_code_for_token(code)
+    access_token = token_json.get("access_token")
+    if not access_token:
+        raise HTTPException(400, "Sprinklr did not return an access_token")
+
+    # Best-effort identity for the account label — a /me hiccup must not
+    # fail the connect (the token itself already proved valid above).
+    info = sprinklr_oauth.fetch_authenticated_user(access_token)
+    label = (
+        info.get("email")
+        or info.get("emailId")
+        or info.get("fullName")
+        or " ".join(x for x in [info.get("firstName"), info.get("lastName")] if x)
+        or ""
+    )
+
+    try:
+        token_encrypted = encrypt_token_json(
+            sprinklr_oauth.token_payload_to_store(token_json)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company_id,
+        provider=sprinklr_oauth.SPRINKLR_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes="",
+        account_label=label or None,
+        config_json=json.dumps({"info": info}) if info else "{}",
+    )
+
+    kickoff_sync(company_id, sprinklr_oauth.SPRINKLR_PROVIDER)
+
+    return _build_post_oauth_redirect(payload, sprinklr_oauth.SPRINKLR_PROVIDER)
+
+
+@router.delete("/sprinklr")
+def sprinklr_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    _require_admin_for_org_connector(company, sprinklr_oauth.SPRINKLR_PROVIDER)
+    row = db.get_connection(company.company_id, sprinklr_oauth.SPRINKLR_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Sprinklr is not connected")
+    db.delete_connection(company.company_id, sprinklr_oauth.SPRINKLR_PROVIDER)
+    return {"deleted": True, "provider": sprinklr_oauth.SPRINKLR_PROVIDER}
 
 
 class HubSpotSyncCorpusIn(BaseModel):

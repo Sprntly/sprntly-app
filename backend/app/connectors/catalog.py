@@ -48,6 +48,7 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "notion": [DOCUMENTS],
     # Customer voice / meetings
     "zendesk": [CUSTOMER_VOICE],
+    "sprinklr": [CUSTOMER_VOICE],
     "fireflies": [MEETINGS],
     "gong": [MEETINGS],
     "dovetail": [CUSTOMER_VOICE],
