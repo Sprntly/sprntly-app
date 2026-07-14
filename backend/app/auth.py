@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import jwt
-from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from app.config import settings
@@ -169,6 +169,60 @@ def require_session(
         except jwt.PyJWTError:
             continue
     raise HTTPException(401, "Not signed in")
+
+
+def _staff_emails() -> set[str]:
+    """The STAFF_EMAILS allowlist, normalized. Empty ⇒ staff surface disabled."""
+    return {
+        e.strip().lower()
+        for e in (settings.staff_emails or "").split(",")
+        if e.strip()
+    }
+
+
+def session_email(session: dict) -> str:
+    """The signed-in user's email, lowercased. Falls back to the stored
+    profile row when the JWT omits `email` (Supabase user-context tokens
+    sometimes do). Empty string when neither source has one."""
+    email = (session.get("email") or "").strip().lower()
+    if email:
+        return email
+    user_id = session.get("sub")
+    if not user_id:
+        return ""
+    try:
+        from app.db.client import require_client
+
+        prof = (
+            require_client()
+            .table("profiles")
+            .select("email")
+            .eq("id", user_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return ((prof[0] if prof else {}).get("email") or "").strip().lower()
+    except Exception:  # noqa: BLE001 — treat a lookup failure as "no email"
+        return ""
+
+
+def require_staff(session: dict = Depends(require_session)) -> dict:
+    """Gate for the Sprntly-staff admin surface (/v1/staff).
+
+    Supabase-authenticated users whose email is in the STAFF_EMAILS allowlist
+    only. Everyone else — including signed-in customers — gets a 404 (not 403)
+    so the staff surface is invisible, mirroring the design-agent feature
+    gate. Legacy demo/app cookie sessions carry no identity and are rejected.
+    """
+    if session.get("aud") != "supabase":
+        raise HTTPException(404, "Not found")
+    allowed = _staff_emails()
+    email = session_email(session) if allowed else ""
+    if not email or email not in allowed:
+        raise HTTPException(404, "Not found")
+    return {**session, "email": email}
 
 
 def require_app_session(

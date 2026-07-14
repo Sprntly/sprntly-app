@@ -2406,6 +2406,79 @@ export const adminApi = {
   testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
 }
 
+// ── Staff admin panel (Sprntly staff only — STAFF_EMAILS allowlist) ──
+// Org invites + per-company entitlements. Non-staff get 404 on every route
+// (the surface is invisible); the /admin page treats any error as "not staff".
+
+export type StaffCompany = {
+  id: string
+  slug: string
+  display_name: string
+  created_at: string | null
+  /** Max members incl. pending invites; null = unlimited. */
+  seat_limit: number | null
+  prototype_enabled: boolean
+  /** true ⇒ runs on Sprntly's platform Claude key; false ⇒ must bring their own. */
+  use_platform_key: boolean
+  feature_flags: Record<string, boolean>
+  /** Whether a BYOK key is stored (never the key itself). */
+  llm_key_configured: boolean
+  member_count: number
+  pending_invite_count: number
+}
+
+export type StaffEntitlementsPatch = {
+  seat_limit?: number | null
+  prototype_enabled?: boolean
+  use_platform_key?: boolean
+  /** Partial merge — only the keys sent change. */
+  feature_flags?: Record<string, boolean>
+}
+
+export type OrgInvite = {
+  id: string
+  email: string
+  company_name: string
+  seat_limit: number | null
+  prototype_enabled: boolean
+  use_platform_key: boolean
+  feature_flags: Record<string, boolean>
+  status: "pending" | "accepted" | "revoked"
+  company_id: string | null
+  created_at: string | null
+  accepted_at: string | null
+  email_sent?: boolean
+}
+
+export type OrgInviteIn = {
+  email: string
+  company_name: string
+  seat_limit?: number | null
+  prototype_enabled?: boolean
+  use_platform_key?: boolean
+  feature_flags?: Record<string, boolean>
+}
+
+export const staffApi = {
+  listCompanies: () =>
+    api.get<{ companies: StaffCompany[] }>("/v1/staff/companies"),
+  updateCompany: (companyId: string, patch: StaffEntitlementsPatch) =>
+    api.patch<StaffCompany>(`/v1/staff/companies/${companyId}`, patch),
+  listInvites: () => api.get<{ invites: OrgInvite[] }>("/v1/staff/invites"),
+  createInvite: (body: OrgInviteIn) =>
+    api.post<OrgInvite>("/v1/staff/invites", body),
+  revokeInvite: (inviteId: string) =>
+    api.delete<void>(`/v1/staff/invites/${inviteId}`),
+  resendInvite: (inviteId: string) =>
+    api.post<OrgInvite>(`/v1/staff/invites/${inviteId}/resend`),
+}
+
+export const orgInviteApi = {
+  /** Apply the signed-in owner's pending org invite to their new company.
+   *  404 ⇒ no pending invite (the normal self-serve case) — callers ignore it. */
+  claim: () => api.post<{ applied: boolean }>("/v1/org-invites/claim"),
+}
+
 // ── Feedback / feature-request (June 20 #13 + #A) ──
 // Users submit a short message + an optional type from the left nav. The
 // backend stores it and emails it to the team. type defaults to "other".
