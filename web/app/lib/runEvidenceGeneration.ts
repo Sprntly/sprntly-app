@@ -45,14 +45,33 @@ async function pollEvidenceToResult(
 /** Polls until the Evidence Page is ready, then parses the markdown with
  *  the evidence adapter (typed semantic blocks + standard markdown). Persists
  *  the active evidence_id so a remount can resume via
- *  `resumeEvidenceGeneration`. */
+ *  `resumeEvidenceGeneration`.
+ *
+ *  Read-first: ready evidence for the insight is returned directly (one GET,
+ *  no generate POST) — generation only starts when nothing exists yet.
+ *  `force: true` skips the read AND the backend's dedup/failed-row check —
+ *  the explicit retry after a failed run. */
 export async function runEvidenceGeneration(
   meta: DetailState["meta"],
+  opts?: { force?: boolean },
 ): Promise<EvidenceGenResult> {
   if (!meta) {
     return { ok: false, message: "Open this evidence from the brief first." }
   }
-  const start = await evidenceApi.generate(meta.briefId, meta.insightIndex)
+  const force = opts?.force ?? false
+  if (!force) {
+    const existing = await loadEvidenceByInsight(meta.briefId, meta.insightIndex)
+    if (existing) return { ok: true, evidence: existing }
+  }
+  const start = await evidenceApi.generate(meta.briefId, meta.insightIndex, force)
+  // A prior run failed and the backend won't silently re-run it — surface the
+  // error so the panel offers the explicit Retry (which sends force=true).
+  if (start.status === "failed") {
+    return {
+      ok: false,
+      message: start.error || "Evidence generation failed on the backend",
+    }
+  }
   const scope = insightScope(meta.briefId, meta.insightIndex)
   setPendingJob("evidence", "_", scope, start.evidence_id)
   return pollEvidenceToResult(start.evidence_id, scope)

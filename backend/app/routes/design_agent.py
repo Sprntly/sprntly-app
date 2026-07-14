@@ -830,10 +830,16 @@ class PrototypeReadiness(BaseModel):
     `ready` is always True when this object appears — absent prototype is
     represented by `prototype: null` on the parent entry, not by a
     `{ready: false}` object, so the frontend never needs to branch on the field.
+
+    `prd_id` is the PRD the ready prototype is actually attached to. It usually
+    equals the parent entry's prd_id, but after a PRD regeneration (which makes
+    a NEW prds row the entry's prd_id) it points at the OLDER PRD the prototype
+    was generated against — the frontend must open the prototype via THIS id.
     """
 
     ready: bool = True
     preview_image_url: str | None = None
+    prd_id: int | None = None
 
 
 class BriefPrototypeMapEntry(BaseModel):
@@ -895,23 +901,40 @@ def get_brief_prototype_map(
     workspace_id = company.company_id
     prd_variant = _prd_variant()
 
-    prds = list_prds_by_brief(brief_id=brief_id, variant=prd_variant)
+    # ALL ready PRDs per insight (newest first within an insight), not just the
+    # newest: a PRD regeneration creates a new prds row while the prototype
+    # stays attached to the old one — checking only the newest PRD would report
+    # "no prototype" forever for that insight.
+    prd_rows = list_prds_by_brief(
+        brief_id=brief_id, variant=prd_variant, newest_only=False
+    )
+    rows_by_insight: dict[int, list[dict]] = {}
+    for row in prd_rows:
+        rows_by_insight.setdefault(row["insight_index"], []).append(row)
 
     entries: list[BriefPrototypeMapEntry] = []
-    for prd in prds:
-        proto_row = find_prototype_by_prd(
-            prd_id=prd["id"], workspace_id=workspace_id, statuses=["ready"]
-        )
-        prototype = (
-            PrototypeReadiness(preview_image_url=proto_row.get("preview_image_url"))
-            if proto_row
-            else None
-        )
+    for insight_index in sorted(rows_by_insight):
+        rows = rows_by_insight[insight_index]  # newest → oldest
+        newest = rows[0]
+        prototype = None
+        for prd in rows:
+            proto_row = find_prototype_by_prd(
+                prd_id=prd["id"], workspace_id=workspace_id, statuses=["ready"]
+            )
+            if proto_row:
+                prototype = PrototypeReadiness(
+                    preview_image_url=proto_row.get("preview_image_url"),
+                    prd_id=prd["id"],
+                )
+                break
         entries.append(
             BriefPrototypeMapEntry(
-                insight_index=prd["insight_index"],
-                prd_id=prd["id"],
-                prd_title=prd["title"] or "",
+                # The entry itself stays bound to the NEWEST ready PRD (that's
+                # what "View PRD" should open); prototype.prd_id says which PRD
+                # to open the prototype through.
+                insight_index=insight_index,
+                prd_id=newest["id"],
+                prd_title=newest["title"] or "",
                 prototype=prototype,
             )
         )

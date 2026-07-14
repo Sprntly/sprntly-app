@@ -437,6 +437,10 @@ export type EvidenceStartResponse = {
   /** Storage variant — `v2` for new rows; historical `v1` rows in prod
    *  remain readable. Implementation detail; UI shouldn't switch on it. */
   variant?: string
+  /** Set when status === "failed": the prior run's error. The backend no
+   *  longer silently re-generates a failed insight on open — the client shows
+   *  this and offers an explicit retry (generate with force=true). */
+  error?: string | null
 }
 
 export type EvidenceRecord = {
@@ -1480,7 +1484,14 @@ export type FigmaFile = {
   name: string
 }
 
-export type BriefPrototypeReadiness = { ready: boolean; preview_image_url: string | null }
+export type BriefPrototypeReadiness = {
+  ready: boolean
+  preview_image_url: string | null
+  /** The PRD the ready prototype is actually attached to — open the prototype
+   *  via THIS id. Usually equals the entry's prd_id, but after a PRD
+   *  regeneration it points at the older PRD the prototype was built against. */
+  prd_id?: number | null
+}
 export type BriefPrototypeMapEntry = {
   insight_index: number
   prd_id: number

@@ -103,6 +103,31 @@ def find_latest_evidence(brief_id: int, insight_index: int) -> dict | None:
 
 
 @retry_on_disconnect
+def find_latest_failed_evidence(
+    brief_id: int, insight_index: int, variant: str = "v1"
+) -> dict | None:
+    """Newest FAILED evidence row for a brief insight at this variant.
+
+    Lets the generate route surface a failure (with its error) instead of
+    silently re-running a full generation on every open — failed rows are
+    excluded from find_existing_evidence, so without this check each reopen
+    of a failing insight kicked off a brand-new LLM run."""
+    c = require_client()
+    resp = (
+        c.table("evidences")
+        .select("*")
+        .eq("brief_id", brief_id)
+        .eq("insight_index", insight_index)
+        .eq("variant", variant)
+        .eq("status", "failed")
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
+
+
+@retry_on_disconnect
 def find_existing_evidence(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:

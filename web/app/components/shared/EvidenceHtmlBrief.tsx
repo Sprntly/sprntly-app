@@ -44,7 +44,7 @@ export function EvidenceHtmlBrief({ html }: { html: string }) {
       style.id = "sprntly-evidence-overrides"
       style.textContent = `
         body { background: #ffffff !important; }
-        .wrap { max-width: 940px !important; padding: 15px 0px 57px !important; }
+        .wrap { max-width: 940px !important; padding: 15px 25px 57px !important; }
       `
       ;(cdoc.head ?? cdoc.documentElement).appendChild(style)
     }

@@ -165,8 +165,11 @@ describe("ChatScreen — insight renders as an in-chat message (not a pinned hea
     // A saved PRD is loaded on the tab → the PRD CTA reads "View PRD" (not "Open").
     expect(within(msg).getByRole("button", { name: "View PRD" })).toBeTruthy()
     expect(within(msg).queryByRole("button", { name: /open prd/i })).toBeNull()
-    // The prototype CTA is present; no prototype built yet → "Generate prototype".
-    expect(within(msg).getByRole("button", { name: "Generate prototype" })).toBeTruthy()
+    // No prototype built yet → NO prototype CTA at all. The chat surface never
+    // offers "Generate prototype" (the PRD panel owns generation); the button
+    // appears only as "View prototype" once one is ready.
+    expect(within(msg).queryByRole("button", { name: /generate prototype/i })).toBeNull()
+    expect(within(msg).queryByRole("button", { name: /view prototype/i })).toBeNull()
 
     // …and the chat composer is present even though the thread is empty — the
     // user can immediately ask Sprntly about this PRD. (Regression: the dock

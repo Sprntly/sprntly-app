@@ -474,6 +474,11 @@ export function BriefChat() {
   const gen = useGeneratePrototype(genPrdId, {
     figmaFileKey: genFigmaKey,
     skipExistenceCheck: true,
+    // The card label comes from the batch map above, which nothing refreshed
+    // after a prototype generation finished — the button stayed on "Generate
+    // prototype" until a remount. Refetch it whenever a run settles so the
+    // card flips to "View prototype" in place.
+    onGenerationSettled: refetchPrototypeMap,
   })
 
   useEffect(() => {
@@ -911,7 +916,9 @@ export function BriefChat() {
         // (ApproveModal / DesignAgentLauncher use router.push(prototypePath(prdId))).
         // goTo("prototype") alone navigates the screen WITHOUT the ?prd= param, so
         // PrototypeRoute has no PRD to resolve and the editor never loads.
-        router.push(prototypePath(state.prdId))
+        // prototypePrdId: the PRD the prototype is actually attached to (may be
+        // an older PRD than the insight's newest after a PRD regeneration).
+        router.push(prototypePath(state.prototypePrdId ?? state.prdId))
       } else if (state.hasPrd && !state.prototypeReady && state.prdId != null) {
         // case 2: PRD exists but no prototype → open generate modal
         setGenPrdId(state.prdId)

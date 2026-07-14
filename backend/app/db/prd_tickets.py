@@ -46,6 +46,29 @@ def prd_content_hash(prd_id: int) -> str | None:
     return hash_prd_row(prd)
 
 
+def prd_hash_matches(prd_id: int, stored_hash: str | None) -> bool:
+    """Whether a stored tickets content_hash still matches the PRD's content.
+
+    Accepts TWO hashes for the current row: the full one (title + Part A +
+    Part B) and one computed with an EMPTY llm_part. The Implementation Spec
+    (Part B / llm_part) warms in the background around ticket generation, so a
+    set stored before the warm landed carries the empty-llm_part hash even
+    though nothing a user can edit changed — that race made the Tickets tab
+    claim "the PRD changed" and regenerate on the next open. llm_part is
+    derived from payload_md (cached by its own source hash), so the body
+    already carries every genuine change signal; accepting the pre-warm hash
+    kills the false positive without missing real edits.
+    """
+    if not stored_hash:
+        return False
+    prd = get_prd_rendered(prd_id)
+    if prd is None:
+        return False
+    if stored_hash == hash_prd_row(prd):
+        return True
+    return stored_hash == hash_prd_row({**prd, "llm_part": ""})
+
+
 @retry_on_disconnect
 def get_tickets(company_id: str, prd_id: int) -> dict | None:
     """The persisted ticket row for a PRD, or None. Tenant-scoped."""

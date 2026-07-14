@@ -294,6 +294,53 @@ def test_brief_prototype_map_returns_newest_prd_per_insight(client):
     assert by_insight[1]["prd_id"] == solo_prd
 
 
+def test_brief_prototype_map_falls_back_to_prototype_on_older_prd(client):
+    """A PRD regeneration creates a NEW prds row while the ready prototype stays
+    attached to the OLD one. The entry must still bind to the newest PRD (that's
+    what "View PRD" opens) but surface the prototype via the older PRD, with
+    prototype.prd_id pointing at the PRD the prototype actually belongs to.
+
+    Regression: the route only checked the newest PRD, so after a PRD regen the
+    brief card showed "Generate prototype" forever even though a ready prototype
+    existed (and the PRD-tab surface, using getByPrd(old prd), still showed it).
+    """
+    old_prd = _seed_prd(brief_id=8, insight_index=0, title="Old PRD")
+    _seed_prototype(prd_id=old_prd, workspace_id=_TEST_COMPANY_ID, status="ready",
+                    preview_image_url="https://storage.example/old-preview.png")
+    new_prd = _seed_prd(brief_id=8, insight_index=0, title="Regenerated PRD")
+    assert new_prd > old_prd
+
+    resp = client.get("/v1/design-agent/brief-prototype-map", params={"brief_id": 8})
+    assert resp.status_code == 200, resp.text
+    entries = resp.json()["entries"]
+    assert len(entries) == 1
+    entry = entries[0]
+
+    # The entry itself still binds to the newest PRD…
+    assert entry["prd_id"] == new_prd
+    assert entry["prd_title"] == "Regenerated PRD"
+    # …but the ready prototype on the older PRD is surfaced, attributed to it.
+    assert entry["prototype"] is not None
+    assert entry["prototype"]["ready"] is True
+    assert entry["prototype"]["prd_id"] == old_prd
+    assert entry["prototype"]["preview_image_url"] == "https://storage.example/old-preview.png"
+
+
+def test_brief_prototype_map_prefers_newest_prds_prototype(client):
+    """When BOTH the newest and an older PRD of the same insight have ready
+    prototypes, the newest PRD's prototype wins (prototype.prd_id == entry.prd_id)."""
+    old_prd = _seed_prd(brief_id=9, insight_index=0, title="Old PRD")
+    _seed_prototype(prd_id=old_prd, workspace_id=_TEST_COMPANY_ID, status="ready")
+    new_prd = _seed_prd(brief_id=9, insight_index=0, title="New PRD")
+    _seed_prototype(prd_id=new_prd, workspace_id=_TEST_COMPANY_ID, status="ready")
+
+    resp = client.get("/v1/design-agent/brief-prototype-map", params={"brief_id": 9})
+    assert resp.status_code == 200, resp.text
+    entry = resp.json()["entries"][0]
+    assert entry["prd_id"] == new_prd
+    assert entry["prototype"]["prd_id"] == new_prd
+
+
 # ─── Workspace isolation ──────────────────────────────────────────────────────
 
 
