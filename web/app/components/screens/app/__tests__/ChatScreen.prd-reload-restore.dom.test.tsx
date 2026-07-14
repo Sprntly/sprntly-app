@@ -128,8 +128,8 @@ const prdProbe = () => screen.getByTestId("prd-probe").textContent
 // Seed localStorage exactly as a reload would leave it: the tab persists (with its
 // briefMeta) but `prd` is stripped, and the active tab points at it.
 function seedPersistedTab(tab: Record<string, unknown>, activeId: string) {
-  localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([tab]))
-  localStorage.setItem("sprntly_chat_active_tab_acme", activeId)
+  localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([tab]))
+  localStorage.setItem("sprntly_chat_active_tab_anon_acme", activeId)
 }
 
 const tabBar = () => within(screen.getByTestId("chat-tab-bar"))
@@ -176,10 +176,10 @@ describe("ChatScreen — PRD panel restore after reload", () => {
       loading: false,
     }
     localStorage.setItem(
-      "sprntly_chat_tabs_acme",
+      "sprntly_chat_tabs_anon_acme",
       JSON.stringify([{ id: "tab-late", title: "PRD · Later PRD", thread: [], dbConvId: null, briefMeta: { briefId: 3, insightIndex: 0 }, insightBody: null }]),
     )
-    localStorage.setItem("sprntly_chat_active_tab_acme", "brief") // land on brief first
+    localStorage.setItem("sprntly_chat_active_tab_anon_acme", "brief") // land on brief first
 
     await act(async () => { mountApp() })
     // On the brief tab, no restore.
@@ -276,11 +276,11 @@ describe("ChatScreen — PRD panel restore after reload", () => {
     // The panel is a single global overlay; switching between PRD tabs must re-sync
     // it to the ACTIVE tab's PRD (the "wrong PRD on refocus" bug left a prior tab's
     // doc showing). Two tabs with distinct saved ids; the panel must track them.
-    localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([
+    localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
       { id: "tab-a", title: "PRD · Alpha", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 10 },
       { id: "tab-b", title: "PRD · Beta", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 20 },
     ]))
-    localStorage.setItem("sprntly_chat_active_tab_acme", "tab-a")
+    localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-a")
 
     await act(async () => { mountApp() })
     // Landed on tab-a → its PRD (10).

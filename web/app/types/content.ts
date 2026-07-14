@@ -217,6 +217,11 @@ export interface ConversationRow {
   title: string
   time: string
   savedTurn?: ConversationSavedTurn | null
+  /** The ChatScreen tab this rail entry mirrors — exactly ONE entry per tab,
+   *  updated in place as the room's chat continues (never one per message). */
+  _tabId?: string
+  /** The Supabase conversation id, once persisted (tagged by ChatScreen). */
+  _dbId?: number
 }
 
 export interface TeamMemberRow {

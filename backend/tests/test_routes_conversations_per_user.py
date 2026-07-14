@@ -6,14 +6,15 @@ update, or delete it. Teammates in the same workspace never see each other's
 chats — only artifacts (PRDs, prototypes, evidence) are workspace-shared.
 
 Legacy rows written before stamping existed (user_id IS NULL) cannot be
-attributed to an owner, so they remain visible company-wide.
+attributed to an owner, so they are hidden from everyone — strict per-user
+privacy beats resurfacing chats whose author is unknown.
 
 Covered:
 - create stamps the caller's user_id on the row
 - list returns only the caller's conversations (teammate's are hidden)
 - by-prd returns the CALLER'S conversation for the PRD, never a teammate's
 - update / delete / turns 404 for a teammate (and don't mutate the row)
-- legacy user_id-NULL rows stay visible to every member
+- legacy user_id-NULL rows are hidden from every member
 """
 from __future__ import annotations
 
@@ -99,18 +100,39 @@ def test_update_delete_and_turns_are_owner_only(tenant_client):
     assert a.client.delete(f"/v1/conversations/{cid}").status_code == 200
 
 
-def test_legacy_unowned_rows_stay_visible_to_all_members(tenant_client):
+def test_ask_history_never_replays_a_teammates_conversation(tenant_client):
+    """ask.py loads prior turns for follow-ups; a teammate's conversation_id
+    must load NOTHING — otherwise their private chat leaks into the model
+    context (the cross-user read that survived the original per-user commit)."""
+    from app.routes.ask import _load_history
+
+    a, b = _two_members(tenant_client)
+    conv = _create(a.client, title="A's chat")
+    a.client.post(
+        f"/v1/conversations/{conv['id']}/turns",
+        json={"role": "user", "content": "A's private question"},
+    )
+
+    owner_turns = _load_history(conv["id"], a.company_id, a.user_id)
+    assert [t["content"] for t in owner_turns] == ["A's private question"]
+
+    assert _load_history(conv["id"], b.company_id, b.user_id) == []
+
+
+def test_legacy_unowned_rows_are_hidden_from_all_members(tenant_client):
     from app.db.client import require_client
 
     a, b = _two_members(tenant_client)
     # A pre-stamping row: user_id NULL (written before chats were per-user).
-    require_client().table("conversations").insert(
+    inserted = require_client().table("conversations").insert(
         {"company_id": a.company_id, "user_id": None, "title": "legacy shared chat"}
     ).execute()
+    legacy_id = inserted.data[0]["id"]
 
     for member in (a, b):
         titles = [
             c["title"]
             for c in member.client.get("/v1/conversations").json()["conversations"]
         ]
-        assert "legacy shared chat" in titles
+        assert "legacy shared chat" not in titles
+        assert member.client.get(f"/v1/conversations/{legacy_id}/turns").status_code == 404

@@ -123,7 +123,7 @@ function renderScreen() {
 function seedThreadTab() {
   const tabId = "tab-seed-1"
   localStorage.setItem(
-    "sprntly_chat_tabs_acme",
+    "sprntly_chat_tabs_anon_acme",
     JSON.stringify([
       {
         id: tabId,
@@ -140,7 +140,7 @@ function seedThreadTab() {
       },
     ]),
   )
-  localStorage.setItem("sprntly_chat_active_tab_acme", tabId)
+  localStorage.setItem("sprntly_chat_active_tab_anon_acme", tabId)
 }
 
 beforeEach(() => {

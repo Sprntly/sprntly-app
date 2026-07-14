@@ -104,9 +104,14 @@ def _strip_citations(payload: dict) -> dict:
     return payload
 
 
-def _load_history(conversation_id: int | None, company_id: str) -> list[dict]:
+def _load_history(
+    conversation_id: int | None, company_id: str, user_id: str
+) -> list[dict]:
     """Fetch prior turns [{role, content}] for an owned conversation, oldest
-    first. Best-effort: no id, foreign conversation, or any read error → []."""
+    first. Chats are per-user: the conversation must belong to the CALLER, not
+    just their company — otherwise a teammate's conversation_id would replay
+    that teammate's private turns into the model context. Best-effort: no id,
+    foreign/unowned conversation, or any read error → []."""
     if not conversation_id:
         return []
     try:
@@ -118,6 +123,7 @@ def _load_history(conversation_id: int | None, company_id: str) -> list[dict]:
             .select("id")
             .eq("id", conversation_id)
             .eq("company_id", company_id)
+            .eq("user_id", user_id)
             .limit(1)
             .execute()
         )
@@ -214,7 +220,7 @@ async def ask(
     # 2) Cache miss → persist a generating job and kick the SAME qa_agent
     # pipeline in the background. The worker writes the result/citations onto
     # the job row; the client polls GET /v1/ask/{ask_id} until ready.
-    history = _load_history(body.conversation_id, enterprise_id)
+    history = _load_history(body.conversation_id, enterprise_id, company.user_id)
     ask_id = start_ask_job(
         company_id=enterprise_id,
         dataset=body.dataset,

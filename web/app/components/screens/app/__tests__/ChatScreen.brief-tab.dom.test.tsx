@@ -216,7 +216,7 @@ describe("ChatScreen — pinned brief tab", () => {
     // (not thread length) is what marks it non-disposable and keeps it alive. A
     // genuinely blank tab (no thread, no briefMeta) is still pruned.
     localStorage.setItem(
-      "sprntly_chat_tabs_acme",
+      "sprntly_chat_tabs_anon_acme",
       JSON.stringify([
         { id: "t-prd", title: "My PRD", thread: [], dbConvId: null, briefMeta: { briefId: 1, insightIndex: 0 } },
         { id: "t-empty", title: "Some chat", thread: [], dbConvId: null, briefMeta: null },
@@ -297,8 +297,8 @@ describe("ChatScreen — pinned brief tab", () => {
 // the surface at all): per-company localStorage persistence with the brief tab
 // EXCLUDED, thread preservation across a brief↔chat switch, route-driven brief
 // activation while mounted on a chat tab, and the ?new=1 one-shot latch.
-const tabsKey = "sprntly_chat_tabs_acme"
-const activeTabKey = "sprntly_chat_active_tab_acme"
+const tabsKey = "sprntly_chat_tabs_anon_acme"
+const activeTabKey = "sprntly_chat_active_tab_anon_acme"
 
 // A persisted chat tab (the slim shape ChatScreen writes — no prd/evidence/
 // *Generating). Used to model a restore and to drive thread preservation.

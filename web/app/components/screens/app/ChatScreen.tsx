@@ -8,7 +8,7 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
-import type { ChatHomeCard } from "../../../types/content"
+import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
 import { BriefChat, isPrdCommand, isTicketsCommand, prototypeCtaLabel } from "../../shared/BriefChat"
@@ -166,9 +166,13 @@ export function ChatScreen() {
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
-  // Company-scoped localStorage keys so different tenants never share chat state.
-  const tabsKey = `sprntly_chat_tabs_${activeCompany}`
-  const activeTabKey = `sprntly_chat_active_tab_${activeCompany}`
+  // User+company-scoped localStorage keys: chats are per-user, so neither a
+  // different tenant NOR a different member of the same workspace signing in
+  // on this browser may see these tabs. (Sign-out also purges the
+  // sprntly_chat_tabs_* prefix — this key is the defense in depth.)
+  const authUserId = auth.kind === "authed" ? auth.user.id : "anon"
+  const tabsKey = `sprntly_chat_tabs_${authUserId}_${activeCompany}`
+  const activeTabKey = `sprntly_chat_active_tab_${authUserId}_${activeCompany}`
 
   const [tabs, setTabs] = useState<ChatTab[]>(() => {
     try {
@@ -225,13 +229,13 @@ export function ChatScreen() {
   // PRD opened from another surface routes to `/`) can't swallow it.
   const [prdPanelPending, setPrdPanelPending] = useState(false)
 
-  // When the active company changes (user switches workspace or logs in as
-  // a different user), reload tabs from the new company-scoped storage so we
-  // never show another tenant's chat threads.
-  const prevCompanyRef = useRef(activeCompany)
+  // When the storage key changes (workspace switch OR a different user signs
+  // in), reload tabs from the new user+company-scoped storage so we never
+  // show another tenant's — or another teammate's — chat threads.
+  const prevTabsKeyRef = useRef(tabsKey)
   useEffect(() => {
-    if (prevCompanyRef.current === activeCompany) return
-    prevCompanyRef.current = activeCompany
+    if (prevTabsKeyRef.current === tabsKey) return
+    prevTabsKeyRef.current = tabsKey
     try {
       const saved = localStorage.getItem(tabsKey)
       if (saved) {
@@ -957,14 +961,34 @@ export function ChatScreen() {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toISOString()
-      const nextCount = prev.length + 1
-      setContent({
-        conversations: [
-          { id: turnId, title, time: timeStr, savedTurn: { id: turnId, query } },
-          ...prev,
-        ],
-        sidebarConvCount: nextCount,
-      })
+      // ONE rail entry per chat tab (mirrors the one-conversation-per-tab DB
+      // invariant in chatPersistence.ts). A follow-up message in the same room
+      // UPDATES that room's entry (latest turn, bumped time, moved to top)
+      // instead of prepending a new row — otherwise every message showed up as
+      // its own item in the History list until the next page reload.
+      const existing = prev.find((c) => (c as any)._tabId === targetTabId)
+      if (existing) {
+        setContent({
+          conversations: [
+            { ...existing, time: timeStr, savedTurn: { id: turnId, query } },
+            ...prev.filter((c) => c !== existing),
+          ],
+        })
+      } else {
+        setContent({
+          conversations: [
+            {
+              id: turnId,
+              title,
+              time: timeStr,
+              savedTurn: { id: turnId, query },
+              _tabId: targetTabId,
+            } as ConversationRow,
+            ...prev,
+          ],
+          sidebarConvCount: prev.length + 1,
+        })
+      }
       // Persist to Supabase against THIS tab's conversation (create-once per tab).
       // Fire-and-forget — failures are swallowed inside the helper.
       void persistence.pushUserTurn(targetTabId, { turnId, title, query })
@@ -977,7 +1001,11 @@ export function ChatScreen() {
       const prev = conversationsRef.current
       setContent({
         conversations: prev.map((c) => {
-          if (c.id !== turnId || !c.savedTurn) return c
+          // Match on the entry's CURRENT saved turn: with one rail entry per
+          // tab, later turns land on the same entry, whose id stays the first
+          // turn's id. A stale finalize (the entry has since moved on to a
+          // newer turn) is dropped rather than clobbering the newer query.
+          if (c.savedTurn?.id !== turnId) return c
           const base = { id: turnId, query: c.savedTurn.query }
           if (updates.reply !== undefined) {
             return { ...c, savedTurn: { ...base, reply: updates.reply } }
@@ -1904,9 +1932,6 @@ export function ChatScreen() {
                               <IconSparkle size={10} />
                               PM COWORKER
                             </span>
-                            {!turn.reply && !turn.error ? (
-                              <span className="bc-agent-status">thinking…</span>
-                            ) : null}
                           </div>
                           <div className="bc-agent-body">
                             {turn.error ? <div className="bc-error">{turn.error}</div> : null}

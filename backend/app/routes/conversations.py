@@ -11,7 +11,8 @@ workspace never see each other's chats (PRD chats included). Only artifacts
 (PRDs, prototypes, evidence) are workspace-shared.
 
 Legacy rows created before stamping (user_id IS NULL) cannot be attributed to
-an owner, so they remain visible to (and manageable by) the whole company.
+an owner, so they are hidden from everyone — strict per-user privacy beats
+resurfacing chats whose author is unknown.
 """
 from __future__ import annotations
 
@@ -49,47 +50,39 @@ class ConversationUpdate(BaseModel):
     pinned: bool | None = None
 
 
-def _visible_to(row: dict[str, Any], user_id: str) -> bool:
-    """Per-user visibility: the owner's rows plus unattributable legacy rows
-    (user_id NULL, written before stamping existed)."""
-    return row.get("user_id") in (None, user_id)
-
-
 def _get_owned_conversation(
     c: Any, conversation_id: int, company: CompanyContext
 ) -> dict[str, Any] | None:
-    """The conversation iff it belongs to this company AND is visible to the
-    caller (owner or legacy-unowned). None otherwise — callers 404."""
+    """The conversation iff it belongs to this company AND the caller owns it.
+    None otherwise (including legacy user_id-NULL rows) — callers 404."""
     resp = (
         c.table("conversations")
         .select("*")
         .eq("id", conversation_id)
         .eq("company_id", company.company_id)
+        .eq("user_id", company.user_id)
         .limit(1)
         .execute()
     )
-    row = resp.data[0] if resp.data else None
-    if row is None or not _visible_to(row, company.user_id):
-        return None
-    return row
+    return resp.data[0] if resp.data else None
 
 
 @router.get("")
 def list_conversations(
     company: CompanyContext = Depends(require_company),
 ):
-    """List the CALLER'S conversations (plus legacy unowned rows), newest first."""
+    """List the CALLER'S conversations, newest first."""
     c = require_client()
     resp = (
         c.table("conversations")
         .select("*")
         .eq("company_id", company.company_id)
+        .eq("user_id", company.user_id)
         .order("created_at", desc=True)
-        .limit(300)
+        .limit(100)
         .execute()
     )
-    rows = [r for r in (resp.data or []) if _visible_to(r, company.user_id)]
-    return {"conversations": rows[:100]}
+    return {"conversations": resp.data or []}
 
 
 @router.post("")
@@ -132,14 +125,12 @@ def get_conversation_by_prd(
         .select("*")
         .eq("company_id", company.company_id)
         .eq("prd_id", prd_id)
+        .eq("user_id", company.user_id)
         .order("updated_at", desc=True)
-        .limit(20)
+        .limit(1)
         .execute()
     )
-    conversation = next(
-        (r for r in (conv.data or []) if _visible_to(r, company.user_id)),
-        None,
-    )
+    conversation = conv.data[0] if conv.data else None
     if conversation is None:
         return {"conversation": None, "turns": []}
     turns = (

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
+import { useAuth } from "../../../lib/auth"
 import {
   conversationsApi,
   briefApi,
@@ -418,9 +419,11 @@ export function ChatsListView({
 // ── Screen ──
 
 // Session-scoped stale-while-revalidate cache (module-level, keyed by
-// company): a return visit to All chats renders the LAST loaded list
-// instantly while the refetch runs in the background and swaps in fresh
-// data. In-memory only — a full page reload starts clean with the skeleton.
+// user + company — chats are per-user, so a member switch within the same
+// workspace must not replay the previous member's list): a return visit to
+// All chats renders the LAST loaded list instantly while the refetch runs in
+// the background and swaps in fresh data. In-memory only — a full page reload
+// starts clean with the skeleton.
 const chatsListCache = new Map<string, ConversationRecord[]>()
 const briefEntryCache = new Map<string, BriefEntry | null>()
 
@@ -428,16 +431,20 @@ export function ChatsScreen() {
   const { goTo } = useNavigation()
   const { content } = useContent()
   const { activeCompany } = useCompany()
+  const auth = useAuth()
   const [search, setSearch] = useState("")
-  const cacheKey = activeCompany ?? "__none__"
+  const authUserId = auth.kind === "authed" ? auth.user.id : "anon"
+  const cacheKey = `${authUserId}:${activeCompany ?? "__none__"}`
   const [dbChats, setDbChats] = useState<ConversationRecord[]>(
     () => chatsListCache.get(cacheKey) ?? [],
   )
   const [loaded, setLoaded] = useState(() => chatsListCache.has(cacheKey))
 
   // ── Current weekly brief (drives the always-pinned top entry) ──
+  // The brief is a workspace-shared artifact (unlike chats), so its cache
+  // stays keyed by company only — matching the effect below.
   const [briefEntry, setBriefEntry] = useState<BriefEntry | null>(
-    () => briefEntryCache.get(cacheKey) ?? null,
+    () => (activeCompany ? briefEntryCache.get(activeCompany) ?? null : null),
   )
 
   // Load from Supabase — stale-while-revalidate: the cached list (if any) is
@@ -520,8 +527,13 @@ export function ChatsScreen() {
     if (dbRows.length > 0) {
       const persisted = dbRows.filter((r) => !isMirroredBrief(r, briefEntry))
       const dbTitles = new Set(persisted.map((r) => r.title))
-      // Add any in-memory conversations not yet in DB
-      const extra = inMemory.filter((c) => !dbTitles.has(c.title))
+      const dbIds = new Set(persisted.map((r) => r._dbId))
+      // Add any in-memory conversations not yet in DB. Dedupe primarily by the
+      // tagged DB id (exact), falling back to title for entries created before
+      // their Supabase create resolved.
+      const extra = inMemory.filter(
+        (c) => !(c._dbId != null && dbIds.has(c._dbId)) && !dbTitles.has(c.title),
+      )
       return [...persisted, ...extra]
     }
     return inMemory

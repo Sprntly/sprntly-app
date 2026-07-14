@@ -163,10 +163,10 @@ import { ChatScreen } from "../ChatScreen"
 const PRD_ID = 796
 
 function seedRestoredTab() {
-  localStorage.setItem("sprntly_chat_tabs_acme", JSON.stringify([
+  localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
     { id: "tab-reload", title: "PRD · Enterprise expansion is stalled", dbConvId: null, briefMeta: { briefId: 7, insightIndex: 0 } },
   ]))
-  localStorage.setItem("sprntly_chat_active_tab_acme", "tab-reload")
+  localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
   // Case 2 — PRD exists, no prototype yet.
   protoMap.set(0, {
     insight_index: 0,
