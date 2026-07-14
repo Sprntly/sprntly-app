@@ -171,7 +171,8 @@ def _related_themes(
     """KG themes most similar to the incident text (embedding kNN). Returns []
     gracefully when embeddings or pgvector are unavailable (e.g. test fake)."""
     try:
-        vec = embed_texts([incident_text])[0]
+        vec = embed_texts([incident_text], enterprise_id=enterprise_id,
+                          purpose="oncall_correlation")[0]
     except Exception:  # noqa: BLE001 — embeddings optional; degrade to no context
         logger.warning("oncall: embeddings unavailable, skipping theme correlation")
         return []
