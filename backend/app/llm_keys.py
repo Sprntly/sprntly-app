@@ -75,6 +75,23 @@ class CompanyKeyRequiredError(HTTPException):
         )
 
 
+class KeyResolutionUnavailableError(HTTPException):
+    """Raised when the company's key posture could not be READ (DB error, decrypt
+    error) — distinct from a resolved "no key" (CompanyKeyRequiredError). The
+    caller's request failed on our side, not on their configuration, so the
+    message says "try again" rather than "add your key". Never cached: the next
+    call re-reads the DB."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            status_code=503,
+            detail=(
+                "Sprntly couldn't verify this workspace's API key configuration "
+                "due to a temporary problem. Please try again."
+            ),
+        )
+
+
 # Small TTL cache of company_id → _Resolution. Keeps request-path binding from
 # hitting the DB on every call. The Admin routes call `invalidate()` on writes
 # for an immediate flush; the short TTL bounds staleness otherwise.
@@ -94,7 +111,6 @@ def _resolve(company_id: str) -> _Resolution:
         return hit[1]
 
     company_key: str | None = None
-    allow_platform = False
     try:
         from app.db.companies import get_company_llm_config
 
@@ -104,10 +120,13 @@ def _resolve(company_id: str) -> _Resolution:
         # Platform fallback is allowed for contracted customers (the DB flag), or
         # while the company is still onboarding (pre-key setup work).
         allow_platform = bool(use_platform_key) or not bool(onboarding_complete)
-    except Exception:  # noqa: BLE001 — never break an LLM call on a resolution error
+    except Exception as exc:  # noqa: BLE001 — a read failure is not a key posture
         logger.exception("Failed to resolve company LLM config for %s", company_id)
-        # Fail safe toward NOT leaking the platform key: no key, no fallback.
-        company_key, allow_platform = None, False
+        # Still fail safe toward NOT leaking the platform key — but as an
+        # explicit "couldn't read your config, try again" (503), never the
+        # misleading "add your API key" (400), and never cached: a transient
+        # DB blip must not poison this company's calls for a TTL window.
+        raise KeyResolutionUnavailableError() from exc
 
     res = _Resolution(company_key=company_key, allow_platform=allow_platform)
     _cache[company_id] = (now, res)
@@ -123,6 +142,8 @@ def resolve_llm_api_key(platform_key: str | None) -> str | None:
       onboarding) → the platform key.
     * Company has no key and fallback is not allowed → raise
       CompanyKeyRequiredError.
+    * Key posture could not be read (DB/decrypt failure) → raise
+      KeyResolutionUnavailableError (503, retryable, never cached).
     """
     company_id = _current_company_id.get()
     if company_id is None:

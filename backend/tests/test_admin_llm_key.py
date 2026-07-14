@@ -92,6 +92,44 @@ def test_use_platform_flag_allows_platform_after_onboarding(isolated_settings, m
         assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
 
 
+def test_config_read_failure_raises_unavailable_not_key_required(
+    isolated_settings, monkeypatch
+):
+    import app.db.companies as companies_mod
+    from app.llm_keys import KeyResolutionUnavailableError, resolve_llm_api_key
+
+    def _boom(_cid):
+        raise RuntimeError("Invalid input ConnectionInputs.RECV_DATA in state ConnectionState.CLOSED")
+
+    monkeypatch.setattr(companies_mod, "get_company_llm_config", _boom)
+    with _bind("co-1"):
+        with pytest.raises(KeyResolutionUnavailableError) as exc_info:
+            resolve_llm_api_key("sk-ant-platform")
+    assert exc_info.value.status_code == 503
+
+
+def test_config_read_failure_is_not_cached(isolated_settings, monkeypatch):
+    """A transient DB error must not poison the company's calls for the cache
+    TTL — the very next call re-reads the DB and succeeds."""
+    import app.db.companies as companies_mod
+    from app.llm_keys import KeyResolutionUnavailableError, resolve_llm_api_key
+
+    calls = {"n": 0}
+
+    def _flaky(_cid):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("Server disconnected")
+        return (None, True, True)  # use_platform_key=true, onboarded
+
+    monkeypatch.setattr(companies_mod, "get_company_llm_config", _flaky)
+    with _bind("co-1"):
+        with pytest.raises(KeyResolutionUnavailableError):
+            resolve_llm_api_key("sk-ant-platform")
+        assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
+    assert calls["n"] == 2
+
+
 # ── client factories go through the resolver ─────────────────────────────────
 
 def test_all_three_factories_honor_company_key(isolated_settings, monkeypatch, fernet_key):
