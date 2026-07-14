@@ -28,7 +28,7 @@ import type {
   PrdContent,
   QaScenarioRow,
 } from "../types/content"
-import { looksLikeHtmlBrief, stripHtmlCodeFence } from "./htmlBrief"
+import { decodeHtmlEntities, looksLikeHtmlBrief, stripHtmlCodeFence } from "./htmlBrief"
 
 /**
  * Pull a display title out of the v3 HTML PRD page: the document `<h1>` text
@@ -39,7 +39,7 @@ import { looksLikeHtmlBrief, stripHtmlCodeFence } from "./htmlBrief"
 function extractHtmlTitle(html: string): string {
   const h1 = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)?.[1]
   const raw = h1 ?? html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1] ?? ""
-  return raw.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim()
+  return decodeHtmlEntities(raw.replace(/<[^>]+>/g, "")).replace(/\s+/g, " ").trim()
 }
 
 const HEADING_RULE = /^─+$/

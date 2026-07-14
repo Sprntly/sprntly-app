@@ -22,6 +22,17 @@ describe("markdownToPrdState", () => {
     expect(out.title).toBe("Perch — Faster onboarding")
   })
 
+  it("decodes HTML entities in the extracted title (&amp; in an imported PRD's h1)", () => {
+    const html =
+      "<!DOCTYPE html><html><body>" +
+      "<h1>Reconditioning &amp; MRT &#8212; Fraznet &quot;Enhancements&quot;</h1>" +
+      "</body></html>"
+    const out = markdownToPrdState(html)
+    // The panel header / tab strip / tickets header all show this plain-text
+    // title, so entities must be decoded, not rendered literally.
+    expect(out.title).toBe('Reconditioning & MRT — Fraznet "Enhancements"')
+  })
+
   it("unwraps a ```html code fence around an HTML PRD page", () => {
     const html = "<!DOCTYPE html><html><body><h1>Fenced PRD</h1></body></html>"
     const out = markdownToPrdState("```html\n" + html + "\n```")
