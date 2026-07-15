@@ -770,6 +770,43 @@ async def test_manual_edit_run_status_failure_marks_failed(env, monkeypatch):
     assert "status=max_iters" in fail_calls[0]["error"]
 
 
+@pytest.mark.asyncio
+async def test_manual_edit_empty_seed_with_checkpoint_fails_closed(env, monkeypatch):
+    # A checkpointed prototype whose staged source reads back EMPTY must fail
+    # loudly BEFORE any agent call: an empty seed would rebuild from scratch and
+    # replace the prototype wholesale. No checkpoint advance, no LLM call.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    agent_calls: list = []
+    stage_calls: list = []
+
+    async def fake_run(**kwargs):
+        agent_calls.append(kwargs)
+        return (SimpleNamespace(status="complete", iters=1, error_message=None,
+                                error_class=None), {"src/App.tsx": "only the change"})
+
+    async def fake_read(prototype_id, checkpoint_id):
+        return {}
+
+    async def fake_stage(**kwargs):
+        stage_calls.append(kwargs)
+
+    monkeypatch.setattr(env.routes, "manual_edit_prototype", fake_run)
+    monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", fake_read)
+    monkeypatch.setattr(env.routes, "_stage_iterate_run", fake_stage)
+
+    pid = _seed_ready(env, current_checkpoint_id=9)
+    body = env.routes.ManualEditRequest(**_GOOD_BODY)
+    await env.routes._run_manual_edit_bg(prototype_id=pid, workspace_id=_TEST_COMPANY_ID, body=body)
+
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "failed"
+    assert row["error"].startswith("source_read_empty:")
+    assert agent_calls == []                       # agent never invoked
+    assert stage_calls == []                       # NO checkpoint advance
+    assert row["current_checkpoint_id"] == 9       # checkpoint untouched
+    assert row["bundle_url"] == "https://bundle/original"
+
+
 # ─── Non-breakage (AC13) ────────────────────────────────────────────────────
 
 

@@ -749,3 +749,122 @@ async def test_run_iterate_bg_failure_marks_prototype_failed(env, monkeypatch):
     assert "error_class=BadRequestError" in row["error"]
     # The original bundle is preserved (iterate failure does not erase it).
     assert row["bundle_url"] == "https://bundle/original"
+
+
+# ─── Empty-seed fail-closed guard ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_iterate_empty_seed_with_checkpoint_fails_closed(env, monkeypatch):
+    # A checkpointed prototype whose staged source reads back EMPTY must fail
+    # loudly BEFORE any agent call: an empty seed renders as a fresh build, and
+    # the execute run would then replace the whole prototype with only the
+    # requested change.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    agent_calls: list = []
+
+    async def fake_agent(**kwargs):
+        agent_calls.append(kwargs)
+        return SimpleNamespace(
+            status="complete", iters=1, error_message=None, error_class=None,
+        ), {"src/App.tsx": "only the change"}
+
+    async def fake_read(prototype_id, checkpoint_id):
+        return {}
+
+    monkeypatch.setattr(env.routes, "iterate_prototype", fake_agent)
+    monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", fake_read)
+    pid = _seed_ready(env, current_checkpoint_id=42)
+
+    await env.routes._run_iterate_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        body=env.routes.IterateRequest(prompt="make the button blue"),
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "failed"
+    assert row["error"].startswith("source_read_empty:")
+    assert agent_calls == []                                # agent never invoked
+    assert row["bundle_url"] == "https://bundle/original"   # prior bundle preserved
+    assert row["current_checkpoint_id"] == 42               # no checkpoint change
+
+
+@pytest.mark.asyncio
+async def test_iterate_without_checkpoint_skips_guard(env, monkeypatch):
+    # current_checkpoint_id IS NULL → nothing staged to wipe; the guard stays
+    # silent and the run reaches the agent with the fresh-build (empty) seed.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    captured = _stub_iterate_capture(monkeypatch, env.routes)
+
+    async def fake_read(prototype_id, checkpoint_id):
+        return {}
+
+    monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", fake_read)
+    pid = _seed_ready(env)  # no current checkpoint
+
+    await env.routes._run_iterate_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        body=env.routes.IterateRequest(prompt="build it"),
+    )
+    assert captured["current_source"] == {}   # agent WAS invoked with the fresh seed
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert not (row["error"] or "").startswith("source_read_empty:")
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_empty_seed_does_not_fail_prototype(env, monkeypatch):
+    # Plan mode is exempt from the guard: a plan run stages nothing and advances
+    # no checkpoint, so an empty seed cannot wipe anything; the destructive
+    # execute run re-reads the source and hits the guard itself.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+
+    async def fake_agent(**kwargs):
+        return SimpleNamespace(
+            status="complete", iters=1, error_message=None, error_class=None,
+            final_content=[{"type": "text", "text": "- shrink the logo"}],
+        ), {}
+
+    async def fake_read(prototype_id, checkpoint_id):
+        return {}
+
+    monkeypatch.setattr(env.routes, "iterate_prototype", fake_agent)
+    monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", fake_read)
+    monkeypatch.setattr(env.routes, "set_iteration_plan", lambda **k: None)
+    pid = _seed_ready(env, current_checkpoint_id=42)
+
+    await env.routes._run_iterate_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        body=env.routes.IterateRequest(prompt="rethink the header", mode="plan"),
+        iteration_id=1,
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "ready"           # NOT failed
+    assert row["error"] is None
+    assert row["bundle_url"] == "https://bundle/original"
+
+
+@pytest.mark.asyncio
+async def test_empty_seed_guard_logs_identifiers_only(env, monkeypatch, caplog):
+    # The guard emits exactly one WARNING carrying prototype_id + checkpoint_id
+    # and no prompt / staged-source content.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+
+    async def fake_read(prototype_id, checkpoint_id):
+        return {}
+
+    monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", fake_read)
+    pid = _seed_ready(env, current_checkpoint_id=42)
+
+    with caplog.at_level(logging.WARNING):
+        await env.routes._run_iterate_bg(
+            prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+            body=env.routes.IterateRequest(prompt="SECRET_PROMPT_BODY"),
+        )
+    warns = [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith("prototype_iterate_source_read_empty")
+    ]
+    assert warns == [
+        f"prototype_iterate_source_read_empty prototype_id={pid} checkpoint_id=42"
+    ]
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SECRET_PROMPT_BODY" not in blob   # never the prompt / content
