@@ -88,6 +88,7 @@ _RELOAD_ORDER = [
     "app.db",
     "app.corpus",
     "app.auth",
+    "app.entitlements",
     "app.llm",
     "app.ingest",
     "app.datasets",
