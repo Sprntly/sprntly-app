@@ -17,6 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.auth import CompanyContext, require_company
 from app.corpus import load_corpus
+from app.entitlements import require_weekly_brief_module
 from app.db.client import require_client
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade, TenantViolationError
@@ -65,7 +66,9 @@ def seed_from_corpus(company: CompanyContext = Depends(require_company)):
 
 
 @router.post("/brief")
-def generate_brief(company: CompanyContext = Depends(require_company)):
+# On-demand brief generation → Weekly Brief module gate. /seed (KG ingestion)
+# stays ungated by owner decision — the KG also grounds PRDs and chat.
+def generate_brief(company: CompanyContext = Depends(require_weekly_brief_module)):
     """Generate the KG-driven weekly brief (replaces the legacy corpus brief).
 
     Incrementally seeds the KG first (only new/changed corpus docs — unchanged

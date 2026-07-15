@@ -29,8 +29,9 @@ from pydantic import BaseModel, Field
 from app import db
 from app.agent_tools import registry
 import app.agent_tools.github  # noqa: F401 — side-effect: registers GitHub tools
-from app.auth import CompanyContext, require_company
+from app.auth import CompanyContext
 from app.config import settings
+from app.entitlements import require_agents_module
 from app.llm import DEFAULT_MODEL
 
 logger = logging.getLogger(__name__)
@@ -86,7 +87,8 @@ class ChatWithToolsIn(BaseModel):
 @router.post("/chat-with-tools")
 def chat_with_tools(
     body: ChatWithToolsIn,
-    company: CompanyContext = Depends(require_company),
+    # Chat surface → Agents module gate (require_company + feature_flags).
+    company: CompanyContext = Depends(require_agents_module),
 ):
     """Run the tool-use loop until the model returns end_turn or we hit
     MAX_ITERATIONS.

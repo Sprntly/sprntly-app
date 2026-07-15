@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 @retry_on_disconnect
 def list_companies() -> list[dict]:
     """All companies (tenants), shaped {id, slug, display_name,
-    notification_settings, owner_timezone}.
+    notification_settings, feature_flags, owner_timezone}.
 
     Used by the scheduler to iterate every tenant for the KG-synthesis cycle and
     to read each company owner's timezone (profiles.timezone, resolved via the
@@ -38,7 +38,7 @@ def list_companies() -> list[dict]:
     try:
         result = (
             client.table("companies")
-            .select("id, slug, display_name, notification_settings")
+            .select("id, slug, display_name, notification_settings, feature_flags")
             .order("slug", desc=False)
             .execute()
         )
@@ -53,6 +53,12 @@ def list_companies() -> list[dict]:
         rows = result.data or []
         for row in rows:
             row.setdefault("notification_settings", {})
+    for row in rows:
+        # feature_flags is best-effort like notification_settings: an older
+        # schema (fallback select) or a NULL column defaults to {} — which the
+        # entitlement resolvers treat as everything-ON (grandfathering).
+        if not isinstance(row.get("feature_flags"), dict):
+            row["feature_flags"] = {}
     return _attach_owner_timezones(rows)
 
 

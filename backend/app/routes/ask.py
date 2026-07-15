@@ -18,6 +18,7 @@ from app.db import (
     start_ask_job,
 )
 from app.deps.ownership import require_owned_dataset
+from app.entitlements import require_agents_module
 from app.skill_router import list_available_skills
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,8 @@ def _resolve_cache_hit(dataset: str, question: str) -> dict | None:
 @router.post("")
 async def ask(
     body: AskIn,
-    company: CompanyContext = Depends(require_company),
+    # Chat is the Agents module: 403 when the staff panel disabled it.
+    company: CompanyContext = Depends(require_agents_module),
 ):
     """Kick off (or short-circuit) an Ask, returning `{ask_id, status}`.
 
@@ -278,7 +280,8 @@ _MAX_EXTRACT_BYTES = 25 * 1024 * 1024  # 25 MB
 @router.post("/extract-file")
 async def extract_file(
     file: UploadFile = File(...),
-    company: CompanyContext = Depends(require_company),  # noqa: ARG001 — auth gate only
+    # Attachment extraction only feeds the chat composer → Agents module.
+    company: CompanyContext = Depends(require_agents_module),  # noqa: ARG001 — auth gate only
 ):
     """Parse a chat attachment (pptx/pdf/docx/…) to markdown for ask context.
 
