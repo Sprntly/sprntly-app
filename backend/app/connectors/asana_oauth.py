@@ -171,3 +171,220 @@ def token_payload_to_store(
         payload["refresh_token"] = keep_refresh_token
     payload["obtained_at"] = int(time.time())
     return json.dumps(payload)
+
+
+# ─────────────────────── Ticket-sync API (tasks / sections / stories) ─────────
+#
+# The write/read surface the two-way ticket sync drives (app/stories/sync.py's
+# _Tracker asana branch + app/stories/push.py). Contracts mirror clickup_oauth:
+# get_task returns the SAME normalized dict the sync reconciles, and writes
+# raise HTTPException(502) on non-auth failures so per-ticket errors stay
+# isolated. Auth failures raise AsanaAuthExpiredError → "reconnect Asana".
+#
+# Asana's data model differs from ClickUp/Jira and shapes the mapping:
+#   * No native status  → a task's "status" is the SECTION it sits in within
+#     the project; moving status = addTask to another section. The `completed`
+#     boolean is the real done signal, kept in step with a done-category move.
+#   * No native priority / issue type → not synced (v1).
+#   * notes are plain text → we store the same labeled/markdown body we send;
+#     it round-trips byte-for-byte so content-hash change detection stays sound.
+
+_WRITE_TIMEOUT = 20
+_TASK_OPT_FIELDS = (
+    "name,notes,completed,permalink_url,modified_at,"
+    "assignee.name,assignee.email,"
+    "memberships.project.gid,memberships.section.gid,memberships.section.name"
+)
+
+
+class AsanaAuthExpiredError(RuntimeError):
+    """Asana rejected the stored token (401/403) — the caller surfaces a
+    reconnect prompt rather than a generic failure."""
+
+
+def _headers(access_token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {access_token}"}
+
+
+def _raise_for(resp: requests.Response, what: str) -> None:
+    if resp.status_code in (401, 403):
+        logger.warning("Asana %s auth rejected: %s", what, resp.status_code)
+        raise AsanaAuthExpiredError(
+            "Asana rejected the stored token — reconnect Asana to continue"
+        )
+    if not resp.ok:
+        logger.warning("Asana %s failed: %s %s", what, resp.status_code, resp.text[:300])
+        raise HTTPException(502, f"Asana {what} failed")
+
+
+def _get(access_token: str, path: str, params: dict | None = None) -> Any:
+    r = requests.get(f"{ASANA_API}{path}", params=params or {},
+                     headers=_headers(access_token), timeout=_WRITE_TIMEOUT)
+    _raise_for(r, "read")
+    return (r.json() or {}).get("data")
+
+
+def list_workspaces(access_token: str) -> list[dict[str, Any]]:
+    """The workspaces the token can see (GET /workspaces → [{gid, name}])."""
+    return [w for w in (_get(access_token, "/workspaces") or []) if isinstance(w, dict)]
+
+
+def _projects_in_workspace(access_token: str, ws: str) -> list[dict[str, Any]]:
+    data = _get(access_token, "/projects",
+                params={"workspace": ws, "archived": "false", "opt_fields": "name",
+                        "limit": 100}) or []
+    return [{"gid": p.get("gid"), "name": p.get("name")}
+            for p in data if isinstance(p, dict) and p.get("gid")]
+
+
+def list_projects(access_token: str, workspace_gid: str | None = None) -> list[dict[str, Any]]:
+    """Projects a push can target ([{gid, name}]). Scoped to `workspace_gid`
+    when given, else EVERY workspace the token can see — a user who belongs to
+    several Asana organizations must be able to pick a project in any of them.
+    Archived projects are excluded."""
+    if workspace_gid:
+        return _projects_in_workspace(access_token, workspace_gid)
+    out: list[dict[str, Any]] = []
+    for ws in list_workspaces(access_token):
+        gid = ws.get("gid")
+        if gid:
+            out.extend(_projects_in_workspace(access_token, gid))
+    return out
+
+
+def list_project_sections(access_token: str, project_gid: str) -> list[dict[str, Any]]:
+    """A project's sections ([{gid, name}]) — Sprntly treats these as the
+    project's status columns. Returns [] on any failure (best-effort meta)."""
+    try:
+        data = _get(access_token, f"/projects/{project_gid}/sections",
+                    params={"opt_fields": "name"}) or []
+    except Exception:  # noqa: BLE001 — metadata reads are best-effort
+        logger.warning("Asana list_project_sections failed for %s", project_gid)
+        return []
+    return [{"gid": s.get("gid"), "name": s.get("name")}
+            for s in data if isinstance(s, dict) and s.get("gid")]
+
+
+def _membership_section(task: dict[str, Any], project_gid: str) -> dict[str, Any] | None:
+    """The section the task sits in WITHIN `project_gid` (Asana tasks can be in
+    several projects). None when the task carries no section there."""
+    memberships = task.get("memberships") or []
+    for m in memberships:
+        if (m.get("project") or {}).get("gid") == project_gid:
+            return m.get("section") or None
+    # A single membership that omits the project gid is unambiguous — it can
+    # only be this task's one project. (A membership that NAMES a different
+    # project is not a match and must not be hijacked.)
+    if len(memberships) == 1 and not (memberships[0].get("project") or {}).get("gid"):
+        return memberships[0].get("section") or None
+    return None
+
+
+def get_task(access_token: str, task_gid: str, *, project_gid: str) -> dict[str, Any]:
+    """Fetch a task's state, normalized to the shape the two-way sync
+    reconciles (mirror of clickup_oauth.get_task). `status` is the task's
+    section NAME within `project_gid`; `completed` is Asana's done boolean.
+    Returns {} on any failure so a single stale/deleted task never breaks the
+    pull."""
+    try:
+        data = _get(access_token, f"/tasks/{task_gid}",
+                    params={"opt_fields": _TASK_OPT_FIELDS})
+    except Exception:  # noqa: BLE001 — a per-task fetch failure (incl. auth) is
+        # non-fatal and ISOLATED to this ticket, exactly like clickup_oauth.
+        # get_task: one deleted/forbidden task must never abort the whole
+        # PRD's sync pass. A genuinely dead token simply makes every remote()
+        # return {} → each ticket is skipped (keeps prev), same as ClickUp.
+        logger.warning("Asana get_task failed for %s", task_gid)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    section = _membership_section(data, project_gid) or {}
+    assignee = data.get("assignee") or {}
+    return {
+        "status": section.get("name"),
+        "section_gid": section.get("gid"),
+        "completed": bool(data.get("completed")),
+        "assignee": assignee.get("name") or assignee.get("email"),
+        "url": data.get("permalink_url"),
+        "title": data.get("name"),
+        "description": data.get("notes") or "",
+        # Asana has no native priority / issue type / (v1) editable fields.
+        "priority": None,
+        "issue_type": None,
+        "custom_fields": {},
+        "updated_at": data.get("modified_at"),
+    }
+
+
+def create_task(
+    access_token: str, project_gid: str, *, name: str, notes: str | None = None,
+) -> dict[str, Any]:
+    """Create one task in `project_gid`. Returns {gid, url}."""
+    body: dict[str, Any] = {"data": {"name": name, "projects": [project_gid]}}
+    if notes is not None:
+        body["data"]["notes"] = notes
+    r = requests.post(f"{ASANA_API}/tasks", json=body,
+                      headers=_headers(access_token), timeout=_WRITE_TIMEOUT)
+    _raise_for(r, "create_task")
+    data = (r.json() or {}).get("data") or {}
+    return {"gid": data.get("gid"), "url": data.get("permalink_url")}
+
+
+def update_task(
+    access_token: str, task_gid: str, *,
+    name: str | None = None, notes: str | None = None,
+    completed: bool | None = None,
+) -> dict[str, Any]:
+    """Update an existing task (idempotent re-push). Only given fields are sent.
+    Returns {gid, url}."""
+    fields: dict[str, Any] = {}
+    if name is not None:
+        fields["name"] = name
+    if notes is not None:
+        fields["notes"] = notes
+    if completed is not None:
+        fields["completed"] = completed
+    r = requests.put(f"{ASANA_API}/tasks/{task_gid}", json={"data": fields},
+                     headers=_headers(access_token), timeout=_WRITE_TIMEOUT)
+    _raise_for(r, "update_task")
+    data = (r.json() or {}).get("data") or {}
+    return {"gid": data.get("gid") or task_gid, "url": data.get("permalink_url")}
+
+
+def create_subtask(access_token: str, parent_gid: str, *, name: str) -> dict[str, Any]:
+    """Create one native subtask under `parent_gid`
+    (POST /tasks/{parent}/subtasks). Asana subtasks need no special type —
+    every task can have them. Returns {gid, url}."""
+    r = requests.post(f"{ASANA_API}/tasks/{parent_gid}/subtasks",
+                      json={"data": {"name": name}},
+                      headers=_headers(access_token), timeout=_WRITE_TIMEOUT)
+    _raise_for(r, "create_subtask")
+    data = (r.json() or {}).get("data") or {}
+    return {"gid": data.get("gid"), "url": data.get("permalink_url")}
+
+
+def add_task_to_section(access_token: str, section_gid: str, task_gid: str) -> None:
+    """Move a task into a section (POST /sections/{gid}/addTask). This is how a
+    Sprntly status change lands in Asana — sections ARE the status columns."""
+    r = requests.post(f"{ASANA_API}/sections/{section_gid}/addTask",
+                      json={"data": {"task": task_gid}},
+                      headers=_headers(access_token), timeout=_WRITE_TIMEOUT)
+    _raise_for(r, "add_task_to_section")
+
+
+def add_task_comment(access_token: str, task_gid: str, text: str) -> str | None:
+    """Post one comment as a story (POST /tasks/{gid}/stories). Returns the
+    story gid, or None on any failure — comment push is best-effort; the sync
+    pass retries unpushed comments."""
+    try:
+        r = requests.post(f"{ASANA_API}/tasks/{task_gid}/stories",
+                          json={"data": {"text": text}},
+                          headers=_headers(access_token), timeout=_WRITE_TIMEOUT)
+        _raise_for(r, "add_task_comment")
+        gid = ((r.json() or {}).get("data") or {}).get("gid")
+        return str(gid) if gid is not None else None
+    except AsanaAuthExpiredError:
+        raise
+    except Exception:  # noqa: BLE001 — comment push is best-effort by design
+        logger.warning("Asana add_task_comment failed for %s", task_gid)
+        return None

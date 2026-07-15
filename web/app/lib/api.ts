@@ -2255,6 +2255,11 @@ export const storiesApi = {
    *  isn't connected. */
   listClickUpLists: () =>
     api.post<{ lists: ClickUpList[] }>("/v1/stories/lists", {}),
+  /** Asana projects the company can push into (target picker). Shaped like the
+   *  ClickUp list picker (project gid as `id`) so the same picker is reused.
+   *  404 if Asana isn't connected. */
+  listAsanaProjects: () =>
+    api.post<{ lists: ClickUpList[] }>("/v1/stories/asana/projects", {}),
   /** Create the reviewed stories as tasks in a ClickUp list (explicit write). */
   pushToClickUp: (listId: string, stories: GeneratedStory[]) =>
     api.post<StoryPushResult>("/v1/stories/push", { list_id: listId, stories }),

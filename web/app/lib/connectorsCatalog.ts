@@ -237,7 +237,7 @@ export function connectorsWithType(type: ConnectorType): ConnectorItemRow[] {
  * `task-management` AND be in this set to appear on the sync button — the
  * type declares what a tool is, the engine declares what we can do with it.
  */
-export const TICKET_SYNC_IMPLEMENTED = new Set<string>(["clickup", "jira"])
+export const TICKET_SYNC_IMPLEMENTED = new Set<string>(["clickup", "jira", "asana"])
 
 /** The task-management tools tickets can actually sync with: {id, label} for
  *  the sync button, its tool menu, and its labels. */

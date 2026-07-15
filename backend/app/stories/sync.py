@@ -36,7 +36,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.connectors import clickup_oauth, jira_oauth
+from app.connectors import asana_oauth, clickup_oauth, jira_oauth
+from app.db.asana_sync import get_asana_task_gid
 from app.db.clickup_sync import get_clickup_task_id
 from app.db.client import require_client, utc_now
 from app.db.jira_sync import get_jira_issue_key
@@ -49,8 +50,11 @@ from app.db.ticket_sync import (
 )
 from app.stories.generate import Story
 from app.stories.push import (
+    _asana_creds,
     _clickup_access_token,
     _jira_creds,
+    push_asana_subtasks,
+    push_stories_to_asana,
     push_stories_to_clickup,
     push_stories_to_jira,
 )
@@ -62,7 +66,7 @@ logger = logging.getLogger(__name__)
 #: ticket_sync_providers(): a provider must also be TYPED task-management in
 #: app/connectors/catalog.py. Adding a tool = catalog type + an entry here +
 #: the engine branches (+ the web's TRACKERS catalog).
-SYNC_PROVIDERS = ("clickup", "jira")
+SYNC_PROVIDERS = ("clickup", "jira", "asana")
 
 
 def ticket_sync_providers() -> tuple[str, ...]:
@@ -327,6 +331,8 @@ class _Tracker:
         elif provider == "jira":
             self._token, self._cloud = _jira_creds(company_id)
             self._site = jira_oauth._site_url_for_cloud(self._token, self._cloud)
+        elif provider == "asana":
+            self._token = _asana_creds(company_id)
         else:
             raise ValueError(f"unknown sync provider {provider!r}")
         # The destination's cached vocabulary (statuses/priorities/fields).
@@ -363,6 +369,8 @@ class _Tracker:
         """The tracker-side id previously created for this ticket, or None."""
         if self.provider == "clickup":
             return get_clickup_task_id(self.company_id, self.destination, ticket_id)
+        if self.provider == "asana":
+            return get_asana_task_gid(self.company_id, self.destination, ticket_id)
         return get_jira_issue_key(self.company_id, self.destination, ticket_id)
 
     def remote(self, ref: str) -> dict[str, Any] | None:
@@ -372,6 +380,8 @@ class _Tracker:
         returns them."""
         if self.provider == "clickup":
             state = clickup_oauth.get_task(self._token, ref)
+        elif self.provider == "asana":
+            state = asana_oauth.get_task(self._token, ref, project_gid=self.destination)
         else:
             state = jira_oauth.get_issue(
                 self._token, self._cloud, ref, site_url=self._site,
@@ -514,6 +524,24 @@ class _Tracker:
                 priority=self._priority_out(story),
             )
             return
+        if self.provider == "asana":
+            # Asana notes are plain text (no priority/issue-type); status is a
+            # section, reconciled separately in set_status. Child issues become
+            # real native subtasks (add-only), so they leave the notes body —
+            # no duplication between the subtask list and the description text.
+            asana_oauth.update_task(
+                self._token, ref, name=story.title,
+                notes=story.to_description(include_subtasks=False),
+            )
+            if story.subtasks:
+                try:
+                    push_asana_subtasks(
+                        self.company_id, self.destination, ref, story.stable_id(),
+                        story.subtasks, access_token=self._token,
+                    )
+                except Exception:  # noqa: BLE001 — children never fail the pass
+                    logger.warning("Asana sub-task sync failed for %s", ref)
+            return
         from app.stories.push import jira_subtask_type, push_jira_subtasks
 
         subtask_type = jira_subtask_type(self.company_id, self.destination)
@@ -543,7 +571,21 @@ class _Tracker:
         lands on it. Legacy Sprntly-vocabulary values (from old edits, or when
         meta was never fetched) keep flowing through the fixed maps."""
         try:
-            if self.meta_status(status):
+            meta_hit = self.meta_status(status)
+            if self.provider == "asana":
+                # Asana has no status field: a status IS a section. Move the
+                # task into the section whose name matches (meta carries the
+                # section gid as the status id) and keep the `completed`
+                # boolean in step with a done-category move. No meta / unknown
+                # section → nothing to move to (best-effort, non-fatal).
+                if not meta_hit or not meta_hit.get("id"):
+                    return False
+                asana_oauth.add_task_to_section(self._token, meta_hit["id"], ref)
+                asana_oauth.update_task(
+                    self._token, ref, completed=(meta_hit.get("category") == "done"),
+                )
+                return True
+            if meta_hit:
                 if self.provider == "clickup":
                     clickup_oauth.set_task_status(self._token, ref, status)
                     return True
@@ -570,6 +612,8 @@ class _Tracker:
         comment id, or None on failure (best-effort — retried by the pass)."""
         if self.provider == "clickup":
             return clickup_oauth.add_task_comment(self._token, ref, text)
+        if self.provider == "asana":
+            return asana_oauth.add_task_comment(self._token, ref, text)
         return jira_oauth.add_issue_comment(self._token, self._cloud, ref, text)
 
     def set_issue_type(self, ref: str, issue_type: str) -> bool:
@@ -602,6 +646,8 @@ class _Tracker:
         also saves the id mappings and creates checklists/dependency links."""
         if self.provider == "clickup":
             return push_stories_to_clickup(self.company_id, self.destination, stories)
+        if self.provider == "asana":
+            return push_stories_to_asana(self.company_id, self.destination, stories)
         return push_stories_to_jira(self.company_id, self.destination, stories)
 
 
@@ -912,8 +958,12 @@ def _two_way_pass(
         # With meta the imported value is the tracker's own status name,
         # VERBATIM — the whole point of tracker-native vocabulary; the old
         # substring heuristics remain only as the no-meta fallback.
+        # Gate on `prev_hash` (baseline established), not on a non-None status:
+        # Asana tasks can legitimately have NO section (status is None), so a
+        # move from no-section INTO a section is a real change to import — the
+        # old `status is not None` guard silently dropped it.
         remote_status = remote.get("status")
-        if prev.get("status") is not None and remote_status != prev.get("status"):
+        if prev_hash and remote_status != prev.get("status"):
             if tracker.meta_status(remote_status):
                 mapped = remote_status
             else:
@@ -922,9 +972,12 @@ def _two_way_pass(
                 import_fields["status"] = mapped
                 sprntly_status = mapped
         elif (
-            prev_hash  # not the baseline pass
-            and sprntly_status
+            sprntly_status
             and sprntly_status != prev.get("sprntly_status")
+            # Push a local status edit even on the BASELINE pass (a status set
+            # before the first push must still reach the tracker) — but only
+            # when it IS a real local edit, never a phantom on a bare baseline.
+            and (prev_hash or (c["edit"] or {}).get("status") is not None)
         ):
             tracker.set_status(ref, sprntly_status)
 
@@ -1042,7 +1095,14 @@ def _two_way_pass(
             # The canonical open/in_progress/done projection (from meta's
             # statusCategory / status type) — what Sprntly reads for
             # completion semantics regardless of the workspace's vocabulary.
-            "status_category": (tracker.meta_status(remote_status) or {}).get("category"),
+            # Asana is dual-signal: a task's `completed` checkbox is the
+            # authoritative done marker independent of its section (the
+            # primary way work is finished there), so it wins the projection.
+            # `completed` is absent for ClickUp/Jira, so they are unaffected.
+            "status_category": (
+                "done" if remote.get("completed")
+                else (tracker.meta_status(remote_status) or {}).get("category")
+            ),
             # Pulled custom-field values (normalized, keyed by field id) —
             # the detail screen's read-side value when there's no override.
             "custom_fields": remote_cf,

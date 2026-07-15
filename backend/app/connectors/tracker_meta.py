@@ -37,7 +37,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PROVIDERS = ("clickup", "jira")
+PROVIDERS = ("clickup", "jira", "asana")
 
 # Canonical status projection values.
 CATEGORY_OPEN = "open"
@@ -147,6 +147,21 @@ def _clickup_category(status_type: str | None) -> str:
     if t in ("closed", "done"):
         return CATEGORY_DONE
     return CATEGORY_IN_PROGRESS
+
+
+def _asana_section_category(name: str | None) -> str:
+    """Asana has no status field — a task's status is which SECTION it's in,
+    and sections carry no category, so we infer one from the section NAME
+    (heuristic, mirror of stories.sync.tracker_status_to_sprntly). Unknown
+    names default to open — a section is a place work sits, so "not clearly
+    done/in-progress" reads as open/todo."""
+    v = (name or "").strip().lower()
+    if "done" in v or "complet" in v or "closed" in v or "resolved" in v or "ship" in v:
+        return CATEGORY_DONE
+    if ("progress" in v or "doing" in v or "review" in v or v == "qa"
+            or "testing" in v or "dev" in v or "build" in v):
+        return CATEGORY_IN_PROGRESS
+    return CATEGORY_OPEN
 
 
 # ── Normalizers ──────────────────────────────────────────────────────────────
@@ -271,6 +286,36 @@ def normalize_clickup_meta(
     }
 
 
+def normalize_asana_meta(
+    destination_id: str,
+    *,
+    sections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Build the normalized TrackerMeta from an Asana project's sections
+    (asana_oauth.list_project_sections). Sections ARE the status columns: the
+    status id is the SECTION GID (stories.sync moves a task by that gid), the
+    name is the section name, the category is inferred from the name. Asana has
+    no native priority / issue type / (v1) editable custom fields, so those are
+    empty — the ticket detail keeps its defaults for them."""
+    return {
+        "provider": "asana",
+        "destination_id": destination_id,
+        "statuses": [
+            {
+                "id": s.get("gid"),
+                "name": s.get("name"),
+                "color": None,
+                "category": _asana_section_category(s.get("name")),
+            }
+            for s in sections
+            if s.get("gid") and s.get("name")
+        ],
+        "priorities": [],
+        "issue_types": None,
+        "fields": [],
+    }
+
+
 # ── Fetch (live read → normalized shape) ─────────────────────────────────────
 
 
@@ -308,6 +353,15 @@ def fetch_tracker_meta(
                 access_token, destination_id
             ),
         )
+    elif provider == "asana":
+        from app.connectors import asana_oauth
+        from app.stories.push import _asana_creds
+
+        access_token = _asana_creds(company_id)
+        meta = normalize_asana_meta(
+            destination_id,
+            sections=asana_oauth.list_project_sections(access_token, destination_id),
+        )
     else:
         raise ValueError(f"unknown tracker provider {provider!r}")
     meta["fetched_at"] = datetime.now(timezone.utc).isoformat()
@@ -342,6 +396,14 @@ def warm_company_tracker_meta(
         token = _clickup_access_token(company_id)
         destinations = [
             l["id"] for l in clickup_oauth.list_lists(token) if l.get("id")
+        ]
+    elif provider == "asana":
+        from app.connectors import asana_oauth
+        from app.stories.push import _asana_creds
+
+        token = _asana_creds(company_id)
+        destinations = [
+            p["gid"] for p in asana_oauth.list_projects(token) if p.get("gid")
         ]
     else:
         return 0
