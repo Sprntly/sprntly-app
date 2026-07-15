@@ -27,6 +27,7 @@ import { useCallback, useEffect, useState } from "react"
 import {
   prdApi,
   type PrdInputQuestion,
+  type PrdInputQuestionsList,
   type PrdRecord,
 } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
@@ -238,10 +239,20 @@ export type PrdInputQuestionsProps = {
    *  it into ContentContext + its tab cache and refresh the panel live. */
   onPrdUpdated?: (prd: PrdState) => void
   /** Injected for tests; fall back to the real api methods (resolved lazily so an
-   *  incomplete api mock in a host's test can never crash render). */
-  listQuestions?: (prdId: number) => Promise<PrdInputQuestion[]>
+   *  incomplete api mock in a host's test can never crash render). A bare
+   *  question array (legacy mocks) is accepted alongside the envelope. */
+  listQuestions?: (
+    prdId: number,
+  ) => Promise<PrdInputQuestion[] | PrdInputQuestionsList>
   answerQuestion?: typeof prdApi.answerInputQuestion
 }
+
+// While the backend backfills extraction for a PRD opened before its questions
+// existed (or one whose generation-time extraction is still running), poll on a
+// steady cadence. Extraction is one small LLM call (~seconds); the cap keeps a
+// stuck flag from polling forever.
+const EXTRACT_POLL_MS = 2500
+const EXTRACT_POLL_MAX = 24 // ≈60s
 
 /**
  * Public component. Loads the PRD's input questions and renders each pending one
@@ -267,17 +278,36 @@ export function PrdInputQuestions({
     // chat simply shows no questions — never crashes. The real api method is
     // resolved INSIDE the promise chain so even a throwing access (e.g. an
     // incomplete api mock in a host's test) is caught rather than crashing render.
+    //
+    // `extracting: true` means the backend just scheduled the extraction for this
+    // PRD (opened from Artifacts before its questions existed, or a fresh PRD
+    // whose extraction still runs) — keep polling until the questions land, so
+    // the chat fills in live instead of staying empty until a reopen.
     let cancelled = false
-    Promise.resolve()
-      .then(() => (listQuestions ?? prdApi.listInputQuestions)(prdId))
-      .then((qs) => {
-        if (!cancelled) setQuestions(qs)
-      })
-      .catch(() => {
-        if (!cancelled) setQuestions([])
-      })
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let polls = 0
+    const load = () => {
+      Promise.resolve()
+        .then(() => (listQuestions ?? prdApi.listInputQuestions)(prdId))
+        .then((res) => {
+          if (cancelled) return
+          const { questions: qs, extracting } = Array.isArray(res)
+            ? { questions: res, extracting: false }
+            : { questions: res.questions ?? [], extracting: !!res.extracting }
+          setQuestions(qs)
+          if (extracting && polls < EXTRACT_POLL_MAX) {
+            polls += 1
+            timer = setTimeout(load, EXTRACT_POLL_MS)
+          }
+        })
+        .catch(() => {
+          if (!cancelled) setQuestions([])
+        })
+    }
+    load()
     return () => {
       cancelled = true
+      if (timer) clearTimeout(timer)
     }
   }, [prdId, listQuestions])
 

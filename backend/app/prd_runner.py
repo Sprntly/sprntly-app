@@ -564,19 +564,36 @@ async def warm_impl_spec(prd_id: int, ctx: dict | None = None) -> None:
         logger.exception("impl-spec pre-warm failed prd_id=%s", prd_id)
 
 
-async def extract_input_questions_task(prd_id: int) -> None:
+async def extract_input_questions_task(prd_id: int, *, reserved: bool = False) -> None:
     """Lift the PRD's "User input needed" section into structured, answerable
     questions (so the PRD's chat can surface each as a message with answer
     buttons). Best-effort + error-isolated: the PRD is already generated and
     stored, so a failed extraction just means no chat questions — never a failed
-    PRD. Runs off the app loop via a worker thread (the extraction call is sync)."""
-    try:
-        from app.prd_questions import extract_input_questions
+    PRD. Runs off the app loop via a worker thread (the extraction call is sync).
 
+    Two schedulers exist — the generation pipeline (right after Part A) and the
+    lazy on-open backfill (GET /input-questions, for PRDs that predate the
+    feature) — so the run is single-flighted through the prd_questions registry:
+    the losing scheduler no-ops and its client polls until the winner's rows
+    land. `reserved=True` means the caller already holds the slot (it marked
+    before create_task, closing the schedule→run gap); this task still releases
+    it."""
+    from app.prd_questions import (
+        clear_extracting,
+        extract_input_questions,
+        mark_extracting,
+    )
+
+    if not reserved and not mark_extracting(prd_id):
+        logger.info("prd input-question extraction already in flight prd_id=%s", prd_id)
+        return
+    try:
         rows = await asyncio.to_thread(extract_input_questions, prd_id)
         logger.info("prd input-question extraction done prd_id=%s count=%s", prd_id, len(rows))
     except Exception:  # noqa: BLE001 — extraction is best-effort
         logger.exception("prd input-question extraction failed prd_id=%s", prd_id)
+    finally:
+        clear_extracting(prd_id)
 
 
 async def generate_prd_and_warm(

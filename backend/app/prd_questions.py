@@ -42,6 +42,37 @@ logger = logging.getLogger(__name__)
 
 _AGENT = "prd"
 
+# ── In-flight extraction registry ────────────────────────────────────────────
+# Guards against DOUBLE extraction for one PRD: the generation pipeline runs it
+# right after Part A, and the lazy on-open backfill (GET /input-questions, for
+# PRDs generated before this feature existed) schedules it on demand. Every
+# runner reserves the prd_id here first; a concurrent caller sees the
+# reservation and skips (its client just keeps polling until rows land).
+# In-process only — a restart clears it, which is safe because extraction is
+# idempotent (replace_questions is delete-then-insert). set ops are atomic
+# under the GIL, so the worker thread's clear never races the event loop.
+_extracting: set[int] = set()
+
+
+def is_extracting(prd_id: int) -> bool:
+    """True while an extraction for this PRD is reserved/running in-process."""
+    return prd_id in _extracting
+
+
+def mark_extracting(prd_id: int) -> bool:
+    """Reserve the extraction slot for a PRD. False if already reserved —
+    exactly one caller wins, so two racing schedulers never run twice."""
+    if prd_id in _extracting:
+        return False
+    _extracting.add(prd_id)
+    return True
+
+
+def clear_extracting(prd_id: int) -> None:
+    """Release the extraction slot (always paired with mark_extracting)."""
+    _extracting.discard(prd_id)
+
+
 # ── Extraction ───────────────────────────────────────────────────────────────
 
 EXTRACT_PROMPT_VERSION = "prd-input-questions-extract-v1"
