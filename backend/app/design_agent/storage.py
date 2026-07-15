@@ -1119,21 +1119,40 @@ async def read_source_files_for_checkpoint(
     return await asyncio.to_thread(_read_source_filesystem_sync, sub_prefix)
 
 
+def _walk_supabase_prefix(storage_obj, prefix: str) -> list[str]:
+    """Recursively list every object under `prefix` via Supabase Storage's
+    one-level-deep list(). Folder entries carry no `id`; recurse into them.
+    Returns full paths (prefix-included). Best-effort: a list() error at any
+    level yields [] for that level (mirrors today's behaviour)."""
+    try:
+        objects = storage_obj.list(prefix) or []
+    except Exception:
+        return []
+    paths: list[str] = []
+    for obj in objects:
+        name = obj.get("name") if isinstance(obj, dict) else getattr(obj, "name", None)
+        obj_id = obj.get("id") if isinstance(obj, dict) else getattr(obj, "id", None)
+        if not name:
+            continue
+        child = f"{prefix}/{name}"
+        if obj_id is None:
+            paths.extend(_walk_supabase_prefix(storage_obj, child))
+        else:
+            paths.append(child)
+    return paths
+
+
 def _read_source_supabase_sync(bucket: str, prefix: str) -> dict[str, str]:
     from app.db.client import require_client
 
     storage = require_client().storage.from_(bucket)
-    try:
-        objects = storage.list(prefix) or []
-    except Exception:
-        return {}
     out: dict[str, str] = {}
-    for obj in objects:
-        rel = obj.get("name") if isinstance(obj, dict) else getattr(obj, "name", None)
-        if not rel:
-            continue
+    # Recursive walk: Supabase list() is one level deep, so a single-level read
+    # would silently drop every nested src/** file from the seed.
+    for full_path in _walk_supabase_prefix(storage, prefix):
+        rel = full_path[len(prefix) + 1:]
         try:
-            data = storage.download(f"{prefix}/{rel}")
+            data = storage.download(full_path)
             out[rel] = data.decode("utf-8") if isinstance(data, (bytes, bytearray)) else str(data)
         except Exception:  # includes UnicodeDecodeError
             continue
@@ -1194,28 +1213,8 @@ def _read_bundle_supabase_sync(bucket: str, prefix: str) -> dict[str, str]:
 
     storage = require_client().storage.from_(bucket)
 
-    def _walk(rel_prefix: str) -> list[str]:
-        # Supabase list() is one level deep; recurse into folder entries (those
-        # carry no `id`) to gather every object's prefix-relative path.
-        try:
-            objects = storage.list(rel_prefix) or []
-        except Exception:
-            return []
-        paths: list[str] = []
-        for obj in objects:
-            name = obj.get("name") if isinstance(obj, dict) else getattr(obj, "name", None)
-            obj_id = obj.get("id") if isinstance(obj, dict) else getattr(obj, "id", None)
-            if not name:
-                continue
-            child = f"{rel_prefix}/{name}"
-            if obj_id is None:
-                paths.extend(_walk(child))
-            else:
-                paths.append(child)
-        return paths
-
     out: dict[str, str] = {}
-    for full_path in _walk(prefix):
+    for full_path in _walk_supabase_prefix(storage, prefix):
         rel = full_path[len(prefix) + 1:]
         if rel.startswith(_BUNDLE_SUBDIR_EXCLUDE):
             continue

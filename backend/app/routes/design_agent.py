@@ -3516,6 +3516,27 @@ async def _run_iterate_bg(
             if checkpoint_id else {}
         )
 
+        # Fail closed on an empty seed: an existing checkpoint whose staged source
+        # reads back empty would be rendered as a fresh build, and the execute run
+        # would then REPLACE the whole prototype with only the requested change.
+        # Plan mode is exempt: a plan run stages nothing and advances no
+        # checkpoint, and the destructive execute run re-reads the source and hits
+        # this guard itself.
+        if checkpoint_id and not current_source and body.mode != "plan":
+            logger.warning(
+                "prototype_iterate_source_read_empty prototype_id=%s checkpoint_id=%s",
+                prototype_id, checkpoint_id,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=(
+                    f"source_read_empty: checkpoint {checkpoint_id} has no readable "
+                    "staged source; refusing to iterate from a blank seed"
+                ),
+            )
+            return
+
         # Open comment threads — the stable cacheable signal (list_comments,
         # filtered to open, anchored-only). See _project_open_comments_for_grounding.
         all_comments = list_comments(prototype_id=prototype_id, workspace_id=workspace_id)
@@ -4109,6 +4130,24 @@ async def _run_manual_edit_bg(
             await read_source_files_for_checkpoint(prototype_id, checkpoint_id)
             if checkpoint_id else {}
         )
+
+        # Fail closed on an empty seed (mirrors _run_iterate_bg): a manual edit
+        # over an existing checkpoint whose staged source reads back empty would
+        # rebuild from scratch and replace the prototype wholesale.
+        if checkpoint_id and not current_source:
+            logger.warning(
+                "prototype_manual_edit_source_read_empty prototype_id=%s checkpoint_id=%s",
+                prototype_id, checkpoint_id,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=(
+                    f"source_read_empty: checkpoint {checkpoint_id} has no readable "
+                    "staged source; refusing to manual-edit from a blank seed"
+                ),
+            )
+            return
 
         cacheable_blocks, volatile_block = render_manual_edit_user(
             current_source=current_source,

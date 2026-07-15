@@ -755,7 +755,7 @@ def _stub_iterate_status(monkeypatch, routes_mod, status: str, **extra):
         ), {}
 
     async def _fake_read(prototype_id, checkpoint_id):
-        return {}
+        return {"src/App.tsx": "x"}
 
     monkeypatch.setattr(routes_mod, "iterate_prototype", _fake)
     monkeypatch.setattr(routes_mod, "read_source_files_for_checkpoint", _fake_read)
