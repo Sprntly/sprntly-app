@@ -55,6 +55,7 @@ import type {
   ConnectorItemRow,
 } from "../../../../types/content"
 import { openOauthTab } from "../../../../lib/connectorsOauth"
+import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 import { useConnectorConnectedSignal } from "../../../../lib/useConnectorConnectedSignal"
 import { notifyBriefRegenerating } from "../../../../lib/useBriefHydration"
 import { ApiKeyPromptModal } from "../../../connectors/ApiKeyPromptModal"
@@ -413,15 +414,36 @@ export function ConnectorsSettingsView({
 
 // ───────────────────── Hooks-wired wrapper ─────────────────────
 
+// Module-scoped cache of the last-loaded connections + files. It survives the
+// pane UNMOUNTING when the user switches settings tabs (the component remounts
+// on return, but this module stays loaded for the SPA session). So a revisit
+// shows the previous state INSTANTLY and revalidates in the background — no
+// "Loading connectors…" spinner every time. `null` = never loaded (cold), the
+// only case that shows the spinner. Reset on sign-out via resetSettingsCaches.
+let _connectionsCache: ConnectionSummary[] | null = null
+let _connectorFilesCache: SourceFile[] | null = null
+
+// Clear on sign-out so a different user never flashes the previous account's
+// connectors (see lib/settingsCache).
+registerSettingsCacheReset(() => {
+  _connectionsCache = null
+  _connectorFilesCache = null
+})
+
 export function ConnectorsSettings() {
   const { activeCompany } = useCompany()
   const { setContent } = useContent()
   const { showToast, goTo } = useNavigation()
 
-  const [connections, setConnections] = useState<ConnectionSummary[]>([])
-  const [files, setFiles] = useState<SourceFile[]>([])
+  // Seed from the module cache so a tab-switch return renders the previous
+  // state immediately; the effects below still revalidate in the background.
+  const [connections, setConnections] = useState<ConnectionSummary[]>(
+    () => _connectionsCache ?? [],
+  )
+  const [files, setFiles] = useState<SourceFile[]>(() => _connectorFilesCache ?? [])
   const [searchQuery, setSearchQuery] = useState("")
-  const [loading, setLoading] = useState(true)
+  // Spinner ONLY on the first-ever (cold) load — a warm revisit shows cache.
+  const [loading, setLoading] = useState(() => _connectionsCache === null)
   const [uploading, setUploading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [regenerating, setRegenerating] = useState(false)
@@ -444,6 +466,7 @@ export function ConnectorsSettings() {
     setLoadError(null)
     try {
       const r = await connectorsApi.list()
+      _connectionsCache = r.connections  // warm the cache for the next visit
       setConnections(r.connections)
       setContent({
         connectorCategories: CONNECTOR_CATALOG,
@@ -460,7 +483,9 @@ export function ConnectorsSettings() {
   }, [setContent])
 
   useEffect(() => {
-    setLoading(true)
+    // Revalidate on mount. Do NOT force loading=true here: a warm revisit keeps
+    // showing cached data while this refresh runs (stale-while-revalidate); the
+    // initial `loading` state already covers the cold first load.
     void reload()
   }, [reload])
 
@@ -474,6 +499,7 @@ export function ConnectorsSettings() {
     }
     try {
       const r = await sourcesApi.list(activeCompany)
+      _connectorFilesCache = r.files
       setFiles(r.files)
     } catch {
       // Non-fatal: the connectors grid still works without the file list.

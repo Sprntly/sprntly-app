@@ -17,6 +17,7 @@ import {
   type BcSrc,
 } from "../../../../lib/api"
 import { profileDisplayName } from "../../../../context/WorkspaceContext"
+import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
 /** The doc form's id — the pane bar's Save submits it from outside the form. */
@@ -579,16 +580,35 @@ function valuesFromDoc(doc: BusinessContextDoc): Record<string, string> {
   return out
 }
 
+// Module-scoped cache of the last-loaded business-context doc. Survives the
+// pane remounting on a settings tab-switch, so a revisit renders the doc
+// INSTANTLY and revalidates in the background — no "Loading business context…"
+// spinner every time. The wrapper distinguishes "never loaded" (null → cold
+// spinner) from "loaded, no doc yet" ({doc: null}). Cleared on sign-out.
+let _bizCtxCache: { doc: BusinessContextDoc | null } | null = null
+
+registerSettingsCacheReset(() => {
+  _bizCtxCache = null
+})
+
 export function BusinessContextSettings() {
   const auth = useAuth()
   const { profile } = useWorkspace()
-  const [doc, setDoc] = useState<BusinessContextDoc | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Seed from cache so a tab-switch return renders instantly; load() below
+  // still revalidates in the background.
+  const [doc, setDoc] = useState<BusinessContextDoc | null>(
+    () => _bizCtxCache?.doc ?? null,
+  )
+  const [loading, setLoading] = useState(() => _bizCtxCache === null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [values, setValues] = useState<Record<string, string>>({})
+  const [values, setValues] = useState<Record<string, string>>(
+    () => (_bizCtxCache?.doc ? valuesFromDoc(_bizCtxCache.doc) : {}),
+  )
   // The last loaded/saved doc values — "Discard" restores these; deviation
   // from them arms the pane bar's Save/Discard.
-  const [snapshot, setSnapshot] = useState<Record<string, string>>({})
+  const [snapshot, setSnapshot] = useState<Record<string, string>>(
+    () => (_bizCtxCache?.doc ? valuesFromDoc(_bizCtxCache.doc) : {}),
+  )
 
   const [canEdit, setCanEdit] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -618,10 +638,13 @@ export function BusinessContextSettings() {
   }, [currentUserId])
 
   const load = useCallback(async () => {
-    setLoading(true)
+    // No setLoading(true): a warm revisit keeps the doc on screen while this
+    // revalidates, and a save/refresh (which routes through load) no longer
+    // flashes the whole pane to "Loading…". Cold load spins via initial state.
     setLoadError(null)
     try {
       const d = await businessContextApi.get()
+      _bizCtxCache = { doc: d }
       setDoc(d)
       const seeded = d ? valuesFromDoc(d) : {}
       setValues(seeded)

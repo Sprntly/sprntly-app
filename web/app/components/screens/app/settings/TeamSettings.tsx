@@ -23,6 +23,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useAuth } from "../../../../lib/auth"
 import { api } from "../../../../lib/api"
+import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 
 // ─────────────────────────── Types ───────────────────────────
 
@@ -564,11 +565,25 @@ type TeamMembersResp = {
 }
 type TeamInvitesResp = { invites: TeamInvite[] }
 
+// Module-scoped cache of the last-loaded team (members + invites). Survives the
+// pane remounting on a settings tab-switch, so a revisit shows the team
+// INSTANTLY and revalidates in the background — no spinner every time. `null` =
+// never loaded (the only cold case that shows the spinner). Cleared on sign-out.
+let _teamCache: { members: TeamMember[]; invites: TeamInvite[] } | null = null
+
+// Clear on sign-out so a different user never sees the previous account's
+// members/invites (see lib/settingsCache).
+registerSettingsCacheReset(() => {
+  _teamCache = null
+})
+
 export function TeamSettings() {
   const auth = useAuth()
-  const [members, setMembers] = useState<TeamMember[]>([])
-  const [invites, setInvites] = useState<TeamInvite[]>([])
-  const [loading, setLoading] = useState(true)
+  // Seed from cache so a tab-switch return renders instantly; reload() below
+  // still revalidates in the background.
+  const [members, setMembers] = useState<TeamMember[]>(() => _teamCache?.members ?? [])
+  const [invites, setInvites] = useState<TeamInvite[]>(() => _teamCache?.invites ?? [])
+  const [loading, setLoading] = useState(() => _teamCache === null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const [showInviteForm, setShowInviteForm] = useState(false)
@@ -585,22 +600,23 @@ export function TeamSettings() {
   const currentUserRole: TeamRole = (currentRow?.role as TeamRole) || "member"
 
   const reload = useCallback(async () => {
-    setLoading(true)
+    // No setLoading(true): a warm revisit keeps the current team on screen
+    // while this revalidates. The cold-load spinner is the initial state above.
     setLoadError(null)
     try {
       const [m, inv] = await Promise.all([
         teamApi.listMembers(),
         teamApi.listInvites(),
       ])
-      setMembers(
-        m.members.map((row) => ({
-          user_id: row.user_id,
-          role: row.role,
-          display_name: row.display_name,
-          email: row.email,
-          avatar_url: row.avatar_url,
-        })),
-      )
+      const nextMembers = m.members.map((row) => ({
+        user_id: row.user_id,
+        role: row.role,
+        display_name: row.display_name,
+        email: row.email,
+        avatar_url: row.avatar_url,
+      }))
+      _teamCache = { members: nextMembers, invites: inv.invites }
+      setMembers(nextMembers)
       setInvites(inv.invites)
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e))

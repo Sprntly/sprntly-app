@@ -9,6 +9,7 @@ import {
   type McpTokenRole,
 } from "../../../../lib/api"
 import { SettingsRow } from "./SettingsLayout"
+import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 
 /**
  * MCP Access pane.
@@ -401,9 +402,24 @@ export function McpSettingsView({
   )
 }
 
+// Module-scoped cache of the last-loaded MCP tokens — survives the pane
+// remounting on a settings tab-switch, so a revisit shows the token list
+// INSTANTLY and revalidates in the background instead of flashing a
+// "Loading MCP tokens…" spinner. `null` = never loaded (the only cold case
+// that shows the spinner). Cleared on sign-out via resetMcpSettingsCache.
+let _mcpTokensCache: McpToken[] | null = null
+
+// Clear on sign-out so a different user never sees the previous account's
+// token list (see lib/settingsCache).
+registerSettingsCacheReset(() => {
+  _mcpTokensCache = null
+})
+
 export function McpSettings() {
-  const [tokens, setTokens] = useState<McpToken[]>([])
-  const [loading, setLoading] = useState(true)
+  // Seed from cache so a tab-switch return renders instantly; refresh() below
+  // still revalidates in the background.
+  const [tokens, setTokens] = useState<McpToken[]>(() => _mcpTokensCache ?? [])
+  const [loading, setLoading] = useState(() => _mcpTokensCache === null)
   const [error, setError] = useState<string | null>(null)
   const [newName, setNewName] = useState("")
   // Default to the least-privileged role — handing out full workspace access
@@ -415,9 +431,12 @@ export function McpSettings() {
   const [revokingId, setRevokingId] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
-    setLoading(true)
+    // No setLoading(true): a warm revisit (or a post-create/revoke refresh)
+    // keeps the current list on screen while this revalidates. The cold-load
+    // spinner is handled by the initial `loading` state above.
     try {
       const { tokens } = await mcpTokensApi.list()
+      _mcpTokensCache = tokens
       setTokens(tokens)
     } catch {
       setError("Could not load MCP tokens.")
