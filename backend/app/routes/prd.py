@@ -53,7 +53,8 @@ from app.db.prds import (
 )
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
 from app.prd_runner import (
-    PRD_VARIANT, ensure_impl_spec, generate_prd, generate_prd_and_warm,
+    PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
+    generate_prd_and_warm,
 )
 from app.prompts import PRD_TEMPLATE_VERSION
 
@@ -509,8 +510,16 @@ def restore_version(
 # ── "User input needed" questions: surface in chat + answer → scoped edit ──────
 
 
+# The prd-author template renders unresolved [ESCALATE]/[NEED] items under this
+# section eyebrow, and the section is SELF-CLEARING (the scoped answer editor
+# removes it once the last item resolves) — so its presence in the stored HTML
+# is a reliable "this PRD still has extractable input items" signal, checked
+# without any LLM call.
+_INPUT_SECTION_MARKER = "User input needed"
+
+
 @router.get("/{prd_id}/input-questions")
-def get_input_questions(
+async def get_input_questions(
     prd_id: int,
     company: CompanyContext = Depends(require_company),
 ):
@@ -520,9 +529,35 @@ def get_input_questions(
     surfaced in the PRD's chat as messages with answer buttons. Returns every
     question (pending + answered) so a reopened chat stays consistent; the client
     renders pending ones as actionable and answered ones as resolved.
+
+    Lazy backfill: PRDs generated before extraction existed (most of what the
+    Artifacts screen opens) have a "User input needed" section in the document
+    but no stored questions. When such a PRD is opened, schedule the SAME
+    best-effort extraction in the background and answer `extracting: true`; the
+    client polls until the rows land. The single-flight registry in
+    app.prd_questions makes concurrent opens (and the generation-time run for a
+    just-finished PRD, whose first fetch can race the pipeline's extraction)
+    schedule exactly one run.
     """
-    require_owned_prd(prd_id, company.company_id)
-    return {"questions": list_questions(prd_id)}
+    row = require_owned_prd(prd_id, company.company_id)
+    questions = list_questions(prd_id)
+    if questions:
+        return {"questions": questions, "extracting": False}
+
+    from app.prd_questions import is_extracting, mark_extracting
+
+    if is_extracting(prd_id):
+        return {"questions": [], "extracting": True}
+    if (
+        row.get("status") == "ready"
+        and _INPUT_SECTION_MARKER in (row.get("payload_md") or "")
+        and mark_extracting(prd_id)
+    ):
+        task = asyncio.create_task(extract_input_questions_task(prd_id, reserved=True))
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
+        return {"questions": [], "extracting": True}
+    return {"questions": [], "extracting": False}
 
 
 class InputAnswerIn(BaseModel):

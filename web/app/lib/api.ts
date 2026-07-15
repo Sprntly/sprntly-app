@@ -1339,13 +1339,14 @@ export const prdApi = {
         `/v1/prd/${id}/generations`,
       )
       .then((r) => r.generations),
-  /** The PRD's structured "User input needed" questions (extracted at generation
-   *  time). Rendered in the PRD's chat as messages with answer buttons. Returns
-   *  every question; the client shows pending ones as actionable. */
+  /** The PRD's structured "User input needed" questions. Rendered in the PRD's
+   *  chat as messages with answer buttons. Returns every question; the client
+   *  shows pending ones as actionable. `extracting: true` means the backend just
+   *  scheduled the extraction for this PRD (a pre-feature PRD opened from
+   *  Artifacts, or a just-generated one whose extraction is still running) —
+   *  poll until it flips false and the questions arrive. */
   listInputQuestions: (id: number) =>
-    api
-      .get<{ questions: PrdInputQuestion[] }>(`/v1/prd/${id}/input-questions`)
-      .then((r) => r.questions),
+    api.get<PrdInputQuestionsList>(`/v1/prd/${id}/input-questions`),
   /** Answer one "User input needed" question. The backend folds the answer into
    *  only the affected PRD sections (a scoped edit — NOT a full regeneration),
    *  saves an undoable version, and returns the updated PRD + which sections
@@ -1371,6 +1372,14 @@ export type PrdInputQuestion = {
   options: PendingQuestionChoice[]
   status: "pending" | "answered" | "dismissed"
   answer?: string | null
+}
+
+/** Response from GET /v1/prd/{id}/input-questions — the stored questions plus
+ *  whether a background extraction is currently producing them (poll while
+ *  true). */
+export type PrdInputQuestionsList = {
+  questions: PrdInputQuestion[]
+  extracting?: boolean
 }
 
 /** Response from POST /v1/prd/{id}/input-questions/{qid}/answer — the updated PRD
