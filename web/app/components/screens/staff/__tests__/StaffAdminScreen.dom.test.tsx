@@ -477,9 +477,16 @@ describe("MODULES + agentsEnabled", () => {
   it("falls back to the old default-on keys for legacy rows", () => {
     expect(agentsEnabled({ on_demand_analysis: true })).toBe(true)
     expect(agentsEnabled({ auto_prd_generation: true })).toBe(true)
-    // The old default-OFF agent keys alone do not light Agents up.
-    expect(agentsEnabled({ engineer_agent: true, research_agent: true })).toBe(false)
-    expect(agentsEnabled({})).toBe(false)
+    // Legacy keys present and all false → off (backend parity).
+    expect(agentsEnabled({ on_demand_analysis: false, auto_prd_generation: false })).toBe(false)
+  })
+
+  it("fails open when no relevant keys exist (backend entitlements parity)", () => {
+    // Empty dict / only irrelevant keys → ON, mirroring
+    // backend app/entitlements.py agents_enabled.
+    expect(agentsEnabled({})).toBe(true)
+    expect(agentsEnabled({ engineer_agent: true, research_agent: true })).toBe(true)
+    expect(agentsEnabled({ claude_code_handoff: false })).toBe(true)
   })
 })
 

@@ -45,13 +45,18 @@ export const MODULES: { key: string; label: string }[] = [
   { key: "weekly_brief", label: "Weekly Brief" },
 ]
 
-/** Whether the Agents module is on, mapping legacy-only rows: rows that
- *  predate the `agents` key count as on when either of the old default-on
- *  keys (on_demand_analysis / auto_prd_generation) was on. Display-level
- *  only — never written back. */
+/** Whether the Agents module is on, mirroring backend
+ *  app/entitlements.py agents_enabled: an explicit `agents` key wins; rows
+ *  that predate it count as on when either of the old default-on keys
+ *  (on_demand_analysis / auto_prd_generation) was on; rows with NO relevant
+ *  keys at all (e.g. an empty dict) fail open to ON, same as the server
+ *  gate. Display-level only — never written back. */
 export function agentsEnabled(flags: Record<string, boolean>): boolean {
   if ("agents" in flags) return !!flags.agents
-  return !!(flags.on_demand_analysis || flags.auto_prd_generation)
+  if ("on_demand_analysis" in flags || "auto_prd_generation" in flags) {
+    return !!(flags.on_demand_analysis || flags.auto_prd_generation)
+  }
+  return true
 }
 
 /** Whether the Weekly Brief module is on — a missing key counts as ON
