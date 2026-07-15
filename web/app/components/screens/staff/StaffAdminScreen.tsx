@@ -54,6 +54,27 @@ export function agentsEnabled(flags: Record<string, boolean>): boolean {
   return !!(flags.on_demand_analysis || flags.auto_prd_generation)
 }
 
+/** Whether the Weekly Brief module is on — a missing key counts as ON
+ *  (grandfathering), mirroring backend app/entitlements.py
+ *  weekly_brief_enabled. Display-level only — never written back. */
+export function weeklyBriefEnabled(flags: Record<string, boolean>): boolean {
+  if ("weekly_brief" in flags) return !!flags.weekly_brief
+  return true
+}
+
+// Effective-state resolvers per flag-backed module. Both the org-row chips
+// and the editor checkboxes go through these so a grandfathered row (missing
+// / legacy-only keys) shows the SAME state everywhere. Toggling a checkbox
+// still writes an explicit `agents` / `weekly_brief` boolean; untouched
+// flags dicts are sent back unchanged.
+const MODULE_RESOLVERS: Record<
+  string,
+  (flags: Record<string, boolean>) => boolean
+> = {
+  agents: agentsEnabled,
+  weekly_brief: weeklyBriefEnabled,
+}
+
 export function keyModeLabel(c: {
   use_platform_key: boolean
   llm_key_configured: boolean
@@ -72,7 +93,7 @@ function enabledModules(company: {
   const on: string[] = []
   if (agentsEnabled(flags)) on.push("Agents")
   if (company.prototype_enabled) on.push("Prototype")
-  if (flags.weekly_brief) on.push("Weekly Brief")
+  if (weeklyBriefEnabled(flags)) on.push("Weekly Brief")
   if (!on.length) return "No modules enabled"
   return on.join(", ")
 }
@@ -102,11 +123,17 @@ function flagCheckbox(
   state: EntitlementFormState,
   onChange: (next: EntitlementFormState) => void,
 ) {
+  // Resolve the DISPLAYED state like the org-row chips do (missing/legacy
+  // keys map to the effective backend state); the raw stored dict stays
+  // untouched until the staff member actually toggles the box.
+  const resolve = MODULE_RESOLVERS[m.key]
   return (
     <label key={m.key} className="sadm-check">
       <input
         type="checkbox"
-        checked={!!state.featureFlags[m.key]}
+        checked={
+          resolve ? resolve(state.featureFlags) : !!state.featureFlags[m.key]
+        }
         onChange={(e) =>
           onChange({
             ...state,
