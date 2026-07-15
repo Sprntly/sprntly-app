@@ -1187,6 +1187,13 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    /* Containment boundary (parity with .main--brief-chat). The chat thread's
+       inner scroll region (.od-center-scroll / .bc-scroll) is bounded by flex,
+       but WITHOUT this its overflow leaked up to .main-column (overflow-y:auto),
+       so the whole page scrolled — dragging the pinned composer up with it once
+       a thread grew past the viewport. Clipping here keeps the scroll INSIDE the
+       thread and pins the composer, exactly as the Weekly-brief tab already does. */
+    overflow: hidden;
   }
 
   .home-chat-root {
