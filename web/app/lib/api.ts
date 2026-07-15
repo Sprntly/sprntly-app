@@ -388,6 +388,13 @@ export const askApi = {
   /** List available skills the chat can route to. */
   skills: () =>
     api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),
+  /** Parse a binary document attachment (pptx/pdf/docx/…) to markdown so the
+   *  composer can inline it as [Attached files] context. Server-side, no LLM. */
+  extractFile: (file: File) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    return api.post<{ name: string; markdown: string }>("/v1/ask/extract-file", form)
+  },
 }
 
 export type PrdStartResponse = {

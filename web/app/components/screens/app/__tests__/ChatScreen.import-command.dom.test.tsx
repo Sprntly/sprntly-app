@@ -23,9 +23,10 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { briefCurrent, importDoc } = vi.hoisted(() => ({
+const { briefCurrent, importDoc, extractFile } = vi.hoisted(() => ({
   briefCurrent: vi.fn(),
   importDoc: vi.fn(),
+  extractFile: vi.fn(),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -34,7 +35,11 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
-    askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
+    askApi: {
+      ask: vi.fn(),
+      skills: vi.fn().mockResolvedValue({ skills: [] }),
+      extractFile: (...a: unknown[]) => extractFile(...a),
+    },
     briefApi: { current: briefCurrent },
     prdApi: {
       importDoc: (...a: unknown[]) => importDoc(...a),
@@ -154,6 +159,8 @@ beforeEach(() => {
   resumePrdGeneration.mockClear()
   importDoc.mockReset()
   importDoc.mockResolvedValue({ prd_id: 42, status: "generating", title: "Imported PRD" })
+  extractFile.mockReset()
+  extractFile.mockResolvedValue({ name: "Fraznet Enhancements.pptx", markdown: "## Slide 1\n\nFraznet MRT workflow" })
   briefCurrent.mockReset()
   briefCurrent.mockResolvedValue({ id: 7, insights: [{ title: "Enterprise expansion is stalled" }] })
 })
@@ -271,17 +278,77 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     expect(document.querySelector('[data-testid="attachment-chip"]')).toBeNull()
   })
 
-  it("a normal ask with a document attached does NOT inline binary content", async () => {
+  it("a normal ask with a document inlines the EXTRACTED markdown, never the raw bytes", async () => {
     renderChat()
     await attachDoc()
     await typeAndSend("Why did enterprise churn spike last month?")
 
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
-    // Document attachments have no text form — the question goes out clean
-    // (before this, binary read as text blew the ask's 2000-char cap).
+    // The document rides along as server-extracted markdown (it used to be
+    // silently dropped here); the raw binary payload must never be inlined —
+    // that's what blew the ask cap before extraction existed.
     const askedQuery = runAskGeneration.mock.calls[0][0] as string
-    expect(askedQuery).toBe("Why did enterprise churn spike last month?")
-    expect(askedQuery).not.toContain("[Attached files]")
+    expect(askedQuery).toContain("Why did enterprise churn spike last month?")
+    expect(askedQuery).toContain("[Attached files]")
+    expect(askedQuery).toContain("Fraznet MRT workflow")
+    expect(askedQuery).not.toContain("pptx-bytes")
     expect(importDoc).not.toHaveBeenCalled()
+  })
+})
+
+describe("ChatScreen — import phrasings and non-command sends over an attached document", () => {
+  it("'Import this document as a PRD' is an import COMMAND (the phrasing that used to fall through)", async () => {
+    renderChat()
+    const file = await attachDoc()
+    await typeAndSend("Import this document as a PRD")
+
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
+    await waitFor(() => expect(panelTab()).toBe("prd"))
+    // It must never go to the ask agent — that path answers "no document was
+    // attached" because the ask payload is text-only.
+    expect(runAskGeneration).not.toHaveBeenCalled()
+    expect(extractFile).not.toHaveBeenCalled()
+    expect(briefCurrent).not.toHaveBeenCalled()
+  })
+
+  it("'convert this document to a PRD' matches the PRD rule, not tickets", async () => {
+    renderChat()
+    const file = await attachDoc()
+    await typeAndSend("convert this document to a PRD")
+
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
+    await waitFor(() => expect(panelTab()).toBe("prd"))
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("a plain question with a document extracts it server-side and inlines it as ask context", async () => {
+    renderChat()
+    const file = await attachDoc()
+    await typeAndSend("What are the riskiest requirements in this deck?")
+
+    // The doc is parsed via POST /v1/ask/extract-file (not silently dropped)…
+    await waitFor(() => expect(extractFile).toHaveBeenCalledWith(file))
+    // …and its markdown rides along to the ask agent as [Attached files] context.
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    const query = runAskGeneration.mock.calls[0][0] as string
+    expect(query).toContain("What are the riskiest requirements in this deck?")
+    expect(query).toContain("[Attached files]")
+    expect(query).toContain("Fraznet Enhancements.pptx")
+    expect(query).toContain("Fraznet MRT workflow")
+    // A plain question is NOT an import — no PRD row is created.
+    expect(importDoc).not.toHaveBeenCalled()
+  })
+
+  it("keeps the attachment and does not send when extraction fails", async () => {
+    extractFile.mockRejectedValueOnce(new Error("could not parse file"))
+    renderChat()
+    await attachDoc()
+    await typeAndSend("What does this deck say?")
+
+    await waitFor(() => expect(extractFile).toHaveBeenCalled())
+    // The send is aborted — nothing reaches the ask agent…
+    expect(runAskGeneration).not.toHaveBeenCalled()
+    // …and the attachment chip is still there for a retry (not silently lost).
+    await waitFor(() => expect(document.body.textContent).toContain("Fraznet Enhancements.pptx"))
   })
 })

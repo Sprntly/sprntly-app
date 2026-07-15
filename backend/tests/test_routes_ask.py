@@ -240,3 +240,117 @@ def test_get_ask_foreign_job_returns_404(tenant_client, isolated_settings, fake_
     b = tenant_client.make(slug="company-b")
     resp = b.client.get(f"/v1/ask/{start['ask_id']}")
     assert resp.status_code == 404
+
+
+# ---- POST /v1/ask/extract-file ----------------------------------------------
+# Parses a binary chat attachment (pptx/pdf/docx/…) to markdown so the composer
+# can inline it as [Attached files] context — the fix for pptx attachments
+# being silently dropped when sent with a plain question.
+
+def _tiny_pptx(*, slides: bool = True) -> bytes:
+    import io
+
+    from pptx import Presentation
+
+    prs = Presentation()
+    if slides:
+        s = prs.slides.add_slide(prs.slide_layouts[5])  # Title Only
+        s.shapes.title.text = "Fraznet Enhancements"
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()
+
+
+def test_extract_file_without_session_returns_401(unauth_client):
+    resp = unauth_client.post(
+        "/v1/ask/extract-file", files={"file": ("a.txt", b"hello", "text/plain")}
+    )
+    assert resp.status_code == 401
+
+
+def test_extract_file_txt_passthrough(tenant_client):
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file",
+        files={"file": ("notes.txt", b"churn is up 20%", "text/plain")},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "notes.txt"
+    assert "churn is up 20%" in body["markdown"]
+
+
+def test_extract_file_pptx_returns_slide_markdown(tenant_client):
+    import pytest
+
+    pytest.importorskip("pptx")
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file",
+        files={
+            "file": (
+                "deck.pptx",
+                _tiny_pptx(),
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "deck.pptx"
+    assert "## Slide 1" in body["markdown"]
+    assert "Fraznet Enhancements" in body["markdown"]
+
+
+def test_extract_file_empty_returns_400(tenant_client):
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file", files={"file": ("a.pptx", b"", "application/octet-stream")}
+    )
+    assert resp.status_code == 400
+
+
+def test_extract_file_no_extractable_text_returns_422(tenant_client):
+    import pytest
+
+    pytest.importorskip("pptx")
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file",
+        files={
+            "file": (
+                "empty-deck.pptx",
+                _tiny_pptx(slides=False),
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_extract_file_over_size_cap_returns_413(tenant_client, monkeypatch):
+    monkeypatch.setattr(ask_route, "_MAX_EXTRACT_BYTES", 10)
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file", files={"file": ("big.txt", b"x" * 11, "text/plain")}
+    )
+    assert resp.status_code == 413
+
+
+def test_ask_accepts_question_with_inlined_attachment_block(tenant_client, isolated_settings, fake_llm):
+    """The composer inlines extracted document markdown into the question
+    ([Attached files] block) — the old 2000-char cap rejected any real deck."""
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    fake_llm["payload"] = {
+        "answer": "ok", "key_points": [], "citations": [],
+        "confidence": 0.9, "unanswered": "",
+    }
+    question = (
+        "What are the riskiest requirements in this deck?\n\n[Attached files]\n"
+        "--- deck.pptx ---\n" + ("Slide content line.\n" * 500)  # ~10k chars
+    )
+    resp = t.client.post("/v1/ask", json={"question": question, "dataset": "acme"})
+    assert resp.status_code == 200, resp.text
+    body = _poll_ask(t.client, resp.json()["ask_id"])
+    assert body["status"] == "ready"
