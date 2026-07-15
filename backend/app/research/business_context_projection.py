@@ -34,7 +34,8 @@ def _ensure_entity(
     facade: GraphFacade, enterprise_id: str, type_: str, label: str, tau_high: float
 ) -> str:
     """find-or-create an entity of `type_` for `label` (embedding kNN dedupe)."""
-    vec = embed_texts([label])[0]
+    vec = embed_texts([label], enterprise_id=enterprise_id,
+                      purpose="business_context")[0]
     candidates = facade.find_candidates(enterprise_id, type_, vec, k=3)
     if candidates and candidates[0][1] >= tau_high:
         return candidates[0][0].id

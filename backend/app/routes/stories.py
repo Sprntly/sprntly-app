@@ -176,6 +176,7 @@ async def generate(
         "insight": body.insight,
         "status": "generating",
         "stories": None,
+        "progress": None,  # {"done": n, "total": m} once fan-out batches land
         "error": None,
     }
     _prune_jobs()
@@ -183,6 +184,23 @@ async def generate(
     from app.config import settings
 
     strategy = "fanout" if settings.ticket_gen_fanout else "single"
+
+    # Bridge fan-out batch completions (which fire on a worker thread) back onto
+    # the event loop so the job dict is only ever mutated there (the single-worker
+    # invariant this store relies on). Each batch publishes the partial ticket set
+    # + progress so the poll can stream them in before the whole run finishes.
+    loop = asyncio.get_running_loop()
+
+    def _on_batch(stories, done: int, total: int) -> None:
+        snapshot = [s.to_dict() for s in stories]  # off-loop: no shared state read
+
+        def _apply() -> None:
+            job = _jobs.get(job_id)
+            if job is not None and job["status"] == "generating":
+                job["stories"] = snapshot
+                job["progress"] = {"done": done, "total": total}
+
+        loop.call_soon_threadsafe(_apply)
 
     async def _run() -> None:
         try:
@@ -192,11 +210,13 @@ async def generate(
                 strategy=strategy,
                 batch_size=settings.ticket_gen_batch_size,
                 max_parallel=settings.ticket_gen_max_parallel,
+                on_batch=_on_batch,
             )
             job = _jobs.get(job_id)
             if job is not None:
                 job["status"] = "ready"
                 job["stories"] = [s.to_dict() for s in stories]
+                job["progress"] = None
         except PRDNotFoundError as exc:
             job = _jobs.get(job_id)
             if job is not None:
@@ -229,6 +249,13 @@ def get_job(
         out["stories"] = job["stories"] or []
     elif job["status"] == "failed":
         out["error"] = job["error"]
+    elif job["status"] == "generating":
+        # Stream partial results: fan-out publishes tickets batch-by-batch, so a
+        # poll mid-run can render what's landed already instead of an empty spin.
+        if job.get("stories"):
+            out["stories"] = job["stories"]
+        if job.get("progress"):
+            out["progress"] = job["progress"]
     return out
 
 

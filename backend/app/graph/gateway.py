@@ -134,6 +134,7 @@ def llm_call(
     log: bool = True,
     background: bool = False,
     temperature: Optional[float] = None,
+    on_delta=None,
 ) -> LLMResult:
     """One attributed, telemetered LLM call. See module docstring.
 
@@ -169,7 +170,8 @@ def llm_call(
     # still produce big docs (technical design, risk analysis, traceability
     # matrix, QA test cases), which were tripping httpx.ReadTimeout on the
     # default 120s non-streamed path. Other callers keep the non-streamed path.
-    use_long_output = long_output or _is_long_output(skill)
+    # A caller asking for per-delta streaming implies the streaming transport.
+    use_long_output = long_output or _is_long_output(skill) or (on_delta is not None)
     stream = use_long_output
     timeout = LONG_REQUEST_TIMEOUT_S if use_long_output else None
     meta: dict = {}
@@ -204,7 +206,7 @@ def llm_call(
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 user_cacheable_prefix=user_cacheable_prefix,
                 meta_out=meta, stream=stream, timeout=timeout, background=background,
-                temperature=temperature,
+                temperature=temperature, on_delta=on_delta,
             )
     latency_ms = int((time.monotonic() - t0) * 1000)
 

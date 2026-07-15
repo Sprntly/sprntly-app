@@ -30,6 +30,7 @@ from app.brief_schedule import (
 )
 from app.config import settings
 from app.db.companies import list_companies
+from app.entitlements import weekly_brief_enabled
 from app.kg_ingest.auto_sync import kickoff_sync
 from app.kg_ingest.runner import PULLERS
 
@@ -131,6 +132,17 @@ async def _run_synthesis_for_all_companies() -> None:
 
     for company in companies:
         slug = company.get("slug") or company.get("id")
+        # Weekly Brief module gate (staff panel): the synthesis cycle GENERATES
+        # briefs (run_synthesis save_brief()s + mid-week delivery), so a company
+        # with weekly_brief explicitly off is skipped. KG ingestion is NOT
+        # affected — connector sync/seeding run elsewhere (owner decision:
+        # the KG also grounds PRDs and chat).
+        if not weekly_brief_enabled(company.get("feature_flags") or {}):
+            logger.info(
+                "Scheduler: weekly_brief module off for %s — skipping synthesis",
+                slug,
+            )
+            continue
         try:
             # generate_brief_for is blocking (LLM + Supabase); keep it off the
             # event loop so one slow company can't stall the scheduler thread.
@@ -176,6 +188,15 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
         company_id = company.get("id")
         slug = company.get("slug") or company_id
         if not slug:
+            continue
+        # Weekly Brief module gate (staff panel): explicitly-off companies get
+        # neither generation nor Slack/email delivery from the weekly tick.
+        # Missing key / empty flags ⇒ ON (grandfathering — app.entitlements).
+        if not weekly_brief_enabled(company.get("feature_flags") or {}):
+            logger.info(
+                "Weekly brief tick: weekly_brief module off for %s — skipping",
+                slug,
+            )
             continue
         ns = company.get("notification_settings") or {}
         # Timezone: prefer the company's chosen tz (Comms & Brief settings),

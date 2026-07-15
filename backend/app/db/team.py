@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import uuid
 
-from app.db.client import require_client
+from app.db.client import require_client, retry_on_disconnect
 
 
+@retry_on_disconnect
 def list_company_members(company_id: str) -> list[dict]:
     """All company_members rows for `company_id`, enriched with profile
     display data.
@@ -70,6 +71,7 @@ def list_company_members(company_id: str) -> list[dict]:
     return enriched
 
 
+@retry_on_disconnect
 def list_pending_invites(company_id: str) -> list[dict]:
     """Pending workspace_invites for `company_id`.
 
@@ -87,6 +89,7 @@ def list_pending_invites(company_id: str) -> list[dict]:
     return result.data or []
 
 
+@retry_on_disconnect
 def get_pending_invite_by_email(*, company_id: str, email: str) -> dict | None:
     """Return the pending invite for (company_id, email) or None."""
     client = require_client()
@@ -103,6 +106,7 @@ def get_pending_invite_by_email(*, company_id: str, email: str) -> dict | None:
     return rows[0] if rows else None
 
 
+@retry_on_disconnect
 def get_invite(invite_id: str) -> dict | None:
     """Fetch a single invite by id, regardless of company."""
     client = require_client()
@@ -118,6 +122,7 @@ def get_invite(invite_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+@retry_on_disconnect
 def member_exists_for_email(*, company_id: str, email: str) -> bool:
     """True iff someone in this company has a profile with this email
     (case-insensitive). Used to enforce 4-A: block invites at create time
@@ -184,6 +189,7 @@ def delete_invite(invite_id: str) -> None:
     ).execute()
 
 
+@retry_on_disconnect
 def get_member(*, company_id: str, user_id: str) -> dict | None:
     client = require_client()
     rows = (
@@ -212,6 +218,7 @@ def delete_member(*, company_id: str, user_id: str) -> None:
     ).eq("user_id", user_id).execute()
 
 
+@retry_on_disconnect
 def count_owners(company_id: str) -> int:
     """How many `owner`-role members in a given company."""
     rows = (
@@ -227,6 +234,7 @@ def count_owners(company_id: str) -> int:
     return len(rows)
 
 
+@retry_on_disconnect
 def find_pending_invite_for_email_anywhere(email: str) -> dict | None:
     """Return the earliest pending invite (across all companies) for `email`,
     or None. Used by the auto-accept-on-sign-in path so the user's first

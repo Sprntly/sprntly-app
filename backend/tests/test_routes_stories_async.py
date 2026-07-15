@@ -26,6 +26,44 @@ async def _drain(job_id: int, tries: int = 100) -> None:
         await asyncio.sleep(0.02)
 
 
+def test_poll_streams_partial_batches_before_ready(isolated_settings, monkeypatch):
+    """Fan-out publishes tickets batch-by-batch; a poll mid-run sees the partial
+    set + progress while status is still 'generating', then the full set on ready."""
+    gate = threading.Event()
+
+    def _staged(cid, prd_id=None, insight=None, on_batch=None, **kw):
+        # Batch 1 lands…
+        on_batch([Story(title="A", body="b")], 1, 2)
+        gate.wait(2)  # …hold in 'generating' so the test can observe the partial
+        both = [Story(title="A", body="b"), Story(title="B", body="b")]
+        on_batch(both, 2, 2)
+        return both
+
+    monkeypatch.setattr(stories, "generate_user_stories", _staged)
+
+    async def _flow():
+        resp = await stories.generate(stories.GenerateIn(insight="x"), _ctx())
+        jid = resp["job_id"]
+        mid = None
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            j = stories.get_job(jid, _ctx())
+            if j["status"] == "generating" and j.get("stories"):
+                mid = j
+                break
+        assert mid is not None, "partial batch never surfaced in the poll"
+        assert [s["title"] for s in mid["stories"]] == ["A"]
+        assert mid["progress"] == {"done": 1, "total": 2}
+        gate.set()
+        await _drain(jid)
+        return stories.get_job(jid, _ctx())
+
+    final = asyncio.run(_flow())
+    assert final["status"] == "ready"
+    assert [s["title"] for s in final["stories"]] == ["A", "B"]
+    assert "progress" not in final, "progress cleared once complete"
+
+
 def test_generate_returns_job_id_then_polls_ready(isolated_settings, monkeypatch):
     monkeypatch.setattr(
         stories, "generate_user_stories",

@@ -553,12 +553,19 @@ export function TicketsTab() {
         refreshing?: boolean
         /** A background refresh failed — the old set stays, with this note. */
         refreshError?: string | null
+        /** First-generation streaming: these tickets are a PARTIAL set arriving
+         *  batch-by-batch (fan-out); more are still landing. */
+        streaming?: boolean
+        /** Batch progress while `streaming`, e.g. {done: 2, total: 4}. */
+        progress?: { done: number; total: number }
       }
     | { kind: "error"; message: string }
   const [genState, setGenState] = useState<GenState>({ kind: "idle" })
   const stories = genState.kind === "ready" ? genState.stories : []
   const refreshing = genState.kind === "ready" && Boolean(genState.refreshing)
   const refreshError = genState.kind === "ready" ? genState.refreshError ?? null : null
+  const streaming = genState.kind === "ready" && Boolean(genState.streaming)
+  const streamProgress = genState.kind === "ready" ? genState.progress ?? null : null
 
   // Which ticket (if any) is open in the in-panel editable detail view.
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
@@ -640,6 +647,18 @@ export function TicketsTab() {
           } else if (j.status === "failed") {
             fail(new Error(j.error || "Couldn't generate tickets"))
           } else {
+            // Still generating. On a FIRST generation (nothing older on screen),
+            // stream the partial set as fan-out batches land instead of holding a
+            // blank spinner. While REFRESHING an edited PRD we keep the previous
+            // complete set untouched — swapping it for a partial would flicker.
+            if (!prevStories?.length && j.stories?.length) {
+              setGenState({
+                kind: "ready",
+                stories: j.stories,
+                streaming: true,
+                progress: j.progress,
+              })
+            }
             timer = setTimeout(() => poll(jobId), 2000)
           }
         })
@@ -1127,6 +1146,12 @@ export function TicketsTab() {
       </div>
 
       {/* Regeneration + sync status lines (under the header). */}
+      {streaming && (
+        <div className="tkt-push-status" data-testid="tickets-streaming">
+          <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
+          Generating tickets{streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}. Showing them as they land…
+        </div>
+      )}
       {refreshing && (
         <div className="tkt-push-status">
           <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>

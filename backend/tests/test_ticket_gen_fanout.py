@@ -16,6 +16,7 @@ from app.stories.generate import (
     ENRICH_PROMPT_VERSION,
     PLAN_PROMPT_VERSION,
     PROMPT_VERSION,
+    _stories_from_output,
     generate_from_input,
     generate_user_stories,
 )
@@ -157,6 +158,181 @@ def test_single_strategy_makes_one_call(isolated_settings, monkeypatch):
     assert len(calls) == 1
     assert calls[0]["prompt_version"] == PROMPT_VERSION
     assert stats["strategy"] == "single"
+
+
+def test_fanout_on_batch_streams_growing_partial_sets(isolated_settings, monkeypatch):
+    titles = [f"T{i}" for i in range(9)]  # 3 batches of 3
+    monkeypatch.setattr(gen, "llm_call", _fake_llm(titles))
+    updates: list[tuple[int, int, int]] = []  # (n_stories_so_far, done, total)
+
+    def _on_batch(stories, done, total):
+        updates.append((len(stories), done, total))
+
+    result = generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=3, max_parallel=3, on_batch=_on_batch,
+    )
+
+    assert len(result) == 9
+    assert len(updates) == 3, "one callback per batch"
+    # Progress counter is monotonic and terminates at total.
+    assert [u[1] for u in updates] == [1, 2, 3]
+    assert all(u[2] == 3 for u in updates)
+    # Accumulated ticket count only grows and ends at the full set.
+    counts = [u[0] for u in updates]
+    assert counts == sorted(counts)
+    assert counts[-1] == 9
+
+
+def test_single_strategy_never_calls_on_batch(isolated_settings, monkeypatch):
+    monkeypatch.setattr(gen, "llm_call",
+                        lambda **kw: _result({"stories": [_story("Only")]}))
+    fired = []
+    generate_from_input("ent-A", prd_input="PRD", strategy="single",
+                        on_batch=lambda *a: fired.append(a))
+    assert fired == [], "the single path has no batches to stream"
+
+
+def test_enrich_tolerates_string_items_in_stories(isolated_settings, monkeypatch):
+    """Regression: a real PRD made the enrich model return a bare string inside
+    `stories`; `s.get('title')` then raised 'str has no attribute get' and failed
+    the whole run. Malformed items must be skipped, valid ones kept."""
+    def _call(**kw):
+        if kw["prompt_version"] == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}]})
+        # One good ticket + a stray string + a None the model slipped in.
+        return _result({"stories": [_story("A"), "just a title string", None]})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                                  batch_size=2, max_parallel=2)
+
+    assert [s.title for s in stories] == ["A"], "valid ticket survives, junk dropped"
+
+
+def test_fanout_all_batches_empty_falls_back_to_single(isolated_settings, monkeypatch):
+    """If every enrich batch yields 0 usable tickets, fall back to the single
+    call rather than returning an empty set for a PRD that did plan stubs."""
+    calls: list[str] = []
+
+    def _call(**kw):
+        pv = kw["prompt_version"]
+        calls.append(pv)
+        if pv == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}]})
+        if pv == ENRICH_PROMPT_VERSION:
+            return _result({"stories": ["garbage", None]})  # all malformed
+        return _result({"stories": [_story("Recovered via single")]})  # PROMPT_VERSION
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                                  batch_size=2, max_parallel=2)
+
+    assert [s.title for s in stories] == ["Recovered via single"]
+    assert PROMPT_VERSION in calls, "fell back to the single-call path"
+
+
+def test_stories_from_output_handles_non_list(isolated_settings, monkeypatch):
+    """Guard the shape where `stories` itself isn't a list."""
+    def _call(**kw):
+        return _result({"stories": "not a list at all"})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="single")
+    assert stories == []
+
+
+# ── per-batch enrich retry ───────────────────────────────────────────────────
+
+def test_enrich_batch_retries_on_shortfall_and_keeps_better(isolated_settings, monkeypatch):
+    """A batch whose first (temp-0) pass drops a malformed item is retried once
+    at a non-zero temperature; the fuller retry result is kept."""
+    enrich_calls: list[float] = []
+
+    def _call(**kw):
+        pv = kw["prompt_version"]
+        if pv == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}]})
+        if pv == ENRICH_PROMPT_VERSION:
+            temp = kw.get("temperature", 0)
+            enrich_calls.append(temp)
+            if temp == 0:
+                return _result({"stories": [_story("A"), "malformed-string"]})  # 1 usable
+            return _result({"stories": [_story("A"), _story("B")]})  # retry: both good
+        return _result({"stories": []})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                                  batch_size=2, max_parallel=1)
+
+    assert sorted(s.title for s in stories) == ["A", "B"], "retry recovered the lost ticket"
+    assert enrich_calls[0] == 0, "first pass is deterministic (temp 0)"
+    assert enrich_calls[1] > 0, "retry samples at a non-zero temperature"
+    assert len(enrich_calls) == 2, "exactly one retry"
+
+
+def test_enrich_batch_no_retry_when_complete(isolated_settings, monkeypatch):
+    """A batch that returns one ticket per stub on the first pass is not retried."""
+    enrich_calls = []
+
+    def _call(**kw):
+        pv = kw["prompt_version"]
+        if pv == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}]})
+        if pv == ENRICH_PROMPT_VERSION:
+            enrich_calls.append(kw.get("temperature", 0))
+            return _result({"stories": [_story("A"), _story("B")]})
+        return _result({"stories": []})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                        batch_size=2, max_parallel=1)
+    assert enrich_calls == [0], "no retry when the batch is already complete"
+
+
+def test_enrich_batch_retry_keeps_best_when_both_short(isolated_settings, monkeypatch):
+    """If the retry is also short, keep whichever attempt had more tickets."""
+    def _call(**kw):
+        pv = kw["prompt_version"]
+        if pv == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": "A"}, {"title": "B"}, {"title": "C"}]})
+        if pv == ENRICH_PROMPT_VERSION:
+            if kw.get("temperature", 0) == 0:
+                return _result({"stories": [_story("A"), _story("B"), None]})  # 2 usable
+            return _result({"stories": [_story("A"), "junk", None]})  # retry: 1 usable
+        return _result({"stories": []})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    stories = generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
+                                  batch_size=3, max_parallel=1)
+    assert sorted(s.title for s in stories) == ["A", "B"], "kept the fuller first pass"
+
+
+# ── malformed model-output tolerance (regression net for the live failure) ────
+# forced tool-use validates the schema only loosely, so the model can hand back
+# stray strings/None/wrong types inside `stories`. This is the class of bug that
+# failed a live ticket generation ('str' object has no attribute 'get'); every
+# shape below must parse to the valid titles with NO exception.
+
+@pytest.mark.parametrize("output,expected", [
+    (None, []),
+    ({}, []),
+    ({"stories": None}, []),
+    ({"stories": "a bare string, not a list"}, []),
+    ({"stories": 42}, []),
+    ({"stories": {}}, []),
+    ({"not_stories": [{"title": "X"}]}, []),
+    ("output is a string, not a dict", []),
+    ([{"title": "X"}], []),                       # output is a list, not a dict
+    ({"stories": []}, []),
+    ({"stories": ["bare title", None, 123, {"no_title": 1}, {"title": ""}]}, []),
+    ({"stories": [{"title": "Good"}]}, ["Good"]),
+    ({"stories": [{"title": "Good"}, "junk", None, {"title": "Also"}]}, ["Good", "Also"]),
+    ({"stories": [{"title": "  Trimmed  "}]}, ["Trimmed"]),
+])
+def test_stories_from_output_tolerates_malformed_shapes(output, expected):
+    stories = _stories_from_output(output)
+    assert [s.title for s in stories] == expected
 
 
 def test_generate_user_stories_honors_strategy(isolated_settings, monkeypatch):

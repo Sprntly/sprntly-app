@@ -41,6 +41,17 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
         "cache_read":     0.5 / 1_000_000,
         "output":         25.0 / 1_000_000,
     },
+    # OpenAI embeddings (KG signal/theme vectors — app.graph.embeddings). Anthropic
+    # has no embeddings API, so this is the one non-Anthropic priced model. Billed
+    # on prompt tokens only — no output, no prompt caching — so the other three
+    # rates are 0.0 (kept so est_cost_usd's fixed key access never KeyErrors).
+    # $0.02 /MTok (OpenAI pricing, text-embedding-3-small).
+    "text-embedding-3-small": {
+        "input":          0.02 / 1_000_000,
+        "cache_write_1h": 0.0,
+        "cache_read":     0.0,
+        "output":         0.0,
+    },
 }
 
 

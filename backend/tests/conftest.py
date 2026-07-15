@@ -88,6 +88,7 @@ _RELOAD_ORDER = [
     "app.db",
     "app.corpus",
     "app.auth",
+    "app.entitlements",
     "app.llm",
     "app.ingest",
     "app.datasets",
@@ -352,6 +353,14 @@ CREATE TABLE companies (
     -- 20260525150000_onboarding_workspace.sql).
     use_platform_key    INTEGER NOT NULL DEFAULT 0,
     onboarding_completed_at TEXT,
+    -- Staff-panel entitlements (mirrors
+    -- 20260712150000_org_invites_admin_entitlements.sql). seat_limit NULL =
+    -- unlimited. prototype_enabled defaults 1 here (unlike the migration's 0)
+    -- because the migration backfills existing companies to true — test
+    -- companies are "existing" for the DA route suites.
+    feature_flags       TEXT NOT NULL DEFAULT '{}',
+    seat_limit          INTEGER,
+    prototype_enabled   INTEGER NOT NULL DEFAULT 1,
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -471,6 +480,27 @@ CREATE TABLE workspace_invites (
     UNIQUE (company_id, email)
 );
 CREATE INDEX workspace_invites_company_id_idx ON workspace_invites (company_id);
+
+-- Staff-panel organization invites (mirrors
+-- 20260712150000_org_invites_admin_entitlements.sql). Read/written by
+-- app.db.org_invites via /v1/staff + the claim route.
+CREATE TABLE org_invites (
+    id                TEXT PRIMARY KEY,
+    email             TEXT NOT NULL,
+    company_name      TEXT NOT NULL,
+    invited_by        TEXT,
+    seat_limit        INTEGER,
+    prototype_enabled INTEGER NOT NULL DEFAULT 0,
+    use_platform_key  INTEGER NOT NULL DEFAULT 0,
+    feature_flags     TEXT NOT NULL DEFAULT '{}',
+    status            TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (status IN ('pending', 'accepted', 'revoked')),
+    company_id        TEXT REFERENCES companies (id) ON DELETE SET NULL,
+    created_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    accepted_at       TEXT
+);
+CREATE UNIQUE INDEX org_invites_pending_email_uq
+    ON org_invites (lower(email)) WHERE status = 'pending';
 
 CREATE TABLE github_installations (
     installation_id      INTEGER PRIMARY KEY,

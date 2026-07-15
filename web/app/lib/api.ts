@@ -388,6 +388,13 @@ export const askApi = {
   /** List available skills the chat can route to. */
   skills: () =>
     api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),
+  /** Parse a binary document attachment (pptx/pdf/docx/…) to markdown so the
+   *  composer can inline it as [Attached files] context. Server-side, no LLM. */
+  extractFile: (file: File) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    return api.post<{ name: string; markdown: string }>("/v1/ask/extract-file", form)
+  },
 }
 
 export type PrdStartResponse = {
@@ -1297,6 +1304,12 @@ export const prdApi = {
       insight_index: insightIndex,
       force,
     }),
+  /** SSE URL to token-stream a PRD's generation as it's written. The bearer
+   *  rides as ?token= (EventSource can't set headers). Frames:
+   *  {kind:'delta',text} then a terminal {kind:'done'|'error'}. Progressive
+   *  display only — prdApi.get(id) stays the authoritative finished PRD. */
+  streamUrl: (prdId: number, token: string): string =>
+    `${API_URL}/v1/prd/${prdId}/stream?token=${encodeURIComponent(token)}`,
   /** Kick off PRD generation for a BACKLOG item (a theme ranked ≥ 4, not in the
    *  brief's top-3). Same fire-and-forget contract as `generate`: returns a
    *  prd_id to poll via prdApi.get(id). The backend synthesizes the insight from
@@ -1345,13 +1358,14 @@ export const prdApi = {
         `/v1/prd/${id}/generations`,
       )
       .then((r) => r.generations),
-  /** The PRD's structured "User input needed" questions (extracted at generation
-   *  time). Rendered in the PRD's chat as messages with answer buttons. Returns
-   *  every question; the client shows pending ones as actionable. */
+  /** The PRD's structured "User input needed" questions. Rendered in the PRD's
+   *  chat as messages with answer buttons. Returns every question; the client
+   *  shows pending ones as actionable. `extracting: true` means the backend just
+   *  scheduled the extraction for this PRD (a pre-feature PRD opened from
+   *  Artifacts, or a just-generated one whose extraction is still running) —
+   *  poll until it flips false and the questions arrive. */
   listInputQuestions: (id: number) =>
-    api
-      .get<{ questions: PrdInputQuestion[] }>(`/v1/prd/${id}/input-questions`)
-      .then((r) => r.questions),
+    api.get<PrdInputQuestionsList>(`/v1/prd/${id}/input-questions`),
   /** Answer one "User input needed" question. The backend folds the answer into
    *  only the affected PRD sections (a scoped edit — NOT a full regeneration),
    *  saves an undoable version, and returns the updated PRD + which sections
@@ -1377,6 +1391,14 @@ export type PrdInputQuestion = {
   options: PendingQuestionChoice[]
   status: "pending" | "answered" | "dismissed"
   answer?: string | null
+}
+
+/** Response from GET /v1/prd/{id}/input-questions — the stored questions plus
+ *  whether a background extraction is currently producing them (poll while
+ *  true). */
+export type PrdInputQuestionsList = {
+  questions: PrdInputQuestion[]
+  extracting?: boolean
 }
 
 /** Response from POST /v1/prd/{id}/input-questions/{qid}/answer — the updated PRD
@@ -2226,6 +2248,9 @@ export type StoryJob = {
   job_id: number
   status: "generating" | "ready" | "failed"
   stories?: GeneratedStory[]
+  // Fan-out streams tickets batch-by-batch: while `generating`, `stories` may
+  // hold the partial set landed so far and `progress` the batch counter.
+  progress?: { done: number; total: number }
   error?: string
 }
 
@@ -2430,6 +2455,165 @@ export const adminApi = {
   deleteLlmKey: () => api.delete<LlmKeyStatus>("/v1/admin/llm-key"),
   /** Explicit, opt-in live validation of the stored key (one cheap call). */
   testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
+}
+
+// ── Staff admin panel (dedicated owner-only credential) ──
+// Org invites + per-company entitlements. Auth is fully separate from the
+// normal app session: POST /v1/staff/login (id + password from env on the
+// backend) mints a short-lived staff JWT which we keep in sessionStorage and
+// send as the Bearer on every staff call — the Supabase token provider is
+// deliberately NOT used here. Anything but a live staff token gets 404 on
+// every route (the surface is invisible); the /admin page treats 401/404 as
+// "signed out" and drops back to its standalone login form.
+
+export const STAFF_TOKEN_KEY = "sprntly_staff_token"
+
+export function getStaffToken(): string | null {
+  if (typeof window === "undefined") return null
+  try {
+    return window.sessionStorage.getItem(STAFF_TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function setStaffToken(token: string): void {
+  if (typeof window === "undefined") return
+  try {
+    window.sessionStorage.setItem(STAFF_TOKEN_KEY, token)
+  } catch {
+    // Storage unavailable (e.g. blocked) — the panel just won't stay signed in.
+  }
+}
+
+export function clearStaffToken(): void {
+  if (typeof window === "undefined") return
+  try {
+    window.sessionStorage.removeItem(STAFF_TOKEN_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+/** Like `request`, but authed with the staff JWT from sessionStorage instead
+ *  of the app session (no cookies, no Supabase token provider). */
+async function staffRequest<T>(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  body?: unknown,
+): Promise<T> {
+  const headers: Record<string, string> = body
+    ? { "Content-Type": "application/json", Accept: "application/json" }
+    : { Accept: "application/json" }
+  const token = getStaffToken()
+  if (token) headers.Authorization = `Bearer ${token}`
+  const res = await fetch(`${API_URL}${path}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  let parsed: unknown = null
+  const text = await res.text()
+  if (text) {
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      parsed = text
+    }
+  }
+  if (!res.ok) {
+    throw new ApiError(res.status, parsed)
+  }
+  return parsed as T
+}
+
+export const staffAuth = {
+  /** Dedicated staff login. Stores the returned token on success. */
+  login: async (id: string, password: string) => {
+    const out = await staffRequest<{
+      token: string
+      token_type: "bearer"
+      expires_in: number
+    }>("POST", "/v1/staff/login", { id, password })
+    setStaffToken(out.token)
+    return out
+  },
+  logout: () => clearStaffToken(),
+  hasToken: () => getStaffToken() != null,
+}
+
+export type StaffCompany = {
+  id: string
+  slug: string
+  display_name: string
+  created_at: string | null
+  /** Max members incl. pending invites; null = unlimited. */
+  seat_limit: number | null
+  prototype_enabled: boolean
+  /** true ⇒ runs on Sprntly's platform Claude key; false ⇒ must bring their own. */
+  use_platform_key: boolean
+  feature_flags: Record<string, boolean>
+  /** Whether a BYOK key is stored (never the key itself). */
+  llm_key_configured: boolean
+  member_count: number
+  pending_invite_count: number
+}
+
+export type StaffEntitlementsPatch = {
+  seat_limit?: number | null
+  prototype_enabled?: boolean
+  use_platform_key?: boolean
+  /** Partial merge — only the keys sent change. */
+  feature_flags?: Record<string, boolean>
+}
+
+export type OrgInvite = {
+  id: string
+  email: string
+  company_name: string
+  seat_limit: number | null
+  prototype_enabled: boolean
+  use_platform_key: boolean
+  feature_flags: Record<string, boolean>
+  status: "pending" | "accepted" | "revoked"
+  company_id: string | null
+  created_at: string | null
+  accepted_at: string | null
+  email_sent?: boolean
+}
+
+export type OrgInviteIn = {
+  email: string
+  company_name: string
+  seat_limit?: number | null
+  prototype_enabled?: boolean
+  use_platform_key?: boolean
+  feature_flags?: Record<string, boolean>
+}
+
+export const staffApi = {
+  listCompanies: () =>
+    staffRequest<{ companies: StaffCompany[] }>("GET", "/v1/staff/companies"),
+  updateCompany: (companyId: string, patch: StaffEntitlementsPatch) =>
+    staffRequest<StaffCompany>(
+      "PATCH",
+      `/v1/staff/companies/${companyId}`,
+      patch,
+    ),
+  listInvites: () =>
+    staffRequest<{ invites: OrgInvite[] }>("GET", "/v1/staff/invites"),
+  createInvite: (body: OrgInviteIn) =>
+    staffRequest<OrgInvite>("POST", "/v1/staff/invites", body),
+  revokeInvite: (inviteId: string) =>
+    staffRequest<void>("DELETE", `/v1/staff/invites/${inviteId}`),
+  resendInvite: (inviteId: string) =>
+    staffRequest<OrgInvite>("POST", `/v1/staff/invites/${inviteId}/resend`),
+}
+
+export const orgInviteApi = {
+  /** Apply the signed-in owner's pending org invite to their new company.
+   *  404 ⇒ no pending invite (the normal self-serve case) — callers ignore it. */
+  claim: () => api.post<{ applied: boolean }>("/v1/org-invites/claim"),
 }
 
 // ── Feedback / feature-request (June 20 #13 + #A) ──

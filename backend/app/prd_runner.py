@@ -405,9 +405,13 @@ def _exemplars_block(ctx: dict) -> str:
     return f"\n{exemplars}\n" if exemplars else ""
 
 
-def _call_part_a(ctx: dict, author: str | None = None, background: bool = False):
+def _call_part_a(ctx: dict, author: str | None = None, background: bool = False,
+                 on_delta=None):
     """Generate the human-readable PRD (Part A) as an HTML page via the
     `prd-author` skill.
+
+    `on_delta(text)` — optional; forwards each HTML text delta as it streams so
+    the client can render the PRD progressively (see app.graph.token_stream).
 
     Steers the model to the HTML visual-system page via _PART_A_DIRECTIVE and
     keeps `skill=_SKILL` so the METHOD + its `+prd-author@<hash>` version pin are
@@ -438,6 +442,7 @@ def _call_part_a(ctx: dict, author: str | None = None, background: bool = False)
         user_cacheable_prefix=template_prefix,
         skill=_SKILL,
         background=background,
+        on_delta=on_delta,
     )
 
 
@@ -512,7 +517,7 @@ def _finalize_part_a(
 async def _generate_human_prd(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
     insight_override: dict | None = None, author: str | None = None,
-    import_source_md: str | None = None,
+    import_source_md: str | None = None, on_delta=None,
 ) -> dict:
     """Build context, generate the human PRD (Part A only), persist + log.
 
@@ -531,7 +536,9 @@ async def _generate_human_prd(
     ctx = await asyncio.to_thread(
         _build_context, brief_id, insight_index, insight_override, import_source_md
     )
-    result_a = await asyncio.to_thread(_call_part_a, ctx, author, background)
+    result_a = await asyncio.to_thread(
+        _call_part_a, ctx, author, background, on_delta=on_delta
+    )
     await asyncio.to_thread(
         _finalize_part_a, prd_id, brief_id, insight_index, ctx, result_a
     )
@@ -557,19 +564,36 @@ async def warm_impl_spec(prd_id: int, ctx: dict | None = None) -> None:
         logger.exception("impl-spec pre-warm failed prd_id=%s", prd_id)
 
 
-async def extract_input_questions_task(prd_id: int) -> None:
+async def extract_input_questions_task(prd_id: int, *, reserved: bool = False) -> None:
     """Lift the PRD's "User input needed" section into structured, answerable
     questions (so the PRD's chat can surface each as a message with answer
     buttons). Best-effort + error-isolated: the PRD is already generated and
     stored, so a failed extraction just means no chat questions — never a failed
-    PRD. Runs off the app loop via a worker thread (the extraction call is sync)."""
-    try:
-        from app.prd_questions import extract_input_questions
+    PRD. Runs off the app loop via a worker thread (the extraction call is sync).
 
+    Two schedulers exist — the generation pipeline (right after Part A) and the
+    lazy on-open backfill (GET /input-questions, for PRDs that predate the
+    feature) — so the run is single-flighted through the prd_questions registry:
+    the losing scheduler no-ops and its client polls until the winner's rows
+    land. `reserved=True` means the caller already holds the slot (it marked
+    before create_task, closing the schedule→run gap); this task still releases
+    it."""
+    from app.prd_questions import (
+        clear_extracting,
+        extract_input_questions,
+        mark_extracting,
+    )
+
+    if not reserved and not mark_extracting(prd_id):
+        logger.info("prd input-question extraction already in flight prd_id=%s", prd_id)
+        return
+    try:
         rows = await asyncio.to_thread(extract_input_questions, prd_id)
         logger.info("prd input-question extraction done prd_id=%s count=%s", prd_id, len(rows))
     except Exception:  # noqa: BLE001 — extraction is best-effort
         logger.exception("prd input-question extraction failed prd_id=%s", prd_id)
+    finally:
+        clear_extracting(prd_id)
 
 
 async def generate_prd_and_warm(
@@ -600,10 +624,22 @@ async def generate_prd_and_warm(
     warm so Part B reuses the SAME grounding without a second `_build_context`
     (KG retrieval + corpus load + exemplar render). None (on a failed Part A)
     lets the warm self-resolve as before."""
-    ctx = await generate_prd(
-        prd_id, brief_id, insight_index, background, insight_override, author,
-        import_source_md,
-    )
+    # Token-stream Part A (the human PRD) to any connected client over
+    # `prd:<id>`. The sink publishes each HTML delta from the LLM worker thread
+    # onto this loop; we send the terminal frame when Part A finishes (done) or
+    # fails (error) — Part B/questions warm afterwards and are not streamed.
+    from app.graph import token_stream
+
+    channel = f"prd:{prd_id}"
+    sink = token_stream.delta_sink(asyncio.get_running_loop(), channel)
+    ctx = None
+    try:
+        ctx = await generate_prd(
+            prd_id, brief_id, insight_index, background, insight_override, author,
+            import_source_md, on_delta=sink,
+        )
+    finally:
+        token_stream.close(channel, kind="done" if ctx is not None else "error")
     await asyncio.gather(
         extract_input_questions_task(prd_id),
         warm_impl_spec(prd_id, ctx=ctx),
@@ -621,7 +657,7 @@ def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
 async def generate_prd(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
     insight_override: dict | None = None, author: str | None = None,
-    import_source_md: str | None = None,
+    import_source_md: str | None = None, on_delta=None,
 ) -> dict | None:
     """Run the human-PRD generation; update DB with result.
 
@@ -651,7 +687,7 @@ async def generate_prd(
     try:
         ctx = await _generate_human_prd(
             prd_id, brief_id, insight_index, background, insight_override, author,
-            import_source_md,
+            import_source_md, on_delta=on_delta,
         )
         logger.info("PRD generation succeeded prd_id=%s", prd_id)
         return ctx

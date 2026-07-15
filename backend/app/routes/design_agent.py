@@ -274,6 +274,19 @@ def _require_feature_enabled() -> None:
         raise HTTPException(status_code=404, detail="Not found")
 
 
+def _require_company_prototype_enabled(company_id: str) -> None:
+    """Per-company prototype gate (companies.prototype_enabled, managed from
+    the staff admin panel) — checked UNDER the global env master switch on the
+    generation-spending entry points (/generate, /locate). Same 404 shape as
+    the env gate so the feature is invisible to un-entitled tenants. Existing
+    prototypes stay readable when a company is toggled off; only new
+    generation is blocked."""
+    from app.db.companies import prototype_enabled_for_company
+
+    if not prototype_enabled_for_company(company_id):
+        raise HTTPException(status_code=404, detail="Not found")
+
+
 # ── Tier 2: opt-in worker queue ──────────────────────────────────────────────
 # When ON *and* a worker heartbeat is fresh, /generate enqueues the generation
 # onto `design_agent_jobs` for `python -m app.worker` to run off the API request
@@ -435,6 +448,7 @@ async def generate(
     dedupe) so a double-click on Generate does not fan out duplicate runs.
     """
     _require_feature_enabled()
+    _require_company_prototype_enabled(company.company_id)
     # Tier 0: while the process is draining on SIGTERM, reject new work
     # cleanly rather than start a task a pending SIGKILL would abandon mid-run.
     # 503 is the retry signal the frontend retry self-heals on (the next
@@ -1311,6 +1325,7 @@ async def locate(
     awaited by drain because it is registered in _inflight_tasks.
     """
     _require_feature_enabled()
+    _require_company_prototype_enabled(company.company_id)
     workspace_id = company.company_id
 
     logger.info(

@@ -7,13 +7,18 @@ authenticated user's active company (the tenant everything else scopes by).
 """
 from __future__ import annotations
 
+import logging
+import uuid
+
 from app.db.client import require_client, retry_on_disconnect
+
+logger = logging.getLogger(__name__)
 
 
 @retry_on_disconnect
 def list_companies() -> list[dict]:
     """All companies (tenants), shaped {id, slug, display_name,
-    notification_settings, owner_timezone}.
+    notification_settings, feature_flags, owner_timezone}.
 
     Used by the scheduler to iterate every tenant for the KG-synthesis cycle and
     to read each company owner's timezone (profiles.timezone, resolved via the
@@ -33,7 +38,7 @@ def list_companies() -> list[dict]:
     try:
         result = (
             client.table("companies")
-            .select("id, slug, display_name, notification_settings")
+            .select("id, slug, display_name, notification_settings, feature_flags")
             .order("slug", desc=False)
             .execute()
         )
@@ -48,6 +53,12 @@ def list_companies() -> list[dict]:
         rows = result.data or []
         for row in rows:
             row.setdefault("notification_settings", {})
+    for row in rows:
+        # feature_flags is best-effort like notification_settings: an older
+        # schema (fallback select) or a NULL column defaults to {} — which the
+        # entitlement resolvers treat as everything-ON (grandfathering).
+        if not isinstance(row.get("feature_flags"), dict):
+            row["feature_flags"] = {}
     return _attach_owner_timezones(rows)
 
 
@@ -271,7 +282,21 @@ def get_company_llm_config(company_id: str) -> tuple[str | None, bool, bool]:
 
     `onboarding_complete` is `companies.onboarding_completed_at IS NOT NULL`. A
     missing company row returns (None, False, False) — treated as still
-    onboarding (lenient: platform allowed) by the resolver."""
+    onboarding (lenient: platform allowed) by the resolver. An id that isn't
+    even a valid UUID (a legacy dataset slug or telemetry tag bound by an older
+    gateway caller) is definitionally not a company: it gets the same lenient
+    missing-row answer instead of erroring the uuid-typed query below — the
+    error would otherwise fail the caller's whole LLM call (this is exactly
+    what silently killed PRD input-question extraction)."""
+    try:
+        uuid.UUID(company_id)
+    except (ValueError, TypeError):
+        logger.warning(
+            "get_company_llm_config: non-company id %r — treating as missing "
+            "(platform-key posture). Fix the caller to bind a company id.",
+            company_id,
+        )
+        return (None, False, False)
     client = require_client()
     result = (
         client.table("companies")
@@ -324,6 +349,159 @@ def clear_llm_api_key(company_id: str) -> None:
     client.table("companies").update(
         {"llm_api_key_encrypted": None}
     ).eq("id", company_id).execute()
+
+
+# Entitlement columns managed by the staff admin panel (plus use_platform_key,
+# which predates it). seat_limit NULL ⇒ unlimited.
+_ENTITLEMENT_FIELDS = (
+    "seat_limit",
+    "prototype_enabled",
+    "use_platform_key",
+    "feature_flags",
+)
+
+
+@retry_on_disconnect
+def get_company_entitlements(company_id: str) -> dict | None:
+    """A company's entitlement snapshot for the staff panel, or None when the
+    company doesn't exist. `llm_key_configured` says whether a BYOK key is
+    stored (never the key itself)."""
+    rows = (
+        require_client()
+        .table("companies")
+        .select(
+            "id, slug, display_name, created_at, seat_limit, "
+            "prototype_enabled, use_platform_key, feature_flags, "
+            "llm_api_key_encrypted"
+        )
+        .eq("id", company_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        return None
+    return _entitlement_row(rows[0])
+
+
+def _entitlement_row(row: dict) -> dict:
+    return {
+        "id": row.get("id"),
+        "slug": row.get("slug"),
+        "display_name": row.get("display_name"),
+        "created_at": row.get("created_at"),
+        "seat_limit": row.get("seat_limit"),
+        "prototype_enabled": bool(row.get("prototype_enabled")),
+        "use_platform_key": bool(row.get("use_platform_key")),
+        "feature_flags": row.get("feature_flags") or {},
+        "llm_key_configured": bool(row.get("llm_api_key_encrypted")),
+    }
+
+
+@retry_on_disconnect
+def update_company_entitlements(company_id: str, patch: dict) -> None:
+    """Apply a staff-panel entitlement change. Only whitelisted columns are
+    written — callers pass a pre-validated partial dict."""
+    payload = {k: v for k, v in patch.items() if k in _ENTITLEMENT_FIELDS}
+    if not payload:
+        return
+    require_client().table("companies").update(payload).eq(
+        "id", company_id
+    ).execute()
+
+
+@retry_on_disconnect
+def list_companies_for_staff() -> list[dict]:
+    """Every company with its entitlement snapshot + member/pending-invite
+    counts, for the staff admin panel's organizations table."""
+    client = require_client()
+    rows = (
+        client.table("companies")
+        .select(
+            "id, slug, display_name, created_at, seat_limit, "
+            "prototype_enabled, use_platform_key, feature_flags, "
+            "llm_api_key_encrypted"
+        )
+        .order("created_at", desc=True)
+        .execute()
+        .data
+        or []
+    )
+    companies = [_entitlement_row(r) for r in rows]
+    # Bulk member / pending-invite counts (two reads, counted in-process —
+    # fine at panel scale, and the fake test client has no group-by).
+    member_counts: dict[str, int] = {}
+    invite_counts: dict[str, int] = {}
+    try:
+        for m in (
+            client.table("company_members").select("company_id").execute().data
+            or []
+        ):
+            cid = m.get("company_id")
+            member_counts[cid] = member_counts.get(cid, 0) + 1
+        for i in (
+            client.table("workspace_invites").select("company_id").execute().data
+            or []
+        ):
+            cid = i.get("company_id")
+            invite_counts[cid] = invite_counts.get(cid, 0) + 1
+    except Exception:  # noqa: BLE001 — counts are display-only, never 500 the panel
+        pass
+    for c in companies:
+        c["member_count"] = member_counts.get(c["id"], 0)
+        c["pending_invite_count"] = invite_counts.get(c["id"], 0)
+    return companies
+
+
+@retry_on_disconnect
+def get_seat_limit(company_id: str) -> int | None:
+    """A company's seat limit, or None for unlimited (unset column, missing
+    row, or a legacy schema without the column)."""
+    try:
+        rows = (
+            require_client()
+            .table("companies")
+            .select("seat_limit")
+            .eq("id", company_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001 — legacy schema/fake client ⇒ unlimited
+        return None
+    if not rows:
+        return None
+    limit = rows[0].get("seat_limit")
+    return int(limit) if limit is not None else None
+
+
+@retry_on_disconnect
+def prototype_enabled_for_company(company_id: str) -> bool:
+    """Per-company design-agent (prototype) gate. Lenient on READ FAILURE
+    only (legacy schema without the column, fake test client ⇒ True, matching
+    the grandfather backfill); an explicit false in the row is respected. The
+    global DESIGN_AGENT_ENABLED env var remains the master switch upstream."""
+    try:
+        rows = (
+            require_client()
+            .table("companies")
+            .select("prototype_enabled")
+            .eq("id", company_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001
+        return True
+    if not rows:
+        return True
+    value = rows[0].get("prototype_enabled")
+    if value is None:
+        return True
+    return bool(value)
 
 
 @retry_on_disconnect

@@ -30,6 +30,8 @@ from __future__ import annotations
 
 import logging
 
+from app.db.briefs import get_brief_by_id
+from app.db.companies import company_id_for_slug
 from app.db.prd_input_questions import replace_questions
 from app.db.prds import get_prd
 from app.graph.gateway import llm_call
@@ -39,6 +41,37 @@ from app.prompts import VOICE_GUARD
 logger = logging.getLogger(__name__)
 
 _AGENT = "prd"
+
+# ── In-flight extraction registry ────────────────────────────────────────────
+# Guards against DOUBLE extraction for one PRD: the generation pipeline runs it
+# right after Part A, and the lazy on-open backfill (GET /input-questions, for
+# PRDs generated before this feature existed) schedules it on demand. Every
+# runner reserves the prd_id here first; a concurrent caller sees the
+# reservation and skips (its client just keeps polling until rows land).
+# In-process only — a restart clears it, which is safe because extraction is
+# idempotent (replace_questions is delete-then-insert). set ops are atomic
+# under the GIL, so the worker thread's clear never races the event loop.
+_extracting: set[int] = set()
+
+
+def is_extracting(prd_id: int) -> bool:
+    """True while an extraction for this PRD is reserved/running in-process."""
+    return prd_id in _extracting
+
+
+def mark_extracting(prd_id: int) -> bool:
+    """Reserve the extraction slot for a PRD. False if already reserved —
+    exactly one caller wins, so two racing schedulers never run twice."""
+    if prd_id in _extracting:
+        return False
+    _extracting.add(prd_id)
+    return True
+
+
+def clear_extracting(prd_id: int) -> None:
+    """Release the extraction slot (always paired with mark_extracting)."""
+    _extracting.discard(prd_id)
+
 
 # ── Extraction ───────────────────────────────────────────────────────────────
 
@@ -153,11 +186,17 @@ def extract_input_questions(prd_id: int) -> list[dict]:
         prd_html = (row.get("payload_md") or "").strip()
         if not prd_html:
             return []
-        # Same enterprise attribution the PRD generation used: the brief's company
-        # isn't threaded here, so attribute to the brief_id-scoped dataset via the
-        # gateway's enterprise_id (a string tag). Using the PRD's brief keeps the
-        # telemetry grouped with the rest of that PRD's calls.
+        # Same enterprise attribution the PRD generation used: resolve the PRD's
+        # brief → dataset → company id, so the gateway routes this call on the
+        # company's own Claude key (app.llm_keys binds enterprise_id as the acting
+        # company). A brief-id string here breaks that binding — the key resolver
+        # rejects non-company ids — and silently kills extraction. Legacy datasets
+        # that own no company fall back to the dataset slug (telemetry-only tag).
         enterprise_id = str(row.get("brief_id") or prd_id)
+        brief = get_brief_by_id(row["brief_id"]) if row.get("brief_id") else None
+        dataset = (brief or {}).get("dataset") or ""
+        if dataset:
+            enterprise_id = company_id_for_slug(dataset) or dataset
         questions = _run_extract(prd_html, enterprise_id)
         return replace_questions(prd_id, questions)
     except Exception:  # noqa: BLE001 — extraction must never break generation

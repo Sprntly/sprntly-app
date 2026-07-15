@@ -31,7 +31,7 @@ import logging
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from app.db.prds import get_prd_rendered
 from app.graph.gateway import llm_call
@@ -321,6 +321,34 @@ def _clean_str_list(value: Any) -> list[str]:
     return [s for s in (str(x).strip() for x in value) if s]
 
 
+def _stories_from_output(output: Any) -> list[Story]:
+    """Parse the `stories` array from an LLM tool-call output into `Story`s,
+    tolerating a non-conforming shape.
+
+    Forced tool-use validates against the schema loosely — the model can still
+    return `stories` as a non-list, or a list with stray string/None items
+    (observed on some real PRDs). Iterating those into `Story.from_dict` blew up
+    with `'str' object has no attribute 'get'`. Skip anything that isn't a
+    titled dict (logging how many were dropped) so a malformed batch degrades to
+    fewer tickets instead of failing the whole generation."""
+    raw = (output or {}).get("stories", []) if isinstance(output, dict) else []
+    if not isinstance(raw, list):
+        logger.warning("ticket output.stories was %s, not a list — dropping",
+                       type(raw).__name__)
+        return []
+    stories: list[Story] = []
+    dropped = 0
+    for s in raw:
+        if isinstance(s, dict) and str(s.get("title") or "").strip():
+            stories.append(Story.from_dict(s))
+        else:
+            dropped += 1
+    if dropped:
+        logger.warning("dropped %d malformed ticket item(s) from a model response",
+                       dropped)
+    return stories
+
+
 @dataclass
 class Story:
     """One generated ticket — the skill's canonical ticket, tracker-agnostic
@@ -580,8 +608,7 @@ def _generate_single(
         max_tokens=32000,
         long_output=True,
     )
-    raw = (result.output or {}).get("stories", []) if result.output else []
-    stories = [Story.from_dict(s) for s in raw if s.get("title")]
+    stories = _stories_from_output(result.output)
     if stats_out is not None:
         stats_out.update(
             strategy="single",
@@ -647,7 +674,13 @@ def _enrich_input(prd_input: str, all_titles: list[str], batch: list[dict]) -> s
     )
 
 
-def _enrich_batch(
+# Temperature for the enrich RETRY only. The first pass runs at 0 (deterministic
+# structured extraction); a retry at 0 would return the identical output, so the
+# retry samples at a small non-zero temperature to escape a malformed response.
+_ENRICH_RETRY_TEMPERATURE = 0.4
+
+
+def _enrich_once(
     enterprise_id: str,
     *,
     prd_input: str,
@@ -655,8 +688,9 @@ def _enrich_batch(
     batch: list[dict],
     purpose: str,
     model: Optional[str],
+    temperature: float,
 ) -> tuple[list[Story], Any]:
-    """Phase 2 (one batch): expand a subset of stubs into full canonical tickets."""
+    """One enrich call over a batch of stubs → parsed tickets + the raw result."""
     result = llm_call(
         enterprise_id=enterprise_id,
         agent="user_stories",
@@ -667,14 +701,55 @@ def _enrich_batch(
         json_schema=_SCHEMA,
         skill="user-stories",
         model=model,
-        temperature=0,
+        temperature=temperature,
         # A batch is a few tickets, not the whole PRD — a smaller budget than the
         # single path, still generous enough that a batch never truncates.
         max_tokens=16000,
         long_output=True,
     )
-    raw = (result.output or {}).get("stories", []) if result.output else []
-    stories = [Story.from_dict(s) for s in raw if s.get("title")]
+    return _stories_from_output(result.output), result
+
+
+def _enrich_batch(
+    enterprise_id: str,
+    *,
+    prd_input: str,
+    all_titles: list[str],
+    batch: list[dict],
+    purpose: str,
+    model: Optional[str],
+) -> tuple[list[Story], Any]:
+    """Phase 2 (one batch): expand a subset of stubs into full canonical tickets.
+
+    Retries the batch ONCE when the first pass returns fewer tickets than it has
+    stubs — the enrich contract is one ticket per stub, so a shortfall means the
+    model returned malformed items that `_stories_from_output` dropped (the class
+    of bug that failed a live generation). The retry samples at a non-zero
+    temperature (a temperature-0 retry would just repeat the bad output) and we
+    keep whichever attempt produced more tickets. Bounded to one retry so a
+    persistently-short batch never loops; a batch that still yields nothing is
+    backstopped by the whole-run single fallback in `_generate_fanout`. Each
+    batch retries on its OWN worker thread, so a retry never blocks sibling
+    batches — they keep generating in parallel."""
+    expected = len(batch)
+    stories, result = _enrich_once(
+        enterprise_id, prd_input=prd_input, all_titles=all_titles, batch=batch,
+        purpose=purpose, model=model, temperature=0,
+    )
+    if len(stories) >= expected:
+        return stories, result
+
+    logger.warning(
+        "enrich batch returned %d/%d tickets — retrying once with a fresh sample",
+        len(stories), expected,
+    )
+    retry_stories, retry_result = _enrich_once(
+        enterprise_id, prd_input=prd_input, all_titles=all_titles, batch=batch,
+        purpose=purpose, model=model, temperature=_ENRICH_RETRY_TEMPERATURE,
+    )
+    # Keep the better attempt (more tickets); a tie keeps the first (temp-0) run.
+    if len(retry_stories) > len(stories):
+        return retry_stories, retry_result
     return stories, result
 
 
@@ -687,12 +762,20 @@ def _generate_fanout(
     batch_size: int,
     max_parallel: int,
     stats_out: Optional[dict] = None,
+    on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
 ) -> list[Story]:
     """Fan-out: plan the ticket set, then expand batches in parallel.
 
     Falls back to the single path on an empty plan so we never regress to zero
     tickets (a real PRD always yields some). Dependency links stay correct
     because every batch is given the full title roster.
+
+    `on_batch(stories_so_far, done, total)` — when given, fires once per enrich
+    batch as it completes (on THIS orchestrating thread, in the as_completed
+    loop — never from the enrich sub-threads), carrying the deduped tickets
+    accumulated so far. Lets the caller stream partial results to the UI instead
+    of blocking on the whole set. Exceptions from the callback are swallowed so
+    a display hiccup never breaks generation.
     """
     t0 = time.monotonic()
     stubs, plan_result = _plan_tickets(
@@ -708,9 +791,14 @@ def _generate_fanout(
     bs = max(1, batch_size)
     batches = [stubs[i : i + bs] for i in range(0, len(stubs), bs)]
     all_titles = [str(s.get("title")).strip() for s in stubs]
+    total = len(batches)
 
     enriched: list[tuple[list[Story], Any]] = []
-    workers = max(1, min(max_parallel, len(batches)))
+    # Dedup by content id (stable_id) as batches land — batches are disjoint by
+    # design, but a stub restated across batches would otherwise double-count.
+    seen: set[str] = set()
+    stories: list[Story] = []
+    workers = max(1, min(max_parallel, total))
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = [
             ex.submit(
@@ -724,20 +812,35 @@ def _generate_fanout(
             )
             for b in batches
         ]
+        done = 0
         for f in as_completed(futs):
-            enriched.append(f.result())
+            batch_stories, _ = result = f.result()
+            enriched.append(result)
+            for s in batch_stories:
+                key = s.stable_id()
+                if key in seen:
+                    continue
+                seen.add(key)
+                stories.append(s)
+            done += 1
+            if on_batch is not None:
+                try:
+                    on_batch(list(stories), done, total)
+                except Exception:  # noqa: BLE001 — a display hiccup never breaks gen
+                    logger.exception("ticket on_batch callback failed (continuing)")
 
-    # Merge, dedup by content id (stable_id) — batches are disjoint by design,
-    # but a stub restated across batches would otherwise double-count.
-    seen: set[str] = set()
-    stories: list[Story] = []
-    for batch_stories, _ in enriched:
-        for s in batch_stories:
-            key = s.stable_id()
-            if key in seen:
-                continue
-            seen.add(key)
-            stories.append(s)
+    # Safety net: if every enrich batch came back empty/malformed (0 tickets from
+    # a real PRD that DID plan stubs), don't hand back an empty set — fall back to
+    # the single call, which reliably returns objects. Never caches empty upstream.
+    if not stories:
+        logger.warning(
+            "fan-out enrich produced 0 tickets across %d batch(es) — falling back "
+            "to single call", len(batches),
+        )
+        return _generate_single(
+            enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
+            stats_out=stats_out,
+        )
 
     if stats_out is not None:
         stats_out.update(
@@ -766,18 +869,21 @@ def generate_from_input(
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_parallel: int = DEFAULT_MAX_PARALLEL,
     stats_out: Optional[dict] = None,
+    on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
 ) -> list[Story]:
     """Generate tickets from an already-assembled model input string.
 
     The strategy-dispatch core shared by the DB-backed `generate_user_stories`
     and the benchmark harness (which feeds a PRD markdown fixture directly, no
     DB). `strategy` is "single" (one big call, the baseline) or "fanout" (plan →
-    parallel enrich). Never persists — callers own persistence.
+    parallel enrich). `on_batch` streams partial results (fanout only). Never
+    persists — callers own persistence.
     """
     if strategy == "fanout":
         return _generate_fanout(
             enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
             batch_size=batch_size, max_parallel=max_parallel, stats_out=stats_out,
+            on_batch=on_batch,
         )
     return _generate_single(
         enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
@@ -795,6 +901,7 @@ def generate_user_stories(
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_parallel: int = DEFAULT_MAX_PARALLEL,
     stats_out: Optional[dict] = None,
+    on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
 ) -> list[Story]:
     """Generate tickets for a company from a PRD or a free-form insight.
 
@@ -804,7 +911,8 @@ def generate_user_stories(
 
     `strategy` selects the generation path: "single" (baseline, one big call) or
     "fanout" (decompose then enrich batches in parallel). Output contract is
-    identical; only latency differs.
+    identical; only latency differs. `on_batch` (fanout only) streams partial
+    tickets as each batch completes.
     """
     if (prd_id is None) == (insight is None):
         raise ValueError("provide exactly one of prd_id or insight")
@@ -827,6 +935,7 @@ def generate_user_stories(
         batch_size=batch_size,
         max_parallel=max_parallel,
         stats_out=stats,
+        on_batch=on_batch,
     )
     # Resolved model / prompt-version for the decision log come from the last
     # underlying call (both paths populate `stats["calls"]`).

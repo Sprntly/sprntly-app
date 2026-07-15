@@ -233,7 +233,8 @@ def _ensure_competitor_entity(
     facade: GraphFacade, enterprise_id: str, name: str, tau_high: float
 ) -> str:
     """find-or-create the `competitor` entity for a roster name."""
-    vec = embed_texts([name])[0]
+    vec = embed_texts([name], enterprise_id=enterprise_id,
+                      purpose="competitor_research")[0]
     candidates = facade.find_candidates(enterprise_id, "competitor", vec, k=3)
     if candidates and candidates[0][1] >= tau_high:
         return candidates[0][0].id

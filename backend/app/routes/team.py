@@ -33,6 +33,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.auth import CompanyContext, require_company, require_session
 from app import team_email as team_email_mod
 from app.team_email import send_invite_email
+from app.db.companies import get_seat_limit
 from app.db.team import (
     accept_invite_for_user,
     count_owners,
@@ -57,6 +58,28 @@ def _require_admin(company: CompanyContext) -> None:
     """Gate for mutating routes. Members cannot mutate the team."""
     if company.role not in ("owner", "admin"):
         raise HTTPException(403, "Team management is restricted to admins")
+
+
+def _seats_in_use(company_id: str) -> int:
+    """Occupied seats = current members + pending invites (each pending
+    invite reserves a seat so accepts can't blow past the limit)."""
+    return len(list_company_members(company_id)) + len(
+        list_pending_invites(company_id)
+    )
+
+
+def _require_free_seat(company_id: str) -> None:
+    """403 when the company is at its staff-configured seat limit
+    (companies.seat_limit; NULL = unlimited)."""
+    limit = get_seat_limit(company_id)
+    if limit is None:
+        return
+    if _seats_in_use(company_id) >= limit:
+        raise HTTPException(
+            403,
+            f"Your plan allows {limit} member{'s' if limit != 1 else ''} "
+            "(including pending invites). Contact Sprntly to add seats.",
+        )
 
 
 class InviteIn(BaseModel):
@@ -176,6 +199,10 @@ def post_team_invite(
         company_id=company.company_id, email=body.email
     ):
         raise HTTPException(409, "An invite for that email is already pending")
+
+    # Staff-configured seat limit (admin panel). Checked after the duplicate
+    # guards so "already invited/member" wins as the clearer error.
+    _require_free_seat(company.company_id)
 
     row = create_invite(
         company_id=company.company_id,

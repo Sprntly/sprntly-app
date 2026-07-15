@@ -1,3 +1,4 @@
+import { orgInviteApi } from "../api"
 import { generateSlug } from "../onboard-helpers"
 import { getSupabase } from "../supabase/client"
 import {
@@ -258,6 +259,16 @@ export async function createWorkspace(input: {
         role: "owner",
       })
       if (memberErr) throw memberErr
+      // Staff org invite: if Sprntly invited this email, apply the invite's
+      // entitlements (modules, seat limit, prototype, key mode) to the new
+      // company. Best-effort — 404 just means self-serve signup (no invite),
+      // and any failure must never break onboarding (staff can re-apply from
+      // the admin panel).
+      try {
+        await orgInviteApi.claim()
+      } catch {
+        /* no pending invite, or transient — onboarding proceeds regardless */
+      }
       const product = await upsertPrimaryProduct(String(company.id), {
         name: input.productName,
         website: input.productWebsite ?? null,

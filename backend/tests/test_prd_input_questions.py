@@ -131,6 +131,44 @@ def test_extract_persists_questions(isolated_settings, monkeypatch):
     assert [o["label"] for o in stored[0]["options"]] == ["Gated", "Open"]
 
 
+def test_extract_attributes_the_prds_company(isolated_settings, monkeypatch):
+    # The gateway binds enterprise_id as the acting company for per-company key
+    # routing (app.llm_keys), so extraction must pass the COMPANY id resolved
+    # from the PRD's brief → dataset — not the brief id (a non-company id makes
+    # the key resolver reject the call and silently kills extraction).
+    company_id = "11111111-2222-4333-8444-555555555555"
+    _, prd_id = _seed_prd(isolated_settings["db"], dataset="acme")
+    seen: dict = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result({"questions": []})
+
+    monkeypatch.setattr(prd_questions, "llm_call", _capture)
+    monkeypatch.setattr(
+        prd_questions, "company_id_for_slug",
+        lambda slug: company_id if slug == "acme" else None,
+    )
+    prd_questions.extract_input_questions(prd_id)
+    assert seen["enterprise_id"] == company_id
+
+
+def test_extract_falls_back_to_dataset_slug_without_company(isolated_settings, monkeypatch):
+    # Legacy corpus datasets own no company row: keep the slug as a
+    # telemetry-only tag (the key resolver treats non-company ids leniently).
+    _, prd_id = _seed_prd(isolated_settings["db"], dataset="legacy-corpus")
+    seen: dict = {}
+
+    def _capture(**kw):
+        seen.update(kw)
+        return _llm_result({"questions": []})
+
+    monkeypatch.setattr(prd_questions, "llm_call", _capture)
+    monkeypatch.setattr(prd_questions, "company_id_for_slug", lambda slug: None)
+    prd_questions.extract_input_questions(prd_id)
+    assert seen["enterprise_id"] == "legacy-corpus"
+
+
 def test_extract_is_best_effort_on_error(isolated_settings, monkeypatch):
     _, prd_id = _seed_prd(isolated_settings["db"])
 
@@ -182,6 +220,56 @@ def test_apply_answer_empty_html_raises(isolated_settings, monkeypatch):
         prd_questions.apply_answer("<html>o</html>", "Q", "A", enterprise_id="co")
 
 
+# ── single-flight registry ───────────────────────────────────────────────────
+
+def test_mark_extracting_single_flight():
+    try:
+        assert not prd_questions.is_extracting(4242)
+        assert prd_questions.mark_extracting(4242) is True
+        assert prd_questions.is_extracting(4242)
+        # The losing scheduler cannot double-reserve.
+        assert prd_questions.mark_extracting(4242) is False
+    finally:
+        prd_questions.clear_extracting(4242)
+    assert not prd_questions.is_extracting(4242)
+
+
+def test_extract_task_releases_slot_on_error(isolated_settings, monkeypatch):
+    # The background task must release its reservation even when extraction
+    # blows up, or the PRD would report `extracting` forever and never retry.
+    import asyncio
+
+    import app.prd_runner as prd_runner
+
+    def _boom(prd_id):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(prd_questions, "extract_input_questions", _boom)
+    assert prd_questions.mark_extracting(777) is True
+    asyncio.run(prd_runner.extract_input_questions_task(777, reserved=True))
+    assert not prd_questions.is_extracting(777)
+
+
+def test_extract_task_skips_when_already_reserved(isolated_settings, monkeypatch):
+    # An unreserved invocation (the generation pipeline) no-ops when another
+    # run holds the slot — and must NOT release the other run's reservation.
+    import asyncio
+
+    import app.prd_runner as prd_runner
+
+    calls: list[int] = []
+    monkeypatch.setattr(
+        prd_questions, "extract_input_questions", lambda prd_id: calls.append(prd_id) or []
+    )
+    assert prd_questions.mark_extracting(778) is True
+    try:
+        asyncio.run(prd_runner.extract_input_questions_task(778))
+        assert calls == []
+        assert prd_questions.is_extracting(778)
+    finally:
+        prd_questions.clear_extracting(778)
+
+
 # ── routes ───────────────────────────────────────────────────────────────────
 
 def test_get_input_questions_route(tenant_client, isolated_settings):
@@ -193,8 +281,99 @@ def test_get_input_questions_route(tenant_client, isolated_settings):
 
     resp = t.client.get(f"/v1/prd/{prd_id}/input-questions")
     assert resp.status_code == 200
-    questions = resp.json()["questions"]
+    body = resp.json()
+    questions = body["questions"]
     assert len(questions) == 1 and questions[0]["prompt"] == "Baseline?"
+    # Stored rows → no backfill needed.
+    assert body["extracting"] is False
+
+
+def _patch_extract_task(monkeypatch):
+    """Replace the background extraction task with a recorder (patch the routes
+    module's binding — that is the name the GET handler schedules)."""
+    import app.routes.prd as prd_routes
+
+    scheduled: list[int] = []
+
+    async def _fake_task(prd_id: int, *, reserved: bool = False) -> None:
+        scheduled.append(prd_id)
+        prd_questions.clear_extracting(prd_id)
+
+    monkeypatch.setattr(prd_routes, "extract_input_questions_task", _fake_task)
+    return scheduled
+
+
+def _wait_for(predicate, timeout=2.0):
+    """The route fire-and-forgets its task onto the app loop; give it a beat to
+    run before asserting (deterministic wait, not a fixed sleep)."""
+    import time
+
+    deadline = time.time() + timeout
+    while not predicate() and time.time() < deadline:
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_get_input_questions_backfills_pre_feature_prd(
+    tenant_client, isolated_settings, monkeypatch
+):
+    # A ready PRD with a "User input needed" section but NO stored questions
+    # (generated before extraction existed, opened from Artifacts): the GET
+    # schedules the backfill and reports extracting so the client polls.
+    t = tenant_client.make(slug="acme")
+    _, prd_id = _seed_prd(
+        isolated_settings["db"], dataset="acme",
+        html="<html><body><div>User input needed</div><ul class='inputs'>"
+             "<li>[NEED] baseline</li></ul></body></html>",
+    )
+    scheduled = _patch_extract_task(monkeypatch)
+
+    resp = t.client.get(f"/v1/prd/{prd_id}/input-questions")
+    assert resp.status_code == 200
+    assert resp.json() == {"questions": [], "extracting": True}
+    assert _wait_for(lambda: scheduled == [prd_id])
+    # The fake task released the slot on completion.
+    assert _wait_for(lambda: not prd_questions.is_extracting(prd_id))
+
+
+def test_get_input_questions_no_section_no_backfill(
+    tenant_client, isolated_settings, monkeypatch
+):
+    # No "User input needed" section in the document → nothing to extract; the
+    # GET answers empty WITHOUT burning an LLM call, and the client stops there.
+    t = tenant_client.make(slug="acme")
+    _, prd_id = _seed_prd(
+        isolated_settings["db"], dataset="acme",
+        html="<html><body>All resolved.</body></html>",
+    )
+    scheduled = _patch_extract_task(monkeypatch)
+
+    resp = t.client.get(f"/v1/prd/{prd_id}/input-questions")
+    assert resp.status_code == 200
+    assert resp.json() == {"questions": [], "extracting": False}
+    # Negative check: give a (wrongly) scheduled task a beat to surface.
+    assert not _wait_for(lambda: scheduled, timeout=0.2)
+
+
+def test_get_input_questions_inflight_not_rescheduled(
+    tenant_client, isolated_settings, monkeypatch
+):
+    # An extraction already holds the slot (e.g. the generation pipeline's run
+    # for a just-finished PRD): the GET reports extracting but schedules nothing.
+    t = tenant_client.make(slug="acme")
+    _, prd_id = _seed_prd(
+        isolated_settings["db"], dataset="acme",
+        html="<html><body>User input needed<ul><li>[NEED] x</li></ul></body></html>",
+    )
+    scheduled = _patch_extract_task(monkeypatch)
+    assert prd_questions.mark_extracting(prd_id) is True
+    try:
+        resp = t.client.get(f"/v1/prd/{prd_id}/input-questions")
+        assert resp.status_code == 200
+        assert resp.json() == {"questions": [], "extracting": True}
+        assert not _wait_for(lambda: scheduled, timeout=0.2)
+    finally:
+        prd_questions.clear_extracting(prd_id)
 
 
 def test_get_input_questions_cross_tenant_404(tenant_client, isolated_settings):

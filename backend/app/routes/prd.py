@@ -16,14 +16,17 @@ it returns any row by id regardless of variant so old bookmarks keep
 resolving.
 """
 import asyncio
+import json
 import logging
 
 from pathlib import Path
 
 from fastapi import Depends, APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company
+from app.auth import CompanyContext, require_company, require_company_from_query
+from app.graph import token_stream
 from app.db import (
     find_existing_prd,
     get_prd_rendered,
@@ -50,7 +53,8 @@ from app.db.prds import (
 )
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
 from app.prd_runner import (
-    PRD_VARIANT, ensure_impl_spec, generate_prd, generate_prd_and_warm,
+    PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
+    generate_prd_and_warm,
 )
 from app.prompts import PRD_TEMPLATE_VERSION
 
@@ -363,6 +367,37 @@ def get(
     return row
 
 
+@router.get("/{prd_id}/stream")
+async def stream_prd_generation(
+    prd_id: int,
+    company: CompanyContext = Depends(require_company_from_query),
+) -> StreamingResponse:
+    """SSE token stream of a PRD's Part A generation, so the client renders the
+    PRD as it's written instead of waiting for the whole document.
+
+    EventSource can't send headers, so the bearer rides as `?token=`
+    (require_company_from_query). Frames: `{"kind":"delta","text":…}` as the HTML
+    streams, then a terminal `{"kind":"done"|"error"}`. PROGRESSIVE DISPLAY ONLY
+    — the client keeps polling GET /{prd_id}, which stays the authoritative
+    source for the finished, persisted PRD. Single-worker transport (see
+    app.graph.token_stream); on multi-worker this yields nothing and the poll
+    still carries the result. Opening late (generation already finished) simply
+    receives no frames — the poll shows the completed PRD.
+    """
+    require_owned_prd(prd_id, company.company_id)  # 404 on cross-tenant/missing
+    channel = f"prd:{prd_id}"
+
+    async def _gen():
+        async for event in token_stream.subscribe(channel):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 # ── Send to Claude Code: on-demand Implementation Spec ─────────────────
 
 
@@ -475,8 +510,16 @@ def restore_version(
 # ── "User input needed" questions: surface in chat + answer → scoped edit ──────
 
 
+# The prd-author template renders unresolved [ESCALATE]/[NEED] items under this
+# section eyebrow, and the section is SELF-CLEARING (the scoped answer editor
+# removes it once the last item resolves) — so its presence in the stored HTML
+# is a reliable "this PRD still has extractable input items" signal, checked
+# without any LLM call.
+_INPUT_SECTION_MARKER = "User input needed"
+
+
 @router.get("/{prd_id}/input-questions")
-def get_input_questions(
+async def get_input_questions(
     prd_id: int,
     company: CompanyContext = Depends(require_company),
 ):
@@ -486,9 +529,35 @@ def get_input_questions(
     surfaced in the PRD's chat as messages with answer buttons. Returns every
     question (pending + answered) so a reopened chat stays consistent; the client
     renders pending ones as actionable and answered ones as resolved.
+
+    Lazy backfill: PRDs generated before extraction existed (most of what the
+    Artifacts screen opens) have a "User input needed" section in the document
+    but no stored questions. When such a PRD is opened, schedule the SAME
+    best-effort extraction in the background and answer `extracting: true`; the
+    client polls until the rows land. The single-flight registry in
+    app.prd_questions makes concurrent opens (and the generation-time run for a
+    just-finished PRD, whose first fetch can race the pipeline's extraction)
+    schedule exactly one run.
     """
-    require_owned_prd(prd_id, company.company_id)
-    return {"questions": list_questions(prd_id)}
+    row = require_owned_prd(prd_id, company.company_id)
+    questions = list_questions(prd_id)
+    if questions:
+        return {"questions": questions, "extracting": False}
+
+    from app.prd_questions import is_extracting, mark_extracting
+
+    if is_extracting(prd_id):
+        return {"questions": [], "extracting": True}
+    if (
+        row.get("status") == "ready"
+        and _INPUT_SECTION_MARKER in (row.get("payload_md") or "")
+        and mark_extracting(prd_id)
+    ):
+        task = asyncio.create_task(extract_input_questions_task(prd_id, reserved=True))
+        _inflight_tasks.add(task)
+        task.add_done_callback(_inflight_tasks.discard)
+        return {"questions": [], "extracting": True}
+    return {"questions": [], "extracting": False}
 
 
 class InputAnswerIn(BaseModel):

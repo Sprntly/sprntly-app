@@ -74,17 +74,22 @@ function nowTime(): string {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
 }
 
+// Exported so ChatScreen intercepts tickets phrasings (incl. "convert this PRD
+// into tickets" over an attached document) with the SAME rule instead of
+// letting the ask agent answer with markdown.
+export const isTicketsCommand = (q: string) =>
+  /\b(create|generate|make|draft|break|convert|turn|split)\b.*\btickets?\b/i.test(q)
 // A "generate a PRD" phrasing is a COMMAND (open the PRD tab), not a question
 // for the ask agent. Exported so ChatScreen intercepts it with the SAME rule —
 // otherwise the ask agent answers it with a raw prd-author HTML dump.
-export const isPrdCommand = (q: string) => /\b(generate|create|write|draft|make)\b.*\bprd\b/i.test(q)
+// import/convert/upload cover the doc-import phrasings ("import this document
+// as a PRD"); a query that is a tickets command is never a PRD command, so
+// "convert this PRD into tickets" routes to tickets in every dispatcher
+// regardless of check order.
+export const isPrdCommand = (q: string) =>
+  /\b(generate|create|write|draft|make|import|convert|upload)\b.*\bprd\b/i.test(q) && !isTicketsCommand(q)
 const isPrototypeCommand = (q: string) =>
   /\b(generate|create|make|build|spin\s*up)\b.*\b(prototype|proto|mock\s*up|mockup)\b/i.test(q)
-// Exported for the same reason as isPrdCommand: ChatScreen intercepts tickets
-// phrasings (incl. "convert this PRD into tickets" over an attached document)
-// with the SAME rule instead of letting the ask agent answer with markdown.
-export const isTicketsCommand = (q: string) =>
-  /\b(create|generate|make|draft|break|convert|turn|split)\b.*\btickets?\b/i.test(q)
 
 // The fixed capability sentence — what the agent continuously does for the user.
 // Lower-cased so it flows after the "Good day, {name} - " salutation in a single

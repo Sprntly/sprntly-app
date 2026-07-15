@@ -6,7 +6,7 @@
 // click routes through answerInputQuestion → onPrdUpdated with the updated PRD; a
 // [NEED] question renders a free-text box. Also covers the pure helpers.
 import * as React from "react"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 vi.hoisted(() => {
@@ -255,5 +255,63 @@ describe("PrdInputQuestions container", () => {
       <PrdInputQuestions prdId={1} listQuestions={vi.fn().mockResolvedValue([])} />,
     )
     await waitFor(() => expect(container.querySelector(".piq-list")).toBeNull())
+  })
+
+  it("accepts the {questions, extracting} envelope from the real api", async () => {
+    const listQuestions = vi
+      .fn()
+      .mockResolvedValue({ questions: [escalateQ], extracting: false })
+    render(<PrdInputQuestions prdId={1} listQuestions={listQuestions} />)
+    await waitFor(() => screen.getByTestId("prd-input-question"))
+    expect(listQuestions).toHaveBeenCalledTimes(1)
+  })
+
+  it("polls while the backend backfills extraction, then renders the questions", async () => {
+    // First fetch: a pre-feature PRD opened from Artifacts — no stored rows yet,
+    // backend scheduled the extraction. Second fetch: the rows landed.
+    vi.useFakeTimers()
+    try {
+      const listQuestions = vi
+        .fn()
+        .mockResolvedValueOnce({ questions: [], extracting: true })
+        .mockResolvedValueOnce({ questions: [escalateQ], extracting: false })
+      const { container } = render(
+        <PrdInputQuestions prdId={1} listQuestions={listQuestions} />,
+      )
+
+      // Let the first fetch resolve → still nothing rendered, a poll is queued.
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(container.querySelector(".piq-list")).toBeNull()
+      expect(listQuestions).toHaveBeenCalledTimes(1)
+
+      // Advance past the poll interval → second fetch lands the questions.
+      await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+      expect(listQuestions).toHaveBeenCalledTimes(2)
+      expect(screen.getByTestId("prd-input-question")).toBeTruthy()
+      // extracting flipped false → polling stops.
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(listQuestions).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("stops polling on unmount", async () => {
+    vi.useFakeTimers()
+    try {
+      const listQuestions = vi
+        .fn()
+        .mockResolvedValue({ questions: [], extracting: true })
+      const { unmount } = render(
+        <PrdInputQuestions prdId={1} listQuestions={listQuestions} />,
+      )
+      await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+      expect(listQuestions).toHaveBeenCalledTimes(1)
+      unmount()
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(listQuestions).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

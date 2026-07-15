@@ -2,9 +2,13 @@ import { prdApi } from "./api"
 import { markdownToPrdState } from "./prd-adapter"
 import { sleepUntilNextPoll } from "./poll"
 import { clearPendingJob, insightScope, setPendingJob } from "./jobResume"
+import { subscribeToGenerationStream } from "./streamGeneration"
 import type { DetailState, PrdState } from "../types/content"
 
 export type PrdGenResult = { ok: true; prd: PrdState } | { ok: false; message: string }
+
+/** Optional live-preview callback: the accumulating Part A HTML as it streams. */
+export type OnPrdPartial = (html: string) => void
 
 const MAX_MS = 6 * 60 * 1000
 
@@ -14,8 +18,30 @@ const MAX_MS = 6 * 60 * 1000
  * `resumePrdGeneration` (which re-enters against a persisted id on remount).
  * Clears the persisted pending-job marker on every terminal exit (ready /
  * failed / timeout) so the resume only fires while a job is genuinely running.
+ *
+ * `onPartial`, when given, opens an SSE token stream alongside the poll and
+ * forwards the accumulating Part A HTML for a live preview. The poll stays the
+ * authoritative source of the finished PRD; the stream only feeds the preview
+ * and is always torn down before returning.
  */
 async function pollPrdToResult(
+  prdId: number,
+  scope: string | null,
+  onPartial?: OnPrdPartial,
+): Promise<PrdGenResult> {
+  const stopStream = onPartial
+    ? subscribeToGenerationStream((t) => prdApi.streamUrl(prdId, t), {
+        onDelta: (full) => onPartial(full),
+      })
+    : () => {}
+  try {
+    return await _pollPrdLoop(prdId, scope)
+  } finally {
+    stopStream()
+  }
+}
+
+async function _pollPrdLoop(
   prdId: number,
   scope: string | null,
 ): Promise<PrdGenResult> {
@@ -58,7 +84,10 @@ async function pollPrdToResult(
 
 /** Polls until PRD is ready (same contract as DetailScreen). Persists the
  *  active prd_id so a remount can resume via `resumePrdGeneration`. */
-export async function runPrdGeneration(meta: DetailState["meta"]): Promise<PrdGenResult> {
+export async function runPrdGeneration(
+  meta: DetailState["meta"],
+  onPartial?: OnPrdPartial,
+): Promise<PrdGenResult> {
   if (!meta) {
     return { ok: false, message: "Open this evidence from the brief first." }
   }
@@ -67,7 +96,7 @@ export async function runPrdGeneration(meta: DetailState["meta"]): Promise<PrdGe
   // across companies — the "_" company token keeps the key shape uniform.
   const scope = insightScope(meta.briefId, meta.insightIndex)
   setPendingJob("prd", "_", scope, start.prd_id)
-  return pollPrdToResult(start.prd_id, scope)
+  return pollPrdToResult(start.prd_id, scope, onPartial)
 }
 
 /**

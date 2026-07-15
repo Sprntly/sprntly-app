@@ -12,7 +12,13 @@ export type KpiTree = {
 }
 
 export type FeatureFlags = {
+  /** The single Agents module (staff admin) — absorbs the four agent-ish
+   *  legacy keys below. Old rows without it fall back to the legacy keys at
+   *  display time (see StaffAdminScreen); stored data is never rewritten. */
+  agents: boolean
   weekly_brief: boolean
+  // Legacy keys — superseded by `agents` but kept so old stored rows and the
+  // dormant FeatureFlagsSettings surface still typecheck.
   on_demand_analysis: boolean
   auto_prd_generation: boolean
   engineer_agent: boolean
@@ -116,6 +122,7 @@ export const ROLE_OPTIONS = [
 ] as const
 
 export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
+  agents: true,
   weekly_brief: true,
   on_demand_analysis: true,
   auto_prd_generation: true,
