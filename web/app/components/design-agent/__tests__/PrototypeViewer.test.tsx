@@ -512,7 +512,7 @@ describe("load mask (Glitch A)", () => {
     )
   })
 
-  it("renders NO placeholder when masking is not opted in (public / default path unchanged)", () => {
+  it("renders NO placeholder when masking is not opted in (default non-masking path)", () => {
     const html = renderWithMask(false)
     expect(html).not.toContain('data-testid="da-viewer-placeholder"')
     // default renderViewer (no prop at all) is also clean

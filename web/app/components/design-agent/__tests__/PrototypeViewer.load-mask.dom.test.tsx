@@ -5,7 +5,7 @@
 // black initial-paint / grant-mint gap is never shown. Exercised on the real DOM
 // (jsdom) because it depends on the iframe `load` event lifting the cover.
 import * as React from "react"
-import { cleanup, fireEvent, render } from "@testing-library/react"
+import { act, cleanup, fireEvent, render } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -47,12 +47,83 @@ describe("load mask lifts on first paint", () => {
     expect(onBundleLoad).toHaveBeenCalledTimes(1)
   })
 
-  it("renders no placeholder at all when masking is not opted in (public path unchanged)", () => {
+  it("renders no placeholder at all when masking is not opted in (default non-masking path)", () => {
     const { container } = render(
       <PrototypeViewer bundleUrl={BUNDLE} isComplete={false} />,
     )
     expect(
       container.querySelector('[data-testid="da-viewer-placeholder"]'),
     ).toBeNull()
+  })
+})
+
+// A stalled bundle (hung signed-URL fetch, dead asset host) never fires `load`,
+// which would otherwise leave the neutral cover up forever. The timeout is a
+// FALLBACK that lifts the cover only — it must not masquerade as a real load
+// (onBundleLoad stays a load-event signal).
+describe("mask timeout fallback", () => {
+  const placeholderIn = (container: HTMLElement) =>
+    container.querySelector('[data-testid="da-viewer-placeholder"]')
+
+  it("test_mask_lifts_after_timeout_without_load: the cover is removed after 8000ms with no load event", () => {
+    vi.useFakeTimers()
+    try {
+      const { container } = render(
+        <PrototypeViewer bundleUrl={BUNDLE} isComplete={false} maskUntilLoaded />,
+      )
+      act(() => {
+        vi.advanceTimersByTime(7999)
+      })
+      // Still covered just under the deadline…
+      expect(placeholderIn(container)).not.toBeNull()
+      act(() => {
+        vi.advanceTimersByTime(1)
+      })
+      // …lifted at 8000ms even though `load` never fired.
+      expect(placeholderIn(container)).toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("test_mask_timeout_does_not_fire_on_bundle_load: onBundleLoad is NOT called by the timeout path", () => {
+    vi.useFakeTimers()
+    try {
+      const onBundleLoad = vi.fn()
+      const { container } = render(
+        <PrototypeViewer
+          bundleUrl={BUNDLE}
+          isComplete={false}
+          maskUntilLoaded
+          onBundleLoad={onBundleLoad}
+        />,
+      )
+      act(() => {
+        vi.advanceTimersByTime(20_000)
+      })
+      // The timeout lifts the cover only; it never synthesizes a load signal.
+      expect(placeholderIn(container)).toBeNull()
+      expect(onBundleLoad).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it("test_mask_timeout_cleared_on_unmount: unmounting before the timeout leaves no pending timer side-effects", () => {
+    vi.useFakeTimers()
+    // React reports a setState-after-unmount (act warning) via console.error —
+    // a leaked timeout would surface there when the timers advance below.
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {})
+    try {
+      const { unmount } = render(
+        <PrototypeViewer bundleUrl={BUNDLE} isComplete={false} maskUntilLoaded />,
+      )
+      unmount()
+      vi.advanceTimersByTime(20_000)
+      expect(errorSpy).not.toHaveBeenCalled()
+    } finally {
+      errorSpy.mockRestore()
+      vi.useRealTimers()
+    }
   })
 })

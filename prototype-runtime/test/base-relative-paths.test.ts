@@ -113,3 +113,27 @@ describe("base: \"./\" — anchor-id plugin unaffected (AC4)", () => {
     expect(bundledJs).toContain("data-anchor-id");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Inline pre-paint background — the template `index.html` carries a neutral
+// `html { background-color: #f6f7f6 }` in an inline <head> style so a served
+// prototype never paints stark white before the bundle's own CSS applies. This
+// piggybacks the real Vite build above to prove the emitted `dist/index.html`
+// PRESERVES the inline head style (asserted against a real build, not memory).
+// ---------------------------------------------------------------------------
+
+describe("inline pre-paint background survives the build", () => {
+  it("emitted index.html keeps the inline pre-paint background", () => {
+    expect(indexHtml).toContain("background-color: #f6f7f6");
+  });
+
+  it("runtime index.html source carries the inline pre-paint background", async () => {
+    // Guards the ROOT template independently of the fixture copy the build
+    // consumes — a regression in either flips one of these two tests red.
+    const runtimeIndexHtml = await readFile(
+      join(PROTOTYPE_RUNTIME_ROOT, "index.html"),
+      "utf8",
+    );
+    expect(runtimeIndexHtml).toContain("background-color: #f6f7f6");
+  });
+});
