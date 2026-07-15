@@ -257,6 +257,17 @@ export function PublicPrototypeChrome({
           data-testid="da-canvas-center"
         >
           <PrototypeViewer
+            // Load mask: cover the iframe with the neutral surface until the
+            // bundle's first paint (with the viewer's own timeout fallback), so
+            // anon share/passcode recipients never see the white/black pre-paint
+            // flash. The key mirrors the signed-in mount's remount-key intent:
+            // `loaded` is per-mount state, so a bundleUrl change (token
+            // re-resolution / signed-URL rotation) remounts the viewer and
+            // re-masks until the fresh bundle paints. Accepted trade-off: a
+            // remount resets the viewer's local platform-toggle state —
+            // bundleUrl only changes on re-resolution, never on user interaction.
+            key={bundleUrl}
+            maskUntilLoaded
             bundleUrl={bundleUrl}
             isComplete={isComplete}
             // Single-device gate: suppress the in-frame Desktop/Mobile toggle when

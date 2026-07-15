@@ -37,6 +37,33 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 // classic runtime, so expose React globally (repo test convention).
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
+// Newer Node ships an experimental global `localStorage` that shadows jsdom's
+// (in this environment `window` IS the test global) and is non-functional
+// without `--localstorage-file` — so the component's `localStorage` persistence
+// (and this file's own reads) would throw or silently no-op. Stub the global
+// with a working in-memory Storage (global-stub-in-test-file is the repo idiom,
+// cf. PrdShareExport.dom.test.tsx) shaped like the real one: methods on the
+// prototype, entries as own enumerable props, so `{ ...localStorage }` spreads
+// to the stored entries exactly as a browser Storage does.
+class MemoryStorage {
+  getItem(key: string): string | null {
+    const store = this as unknown as Record<string, string>
+    return Object.prototype.hasOwnProperty.call(store, key) ? store[key]! : null
+  }
+  setItem(key: string, value: string): void {
+    ;(this as unknown as Record<string, string>)[key] = String(value)
+  }
+  removeItem(key: string): void {
+    delete (this as unknown as Record<string, string>)[key]
+  }
+  clear(): void {
+    for (const key of Object.keys(this)) {
+      delete (this as unknown as Record<string, string>)[key]
+    }
+  }
+}
+vi.stubGlobal("localStorage", new MemoryStorage())
+
 // NavigationProvider depends on next/navigation. Stub the router/pathname so the
 // provider mounts without a Next router context. `pushSpy` is hoisted + stable so
 // a test can assert the exact URL a navigation pushed (the router mock returned a
@@ -296,7 +323,11 @@ function cardFor(title: string): HTMLElement {
 
 afterEach(() => {
   cleanup()
-  localStorage.clear()
+  try {
+    window.localStorage.clear()
+  } catch {
+    /* storage disabled (private mode) — nothing to clear */
+  }
   vi.clearAllMocks()
   mapEntries.clear()
   mapState.loading = false
