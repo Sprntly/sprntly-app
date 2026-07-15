@@ -346,6 +346,86 @@ def _resolve_recipients(company_id: str, notif: dict) -> list[str]:
     return out
 
 
+def render_brief_ready_ping_email() -> tuple[str, str, str]:
+    """Render (subject, html_body, text_body) for the short regenerate ping —
+    one line of copy plus the same primary CTA button the weekly brief email
+    uses, NOT the full card layout. Pure + deterministic."""
+    from app.synthesis.delivery import READY_PING_CTA_LABEL, READY_PING_TEXT
+
+    url = _app_brief_url()
+    subject = "Your brief is ready"
+    text_body = f"{READY_PING_TEXT}\n\n{READY_PING_CTA_LABEL}: {url}"
+
+    open_btn = (
+        f'<a href="{html.escape(url)}" style="display:inline-block;'
+        f'background:{_GREEN};color:#ffffff;text-decoration:none;'
+        f'font-family:{_SANS};font-weight:600;font-size:14px;'
+        f'padding:11px 20px;border-radius:9px;">{html.escape(READY_PING_CTA_LABEL)}</a>'
+    )
+    html_body = (
+        '<!DOCTYPE html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width,initial-scale=1.0">'
+        f'<link href="{_FONTS_HREF}" rel="stylesheet">'
+        f'<style>body{{margin:0;padding:0;background:{_PAPER};}}</style></head>'
+        f'<body style="margin:0;padding:0;background:{_PAPER};">'
+        f'<div style="background:{_PAPER};padding:32px 16px;font-family:{_SANS};'
+        f'color:{_INK};-webkit-font-smoothing:antialiased;">'
+        '<div style="max-width:600px;margin:0 auto;">'
+        f'<div style="font-family:{_SANS};font-size:16px;line-height:1.6;'
+        f'color:{_INK_2};margin-bottom:20px;">{html.escape(READY_PING_TEXT)}</div>'
+        f'<div>{open_btn}</div>'
+        f'<div style="font-family:{_SANS};font-size:12px;color:{_INK_SOFT};'
+        f'margin-top:26px;line-height:1.5;">You are receiving this because brief '
+        'notifications are enabled for your company in Sprntly.</div>'
+        '</div></div></body></html>'
+    )
+    return subject, html_body, text_body
+
+
+def deliver_brief_ping_to_email(company_id: str) -> dict:
+    """Best-effort email delivery of the short regenerate ping. Same gates and
+    recipient resolution as deliver_brief_to_email (email_enabled toggle,
+    explicit recipients or company members, per-recipient failure isolation);
+    only the rendered content differs. Never raises."""
+    try:
+        api_key = settings.resend_api_key
+        if not api_key:
+            return {"delivered": False, "reason": "resend_not_configured",
+                    "recipients": []}
+
+        notif = companies_db.get_notification_settings(company_id)
+        if not notif.get("email_enabled"):
+            return {"delivered": False, "reason": "email_disabled",
+                    "recipients": []}
+
+        recipients = _resolve_recipients(company_id, notif)
+        if not recipients:
+            return {"delivered": False, "reason": "no_recipients",
+                    "recipients": []}
+
+        subject, html_body, text_body = render_brief_ready_ping_email()
+
+        results: list[dict] = []
+        for addr in recipients:
+            try:
+                _send_via_resend(api_key, to=addr, subject=subject,
+                                 html_body=html_body, text_body=text_body)
+                results.append({"email": addr, "delivered": True})
+            except Exception as e:  # noqa: BLE001 — one address never breaks the rest
+                logger.exception("brief ping email delivery failed for %s", addr)
+                results.append({"email": addr, "delivered": False,
+                                "reason": f"error: {e}"})
+
+        any_delivered = any(r["delivered"] for r in results)
+        out: dict = {"delivered": any_delivered, "recipients": results}
+        if not any_delivered:
+            out["reason"] = results[0].get("reason", "not_delivered")
+        return out
+    except Exception as e:  # noqa: BLE001 — delivery never breaks generation
+        logger.exception("brief ping email delivery failed for %s", company_id)
+        return {"delivered": False, "reason": f"error: {e}", "recipients": []}
+
+
 def deliver_brief_to_email(company_id: str, brief: dict) -> dict:
     """Best-effort email delivery of a brief to a company's recipients.
 

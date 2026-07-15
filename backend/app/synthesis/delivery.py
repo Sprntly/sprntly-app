@@ -27,6 +27,13 @@ from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 
 logger = logging.getLogger(__name__)
 
+# The short notification for a USER-TRIGGERED (unscheduled) regenerate. The
+# user just asked for the brief, so they don't need the full weekly message —
+# just a heads-up that it's ready, with the same deep-link button the weekly
+# message carries.
+READY_PING_TEXT = "Hey, your brief is generated."
+READY_PING_CTA_LABEL = "Open your brief"
+
 
 def _deliver_to_one(row: dict, text: str, blocks: list[dict]) -> dict:
     """Deliver the (already skill-drafted) brief message to a single per-user
@@ -70,13 +77,16 @@ def deliver_brief(enterprise_id: str, brief: dict) -> dict:
     """Push a brief to ALL of a company's configured destinations — per-user
     Slack + email — logging any real failure. Best-effort; never raises.
 
-    Invoked by the WEEKLY SCHEDULER TICK (app.scheduler), not by synthesis.
-    Delivery is a scheduled action, not a side effect of generating a brief:
-    the tick delivers whatever brief is current at the configured day/time —
-    whether it was freshly synthesized this run or returned from cache because
-    the KG hadn't changed. (Delivery used to live inside run_synthesis, so an
-    unchanged-KG week skipped synthesis AND silently skipped delivery — the
-    "my scheduled brief never arrived" bug.)"""
+    This is the FULL weekly brief message. Two callers:
+      - the weekly scheduler (app.scheduler): exactly AT the company's
+        configured day/time — the brief was already generated GENERATION_LEAD
+        earlier with delivery suppressed, so the push lands on time, never
+        early;
+      - run_synthesis with deliver=True: autonomous fresh briefs outside the
+        schedule (startup pass, new-dataset seed) announce themselves on
+        generation.
+    User-triggered regenerates never send this — they send the short
+    deliver_brief_ready_ping instead."""
     from app.synthesis.email_delivery import deliver_brief_to_email
 
     slack = deliver_brief_to_slack(enterprise_id, brief)
@@ -126,4 +136,67 @@ def deliver_brief_to_slack(enterprise_id: str, brief: dict) -> dict:
         return out
     except Exception as e:  # noqa: BLE001 — delivery never breaks generation
         logger.exception("brief slack delivery failed for %s", enterprise_id)
+        return {"delivered": False, "reason": f"error: {e}", "recipients": []}
+
+
+def ready_ping_slack_blocks() -> tuple[str, list[dict]]:
+    """(plain-text fallback, Block Kit blocks) for the short regenerate ping:
+    one line of copy + the same deep-link CTA button the weekly message uses.
+    Static copy — no LLM draft, this is a notification, not the brief itself."""
+    deep_link = brief_deep_link()
+    blocks: list[dict] = [
+        {"type": "section",
+         "text": {"type": "mrkdwn", "text": READY_PING_TEXT}},
+        {"type": "actions",
+         "elements": [
+             {"type": "button",
+              "text": {"type": "plain_text", "text": READY_PING_CTA_LABEL},
+              "url": deep_link,
+              "style": "primary"},
+         ]},
+    ]
+    return READY_PING_TEXT, blocks
+
+
+def deliver_brief_ready_ping(enterprise_id: str) -> dict:
+    """Push the short "Hey, your brief is generated." ping (Slack + email) after
+    a USER-TRIGGERED regenerate — NOT the full weekly brief message, which stays
+    reserved for the scheduled delivery. Same recipients/config gates as
+    deliver_brief; best-effort, never raises."""
+    from app.synthesis.email_delivery import deliver_brief_ping_to_email
+
+    slack = deliver_ready_ping_to_slack(enterprise_id)
+    if not slack.get("delivered") and slack.get("reason") not in (
+        "slack_not_connected", "no_channel_configured"
+    ):
+        logger.warning("brief ready-ping slack delivery: %s", slack)
+
+    email = deliver_brief_ping_to_email(enterprise_id)
+    if not email.get("delivered") and email.get("reason") not in (
+        "email_disabled", "no_recipients", "resend_not_configured"
+    ):
+        logger.warning("brief ready-ping email delivery: %s", email)
+
+    return {"slack": slack, "email": email}
+
+
+def deliver_ready_ping_to_slack(enterprise_id: str) -> dict:
+    """Fan the static ready-ping out to every member who connected their own
+    Slack and picked a target — same routing as deliver_brief_to_slack, minus
+    the LLM-drafted announcement. Never raises."""
+    try:
+        rows = db.list_slack_connections(enterprise_id)
+        if not rows:
+            return {"delivered": False, "reason": "slack_not_connected",
+                    "recipients": []}
+        text, blocks = ready_ping_slack_blocks()
+        recipients = [_deliver_to_one(row, text, blocks) for row in rows]
+        any_delivered = any(r.get("delivered") for r in recipients)
+        out: dict = {"delivered": any_delivered, "recipients": recipients}
+        if not any_delivered:
+            out["reason"] = recipients[0].get("reason", "not_delivered")
+        return out
+    except Exception as e:  # noqa: BLE001 — delivery never breaks generation
+        logger.exception("brief ready-ping slack delivery failed for %s",
+                         enterprise_id)
         return {"delivered": False, "reason": f"error: {e}", "recipients": []}

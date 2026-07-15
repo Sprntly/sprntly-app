@@ -59,18 +59,21 @@ def test_generate_synthesis_path_runs_run_synthesis(app_client, isolated_setting
     db = isolated_settings["supabase"]
     _seed_company(db, company_id="co-1", slug="acme")
 
-    def _fake_gen(slug):
+    def _fake_gen(slug, **_kw):
         # mirror run_synthesis: persist into briefs, return payload
         payload = _fake_synthesis_payload("acme")
         isolated_settings["db"].save_brief("acme", payload["week_label"], payload,
                                            schema_version=1)
         return payload
 
-    with patch.object(brief_routes, "generate_brief_for", side_effect=_fake_gen) as gen:
+    with patch.object(brief_routes, "generate_brief_for", side_effect=_fake_gen) as gen, \
+         patch.object(brief_routes, "_notify_brief_ready") as ping:
         r = app_client.post("/v1/brief/generate?dataset=acme")
 
     assert r.status_code == 200, r.text
-    gen.assert_called_once_with("acme")
+    # User-triggered: delivery suppressed in synthesis, short ping sent instead.
+    gen.assert_called_once_with("acme", deliver=False)
+    ping.assert_called_once()
     body = r.json()
     assert body["summary_headline"] == "synthesis headline"
     # response preserves the {brief_id, **payload} contract
@@ -81,12 +84,13 @@ def test_generate_synthesis_then_current_reads_back(app_client, isolated_setting
     db = isolated_settings["supabase"]
     _seed_company(db, company_id="co-1", slug="acme")
 
-    def _fake_gen(slug):
+    def _fake_gen(slug, **_kw):
         payload = _fake_synthesis_payload("acme")
         isolated_settings["db"].save_brief("acme", payload["week_label"], payload, 1)
         return payload
 
-    with patch.object(brief_routes, "generate_brief_for", side_effect=_fake_gen):
+    with patch.object(brief_routes, "generate_brief_for", side_effect=_fake_gen), \
+         patch.object(brief_routes, "_notify_brief_ready"):
         app_client.post("/v1/brief/generate?dataset=acme")
 
     # UI read path unchanged: /current returns the saved synthesis brief
@@ -123,9 +127,10 @@ def test_regenerate_synthesis_path_starts_synthesis_bg(app_client, isolated_sett
 
 
 def test_synthesis_bg_runner_invokes_generate_brief_for(isolated_settings, monkeypatch):
-    with patch.object(brief_routes, "generate_brief_for") as gen:
+    with patch.object(brief_routes, "generate_brief_for") as gen, \
+         patch.object(brief_routes, "_notify_brief_ready"):
         asyncio.run(brief_routes._synthesis_generate_bg("acme"))
-    gen.assert_called_once_with("acme")
+    gen.assert_called_once_with("acme", deliver=False)
 
 
 def test_synthesis_bg_runner_swallows_errors(isolated_settings, monkeypatch):
@@ -580,7 +585,7 @@ def test_synthesis_bg_warms_drilldowns_after_generate(isolated_settings, monkeyp
     """/regenerate's synthesis bg body warms drill-downs after the brief."""
     order: list[str] = []
     with patch.object(brief_routes, "generate_brief_for",
-                      side_effect=lambda slug: order.append("gen")), \
+                      side_effect=lambda slug, **_kw: order.append("gen")), \
          patch.object(brief_routes, "warm_synthesis_drilldowns",
                       side_effect=lambda slug: order.append("warm")) as warm:
         asyncio.run(brief_routes._synthesis_generate_bg("acme"))

@@ -230,8 +230,12 @@ def generate_all_synthesis_briefs() -> None:
                              slug)
 
 
-def generate_brief_for(company_id_or_slug: str) -> dict:
+def generate_brief_for(company_id_or_slug: str, *, deliver: bool = True) -> dict:
     """Generate + persist the KG-driven weekly brief for one company.
+
+    ``deliver=False`` suppresses the on-generation Slack/email push (see
+    run_synthesis) — for callers that deliver on their own schedule (the weekly
+    scheduler) or send their own short notification (the regenerate paths).
 
     Resolves slug↔company_id, incrementally seeds the KG (always picking up
     newly-uploaded corpus docs), then runs synthesis (which save_brief()s into
@@ -276,4 +280,4 @@ def generate_brief_for(company_id_or_slug: str) -> dict:
         prior["_from_cache"] = True
         return prior
 
-    return run_synthesis(facade, company_id, dataset_slug=slug)
+    return run_synthesis(facade, company_id, dataset_slug=slug, deliver=deliver)

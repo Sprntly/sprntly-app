@@ -20,16 +20,19 @@ Coverage:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.brief_schedule import (
     DEFAULT_TIMEZONE,
+    GENERATION_LEAD,
+    generation_start_time,
     next_fire_time,
     previous_fire_time,
     resolve_schedule,
     resolve_timezone,
     resolve_user_timezone,
+    should_generate_weekly_brief,
     should_run_weekly_brief,
 )
 
@@ -261,3 +264,75 @@ def test_naive_datetimes_are_treated_as_utc():
     tolerate naive (assumed-UTC) inputs too, so tests can be terse."""
     ny = ZoneInfo("America/New_York")
     assert should_run_weekly_brief(datetime(2026, 6, 8, 10, 0), ny, None) is True
+
+
+# ── generation lead: start GENERATION_LEAD (3h) before the fire time ─────────
+
+
+def test_generation_lead_is_three_hours():
+    assert GENERATION_LEAD == timedelta(hours=3)
+
+
+def test_generation_start_time_is_lead_before_the_fire():
+    """NY fires Monday 06:00 EDT = 10:00 UTC; generation starts 07:00 UTC. The
+    start instant is returned even while its fire is still in the FUTURE."""
+    ny = ZoneInfo("America/New_York")
+    now = datetime(2026, 6, 8, 7, 30, tzinfo=UTC)  # inside the lead window
+    assert generation_start_time(now, ny) == datetime(2026, 6, 8, 7, 0, tzinfo=UTC)
+
+
+def test_generation_due_3h_before_fire_but_not_earlier():
+    ny = ZoneInfo("America/New_York")
+    # 07:00 UTC Monday = fire (10:00 UTC) − 3h → generation due.
+    assert should_generate_weekly_brief(
+        datetime(2026, 6, 8, 7, 0, tzinfo=UTC), ny, None) is True
+    # 06:30 UTC — before the lead window opens → not due.
+    assert should_generate_weekly_brief(
+        datetime(2026, 6, 8, 6, 30, tzinfo=UTC), ny, None) is False
+    # 08:30 UTC — past the (1h) window → not due; the fallback path owns late.
+    assert should_generate_weekly_brief(
+        datetime(2026, 6, 8, 8, 30, tzinfo=UTC), ny, None) is False
+
+
+def test_generation_not_due_at_the_fire_time_itself():
+    """At the delivery instant the lead window is long closed — generation must
+    have happened earlier, delivery is a separate decision."""
+    ny = ZoneInfo("America/New_York")
+    assert should_generate_weekly_brief(
+        datetime(2026, 6, 8, 10, 0, tzinfo=UTC), ny, None) is False
+
+
+def test_generation_once_per_cycle_guard():
+    ny = ZoneInfo("America/New_York")
+    first = datetime(2026, 6, 8, 7, 0, tzinfo=UTC)
+    assert should_generate_weekly_brief(first, ny, None) is True
+    # A later tick in the same window, ledger recorded → suppressed.
+    assert should_generate_weekly_brief(
+        datetime(2026, 6, 8, 7, 45, tzinfo=UTC), ny, first) is False
+    # Last cycle's generation does not suppress this cycle's.
+    last_week = datetime(2026, 6, 1, 7, 0, tzinfo=UTC)
+    assert should_generate_weekly_brief(first, ny, last_week) is True
+
+
+def test_generation_honors_custom_schedule():
+    """A Wednesday-15:00-UTC brief (Comms & Brief settings) generates at
+    Wednesday 12:00 UTC."""
+    utc = ZoneInfo("UTC")
+    kw = {"weekday": 2, "hour": 15, "minute": 0}
+    assert should_generate_weekly_brief(
+        datetime(2026, 6, 10, 12, 0, tzinfo=UTC), utc, None, **kw) is True
+    assert should_generate_weekly_brief(
+        datetime(2026, 6, 10, 15, 0, tzinfo=UTC), utc, None, **kw) is False
+
+
+def test_generation_lead_crosses_local_midnight():
+    """A Monday-01:00-local fire generates Sunday 22:00 local — the lead window
+    living on the PREVIOUS local day (and weekday) must still resolve."""
+    utc = ZoneInfo("UTC")
+    kw = {"weekday": 0, "hour": 1, "minute": 0}  # Monday 01:00 UTC
+    # Sunday 2026-06-07 22:00 UTC = fire − 3h → due.
+    assert should_generate_weekly_brief(
+        datetime(2026, 6, 7, 22, 0, tzinfo=UTC), utc, None, **kw) is True
+    # Sunday 20:00 UTC → not yet.
+    assert should_generate_weekly_brief(
+        datetime(2026, 6, 7, 20, 0, tzinfo=UTC), utc, None, **kw) is False
