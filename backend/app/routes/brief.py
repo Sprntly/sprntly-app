@@ -5,6 +5,7 @@ from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
+from app.entitlements import require_weekly_brief_module
 from app.brief_runner import get_status, set_status, warm_synthesis_drilldowns
 from app.db import (
     find_existing_evidence,
@@ -262,7 +263,8 @@ def status(
 @router.post("/regenerate")
 async def regenerate(
     dataset: str,
-    company: CompanyContext = Depends(require_company),
+    # On-demand brief generation → Weekly Brief module gate.
+    company: CompanyContext = Depends(require_weekly_brief_module),
 ):
     """Force a fresh brief generation in the background. Returns immediately.
 
@@ -280,7 +282,10 @@ async def regenerate(
 @router.post("/regenerate-all")
 async def regenerate_all(
     dataset: str,
-    company: CompanyContext = Depends(require_company),
+    # The "Regenerate brief" full-pipeline button → Weekly Brief module gate.
+    # (Scheduled KG ingestion via connector sync is NOT affected — see
+    # app.entitlements module docstring.)
+    company: CompanyContext = Depends(require_weekly_brief_module),
 ):
     """Run the FULL regeneration pipeline in the background. Returns immediately.
 
@@ -372,7 +377,8 @@ def by_id(
 @router.post("/generate")
 def generate(
     dataset: str,
-    company: CompanyContext = Depends(require_company),
+    # On-demand brief generation → Weekly Brief module gate.
+    company: CompanyContext = Depends(require_weekly_brief_module),
 ):
     """Synchronously generate a fresh brief and return it.
 

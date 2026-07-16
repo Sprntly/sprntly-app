@@ -72,7 +72,13 @@ vi.mock("../../../../lib/api", () => ({
   },
 }))
 
-import { StaffAdminScreen, keyModeLabel } from "../StaffAdminScreen"
+import {
+  StaffAdminScreen,
+  MODULES,
+  agentsEnabled,
+  weeklyBriefEnabled,
+  keyModeLabel,
+} from "../StaffAdminScreen"
 
 const ACME = {
   id: "co-1",
@@ -82,7 +88,7 @@ const ACME = {
   seat_limit: 5,
   prototype_enabled: true,
   use_platform_key: true,
-  feature_flags: { weekly_brief: true, research_agent: false },
+  feature_flags: { agents: false, weekly_brief: true },
   llm_key_configured: false,
   member_count: 2,
   pending_invite_count: 1,
@@ -209,9 +215,51 @@ describe("StaffAdminScreen organizations", () => {
     expect(screen.getByText(/1 pending/)).toBeTruthy()
     expect(screen.getByText("Prototype on")).toBeTruthy()
     expect(screen.getByText("Platform key")).toBeTruthy()
-    // Only enabled modules are summarized.
-    expect(screen.getByText("Weekly Brief")).toBeTruthy()
-    expect(screen.queryByText(/Research Agent/)).toBeNull()
+    // Only enabled modules are summarized — the three-module scheme in order
+    // (agents is explicitly off; Prototype comes from prototype_enabled).
+    expect(screen.getByText("Prototype, Weekly Brief")).toBeTruthy()
+    expect(screen.queryByText(/Agents/)).toBeNull()
+  })
+
+  it("maps legacy-only flag rows onto the Agents chip at display time", async () => {
+    // A pre-rework row: no `agents` key, but one of the old default-on agent
+    // keys is on ⇒ the summary shows Agents (display-level mapping only).
+    const legacy = {
+      ...ACME,
+      id: "co-2",
+      display_name: "Legacy Corp",
+      prototype_enabled: false,
+      feature_flags: { weekly_brief: true, on_demand_analysis: true },
+    }
+    listCompanies.mockResolvedValue({ companies: [legacy] })
+    listInvites.mockResolvedValue({ invites: [] })
+    await mount()
+
+    expect(screen.getByText("Agents, Weekly Brief")).toBeTruthy()
+  })
+
+  it("offers exactly the three modules — Agents, Prototype, Weekly Brief — in the editor", async () => {
+    listCompanies.mockResolvedValue({ companies: [ACME] })
+    listInvites.mockResolvedValue({ invites: [] })
+    await mount()
+
+    fireEvent.click(screen.getByText("Edit"))
+
+    const modules = screen.getByRole("group", { name: "Modules" })
+    const labels = Array.from(modules.querySelectorAll("label")).map(
+      (l) => l.textContent ?? "",
+    )
+    expect(labels).toHaveLength(3)
+    expect(labels[0]).toBe("Agents")
+    expect(labels[1]).toMatch(/^Prototype/)
+    expect(labels[2]).toBe("Weekly Brief")
+    // The retired modules leave no dead UI behind.
+    expect(screen.queryByText("On-call Agent")).toBeNull()
+    expect(screen.queryByText("Claude Code Handoff")).toBeNull()
+    expect(screen.queryByText("On-demand Analysis")).toBeNull()
+    expect(screen.queryByText("Auto PRD Generation")).toBeNull()
+    expect(screen.queryByText("Engineer Agent")).toBeNull()
+    expect(screen.queryByText("Research Agent")).toBeNull()
   })
 
   it("saves entitlement edits through staffApi.updateCompany", async () => {
@@ -221,8 +269,9 @@ describe("StaffAdminScreen organizations", () => {
     await mount()
 
     fireEvent.click(screen.getByText("Edit"))
-    // Toggle the prototype feature off.
-    fireEvent.click(screen.getByLabelText(/Prototype feature/))
+    // Toggle the Prototype module off — it still writes prototype_enabled
+    // (the column), not feature_flags.
+    fireEvent.click(screen.getByLabelText(/^Prototype/))
     await act(async () => {
       fireEvent.click(screen.getByText("Save changes"))
     })
@@ -236,7 +285,131 @@ describe("StaffAdminScreen organizations", () => {
         feature_flags: expect.objectContaining({ weekly_brief: true }),
       }),
     )
+    const patch = updateCompany.mock.calls[0][1] as {
+      feature_flags: Record<string, boolean>
+    }
+    expect("prototype_enabled" in patch.feature_flags).toBe(false)
     expect(screen.getByText("Prototype off")).toBeTruthy()
+  })
+
+  // ── Editor prefill = the chips' effective-state mapping ──
+  // Regression: the editor used to read the RAW stored keys, so a
+  // grandfathered row whose chip said "Agents" opened with the checkbox
+  // unchecked.
+
+  it("prefills the editor's Agents checkbox via the legacy mapping (chip parity)", async () => {
+    const legacy = {
+      ...ACME,
+      id: "co-2",
+      display_name: "Legacy Corp",
+      // No `agents` key — only the old default-on capability keys.
+      feature_flags: { on_demand_analysis: true, auto_prd_generation: true },
+    }
+    listCompanies.mockResolvedValue({ companies: [legacy] })
+    listInvites.mockResolvedValue({ invites: [] })
+    await mount()
+
+    // The chip summary shows Agents on…
+    expect(screen.getByText(/Agents/)).toBeTruthy()
+    fireEvent.click(screen.getByText("Edit"))
+
+    // …and the editor now agrees.
+    const agents = screen.getByLabelText("Agents") as HTMLInputElement
+    expect(agents.checked).toBe(true)
+    // weekly_brief is missing too ⇒ ON per backend grandfathering.
+    const brief = screen.getByLabelText("Weekly Brief") as HTMLInputElement
+    expect(brief.checked).toBe(true)
+  })
+
+  it("keeps an explicit agents:false unchecked in the editor", async () => {
+    // ACME stores agents:false, weekly_brief:true explicitly.
+    listCompanies.mockResolvedValue({ companies: [ACME] })
+    listInvites.mockResolvedValue({ invites: [] })
+    await mount()
+
+    fireEvent.click(screen.getByText("Edit"))
+
+    expect((screen.getByLabelText("Agents") as HTMLInputElement).checked).toBe(
+      false,
+    )
+    expect(
+      (screen.getByLabelText("Weekly Brief") as HTMLInputElement).checked,
+    ).toBe(true)
+  })
+
+  it("shows a missing weekly_brief key as ON — chip and editor alike", async () => {
+    const grandfathered = {
+      ...ACME,
+      id: "co-3",
+      display_name: "Old Corp",
+      // Explicit agents, but no weekly_brief key at all.
+      feature_flags: { agents: true },
+    }
+    listCompanies.mockResolvedValue({ companies: [grandfathered] })
+    listInvites.mockResolvedValue({ invites: [] })
+    await mount()
+
+    expect(screen.getByText("Agents, Prototype, Weekly Brief")).toBeTruthy()
+    fireEvent.click(screen.getByText("Edit"))
+    expect(
+      (screen.getByLabelText("Weekly Brief") as HTMLInputElement).checked,
+    ).toBe(true)
+  })
+
+  it("saving without touching the modules sends the stored dict unchanged", async () => {
+    const legacy = {
+      ...ACME,
+      id: "co-2",
+      display_name: "Legacy Corp",
+      feature_flags: { on_demand_analysis: true },
+    }
+    listCompanies.mockResolvedValue({ companies: [legacy] })
+    listInvites.mockResolvedValue({ invites: [] })
+    updateCompany.mockResolvedValue(legacy)
+    await mount()
+
+    fireEvent.click(screen.getByText("Edit"))
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save changes"))
+    })
+
+    // Prefill is display-level only — no `agents`/`weekly_brief` keys get
+    // injected into an untouched dict.
+    const patch = updateCompany.mock.calls[0][1] as {
+      feature_flags: Record<string, boolean>
+    }
+    expect(patch.feature_flags).toEqual({ on_demand_analysis: true })
+  })
+
+  it("toggling a prefilled-on legacy checkbox writes an explicit agents:false", async () => {
+    const legacy = {
+      ...ACME,
+      id: "co-2",
+      display_name: "Legacy Corp",
+      feature_flags: { on_demand_analysis: true },
+    }
+    listCompanies.mockResolvedValue({ companies: [legacy] })
+    listInvites.mockResolvedValue({ invites: [] })
+    updateCompany.mockResolvedValue(legacy)
+    await mount()
+
+    fireEvent.click(screen.getByText("Edit"))
+    // Checked via the legacy mapping; one click turns it explicitly OFF.
+    fireEvent.click(screen.getByLabelText("Agents"))
+    expect((screen.getByLabelText("Agents") as HTMLInputElement).checked).toBe(
+      false,
+    )
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save changes"))
+    })
+
+    const patch = updateCompany.mock.calls[0][1] as {
+      feature_flags: Record<string, boolean>
+    }
+    expect(patch.feature_flags).toEqual({
+      on_demand_analysis: true,
+      agents: false,
+    })
   })
 })
 
@@ -267,11 +440,12 @@ describe("StaffAdminScreen invites", () => {
     fireEvent.change(screen.getByPlaceholderText("Acme Corp"), {
       target: { value: "Customer Inc" },
     })
-    fireEvent.click(screen.getByLabelText(/Prototype feature/))
+    fireEvent.click(screen.getByLabelText(/^Prototype/))
     await act(async () => {
       fireEvent.click(screen.getByText("Send invite"))
     })
 
+    // Both flag-backed modules default ON for new invites.
     expect(createInvite).toHaveBeenCalledWith(
       expect.objectContaining({
         email: "admin@customer.com",
@@ -279,13 +453,50 @@ describe("StaffAdminScreen invites", () => {
         seat_limit: null,
         prototype_enabled: true,
         use_platform_key: false,
-        feature_flags: expect.objectContaining({ weekly_brief: true }),
+        feature_flags: { agents: true, weekly_brief: true },
       }),
     )
     expect(screen.getByText(/Invite sent to admin@customer.com/)).toBeTruthy()
     // The new invite lands in the pending list.
     expect(screen.getByText("Customer Inc")).toBeTruthy()
     expect(screen.getByText("Pending")).toBeTruthy()
+  })
+})
+
+describe("MODULES + agentsEnabled", () => {
+  it("keeps exactly the two flag-backed modules (Prototype is column-backed)", () => {
+    expect(MODULES.map((m) => m.key)).toEqual(["agents", "weekly_brief"])
+  })
+
+  it("prefers an explicit agents key over the legacy fallback", () => {
+    expect(agentsEnabled({ agents: true })).toBe(true)
+    // Explicitly off wins even when legacy keys are on.
+    expect(agentsEnabled({ agents: false, on_demand_analysis: true })).toBe(false)
+  })
+
+  it("falls back to the old default-on keys for legacy rows", () => {
+    expect(agentsEnabled({ on_demand_analysis: true })).toBe(true)
+    expect(agentsEnabled({ auto_prd_generation: true })).toBe(true)
+    // Legacy keys present and all false → off (backend parity).
+    expect(agentsEnabled({ on_demand_analysis: false, auto_prd_generation: false })).toBe(false)
+  })
+
+  it("fails open when no relevant keys exist (backend entitlements parity)", () => {
+    // Empty dict / only irrelevant keys → ON, mirroring
+    // backend app/entitlements.py agents_enabled.
+    expect(agentsEnabled({})).toBe(true)
+    expect(agentsEnabled({ engineer_agent: true, research_agent: true })).toBe(true)
+    expect(agentsEnabled({ claude_code_handoff: false })).toBe(true)
+  })
+})
+
+describe("weeklyBriefEnabled", () => {
+  it("honors an explicit key and defaults a missing key to ON", () => {
+    expect(weeklyBriefEnabled({ weekly_brief: true })).toBe(true)
+    expect(weeklyBriefEnabled({ weekly_brief: false })).toBe(false)
+    // Missing key = grandfathered ON (backend app/entitlements.py parity).
+    expect(weeklyBriefEnabled({})).toBe(true)
+    expect(weeklyBriefEnabled({ agents: false })).toBe(true)
   })
 })
 

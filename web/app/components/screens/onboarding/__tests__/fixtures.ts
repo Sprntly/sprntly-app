@@ -26,6 +26,7 @@ export function makeWorkspace(
     biggest_risk: null,
     kpi_tree: { north_star: "", north_star_description: "", metrics: [] },
     feature_flags: {
+      agents: true,
       weekly_brief: true,
       on_demand_analysis: true,
       auto_prd_generation: true,

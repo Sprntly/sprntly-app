@@ -33,16 +33,52 @@ import {
 } from "../../../lib/api"
 
 // The module toggles stored in companies.feature_flags — mirrors the
-// FeatureFlags keys in lib/onboarding/types.ts.
+// FeatureFlags keys in lib/onboarding/types.ts. The Modules group shows
+// exactly three modules — Agents, Prototype, Weekly Brief — but Prototype is
+// backed by the companies.prototype_enabled COLUMN (enforced server-side),
+// not feature_flags, so only the other two live here. `agents` absorbs the
+// legacy on_demand_analysis / auto_prd_generation / engineer_agent /
+// research_agent keys; old rows without it are mapped at display time only
+// (see agentsEnabled) — stored data is never rewritten.
 export const MODULES: { key: string; label: string }[] = [
+  { key: "agents", label: "Agents" },
   { key: "weekly_brief", label: "Weekly Brief" },
-  { key: "on_demand_analysis", label: "On-demand Analysis" },
-  { key: "auto_prd_generation", label: "Auto PRD Generation" },
-  { key: "engineer_agent", label: "Engineer Agent" },
-  { key: "research_agent", label: "Research Agent" },
-  { key: "on_call_agent", label: "On-call Agent" },
-  { key: "claude_code_handoff", label: "Claude Code Handoff" },
 ]
+
+/** Whether the Agents module is on, mirroring backend
+ *  app/entitlements.py agents_enabled: an explicit `agents` key wins; rows
+ *  that predate it count as on when either of the old default-on keys
+ *  (on_demand_analysis / auto_prd_generation) was on; rows with NO relevant
+ *  keys at all (e.g. an empty dict) fail open to ON, same as the server
+ *  gate. Display-level only — never written back. */
+export function agentsEnabled(flags: Record<string, boolean>): boolean {
+  if ("agents" in flags) return !!flags.agents
+  if ("on_demand_analysis" in flags || "auto_prd_generation" in flags) {
+    return !!(flags.on_demand_analysis || flags.auto_prd_generation)
+  }
+  return true
+}
+
+/** Whether the Weekly Brief module is on — a missing key counts as ON
+ *  (grandfathering), mirroring backend app/entitlements.py
+ *  weekly_brief_enabled. Display-level only — never written back. */
+export function weeklyBriefEnabled(flags: Record<string, boolean>): boolean {
+  if ("weekly_brief" in flags) return !!flags.weekly_brief
+  return true
+}
+
+// Effective-state resolvers per flag-backed module. Both the org-row chips
+// and the editor checkboxes go through these so a grandfathered row (missing
+// / legacy-only keys) shows the SAME state everywhere. Toggling a checkbox
+// still writes an explicit `agents` / `weekly_brief` boolean; untouched
+// flags dicts are sent back unchanged.
+const MODULE_RESOLVERS: Record<
+  string,
+  (flags: Record<string, boolean>) => boolean
+> = {
+  agents: agentsEnabled,
+  weekly_brief: weeklyBriefEnabled,
+}
 
 export function keyModeLabel(c: {
   use_platform_key: boolean
@@ -52,8 +88,17 @@ export function keyModeLabel(c: {
   return c.llm_key_configured ? "Own key (set)" : "Own key (not set yet)"
 }
 
-function enabledModules(flags: Record<string, boolean>): string {
-  const on = MODULES.filter((m) => flags[m.key]).map((m) => m.label)
+// The org-row module summary — the three-module scheme in display order.
+// Prototype comes from the prototype_enabled column, not feature_flags.
+function enabledModules(company: {
+  feature_flags: Record<string, boolean>
+  prototype_enabled: boolean
+}): string {
+  const flags = company.feature_flags
+  const on: string[] = []
+  if (agentsEnabled(flags)) on.push("Agents")
+  if (company.prototype_enabled) on.push("Prototype")
+  if (weeklyBriefEnabled(flags)) on.push("Weekly Brief")
   if (!on.length) return "No modules enabled"
   return on.join(", ")
 }
@@ -76,6 +121,34 @@ type EntitlementFormState = {
   prototypeEnabled: boolean
   usePlatformKey: boolean
   featureFlags: Record<string, boolean>
+}
+
+function flagCheckbox(
+  m: { key: string; label: string },
+  state: EntitlementFormState,
+  onChange: (next: EntitlementFormState) => void,
+) {
+  // Resolve the DISPLAYED state like the org-row chips do (missing/legacy
+  // keys map to the effective backend state); the raw stored dict stays
+  // untouched until the staff member actually toggles the box.
+  const resolve = MODULE_RESOLVERS[m.key]
+  return (
+    <label key={m.key} className="sadm-check">
+      <input
+        type="checkbox"
+        checked={
+          resolve ? resolve(state.featureFlags) : !!state.featureFlags[m.key]
+        }
+        onChange={(e) =>
+          onChange({
+            ...state,
+            featureFlags: { ...state.featureFlags, [m.key]: e.target.checked },
+          })
+        }
+      />
+      <span>{m.label}</span>
+    </label>
+  )
 }
 
 function EntitlementFields({
@@ -107,17 +180,6 @@ function EntitlementFields({
       <label className="sadm-check">
         <input
           type="checkbox"
-          checked={state.prototypeEnabled}
-          onChange={(e) =>
-            onChange({ ...state, prototypeEnabled: e.target.checked })
-          }
-        />
-        <span>Prototype feature (design agent)</span>
-      </label>
-
-      <label className="sadm-check">
-        <input
-          type="checkbox"
           checked={state.usePlatformKey}
           onChange={(e) =>
             onChange({ ...state, usePlatformKey: e.target.checked })
@@ -132,26 +194,26 @@ function EntitlementFields({
         </span>
       </label>
 
+      {/* Exactly three modules, in this order: Agents, Prototype, Weekly
+          Brief. Prototype sits in the middle but writes prototype_enabled
+          (the column), not featureFlags. */}
       <fieldset className="sadm-modules">
         <legend>Modules</legend>
-        {MODULES.map((m) => (
-          <label key={m.key} className="sadm-check">
-            <input
-              type="checkbox"
-              checked={!!state.featureFlags[m.key]}
-              onChange={(e) =>
-                onChange({
-                  ...state,
-                  featureFlags: {
-                    ...state.featureFlags,
-                    [m.key]: e.target.checked,
-                  },
-                })
-              }
-            />
-            <span>{m.label}</span>
-          </label>
-        ))}
+        {flagCheckbox(MODULES[0], state, onChange)}
+        <label className="sadm-check">
+          <input
+            type="checkbox"
+            checked={state.prototypeEnabled}
+            onChange={(e) =>
+              onChange({ ...state, prototypeEnabled: e.target.checked })
+            }
+          />
+          <span>
+            Prototype
+            <span className="sadm-field-hint"> — design agent</span>
+          </span>
+        </label>
+        {flagCheckbox(MODULES[1], state, onChange)}
       </fieldset>
     </div>
   )
@@ -228,7 +290,7 @@ function CompanyRow({
             {" · joined "}
             {formatDate(company.created_at)}
           </div>
-          <div className="sadm-org-meta">{enabledModules(company.feature_flags)}</div>
+          <div className="sadm-org-meta">{enabledModules(company)}</div>
         </div>
         <div className="sadm-org-right">
           <span
@@ -283,10 +345,10 @@ const EMPTY_INVITE_FORM: EntitlementFormState = {
   seatLimit: "",
   prototypeEnabled: false,
   usePlatformKey: false,
+  // Both flag-backed modules default ON for new invites.
   featureFlags: {
+    agents: true,
     weekly_brief: true,
-    on_demand_analysis: true,
-    auto_prd_generation: true,
   },
 }
 
