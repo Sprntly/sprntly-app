@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 _TABLE = "prototype_comments"
 _LEGAL_STATUS = {"open", "resolved", "orphaned"}
+_LEGAL_ORIGIN = {"internal", "public"}
 
 
 def insert_comment(
@@ -55,18 +56,25 @@ def insert_comment(
     pin_x_pct: float | None = None,        # viewport-relative x position (0..100), None for non-pin comments
     pin_y_pct: float | None = None,        # viewport-relative y position (0..100), None for non-pin comments
     resolved_anchor_id: str | None = None,  # stable JSX anchor at the pin point, None if unresolved
+    origin: str = "internal",              # who created it: 'internal' (authed) | 'public' (share-link viewer)
+    visitor_id: str | None = None,          # server-minted anonymous-visitor identity (public writes only)
 ) -> dict[str, Any]:
     """Insert a comment. anchor_id=None is a general (unpinned) comment -- valid.
     Returns the inserted row.
 
     Raises ValueError on an empty-STRING anchor_id (a validation/programming
-    bug distinct from the honest "no anchor" None case) or empty/whitespace
-    body — both real bugs, not runtime conditions to swallow.
+    bug distinct from the honest "no anchor" None case), empty/whitespace
+    body, or an origin outside {'internal', 'public'} — all real bugs, not
+    runtime conditions to swallow.
     """
     if anchor_id == "":
         raise ValueError("insert_comment: anchor_id is empty string (use None for no anchor)")
     if not body.strip():
         raise ValueError("insert_comment: body is empty")
+    if origin not in _LEGAL_ORIGIN:
+        raise ValueError(
+            f"insert_comment: illegal origin {origin!r} (expected one of {sorted(_LEGAL_ORIGIN)})"
+        )
     c = require_client()
     payload: dict[str, Any] = {
         "prototype_id": prototype_id,
@@ -88,6 +96,14 @@ def insert_comment(
         payload["pin_y_pct"] = pin_y_pct
     if resolved_anchor_id is not None:
         payload["resolved_anchor_id"] = resolved_anchor_id
+    # Write origin only when it differs from the column DEFAULT ('internal') and
+    # visitor_id only when supplied — same optional-column convention as above.
+    # The DB default carries 'internal', so internal writes insert exactly the
+    # prior column set; readers project a missing origin as 'internal'.
+    if origin != "internal":
+        payload["origin"] = origin
+    if visitor_id is not None:
+        payload["visitor_id"] = visitor_id
     resp = c.table(_TABLE).insert(payload).execute()
     row = resp.data[0]
     # Identifiers only -- never log comment body (PII per Rule #24).
@@ -148,15 +164,22 @@ def list_comments(
     *,
     prototype_id: int,
     workspace_id: str,
+    origin: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return all comments for a prototype (any status), ordered by created_at
     ascending. Workspace-filtered (Rule #22). Author is resolved from profiles
-    at read time for rows that carry a user_id — name changes propagate."""
+    at read time for rows that carry a user_id — name changes propagate.
+
+    origin=None returns every row (the authed team view); origin='public'
+    restricts to share-link-viewer rows (the public by-token list). The origin
+    filter is ADDITIONAL to the workspace filter, never a replacement."""
     c = require_client()
-    resp = (c.table(_TABLE).select("*")
-            .eq("prototype_id", prototype_id)
-            .eq("workspace_id", workspace_id)
-            .order("created_at", desc=False).execute())
+    q = (c.table(_TABLE).select("*")
+         .eq("prototype_id", prototype_id)
+         .eq("workspace_id", workspace_id))
+    if origin is not None:
+        q = q.eq("origin", origin)
+    resp = q.order("created_at", desc=False).execute()
     rows = resp.data or []
     return _resolve_display_names(rows)
 
