@@ -478,7 +478,12 @@ CREATE INDEX products_company_id_idx ON products (company_id);
 -- Mirrors supabase/migrations/20260606120000_workspaces_and_connection_scope.sql.
 CREATE TABLE workspaces (
     id          TEXT PRIMARY KEY,
-    company_id  TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    -- No REFERENCES companies(id) here, unlike prod: route tests override
+    -- require_company with fabricated company ids (co-X, acme, …) that have no
+    -- companies row, and require_workspace's ensure_default_workspace self-heal
+    -- must be able to insert for them. In prod require_company resolves the
+    -- company FROM the DB, so the row always exists and the FK never bites.
+    company_id  TEXT NOT NULL,
     product_id  TEXT REFERENCES products (id) ON DELETE SET NULL,
     name        TEXT NOT NULL,
     slug        TEXT NOT NULL,
