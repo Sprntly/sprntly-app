@@ -43,3 +43,18 @@ def save_jira_issue_key(
         },
         on_conflict="company_id,project_key,ticket_id",
     ).execute()
+
+
+@retry_on_disconnect
+def delete_jira_issue_key(company_id: str, project_key: str, ticket_id: str) -> None:
+    """Drop the ticket's mapping AND its sub-task rows (`{ticket_id}#sub#…`).
+    Called when the Jira issue was DELETED in the tracker so a re-sync treats
+    the ticket (and its sub-tasks) as never-pushed and re-creates them cleanly
+    — no orphan rows pointing at deleted issues."""
+    cli = require_client()
+    cli.table("jira_issue_map").delete().eq("company_id", company_id).eq(
+        "project_key", project_key
+    ).eq("ticket_id", ticket_id).execute()
+    cli.table("jira_issue_map").delete().eq("company_id", company_id).eq(
+        "project_key", project_key
+    ).like("ticket_id", f"{ticket_id}#sub#%").execute()

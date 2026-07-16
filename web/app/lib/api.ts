@@ -2406,7 +2406,7 @@ export type TrackerTransition = {
 
 // ── Ticket tracker sync (per-PRD) ────────────────────────────────────────────
 
-export type TrackerProvider = "clickup" | "jira"
+export type TrackerProvider = "clickup" | "jira" | "asana"
 
 /** Per-PRD tracker-sync state (GET /v1/stories/sync/{prd_id}). After the first
  *  push registers a destination, the backend auto-syncs on an interval; the

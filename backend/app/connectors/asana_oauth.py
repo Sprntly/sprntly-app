@@ -191,9 +191,18 @@ def token_payload_to_store(
 
 _WRITE_TIMEOUT = 20
 _TASK_OPT_FIELDS = (
-    "name,notes,completed,permalink_url,modified_at,"
+    "name,notes,completed,permalink_url,modified_at,due_on,start_on,"
     "assignee.name,assignee.email,"
-    "memberships.project.gid,memberships.section.gid,memberships.section.name"
+    "memberships.project.gid,memberships.section.gid,memberships.section.name,"
+    # Custom-field values (structured, per type) so the two-way sync can
+    # round-trip them — display_value alone can't be written back.
+    "custom_fields.gid,custom_fields.name,custom_fields.resource_subtype,custom_fields.type,"
+    "custom_fields.enum_value.gid,custom_fields.enum_value.name,"
+    "custom_fields.multi_enum_values.gid,custom_fields.multi_enum_values.name,"
+    "custom_fields.text_value,custom_fields.number_value,"
+    "custom_fields.date_value.date,custom_fields.date_value.date_time,"
+    "custom_fields.people_value.gid,custom_fields.people_value.name,"
+    "custom_fields.display_value"
 )
 
 
@@ -265,6 +274,73 @@ def list_project_sections(access_token: str, project_gid: str) -> list[dict[str,
             for s in data if isinstance(s, dict) and s.get("gid")]
 
 
+def get_project_custom_fields(access_token: str, project_gid: str) -> list[dict[str, Any]]:
+    """A project's custom-field DEFINITIONS (via custom_field_settings) — what
+    tracker_meta normalizes into the editable field vocabulary. Each entry is
+    the custom_field: {gid, name, resource_subtype/type, enum_options:[{gid,
+    name,color,enabled}]}. Returns [] on any failure (best-effort meta)."""
+    try:
+        data = _get(
+            access_token, f"/projects/{project_gid}/custom_field_settings",
+            params={"opt_fields": (
+                "custom_field.gid,custom_field.name,custom_field.resource_subtype,"
+                "custom_field.type,custom_field.enum_options.gid,"
+                "custom_field.enum_options.name,custom_field.enum_options.color,"
+                "custom_field.enum_options.enabled"
+            )},
+        ) or []
+    except Exception:  # noqa: BLE001 — metadata reads are best-effort
+        logger.warning("Asana get_project_custom_fields failed for %s", project_gid)
+        return []
+    return [
+        s["custom_field"]
+        for s in data
+        if isinstance(s, dict) and isinstance(s.get("custom_field"), dict)
+        and s["custom_field"].get("gid")
+    ]
+
+
+def _cf_subtype(cf: dict[str, Any]) -> str:
+    """Asana custom-field type — resource_subtype is canonical; `type` is the
+    legacy alias some payloads still carry."""
+    return (cf.get("resource_subtype") or cf.get("type") or "").lower()
+
+
+def _cf_read_value(cf: dict[str, Any]) -> Any:
+    """The task's value for one custom field, normalized to the shape the
+    tracker_meta codec's DEFAULT (non-clickup/jira) decode paths expect — so
+    no Asana-specific decode branch is needed: enum→{id,name},
+    multi_enum→[{id,name}], date→date str, people→[{id,name}], text/number raw."""
+    st = _cf_subtype(cf)
+    if st == "enum":
+        ev = cf.get("enum_value")
+        return {"id": ev.get("gid"), "name": ev.get("name")} if isinstance(ev, dict) else None
+    if st == "multi_enum":
+        return [
+            {"id": o.get("gid"), "name": o.get("name")}
+            for o in cf.get("multi_enum_values") or [] if isinstance(o, dict)
+        ] or None
+    if st == "text":
+        return cf.get("text_value")
+    if st == "number":
+        return cf.get("number_value")
+    if st == "date":
+        # Sprntly stores/edits day granularity; Asana date_value always carries
+        # `date` (YYYY-MM-DD) even when a time is set, so read the date part —
+        # returning date_time would be an ISO datetime that no longer matches
+        # what we write back ({"date": "YYYY-MM-DD"}).
+        dv = cf.get("date_value")
+        if not isinstance(dv, dict):
+            return None
+        return dv.get("date") or (str(dv.get("date_time") or "")[:10] or None)
+    if st == "people":
+        return [
+            {"id": p.get("gid"), "name": p.get("name")}
+            for p in cf.get("people_value") or [] if isinstance(p, dict)
+        ] or None
+    return None
+
+
 def _membership_section(task: dict[str, Any], project_gid: str) -> dict[str, Any] | None:
     """The section the task sits in WITHIN `project_gid` (Asana tasks can be in
     several projects). None when the task carries no section there."""
@@ -287,15 +363,23 @@ def get_task(access_token: str, task_gid: str, *, project_gid: str) -> dict[str,
     Returns {} on any failure so a single stale/deleted task never breaks the
     pull."""
     try:
-        data = _get(access_token, f"/tasks/{task_gid}",
-                    params={"opt_fields": _TASK_OPT_FIELDS})
-    except Exception:  # noqa: BLE001 — a per-task fetch failure (incl. auth) is
-        # non-fatal and ISOLATED to this ticket, exactly like clickup_oauth.
-        # get_task: one deleted/forbidden task must never abort the whole
-        # PRD's sync pass. A genuinely dead token simply makes every remote()
-        # return {} → each ticket is skipped (keeps prev), same as ClickUp.
+        r = requests.get(f"{ASANA_API}/tasks/{task_gid}",
+                         params={"opt_fields": _TASK_OPT_FIELDS},
+                         headers=_headers(access_token), timeout=_WRITE_TIMEOUT)
+    except Exception:  # noqa: BLE001 — network error is transient, isolated to
+        # this ticket (never aborts the whole PRD's sync pass).
         logger.warning("Asana get_task failed for %s", task_gid)
         return {}
+    # A definite deletion (404/410) is reported distinctly so the sync can
+    # RE-PUSH a tracker-side-deleted task instead of skipping it (see
+    # app.stories.sync). Any other failure — incl. auth 401/403 — stays a
+    # transient {} that isolates to this ticket and keeps its prior state.
+    if r.status_code in (404, 410):
+        return {"__gone__": True}
+    if not r.ok:
+        logger.warning("Asana get_task failed for %s: %s", task_gid, r.status_code)
+        return {}
+    data = (r.json() or {}).get("data")
     if not isinstance(data, dict):
         return {}
     section = _membership_section(data, project_gid) or {}
@@ -308,10 +392,20 @@ def get_task(access_token: str, task_gid: str, *, project_gid: str) -> dict[str,
         "url": data.get("permalink_url"),
         "title": data.get("name"),
         "description": data.get("notes") or "",
-        # Asana has no native priority / issue type / (v1) editable fields.
+        # Asana has no native priority / issue type.
         "priority": None,
         "issue_type": None,
-        "custom_fields": {},
+        # Custom fields normalized to the ClickUp-style [{id, value}] list so the
+        # sync's remote_custom_fields reads them the same way. Built-in dates are
+        # surfaced under the shared builtin keys (due_date/start_date) the codec
+        # already maps.
+        "custom_fields": [
+            {"id": cf.get("gid"), "value": _cf_read_value(cf)}
+            for cf in data.get("custom_fields") or []
+            if isinstance(cf, dict) and cf.get("gid")
+        ],
+        "due_date": data.get("due_on"),
+        "start_date": data.get("start_on"),
         "updated_at": data.get("modified_at"),
     }
 
@@ -334,9 +428,13 @@ def update_task(
     access_token: str, task_gid: str, *,
     name: str | None = None, notes: str | None = None,
     completed: bool | None = None,
+    custom_fields: dict[str, Any] | None = None,
+    extra_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Update an existing task (idempotent re-push). Only given fields are sent.
-    Returns {gid, url}."""
+    `custom_fields` is Asana's write map {field_gid: encoded_value}; `extra_fields`
+    carries built-in task properties (e.g. {"due_on": "2026-07-15"}). Returns
+    {gid, url}."""
     fields: dict[str, Any] = {}
     if name is not None:
         fields["name"] = name
@@ -344,6 +442,10 @@ def update_task(
         fields["notes"] = notes
     if completed is not None:
         fields["completed"] = completed
+    if custom_fields is not None:
+        fields["custom_fields"] = custom_fields
+    if extra_fields:
+        fields.update(extra_fields)
     r = requests.put(f"{ASANA_API}/tasks/{task_gid}", json={"data": fields},
                      headers=_headers(access_token), timeout=_WRITE_TIMEOUT)
     _raise_for(r, "update_task")

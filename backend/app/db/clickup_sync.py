@@ -43,3 +43,19 @@ def save_clickup_task_id(
         },
         on_conflict="company_id,list_id,ticket_id",
     ).execute()
+
+
+@retry_on_disconnect
+def delete_clickup_task_id(company_id: str, list_id: str, ticket_id: str) -> None:
+    """Drop the ticket's mapping AND any child-issue subtask rows
+    (`{ticket_id}#sub#…`). Called when the ClickUp task was DELETED in the
+    tracker so a re-sync treats the ticket as never-pushed and re-creates it
+    cleanly. (ClickUp children are checklists, not mapped rows, so the
+    subtask sweep is a harmless no-op there — kept for parity.)"""
+    cli = require_client()
+    cli.table("clickup_task_map").delete().eq("company_id", company_id).eq(
+        "list_id", list_id
+    ).eq("ticket_id", ticket_id).execute()
+    cli.table("clickup_task_map").delete().eq("company_id", company_id).eq(
+        "list_id", list_id
+    ).like("ticket_id", f"{ticket_id}#sub#%").execute()

@@ -37,10 +37,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from app.connectors import asana_oauth, clickup_oauth, jira_oauth
-from app.db.asana_sync import get_asana_task_gid
-from app.db.clickup_sync import get_clickup_task_id
+from app.db.asana_sync import delete_asana_task_gid, get_asana_task_gid
+from app.db.clickup_sync import delete_clickup_task_id, get_clickup_task_id
 from app.db.client import require_client, utc_now
-from app.db.jira_sync import get_jira_issue_key
+from app.db.jira_sync import delete_jira_issue_key, get_jira_issue_key
 from app.db.prd_tickets import get_tickets
 from app.db.ticket_sync import (
     STALE_SYNC_MINUTES,
@@ -373,6 +373,18 @@ class _Tracker:
             return get_asana_task_gid(self.company_id, self.destination, ticket_id)
         return get_jira_issue_key(self.company_id, self.destination, ticket_id)
 
+    def clear_ref(self, ticket_id: str) -> None:
+        """Forget the tracker mapping for this ticket (+ its subtask rows) so
+        it's treated as never-pushed and RE-CREATED. Called when the tracker
+        task was DELETED there — we only push, so a tracker-side delete must
+        re-push, never drop the Sprntly ticket."""
+        if self.provider == "clickup":
+            delete_clickup_task_id(self.company_id, self.destination, ticket_id)
+        elif self.provider == "asana":
+            delete_asana_task_gid(self.company_id, self.destination, ticket_id)
+        else:
+            delete_jira_issue_key(self.company_id, self.destination, ticket_id)
+
     def remote(self, ref: str) -> dict[str, Any] | None:
         """The task/issue's current state (see get_task/get_issue), or None
         when the fetch fails (deleted task, transient error). Jira fetches the
@@ -406,11 +418,14 @@ class _Tracker:
         from app.connectors.tracker_meta import decode_field_value
 
         out: dict[str, Any] = {}
+        # ClickUp + Asana return custom fields as a [{id, value}] LIST; Jira as
+        # a {id: raw} MAP.
+        list_shaped = self.provider in ("clickup", "asana")
         by_id = {
             r.get("id"): r
             for r in remote.get("custom_fields") or [] if isinstance(r, dict)
-        } if self.provider == "clickup" else None
-        raw_map = remote.get("custom_fields") or {} if by_id is None else {}
+        } if list_shaped else None
+        raw_map = {} if list_shaped else (remote.get("custom_fields") or {})
         for f in self.editable_fields():
             fid = f["id"]
             if fid.startswith("builtin:"):
@@ -420,9 +435,9 @@ class _Tracker:
                     out[fid] = [str(x) for x in raw] if raw else None
                 else:
                     out[fid] = decode_field_value(self.provider, f, raw)
-            elif self.provider == "clickup":
+            elif list_shaped:
                 out[fid] = decode_field_value(
-                    "clickup", f, (by_id.get(fid) or {}).get("value")
+                    self.provider, f, (by_id.get(fid) or {}).get("value")
                 )
             else:
                 out[fid] = decode_field_value("jira", f, raw_map.get(fid))
@@ -441,6 +456,32 @@ class _Tracker:
         every changed field, built-ins included; ClickUp: task PUT for
         built-ins + one field-endpoint call per custom field)."""
         from app.connectors.tracker_meta import encode_field_value, field_def
+
+        if self.provider == "asana":
+            # One task PUT carries every changed custom field + built-in date.
+            cf: dict[str, Any] = {}
+            extra: dict[str, Any] = {}
+            for fid, v in values.items():
+                fdef = field_def(self.meta, fid)
+                if not fdef:
+                    continue
+                if fid == "builtin:due_date":
+                    # Only the due date is an editable built-in (start_on can't
+                    # be set without due_on in the same Asana request).
+                    extra["due_on"] = str(v)[:10] if v else None
+                elif fid.startswith("builtin:"):
+                    continue
+                elif v is not None:
+                    cf[fid] = encode_field_value("asana", fdef, v)
+                else:
+                    # A cleared override → clear the Asana field explicitly.
+                    cf[fid] = None
+            if cf or extra:
+                asana_oauth.update_task(
+                    self._token, ref,
+                    custom_fields=cf or None, extra_fields=extra or None,
+                )
+            return
 
         if self.provider == "jira":
             extra: dict[str, Any] = {}
@@ -896,12 +937,38 @@ def _two_way_pass(
                 statuses[tid] = prev
             continue
         remote = tracker.remote(ref)
-        if remote is None:  # transient fetch failure — don't guess, keep prev
+
+        # ── Tracker-side DELETION → RE-PUSH ──
+        # The mapping points at a task the tracker 404s (the user deleted it
+        # there). We only PUSH, never pull, so a tracker-side delete must
+        # RE-CREATE the ticket (Sprntly is the source of record) — not drop it.
+        # A definite "gone" (from get_task/get_issue) is distinct from a
+        # transient fetch failure (remote is None), so a network blip can never
+        # duplicate a task. clear_ref forgets the stale mapping AND the ticket's
+        # subtask rows so the parent + its children re-create cleanly.
+        recreated = False
+        if remote is not None and remote.get("__gone__"):
+            logger.info("ticket sync: %s was deleted in %s — re-pushing",
+                        c["merged"].title, provider)
+            tracker.clear_ref(tid)
+            result = tracker.bulk_create([c["merged"]])
+            pushed += len(result.get("created") or [])
+            push_errors += len(result.get("errors") or [])
+            ref = tracker.task_ref(tid)
+            if ref is None:  # re-create failed — retry next pass (drop stale prev)
+                continue
+            remote = tracker.remote(ref)
+            prev = {}         # fresh task → baseline (no stale comparison)
+            recreated = True
+
+        if remote is None or remote.get("__gone__"):
+            # Transient fetch failure (or a just-recreated task that vanished
+            # again) — don't guess, keep prev.
             if prev:
                 statuses[tid] = prev
             continue
 
-        was_created = any(x is c for x in creates)
+        was_created = recreated or any(x is c for x in creates)
         remote_hash = content_hash(remote.get("title"), remote.get("description"))
         prev_hash = prev.get("content_hash")
         synced_at = parse_ts(prev.get("synced_at"))

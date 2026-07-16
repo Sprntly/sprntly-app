@@ -50,6 +50,17 @@ def test_get_task_returns_empty_on_failure():
         assert asana_oauth.get_task("tok", "task1", project_gid=PROJ) == {}
 
 
+def test_get_task_reports_gone_on_404():
+    """A deleted Asana task (404/410) is reported as '__gone__' — distinct from
+    a transient failure — so the sync re-pushes it instead of skipping."""
+    from app.connectors import asana_oauth
+
+    for code in (404, 410):
+        resp = MagicMock(status_code=code, ok=False, text="not found")
+        with patch("app.connectors.asana_oauth.requests.get", return_value=resp):
+            assert asana_oauth.get_task("tok", "t1", project_gid=PROJ) == {"__gone__": True}
+
+
 def test_get_task_isolates_auth_error_per_task():
     """A 401/403 on ONE task returns {} (skip this ticket), never raises —
     one forbidden/expired task must not abort the whole PRD sync pass
@@ -81,6 +92,142 @@ def test_list_projects_spans_all_workspaces():
     ]
 
 
+# ── Custom fields: metadata, read normalization, write encoding ──────────────
+
+
+def test_normalize_asana_meta_maps_custom_fields_and_builtins():
+    from app.connectors import tracker_meta as tm
+
+    meta = tm.normalize_asana_meta("PROJ1", sections=[
+        {"gid": "s1", "name": "To Do"},
+    ], custom_fields=[
+        {"gid": "cf_enum", "name": "Effort", "resource_subtype": "enum",
+         "enum_options": [{"gid": "o_hi", "name": "High", "color": "red"},
+                          {"gid": "o_lo", "name": "Low", "color": "blue"}]},
+        {"gid": "cf_multi", "name": "Areas", "resource_subtype": "multi_enum",
+         "enum_options": [{"gid": "a1", "name": "API"}]},
+        {"gid": "cf_text", "name": "Notes", "resource_subtype": "text"},
+        {"gid": "cf_num", "name": "Points", "resource_subtype": "number"},
+        {"gid": "cf_date", "name": "Target", "resource_subtype": "date"},
+        {"gid": "cf_people", "name": "Reviewer", "resource_subtype": "people"},
+    ])
+    by_id = {f["id"]: f for f in meta["fields"]}
+    # Due date is the editable built-in (start date is intentionally NOT
+    # editable — Asana rejects start_on writes without due_on).
+    assert by_id["builtin:due_date"]["type"] == "date" and by_id["builtin:due_date"]["editable"]
+    assert "builtin:start_date" not in by_id
+    # Custom fields mapped to editor types + editable.
+    assert by_id["cf_enum"]["type"] == "select" and by_id["cf_enum"]["editable"]
+    assert by_id["cf_enum"]["options"] == [
+        {"id": "o_hi", "name": "High", "color": "red"},
+        {"id": "o_lo", "name": "Low", "color": "blue"}]
+    assert by_id["cf_multi"]["type"] == "multiselect"
+    assert by_id["cf_text"]["type"] == "text"
+    assert by_id["cf_num"]["type"] == "number"
+    assert by_id["cf_date"]["type"] == "date"
+    assert by_id["cf_people"]["type"] == "users" and by_id["cf_people"]["editable"]
+
+
+def test_cf_read_value_normalizes_each_type():
+    from app.connectors import asana_oauth as ao
+
+    assert ao._cf_read_value({"resource_subtype": "enum",
+                              "enum_value": {"gid": "o1", "name": "High"}}) == {"id": "o1", "name": "High"}
+    assert ao._cf_read_value({"resource_subtype": "multi_enum",
+                              "multi_enum_values": [{"gid": "a", "name": "A"}]}) == [{"id": "a", "name": "A"}]
+    assert ao._cf_read_value({"resource_subtype": "text", "text_value": "hi"}) == "hi"
+    assert ao._cf_read_value({"resource_subtype": "number", "number_value": 7}) == 7
+    assert ao._cf_read_value({"resource_subtype": "date",
+                              "date_value": {"date": "2026-07-15", "date_time": None}}) == "2026-07-15"
+    assert ao._cf_read_value({"resource_subtype": "people",
+                              "people_value": [{"gid": "u1", "name": "Ada"}]}) == [{"id": "u1", "name": "Ada"}]
+    # Empty values → None.
+    assert ao._cf_read_value({"resource_subtype": "enum", "enum_value": None}) is None
+
+
+def test_encode_asana_custom_field_write_shapes():
+    from app.connectors import tracker_meta as tm
+
+    # enum/select → the chosen option gid (string).
+    assert tm.encode_field_value("asana", {"type": "select", "editable": True},
+                                 {"id": "o_hi", "name": "High"}) == "o_hi"
+    # multi_enum/multiselect → list of option gids.
+    assert tm.encode_field_value("asana", {"type": "multiselect", "editable": True},
+                                 [{"id": "a1"}, {"id": "a2"}]) == ["a1", "a2"]
+    # date → Asana's date object.
+    assert tm.encode_field_value("asana", {"type": "date", "editable": True},
+                                 "2026-07-15") == {"date": "2026-07-15"}
+    # people/users → list of user gids.
+    assert tm.encode_field_value("asana", {"type": "users", "editable": True},
+                                 [{"id": "u1"}]) == ["u1"]
+    # text/number pass through.
+    assert tm.encode_field_value("asana", {"type": "text", "editable": True}, "x") == "x"
+    assert tm.encode_field_value("asana", {"type": "number", "editable": True}, 5) == 5
+
+
+def test_asana_people_field_decodes_with_name():
+    """People fields keep the person's NAME through decode — Asana's user
+    compact is {gid, name}, so the override round-trips and the reconcile
+    loop doesn't spuriously re-import a name=None value."""
+    from app.connectors import tracker_meta as tm
+
+    fdef = {"id": "cf_people", "type": "users", "editable": True, "options": None}
+    got = tm.decode_field_value("asana", fdef, [{"id": "u1", "name": "Ada"}])
+    assert got == [{"id": "u1", "name": "Ada"}]
+
+
+def test_cf_read_value_date_reads_date_part_even_with_time():
+    from app.connectors import asana_oauth as ao
+
+    v = ao._cf_read_value({"resource_subtype": "date", "date_value": {
+        "date": "2026-07-15", "date_time": "2026-07-15T09:00:00.000Z"}})
+    assert v == "2026-07-15"  # date part, not the ISO datetime
+
+
+def test_encode_asana_date_rejects_garbage():
+    import pytest
+
+    from app.connectors import tracker_meta as tm
+
+    with pytest.raises(ValueError):
+        tm.encode_field_value("asana", {"type": "date", "editable": True}, "not-a-date")
+
+
+def test_encode_asana_users_rejects_entries_without_ids():
+    import pytest
+
+    from app.connectors import tracker_meta as tm
+
+    with pytest.raises(ValueError):
+        tm.encode_field_value("asana", {"type": "users", "editable": True},
+                              [{"name": "Ada"}])  # no id → fail loudly, not clear
+
+
+def test_get_task_surfaces_custom_fields_and_due_date():
+    from app.connectors import asana_oauth
+
+    payload = {"data": {
+        "name": "T", "notes": "n", "completed": False, "permalink_url": "u",
+        "modified_at": "2026-07-15T10:00:00.000Z", "due_on": "2026-07-20",
+        "start_on": "2026-07-10",
+        "memberships": [{"project": {"gid": PROJ}, "section": {"gid": "s1", "name": "To Do"}}],
+        "custom_fields": [
+            {"gid": "cf_enum", "resource_subtype": "enum",
+             "enum_value": {"gid": "o_hi", "name": "High"}},
+            {"gid": "cf_text", "resource_subtype": "text", "text_value": "hello"},
+        ],
+    }}
+    resp = MagicMock(status_code=200, ok=True)
+    resp.json.return_value = payload
+    with patch("app.connectors.asana_oauth.requests.get", return_value=resp):
+        state = asana_oauth.get_task("tok", "t1", project_gid=PROJ)
+    assert state["custom_fields"] == [
+        {"id": "cf_enum", "value": {"id": "o_hi", "name": "High"}},
+        {"id": "cf_text", "value": "hello"},
+    ]
+    assert state["due_date"] == "2026-07-20" and state["start_date"] == "2026-07-10"
+
+
 # ── _Tracker asana branch: status write = move to section (+ completed) ──────
 
 
@@ -102,6 +249,47 @@ _META = {
     ],
     "priorities": [], "issue_types": None, "fields": [],
 }
+
+
+_META_CF = {
+    "provider": "asana", "destination_id": PROJ,
+    "statuses": [], "priorities": [], "issue_types": None,
+    "fields": [
+        {"id": "cf_enum", "name": "Effort", "type": "select", "editable": True,
+         "options": [{"id": "o_hi", "name": "High"}]},
+        {"id": "builtin:due_date", "name": "Due date", "type": "date",
+         "editable": True, "options": None},
+    ],
+}
+
+
+def test_asana_tracker_reads_and_writes_custom_fields():
+    """A select custom field + the built-in due date round-trip through the
+    _Tracker: get_task-shaped remote decodes to normalized values, and a push
+    encodes them into ONE task PUT (custom_fields map + due_on)."""
+    from app.connectors import asana_oauth
+
+    tracker = _asana_tracker(_META_CF)
+
+    # READ side.
+    remote = {
+        "custom_fields": [{"id": "cf_enum", "value": {"id": "o_hi", "name": "High"}}],
+        "due_date": "2026-07-20",
+    }
+    got = tracker.remote_custom_fields(remote)
+    assert got["cf_enum"] == {"id": "o_hi", "name": "High"}
+    assert got["builtin:due_date"] == "2026-07-20"
+
+    # WRITE side: one PUT, custom field encoded to its option gid + due_on built-in.
+    with patch.object(asana_oauth, "update_task") as upd:
+        tracker.push_custom_fields("t1", {
+            "cf_enum": {"id": "o_hi", "name": "High"},
+            "builtin:due_date": "2026-07-20",
+        })
+    upd.assert_called_once()
+    kwargs = upd.call_args.kwargs
+    assert kwargs["custom_fields"] == {"cf_enum": "o_hi"}
+    assert kwargs["extra_fields"] == {"due_on": "2026-07-20"}
 
 
 def test_set_status_moves_to_section_and_completes_on_done():

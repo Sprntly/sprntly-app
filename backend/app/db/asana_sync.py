@@ -44,3 +44,18 @@ def save_asana_task_gid(
         },
         on_conflict="company_id,project_gid,ticket_id",
     ).execute()
+
+
+@retry_on_disconnect
+def delete_asana_task_gid(company_id: str, project_gid: str, ticket_id: str) -> None:
+    """Drop the ticket's mapping AND its child-issue subtask rows
+    (`{ticket_id}#sub#…`). Called when the Asana task was DELETED in the
+    tracker so a re-sync treats the ticket (and its subtasks) as never-pushed
+    and re-creates them cleanly — no orphan rows pointing at deleted tasks."""
+    cli = require_client()
+    cli.table("asana_task_map").delete().eq("company_id", company_id).eq(
+        "project_gid", project_gid
+    ).eq("ticket_id", ticket_id).execute()
+    cli.table("asana_task_map").delete().eq("company_id", company_id).eq(
+        "project_gid", project_gid
+    ).like("ticket_id", f"{ticket_id}#sub#%").execute()
