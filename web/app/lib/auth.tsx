@@ -13,6 +13,7 @@ import type { Session, User } from "@supabase/supabase-js"
 import { authCallbackUrl } from "./supabase/client"
 import { normalizeEmail } from "./auth-validation"
 import { setAccessTokenProvider } from "./api"
+import { resetSettingsCaches } from "./settingsCache"
 import {
   getSupabase,
   isSupabaseConfigured,
@@ -224,6 +225,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         }
       } catch {
         // localStorage may be disabled; not fatal.
+      }
+      // In-memory settings-pane caches (Connectors/MCP/Team/Admin) survive
+      // localStorage wipes — clear them too so the next user never flashes the
+      // previous account's connectors/tokens/team before revalidation.
+      try {
+        resetSettingsCaches()
+      } catch {
+        // Never let cache cleanup block sign-out.
       }
       setState({ kind: "anonymous" })
     }

@@ -25,6 +25,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "google_analytics", name: "Google Analytics", logo: "G", logoText: "G", logoColor: "#F9AB00", logoSvg: "/connectors/google_analytics.svg", oauth: false, types: ["analytics"] },
       { id: "heap",             name: "Heap",             logo: "H", logoText: "H", logoColor: "#FF6E6E", oauth: false, types: ["analytics"] },
       { id: "posthog",          name: "PostHog",          logo: "P", logoText: "P", logoColor: "#0CC1AE", logoSvg: "/connectors/posthog.svg", oauth: false, types: ["analytics"] },
+      // Self-hosted BI — connects with instance URL + service-account login
+      // (authType "credentials"), the first wired Analytics connector.
+      { id: "superset",         name: "Superset",         logo: "S", logoText: "S", logoColor: "#20A7C9", oauth: false, authType: "credentials", types: ["analytics"] },
     ],
   },
   {
@@ -36,7 +39,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", logoSvg: "/connectors/linear.svg", oauth: false, types: ["task-management"] },
       { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", logoSvg: "/connectors/jira.svg", oauth: true, types: ["task-management"] },
       { id: "clickup",      name: "ClickUp",     logo: "C", logoText: "C", logoColor: "#7B68EE", logoSvg: "/connectors/clickup.svg", oauth: true, types: ["task-management"] },
-      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: false, types: ["task-management"] },
+      // OAuth connect only for now — deliberately NOT in TICKET_SYNC_IMPLEMENTED
+      // (no backend sync-engine branch yet), so it never shows on the sync button.
+      { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: true, types: ["task-management"] },
     ],
   },
   {
@@ -62,6 +67,8 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     items: [
       { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false, types: ["communication"] },
       { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", logoSvg: "/connectors/zendesk.svg", oauth: false, types: ["customer-voice"] },
+      // No bundled SVG mark yet — brand-color letter glyph like Fireflies.
+      { id: "sprinklr",   name: "Sprinklr",   logo: "S", logoText: "S", logoColor: "#107EFF", oauth: true, types: ["customer-voice"] },
       // Fireflies has no official SVG mark we could bundle, so it keeps the
       // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
       { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings"] },
@@ -153,14 +160,19 @@ export const CONNECTOR_IDS_WITH_OAUTH = new Set<string>(
  */
 export const CONNECTOR_IDS_CONNECTABLE = new Set<string>(
   CONNECTOR_CATALOG.flatMap((c) => c.items)
-    .filter((i) => i.oauth || i.authType === "apikey")
+    .filter((i) => i.oauth || i.authType === "apikey" || i.authType === "credentials")
     .map((i) => i.id),
 )
 
 /** True iff this connector has a working integration the user can actually
- *  use today (OAuth or API key). Everything else is "Coming soon". */
+ *  use today (OAuth, API key, or a credentials form). Everything else is
+ *  "Coming soon". */
 export function isConnectableConnector(item: ConnectorItemRow): boolean {
-  return Boolean(item.oauth) || item.authType === "apikey"
+  return (
+    Boolean(item.oauth)
+    || item.authType === "apikey"
+    || item.authType === "credentials"
+  )
 }
 
 /**
@@ -225,7 +237,7 @@ export function connectorsWithType(type: ConnectorType): ConnectorItemRow[] {
  * `task-management` AND be in this set to appear on the sync button — the
  * type declares what a tool is, the engine declares what we can do with it.
  */
-export const TICKET_SYNC_IMPLEMENTED = new Set<string>(["clickup", "jira"])
+export const TICKET_SYNC_IMPLEMENTED = new Set<string>(["clickup", "jira", "asana"])
 
 /** The task-management tools tickets can actually sync with: {id, label} for
  *  the sync button, its tool menu, and its labels. */

@@ -18,7 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
-from app.connectors import clickup_oauth, jira_oauth
+from app.connectors import asana_oauth, clickup_oauth, jira_oauth
 from app.stories.generate import (
     PRDNotFoundError,
     Story,
@@ -26,8 +26,10 @@ from app.stories.generate import (
 )
 from app.prd_runner import warm_impl_spec
 from app.stories.push import (
+    AsanaNotConnectedError,
     ClickUpNotConnectedError,
     JiraNotConnectedError,
+    push_stories_to_asana,
     push_stories_to_clickup,
     push_stories_to_jira,
 )
@@ -335,6 +337,27 @@ def jira_projects(company: CompanyContext = Depends(require_company)):
     except JiraNotConnectedError as e:
         raise HTTPException(404, str(e)) from e
     return {"projects": jira_oauth.list_projects(access_token, cloud_id)}
+
+
+@router.post("/asana/projects")
+def asana_projects(company: CompanyContext = Depends(require_company)):
+    """List the Asana projects this company can push stories into (target
+    picker). Returns `{lists: [{id, name}]}` — shaped like the ClickUp list
+    picker (project gid as `id`) so the web's compact destination picker is
+    reused unchanged. 404 if Asana isn't connected.
+    """
+    from app.stories.push import _asana_creds
+
+    try:
+        token = _asana_creds(company.company_id)
+    except AsanaNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    return {
+        "lists": [
+            {"id": p["gid"], "name": p.get("name") or p["gid"]}
+            for p in asana_oauth.list_projects(token) if p.get("gid")
+        ]
+    }
 
 
 class JiraMembersIn(BaseModel):

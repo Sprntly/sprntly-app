@@ -214,10 +214,15 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders 31 connector rows total (29 design + ClickUp + Fireflies)", () => {
+  it("renders 33 connector rows total (29 design + ClickUp + Fireflies + Sprinklr + Superset)", () => {
     const html = render()
     const matches = html.match(/class="set-conn-row"/g) ?? []
-    expect(matches.length).toBe(31)
+    expect(matches.length).toBe(33)
+  })
+
+  it("Asana row is wired for OAuth connect (no sync-engine support yet)", () => {
+    const html = render()
+    expect(html).toContain("Asana")
   })
 
   it("shows 'Off' pill + 'Connect' action for an apikey-supported connector with no connection", () => {
@@ -360,9 +365,9 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
   it("groups the wired connectors into their categories (empty categories dropped)", () => {
     const html = render({ categories: connectableCatalog() })
     const keptCategories = connectableCatalog()
-    // 8 wired connector rows across the surviving categories, one upload
+    // 11 wired connector rows across the surviving categories, one upload
     // strip per surviving category.
-    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(8)
+    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(11)
     expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
       keptCategories.length,
     )
@@ -375,7 +380,8 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
 
   it("renders each connector's real brand logo from a locally bundled SVG", () => {
     const html = render({ categories: connectableCatalog() })
-    // 7 of the 8 wired connectors have an official bundled SVG mark.
+    // 8 of the 10 wired connectors have an official bundled SVG mark
+    // (Fireflies and Sprinklr keep their letter glyphs).
     for (const id of [
       "slack",
       "github",
@@ -384,10 +390,11 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
       "clickup",
       "jira",
       "google_drive",
+      "asana",
     ]) {
       expect(html).toContain(`src="/connectors/${id}.svg"`)
     }
-    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(7)
+    expect((html.match(/src="\/connectors\//g) ?? []).length).toBe(8)
     // No runtime favicon fetch remains.
     expect(html).not.toContain("s2/favicons")
     // Fireflies has no bundled SVG, so it keeps its letter glyph (no <img>).

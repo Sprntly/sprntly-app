@@ -151,9 +151,10 @@ describe("Connectors (container) — design-v4 accordion", () => {
 
   it("hides unsupported connectors and empty categories", () => {
     const { container } = mountLoaded()
-    // Analytics has no supported connector today → the whole category and all
-    // of its connectors (Mixpanel, PostHog, …) are hidden — no accordion step.
-    expect(container.querySelector('.conn-step[data-conn="analytics"]')).toBeNull()
+    // Analytics is back (Superset is credentials-wired) and opens first, but
+    // its unsupported connectors (Mixpanel, PostHog, …) stay hidden.
+    expect(container.querySelector('.conn-step[data-conn="analytics"]')).not.toBeNull()
+    expect(screen.getByText("Superset")).not.toBeNull()
     expect(screen.queryByText("Mixpanel")).toBeNull()
     expect(screen.queryByText("PostHog")).toBeNull()
     // Communication is still shown (Slack is OAuth-wired) — its accordion step
@@ -162,12 +163,14 @@ describe("Connectors (container) — design-v4 accordion", () => {
     // … but MS Teams (coming soon) is dropped from the catalog entirely, so it
     // never renders in the accordion tree (whether the step is open or not).
     expect(screen.queryByText("MS Teams")).toBeNull()
-    // Within the OPEN first category we render only supported connectors:
-    // ClickUp + Jira (oauth) but not Linear/Asana (coming soon).
+    // Advance to Project Management (steps render their grids only while
+    // open): only supported connectors render — ClickUp + Jira + Asana
+    // (oauth) but not Linear (coming soon).
+    fireEvent.click(doneNextButton(container))
     expect(screen.getByText("ClickUp")).not.toBeNull()
     expect(screen.getByText("Jira")).not.toBeNull()
+    expect(screen.getByText("Asana")).not.toBeNull()
     expect(screen.queryByText("Linear")).toBeNull()
-    expect(screen.queryByText("Asana")).toBeNull()
     // Design-kit-only names never appear.
     expect(screen.queryByText("Segment")).toBeNull()
     expect(screen.queryByText("Trello")).toBeNull()
@@ -223,8 +226,9 @@ describe("Connectors (container) — design-v4 accordion", () => {
 
   it("opens the connect modal for a connectable card", () => {
     const { container } = mountLoaded()
-    // Project Management is the first shown category; ClickUp (oauth) lives
-    // there and is open by default.
+    // Analytics (Superset) opens first now — advance to Project Management,
+    // where ClickUp (oauth) lives.
+    fireEvent.click(doneNextButton(container))
     fireEvent.click(screen.getByText("ClickUp").closest(".conn") as HTMLElement)
     const modal = container.querySelector('[data-testid="connect-modal"]')
     expect(modal).not.toBeNull()

@@ -1157,6 +1157,14 @@ export const connectorsApi = {
       history_days: historyDays,
     }),
 
+  // ---- Sprinklr ------------------------------------------------------------
+  disconnectSprinklr: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/sprinklr`),
+
+  // ---- Asana ---------------------------------------------------------------
+  disconnectAsana: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/asana`),
+
   // ---- Fireflies (API key, not OAuth) --------------------------------------
   connectFirefliesWithApiKey: (apiKey: string) =>
     api.post<{ ok: true; provider: string; account_label: string }>(
@@ -1165,6 +1173,17 @@ export const connectorsApi = {
     ),
   disconnectFireflies: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
+
+  // ---- Superset (self-hosted; instance URL + service-account login) --------
+  connectSupersetWithCredentials: (
+    baseUrl: string, username: string, password: string,
+  ) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      `/v1/connectors/superset/connect`,
+      { base_url: baseUrl, username, password },
+    ),
+  disconnectSuperset: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/superset`),
 
   // ---- Generic test-connection --------------------------------------------
   /**
@@ -2261,6 +2280,11 @@ export const storiesApi = {
    *  isn't connected. */
   listClickUpLists: () =>
     api.post<{ lists: ClickUpList[] }>("/v1/stories/lists", {}),
+  /** Asana projects the company can push into (target picker). Shaped like the
+   *  ClickUp list picker (project gid as `id`) so the same picker is reused.
+   *  404 if Asana isn't connected. */
+  listAsanaProjects: () =>
+    api.post<{ lists: ClickUpList[] }>("/v1/stories/asana/projects", {}),
   /** Create the reviewed stories as tasks in a ClickUp list (explicit write). */
   pushToClickUp: (listId: string, stories: GeneratedStory[]) =>
     api.post<StoryPushResult>("/v1/stories/push", { list_id: listId, stories }),
@@ -2382,7 +2406,7 @@ export type TrackerTransition = {
 
 // ── Ticket tracker sync (per-PRD) ────────────────────────────────────────────
 
-export type TrackerProvider = "clickup" | "jira"
+export type TrackerProvider = "clickup" | "jira" | "asana"
 
 /** Per-PRD tracker-sync state (GET /v1/stories/sync/{prd_id}). After the first
  *  push registers a destination, the backend auto-syncs on an interval; the

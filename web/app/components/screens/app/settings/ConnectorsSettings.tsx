@@ -55,9 +55,14 @@ import type {
   ConnectorItemRow,
 } from "../../../../types/content"
 import { openOauthTab } from "../../../../lib/connectorsOauth"
+import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 import { useConnectorConnectedSignal } from "../../../../lib/useConnectorConnectedSignal"
 import { notifyBriefRegenerating } from "../../../../lib/useBriefHydration"
 import { ApiKeyPromptModal } from "../../../connectors/ApiKeyPromptModal"
+import {
+  CredentialsPromptModal,
+  type CredentialsValues,
+} from "../../../connectors/CredentialsPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
 
@@ -409,15 +414,36 @@ export function ConnectorsSettingsView({
 
 // ───────────────────── Hooks-wired wrapper ─────────────────────
 
+// Module-scoped cache of the last-loaded connections + files. It survives the
+// pane UNMOUNTING when the user switches settings tabs (the component remounts
+// on return, but this module stays loaded for the SPA session). So a revisit
+// shows the previous state INSTANTLY and revalidates in the background — no
+// "Loading connectors…" spinner every time. `null` = never loaded (cold), the
+// only case that shows the spinner. Reset on sign-out via resetSettingsCaches.
+let _connectionsCache: ConnectionSummary[] | null = null
+let _connectorFilesCache: SourceFile[] | null = null
+
+// Clear on sign-out so a different user never flashes the previous account's
+// connectors (see lib/settingsCache).
+registerSettingsCacheReset(() => {
+  _connectionsCache = null
+  _connectorFilesCache = null
+})
+
 export function ConnectorsSettings() {
   const { activeCompany } = useCompany()
   const { setContent } = useContent()
   const { showToast, goTo } = useNavigation()
 
-  const [connections, setConnections] = useState<ConnectionSummary[]>([])
-  const [files, setFiles] = useState<SourceFile[]>([])
+  // Seed from the module cache so a tab-switch return renders the previous
+  // state immediately; the effects below still revalidate in the background.
+  const [connections, setConnections] = useState<ConnectionSummary[]>(
+    () => _connectionsCache ?? [],
+  )
+  const [files, setFiles] = useState<SourceFile[]>(() => _connectorFilesCache ?? [])
   const [searchQuery, setSearchQuery] = useState("")
-  const [loading, setLoading] = useState(true)
+  // Spinner ONLY on the first-ever (cold) load — a warm revisit shows cache.
+  const [loading, setLoading] = useState(() => _connectionsCache === null)
   const [uploading, setUploading] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [regenerating, setRegenerating] = useState(false)
@@ -426,6 +452,8 @@ export function ConnectorsSettings() {
     string | null
   >(null)
   const [apiKeyConnectingItem, setApiKeyConnectingItem] =
+    useState<ConnectorItemRow | null>(null)
+  const [credentialsConnectingItem, setCredentialsConnectingItem] =
     useState<ConnectorItemRow | null>(null)
   // Set when we send the user to a provider's OAuth page in a sibling tab —
   // tells the visibility listener to refresh connections when they switch back.
@@ -438,6 +466,7 @@ export function ConnectorsSettings() {
     setLoadError(null)
     try {
       const r = await connectorsApi.list()
+      _connectionsCache = r.connections  // warm the cache for the next visit
       setConnections(r.connections)
       setContent({
         connectorCategories: CONNECTOR_CATALOG,
@@ -454,7 +483,9 @@ export function ConnectorsSettings() {
   }, [setContent])
 
   useEffect(() => {
-    setLoading(true)
+    // Revalidate on mount. Do NOT force loading=true here: a warm revisit keeps
+    // showing cached data while this refresh runs (stale-while-revalidate); the
+    // initial `loading` state already covers the cold first load.
     void reload()
   }, [reload])
 
@@ -468,6 +499,7 @@ export function ConnectorsSettings() {
     }
     try {
       const r = await sourcesApi.list(activeCompany)
+      _connectorFilesCache = r.files
       setFiles(r.files)
     } catch {
       // Non-fatal: the connectors grid still works without the file list.
@@ -527,6 +559,12 @@ export function ConnectorsSettings() {
         return
       }
 
+      if (item?.authType === "credentials") {
+        // Self-hosted tool: open the URL + username + password form.
+        setCredentialsConnectingItem(item)
+        return
+      }
+
       if (!CONNECTOR_IDS_WITH_OAUTH.has(providerId)) return
       // Open the provider in a new tab so the user keeps their place in
       // Settings. Pre-open synchronously (before the startOauth await) so the
@@ -572,6 +610,23 @@ export function ConnectorsSettings() {
       }
     },
     [apiKeyConnectingItem, reload],
+  )
+
+  const handleCredentialsConnect = useCallback(
+    async (values: CredentialsValues) => {
+      if (!credentialsConnectingItem) return
+      if (credentialsConnectingItem.id === "superset") {
+        await connectorsApi.connectSupersetWithCredentials(
+          values.baseUrl, values.username, values.password,
+        )
+        await reload()
+      } else {
+        throw new Error(
+          `Credentials connect not wired for provider: ${credentialsConnectingItem.id}`,
+        )
+      }
+    },
+    [credentialsConnectingItem, reload],
   )
 
   const onConfigure = useCallback((providerId: string) => {
@@ -688,6 +743,17 @@ export function ConnectorsSettings() {
         }
         onConnect={handleApiKeyConnect}
         onClose={() => setApiKeyConnectingItem(null)}
+      />
+      <CredentialsPromptModal
+        open={credentialsConnectingItem != null}
+        connectorName={credentialsConnectingItem?.name ?? ""}
+        helpText={
+          credentialsConnectingItem?.id === "superset"
+            ? "Enter your Superset instance URL and a service account — ideally a dedicated read-only (Gamma) user created just for Sprntly."
+            : null
+        }
+        onConnect={handleCredentialsConnect}
+        onClose={() => setCredentialsConnectingItem(null)}
       />
     </>
   )

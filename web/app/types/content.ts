@@ -290,8 +290,10 @@ export interface ConnectorItemRow {
    * catalog rows (which use `oauth: true|false`) don't need a churn.
    * Use "apikey" for providers (e.g. Fireflies) whose primary auth path
    * is a user-issued API key pasted into a modal — no OAuth redirect.
+   * Use "credentials" for self-hosted tools (e.g. Superset) connected
+   * with an instance URL + username + password form.
    */
-  authType?: "oauth" | "apikey"
+  authType?: "oauth" | "apikey" | "credentials"
 }
 
 export interface ConnectorCategoryRow {

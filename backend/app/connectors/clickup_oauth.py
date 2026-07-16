@@ -410,6 +410,15 @@ def get_task(access_token: str, task_id: str) -> dict[str, Any]:
             access_token, f"/task/{task_id}",
             params={"include_markdown_description": "true"},
         )
+    except requests.HTTPError as e:
+        # A definite deletion (404/410) is reported distinctly so the sync can
+        # RE-PUSH a tracker-side-deleted task rather than skip it (see
+        # app.stories.sync). Any other error stays transient ({}).
+        resp = getattr(e, "response", None)
+        if resp is not None and resp.status_code in (404, 410):
+            return {"__gone__": True}
+        logger.warning("ClickUp get_task failed for %s", task_id)
+        return {}
     except Exception:  # noqa: BLE001 — a per-task fetch failure is non-fatal
         logger.warning("ClickUp get_task failed for %s", task_id)
         return {}

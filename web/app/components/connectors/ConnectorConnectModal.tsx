@@ -30,6 +30,7 @@ import {
 import { CONNECTOR_CATALOG } from "../../lib/connectorsCatalog"
 import type { ConnectorItemRow } from "../../types/content"
 import { ConnectorLogo } from "./ConnectorLogo"
+import type { CredentialsValues } from "./CredentialsPromptModal"
 import { openOauthTab } from "../../lib/connectorsOauth"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
@@ -54,13 +55,19 @@ export type ConnectorConnectModalViewProps = {
   /** Live connection record; non-null means the connector is already active. */
   connection: ConnectionSummary | null
 
-  /** "oauth" (most providers) vs "apikey" (Fireflies). */
-  authType: "oauth" | "apikey"
+  /** "oauth" (most providers), "apikey" (Fireflies), or "credentials"
+   *  (self-hosted tools like Superset — URL + username + password). */
+  authType: "oauth" | "apikey" | "credentials"
 
   /** Controlled api-key input value (apikey mode only). */
   apiKey: string
   apiKeyError: string | null
   isSubmittingApiKey: boolean
+
+  /** Controlled form values (credentials mode only). */
+  credentials?: CredentialsValues
+  credentialsError?: string | null
+  isSubmittingCredentials?: boolean
 
   /** True while the OAuth startOauth request is in flight (between
    *  click + browser navigation). */
@@ -77,6 +84,8 @@ export type ConnectorConnectModalViewProps = {
   onConnect: () => void
   onApiKeyChange: (next: string) => void
   onSubmitApiKey: () => void
+  onCredentialsChange?: (next: CredentialsValues) => void
+  onSubmitCredentials?: () => void
   onCompleteFlow: () => void
   onRestartFlow: () => void
 
@@ -93,6 +102,9 @@ export function ConnectorConnectModalView({
   apiKey,
   apiKeyError,
   isSubmittingApiKey,
+  credentials = { baseUrl: "", username: "", password: "" },
+  credentialsError = null,
+  isSubmittingCredentials = false,
   isConnecting,
   oauthError,
   showCompleteOrRestart,
@@ -101,6 +113,8 @@ export function ConnectorConnectModalView({
   onConnect,
   onApiKeyChange,
   onSubmitApiKey,
+  onCredentialsChange = () => {},
+  onSubmitCredentials = () => {},
   onCompleteFlow,
   onRestartFlow,
   children,
@@ -109,6 +123,11 @@ export function ConnectorConnectModalView({
 
   const isConnected = connection != null
   const canSubmitApiKey = apiKey.trim().length > 0 && !isSubmittingApiKey
+  const canSubmitCredentials =
+    credentials.baseUrl.trim().length > 0 &&
+    credentials.username.trim().length > 0 &&
+    credentials.password.length > 0 &&
+    !isSubmittingCredentials
   // Connected state wins — never show the in-flight prompt at the same
   // time as a Done screen.
   const showPrompt = showCompleteOrRestart && !isConnected
@@ -215,6 +234,64 @@ export function ConnectorConnectModalView({
                 </p>
               ) : null}
             </>
+          ) : authType === "credentials" ? (
+            /* ─── Pre-connect credentials form (self-hosted tools) ─── */
+            <>
+              <p className="conn-modal-blurb">
+                {item.name} is self-hosted — enter your instance URL and a
+                service-account login (ideally a dedicated read-only user
+                created just for Sprntly).
+              </p>
+              <label className="field-label" htmlFor="conn-modal-cred-url">
+                Instance URL
+              </label>
+              <input
+                id="conn-modal-cred-url"
+                type="url"
+                className="input"
+                value={credentials.baseUrl}
+                onChange={(e) =>
+                  onCredentialsChange({ ...credentials, baseUrl: e.target.value })
+                }
+                placeholder={`https://your-${item.name.toLowerCase()}.example.com`}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <label className="field-label" htmlFor="conn-modal-cred-user">
+                Username
+              </label>
+              <input
+                id="conn-modal-cred-user"
+                type="text"
+                className="input"
+                value={credentials.username}
+                onChange={(e) =>
+                  onCredentialsChange({ ...credentials, username: e.target.value })
+                }
+                placeholder="Service-account username"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <label className="field-label" htmlFor="conn-modal-cred-pass">
+                Password
+              </label>
+              <input
+                id="conn-modal-cred-pass"
+                type="password"
+                className="input"
+                value={credentials.password}
+                onChange={(e) =>
+                  onCredentialsChange({ ...credentials, password: e.target.value })
+                }
+                placeholder="Service-account password"
+                autoComplete="new-password"
+              />
+              {credentialsError ? (
+                <p className="conn-modal-error" role="alert">
+                  {credentialsError}
+                </p>
+              ) : null}
+            </>
           ) : (
             /* ─── Pre-connect OAuth ─── */
             <>
@@ -262,6 +339,24 @@ export function ConnectorConnectModalView({
                 onClick={onSubmitApiKey}
               >
                 {isSubmittingApiKey ? "Connecting…" : "Connect"}
+              </button>
+            </>
+          ) : authType === "credentials" ? (
+            <>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={onSkipForLater}
+              >
+                Skip &amp; mark for later
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                disabled={!canSubmitCredentials}
+                onClick={onSubmitCredentials}
+              >
+                {isSubmittingCredentials ? "Connecting…" : "Connect"}
               </button>
             </>
           ) : (
@@ -367,13 +462,20 @@ export function ConnectorConnectModal({
   onSkipForLater,
 }: Props) {
   const item = providerId ? lookupItem(providerId) : null
-  const authType: "oauth" | "apikey" =
-    item?.authType === "apikey" ? "apikey" : "oauth"
+  const authType: "oauth" | "apikey" | "credentials" =
+    item?.authType === "apikey" || item?.authType === "credentials"
+      ? item.authType
+      : "oauth"
   const open = providerId != null && item != null
 
   const [apiKey, setApiKey] = useState("")
   const [apiKeyError, setApiKeyError] = useState<string | null>(null)
   const [isSubmittingApiKey, setIsSubmittingApiKey] = useState(false)
+  const [credentials, setCredentials] = useState<CredentialsValues>(
+    { baseUrl: "", username: "", password: "" },
+  )
+  const [credentialsError, setCredentialsError] = useState<string | null>(null)
+  const [isSubmittingCredentials, setIsSubmittingCredentials] = useState(false)
   const [isConnecting, setIsConnecting] = useState(false)
   const [oauthError, setOauthError] = useState<string | null>(null)
   const [showCompleteOrRestart, setShowCompleteOrRestart] = useState(false)
@@ -386,6 +488,9 @@ export function ConnectorConnectModal({
     setApiKey("")
     setApiKeyError(null)
     setIsSubmittingApiKey(false)
+    setCredentials({ baseUrl: "", username: "", password: "" })
+    setCredentialsError(null)
+    setIsSubmittingCredentials(false)
     setIsConnecting(false)
     setOauthError(null)
     // Detect in-flight: a Connect was started for this provider that
@@ -461,6 +566,36 @@ export function ConnectorConnectModal({
     }
   }, [providerId, apiKey, onConnected])
 
+  const handleSubmitCredentials = useCallback(async () => {
+    if (!providerId) return
+    setIsSubmittingCredentials(true)
+    setCredentialsError(null)
+    try {
+      if (providerId === "superset") {
+        await connectorsApi.connectSupersetWithCredentials(
+          credentials.baseUrl.trim(),
+          credentials.username.trim(),
+          credentials.password,
+        )
+        onConnected()
+      } else {
+        throw new Error(
+          `Credentials connect not wired for provider: ${providerId}`,
+        )
+      }
+    } catch (e) {
+      const msg =
+        e instanceof ApiError
+          ? apiErrorMessage(e.status, e.body)
+          : e instanceof Error
+            ? e.message
+            : String(e)
+      setCredentialsError(msg)
+    } finally {
+      setIsSubmittingCredentials(false)
+    }
+  }, [providerId, credentials, onConnected])
+
   const handleRestart = useCallback(() => {
     if (!providerId) return
     clearConnectInFlight(providerId)
@@ -506,6 +641,9 @@ export function ConnectorConnectModal({
       apiKey={apiKey}
       apiKeyError={apiKeyError}
       isSubmittingApiKey={isSubmittingApiKey}
+      credentials={credentials}
+      credentialsError={credentialsError}
+      isSubmittingCredentials={isSubmittingCredentials}
       isConnecting={isConnecting}
       oauthError={oauthError}
       showCompleteOrRestart={showCompleteOrRestart}
@@ -514,6 +652,8 @@ export function ConnectorConnectModal({
       onConnect={() => void handleConnect()}
       onApiKeyChange={setApiKey}
       onSubmitApiKey={() => void handleSubmitApiKey()}
+      onCredentialsChange={setCredentials}
+      onSubmitCredentials={() => void handleSubmitCredentials()}
       onCompleteFlow={() => void handleConnect()}
       onRestartFlow={handleRestart}
     >

@@ -19,10 +19,12 @@ describe("wizard categories", () => {
   it("exposes only supported categories, in catalog order", () => {
     const cats = wizardCategories()
     expect(cats.length).toBeGreaterThan(0)
-    // Analytics has no supported connector today → hidden from onboarding.
-    expect(cats.map((c) => c.key)).not.toContain(REQUIRED_CATEGORY_KEY)
-    // Project Management leads (its ClickUp is OAuth-wired).
-    expect(cats[0].key).toBe("pm")
+    // Analytics leads: Superset (credentials-wired) made the required
+    // category connectable, so it now surfaces first in catalog order.
+    expect(cats[0].key).toBe(REQUIRED_CATEGORY_KEY)
+    expect(cats[0].items.map((i) => i.id)).toEqual(["superset"])
+    // Project Management follows (its ClickUp is OAuth-wired).
+    expect(cats[1].key).toBe("pm")
   })
 
   it("drops connectors we don't support yet (e.g. Linear, MS Teams)", () => {
@@ -36,7 +38,8 @@ describe("wizard categories", () => {
     const cats = wizardCategories(new Set(["mixpanel"]))
     const analytics = cats.find((c) => c.key === REQUIRED_CATEGORY_KEY)
     expect(analytics).toBeTruthy()
-    expect(analytics!.items.map((i) => i.id)).toEqual(["mixpanel"])
+    // Live-but-unwired Mixpanel joins the wired Superset, catalog order.
+    expect(analytics!.items.map((i) => i.id)).toEqual(["mixpanel", "superset"])
   })
 
   it("requiredCategoryIds still reflects the raw Analytics category", () => {

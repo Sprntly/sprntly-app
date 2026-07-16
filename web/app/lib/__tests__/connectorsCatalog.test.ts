@@ -28,9 +28,9 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 31 connector rows across all categories (29 design + ClickUp + Fireflies)", () => {
+  it("totals 33 connector rows across all categories (29 design + ClickUp + Fireflies + Sprinklr + Superset)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(31)
+    expect(total).toBe(33)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -88,9 +88,9 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     return cat.items.map((i) => i.name)
   }
 
-  it("Analytics: Mixpanel, Amplitude, Google Analytics, Heap, PostHog", () => {
+  it("Analytics: Mixpanel, Amplitude, Google Analytics, Heap, PostHog, Superset", () => {
     expect(items("Analytics")).toEqual([
-      "Mixpanel", "Amplitude", "Google Analytics", "Heap", "PostHog",
+      "Mixpanel", "Amplitude", "Google Analytics", "Heap", "PostHog", "Superset",
     ])
   })
 
@@ -104,9 +104,9 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     expect(items("Business documentation")).toEqual(["Notion", "Google Docs"])
   })
 
-  it("Customer Voice & Support: Intercom, Zendesk, Fireflies, Gong, Dovetail, Salesforce", () => {
+  it("Customer Voice & Support: Intercom, Zendesk, Sprinklr, Fireflies, Gong, Dovetail, Salesforce", () => {
     expect(items("Customer Voice & Support")).toEqual([
-      "Intercom", "Zendesk", "Fireflies", "Gong", "Dovetail", "Salesforce",
+      "Intercom", "Zendesk", "Sprinklr", "Fireflies", "Gong", "Dovetail", "Salesforce",
     ])
   })
 
@@ -134,12 +134,15 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
 })
 
 describe("CONNECTOR_IDS_WITH_OAUTH", () => {
-  it("contains the connectors whose UI surfaces a live OAuth flow (Drive/GitHub + ClickUp + Jira + HubSpot + Slack + Figma)", () => {
+  it("contains the connectors whose UI surfaces a live OAuth flow", () => {
     // Figma is OAuth-only for the app-review resubmission — Figma's reviewers
     // rejected the PAT-based connect path, so it was removed entirely (no
     // figma_pat module, no /figma/pat route).
     expect([...CONNECTOR_IDS_WITH_OAUTH].sort()).toEqual(
-      ["clickup", "figma", "github", "google_drive", "hubspot", "jira", "slack"].sort(),
+      [
+        "asana", "clickup", "figma", "github", "google_drive",
+        "hubspot", "jira", "slack", "sprinklr",
+      ].sort(),
     )
   })
 
@@ -156,9 +159,10 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
 })
 
 describe("CONNECTOR_IDS_CONNECTABLE", () => {
-  it("contains all OAuth providers PLUS API-key ones (Fireflies)", () => {
+  it("contains all OAuth providers PLUS API-key (Fireflies) and credentials (Superset) ones", () => {
     expect([...CONNECTOR_IDS_CONNECTABLE].sort()).toEqual(
       [
+        "asana",
         "clickup",
         "figma",
         "fireflies",
@@ -167,6 +171,8 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "hubspot",
         "jira",
         "slack",
+        "sprinklr",
+        "superset",
       ].sort(),
     )
   })
@@ -195,6 +201,7 @@ describe("Business documentation category", () => {
 describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
   it("keeps only the categories that still have a wired connector, in order", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
+      "Analytics",
       "Project Management",
       "Business documentation",
       "Customer Voice & Support",
@@ -205,13 +212,14 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     ])
   })
 
-  it("shows only the 8 wired connectors (OAuth + API key) and nothing else", () => {
+  it("shows only the 11 wired connectors (OAuth + API key + credentials) and nothing else", () => {
     const ids = connectableCatalog()
       .flatMap((c) => c.items)
       .map((i) => i.id)
       .sort()
     expect(ids).toEqual(
       [
+        "asana",
         "clickup",
         "figma",
         "fireflies",
@@ -220,17 +228,19 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "hubspot",
         "jira",
         "slack",
+        "sprinklr",
+        "superset",
       ].sort(),
     )
   })
 
-  it("drops categories that end up with no connectors (Analytics, Monitoring)", () => {
+  it("drops categories that end up with no connectors (Monitoring)", () => {
     const titles = connectableCatalog().map((c) => c.title)
-    expect(titles).not.toContain("Analytics")
     expect(titles).not.toContain("Monitoring & Reliability")
     const byTitle = (t: string) =>
       connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
-    expect(byTitle("Project Management")).toEqual(["jira", "clickup"])
+    expect(byTitle("Analytics")).toEqual(["superset"])
+    expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
     expect(byTitle("Business documentation")).toEqual(["google_drive"])
     expect(byTitle("Code")).toEqual(["github"])
     expect(byTitle("Communication")).toEqual(["slack"])
@@ -246,7 +256,8 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
   it("never hides a provider that has a live connection, even if not yet wired", () => {
     const cats = connectableCatalog(new Set(["mixpanel"]))
     const analytics = cats.find((c) => c.title === "Analytics")!
-    expect(analytics.items.map((i) => i.id)).toEqual(["mixpanel"])
+    // Live-but-unwired Mixpanel joins the wired Superset, catalog order.
+    expect(analytics.items.map((i) => i.id)).toEqual(["mixpanel", "superset"])
   })
 
   it("does not mutate the source CONNECTOR_CATALOG", () => {
@@ -257,10 +268,13 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
 })
 
 describe("isConnectableConnector", () => {
-  it("true for OAuth and API-key connectors, false for 'Coming soon'", () => {
+  it("true for OAuth, API-key, and credentials connectors, false for 'Coming soon'", () => {
     expect(isConnectableConnector({ id: "slack", name: "Slack", logo: "S", oauth: true })).toBe(true)
     expect(
       isConnectableConnector({ id: "fireflies", name: "Fireflies", logo: "F", oauth: false, authType: "apikey" }),
+    ).toBe(true)
+    expect(
+      isConnectableConnector({ id: "superset", name: "Superset", logo: "S", oauth: false, authType: "credentials" }),
     ).toBe(true)
     expect(isConnectableConnector({ id: "mixpanel", name: "Mixpanel", logo: "M", oauth: false })).toBe(false)
   })

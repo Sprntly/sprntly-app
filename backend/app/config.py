@@ -196,6 +196,29 @@ class Settings(BaseSettings):
     # backward-compat with older legacy apps still active in production.
     hubspot_oauth_version: str = "v3"
 
+    # Asana connector (OAuth 2.0; ~1h access tokens with long-lived refresh).
+    # App registered in the Asana developer console. Scope depends on the
+    # app's permission MODE there: full-permissions apps accept only the
+    # special "default" scope (granular scopes get `forbidden_scopes`),
+    # while scoped-permissions apps take space-separated
+    # "<resource>:<action>" scopes that were pre-selected on the app —
+    # for those, set ASANA_SCOPES="users:read workspaces:read".
+    asana_client_id: str = ""
+    asana_client_secret: str = ""
+    asana_oauth_redirect_uri: str = ""
+    asana_scopes: str = "default"
+
+    # Sprinklr connector (OAuth 2.0; ~30-day access tokens with refresh).
+    # Key + secret come from an app registered on dev.sprinklr.com; they are
+    # ENVIRONMENT-SPECIFIC — a key minted for one Sprinklr environment is
+    # invalid in another, so sprinklr_environment must match the env the app
+    # was registered for ("" = production app.sprinklr.com; "prod0"/"prod2"/
+    # "sandbox" for the others).
+    sprinklr_api_key: str = ""
+    sprinklr_api_secret: str = ""
+    sprinklr_oauth_redirect_url: str = ""
+    sprinklr_environment: str = ""
+
     # Slack connector (OAuth 2.0 — bot token for message delivery + sync)
     slack_client_id: str = ""
     slack_client_secret: str = ""

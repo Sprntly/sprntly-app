@@ -850,10 +850,19 @@ export function TicketsTab() {
         setPickState({ kind: "picking-jira", provider: "jira", projects: r.projects })
         return
       }
-      const r = await storiesApi.listClickUpLists()
+      // ClickUp lists and Asana projects share the compact list picker (both
+      // return {lists:[{id,name}]}); only the destination-fetch call differs.
+      const r = provider === "asana"
+        ? await storiesApi.listAsanaProjects()
+        : await storiesApi.listClickUpLists()
       if (r.lists.length === 0) {
         setPickState({ kind: "idle" })
-        showToast("No ClickUp lists found", "Create a list in ClickUp first.")
+        showToast(
+          provider === "asana" ? "No Asana projects found" : "No ClickUp lists found",
+          provider === "asana"
+            ? "Create a project in Asana first."
+            : "Create a list in ClickUp first.",
+        )
         return
       }
       setSelectedListId(r.lists[0].id)
