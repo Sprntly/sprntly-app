@@ -44,7 +44,7 @@ import uuid
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -123,6 +123,7 @@ from app.design_agent.storage import (
     repair_unresolved_relative_imports,
     stage_bundle,
     stage_preview_image,
+    stage_screenshot,
     vite_build,
     vite_build_with_repair,
 )
@@ -393,11 +394,19 @@ class GenerateRequest(BaseModel):
     #                                       and, when a matching GitHub App installation
     #                                       is known, into the design-system source
     #                                       resolver for future codebase extraction.
-    design_source: Literal["figma", "github", "website"] | None = None
+    screenshot_key: str | None = None
+    #   Staged upload key returned by POST /uploads/screenshot — a generate-time
+    #   input snapshot mirroring figma_file_key (persisted on the row; iterate
+    #   re-reads it from there, never from a fresh upload). This release only
+    #   accepts + persists the key; engine selection semantics land separately.
+    design_source: Literal["figma", "github", "website", "screenshot"] | None = None
     #   Explicit single-source selector. figma → use figma_file_key; github →
     #   use github_repo; website → use the onboarding website (or a typed
     #   website_url). None = old client / no explicit choice → preserve the
     #   prior implicit precedence + always-on onboarding fallback unchanged.
+    #   "screenshot" is ACCEPTED but not yet consumed by the runner's source
+    #   arms — it falls through to the implicit precedence (safe by design)
+    #   until the engine wiring lands.
     chosen_screen_route: str | None = None
     #   The route the PM confirmed in the locate UX (codebase generation only).
     #   When present alongside a resolved installation, the background task
@@ -432,6 +441,66 @@ class GenerateResponse(BaseModel):
 # ─── Routes ───────────────────────────────────────────────────────────────
 
 
+# ── Screenshot upload intake ─────────────────────────────────────────────────
+#
+# Stages a user-uploaded screenshot as generate-time design context (the key is
+# threaded into a later POST /generate). Unrelated to design_agent/screenshot.py,
+# which is the server-side preview CAPTURE of staged bundles.
+#
+# Declared ABOVE the single-segment GET /{prototype_id} catch-all per the house
+# route-ordering convention (see design_agent_comments.py) — a 2-segment POST is
+# unshadowable by a GET catch-all, but the ordering rule stays uniform.
+
+_MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024  # 8 MB — generous for a UI screenshot.
+
+# Magic-byte signatures. The DECLARED content-type is never trusted: the sniffed
+# type decides (a prefix check meets the threat model — the bytes are stored,
+# never decoded server-side, so no image dependency is warranted).
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+
+
+def _sniff_image_media_type(data: bytes) -> str | None:
+    """Return the media type for a PNG/JPEG/WebP byte signature, else None."""
+    if data.startswith(_PNG_MAGIC):
+        return "image/png"
+    if data.startswith(_JPEG_MAGIC):
+        return "image/jpeg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+@router.post(
+    "/uploads/screenshot",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+async def upload_screenshot(
+    file: UploadFile = File(...),
+    company: CompanyContext = Depends(require_company),
+) -> dict[str, str]:
+    """Validate + stage an uploaded screenshot; return its storage key.
+
+    Guards mirror routes/prd.py's import guard: empty → 400, oversize → 413,
+    plus a magic-byte sniff → 422 when the bytes match no allowed image
+    signature. The response media_type is the SNIFFED type (e.g. JPEG bytes
+    uploaded under a .png name come back "image/jpeg").
+    """
+    _require_feature_enabled()
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Uploaded file is empty.")
+    if len(data) > _MAX_SCREENSHOT_BYTES:
+        raise HTTPException(413, "File too large (max 8 MB).")
+    media_type = _sniff_image_media_type(data)
+    if media_type is None:
+        raise HTTPException(422, "Unsupported file type (PNG, JPEG, or WebP required).")
+    key = await stage_screenshot(
+        workspace_id=company.company_id, data=data, media_type=media_type
+    )
+    return {"screenshot_key": key, "media_type": media_type}
+
+
 @router.post(
     "/generate",
     response_model=GenerateResponse,
@@ -460,6 +529,15 @@ async def generate(
             detail="service is draining, retry shortly",
         )
     workspace_id = company.company_id
+
+    # Route-layer mirror of read_screenshot's workspace-prefix check: a key from
+    # another tenant's upload space (or any non-upload key) is refused outright.
+    # 403 — the caller referenced an object it does not own; not invisibility
+    # (the route itself already resolved past the feature gate).
+    if body.screenshot_key is not None and not body.screenshot_key.startswith(
+        f"uploads/{workspace_id}/"
+    ):
+        raise HTTPException(status_code=403, detail={"error": "screenshot_key_forbidden"})
 
     # Sync DB helpers, called directly (no await) — see CALL-STYLE NOTE.
     existing = find_existing_prototype(
@@ -523,6 +601,7 @@ async def generate(
         figma_file_key=body.figma_file_key,
         website_url=effective_website_url,  # snapshot; resolved value incl. onboarding fallback
         github_installation_id=github_installation_id,
+        screenshot_key=body.screenshot_key,  # snapshot; ownership-checked above
     )
 
     # Open a usage-ledger row for this generation (billing/observability). The id

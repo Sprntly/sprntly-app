@@ -43,6 +43,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -1328,3 +1329,134 @@ def _stage_preview_filesystem_sync(object_path: str, png_bytes: bytes) -> str:
     if not public_base:
         return target.as_uri()
     return f"{public_base}/{object_path}"
+
+
+# ─── User-uploaded screenshot staging (generate-time design context) ──────────
+#
+# NOT to be confused with app/design_agent/screenshot.py — that module is the
+# server-side PREVIEW-CAPTURE path (rendering staged bundles to preview images).
+# These helpers stage a USER-UPLOADED screenshot as design context for a later
+# generate call. Same Supabase-primary / filesystem-fallback dual backend as
+# stage_bundle / stage_preview_image; binary bytes like the preview path.
+#
+# Key shape IS the isolation boundary: `uploads/{workspace_id}/{uuid4}.{ext}`.
+# The workspace prefix is enforced at write (key construction here) AND at read
+# (`read_screenshot` refuses any key outside the caller's prefix), so a leaked
+# or guessed key from another tenant is unusable.
+
+_SCREENSHOT_EXT_BY_MEDIA_TYPE = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+}
+_SCREENSHOT_MEDIA_TYPE_BY_EXT = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "webp": "image/webp",
+}
+
+
+async def stage_screenshot(*, workspace_id: str, data: bytes, media_type: str) -> str:
+    """Write the screenshot bytes to storage; return the object key.
+
+    The key is `uploads/{workspace_id}/{uuid4}.{png|jpg|webp}` — extension
+    derived from the (route-sniffed) media_type. Supabase Storage is the primary
+    destination; the filesystem under settings.storage_dir is the dev/test
+    fallback when no bucket is configured (same dual-backend contract as
+    stage_bundle). Raises ValueError on a media_type outside the allowed set
+    (a programming error — the route sniffs before calling).
+    """
+    if not workspace_id:
+        raise ValueError("stage_screenshot: workspace_id is required")
+    ext = _SCREENSHOT_EXT_BY_MEDIA_TYPE.get(media_type)
+    if ext is None:
+        raise ValueError(f"stage_screenshot: unsupported media_type {media_type!r}")
+    key = f"uploads/{workspace_id}/{uuid.uuid4()}.{ext}"
+
+    bucket = _bucket_name()
+    if bucket:
+        await asyncio.to_thread(
+            _stage_screenshot_supabase_sync, bucket, key, data, media_type
+        )
+        backend = "supabase"
+    else:
+        await asyncio.to_thread(_stage_screenshot_filesystem_sync, key, data)
+        backend = "filesystem"
+    # Identifiers only — never the image bytes; key logged by uuid suffix only
+    # (Rule #24: the full key embeds the workspace id).
+    logger.info(
+        "screenshot_uploaded workspace_present=%s key_suffix=%s size_bytes=%s backend=%s",
+        bool(workspace_id), key.rsplit("/", 1)[-1], len(data), backend,
+    )
+    return key
+
+
+async def read_screenshot(*, key: str, workspace_id: str) -> tuple[bytes, str]:
+    """Download a staged screenshot by key; return (bytes, media_type).
+
+    REFUSES any key not under `uploads/{workspace_id}/` — a cross-workspace read
+    is an isolation bug (a programming error upstream), so it raises ValueError
+    rather than returning empty. media_type is derived from the key's extension
+    (the write side is the only key producer, so the extension is trusted).
+    """
+    prefix = f"uploads/{workspace_id}/"
+    if not workspace_id or not key.startswith(prefix):
+        raise ValueError("read_screenshot: key is outside the caller's workspace prefix")
+    # A `..` segment could satisfy the literal prefix yet resolve into another
+    # workspace's directory on the filesystem backend — refuse it on BOTH
+    # backends (the write side never produces one, so it is always hostile).
+    if ".." in key.split("/"):
+        raise ValueError("read_screenshot: key contains a traversal segment")
+    ext = key.rsplit(".", 1)[-1].lower()
+    media_type = _SCREENSHOT_MEDIA_TYPE_BY_EXT.get(ext)
+    if media_type is None:
+        raise ValueError(f"read_screenshot: unsupported key extension {ext!r}")
+
+    bucket = _bucket_name()
+    if bucket:
+        data = await asyncio.to_thread(_read_screenshot_supabase_sync, bucket, key)
+    else:
+        data = await asyncio.to_thread(_read_screenshot_filesystem_sync, key)
+    return data, media_type
+
+
+def _stage_screenshot_supabase_sync(
+    bucket: str, key: str, data: bytes, media_type: str
+) -> None:
+    """Upload the raw image bytes via the Supabase Storage client.
+
+    Mirrors `_stage_preview_supabase_sync`: raw bytes, sniffed content-type,
+    `upsert` for idempotence, same `require_client()` service-role client."""
+    from app.db.client import require_client
+
+    storage = require_client().storage.from_(bucket)
+    storage.upload(
+        path=key,
+        file=data,
+        file_options={"content-type": media_type, "upsert": "true"},
+    )
+
+
+def _stage_screenshot_filesystem_sync(key: str, data: bytes) -> None:
+    """Write the image bytes under settings.storage_dir (dev/test fallback)."""
+    target = Path(settings.storage_dir).resolve() / key
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+
+
+def _read_screenshot_supabase_sync(bucket: str, key: str) -> bytes:
+    from app.db.client import require_client
+
+    storage = require_client().storage.from_(bucket)
+    data = storage.download(key)
+    return bytes(data) if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8")
+
+
+def _read_screenshot_filesystem_sync(key: str) -> bytes:
+    storage_root = Path(settings.storage_dir).resolve()
+    target = (storage_root / key).resolve()
+    # Filesystem containment (mirrors the bundle-read guard): the resolved path
+    # MUST stay under storage_dir so a hostile `..`/symlink key cannot escape.
+    if not _is_relative_to(target, storage_root):
+        raise ValueError("read_screenshot: key escapes the storage root")
+    return target.read_bytes()
