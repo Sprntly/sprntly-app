@@ -363,6 +363,8 @@ export type SkillInfo = {
   label: string
   trigger: string
   description: string
+  /** Display category from the backend catalog (e.g. "Discovery & Research"). */
+  category: string
 }
 
 /** POST /v1/ask is fire-and-forget: it returns an ask_id immediately and the

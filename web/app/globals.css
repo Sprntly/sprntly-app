@@ -18069,6 +18069,210 @@
 
 .tpl-add-t { font-size: 13.5px; font-weight: 600; }
 .tpl-add-s { font-size: 12px; color: var(--ink-3); max-width: 220px; }
+
+/* ── Skills gallery (data-view="skills") ─────────────────────────────────────
+   Mirrors the Templates surface chrome (.tpl-*): sticky header row, intro
+   banner, then one section per catalog category — serif numbered heading with
+   a tagline — over a card grid. Cards are BUTTONS (the whole card invokes the
+   skill into a new chat thread), so they carry hover/focus affordances. */
+
+.main--skills {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.skl-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.skl-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.skl-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.skl-title-icon { color: var(--accent); flex-shrink: 0; }
+
+.skl-sub {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ink-3);
+  margin-left: 4px;
+}
+
+.skl-create { display: inline-flex; align-items: center; gap: 6px; }
+
+.skl-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.skl-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent-2);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.skl-intro-icon { color: var(--accent); flex-shrink: 0; margin-top: 1px; }
+
+.skl-search {
+  position: relative;
+  max-width: 460px;
+}
+
+.skl-search svg {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ink-3);
+  pointer-events: none;
+}
+
+.skl-search input {
+  width: 100%;
+  font-size: 13px;
+  padding: 8px 14px 8px 35px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-3, #EEF0EE);
+  color: var(--ink);
+  outline: none;
+}
+
+.skl-search input:focus {
+  border-color: var(--accent-alpha-40);
+  background: var(--surface-2, #fff);
+}
+
+.skl-msg {
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+}
+.skl-msg-error { background: #fdeaea; color: #c13838; border: 1px solid #f5b3b3; }
+
+.skl-placeholder { font-size: 13px; color: var(--ink-3); padding: 8px 0; }
+
+.skl-group { display: flex; flex-direction: column; gap: 12px; }
+
+.skl-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.skl-group-title {
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--ink);
+  margin: 0;
+}
+
+.skl-group-tag { font-size: 12.5px; color: var(--ink-3); }
+
+.skl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.skl-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 8px;
+  padding: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
+}
+.skl-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 10px rgba(23, 148, 99, 0.08);
+  transform: translateY(-1px);
+}
+.skl-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.skl-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--accent-muted);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.skl-card-t { font-size: 14px; font-weight: 600; color: var(--ink); }
+
+.skl-card-d {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-3);
+  flex: 1;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.skl-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.skl-by {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+.skl-by svg { color: var(--accent); }
 /* ── Weekly-brief skill design — 7-type taxonomy accents ──────────────────────
    Each finding card sets `--card-accent` inline (lib/brief-skill-taxonomy,
    derived from the finding type, NOT the model's mismatchable accent). The left

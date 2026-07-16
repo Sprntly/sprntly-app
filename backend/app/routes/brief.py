@@ -60,6 +60,23 @@ def _with_company_name(brief: dict) -> dict:
     return {**brief, "company_name": display_name_for_slug(brief.get("dataset") or "")}
 
 
+def _notify_brief_ready(dataset: str, brief: dict | None) -> None:
+    """Send the short "Hey, your brief is generated." ping (Slack + email) after
+    a USER-TRIGGERED regenerate — not the full weekly brief message, which stays
+    reserved for the scheduled delivery time. Only fires for a FRESH brief; a
+    cache-returned run (`_from_cache`, KG unchanged) produced nothing new to
+    announce. Best-effort: blocking HTTP, never raises."""
+    if not brief or brief.get("_from_cache"):
+        return
+    from app.synthesis.delivery import deliver_brief_ready_ping
+
+    try:
+        company_id, _slug = resolve_company(dataset)
+        deliver_brief_ready_ping(company_id)
+    except Exception:  # noqa: BLE001 — a ping failure never breaks the brief
+        logger.exception("brief ready ping failed for %s", dataset)
+
+
 async def _synthesis_generate_bg(dataset: str) -> None:
     """Background body for /regenerate under the synthesis engine.
 
@@ -67,10 +84,12 @@ async def _synthesis_generate_bg(dataset: str) -> None:
     LLM/Supabase calls); failures are
     logged, never raised — the service keeps serving the prior cached brief.
     run_synthesis save_brief()s the new brief, so /current picks it up.
+    Delivery: the fresh brief is announced with the short ready ping (see
+    _notify_brief_ready), not the full scheduled brief message.
     """
     set_status(dataset, "generating")
     try:
-        await asyncio.to_thread(generate_brief_for, dataset)
+        brief = await asyncio.to_thread(generate_brief_for, dataset, deliver=False)
         set_status(dataset, "ready")
         logger.info("Synthesis brief generated for %s", dataset)
     except EmptyKnowledgeGraphError:
@@ -86,6 +105,8 @@ async def _synthesis_generate_bg(dataset: str) -> None:
                    error="Brief generation failed — check server logs.")
         logger.exception("Synthesis brief generation failed for %s", dataset)
         return
+    # Tell the user their brief is ready (short ping, fresh briefs only).
+    await asyncio.to_thread(_notify_brief_ready, dataset, brief)
     # Warm the per-insight drill-downs so the first click is instant.
     # Error-isolated inside the
     # helper, so it can never undo the brief we just generated.
@@ -173,7 +194,7 @@ async def _full_pipeline_bg(dataset: str) -> None:
 
     # Step 2: seed-if-needed + synthesize the brief off the event loop.
     try:
-        await asyncio.to_thread(generate_brief_for, dataset)
+        brief = await asyncio.to_thread(generate_brief_for, dataset, deliver=False)
         set_status(dataset, "ready")
         logger.info("Full-pipeline brief generated for %s", dataset)
     except EmptyKnowledgeGraphError:
@@ -187,6 +208,10 @@ async def _full_pipeline_bg(dataset: str) -> None:
                    error="Brief generation failed — check server logs.")
         logger.exception("Full-pipeline brief generation failed for %s", dataset)
         return
+
+    # Tell the user their brief is ready (short ping, fresh briefs only) before
+    # the slower PRD/evidence fan-out below.
+    await asyncio.to_thread(_notify_brief_ready, dataset, brief)
 
     # Steps 3 + 4: fan out PRD + evidence generation for the fresh brief, then
     # warm the drill-downs. All error-isolated so they can't undo the brief.
@@ -368,10 +393,12 @@ def generate(
     """
     require_owned_dataset(dataset, company.company_id, company.workspace_id)
     try:
-        payload = generate_brief_for(dataset)
+        payload = generate_brief_for(dataset, deliver=False)
     except ValueError as e:
         # Unknown dataset/company or an empty KG even after seeding.
         raise HTTPException(409, str(e)) from e
+    # User-triggered: announce with the short ready ping, not the full message.
+    _notify_brief_ready(dataset, payload)
     saved = get_current_brief(dataset)
     brief_id = saved.get("id") if saved else None
     return _with_company_name({"brief_id": brief_id, "dataset": dataset, **payload})

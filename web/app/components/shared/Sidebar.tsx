@@ -7,7 +7,7 @@ import { useAuth } from "../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand } from "@tabler/icons-react"
 import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 
@@ -194,6 +194,7 @@ export function Sidebar(_props: SidebarProps = {}) {
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
         {/* <RailItem screen="backlog" icon={<IconBulb size={18} />} label="Backlog Projects" /> */}
         <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates" />
+        <RailItem screen="skills" icon={<IconWand size={18} />} label="Skills" />
         <RailItem screen="sources" icon={<IconSources />} label="Sources" />
         {/* <RailItem screen="prototype" icon={<IconPrompt size={18} />} label="Prototype" /> */}
         {/* <RailItem screen="tickets" icon={<IconLayoutKanban size={18} />} label="Project Management" /> */}

@@ -207,9 +207,11 @@ def test_brief_reads_stay_open_when_weekly_brief_off(
 def _reset_ledger():
     from app import scheduler as sched_mod
 
-    sched_mod._last_brief_run.clear()
+    sched_mod._last_brief_generation.clear()
+    sched_mod._last_brief_delivery.clear()
     yield
-    sched_mod._last_brief_run.clear()
+    sched_mod._last_brief_generation.clear()
+    sched_mod._last_brief_delivery.clear()
 
 
 def _run_weekly_tick(now, companies):
@@ -219,25 +221,29 @@ def _run_weekly_tick(now, companies):
 
     generated: list[str] = []
 
-    async def _fake_gen(company_id, slug):
+    async def _fake_gen(slug):
         generated.append(slug)
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
          patch.object(sched_mod, "_generate_weekly_brief_for_company",
-                      side_effect=_fake_gen):
+                      side_effect=_fake_gen), \
+         patch.object(sched_mod, "_deliver_weekly_brief_for_company"), \
+         patch.object(sched_mod, "_schedule_exact_delivery"):
         asyncio.run(sched_mod._run_weekly_brief_tick(now=now))
     return generated
 
 
 def test_weekly_tick_skips_company_with_weekly_brief_off():
-    """Two UTC companies inside the Monday-06:00 window: the explicitly-off one
-    is skipped, the missing-key one still fires (grandfathered ON)."""
+    """Two UTC companies inside the Monday generation lead window (fire 06:00
+    UTC − 3h): the explicitly-off one is skipped, the missing-key one still
+    fires (grandfathered ON)."""
     companies = [
         {"id": "co-off", "slug": "gated", "feature_flags": {"weekly_brief": False}},
         {"id": "co-on", "slug": "open", "feature_flags": {}},
     ]
-    # Monday 2026-06-08 06:00 UTC — both companies' (default-UTC) window is open.
-    generated = _run_weekly_tick(datetime(2026, 6, 8, 6, 0, tzinfo=UTC), companies)
+    # Monday 2026-06-08 03:00 UTC — both companies' (default-UTC) generation
+    # lead window is open.
+    generated = _run_weekly_tick(datetime(2026, 6, 8, 3, 0, tzinfo=UTC), companies)
     assert generated == ["open"]
 
 
@@ -246,7 +252,7 @@ def test_weekly_tick_agents_flag_is_irrelevant_to_brief():
     companies = [
         {"id": "co-1", "slug": "chatless", "feature_flags": {"agents": False}},
     ]
-    generated = _run_weekly_tick(datetime(2026, 6, 8, 6, 0, tzinfo=UTC), companies)
+    generated = _run_weekly_tick(datetime(2026, 6, 8, 3, 0, tzinfo=UTC), companies)
     assert generated == ["chatless"]
 
 

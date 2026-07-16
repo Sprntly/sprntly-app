@@ -74,6 +74,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   prototype: PROTOTYPE_PATH,
   backlog: "/backlog",
   templates: "/templates",
+  skills: "/skills",
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -94,6 +95,7 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   [PROTOTYPE_PATH]: "prototype",
   "/backlog": "backlog",
   "/templates": "templates",
+  "/skills": "skills",
 }
 
 // Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).

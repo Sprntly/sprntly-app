@@ -33,6 +33,9 @@ export type ScreenId =
   // Top-level "what good looks like" surface: the company's gold-standard PRD
   // examples. Design data-view="templates", bookmark icon.
   | "templates"
+  // The Skills gallery — every routable PM skill as a card; clicking one opens
+  // a chat thread with the skill's /trigger pre-filled in the composer.
+  | "skills"
 
 // The NUMBERED onboarding screens, in flow order.
 export const ONBOARDING_SCREENS: ScreenId[] = [
@@ -65,6 +68,7 @@ export const APP_SCREENS: ScreenId[] = [
   "prototype",
   "backlog",
   "templates",
+  "skills",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
@@ -93,6 +97,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   prototype: "Prototype",
   backlog: "Backlog Projects",
   templates: "Templates",
+  skills: "Skills",
 }
 
 export function getMainChromeTitle(screen: ScreenId): string {
