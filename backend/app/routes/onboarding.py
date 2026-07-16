@@ -105,3 +105,53 @@ def get_analyze_website(
         "result": row.get("result"),
         "error": row.get("error"),
     }
+
+
+class WorkspaceNameIn(BaseModel):
+    name: str
+
+    @property
+    def clean_name(self) -> str:
+        return self.name.strip()
+
+
+@router.post("/workspace")
+def post_onboarding_workspace(
+    body: WorkspaceNameIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Final onboarding step — "Create your workspace".
+
+    RENAMES the company's default workspace (never creates a second one: the
+    default was created at company creation / by backfill, and
+    ensure_default_workspace self-heals the gap for companies that predate
+    workspace rows). Also grants the caller a workspace-admin membership and
+    binds the company dataset (bare company slug) to the workspace, making it
+    the workspace's corpus. Idempotent — safe to re-run on a resumed step.
+    """
+    name = body.clean_name
+    if not name:
+        raise HTTPException(422, "Workspace name cannot be empty")
+    if len(name) > 100:
+        raise HTTPException(422, "Workspace name is too long")
+
+    from app.db.companies import slug_for_company_id
+    from app.db.workspaces import (
+        ensure_default_workspace,
+        register_workspace_dataset,
+        update_workspace,
+        upsert_workspace_member,
+    )
+
+    ws = ensure_default_workspace(company.company_id)
+    updated = update_workspace(ws["id"], name=name) or {**ws, "name": name}
+    upsert_workspace_member(ws["id"], company.user_id, "admin")
+    company_slug = slug_for_company_id(company.company_id)
+    if company_slug:
+        register_workspace_dataset(updated, company_slug=company_slug)
+    return {
+        "id": updated["id"],
+        "name": updated["name"],
+        "slug": updated["slug"],
+        "is_default": bool(updated.get("is_default")),
+    }

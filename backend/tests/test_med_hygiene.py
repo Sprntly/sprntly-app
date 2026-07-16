@@ -72,6 +72,9 @@ def test_prd_autoversion_success_does_not_log_warning(isolated_settings, caplog)
 
 class _DummyCompany:
     company_id = "co-1"
+    # Routes read ctx.workspace_id since the multi-workspace slice; None keeps
+    # require_owned_prd on the company-wide (legacy) check.
+    workspace_id = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────

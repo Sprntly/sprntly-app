@@ -21,6 +21,14 @@ chain is:
 On any mismatch (or a missing row, or an unresolvable slug) we raise 404 rather
 than 403 — a foreign tenant must not be able to tell an existing-but-not-yours
 row apart from a non-existent one (no existence disclosure).
+
+Multi-workspace (2026-07): datasets are per-WORKSPACE (datasets.workspace_id;
+the default workspace keeps the bare company slug, additional workspaces use
+'{company}--{workspace}'). Every helper takes an optional `workspace_id`;
+when provided (routes on require_workspace pass ctx.workspace_id) the dataset
+must be bound to THAT workspace — with a rollout fallback: a dataset whose
+binding is NULL but whose slug resolves to the caller's company stays
+accepted (pre-backfill rows must not 404).
 """
 from __future__ import annotations
 
@@ -37,52 +45,84 @@ def _not_found(detail: str) -> HTTPException:
 def company_id_for_dataset(slug: str) -> str | None:
     """The owning company id for a dataset slug, or None when no company owns it.
 
-    A dataset slug IS a company slug (briefs/prds/asks all key off the slug as
-    TEXT; the company that owns the slug owns those rows). Returns None when the
+    Resolution order: the dataset's bound workspace (datasets.workspace_id →
+    workspaces.company_id — covers per-workspace '{company}--{workspace}'
+    slugs), then the legacy slug==company-slug mapping. Returns None when the
     slug maps to no company so callers can 404 without disclosing existence.
     """
     if not slug:
         return None
+    from app.db.workspaces import workspace_for_dataset_slug
+
+    bound = workspace_for_dataset_slug(slug)
+    if bound:
+        return bound["company_id"]
     return company_id_for_slug(slug)
 
 
-def require_owned_dataset(slug: str, company_id: str) -> str:
-    """Assert dataset `slug` belongs to `company_id`; return the slug.
+def _dataset_in_workspace(slug: str, company_id: str, workspace_id: str) -> bool:
+    """True iff dataset `slug` is usable from `workspace_id`. Bound datasets
+    must match exactly; an unbound dataset (NULL workspace_id) owned by the
+    company is accepted during rollout (legacy rows pre-backfill)."""
+    from app.db.workspaces import workspace_for_dataset_slug
 
-    Raises 404 when the slug maps to a different company (or to no company),
-    so a caller can never act on, list files of, or seed an LLM answer from a
-    dataset that isn't theirs.
+    bound = workspace_for_dataset_slug(slug)
+    if bound:
+        return bound["workspace_id"] == workspace_id
+    return company_id_for_slug(slug) == company_id
+
+
+def require_owned_dataset(
+    slug: str, company_id: str, workspace_id: str | None = None
+) -> str:
+    """Assert dataset `slug` belongs to `company_id` (and, when given, to the
+    active `workspace_id`); return the slug.
+
+    Raises 404 when the slug maps to a different company/workspace (or to no
+    company), so a caller can never act on, list files of, or seed an LLM
+    answer from a dataset that isn't theirs.
     """
     owner = company_id_for_dataset(slug)
     if owner is None or owner != company_id:
         raise _not_found(f"Dataset {slug!r} not found")
+    if workspace_id and not _dataset_in_workspace(slug, company_id, workspace_id):
+        raise _not_found(f"Dataset {slug!r} not found")
     return slug
 
 
-def require_owned_brief(brief_id: int, company_id: str) -> dict:
-    """Resolve `brief_id` → brief and assert it belongs to `company_id`.
+def require_owned_brief(
+    brief_id: int, company_id: str, workspace_id: str | None = None
+) -> dict:
+    """Resolve `brief_id` → brief and assert it belongs to `company_id` (and
+    the active workspace when given).
 
     Returns the brief row on success; raises 404 when the brief is missing or
-    its dataset resolves to a different company.
+    its dataset resolves to a different company/workspace.
     """
     from app.db import get_brief_by_id
 
     brief = get_brief_by_id(brief_id)
     if not brief:
         raise _not_found("Brief not found")
-    owner = company_id_for_dataset(brief.get("dataset") or "")
+    slug = brief.get("dataset") or ""
+    owner = company_id_for_dataset(slug)
     if owner is None or owner != company_id:
+        raise _not_found("Brief not found")
+    if workspace_id and not _dataset_in_workspace(slug, company_id, workspace_id):
         raise _not_found("Brief not found")
     return brief
 
 
-def require_owned_prd(prd_id: int, company_id: str) -> dict:
-    """Resolve `prd_id` → prd → brief and assert ownership by `company_id`.
+def require_owned_prd(
+    prd_id: int, company_id: str, workspace_id: str | None = None
+) -> dict:
+    """Resolve `prd_id` → prd → brief and assert ownership by `company_id`
+    (and the active workspace when given).
 
     Returns the raw prd row on success (callers that need the rendered body
     re-read via get_prd_rendered after the gate passes). Raises 404 when the
     prd is missing, its brief is missing, or the brief's dataset resolves to a
-    different company.
+    different company/workspace.
     """
     from app.db.prds import get_prd
 
@@ -91,20 +131,23 @@ def require_owned_prd(prd_id: int, company_id: str) -> dict:
         raise _not_found("PRD not found")
     # Bind the prd to its company via brief.dataset. A prd whose brief vanished
     # is unattributable to any tenant → treat as not found (fail closed).
-    require_owned_brief(prd["brief_id"], company_id)
+    require_owned_brief(prd["brief_id"], company_id, workspace_id)
     return prd
 
 
-def require_owned_evidence(evidence_id: int, company_id: str) -> dict:
-    """Resolve `evidence_id` → evidence → brief and assert ownership.
+def require_owned_evidence(
+    evidence_id: int, company_id: str, workspace_id: str | None = None
+) -> dict:
+    """Resolve `evidence_id` → evidence → brief and assert ownership (company
+    + active workspace when given).
 
     Returns the evidence row on success; raises 404 when the evidence is
-    missing or its brief's dataset resolves to a different company.
+    missing or its brief's dataset resolves to a different company/workspace.
     """
     from app.db import get_evidence
 
     evidence = get_evidence(evidence_id)
     if not evidence:
         raise _not_found("Evidence not found")
-    require_owned_brief(evidence["brief_id"], company_id)
+    require_owned_brief(evidence["brief_id"], company_id, workspace_id)
     return evidence

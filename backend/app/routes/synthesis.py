@@ -6,8 +6,9 @@ POST /v1/synthesis/brief  — generate the KG-driven weekly brief; saved under
                             the company's dataset slug so the existing Brief
                             screen renders it.
 
-Both tenant-scoped via require_company (1 user ↔ 1 company); the company's
-slug doubles as the dataset slug (aligned at onboarding).
+Both tenant-scoped (/seed via require_workspace, /brief via the Weekly-Brief
+module gate); the company's slug doubles as the dataset slug (aligned at
+onboarding).
 """
 from __future__ import annotations
 
@@ -15,7 +16,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from app.auth import CompanyContext, require_company
+from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.corpus import load_corpus
 from app.entitlements import require_weekly_brief_module
 from app.db.client import require_client
@@ -40,7 +41,7 @@ def _company_slug(company_id: str) -> str:
 
 
 @router.post("/seed")
-def seed_from_corpus(company: CompanyContext = Depends(require_company)):
+def seed_from_corpus(company: WorkspaceContext = Depends(require_workspace)):
     """Extract the company's uploaded corpus into the knowledge graph."""
     slug = _company_slug(company.company_id)
     try:

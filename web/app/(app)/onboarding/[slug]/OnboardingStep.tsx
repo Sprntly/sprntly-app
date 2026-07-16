@@ -4,11 +4,13 @@ import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import {
   ApiKey,
-  BusinessInfo,
+  CompanyStep,
   Connectors,
-  BusinessContext,
+  MetricsStep,
+  ProductStep,
   Strategy,
-  Workspace,
+  TeamStep,
+  WorkspaceStep,
 } from "../../../components/screens/onboarding"
 import {
   ONBOARDING_STEP_SLUGS,
@@ -17,18 +19,18 @@ import {
 
 /**
  * The ordered onboarding step list — the single source of truth pairing each
- * semantic slug with its screen component, in flow order (6-step redesign):
+ * semantic slug with its screen component, in flow order (2026-07 registration
+ * spec: Company / Product / Team sections; starred fields mandatory for
+ * company accounts only):
  *
- *   1. business-info     → BusinessInfo    (onb1: product + pick-3 metrics;
- *                                           kicks off the website analysis in the
- *                                           background on Continue)
- *   2. workspace         → Workspace       (onbws: slim, name-only — continues)
- *   3. api-key           → ApiKey          (company Claude key, BEFORE connectors
- *                                           so the KG build runs on their key)
- *   4. connectors        → Connectors      (onb4: connect your tools)
- *   5. business-context  → BusinessContext (onbctx: auto-drafted, editable)
- *   6. strategy          → Strategy        (onbstrat: priorities + roadmap doc;
- *                                           the FINAL step — completes onboarding)
+ *   1. company     → CompanyStep    (name* + website*; mission/strategy optional)
+ *   2. product     → ProductStep    (URL* + surfaces*; personas/monetization optional)
+ *   3. metrics     → MetricsStep    (pick-3 success metrics)
+ *   4. api-key     → ApiKey         (company Claude key, BEFORE connectors)
+ *   5. connectors  → Connectors     (connect your tools*)
+ *   6. team        → TeamStep       (scope* + framework*; invites/brief day optional)
+ *   7. strategy    → Strategy       (docs + roadmap upload)
+ *   8. workspace   → WorkspaceStep  (name your workspace — completes onboarding)
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
  * `onboarding_step` is the 1-based index into both).
@@ -37,12 +39,14 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   slug: OnboardingStepSlug
   Component: React.ComponentType
 }> = [
-  { slug: "business-info", Component: BusinessInfo },
-  { slug: "workspace", Component: Workspace },
+  { slug: "company", Component: CompanyStep },
+  { slug: "product", Component: ProductStep },
+  { slug: "metrics", Component: MetricsStep },
   { slug: "api-key", Component: ApiKey },
   { slug: "connectors", Component: Connectors },
-  { slug: "business-context", Component: BusinessContext },
+  { slug: "team", Component: TeamStep },
   { slug: "strategy", Component: Strategy },
+  { slug: "workspace", Component: WorkspaceStep },
 ]
 
 // Dev-time guard: the route map and the slug source of truth must agree in

@@ -11,7 +11,7 @@
   POST   /v1/tickets/lists                -> ClickUp lists to pick a target
   POST   /v1/tickets/push-clickup         -> create the tickets in ClickUp
 
-All routes require_company (tenant scoped). Ticket data is stored in Supabase
+All routes require_workspace (tenant scoped). Ticket data is stored in Supabase
 tables: ticket_edits, ticket_attachments, ticket_comments.
 """
 from __future__ import annotations
@@ -22,7 +22,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company
+from app.auth import WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.connectors import clickup_oauth, jira_oauth
 from app.db.client import require_client, utc_now
 from app.llm import call_json
@@ -86,7 +86,7 @@ class CommentIn(BaseModel):
 @router.get("/{ticket_key}/data")
 def get_ticket_data(
     ticket_key: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Get all overrides for a ticket: description, attachments, comments."""
     c = require_client()
@@ -145,7 +145,7 @@ def get_ticket_data(
 def save_description(
     ticket_key: str,
     body: DescriptionIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Save/update description and acceptance criteria for a ticket. A
     tracker-bound ticket pushes the change out immediately (instant sync)."""
@@ -171,7 +171,7 @@ def save_description(
 def save_fields(
     ticket_key: str,
     body: FieldsIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Save title/priority/status/sprint/assignee. Only the fields actually sent
     are written (exclude_unset), so a partial save preserves the description and
@@ -224,7 +224,7 @@ def save_fields(
 def add_attachment(
     ticket_key: str,
     body: AttachmentIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Add an attachment to a ticket."""
     c = require_client()
@@ -242,7 +242,7 @@ def add_attachment(
 def remove_attachment(
     ticket_key: str,
     attachment_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Remove an attachment."""
     c = require_client()
@@ -256,7 +256,7 @@ def remove_attachment(
 def add_comment(
     ticket_key: str,
     body: CommentIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Add a comment to a ticket, attributed to the signed-in user.
 
@@ -292,7 +292,7 @@ def add_comment(
 def remove_comment(
     ticket_key: str,
     comment_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Remove a comment."""
     c = require_client()
@@ -328,7 +328,7 @@ _SUMMARY_SCHEMA: dict[str, Any] = {
 @router.get("/{ticket_key}/comments/summary")
 def summarize_comments(
     ticket_key: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """An AI summary of the ticket's comment thread + an optional structured
     proposal. Returns {"summary": null} when there's too little to summarize
@@ -374,7 +374,7 @@ class TrackerMetaIn(BaseModel):
 def tracker_meta_for_destination(
     body: TrackerMetaIn,
     refresh: bool = False,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """A destination's normalized vocabulary (statuses / priorities / issue
     types / custom fields), cached per destination. 404 when the provider
@@ -410,7 +410,7 @@ def _parse_ticket_key(ticket_key: str) -> tuple[int, str]:
 @router.get("/{ticket_key}/transitions")
 def ticket_transitions(
     ticket_key: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """The status moves LEGAL for this ticket right now — what the status
     dropdown offers when the PRD is tracker-bound.
@@ -593,7 +593,7 @@ def _render_markdown(
 
 
 @router.post("/lists")
-def clickup_lists(company: CompanyContext = Depends(require_company)):
+def clickup_lists(company: WorkspaceContext = Depends(require_workspace)):
     """List the ClickUp lists this company can push tickets into (target picker).
 
     404 if ClickUp isn't connected.
@@ -608,7 +608,7 @@ def clickup_lists(company: CompanyContext = Depends(require_company)):
 @router.post("/push-clickup")
 def push_clickup(
     body: PushClickUpIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Create the selected tasks as ClickUp tasks in a list (explicit write).
 
@@ -684,7 +684,7 @@ def push_clickup(
 
 
 @router.post("/jira/projects")
-def jira_projects(company: CompanyContext = Depends(require_company)):
+def jira_projects(company: WorkspaceContext = Depends(require_workspace)):
     """List the Jira projects this company can push tickets into (target picker).
 
     404 if Jira isn't connected.
@@ -704,7 +704,7 @@ class JiraMembersIn(BaseModel):
 @router.post("/jira/members")
 def jira_members(
     body: JiraMembersIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """List the users assignable to issues in a Jira project (assignee picker).
 
@@ -724,7 +724,7 @@ def jira_members(
 @router.post("/push-jira")
 def push_jira(
     body: PushJiraIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Create the selected tasks as Jira issues in a project (explicit write).
 

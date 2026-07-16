@@ -85,6 +85,10 @@ def _require_free_seat(company_id: str) -> None:
 class InviteIn(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
     role: str = "member"
+    # The workspaces the invitee joins on accept. Empty = the company's
+    # default workspace, resolved at accept time. Each id is validated
+    # against the caller's company in the route.
+    workspace_ids: list[str] = Field(default_factory=list)
 
     @field_validator("email")
     @classmethod
@@ -105,12 +109,29 @@ class InviteIn(BaseModel):
             raise ValueError("role must be 'admin', 'member', or 'viewer'")
         return v
 
+    @field_validator("workspace_ids")
+    @classmethod
+    def _dedupe_workspaces(cls, v: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for wid in v:
+            w = str(wid).strip()
+            if w and w not in seen:
+                seen.add(w)
+                out.append(w)
+        return out
+
 router = APIRouter(prefix="/v1/team", tags=["team"])
 
 
 @router.get("/members")
 def get_team_members(company: CompanyContext = Depends(require_company)):
     rows = list_company_members(company.company_id)
+    # Explicit workspace grants per member. Org owners/admins typically have
+    # none — their access is implicit across every workspace.
+    from app.db.workspaces import workspace_ids_by_user
+
+    ws_by_user = workspace_ids_by_user(company.company_id)
     return {
         "members": [
             {
@@ -124,6 +145,7 @@ def get_team_members(company: CompanyContext = Depends(require_company)):
                 "display_name": r.get("display_name"),
                 "email": r.get("email"),
                 "avatar_url": r.get("avatar_url"),
+                "workspace_ids": ws_by_user.get(r.get("user_id"), []),
             }
             for r in rows
         ]
@@ -141,6 +163,7 @@ def get_team_invites(company: CompanyContext = Depends(require_company)):
                 "role": r.get("role"),
                 "invited_by": r.get("invited_by"),
                 "created_at": r.get("created_at"),
+                "workspace_ids": r.get("workspace_ids") or [],
             }
             for r in rows
         ]
@@ -159,6 +182,7 @@ def _public_invite(
         "role": row.get("role"),
         "invited_by": row.get("invited_by"),
         "created_at": row.get("created_at"),
+        "workspace_ids": row.get("workspace_ids") or [],
     }
     if email_sent is not None:
         out["email_sent"] = email_sent
@@ -204,11 +228,22 @@ def post_team_invite(
     # guards so "already invited/member" wins as the clearer error.
     _require_free_seat(company.company_id)
 
+    # Every requested workspace must belong to the caller's company; a bad id
+    # is a 400 (client bug), not silently dropped.
+    if body.workspace_ids:
+        from app.db.workspaces import list_workspaces_for_company
+
+        valid = {w["id"] for w in list_workspaces_for_company(company.company_id)}
+        unknown = [w for w in body.workspace_ids if w not in valid]
+        if unknown:
+            raise HTTPException(400, "Unknown workspace id in workspace_ids")
+
     row = create_invite(
         company_id=company.company_id,
         email=body.email,
         role=body.role,
         invited_by=company.user_id,
+        workspace_ids=body.workspace_ids,
     )
     # Fire the invite email. Best-effort: if it fails we still return 201 so
     # the workspace_invites row stays visible in the UI, but `email_sent:
@@ -300,6 +335,53 @@ def patch_team_member(
     return _public_member(updated or {"user_id": user_id, "role": body.role})
 
 
+class MemberWorkspacesPut(BaseModel):
+    workspace_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("workspace_ids")
+    @classmethod
+    def _dedupe(cls, v: list[str]) -> list[str]:
+        seen: set[str] = set()
+        out: list[str] = []
+        for wid in v:
+            w = str(wid).strip()
+            if w and w not in seen:
+                seen.add(w)
+                out.append(w)
+        return out
+
+
+@router.put("/members/{user_id}/workspaces")
+def put_team_member_workspaces(
+    user_id: str,
+    body: MemberWorkspacesPut,
+    company: CompanyContext = Depends(require_company),
+):
+    """Replace a member's explicit workspace grants (Settings → Team row
+    workspaces multi-select). Grants that survive keep their per-workspace
+    role; new grants default to 'member'. Meaningless for org owners/admins
+    (implicit access everywhere) but harmless."""
+    _require_admin(company)
+    member = get_member(company_id=company.company_id, user_id=user_id)
+    if not member:
+        raise HTTPException(404, "Member not found")
+
+    from app.db.workspaces import (
+        list_workspaces_for_company,
+        set_member_workspaces,
+    )
+
+    valid = {w["id"] for w in list_workspaces_for_company(company.company_id)}
+    unknown = [w for w in body.workspace_ids if w not in valid]
+    if unknown:
+        raise HTTPException(400, "Unknown workspace id in workspace_ids")
+
+    result = set_member_workspaces(
+        company.company_id, user_id, body.workspace_ids
+    )
+    return {"user_id": user_id, "workspace_ids": result}
+
+
 @router.delete(
     "/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT
 )
@@ -318,6 +400,90 @@ def remove_team_member(
         )
 
     delete_member(company_id=company.company_id, user_id=user_id)
+    return None
+
+
+# ─────────────────── Workspace member management ───────────────────
+#
+# Per-workspace rosters. Gated to org owner/admin OR a workspace admin
+# (the two-level role model: org admins implicitly administer every
+# workspace; plain members need a workspace_members admin row).
+
+
+def _require_workspace_in_company(workspace_id: str, company: CompanyContext) -> dict:
+    from app.db.workspaces import get_workspace
+
+    ws = get_workspace(workspace_id)
+    if not ws or ws.get("company_id") != company.company_id:
+        raise HTTPException(404, "Workspace not found")
+    return ws
+
+
+def _require_workspace_admin(workspace_id: str, company: CompanyContext) -> None:
+    if company.role in ("owner", "admin"):
+        return
+    from app.db.workspaces import get_workspace_member
+
+    member = get_workspace_member(workspace_id, company.user_id)
+    if not member or member.get("role") != "admin":
+        raise HTTPException(403, "Workspace management is restricted to admins")
+
+
+class WorkspaceMemberRolePut(BaseModel):
+    role: str
+
+    @field_validator("role")
+    @classmethod
+    def _validate(cls, v: str) -> str:
+        if v not in ("admin", "member", "viewer"):
+            raise ValueError("role must be 'admin', 'member', or 'viewer'")
+        return v
+
+
+@router.get("/workspaces/{workspace_id}/members")
+def get_workspace_members(
+    workspace_id: str,
+    company: CompanyContext = Depends(require_company),
+):
+    _require_workspace_in_company(workspace_id, company)
+    from app.db.workspaces import list_workspace_members
+
+    return {"members": list_workspace_members(workspace_id)}
+
+
+@router.put("/workspaces/{workspace_id}/members/{user_id}")
+def put_workspace_member(
+    workspace_id: str,
+    user_id: str,
+    body: WorkspaceMemberRolePut,
+    company: CompanyContext = Depends(require_company),
+):
+    _require_workspace_in_company(workspace_id, company)
+    _require_workspace_admin(workspace_id, company)
+    # The target must already be in the company — workspace grants never
+    # create org membership (that's the invite flow's job).
+    if not get_member(company_id=company.company_id, user_id=user_id):
+        raise HTTPException(404, "User is not a member of this company")
+    from app.db.workspaces import upsert_workspace_member
+
+    row = upsert_workspace_member(workspace_id, user_id, body.role)
+    return {"user_id": row["user_id"], "role": row["role"]}
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/members/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def remove_workspace_member(
+    workspace_id: str,
+    user_id: str,
+    company: CompanyContext = Depends(require_company),
+):
+    _require_workspace_in_company(workspace_id, company)
+    _require_workspace_admin(workspace_id, company)
+    from app.db.workspaces import delete_workspace_member
+
+    delete_workspace_member(workspace_id, user_id)
     return None
 
 

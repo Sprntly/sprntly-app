@@ -15,8 +15,9 @@ from types import SimpleNamespace
 async def test_trigger_pipeline_collapses_repeat_clicks(monkeypatch):
     from app.routes import pipeline as route
 
-    # Bypass the tenant-ownership guard (not under test here).
-    monkeypatch.setattr(route, "require_owned_dataset", lambda ds, cid: None)
+    # Bypass the tenant-ownership guard (not under test here). *a soaks up the
+    # workspace_id the route now passes alongside dataset + company_id.
+    monkeypatch.setattr(route, "require_owned_dataset", lambda *a, **k: None)
 
     started = asyncio.Event()
     release = asyncio.Event()
@@ -32,7 +33,7 @@ async def test_trigger_pipeline_collapses_repeat_clicks(monkeypatch):
     # so patch the attribute on the source module.
     monkeypatch.setattr("app.pipeline.run_full_pipeline", _fake_run)
     route._INFLIGHT.discard("ds-1")
-    company = SimpleNamespace(company_id="co-1")
+    company = SimpleNamespace(company_id="co-1", workspace_id=None)
 
     # First click → a run starts.
     r1 = await route.trigger_pipeline("ds-1", company=company)

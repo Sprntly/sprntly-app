@@ -10,7 +10,7 @@ import asyncio
 
 from fastapi import APIRouter, Depends
 
-from app.auth import CompanyContext, require_company
+from app.auth import WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.db.pipeline_runs import get_latest_run, list_runs
 from app.deps.ownership import require_owned_dataset
 
@@ -30,7 +30,7 @@ _INFLIGHT: set[str] = set()
 @router.post("/{dataset}/run")
 async def trigger_pipeline(
     dataset: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Trigger a full pipeline run for a dataset.
 
@@ -40,7 +40,7 @@ async def trigger_pipeline(
     """
     # Tenant guard: only run a pipeline on a dataset the caller's company owns
     # (404 otherwise — these are expensive runs and the slug is low-entropy).
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     from app.pipeline import run_full_pipeline
 
     # Collapse repeat clicks onto the in-flight run. The check+add is atomic on
@@ -73,10 +73,10 @@ async def trigger_pipeline(
 @router.get("/{dataset}/status")
 def pipeline_status(
     dataset: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Get the latest pipeline run status for a dataset."""
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     try:
         run = get_latest_run(dataset)
     except Exception:
@@ -102,10 +102,10 @@ def pipeline_status(
 def pipeline_runs_list(
     dataset: str,
     limit: int = 20,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """List recent pipeline runs for a dataset."""
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     try:
         runs = list_runs(dataset, limit=limit)
     except Exception:

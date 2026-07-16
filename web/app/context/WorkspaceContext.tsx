@@ -11,9 +11,33 @@ import {
   type ReactNode,
 } from "react"
 import { useAuth } from "../lib/auth"
+import {
+  setActiveWorkspaceId,
+  workspacesApi,
+  type WorkspaceSummary,
+} from "../lib/api"
 import { fetchUserProfile, fetchWorkspaceForUser } from "../lib/onboarding/store"
 import type { UserProfile, WorkspaceCompany } from "../lib/onboarding/types"
 import { isSupabaseConfigured } from "../lib/supabase/client"
+
+const ACTIVE_WS_KEY_PREFIX = "sprntly.activeWorkspace."
+
+function readStoredActiveWorkspace(userId: string): string | null {
+  try {
+    return window.localStorage.getItem(ACTIVE_WS_KEY_PREFIX + userId)
+  } catch {
+    return null
+  }
+}
+
+function storeActiveWorkspace(userId: string, id: string | null) {
+  try {
+    if (id) window.localStorage.setItem(ACTIVE_WS_KEY_PREFIX + userId, id)
+    else window.localStorage.removeItem(ACTIVE_WS_KEY_PREFIX + userId)
+  } catch {
+    /* localStorage may be disabled */
+  }
+}
 
 type WorkspaceCtx = {
   /**
@@ -34,6 +58,14 @@ type WorkspaceCtx = {
   refreshing: boolean
   profile: UserProfile | null
   workspace: WorkspaceCompany | null
+  /** The company's workspaces the caller can enter (multi-workspace 2026-07).
+   *  Empty until the authed load lands (or when the backend is unreachable —
+   *  the app then behaves single-workspace via the default fallback). */
+  workspaces: WorkspaceSummary[]
+  /** The ACTIVE workspace — every backend call carries its id as
+   *  X-Workspace-Id (set into lib/api before consumers render). */
+  activeWorkspace: WorkspaceSummary | null
+  setActiveWorkspace: (id: string) => void
   refresh: () => Promise<void>
 }
 
@@ -62,6 +94,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [refreshing, setRefreshing] = useState(false)
   const [profile, setProfile] = useState<UserProfile | null>(null)
   const [workspace, setWorkspace] = useState<WorkspaceCompany | null>(null)
+  const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([])
+  const [activeWorkspace, setActiveWorkspaceState] =
+    useState<WorkspaceSummary | null>(null)
 
   // Tracks whether the FIRST authed load has completed, so subsequent refreshes
   // (e.g. a Supabase token refresh on tab refocus) re-fetch in the background
@@ -83,6 +118,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       hasLoadedRef.current = false
       setProfile(null)
       setWorkspace(null)
+      setWorkspaces([])
+      setActiveWorkspaceState(null)
+      setActiveWorkspaceId(null)
       setLoading(false)
       setRefreshing(false)
       return
@@ -101,6 +139,34 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       ])
       setProfile(p)
       setWorkspace(w)
+      // Workspaces list (best-effort: an unreachable backend leaves the app
+      // in single-workspace mode via the header-absent default fallback).
+      // Restore the persisted active choice when it's still in the list;
+      // otherwise fall back to the default workspace. setActiveWorkspaceId
+      // runs BEFORE `loading` clears so the first consumer fetches already
+      // carry the header.
+      if (w) {
+        try {
+          const { workspaces: list } = await workspacesApi.list()
+          setWorkspaces(list)
+          const storedId = readStoredActiveWorkspace(authUserId)
+          const active =
+            list.find((x) => x.id === storedId) ??
+            list.find((x) => x.is_default) ??
+            list[0] ??
+            null
+          setActiveWorkspaceState(active)
+          setActiveWorkspaceId(active?.id ?? null)
+        } catch {
+          setWorkspaces([])
+          setActiveWorkspaceState(null)
+          setActiveWorkspaceId(null)
+        }
+      } else {
+        setWorkspaces([])
+        setActiveWorkspaceState(null)
+        setActiveWorkspaceId(null)
+      }
       hasLoadedRef.current = true
     } finally {
       setLoading(false)
@@ -113,9 +179,42 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     void refresh()
   }, [refresh])
 
+  const setActiveWorkspace = useCallback(
+    (id: string) => {
+      setWorkspaces((list) => {
+        const next = list.find((x) => x.id === id) ?? null
+        if (next) {
+          setActiveWorkspaceState(next)
+          setActiveWorkspaceId(next.id)
+          if (authUserId) storeActiveWorkspace(authUserId, next.id)
+        }
+        return list
+      })
+    },
+    [authUserId],
+  )
+
   const value = useMemo(
-    () => ({ loading, refreshing, profile, workspace, refresh }),
-    [loading, refreshing, profile, workspace, refresh],
+    () => ({
+      loading,
+      refreshing,
+      profile,
+      workspace,
+      workspaces,
+      activeWorkspace,
+      setActiveWorkspace,
+      refresh,
+    }),
+    [
+      loading,
+      refreshing,
+      profile,
+      workspace,
+      workspaces,
+      activeWorkspace,
+      setActiveWorkspace,
+      refresh,
+    ],
   )
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>

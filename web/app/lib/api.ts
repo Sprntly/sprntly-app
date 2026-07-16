@@ -51,6 +51,20 @@ export function setAccessTokenProvider(fn: () => Promise<string | null>) {
   accessTokenProvider = fn
 }
 
+// The ACTIVE workspace, set by WorkspaceContext when the user picks one from
+// the switcher (mirrors the accessTokenProvider pattern). Injected as the
+// X-Workspace-Id header on every backend request in ONE place; the backend
+// falls back to the company's default workspace when absent.
+let activeWorkspaceId: string | null = null
+
+export function setActiveWorkspaceId(id: string | null) {
+  activeWorkspaceId = id
+}
+
+export function getActiveWorkspaceId(): string | null {
+  return activeWorkspaceId
+}
+
 async function request<T>(
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH",
   path: string,
@@ -67,6 +81,7 @@ async function request<T>(
     const token = await accessTokenProvider()
     if (token) headers.Authorization = `Bearer ${token}`
   }
+  if (activeWorkspaceId) headers["X-Workspace-Id"] = activeWorkspaceId
 
   const res = await fetch(`${API_URL}${path}`, {
     method,
@@ -348,6 +363,8 @@ export type SkillInfo = {
   label: string
   trigger: string
   description: string
+  /** Display category from the backend catalog (e.g. "Discovery & Research"). */
+  category: string
 }
 
 /** POST /v1/ask is fire-and-forget: it returns an ask_id immediately and the
@@ -584,6 +601,66 @@ export const onboardingApi = {
   analyzeWebsiteStatus: (jobId: number) =>
     api.get<AnalyzeWebsiteStatusResponse>(
       `/v1/onboarding/analyze-website/${jobId}`,
+    ),
+  /**
+   * Final onboarding step: name the workspace. Server-side this renames the
+   * company's default `workspaces` row (never creates a second), grants the
+   * caller a workspace-admin membership, and binds the company dataset to it.
+   */
+  createWorkspace: (name: string) =>
+    api.post<{ id: string; name: string; slug: string; is_default: boolean }>(
+      "/v1/onboarding/workspace",
+      { name },
+    ),
+}
+
+// ── Workspaces (multi-workspace 2026-07) ────────────────────────────────────
+
+/** One workspace as the switcher sees it: the caller's effective role plus
+ *  the dataset slug every dataset-keyed call feeds on. */
+export type WorkspaceSummary = {
+  id: string
+  name: string
+  slug: string
+  is_default: boolean
+  product_id: string | null
+  dataset: string | null
+  role: "admin" | "member" | "viewer"
+}
+
+export type WorkspaceMemberRecord = {
+  id: string | null
+  user_id: string
+  role: "admin" | "member" | "viewer"
+  created_at: string | null
+  display_name: string | null
+  email: string | null
+  avatar_url: string | null
+}
+
+export const workspacesApi = {
+  list: () => api.get<{ workspaces: WorkspaceSummary[] }>("/v1/workspaces"),
+  create: (name: string) =>
+    api.post<WorkspaceSummary>("/v1/workspaces", { name }),
+  rename: (id: string, name: string) =>
+    api.patch<WorkspaceSummary>(
+      `/v1/workspaces/${encodeURIComponent(id)}`,
+      { name },
+    ),
+  remove: (id: string) =>
+    api.delete<void>(`/v1/workspaces/${encodeURIComponent(id)}`),
+  members: (id: string) =>
+    api.get<{ members: WorkspaceMemberRecord[] }>(
+      `/v1/team/workspaces/${encodeURIComponent(id)}/members`,
+    ),
+  setMemberRole: (id: string, userId: string, role: "admin" | "member" | "viewer") =>
+    api.put<{ user_id: string; role: string }>(
+      `/v1/team/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+      { role },
+    ),
+  removeMember: (id: string, userId: string) =>
+    api.delete<void>(
+      `/v1/team/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
     ),
 }
 
@@ -1309,7 +1386,10 @@ export const prdApi = {
    *  {kind:'delta',text} then a terminal {kind:'done'|'error'}. Progressive
    *  display only — prdApi.get(id) stays the authoritative finished PRD. */
   streamUrl: (prdId: number, token: string): string =>
-    `${API_URL}/v1/prd/${prdId}/stream?token=${encodeURIComponent(token)}`,
+    `${API_URL}/v1/prd/${prdId}/stream?token=${encodeURIComponent(token)}` +
+    (activeWorkspaceId
+      ? `&workspace_id=${encodeURIComponent(activeWorkspaceId)}`
+      : ""),
   /** Kick off PRD generation for a BACKLOG item (a theme ranked ≥ 4, not in the
    *  brief's top-3). Same fire-and-forget contract as `generate`: returns a
    *  prd_id to poll via prdApi.get(id). The backend synthesizes the insight from

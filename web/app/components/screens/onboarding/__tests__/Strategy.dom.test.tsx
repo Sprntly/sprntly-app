@@ -1,18 +1,17 @@
 // @vitest-environment jsdom
 //
-// Container mount test for the onboarding step 05 — "Strategy, leadership &
-// your roadmap" (design scene onbstrat). In the redesign this is the FINAL
-// step. This PR rebuilds its CONTENT: a 2×2 grid of typed document-upload cards
-// (CEO memo / team priorities / research / company strategy → POST
-// /v1/company/documents) + the existing roadmap-doc upload (POST
-// /v1/company/roadmap-doc) as its own section. Then it COMPLETES onboarding —
-// kicks the first brief, calls completeOnboarding, and enters the app at /brief.
+// Container mount test for the onboarding step 07 — "Strategy, leadership &
+// your roadmap" (design scene onbstrat). No longer the closing step: it
+// collects the uploads and advances to the final workspace step. Content: a
+// 2×2 grid of typed document-upload cards (CEO memo / team priorities /
+// research / company strategy → POST /v1/company/documents) + the existing
+// roadmap-doc upload (POST /v1/company/roadmap-doc) as its own section.
 //
 // Covers: the 4 doc cards + roadmap card render; a doc-card upload calls the
 // documents API with its doc_type + shows the "uploaded" confirmation; the
 // roadmap upload calls its API + shows confirmation; a failed upload surfaces a
-// non-blocking notice without halting the step; "Finish setup" and "Skip" both
-// complete onboarding + redirect to /brief.
+// non-blocking notice without halting the step; Continue and "Skip" both
+// advance to the workspace step.
 //
 // Matchers: native DOM only.
 import * as React from "react"
@@ -24,7 +23,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
-const completeOnboardingMock = vi.fn()
+const advanceStepMock = vi.fn()
 const roadmapUploadMock = vi.fn()
 const docUploadMock = vi.fn()
 
@@ -32,20 +31,10 @@ vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
 }))
-vi.mock("../../../../context/ContentContext", () => ({
-  useContent: () => ({ setContent: vi.fn() }),
-}))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
-  completeOnboarding: (...a: unknown[]) => completeOnboardingMock(...a),
+  advanceOnboardingStep: (...a: unknown[]) => advanceStepMock(...a),
 }))
-vi.mock("../../../../lib/workspace-brief", () => ({
-  ensureDatasetForWorkspace: vi.fn().mockResolvedValue(undefined),
-  seedWorkspaceContextFiles: vi.fn().mockResolvedValue(undefined),
-  fetchBriefWhenReady: vi.fn().mockResolvedValue(null),
-  startBriefGeneration: vi.fn().mockResolvedValue(undefined),
-}))
-vi.mock("../../../../lib/brief-adapter", () => ({ briefToContentPatch: () => ({}) }))
 vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
   saveDraft: vi.fn(),
   loadDraft: () => null,
@@ -75,7 +64,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("Strategy (onboarding step 05 — onbstrat upload cards, completes onboarding)", () => {
+describe("Strategy (onboarding step 07 — onbstrat upload cards, advances to workspace)", () => {
   it("renders the heading, the 4 typed doc cards, and the roadmap-doc card", () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
     render(React.createElement(Strategy))
@@ -145,10 +134,10 @@ describe("Strategy (onboarding step 05 — onbstrat upload cards, completes onbo
     expect(
       document.querySelector('[data-field="doc-research"][data-uploaded="true"]'),
     ).toBeNull()
-    const finishBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /finish setup/i.test(b.textContent ?? ""),
+    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /continue/i.test(b.textContent ?? ""),
     ) as HTMLButtonElement
-    expect(finishBtn.disabled).toBe(false)
+    expect(continueBtn.disabled).toBe(false)
   })
 
   it("the roadmap-doc upload calls the REAL API and shows the uploaded confirmation", async () => {
@@ -177,25 +166,25 @@ describe("Strategy (onboarding step 05 — onbstrat upload cards, completes onbo
     ).not.toBeNull()
   })
 
-  it("'Finish setup' completes onboarding and enters /brief", async () => {
+  it("Continue advances to step 8 and routes to the workspace step", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
-    completeOnboardingMock.mockResolvedValue(undefined)
+    advanceStepMock.mockResolvedValue(makeOnboardingCtx().workspace)
 
     render(React.createElement(Strategy))
-    const finishBtn = Array.from(document.querySelectorAll("button")).find((b) =>
-      /finish setup/i.test(b.textContent ?? ""),
+    const continueBtn = Array.from(document.querySelectorAll("button")).find((b) =>
+      /^continue$/i.test((b.textContent ?? "").trim()),
     ) as HTMLButtonElement
     await act(async () => {
-      finishBtn.click()
+      continueBtn.click()
     })
 
-    expect(completeOnboardingMock).toHaveBeenCalledWith("ws-1", "u-1")
-    expect(routerMock.replace).toHaveBeenCalledWith("/brief")
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 8)
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
   })
 
-  it("'Skip' completes onboarding and enters /brief", async () => {
+  it("'Skip' also advances to the workspace step", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx())
-    completeOnboardingMock.mockResolvedValue(undefined)
+    advanceStepMock.mockResolvedValue(makeOnboardingCtx().workspace)
 
     render(React.createElement(Strategy))
     const skip = Array.from(document.querySelectorAll("button")).find((b) =>
@@ -205,7 +194,7 @@ describe("Strategy (onboarding step 05 — onbstrat upload cards, completes onbo
       skip.click()
     })
 
-    expect(completeOnboardingMock).toHaveBeenCalledWith("ws-1", "u-1")
-    expect(routerMock.replace).toHaveBeenCalledWith("/brief")
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 8)
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
   })
 })

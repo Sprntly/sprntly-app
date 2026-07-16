@@ -4,10 +4,11 @@
 // "What should we call you?" (the unnumbered /onboarding/your-name route).
 // Mounts the real component under jsdom with mocked auth / workspace / router
 // and a stubbed updateUserProfile, covering: rendering the first/last name
-// inputs; prefilling from auth.user.user_metadata (first_name/last_name first,
-// then Google's given_name/family_name); submit with a first name →
-// updateUserProfile called with the right args → workspace refresh → navigate
-// to /onboarding/business-info; and empty-first-name blocks submit.
+// inputs + the required account-type cards; prefilling from
+// auth.user.user_metadata (first_name/last_name first, then Google's
+// given_name/family_name); submit with a first name → updateUserProfile
+// called with the right args (incl. account_type) → workspace refresh →
+// navigate to the first numbered step; and empty-first-name blocks submit.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -96,7 +97,16 @@ describe("YourName (pre-onboarding profile gate)", () => {
     expect(lastInput().value).toBe("Mathison Turing")
   })
 
-  it("submitting with a first name saves the profile, refreshes, and navigates to business-info", async () => {
+  it("renders the required account-type cards (default: company for a work email)", () => {
+    authedWith({})
+    const { container } = render(React.createElement(YourName))
+    const cards = container.querySelectorAll(".auth-acct-card")
+    expect(cards.length).toBe(2)
+    const active = container.querySelector(".auth-acct-card-active")
+    expect(active?.textContent).toContain("For a company")
+  })
+
+  it("submitting with a first name saves the profile (incl. account type), refreshes, and navigates to the first step", async () => {
     authedWith({ given_name: "Grace", family_name: "Hopper" })
     updateProfileMock.mockResolvedValue({})
     refreshMock.mockResolvedValue(undefined)
@@ -111,9 +121,33 @@ describe("YourName (pre-onboarding profile gate)", () => {
       first_name: "Grace",
       last_name: "Hopper",
       role: null,
+      account_type: "company",
     })
     expect(refreshMock).toHaveBeenCalledTimes(1)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/business-info")
+    expect(routerMock.push).toHaveBeenCalledTimes(1)
+    expect(String(routerMock.push.mock.calls[0][0])).toMatch(/^\/onboarding\//)
+  })
+
+  it("saves the picked account type (personal)", async () => {
+    authedWith({ first_name: "Ada" })
+    updateProfileMock.mockResolvedValue({})
+    refreshMock.mockResolvedValue(undefined)
+
+    const { container } = render(React.createElement(YourName))
+    const personalCard = Array.from(
+      container.querySelectorAll(".auth-acct-card"),
+    ).find((b) => b.textContent?.includes("For personal use"))
+    expect(personalCard).toBeTruthy()
+    fireEvent.click(personalCard as HTMLButtonElement)
+
+    await act(async () => {
+      fireEvent.click(continueButton())
+    })
+
+    expect(updateProfileMock).toHaveBeenCalledWith(
+      "user-1",
+      expect.objectContaining({ account_type: "personal" }),
+    )
   })
 
   it("includes a selected role in the saved profile", async () => {
@@ -134,6 +168,7 @@ describe("YourName (pre-onboarding profile gate)", () => {
       first_name: "Ada",
       last_name: "",
       role: "PM",
+      account_type: "company",
     })
   })
 

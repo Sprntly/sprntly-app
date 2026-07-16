@@ -47,18 +47,48 @@ logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 
-# Per-company once-per-cycle ledgers (company_id → aware UTC dt). Generation
-# and delivery are tracked separately because they happen at different instants:
-# generation starts GENERATION_LEAD before the configured fire time, delivery
-# happens exactly AT it. In-memory only: a process restart re-evaluates from
-# scratch, which is safe — both decisions key off a bounded firing WINDOW
-# (default 1h), so a restart can at most regenerate one brief inside an open
-# window, and generation is itself idempotent/refresh-gated
+# Per-WORKSPACE once-per-cycle ledgers (workspace_id → aware UTC dt; falls
+# back to company_id when the workspaces lookup fails). Generation and delivery
+# are tracked separately because they happen at different instants: generation
+# starts GENERATION_LEAD before the configured fire time, delivery happens
+# exactly AT it. In-memory only: a process restart re-evaluates from scratch,
+# which is safe — both decisions key off a bounded firing WINDOW (default 1h),
+# so a restart can at most regenerate one brief inside an open window, and
+# generation is itself idempotent/refresh-gated
 # (synthesis_brief.generate_brief_for skips when the KG is unchanged). A restart
 # that loses a pending one-shot delivery job is covered by the tick's catch-up
-# fallback after the fire time. Bounded by the company count.
+# fallback after the fire time. Bounded by the workspace count.
 _last_brief_generation: dict[str, datetime] = {}
 _last_brief_delivery: dict[str, datetime] = {}
+
+
+def _company_workspace_slugs(company_id: str | None, company_slug: str) -> list[tuple[str, str]]:
+    """(ledger_key, dataset_slug) pairs to generate briefs for — one per
+    workspace. The default workspace's dataset is the bare company slug;
+    additional workspaces carry their own dataset slugs. Any failure (or no
+    workspace rows yet) degrades to the single company-level pair, keeping
+    the pre-multi-workspace behavior."""
+    if not company_id:
+        return [(company_slug, company_slug)]
+    try:
+        from app.db.workspaces import (
+            dataset_slug_for_workspace,
+            list_workspaces_for_company,
+        )
+
+        workspaces = list_workspaces_for_company(company_id)
+        out: list[tuple[str, str]] = []
+        for ws in workspaces:
+            slug = dataset_slug_for_workspace(ws["id"])
+            if not slug and ws.get("is_default"):
+                slug = company_slug
+            if slug:
+                out.append((ws["id"], slug))
+        if out:
+            return out
+    except Exception:  # noqa: BLE001 — never let workspace lookup kill the tick
+        logger.exception("scheduler: workspace lookup failed for %s", company_id)
+    return [(company_id, company_slug)]
 
 
 def _refresh_all_company_connectors() -> None:
@@ -156,16 +186,19 @@ async def _run_synthesis_for_all_companies() -> None:
                 slug,
             )
             continue
-        try:
-            # generate_brief_for is blocking (LLM + Supabase); keep it off the
-            # event loop so one slow company can't stall the scheduler thread.
-            await asyncio.to_thread(generate_brief_for, slug)
-            logger.info("Scheduler: synthesis brief for %s → ok", slug)
-            # Parity with the legacy path: warm evidence/PRD/Ask drill-downs so
-            # the first user click is instant. Error-isolated in the helper.
-            warm_synthesis_drilldowns(slug)
-        except Exception as exc:  # noqa: BLE001 — per-company isolation
-            logger.error("Scheduler: synthesis failed for %s: %s", slug, exc)
+        # One synthesis per WORKSPACE — each workspace's dataset slug is its
+        # own corpus (the default workspace keeps the bare company slug).
+        for _ledger_key, ws_slug in _company_workspace_slugs(company.get("id"), slug):
+            try:
+                # generate_brief_for is blocking (LLM + Supabase); keep it off the
+                # event loop so one slow company can't stall the scheduler thread.
+                await asyncio.to_thread(generate_brief_for, ws_slug)
+                logger.info("Scheduler: synthesis brief for %s → ok", ws_slug)
+                # Parity with the legacy path: warm evidence/PRD/Ask drill-downs so
+                # the first user click is instant. Error-isolated in the helper.
+                warm_synthesis_drilldowns(ws_slug)
+            except Exception as exc:  # noqa: BLE001 — per-workspace isolation
+                logger.error("Scheduler: synthesis failed for %s: %s", ws_slug, exc)
 
 
 def _resolve_company_schedule(company: dict) -> tuple[object, dict]:
@@ -234,54 +267,64 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
             continue
         tz, schedule = _resolve_company_schedule(company)
 
-        # Phase 1 — GENERATION, GENERATION_LEAD before the fire time.
-        last_gen = _last_brief_generation.get(company_id) if company_id else None
-        if should_generate_weekly_brief(now, tz, last_gen, **schedule):
-            # The delivery instant this generation is for: the fire time whose
-            # lead window we are inside (still up to GENERATION_LEAD away).
-            fire_utc = previous_fire_time(now + GENERATION_LEAD, tz, **schedule)
+        # Schedule / timezone / entitlement are COMPANY-level decisions; both
+        # phases fan out per workspace (each workspace's dataset slug is its
+        # own corpus). The ledgers and the one-shot delivery job are keyed per
+        # workspace so a mid-week workspace addition can't skip or double
+        # anyone.
+        for ledger_key, ws_slug in _company_workspace_slugs(company_id, slug):
+            # Phase 1 — GENERATION, GENERATION_LEAD before the fire time.
+            last_gen = _last_brief_generation.get(ledger_key)
+            if should_generate_weekly_brief(now, tz, last_gen, **schedule):
+                # The delivery instant this generation is for: the fire time
+                # whose lead window we are inside (still up to GENERATION_LEAD
+                # away).
+                fire_utc = previous_fire_time(now + GENERATION_LEAD, tz, **schedule)
+                logger.info(
+                    "Weekly brief tick: company=%s (dataset=%s, tz=%s) generation due — "
+                    "generating for delivery at %s",
+                    company_id, ws_slug, tz.key, fire_utc.isoformat(),
+                )
+                try:
+                    await _generate_weekly_brief_for_company(ws_slug)
+                    if company_id:
+                        _last_brief_generation[ledger_key] = now.astimezone(timezone.utc)
+                        _schedule_exact_delivery(
+                            company_id, ws_slug, fire_utc, ledger_key=ledger_key
+                        )
+                    logger.info("Weekly brief tick: brief for %s → generated", ws_slug)
+                except Exception as exc:  # noqa: BLE001 — per-workspace isolation
+                    logger.error("Weekly brief tick: brief failed for %s: %s", ws_slug, exc)
+
+            # Phase 2 — DELIVERY catch-up fallback, at/after the fire time only.
+            # The normal path is the exact-time one-shot job registered above;
+            # this only fires when that job is gone (restart) or generation
+            # never ran.
+            if not company_id:
+                continue
+            if _delivery_job_pending(ledger_key):
+                continue
+            if not should_run_weekly_brief(
+                now, tz, _last_brief_delivery.get(ledger_key), **schedule
+            ):
+                continue
             logger.info(
-                "Weekly brief tick: company=%s (slug=%s, tz=%s) generation due — "
-                "generating for delivery at %s",
-                company_id, slug, tz.key, fire_utc.isoformat(),
+                "Weekly brief tick: company=%s (dataset=%s) delivery fallback — "
+                "catch-up generate + deliver", company_id, ws_slug,
             )
             try:
-                await _generate_weekly_brief_for_company(slug)
-                if company_id:
-                    _last_brief_generation[company_id] = now.astimezone(timezone.utc)
-                    _schedule_exact_delivery(company_id, slug, fire_utc)
-                logger.info("Weekly brief tick: brief for %s → generated", slug)
-            except Exception as exc:  # noqa: BLE001 — per-company isolation
-                logger.error("Weekly brief tick: brief failed for %s: %s", slug, exc)
-
-        # Phase 2 — DELIVERY catch-up fallback, at/after the fire time only.
-        # The normal path is the exact-time one-shot job registered above; this
-        # only fires when that job is gone (restart) or generation never ran.
-        if not company_id:
-            continue
-        if _delivery_job_pending(company_id):
-            continue
-        if not should_run_weekly_brief(
-            now, tz, _last_brief_delivery.get(company_id), **schedule
-        ):
-            continue
-        logger.info(
-            "Weekly brief tick: company=%s (slug=%s) delivery fallback — "
-            "catch-up generate + deliver", company_id, slug,
-        )
-        try:
-            await _generate_weekly_brief_for_company(slug)
-        except Exception as exc:  # noqa: BLE001 — deliver the prior brief anyway
-            logger.error(
-                "Weekly brief tick: catch-up generation failed for %s: %s",
-                slug, exc,
-            )
-        try:
-            if await _deliver_weekly_brief_for_company(company_id, slug):
-                _last_brief_delivery[company_id] = now.astimezone(timezone.utc)
-        except Exception as exc:  # noqa: BLE001 — per-company isolation
-            logger.error(
-                "Weekly brief tick: delivery failed for %s: %s", slug, exc)
+                await _generate_weekly_brief_for_company(ws_slug)
+            except Exception as exc:  # noqa: BLE001 — deliver the prior brief anyway
+                logger.error(
+                    "Weekly brief tick: catch-up generation failed for %s: %s",
+                    ws_slug, exc,
+                )
+            try:
+                if await _deliver_weekly_brief_for_company(company_id, ws_slug):
+                    _last_brief_delivery[ledger_key] = now.astimezone(timezone.utc)
+            except Exception as exc:  # noqa: BLE001 — per-workspace isolation
+                logger.error(
+                    "Weekly brief tick: delivery failed for %s: %s", ws_slug, exc)
 
 
 async def _generate_weekly_brief_for_company(slug: str) -> None:
@@ -317,34 +360,42 @@ async def _deliver_weekly_brief_for_company(company_id: str, slug: str) -> bool:
     return True
 
 
-def _delivery_job_id(company_id: str) -> str:
-    return f"weekly_brief_delivery_{company_id}"
+def _delivery_job_id(key: str) -> str:
+    """`key` is the per-workspace ledger key (workspace id, or company id when
+    the workspaces lookup degraded) — one one-shot job per workspace, so one
+    workspace's re-generation can't replace a sibling's pending delivery."""
+    return f"weekly_brief_delivery_{key}"
 
 
-def _delivery_job_pending(company_id: str) -> bool:
+def _delivery_job_pending(key: str) -> bool:
     """True when an exact-time one-shot delivery job is registered for this
-    company — the tick's fallback must stand down and let it fire."""
+    workspace — the tick's fallback must stand down and let it fire."""
     if _scheduler is None:
         return False
     try:
-        return _scheduler.get_job(_delivery_job_id(company_id)) is not None
+        return _scheduler.get_job(_delivery_job_id(key)) is not None
     except Exception:  # noqa: BLE001 — a scheduler hiccup must not skip delivery
         return False
 
 
-def _schedule_exact_delivery(company_id: str, slug: str, fire_utc: datetime) -> None:
+def _schedule_exact_delivery(
+    company_id: str, slug: str, fire_utc: datetime, ledger_key: str | None = None
+) -> None:
     """Register the one-shot job that delivers this cycle's brief exactly AT the
     configured fire instant (DateTrigger). No-op when the APScheduler isn't
     running (tests / manual invocation) — the tick's post-fire fallback delivers
-    instead. replace_existing keeps re-generation inside one window idempotent."""
+    instead. replace_existing keeps re-generation inside one window idempotent.
+    `ledger_key` keys the job + delivery ledger per workspace; defaults to the
+    company id (the degraded single-workspace case)."""
     if _scheduler is None:
         return
+    key = ledger_key or company_id
     try:
         _scheduler.add_job(
             _run_exact_delivery,
             trigger=DateTrigger(run_date=fire_utc),
-            args=[company_id, slug, fire_utc],
-            id=_delivery_job_id(company_id),
+            args=[company_id, slug, fire_utc, key],
+            id=_delivery_job_id(key),
             name=f"Weekly brief delivery for {slug} at {fire_utc.isoformat()}",
             replace_existing=True,
             # A busy event loop must delay the send (still exactly-once), not
@@ -356,7 +407,9 @@ def _schedule_exact_delivery(company_id: str, slug: str, fire_utc: datetime) -> 
             "Weekly brief: failed to schedule exact delivery for %s", slug)
 
 
-async def _run_exact_delivery(company_id: str, slug: str, fire_utc: datetime) -> None:
+async def _run_exact_delivery(
+    company_id: str, slug: str, fire_utc: datetime, ledger_key: str | None = None
+) -> None:
     """One-shot job body: push the current brief at the exact fire instant and
     record the cycle in the delivery ledger so the tick fallback stands down."""
     try:
@@ -365,7 +418,7 @@ async def _run_exact_delivery(company_id: str, slug: str, fire_utc: datetime) ->
         logger.exception("Weekly brief: exact-time delivery failed for %s", slug)
         return
     if delivered:
-        _last_brief_delivery[company_id] = datetime.now(timezone.utc)
+        _last_brief_delivery[ledger_key or company_id] = datetime.now(timezone.utc)
         logger.info(
             "Weekly brief: delivered for %s at scheduled time %s",
             slug, fire_utc.isoformat(),

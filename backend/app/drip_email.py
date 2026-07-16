@@ -22,6 +22,7 @@ rule.
 """
 from __future__ import annotations
 
+import html as html_mod
 import logging
 from dataclasses import dataclass
 
@@ -193,6 +194,73 @@ def render_step(step: DripStep, *, company: str, name: str) -> tuple[str, str]:
     return subject, body
 
 
+# Branded shell tokens — mirrors supabase/templates/*.html and the
+# weekly-brief email (app/synthesis/email_delivery.py): paper background,
+# white card, serif headline, green CTA.
+_SERIF = "'Spectral',Georgia,'Times New Roman',serif"
+_SANS = "'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"
+
+
+def render_drip_html(*, subject: str, body_text: str) -> str:
+    """Wrap a plain-text drip body in the branded HTML shell (paper
+    background, white card, serif headline, green 'Open Sprntly' CTA).
+    The text body stays in the Resend payload as the plain-text fallback.
+
+    Pure + deterministic: paragraphs are split on blank lines and escaped;
+    the '— The Sprntly team' sign-off renders muted."""
+    base = (config_mod.settings.frontend_url or "https://app.sprntly.ai").rstrip("/")
+    paragraphs = [p.strip() for p in body_text.split("\n\n") if p.strip()]
+
+    body_html = ""
+    for p in paragraphs:
+        escaped = html_mod.escape(p).replace("\n", "<br>")
+        if p.startswith("—"):
+            body_html += (
+                f'<p style="margin:24px 0 0;font-family:{_SANS};font-size:13.5px;'
+                f'line-height:1.6;color:#80838d">{escaped}</p>'
+            )
+        else:
+            body_html += (
+                f'<p style="margin:0 0 16px;font-family:{_SANS};font-size:15px;'
+                f'line-height:1.65;color:#41444f">{escaped}</p>'
+            )
+
+    heading = html_mod.escape(subject)
+    return f"""\
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f6f5f1;margin:0;padding:0">
+  <tr>
+    <td align="center" style="padding:44px 16px 36px">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;max-width:520px">
+        <tr>
+          <td align="center" style="padding:0 0 20px;font-family:{_SERIF};font-size:25px;font-weight:600;color:#15171c;letter-spacing:-0.02em">
+            Sprntly<span style="color:#1a8a52">.</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="background-color:#ffffff;border:1px solid #e9e8e4;border-radius:14px;padding:40px 40px 34px">
+            <h1 style="margin:0 0 14px;font-family:{_SERIF};font-size:23px;line-height:1.3;font-weight:600;color:#15171c">{heading}</h1>
+            {body_html}
+            <table role="presentation" cellpadding="0" cellspacing="0" style="margin-top:28px">
+              <tr>
+                <td align="center" style="border-radius:10px;background-color:#1a8a52">
+                  <a href="{base}" style="display:inline-block;padding:13px 28px;font-family:{_SANS};font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px">Open Sprntly</a>
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="padding:20px 8px 0;font-family:{_SANS};font-size:12px;line-height:1.7;color:#a9aab1">
+            Sprntly — product intelligence for product teams<br>
+            <a href="{base}" style="color:#80838d;text-decoration:none">sprntly.ai</a>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>"""
+
+
 def send_drip_email(*, to_email: str, subject: str, body_text: str) -> bool:
     """Send one drip email via Resend. Returns True iff Resend accepted it.
 
@@ -219,6 +287,7 @@ def send_drip_email(*, to_email: str, subject: str, body_text: str) -> bool:
                 "to": [to_email],
                 "subject": subject,
                 "text": body_text,
+                "html": render_drip_html(subject=subject, body_text=body_text),
             },
             timeout=_HTTP_TIMEOUT_SECONDS,
         )

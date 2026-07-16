@@ -19,19 +19,32 @@ export const V4_ROLES = [
   "Other",
 ] as const
 
+export type SignUpAccountType = "company" | "personal"
+
 export type SignUpStep1ViewProps = {
   email: string
   password: string
+  accountType: SignUpAccountType
   showPassword: boolean
   error: string | null
   termsHref: string
   privacyHref: string
   onEmailChange: (v: string) => void
   onPasswordChange: (v: string) => void
+  onAccountTypeChange: (v: SignUpAccountType) => void
   onToggleShowPassword: () => void
   onSubmit: (e: React.FormEvent) => void
   onGoogle: () => void
 }
+
+const ACCOUNT_TYPE_OPTIONS: Array<{
+  value: SignUpAccountType
+  title: string
+  sub: string
+}> = [
+  { value: "company", title: "For a company", sub: "My team's product work" },
+  { value: "personal", title: "For personal use", sub: "Just me, exploring" },
+]
 
 export function SignUpStep1View(props: SignUpStep1ViewProps) {
   return (
@@ -41,8 +54,32 @@ export function SignUpStep1View(props: SignUpStep1ViewProps) {
 
       <form onSubmit={props.onSubmit}>
         <div className="field">
+          <div className="field-l">How will you use Sprntly?</div>
+          <div className="auth-acct-row" role="radiogroup" aria-label="Account type">
+            {ACCOUNT_TYPE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                role="radio"
+                aria-checked={props.accountType === opt.value}
+                className={
+                  "auth-acct-card" +
+                  (props.accountType === opt.value ? " auth-acct-card-active" : "")
+                }
+                onClick={() => props.onAccountTypeChange(opt.value)}
+              >
+                <span className="t">{opt.title}</span>
+                <span className="s">{opt.sub}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="field">
           <div className="field-l">
-            <label htmlFor="email">Work email</label> <span className="req">*</span>
+            <label htmlFor="email">
+              {props.accountType === "personal" ? "Email" : "Work email"}
+            </label>{" "}
+            <span className="req">*</span>
           </div>
           <input
             id="email"

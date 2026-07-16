@@ -205,7 +205,7 @@ def _override_company(main_mod, ingest_route):
     from app.auth import CompanyContext
     require_company = ingest_route.require_company
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
-        company_id="co-X", role="member", user_id="u1")
+        company_id="co-X", role="admin", user_id="u1")
     return require_company
 
 

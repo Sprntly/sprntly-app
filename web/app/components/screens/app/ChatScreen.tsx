@@ -364,15 +364,15 @@ export function ChatScreen() {
     askApi.skills().then((r) => setSkills(r.skills)).catch(() => {
       // Hardcoded fallback if endpoint not available
       setSkills([
-        { id: "prd-author", label: "Generate PRD", trigger: "/prd", description: "Draft a product requirements document" },
-        { id: "prioritize", label: "Prioritize", trigger: "/prioritize", description: "Rank ideas using RICE, ICE, MoSCoW, or WSJF" },
-        { id: "user-stories", label: "User stories", trigger: "/stories", description: "Break a PRD into user stories" },
-        { id: "backlog-triage", label: "Triage backlog", trigger: "/triage", description: "Clean up backlog: cluster, dedupe" },
-        { id: "decision-memo", label: "Decision memo", trigger: "/decide", description: "Structure a build/buy decision" },
-        { id: "feedback-synthesis", label: "Feedback synthesis", trigger: "/feedback", description: "Synthesize feedback into themes" },
-        { id: "competitive-intelligence-review", label: "Competitive analysis", trigger: "/compete", description: "Competitive intelligence review" },
-        { id: "incident-runbook", label: "Incident runbook", trigger: "/incident", description: "Generate incident response runbook" },
-        { id: "fact-check", label: "Fact-check", trigger: "/factcheck", description: "Verify claims against sources" },
+        { id: "prd-author", label: "Generate PRD", trigger: "/prd", description: "Draft a product requirements document", category: "Documentation & Specification" },
+        { id: "prioritize", label: "Prioritize", trigger: "/prioritize", description: "Rank ideas using RICE, ICE, MoSCoW, or WSJF", category: "Prioritization & Decision" },
+        { id: "user-stories", label: "User stories", trigger: "/stories", description: "Break a PRD into user stories", category: "Documentation & Specification" },
+        { id: "backlog-triage", label: "Triage backlog", trigger: "/triage", description: "Clean up backlog: cluster, dedupe", category: "Prioritization & Decision" },
+        { id: "decision-memo", label: "Decision memo", trigger: "/decide", description: "Structure a build/buy decision", category: "Prioritization & Decision" },
+        { id: "feedback-synthesis", label: "Feedback synthesis", trigger: "/feedback", description: "Synthesize feedback into themes", category: "Stakeholder & Communication" },
+        { id: "competitive-intelligence-review", label: "Competitive analysis", trigger: "/compete", description: "Competitive intelligence review", category: "Strategy & Vision" },
+        { id: "incident-runbook", label: "Incident runbook", trigger: "/incident", description: "Generate incident response runbook", category: "Delivery & Operations" },
+        { id: "fact-check", label: "Fact-check", trigger: "/factcheck", description: "Verify claims against sources", category: "Verification" },
       ])
     })
   }, [])

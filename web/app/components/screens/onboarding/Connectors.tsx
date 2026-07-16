@@ -32,10 +32,12 @@ import {
  * so this page tracks Settings automatically (the design kit's hardcoded
  * grid is NOT the source of truth).
  *
- * Everything is optional: there is deliberately NO required-Analytics
- * gate on Continue. Connectable providers open the real OAuth/API-key
- * modal; everything else toggles a "planned" selection that pre-stages
- * intent for Settings → Connectors.
+ * Mandatory for COMPANY accounts (registration spec 2026-07): Continue
+ * requires at least one LIVE connection; the skip link is hidden. PERSONAL
+ * accounts keep everything optional with the "Connect later" skip.
+ * Connectable providers open the real OAuth/API-key modal; everything else
+ * toggles a "planned" selection that pre-stages intent for
+ * Settings → Connectors.
  */
 
 /** Mockup `.conn-step-info .s` copy per catalog category key. */
@@ -167,8 +169,9 @@ function ArrowDownIcon(props: SVGProps<SVGSVGElement>) {
 
 export function Connectors() {
   const auth = useAuth()
-  const { workspace, setWorkspace, loading } = useOnboarding()
+  const { workspace, profile, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
+  const isCompany = (profile?.account_type ?? "company") === "company"
   // Accordion state: which categories are done/skipped + which is expanded.
   const [doneCats, setDoneCats] = useState<Set<number>>(new Set())
   const [openCat, setOpenCat] = useState<number | null>(0)
@@ -261,10 +264,10 @@ export function Connectors() {
     setSaving(true)
     try {
       if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
-      // Next numbered step is business-context (index 5 in ONBOARDING_STEP_SLUGS).
-      const updated = await advanceOnboardingStep(workspace.id, 5)
+      // Next numbered step is team (index 6 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 6)
       setWorkspace(updated)
-      router.push("/onboarding/business-context")
+      router.push("/onboarding/team")
     } finally {
       setSaving(false)
     }
@@ -275,7 +278,7 @@ export function Connectors() {
   // that path surfaces in production as a client-side exception / error
   // boundary. Render returns the loading shell until the redirect lands.
   useEffect(() => {
-    if (!loading && !workspace) router.replace("/onboarding/business-info")
+    if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
@@ -284,33 +287,43 @@ export function Connectors() {
     .flatMap((c) => c.items)
     .filter((it) => selected.has(it.id)).length
 
+  const hasLiveConnection = connected.size > 0
+
   return (
     <OnboardingChrome
-      step={4}
+      step={5}
       saveLabel="Saved · auto-saves"
       title={
         <>
           Connect your <em>tools.</em>
         </>
       }
-      subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
+      subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next."
       footerMeta={
-        <>
-          {selectedCount} connector{selectedCount === 1 ? "" : "s"} selected ·
-          all optional —{" "}
-          <button
-            type="button"
-            className="onb-skip-link"
-            onClick={() => go(true)}
-            disabled={saving}
-          >
-            Connect later
-          </button>
-        </>
+        isCompany ? (
+          hasLiveConnection ? (
+            `${selectedCount} connector${selectedCount === 1 ? "" : "s"} selected — ready to continue`
+          ) : (
+            "Connect at least one source to continue — it's what your briefs are built from."
+          )
+        ) : (
+          <>
+            {selectedCount} connector{selectedCount === 1 ? "" : "s"} selected ·
+            all optional —{" "}
+            <button
+              type="button"
+              className="onb-skip-link"
+              onClick={() => go(true)}
+              disabled={saving}
+            >
+              Connect later
+            </button>
+          </>
+        )
       }
       onBack={() => router.push("/onboarding/api-key")}
       onContinue={() => go(false)}
-      continueDisabled={saving}
+      continueDisabled={saving || (isCompany && !hasLiveConnection)}
       loading={saving}
     >
       <div className="conn-steps">

@@ -47,7 +47,7 @@ export function ApiKey() {
 
   // Redirect when there's no workspace to anchor the step (mirrors Connectors).
   useEffect(() => {
-    if (!loading && !workspace) router.replace("/onboarding/business-info")
+    if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
@@ -59,8 +59,8 @@ export function ApiKey() {
   async function toNextStep(skipped: boolean) {
     if (!workspace || auth.kind !== "authed") return
     if (skipped) await markSkippedFields(auth.user.id, ["api_key"])
-    // Next numbered step is connectors (index 4 in ONBOARDING_STEP_SLUGS).
-    const updated = await advanceOnboardingStep(workspace.id, 4)
+    // Next numbered step is connectors (index 5 in ONBOARDING_STEP_SLUGS).
+    const updated = await advanceOnboardingStep(workspace.id, 5)
     setWorkspace(updated)
     router.push("/onboarding/connectors")
   }
@@ -107,7 +107,7 @@ export function ApiKey() {
 
   return (
     <OnboardingChrome
-      step={3}
+      step={4}
       saveLabel="Encrypted · stored securely"
       title={
         <>
@@ -132,7 +132,7 @@ export function ApiKey() {
           <>Required — get a key at console.anthropic.com → API keys.</>
         )
       }
-      onBack={() => router.push("/onboarding/workspace")}
+      onBack={() => router.push("/onboarding/metrics")}
       onContinue={onContinue}
       continueDisabled={saving || !canContinue}
       loading={saving}

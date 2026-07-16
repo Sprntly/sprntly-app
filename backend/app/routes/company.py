@@ -20,7 +20,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
-from app.auth import CompanyContext, require_company
+from app.auth import (
+    CompanyContext,
+    WorkspaceContext,
+    require_company,
+    require_workspace,
+)
 from app.company_document import (
     DOC_TYPES,
     is_valid_doc_type,
@@ -94,13 +99,13 @@ def put_coworkers(
     return {"ok": True, "coworker_names": saved.model_dump()}
 
 
-# ── Roadmap doc — the company's uploaded roadmap (priorities anchor) ──────────
+# ── Roadmap doc — the workspace's uploaded roadmap (priorities anchor) ───────
 # Backs the onboarding strategy step's roadmap upload (design scene onbstrat) +
 # the read-only `roadmapdoc` artifact view. The stored roadmap feeds weekly-brief
 # composition as a high-weight priorities signal (see app.synthesis.agent). One
-# roadmap per company; the latest upload wins.
-def _roadmap_payload(company_id: str) -> dict | None:
-    doc = load_roadmap_doc(company_id)
+# roadmap per WORKSPACE; the latest upload wins.
+def _roadmap_payload(company_id: str, workspace_id: str | None = None) -> dict | None:
+    doc = load_roadmap_doc(company_id, workspace_id=workspace_id)
     if doc is None:
         return None
     # Don't ship the raw base64 blob in the artifact JSON by default — the
@@ -118,13 +123,14 @@ def _roadmap_payload(company_id: str) -> dict | None:
 @router.post("/roadmap-doc")
 async def post_roadmap_doc(
     file: Annotated[UploadFile, File(description="Roadmap doc (PDF/DOCX/MD/spreadsheet/deck)")],
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
-    """Store the company's roadmap upload + its extracted text (multipart `file`).
+    """Store the active workspace's roadmap upload + its extracted text
+    (multipart `file`).
 
     Reuses the shared ingest converter (the same one the dataset upload path
     uses) to extract text, which then feeds the weekly brief as a priorities
-    anchor. Any member may set the company roadmap during onboarding.
+    anchor. Any member may set the roadmap during onboarding.
     """
     filename = file.filename or "roadmap"
     data = await file.read()
@@ -140,6 +146,7 @@ async def post_roadmap_doc(
         filename=filename,
         data=data,
         content_type=file.content_type,
+        workspace_id=company.workspace_id,
     )
     return {
         "ok": True,
@@ -150,13 +157,14 @@ async def post_roadmap_doc(
 
 
 @router.get("/roadmap-doc")
-def get_roadmap_doc(company: CompanyContext = Depends(require_company)):
-    """Fetch the company's stored roadmap for the read-only artifact view.
+def get_roadmap_doc(company: WorkspaceContext = Depends(require_workspace)):
+    """Fetch the active workspace's stored roadmap for the read-only artifact
+    view.
 
     404 when none has been uploaded yet (the artifact view shows its empty
     state). Returns the extracted text + metadata; not the raw bytes.
     """
-    payload = _roadmap_payload(company.company_id)
+    payload = _roadmap_payload(company.company_id, company.workspace_id)
     if payload is None:
         raise HTTPException(404, "No roadmap uploaded yet")
     return payload
@@ -263,7 +271,7 @@ def _document_item(d) -> dict:
 async def post_company_document(
     file: Annotated[UploadFile, File(description="Strategy/context doc (PDF/DOCX/MD/…)")],
     doc_type: Annotated[str, Form()],
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Upload a strategy/context document for the company (multiple allowed).
 
@@ -292,6 +300,7 @@ async def post_company_document(
         filename=filename,
         data=data,
         content_type=file.content_type,
+        workspace_id=company.workspace_id,
     )
     return {"ok": True, **_document_item(saved)}
 
@@ -299,10 +308,12 @@ async def post_company_document(
 @router.get("/documents")
 def get_company_documents(
     doc_type: str | None = None,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
-    """List the company's strategy/context documents (newest first). Optionally
-    filtered by `doc_type`. Returns metadata + extracted-char counts, not the raw
-    bytes."""
-    items = list_company_documents(company.company_id, doc_type=doc_type)
+    """List the active workspace's strategy/context documents (newest first).
+    Optionally filtered by `doc_type`. Returns metadata + extracted-char
+    counts, not the raw bytes."""
+    items = list_company_documents(
+        company.company_id, doc_type=doc_type, workspace_id=company.workspace_id
+    )
     return {"documents": [_document_item(d) for d in items]}

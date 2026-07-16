@@ -4,10 +4,14 @@ import { Suspense, useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
-import { validatePassword, validateWorkEmail } from "../lib/auth-validation"
+import { isPersonalDomain, validatePassword, validateWorkEmail } from "../lib/auth-validation"
 import { publicPath } from "../lib/public-path"
 import { AuthShell } from "../components/auth/AuthShell"
-import { SignUpStep1View, SignUpStep2View } from "../components/auth/SignUpView"
+import {
+  SignUpStep1View,
+  SignUpStep2View,
+  type SignUpAccountType,
+} from "../components/auth/SignUpView"
 
 export default function SignUpPage() {
   return (
@@ -40,9 +44,28 @@ function SignUpForm() {
   const [firstName, setFirstName] = useState("")
   const [lastName, setLastName] = useState("")
   const [role, setRole] = useState("Product Manager")
+  // Explicit company-vs-personal choice. Until the user clicks a card we
+  // SUGGEST a value from the email domain (gmail/yahoo/… → personal); an
+  // explicit click pins the choice and stops the suggestion.
+  const [accountType, setAccountType] = useState<SignUpAccountType>(
+    prefillEmail && isPersonalDomain(prefillEmail) ? "personal" : "company",
+  )
+  const [accountTypeTouched, setAccountTypeTouched] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  function onEmailChange(v: string) {
+    setEmail(v)
+    if (!accountTypeTouched) {
+      setAccountType(isPersonalDomain(v) ? "personal" : "company")
+    }
+  }
+
+  function onAccountTypeChange(v: SignUpAccountType) {
+    setAccountTypeTouched(true)
+    setAccountType(v)
+  }
 
   useEffect(() => {
     if (auth.kind === "authed") {
@@ -94,6 +117,7 @@ function SignUpForm() {
         firstName,
         lastName,
         role,
+        accountType,
       })
       if (result === "already_registered") {
         setError("An account with this email already exists. Try signing in.")
@@ -150,12 +174,14 @@ function SignUpForm() {
     <SignUpStep1View
       email={email}
       password={password}
+      accountType={accountType}
       showPassword={showPassword}
       error={error}
       termsHref={publicPath("/terms")}
       privacyHref={publicPath("/privacy")}
-      onEmailChange={setEmail}
+      onEmailChange={onEmailChange}
       onPasswordChange={setPassword}
+      onAccountTypeChange={onAccountTypeChange}
       onToggleShowPassword={() => setShowPassword((v) => !v)}
       onSubmit={onStep1}
       onGoogle={onGoogle}

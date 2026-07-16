@@ -171,7 +171,7 @@ def _override_company(monkeypatch):
     import app.routes.oncall as oncall_route
     require_company = oncall_route.require_company
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
-        company_id="co-X", role="member", user_id="u1")
+        company_id="co-X", role="admin", user_id="u1")
     return main_mod, require_company
 
 

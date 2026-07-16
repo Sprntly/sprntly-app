@@ -346,7 +346,7 @@ describe("Metrics (container) — pick 3 to 5", () => {
     render(React.createElement(Metrics))
     spy.mockRestore()
 
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/business-info")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/company")
     expect(screen.getByText("Loading…")).not.toBeNull()
     const sideEffectInRender = errors
       .map(String)

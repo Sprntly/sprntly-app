@@ -56,7 +56,8 @@ def _run_tick(now, companies):
          patch.object(sched_mod, "_deliver_weekly_brief_for_company",
                       side_effect=_fake_deliver), \
          patch.object(sched_mod, "_schedule_exact_delivery",
-                      side_effect=lambda cid, slug, fire: exact.append((slug, fire))):
+                      side_effect=lambda cid, slug, fire, ledger_key=None:
+                      exact.append((slug, fire))):
         asyncio.run(sched_mod._run_weekly_brief_tick(now=now))
     return generated, delivered, exact
 

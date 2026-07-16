@@ -3,9 +3,14 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
+import { isPersonalDomain } from "../../../lib/auth-validation"
 import { useWorkspace } from "../../../context/WorkspaceContext"
 import { updateUserProfile } from "../../../lib/onboarding/store"
-import { ROLE_OPTIONS } from "../../../lib/onboarding/types"
+import {
+  ONBOARDING_STEP_SLUGS,
+  ROLE_OPTIONS,
+  type AccountType,
+} from "../../../lib/onboarding/types"
 
 /**
  * Pre-onboarding PROFILE GATE — "What should we call you?".
@@ -15,14 +20,17 @@ import { ROLE_OPTIONS } from "../../../lib/onboarding/types"
  * is not a back-navigable numbered step, and it renders no progress dots. It
  * therefore touches none of the 1-based `onboarding_step` index math.
  *
- * It exists so users who sign up via Google (whose Supabase profile lands with
- * empty first/last name) can set their name before the numbered flow begins.
- * `postLoginPath` routes a NEW user (no workspace) here only when their profile
- * `first_name` is empty — email/password users (who type their name at sign-up)
- * skip straight to `/onboarding/business-info`.
+ * It exists so users who sign up via Google can complete their profile before
+ * the numbered flow begins: their Supabase profile may land with an empty
+ * first/last name and ALWAYS lands without an account_type (the company-vs-
+ * personal choice only exists on the email sign-up form). `postLoginPath`
+ * routes a NEW user (no workspace) here when either `first_name` or
+ * `account_type` is missing — email/password users (who provide both at
+ * sign-up) skip straight to the first numbered step.
  *
- * On submit it persists the name via updateUserProfile (which derives full_name),
- * refreshes the workspace context, then forwards to the first numbered step.
+ * On submit it persists the name + account type via updateUserProfile (which
+ * derives full_name), refreshes the workspace context, then forwards to the
+ * first numbered step.
  */
 
 function deriveInitialNames(
@@ -59,6 +67,13 @@ export function YourName() {
   const [lastName, setLastName] = useState(initial.last)
   const [role, setRole] = useState("")
   const [roleOther, setRoleOther] = useState("")
+  // Company-vs-personal choice (required here — Google sign-ups never made it).
+  // Pre-suggest from the email domain; a click pins it.
+  const [accountType, setAccountType] = useState<AccountType>(() =>
+    auth.kind === "authed" && isPersonalDomain(auth.user.email ?? "")
+      ? "personal"
+      : "company",
+  )
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -78,9 +93,10 @@ export function YourName() {
         first_name: firstName,
         last_name: lastName,
         role: resolvedRole,
+        account_type: accountType,
       })
       await refresh()
-      router.push("/onboarding/business-info")
+      router.push(`/onboarding/${ONBOARDING_STEP_SLUGS[0]}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't save your name.")
     } finally {
@@ -141,6 +157,40 @@ export function YourName() {
                 placeholder="Last name"
                 aria-label="Last name"
               />
+            </div>
+
+            <div className="field full" data-field="accountType">
+              <div className="field-l">
+                How will you use Sprntly? <span className="req">*</span>
+              </div>
+              <div className="auth-acct-row" role="radiogroup" aria-label="Account type">
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={accountType === "company"}
+                  className={
+                    "auth-acct-card" +
+                    (accountType === "company" ? " auth-acct-card-active" : "")
+                  }
+                  onClick={() => setAccountType("company")}
+                >
+                  <span className="t">For a company</span>
+                  <span className="s">My team&apos;s product work</span>
+                </button>
+                <button
+                  type="button"
+                  role="radio"
+                  aria-checked={accountType === "personal"}
+                  className={
+                    "auth-acct-card" +
+                    (accountType === "personal" ? " auth-acct-card-active" : "")
+                  }
+                  onClick={() => setAccountType("personal")}
+                >
+                  <span className="t">For personal use</span>
+                  <span className="s">Just me, exploring</span>
+                </button>
+              </div>
             </div>
 
             <div className="field full">

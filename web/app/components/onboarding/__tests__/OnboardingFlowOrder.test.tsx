@@ -1,11 +1,13 @@
 // @vitest-environment jsdom
 //
-// Integrity tests for the semantic-slug onboarding flow (5-step redesign):
-//   business-info → workspace → connectors → business-context → strategy
-// (workspace moved EARLY; strategy is the closing step. The agent-naming
-//  `coworkers` step stays removed; the old metrics + first-brief routes were
-//  folded into business-info + strategy; the old `analyzing` loader route was
-//  removed — its work now runs in the background from business-info.)
+// Integrity tests for the semantic-slug onboarding flow (2026-07 registration
+// spec, 8 steps):
+//   company → product → metrics → api-key → connectors → team → strategy →
+//   workspace
+// (The old combined business-info split into company/product/metrics; the old
+//  early name-only workspace step was folded away — the slug now names the NEW
+//  closing create-your-workspace step; the onboarding business-context review
+//  moved to Settings.)
 //
 // Asserts the slug→screen map renders the right component per numbered step (in
 // the right order, no gaps), that an unknown slug falls back to the first step,
@@ -23,12 +25,14 @@ vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 // Stub each screen with a marker so we can assert which one a route renders,
 // without dragging in their hooks/contexts.
 vi.mock("../../screens/onboarding", () => ({
-  BusinessInfo: () => React.createElement("div", { "data-screen": "business-info" }),
+  CompanyStep: () => React.createElement("div", { "data-screen": "company" }),
+  ProductStep: () => React.createElement("div", { "data-screen": "product" }),
+  MetricsStep: () => React.createElement("div", { "data-screen": "metrics" }),
   ApiKey: () => React.createElement("div", { "data-screen": "api-key" }),
   Connectors: () => React.createElement("div", { "data-screen": "connectors" }),
-  BusinessContext: () => React.createElement("div", { "data-screen": "business-context" }),
+  TeamStep: () => React.createElement("div", { "data-screen": "team" }),
   Strategy: () => React.createElement("div", { "data-screen": "strategy" }),
-  Workspace: () => React.createElement("div", { "data-screen": "workspace" }),
+  WorkspaceStep: () => React.createElement("div", { "data-screen": "workspace" }),
 }))
 
 import { OnboardingStep } from "../../../(app)/onboarding/[slug]/OnboardingStep"
@@ -47,25 +51,28 @@ afterEach(() => {
 // The expected slug → screen order is exactly ONBOARDING_STEP_SLUGS (each slug
 // renders the screen with the same data-screen marker).
 const EXPECTED_ORDER = [
-  "business-info",
-  "workspace",
+  "company",
+  "product",
+  "metrics",
   "api-key",
   "connectors",
-  "business-context",
+  "team",
   "strategy",
+  "workspace",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 6 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(6)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 8 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(8)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
-  it("renders the workspace page at the 'workspace' slug (right after the loader)", () => {
+  it("renders the closing workspace page at the 'workspace' slug (the last step)", () => {
     const { container } = render(
       React.createElement(OnboardingStep, { slug: "workspace" }),
     )
     expect(container.querySelector('[data-screen="workspace"]')).not.toBeNull()
+    expect(ONBOARDING_STEP_SLUGS[ONBOARDING_STEP_COUNT - 1]).toBe("workspace")
   })
 
   it("maps every numbered slug to the expected screen, in order, with no gaps", () => {
@@ -92,10 +99,17 @@ describe("onboarding flow order — slug → screen", () => {
     )
   })
 
-  it("does not expose the dropped strategic/metrics/first-brief/coworkers pages as steps", () => {
-    // business-context + strategy are now REAL numbered steps (re-added in the
-    // redesign); metrics + first-brief were folded in and are no longer routes.
-    for (const slug of ["strategic-context", "metrics", "first-brief", "optimizing", "coworkers"]) {
+  it("does not expose the dropped business-info/business-context/first-brief/coworkers pages as steps", () => {
+    // business-info split into company/product/metrics; the business-context
+    // review moved to Settings; first-brief/coworkers stay retired.
+    for (const slug of [
+      "business-info",
+      "business-context",
+      "strategic-context",
+      "first-brief",
+      "optimizing",
+      "coworkers",
+    ]) {
       const { container, unmount } = render(
         React.createElement(OnboardingStep, { slug }),
       )

@@ -299,7 +299,7 @@ def _override_company(isolated_settings, monkeypatch):
     cid = _seed_company(db, "co-X")
     require_company = metrics_route.require_company
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
-        company_id=cid, role="member", user_id="u1")
+        company_id=cid, role="admin", user_id="u1")
     yield cid
     main_mod.app.dependency_overrides.pop(require_company, None)
 

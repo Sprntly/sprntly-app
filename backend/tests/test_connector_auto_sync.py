@@ -333,7 +333,7 @@ def test_status_endpoint_surfaces_sync_stamps(isolated_settings, monkeypatch):
 
     require_company = conn_route.require_company
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
-        company_id="co-X", role="member", user_id="u1")
+        company_id="co-X", role="admin", user_id="u1")
     try:
         client = TestClient(main_mod.app)
         r = client.get("/v1/connectors/status")
