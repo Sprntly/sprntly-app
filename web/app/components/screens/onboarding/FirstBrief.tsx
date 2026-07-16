@@ -185,7 +185,7 @@ export function FirstBrief() {
   // that path surfaces in production as a client-side exception / error
   // boundary. Render returns the loading shell until the redirect lands.
   useEffect(() => {
-    if (!loading && !workspace) router.replace("/onboarding/business-info")
+    if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>

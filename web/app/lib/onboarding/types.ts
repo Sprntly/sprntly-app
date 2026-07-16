@@ -34,6 +34,17 @@ export type WorkspaceProduct = {
   website: string | null
   description: string | null
   is_primary: boolean
+  /** Where the product ships (registration spec 2026-07): 'web','mobile','api','hardware'. */
+  surfaces: string[]
+  /** User personas, free-text chips. */
+  personas: string[]
+  /** Product positioning (settings-only). */
+  positioning: string | null
+  /** 'subscription','seat','usage','transaction-fee','advertising'. */
+  monetization: string[]
+  /** Spec's "State" — 'enterprise','mid-market','startup','early-stage'
+   *  (settings-only; named to avoid the companies.stage collision). */
+  maturity: string | null
 }
 
 export type DesignSourcePreference = {
@@ -43,6 +54,20 @@ export type DesignSourcePreference = {
   website_url?: string | null
 }
 
+/** ICP (settings-only) — companies.icp jsonb. */
+export type CompanyIcp = {
+  segment: string | null
+  buyer_persona: string | null
+  buyer: string | null
+}
+
+/** Tone & voice (settings-only) — companies.tone_voice jsonb. */
+export type CompanyToneVoice = {
+  brand: string | null
+  tone: string | null
+  colors: string[]
+}
+
 export type WorkspaceCompany = {
   id: string
   slug: string
@@ -50,6 +75,7 @@ export type WorkspaceCompany = {
   /** @deprecated Use `product` — kept for rows not yet migrated to products table */
   product_description: string | null
   product: WorkspaceProduct | null
+  account_type: AccountType | null
   industry: string | null
   stage: string | null
   business_type: string | null
@@ -59,6 +85,15 @@ export type WorkspaceCompany = {
   competitors: string[]
   tech_stack: string[]
   okrs: string | null
+  mission: string | null
+  strategy: string | null
+  portfolio: string | null
+  icp: CompanyIcp
+  tone_voice: CompanyToneVoice
+  planning_cycle: string | null
+  team_scope: string | null
+  prioritization_framework: string | null
+  sizing_methodology: string | null
   recent_decisions: string | null
   dead_ends: string[]
   biggest_risk: string | null
@@ -74,6 +109,18 @@ export type WorkspaceCompany = {
   use_platform_key: boolean
 }
 
+/** The signup choice (registration spec 2026-07): "company" accounts get
+ *  mandatory starred onboarding fields; "personal" (gmail/yahoo-style)
+ *  accounts see the same wizard with everything skippable. Chosen EXPLICITLY
+ *  at sign-up (email flow) or at the your-name gate (Google SSO). null =
+ *  not chosen yet — treat as "company" (the strict interpretation) anywhere
+ *  a default is needed. */
+export type AccountType = "company" | "personal"
+
+export function parseAccountType(raw: unknown): AccountType | null {
+  return raw === "company" || raw === "personal" ? raw : null
+}
+
 export type UserProfile = {
   id: string
   email: string | null
@@ -83,6 +130,7 @@ export type UserProfile = {
   /** IANA timezone (e.g. "America/New_York"); drives the weekly brief send time.
    *  null until captured at signup or set in settings → backend falls back to UTC. */
   timezone: string | null
+  account_type: AccountType | null
   onboarding_step: number
   onboarding_completed_at: string | null
   skipped_fields: string[]
@@ -121,6 +169,46 @@ export const ROLE_OPTIONS = [
   "Other",
 ] as const
 
+// ── Registration-spec option vocabularies (2026-07) ─────────────────────────
+// Canonical stored values, with display labels where they differ.
+
+export const SURFACE_OPTIONS = [
+  { value: "web", label: "Web" },
+  { value: "mobile", label: "Mobile" },
+  { value: "api", label: "API" },
+  { value: "hardware", label: "Hardware" },
+] as const
+
+export const MONETIZATION_OPTIONS = [
+  { value: "subscription", label: "Subscription" },
+  { value: "seat", label: "Seat-based" },
+  { value: "usage", label: "Usage-based" },
+  { value: "transaction-fee", label: "Transaction fee" },
+  { value: "advertising", label: "Advertising" },
+] as const
+
+export const PRIORITIZATION_FRAMEWORKS = [
+  { value: "goal-based", label: "Based on goal" },
+  { value: "rice", label: "RICE" },
+  { value: "wsjf", label: "WSJF" },
+  { value: "moscow", label: "MoSCoW" },
+  { value: "kano", label: "Kano" },
+  { value: "volume-severity", label: "Volume / severity" },
+] as const
+
+export const MATURITY_OPTIONS = [
+  { value: "enterprise", label: "Enterprise" },
+  { value: "mid-market", label: "Mid-market" },
+  { value: "startup", label: "Startup" },
+  { value: "early-stage", label: "Early stage" },
+] as const
+
+export const PLANNING_CYCLES = [
+  { value: "half", label: "Every half" },
+  { value: "quarterly", label: "Quarterly" },
+  { value: "monthly", label: "Monthly" },
+] as const
+
 export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   agents: true,
   weekly_brief: true,
@@ -135,46 +223,49 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
 /**
  * The semantic slugs of the numbered onboarding steps, in flow order. This is
  * the single source of truth for the onboarding route order. The flow follows
- * the product-approved 5-step redesign (design scenes onb1/onbws/onb4/onbctx/
- * onbstrat):
+ * the 2026-07 registration spec (Company / Product / Team sections; starred
+ * fields mandatory for COMPANY accounts, everything skippable for PERSONAL —
+ * see AccountType):
  *
- *   1. business-info     → BusinessInfo     (onb1: company + product + website
- *                                            + pick-3 success metrics, combined.
- *                                            Kicks off the website analysis in
- *                                            the BACKGROUND on Continue — no
- *                                            interstitial.)
- *   2. workspace         → Workspace         (onbws: slim, name-only — captures
- *                                            the workspace name and continues.
- *                                            Invites + completion no longer live
- *                                            here.)
- *   3. connectors        → Connectors        (onb4: connect your tools)
- *   4. business-context  → BusinessContext   (onbctx: auto-drafted, editable —
- *                                            reuses the #450 Business Context
- *                                            model + /v1/company/business-context)
- *   5. strategy          → Strategy          (onbstrat: priorities + roadmap-doc
- *                                            upload — the FINAL step that
- *                                            COMPLETES onboarding + kicks the
- *                                            first brief)
+ *   1. company     → CompanyStep    (company name* + website*; mission/strategy
+ *                                    behind an optional disclosure. Kicks the
+ *                                    website analysis in the BACKGROUND on
+ *                                    Continue.)
+ *   2. product     → ProductStep    (product name + URL* + surfaces*; personas/
+ *                                    monetization behind a disclosure)
+ *   3. metrics     → MetricsStep    (pick-3 success metrics — split out of the
+ *                                    old combined business-info step)
+ *   4. api-key     → ApiKey         (company Claude key, BEFORE connectors so
+ *                                    the token-heavy KG build runs on their key)
+ *   5. connectors  → Connectors     (onb4: connect your tools*)
+ *   6. team        → TeamStep       (team scope* + prioritization framework*;
+ *                                    invites + weekly-brief day behind a
+ *                                    disclosure)
+ *   7. strategy    → Strategy       (docs + roadmap upload — no longer the
+ *                                    closing step)
+ *   8. workspace   → WorkspaceStep  (name your workspace — the FINAL step that
+ *                                    COMPLETES onboarding + kicks the first
+ *                                    brief)
  *
- * The earlier 4-step flow merged product + metrics into TWO routes
- * (business-info → metrics); the redesign combines them into onb1, and re-adds
- * the previously-trimmed business-context + strategy steps. The agent-naming
- * `coworkers` step stays removed. The redesign also moves the workspace step
- * EARLY (right after business-info) and makes strategy the closing step.
+ * The previous 6-step flow's `business-info` split into company/product/
+ * metrics; the old early name-only `workspace` step was folded away and the
+ * slug now names the NEW closing create-your-workspace step; the onboarding
+ * `business-context` review step moved to Settings (the auto-draft still runs
+ * in the background).
  *
  * `onboarding_step` (the integer DB column) is the 1-based INDEX into this
  * array. Use `slugForStep` / `stepForSlug` to convert, and `clampStep` to keep
- * persisted values (including stale ones from older, longer flows) in range.
+ * persisted values (including stale ones from older flows) in range.
  */
 export const ONBOARDING_STEP_SLUGS = [
-  "business-info",
-  "workspace",
-  // Claude API key — collected BEFORE connectors so the token-heavy KG build
-  // (which runs after sources connect) uses the company's own key, not ours.
+  "company",
+  "product",
+  "metrics",
   "api-key",
   "connectors",
-  "business-context",
+  "team",
   "strategy",
+  "workspace",
 ] as const
 
 export type OnboardingStepSlug = (typeof ONBOARDING_STEP_SLUGS)[number]
@@ -264,6 +355,26 @@ export function parseKpiTree(raw: unknown): KpiTree {
 export function parseFeatureFlags(raw: unknown): FeatureFlags {
   if (!raw || typeof raw !== "object") return { ...DEFAULT_FEATURE_FLAGS }
   return { ...DEFAULT_FEATURE_FLAGS, ...(raw as Partial<FeatureFlags>) }
+}
+
+export function parseCompanyIcp(raw: unknown): CompanyIcp {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {}
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : null)
+  return {
+    segment: str(o.segment),
+    buyer_persona: str(o.buyer_persona),
+    buyer: str(o.buyer),
+  }
+}
+
+export function parseCompanyToneVoice(raw: unknown): CompanyToneVoice {
+  const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {}
+  const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : null)
+  return {
+    brand: str(o.brand),
+    tone: str(o.tone),
+    colors: Array.isArray(o.colors) ? o.colors.map(String).filter(Boolean) : [],
+  }
 }
 
 export function parseDesignSourcePreference(raw: unknown): DesignSourcePreference | null {

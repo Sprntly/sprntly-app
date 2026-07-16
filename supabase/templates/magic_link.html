@@ -1,21 +1,57 @@
 <!--
   Supabase "magic_link" email (passwordless sign-in).
   Variables: {{ .ConfirmationURL }}, {{ .Email }}, {{ .SiteURL }}, {{ .Token }}.
+
+  Design: branded shell shared with confirmation.html (see the note there —
+  the deployed project needs this pasted into the Supabase Dashboard).
 -->
-<div style="font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;max-width:480px;margin:0 auto;padding:32px 24px;color:#1a1a1a">
-  <h1 style="font-size:20px;font-weight:600;margin:0 0 12px">Sign in to Sprntly</h1>
-  <p style="font-size:15px;line-height:1.5;color:#444;margin:0 0 24px">
-    Click below to sign in to your Sprntly account. This link expires in 1 hour and can be used once.
-  </p>
-  <a href="{{ .ConfirmationURL }}"
-     style="display:inline-block;background:#1a1a1a;color:#fff;text-decoration:none;font-size:15px;font-weight:500;padding:12px 24px;border-radius:8px">
-    Sign in
-  </a>
-  <p style="font-size:13px;line-height:1.5;color:#888;margin:24px 0 0">
-    If the button doesn't work, copy and paste this link:<br>
-    <a href="{{ .ConfirmationURL }}" style="color:#555;word-break:break-all">{{ .ConfirmationURL }}</a>
-  </p>
-  <p style="font-size:12px;color:#aaa;margin:24px 0 0">
-    If you didn't try to sign in, you can safely ignore this email.
-  </p>
-</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f6f5f1;margin:0;padding:0">
+  <tr>
+    <td align="center" style="padding:44px 16px 36px">
+      <table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;max-width:520px">
+        <tr>
+          <td align="center" style="padding:0 0 20px;font-family:'Spectral',Georgia,'Times New Roman',serif;font-size:25px;font-weight:600;color:#15171c;letter-spacing:-0.02em">
+            Sprntly<span style="color:#1a8a52">.</span>
+          </td>
+        </tr>
+        <tr>
+          <td style="background-color:#ffffff;border:1px solid #e9e8e4;border-radius:14px;padding:40px 40px 34px">
+            <h1 style="margin:0 0 14px;font-family:'Spectral',Georgia,'Times New Roman',serif;font-size:24px;line-height:1.25;font-weight:600;color:#15171c">
+              Sign in to Sprntly
+            </h1>
+            <p style="margin:0 0 28px;font-family:'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.65;color:#41444f">
+              Click below to sign in as
+              <strong style="color:#15171c">{{ .Email }}</strong>. This link
+              expires in 1 hour and can only be used once.
+            </p>
+            <table role="presentation" cellpadding="0" cellspacing="0">
+              <tr>
+                <td align="center" style="border-radius:10px;background-color:#1a8a52">
+                  <a href="{{ .ConfirmationURL }}"
+                     style="display:inline-block;padding:13px 28px;font-family:'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px">
+                    Sign in
+                  </a>
+                </td>
+              </tr>
+            </table>
+            <p style="margin:28px 0 0;font-family:'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.6;color:#80838d">
+              Or copy and paste this link into your browser:<br>
+              <a href="{{ .ConfirmationURL }}" style="color:#1a8a52;word-break:break-all">{{ .ConfirmationURL }}</a>
+            </p>
+            <hr style="border:none;border-top:1px solid #e9e8e4;margin:28px 0 20px">
+            <p style="margin:0;font-family:'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12.5px;line-height:1.6;color:#80838d">
+              If you didn't try to sign in, you can safely ignore this email —
+              your account stays secure.
+            </p>
+          </td>
+        </tr>
+        <tr>
+          <td align="center" style="padding:20px 8px 0;font-family:'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.7;color:#a9aab1">
+            Sprntly — product intelligence for product teams<br>
+            <a href="{{ .SiteURL }}" style="color:#80838d;text-decoration:none">sprntly.ai</a>
+          </td>
+        </tr>
+      </table>
+    </td>
+  </tr>
+</table>

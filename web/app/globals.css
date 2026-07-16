@@ -1396,6 +1396,108 @@
     display: none;
   }
 
+  /* Workspace switcher (multi-workspace 2026-07): the brand name is the
+   trigger; the menu drops below the sidebar header. */
+  .sb-ws-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+  }
+
+  .sidebar--collapsed .sb-ws-wrap {
+    display: none;
+  }
+
+  .sb-ws-trigger {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: none;
+    padding: 2px 4px;
+    cursor: pointer;
+    border-radius: 6px;
+    width: 100%;
+    text-align: left;
+  }
+
+  .sb-ws-trigger:hover {
+    background: var(--nav-2);
+  }
+
+  .sb-ws-trigger--static {
+    cursor: default;
+  }
+
+  .sb-ws-trigger--static:hover {
+    background: transparent;
+  }
+
+  .sb-ws-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .sb-ws-menu {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 6px);
+    min-width: 200px;
+    max-width: 260px;
+    background: var(--nav);
+    border: 1px solid var(--nav-2);
+    border-radius: 10px;
+    box-shadow: var(--shadow-lg);
+    padding: 4px;
+    z-index: 80;
+  }
+
+  .sb-ws-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    background: transparent;
+    border: none;
+    color: var(--nav-text-hover);
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    border-radius: 6px;
+  }
+
+  .sb-ws-row:hover,
+  .sb-ws-row.active {
+    background: var(--nav-2);
+  }
+
+  .sb-ws-row-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sb-ws-row-meta {
+    font-size: 11px;
+    color: var(--nav-text);
+  }
+
+  .sb-ws-row--create {
+    color: var(--nav-text);
+  }
+
+  .sb-ws-sep {
+    height: 1px;
+    background: var(--nav-2);
+    margin: 4px 0;
+  }
+
   /* Inline label shown beside each icon only when expanded. */
   .sb-rail-label {
     font-size: 13px;
@@ -10120,8 +10222,10 @@
   }
 
   .set-team-invite-form {
-    display: grid;
-    grid-template-columns: 1fr 130px auto;
+    /* Flex (not the old 3-col grid) so the optional workspaces multi-select
+       slots in and narrow panes wrap gracefully. */
+    display: flex;
+    flex-wrap: wrap;
     gap: 10px;
     align-items: center;
     padding: 12px 0 14px;
@@ -10130,6 +10234,8 @@
   }
 
   .set-team-invite-input {
+    flex: 1 1 200px;
+    min-width: 0;
     font-size: 13px;
     padding: 9px 11px;
     border: 1px solid var(--line);
@@ -10304,6 +10410,83 @@
   .themed-select-option.active {
     color: var(--accent);
     font-weight: 600;
+  }
+
+  /* Rich options: role name + definition (the old "Roles" reference card
+     lives inside the dropdown now). Wide menus right-anchor so they never
+     overflow the card on the row's right edge. */
+  .themed-select-menu.wide {
+    width: 300px;
+    left: auto;
+    right: 0;
+  }
+
+  .themed-select-option-label {
+    display: block;
+  }
+
+  .themed-select-option-desc {
+    display: block;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--ink-3);
+    font-weight: 400;
+    margin-top: 1px;
+  }
+
+  /* Multi-select (workspaces): checkbox-style options, menu stays open. */
+  .themed-select-option.check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .themed-select-trigger .placeholder {
+    color: var(--ink-3);
+  }
+
+  .themed-select-check {
+    width: 14px;
+    height: 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    background: var(--surface);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: #fff;
+  }
+
+  .themed-select-check.on {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .themed-select.set-team-invite-ws {
+    width: 170px;
+  }
+
+  .themed-select.set-team-row-ws {
+    width: 150px;
+    flex-shrink: 0;
+  }
+
+  .set-team-row-ws .themed-select-menu,
+  .set-team-row-select .themed-select-menu {
+    left: auto;
+    right: 0;
+    min-width: 100%;
+  }
+
+  /* Org owners/admins: implicit access everywhere — shown as a muted label
+     where plain members get the workspaces multi-select. */
+  .set-team-row-ws-all {
+    width: 150px;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--ink-3);
+    padding: 7px 10px;
   }
 
   /* Status chips — design-kit semantic pair pattern (-l bg, -d text, -b border). */
@@ -14439,6 +14622,88 @@
     flex: 1;
     height: 1px;
     background: var(--line);
+  }
+
+  /* Optional-field disclosure (registration spec 2026-07): collapsed
+   "+ Add …" row that expands optional inputs inline on onboarding steps. */
+  .onb-disclosure {
+    margin-top: 16px;
+  }
+
+  .onb-disclosure-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px dashed var(--line-strong);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .onb-disclosure-toggle:hover {
+    background: var(--surface-3);
+  }
+
+  .onb-disclosure-toggle .t {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .onb-disclosure-toggle .s {
+    font-size: 11px;
+    color: var(--ink-3);
+  }
+
+  .onb-disclosure-body {
+    margin-top: 12px;
+  }
+
+  /* Account-type choice (registration spec 2026-07): two-card segmented
+   control on sign-up step 1 and the your-name gate. */
+  .auth-acct-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .auth-acct-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    background: var(--surface-2);
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .auth-acct-card:hover {
+    background: var(--surface-3);
+  }
+
+  .auth-acct-card .t {
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+
+  .auth-acct-card .s {
+    font-size: 11px;
+    color: var(--ink-3);
+  }
+
+  .auth-acct-card-active {
+    border-color: var(--accent);
+    background: var(--surface-3);
   }
 
   .sso-row {

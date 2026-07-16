@@ -20,7 +20,7 @@ import asyncio
 from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company
+from app.auth import WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.db import (
     find_existing_evidence,
     find_latest_failed_evidence,
@@ -51,7 +51,7 @@ class GenerateIn(BaseModel):
 @router.post("/generate")
 async def generate(
     body: GenerateIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Kick off evidence generation in the background.
 
@@ -60,7 +60,7 @@ async def generate(
     the existing row.
     """
     # Tenant gate: the body's brief_id must belong to the caller's company.
-    brief = require_owned_brief(body.brief_id, company.company_id)
+    brief = require_owned_brief(body.brief_id, company.company_id, company.workspace_id)
     insights = brief.get("insights") or []
     if not (0 <= body.insight_index < len(insights)):
         raise HTTPException(
@@ -126,7 +126,7 @@ async def generate(
 def get_by_insight(
     brief_id: int,
     insight_index: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Return the latest evidence for a brief insight (ready or in-flight), or 404.
 
@@ -137,7 +137,7 @@ def get_by_insight(
     (404 on a foreign/missing brief). Two-segment-deeper path, so it can never be
     shadowed by the single-segment `GET /{evidence_id}` below.
     """
-    require_owned_brief(brief_id, company.company_id)
+    require_owned_brief(brief_id, company.company_id, company.workspace_id)
     row = find_existing_evidence(brief_id, insight_index, variant=_VARIANT)
     if not row:
         raise HTTPException(status_code=404, detail="No evidence for this insight")
@@ -147,7 +147,7 @@ def get_by_insight(
 @router.get("/{evidence_id}")
 def get(
     evidence_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Fetch an evidence row by id (only if it belongs to the caller's company).
 
@@ -157,4 +157,4 @@ def get(
     """
     # require_owned_evidence resolves evidence → brief → dataset → company and
     # 404s on mismatch (or a missing row), returning the evidence row.
-    return require_owned_evidence(evidence_id, company.company_id)
+    return require_owned_evidence(evidence_id, company.company_id, company.workspace_id)

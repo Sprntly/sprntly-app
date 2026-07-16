@@ -85,7 +85,9 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "cached_asks":          {"response"},
     "ask_jobs":             {"response"},
     "website_analysis_jobs": {"result"},
-    "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings", "feature_flags"},
+    "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings", "feature_flags", "icp", "tone_voice"},
+    "products":             {"surfaces", "personas", "monetization"},
+    "workspace_invites":    {"workspace_ids"},
     "connections":          {"config"},
     "org_invites":          {"feature_flags"},
     "github_installations": {"permissions", "events"},
@@ -112,6 +114,8 @@ _BOOL_COLUMNS: dict[str, set[str]] = {
     "briefs":               {"is_current"},
     "github_installations": {"suspended"},
     "github_pull_requests": {"is_draft"},
+    "workspaces":           {"is_default"},
+    "products":             {"is_primary"},
 }
 
 

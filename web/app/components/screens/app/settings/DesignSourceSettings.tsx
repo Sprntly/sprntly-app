@@ -166,7 +166,7 @@ export function DesignSourceSettings() {
     return (
       <SettingsSection title="Prototypes" sub="Complete onboarding to set a design source preference.">
         <p className="settings-placeholder">
-          <a href="/onboarding/business-info">Continue onboarding →</a>
+          <a href="/onboarding/company">Continue onboarding →</a>
         </p>
       </SettingsSection>
     )

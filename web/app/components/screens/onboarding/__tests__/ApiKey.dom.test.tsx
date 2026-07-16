@@ -70,7 +70,7 @@ describe("ApiKey (onboarding step 03 — Claude key)", () => {
       fireEvent.click(screen.getByRole("button", { name: /continue/i }))
     })
     await waitFor(() => expect(setLlmKeyMock).toHaveBeenCalledWith("sk-ant-abcdef123456"))
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
@@ -108,7 +108,7 @@ describe("ApiKey (onboarding step 03 — Claude key)", () => {
       fireEvent.click(skip)
     })
     await waitFor(() => expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["api_key"]))
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     expect(setLlmKeyMock).not.toHaveBeenCalled()
   })

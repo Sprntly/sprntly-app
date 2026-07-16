@@ -17,8 +17,14 @@ type Ctx = {
 const CompanyContext = createContext<Ctx | null>(null)
 
 export function CompanyProvider({ children }: { children: ReactNode }) {
-  const { workspace } = useWorkspace()
-  const [activeCompany, setActiveCompany] = useActiveCompany(workspace?.slug ?? null)
+  const { workspace, activeWorkspace } = useWorkspace()
+  // Multi-workspace: the ACTIVE workspace's dataset slug is what every
+  // dataset-keyed call feeds on (the default workspace's dataset is the bare
+  // company slug, so single-workspace behavior is unchanged). Falls back to
+  // the company slug while the workspaces list is still loading.
+  const [activeCompany, setActiveCompany] = useActiveCompany(
+    activeWorkspace?.dataset ?? workspace?.slug ?? null,
+  )
   const activeCompanyDisplayName = workspace?.display_name ?? DEMO_DEFAULT_COMPANY_SLUG
   return (
     <CompanyContext.Provider

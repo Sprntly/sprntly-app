@@ -20,12 +20,14 @@ function renderStep1(override: Partial<SignUpStep1ViewProps> = {}): string {
   const defaults: SignUpStep1ViewProps = {
     email: "",
     password: "",
+    accountType: "company",
     showPassword: false,
     error: null,
     termsHref: "/terms",
     privacyHref: "/privacy",
     onEmailChange: noop,
     onPasswordChange: noop,
+    onAccountTypeChange: noop,
     onToggleShowPassword: noop,
     onSubmit: noop,
     onGoogle: noop,
@@ -76,6 +78,18 @@ describe("SignUpStep1View (v4 page 02)", () => {
     expect(html).toContain("Terms")
     expect(html).toContain("Privacy Policy")
     expect(html).toContain("Sign up with Google")
+  })
+
+  it("renders the company/personal account-type cards with the active one checked", () => {
+    const html = renderStep1({ accountType: "company" })
+    expect(html).toContain("For a company")
+    expect(html).toContain("For personal use")
+    expect(html).toContain("auth-acct-card-active")
+  })
+
+  it("labels the email field by account type", () => {
+    expect(renderStep1({ accountType: "company" })).toContain("Work email")
+    expect(renderStep1({ accountType: "personal" })).not.toContain("Work email")
   })
 })
 

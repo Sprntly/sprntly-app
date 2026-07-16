@@ -119,6 +119,24 @@ def test_render_step_uses_company_not_dataset(isolated_settings):
     assert "there" in body
 
 
+def test_render_drip_html_branded_shell(isolated_settings):
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    subject, body = drip.render_step(
+        drip.DEFAULT_CADENCE[0], company="Acme <Co>", name="Pat"
+    )
+    html = drip.render_drip_html(subject=subject, body_text=body)
+    # Branded shell: wordmark, card, green CTA.
+    assert "Sprntly<span" in html
+    assert "#1a8a52" in html
+    assert "Open Sprntly" in html
+    # Body paragraphs render escaped (no raw angle brackets from user data).
+    assert "Acme &lt;Co&gt;" in html
+    assert "Acme <Co>" not in html
+    # Sign-off renders as the muted footer paragraph.
+    assert "— The Sprntly team" in html
+
+
 # ── send_drip_email best-effort contract ──────────────────────────────
 
 
@@ -159,6 +177,9 @@ def test_send_drip_email_success(isolated_settings, monkeypatch):
     assert captured["url"] == drip.RESEND_API_URL
     assert captured["json"]["to"] == ["a@b.com"]
     assert captured["json"]["subject"] == "Hello"
+    # Both parts ship: branded HTML + the plain-text fallback.
+    assert captured["json"]["text"] == "Body"
+    assert "Open Sprntly" in captured["json"]["html"]
     assert "Bearer re_test" in captured["headers"]["Authorization"]
 
 

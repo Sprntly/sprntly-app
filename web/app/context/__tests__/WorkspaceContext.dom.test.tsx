@@ -24,11 +24,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const authMock = vi.fn()
 const fetchProfileMock = vi.fn()
 const fetchWorkspaceMock = vi.fn()
+const listWorkspacesMock = vi.fn()
 
 vi.mock("../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../lib/onboarding/store", () => ({
   fetchUserProfile: (...a: unknown[]) => fetchProfileMock(...a),
   fetchWorkspaceForUser: (...a: unknown[]) => fetchWorkspaceMock(...a),
+}))
+// The workspaces list ride-along (multi-workspace 2026-07) — stubbed so no
+// real fetch fires; the identity-stability behavior under test is unchanged.
+vi.mock("../../lib/api", () => ({
+  setActiveWorkspaceId: vi.fn(),
+  workspacesApi: { list: (...a: unknown[]) => listWorkspacesMock(...a) },
 }))
 // Supabase is "configured" in every test — the unauthed branch is exercised
 // purely via auth.kind, matching production where the env is always present.
@@ -61,6 +68,7 @@ beforeEach(() => {
   fetchWorkspaceMock.mockImplementation((uid: string) =>
     Promise.resolve({ slug: `ws-${uid}` }),
   )
+  listWorkspacesMock.mockResolvedValue({ workspaces: [] })
 })
 
 afterEach(() => {

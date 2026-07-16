@@ -95,13 +95,14 @@ export async function postLoginPath(): Promise<string> {
         return `/onboarding/${slugForStep(fresh.onboarding_step)}`
       }
     }
-    // Pre-onboarding profile gate: a brand-new user whose profile has no first
-    // name (primarily Google sign-ups — Supabase lands them with empty
-    // first/last) goes to the unnumbered `your-name` gate to set it before the
-    // numbered flow. Email/password users (who type their name at sign-up) and
-    // anyone who already has a name skip straight to the first numbered step.
-    // A missing profile row is treated as an empty name → show the gate.
-    if (!(await hasFirstName(user.id))) {
+    // Pre-onboarding profile gate: a brand-new user whose profile is missing
+    // a first name OR the company-vs-personal account type goes to the
+    // unnumbered `your-name` gate first. Google sign-ups always miss the
+    // account type (the choice only exists on the email sign-up form) and may
+    // miss the name; email/password users provide both at sign-up and skip
+    // straight to the first numbered step. A missing profile row is treated
+    // as missing both → show the gate.
+    if (!(await hasCompleteSignupProfile(user.id))) {
       return "/onboarding/your-name"
     }
     return `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
@@ -111,20 +112,25 @@ export async function postLoginPath(): Promise<string> {
 }
 
 /**
- * True when the user's profile already has a non-empty first name. Minimal
- * query (`select first_name`); a missing row or any error is treated as "no
- * name" so the gate shows rather than silently skipping it.
+ * True when the user's profile already has BOTH a non-empty first name and an
+ * account type (the company-vs-personal signup choice). Minimal query; a
+ * missing row or any error is treated as incomplete so the gate shows rather
+ * than silently skipping it.
  */
-async function hasFirstName(userId: string): Promise<boolean> {
+async function hasCompleteSignupProfile(userId: string): Promise<boolean> {
   try {
     const supabase = getSupabase()
     const { data, error } = await supabase
       .from("profiles")
-      .select("first_name")
+      .select("first_name, account_type")
       .eq("id", userId)
       .maybeSingle()
     if (error || !data) return false
-    return String((data as { first_name?: unknown }).first_name ?? "").trim().length > 0
+    const row = data as { first_name?: unknown; account_type?: unknown }
+    return (
+      String(row.first_name ?? "").trim().length > 0 &&
+      (row.account_type === "company" || row.account_type === "personal")
+    )
   } catch {
     return false
   }
@@ -132,11 +138,9 @@ async function hasFirstName(userId: string): Promise<boolean> {
 
 async function tryAutoAcceptInvite(): Promise<boolean> {
   try {
-    // Lazy import keeps the team-settings module (which transitively pulls
-    // in React-flavoured deps) out of the cold-start path of postLoginPath.
-    const { teamApi } = await import(
-      "../../components/screens/app/settings/TeamSettings"
-    )
+    // Lazy import keeps the api module out of the cold-start path of
+    // postLoginPath (teamApi now lives in lib/teamApi, not TeamSettings).
+    const { teamApi } = await import("../teamApi")
     await teamApi.acceptInvite()
     return true
   } catch {

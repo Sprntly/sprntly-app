@@ -164,7 +164,7 @@ export function ProfileSettings() {
             timezone: metaTz,
           })
           .select(
-            "id, email, first_name, last_name, role, timezone, onboarding_step, onboarding_completed_at, skipped_fields",
+            "id, email, first_name, last_name, role, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields",
           )
           .single()
         if (!error && data) {
@@ -175,6 +175,10 @@ export function ProfileSettings() {
             last_name: data.last_name,
             role: data.role,
             timezone: data.timezone ?? null,
+            account_type:
+              data.account_type === "company" || data.account_type === "personal"
+                ? data.account_type
+                : null,
             onboarding_step: data.onboarding_step ?? 0,
             onboarding_completed_at: data.onboarding_completed_at,
             skipped_fields: Array.isArray(data.skipped_fields) ? data.skipped_fields : [],
@@ -348,6 +352,22 @@ export function ProfileSettings() {
               value={email || "—"}
               readOnly
               title="Contact support to change your login email."
+            />
+          </div>
+          <div className="pset-field">
+            <label className="pset-label" htmlFor="pset-account-type">Account type</label>
+            <input
+              id="pset-account-type"
+              className="input"
+              value={
+                ctxProfile?.account_type === "personal"
+                  ? "Personal"
+                  : ctxProfile?.account_type === "company"
+                    ? "Company"
+                    : "—"
+              }
+              readOnly
+              title="Chosen at sign-up. Contact support to change it."
             />
           </div>
           <div className="pset-field">

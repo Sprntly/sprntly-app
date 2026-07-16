@@ -25,7 +25,7 @@ from fastapi import Depends, APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company, require_company_from_query
+from app.auth import WorkspaceContext, require_company, require_workspace, require_workspace_from_query  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.graph import token_stream
 from app.db import (
     find_existing_prd,
@@ -97,7 +97,7 @@ class GenerateIn(BaseModel):
 @router.post("/generate")
 async def generate(
     body: GenerateIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Kick off PRD generation in the background.
 
@@ -107,7 +107,7 @@ async def generate(
     """
     # Tenant gate: the body's brief_id must belong to the caller's company
     # (404 on mismatch — no cross-tenant existence disclosure).
-    brief = require_owned_brief(body.brief_id, company.company_id)
+    brief = require_owned_brief(body.brief_id, company.company_id, company.workspace_id)
     insights = brief.get("insights") or []
     if not (0 <= body.insight_index < len(insights)):
         raise HTTPException(
@@ -174,7 +174,7 @@ class BacklogGenerateIn(BaseModel):
 @router.post("/generate-from-backlog")
 async def generate_from_backlog(
     body: BacklogGenerateIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Kick off PRD generation for a BACKLOG item (a theme ranked ≥ 4 that never
     made the weekly brief's top-3).
@@ -266,7 +266,7 @@ _MAX_IMPORT_BYTES = 25 * 1024 * 1024  # 25 MB
 async def import_prd(
     file: UploadFile = File(...),
     dataset: str = Form(...),
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Import an existing PRD the customer uploaded (PDF/PPT/DOCX/…).
 
@@ -281,7 +281,7 @@ async def import_prd(
     GET /v1/prd/{prd_id} until status == 'ready'.
     """
     # Tenant gate: the dataset (company slug) must belong to the caller (404).
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
 
     data = await file.read()
     if not data:
@@ -339,14 +339,14 @@ async def import_prd(
 @router.get("/latest")
 def latest(
     dataset: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Return the most recent ready PRD for a dataset (company slug).
 
     Used by the PRD screen to auto-load the last generated PRD on refresh
     instead of showing an empty pane.
     """
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     row = latest_prd_for_dataset(dataset)
     if not row:
         raise HTTPException(404, "No PRD found for this workspace")
@@ -357,10 +357,10 @@ def latest(
 @router.get("/{prd_id}")
 def get(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Fetch a PRD row by id (only if it belongs to the caller's company)."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     row = get_prd_rendered(prd_id)
     if not row:
         raise HTTPException(404, "PRD not found")
@@ -370,13 +370,13 @@ def get(
 @router.get("/{prd_id}/stream")
 async def stream_prd_generation(
     prd_id: int,
-    company: CompanyContext = Depends(require_company_from_query),
+    company: WorkspaceContext = Depends(require_workspace_from_query),
 ) -> StreamingResponse:
     """SSE token stream of a PRD's Part A generation, so the client renders the
     PRD as it's written instead of waiting for the whole document.
 
     EventSource can't send headers, so the bearer rides as `?token=`
-    (require_company_from_query). Frames: `{"kind":"delta","text":…}` as the HTML
+    (require_workspace_from_query). Frames: `{"kind":"delta","text":…}` as the HTML
     streams, then a terminal `{"kind":"done"|"error"}`. PROGRESSIVE DISPLAY ONLY
     — the client keeps polling GET /{prd_id}, which stays the authoritative
     source for the finished, persisted PRD. Single-worker transport (see
@@ -384,7 +384,7 @@ async def stream_prd_generation(
     still carries the result. Opening late (generation already finished) simply
     receives no frames — the poll shows the completed PRD.
     """
-    require_owned_prd(prd_id, company.company_id)  # 404 on cross-tenant/missing
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)  # 404 on cross-tenant/missing
     channel = f"prd:{prd_id}"
 
     async def _gen():
@@ -404,7 +404,7 @@ async def stream_prd_generation(
 @router.post("/{prd_id}/impl-spec")
 def generate_impl_spec(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Produce the machine-readable Implementation Spec for a PRD on demand.
 
@@ -414,7 +414,7 @@ def generate_impl_spec(
     Synchronous: the caller shows a loading state and pastes the returned
     `llm_part` into Claude Code. Returns {"llm_part": ..., "cached": ...}.
     """
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     try:
         return ensure_impl_spec(prd_id)
     except RuntimeError as exc:
@@ -434,10 +434,10 @@ class PrdUpdateIn(BaseModel):
 def update(
     prd_id: int,
     body: PrdUpdateIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Save PRD edits to Supabase. Auto-creates a version snapshot."""
-    row = require_owned_prd(prd_id, company.company_id)
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
     # Save current content as a version before overwriting
     try:
         save_prd_version(prd_id, row.get("title", ""), row.get("payload_md", ""), saved_by="auto")
@@ -463,10 +463,10 @@ class PrdVersionSaveIn(BaseModel):
 def create_version(
     prd_id: int,
     body: PrdVersionSaveIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Explicitly save a named version of the PRD."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     version = save_prd_version(prd_id, body.title, body.payload_md, saved_by=body.label)
     return version
 
@@ -474,22 +474,22 @@ def create_version(
 @router.get("/{prd_id}/versions")
 def get_versions(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """List all versions of a PRD, newest first."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     return list_prd_versions(prd_id)
 
 
 @router.get("/{prd_id}/generations")
 def get_generations(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Prior generations of this PRD (other prds rows sharing the same
     brief+insight), newest first — the regeneration history surfaced in the
     PRD's Version History dropdown."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     return {"generations": list_prd_generations(prd_id)}
 
 
@@ -497,10 +497,10 @@ def get_generations(
 def restore_version(
     prd_id: int,
     version_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Restore a PRD to a specific version."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     result = restore_prd_version(prd_id, version_id)
     if not result:
         raise HTTPException(404, "Version not found")
@@ -521,7 +521,7 @@ _INPUT_SECTION_MARKER = "User input needed"
 @router.get("/{prd_id}/input-questions")
 async def get_input_questions(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """List the PRD's structured "User input needed" questions.
 
@@ -539,7 +539,7 @@ async def get_input_questions(
     just-finished PRD, whose first fetch can race the pipeline's extraction)
     schedule exactly one run.
     """
-    row = require_owned_prd(prd_id, company.company_id)
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
     questions = list_questions(prd_id)
     if questions:
         return {"questions": questions, "extracting": False}
@@ -569,7 +569,7 @@ def answer_input_question(
     prd_id: int,
     question_id: int,
     body: InputAnswerIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Answer one "User input needed" question and fold the answer into the PRD.
 
@@ -585,7 +585,7 @@ def answer_input_question(
     # gateway) and mirror the lazy-import discipline used elsewhere in this file.
     from app.prd_questions import apply_answer
 
-    row = require_owned_prd(prd_id, company.company_id)
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
     question = get_question(question_id)
     if not question or question.get("prd_id") != prd_id:
         raise HTTPException(404, "Question not found")

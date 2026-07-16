@@ -9,7 +9,7 @@ from fastapi import Depends, APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.ask_job_runner import run_ask_job
-from app.auth import CompanyContext, require_company
+from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.ingest import convert
 from app.db import (
     complete_ask_job,
@@ -199,9 +199,10 @@ async def ask(
     """
     # 0) Tenant gate: the dataset slug must resolve to the caller's company.
     # Without this, an arbitrary client slug would seed a FOREIGN company's
-    # corpus into the LLM answer (cross-tenant corpus leak). require_company
-    # scopes the KG half; this scopes the corpus/dataset half. 404 on mismatch.
-    require_owned_dataset(body.dataset, company.company_id)
+    # corpus into the LLM answer (cross-tenant corpus leak). The company gate
+    # (via require_agents_module) scopes the KG half; this scopes the
+    # corpus/dataset half. 404 on mismatch.
+    require_owned_dataset(body.dataset, company.company_id, company.workspace_id)
     enterprise_id = company.company_id
 
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
@@ -307,7 +308,7 @@ async def extract_file(
 
 
 @router.get("/usage")
-def get_usage(company: CompanyContext = Depends(require_company)):
+def get_usage(company: WorkspaceContext = Depends(require_workspace)):
     """Per-enterprise Q&A usage: calls, cost, tokens (total + by agent)."""
     from app.qa_usage import fetch_qa_usage
 
@@ -319,7 +320,7 @@ def get_usage(company: CompanyContext = Depends(require_company)):
 @router.get("/{ask_id}")
 def get_ask(
     ask_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Status + result for an Ask job.
 

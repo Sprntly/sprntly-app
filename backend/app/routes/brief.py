@@ -4,7 +4,7 @@ import logging
 from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company
+from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.entitlements import require_weekly_brief_module
 from app.brief_runner import get_status, set_status, warm_synthesis_drilldowns
 from app.db import (
@@ -197,7 +197,7 @@ async def _full_pipeline_bg(dataset: str) -> None:
 @router.get("/current")
 def current(
     dataset: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Return the latest cached brief for a dataset.
 
@@ -206,7 +206,7 @@ def current(
     poll `/v1/brief/status` while this is anything other than `ready`.
     """
     # Tenant gate: the dataset slug must resolve to the caller's company.
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     brief = get_current_brief(dataset)
     if brief:
         return _with_company_name(brief)
@@ -216,7 +216,7 @@ def current(
 @router.get("/status")
 def status(
     dataset: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Lightweight poll endpoint for the frontend.
 
@@ -231,7 +231,7 @@ def status(
         one (status stays "ready" so the current brief keeps rendering). The home
         surface uses this to show a lightweight "refreshing your brief" indicator.
     """
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     return {"dataset": dataset, **get_status(dataset)}
 
 
@@ -249,7 +249,7 @@ async def regenerate(
 
     Runs the KG seed-if-empty → run_synthesis path in the background.
     """
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     _track(asyncio.create_task(_synthesis_generate_bg(dataset)))
     return {"started": True, "dataset": dataset}
 
@@ -273,7 +273,7 @@ async def regenerate_all(
     Poll `/v1/brief/status` for the brief stage; PRDs/evidence continue warming
     after the brief flips to `ready`.
     """
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     _track(asyncio.create_task(_full_pipeline_bg(dataset)))
     return {"started": True, "dataset": dataset}
 
@@ -291,7 +291,7 @@ class DismissIn(BaseModel):
 @router.post("/dismiss")
 def dismiss(
     body: DismissIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Record that the user dismissed a brief finding (action='dismissed').
 
@@ -309,7 +309,7 @@ def dismiss(
                 400, "Provide either theme_id or (brief_id and insight_index)"
             )
         # Tenant gate + resolve insight → theme_id from the brief payload.
-        brief = require_owned_brief(body.brief_id, company.company_id)
+        brief = require_owned_brief(body.brief_id, company.company_id, company.workspace_id)
         insights = brief.get("insights") or []
         if not (0 <= body.insight_index < len(insights)):
             raise HTTPException(
@@ -328,13 +328,13 @@ def dismiss(
 @router.post("/{brief_id}/opened")
 def mark_opened(
     brief_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Record that the signed-in user opened this brief. This is the open-state
     signal the brief-nudge cadence reads: once a user opens the brief, the
     Day 1/2/3 reminders stop for them (app/brief_nudge.py, app/db/nudge.py).
     Tenant-gated via require_owned_brief; idempotent (upsert)."""
-    require_owned_brief(brief_id, company.company_id)
+    require_owned_brief(brief_id, company.company_id, company.workspace_id)
     nudge_db.mark_brief_opened(company.company_id, company.user_id, brief_id)
     return {"opened": True, "brief_id": brief_id}
 
@@ -342,11 +342,13 @@ def mark_opened(
 @router.get("/{brief_id}")
 def by_id(
     brief_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     # require_owned_brief resolves brief → dataset → company and 404s on
     # mismatch (or a missing brief), returning the brief row on success.
-    return _with_company_name(require_owned_brief(brief_id, company.company_id))
+    return _with_company_name(
+        require_owned_brief(brief_id, company.company_id, company.workspace_id)
+    )
 
 
 @router.post("/generate")
@@ -364,7 +366,7 @@ def generate(
     result); we then read it back to preserve the {brief_id, **payload}
     response shape.
     """
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     try:
         payload = generate_brief_for(dataset)
     except ValueError as e:

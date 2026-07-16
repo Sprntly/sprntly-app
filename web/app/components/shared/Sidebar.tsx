@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
@@ -9,6 +9,7 @@ import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
 import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles } from "@tabler/icons-react"
 import { FeedbackModal } from "./FeedbackModal"
+import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 
 interface SidebarProps {
   activeCompany?: string
@@ -19,8 +20,28 @@ export function Sidebar(_props: SidebarProps = {}) {
   const { currentScreen, goTo, goToNewChat, sidebarCollapsed, toggleSidebar } = useNavigation()
   const { content } = useContent()
   const auth = useAuth()
-  const { profile, workspace } = useWorkspace()
+  const {
+    profile,
+    workspace,
+    workspaces = [],
+    activeWorkspace,
+    setActiveWorkspace,
+  } = useWorkspace()
   const [feedbackOpen, setFeedbackOpen] = useState(false)
+  // Workspace switcher (multi-workspace 2026-07): the brand name doubles as
+  // the trigger; the menu lists the caller's workspaces + a create affordance.
+  const [wsMenuOpen, setWsMenuOpen] = useState(false)
+  const [createWsOpen, setCreateWsOpen] = useState(false)
+  const wsMenuRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    function onClick(e: MouseEvent) {
+      if (!wsMenuRef.current) return
+      if (!wsMenuRef.current.contains(e.target as Node)) setWsMenuOpen(false)
+    }
+    if (wsMenuOpen) document.addEventListener("mousedown", onClick)
+    return () => document.removeEventListener("mousedown", onClick)
+  }, [wsMenuOpen])
 
   const RailItem = ({
     screen,
@@ -57,12 +78,21 @@ export function Sidebar(_props: SidebarProps = {}) {
       .slice(0, 2)
       .toUpperCase()
 
-  const companyInitial = (workspace?.display_name ?? workspace?.product?.name ?? "S").charAt(0).toUpperCase()
-  const brandName = workspace?.display_name ?? workspace?.product?.name ?? content.homeHeadline ?? "Sprntly"
+  // The header shows the ACTIVE WORKSPACE (multi-workspace 2026-07); company
+  // display name is the fallback while the workspaces list loads.
+  const brandName =
+    activeWorkspace?.name ??
+    workspace?.display_name ??
+    workspace?.product?.name ??
+    content.homeHeadline ??
+    "Sprntly"
+  const companyInitial = brandName.charAt(0).toUpperCase()
+  const isWsAdmin = (activeWorkspace?.role ?? "member") === "admin"
+  const wsInteractive = workspaces.length > 1 || isWsAdmin
 
   return (
     <aside className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : "sidebar--expanded"}`}>
-      {/* Logo + expand/collapse toggle */}
+      {/* Logo + workspace switcher + expand/collapse toggle */}
       <div className="sb-rail-header">
         <div
           className="sb-rail-logo"
@@ -75,7 +105,61 @@ export function Sidebar(_props: SidebarProps = {}) {
             <span className="sb-rail-logo-dot">.</span>
           </span>
         </div>
-        <span className="sb-rail-brand-name">{brandName}</span>
+        <div className="sb-ws-wrap" ref={wsMenuRef}>
+          <button
+            type="button"
+            className={`sb-rail-brand-name sb-ws-trigger${wsInteractive ? "" : " sb-ws-trigger--static"}`}
+            onClick={() => wsInteractive && setWsMenuOpen((v) => !v)}
+            aria-haspopup="listbox"
+            aria-expanded={wsMenuOpen}
+            title={brandName}
+            data-testid="workspace-switcher"
+          >
+            <span className="sb-ws-name">{brandName}</span>
+            {wsInteractive && (
+              <svg width="10" height="10" viewBox="0 0 24 24" aria-hidden>
+                <path d="M6 9 L12 15 L18 9" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" />
+              </svg>
+            )}
+          </button>
+          {wsMenuOpen && (
+            <div className="sb-ws-menu" role="listbox">
+              {workspaces.map((w) => (
+                <button
+                  key={w.id}
+                  type="button"
+                  className={`sb-ws-row${w.id === activeWorkspace?.id ? " active" : ""}`}
+                  onClick={() => {
+                    setActiveWorkspace(w.id)
+                    setWsMenuOpen(false)
+                  }}
+                  role="option"
+                  aria-selected={w.id === activeWorkspace?.id}
+                >
+                  <span className="sb-ws-row-name">{w.name}</span>
+                  {w.id === activeWorkspace?.id && (
+                    <span className="sb-ws-row-meta">active</span>
+                  )}
+                </button>
+              ))}
+              {isWsAdmin && (
+                <>
+                  <div className="sb-ws-sep" />
+                  <button
+                    type="button"
+                    className="sb-ws-row sb-ws-row--create"
+                    onClick={() => {
+                      setWsMenuOpen(false)
+                      setCreateWsOpen(true)
+                    }}
+                  >
+                    + New workspace
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+        </div>
         <button
           type="button"
           className="sb-rail-expand"
@@ -144,6 +228,7 @@ export function Sidebar(_props: SidebarProps = {}) {
       </div>
 
       <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
+      <CreateWorkspaceModal open={createWsOpen} onClose={() => setCreateWsOpen(false)} />
     </aside>
   )
 }

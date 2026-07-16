@@ -44,12 +44,14 @@ export function prdIdFromPrototypeSearch(raw: string | null): number | null {
 
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
-  "ob-business-info": "/onboarding/business-info",
-  "ob-workspace": "/onboarding/workspace",
+  "ob-company": "/onboarding/company",
+  "ob-product": "/onboarding/product",
+  "ob-metrics": "/onboarding/metrics",
   "ob-api-key": "/onboarding/api-key",
   "ob-connectors": "/onboarding/connectors",
-  "ob-business-context": "/onboarding/business-context",
+  "ob-team": "/onboarding/team",
   "ob-strategy": "/onboarding/strategy",
+  "ob-workspace": "/onboarding/workspace",
   chat: "/",
   chats: "/history",
   artifacts: "/artifacts",

@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import { InterviewLayout, useFieldValidation } from "../InterviewLayout"
+import { ONBOARDING_STEP_COUNT } from "../../../lib/onboarding/types"
 import type { FieldCheck } from "../../../lib/onboarding/validation"
 
 const noop = () => {}
@@ -35,11 +36,13 @@ describe("InterviewLayout (v4 onboarding shell)", () => {
     expect(html).toContain("preview")
   })
 
-  it("shows the step progress label and a 6-dot indicator", () => {
+  it("shows the step progress label and one dot per numbered step", () => {
     const html = render({ step: 4 })
-    expect(html).toContain("Step 4 of 6")
+    expect(html).toContain(`Step 4 of ${ONBOARDING_STEP_COUNT}`)
     // one dot element per step (match the className attribute, not CSS rules)
-    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(6)
+    expect((html.match(/class="interview-dot/g) ?? []).length).toBe(
+      ONBOARDING_STEP_COUNT,
+    )
   })
 
   it("marks done/active dots relative to the current step", () => {

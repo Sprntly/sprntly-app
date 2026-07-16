@@ -16,11 +16,14 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
     expect(you.items.map((i) => i.id)).toEqual(["profile", "comms-brief"])
   })
 
-  it("Workspace group contains Product & Category, Business Context, Team & roles", () => {
+  it("Workspace group contains Product & Category, Company Profile, Process & Planning, Business Context, Workspaces, Team & roles", () => {
     const ws = SETTINGS_NAV.find((g) => g.groupLabel === "Workspace")!
     expect(ws.items.map((i) => i.id)).toEqual([
       "product-category",
+      "company-profile",
+      "process",
       "business-context",
+      "workspaces",
       "team",
     ])
   })
@@ -42,7 +45,10 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       profile: "Profile",
       "comms-brief": "Comms & Brief",
       "product-category": "Product & Category",
+      "company-profile": "Company Profile",
+      process: "Process & Planning",
       "business-context": "Business Context",
+      workspaces: "Workspaces",
       team: "Team & roles",
       connectors: "Connectors",
       mcp: "MCP Access",

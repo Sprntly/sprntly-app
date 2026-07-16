@@ -38,14 +38,44 @@ logger = logging.getLogger(__name__)
 
 _scheduler: AsyncIOScheduler | None = None
 
-# Per-company "last weekly brief fired at" ledger (company_id → aware UTC dt),
-# the once-per-week guard handed to should_run_weekly_brief. In-memory only: a
+# Per-WORKSPACE "last weekly brief fired at" ledger (workspace_id → aware UTC
+# dt; falls back to company_id when the workspaces lookup fails), the
+# once-per-week guard handed to should_run_weekly_brief. In-memory only: a
 # process restart re-evaluates from scratch, which is safe — should_run_weekly_brief
 # keys off the local Monday-09:00 firing WINDOW (default 1h), so a restart can at
 # most regenerate one brief inside an open window, and brief generation is itself
 # idempotent/refresh-gated (synthesis_brief.generate_brief_for skips when the KG
-# is unchanged). Bounded by the company count.
+# is unchanged). Bounded by the workspace count.
 _last_brief_run: dict[str, datetime] = {}
+
+
+def _company_workspace_slugs(company_id: str | None, company_slug: str) -> list[tuple[str, str]]:
+    """(ledger_key, dataset_slug) pairs to generate briefs for — one per
+    workspace. The default workspace's dataset is the bare company slug;
+    additional workspaces carry their own dataset slugs. Any failure (or no
+    workspace rows yet) degrades to the single company-level pair, keeping
+    the pre-multi-workspace behavior."""
+    if not company_id:
+        return [(company_slug, company_slug)]
+    try:
+        from app.db.workspaces import (
+            dataset_slug_for_workspace,
+            list_workspaces_for_company,
+        )
+
+        workspaces = list_workspaces_for_company(company_id)
+        out: list[tuple[str, str]] = []
+        for ws in workspaces:
+            slug = dataset_slug_for_workspace(ws["id"])
+            if not slug and ws.get("is_default"):
+                slug = company_slug
+            if slug:
+                out.append((ws["id"], slug))
+        if out:
+            return out
+    except Exception:  # noqa: BLE001 — never let workspace lookup kill the tick
+        logger.exception("scheduler: workspace lookup failed for %s", company_id)
+    return [(company_id, company_slug)]
 
 
 def _refresh_all_company_connectors() -> None:
@@ -143,16 +173,19 @@ async def _run_synthesis_for_all_companies() -> None:
                 slug,
             )
             continue
-        try:
-            # generate_brief_for is blocking (LLM + Supabase); keep it off the
-            # event loop so one slow company can't stall the scheduler thread.
-            await asyncio.to_thread(generate_brief_for, slug)
-            logger.info("Scheduler: synthesis brief for %s → ok", slug)
-            # Parity with the legacy path: warm evidence/PRD/Ask drill-downs so
-            # the first user click is instant. Error-isolated in the helper.
-            warm_synthesis_drilldowns(slug)
-        except Exception as exc:  # noqa: BLE001 — per-company isolation
-            logger.error("Scheduler: synthesis failed for %s: %s", slug, exc)
+        # One synthesis per WORKSPACE — each workspace's dataset slug is its
+        # own corpus (the default workspace keeps the bare company slug).
+        for _ledger_key, ws_slug in _company_workspace_slugs(company.get("id"), slug):
+            try:
+                # generate_brief_for is blocking (LLM + Supabase); keep it off the
+                # event loop so one slow company can't stall the scheduler thread.
+                await asyncio.to_thread(generate_brief_for, ws_slug)
+                logger.info("Scheduler: synthesis brief for %s → ok", ws_slug)
+                # Parity with the legacy path: warm evidence/PRD/Ask drill-downs so
+                # the first user click is instant. Error-isolated in the helper.
+                warm_synthesis_drilldowns(ws_slug)
+            except Exception as exc:  # noqa: BLE001 — per-workspace isolation
+                logger.error("Scheduler: synthesis failed for %s: %s", ws_slug, exc)
 
 
 async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
@@ -208,23 +241,27 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
             else resolve_user_timezone(company.get("owner_timezone"))
         )
         weekday, hour, minute = resolve_schedule(ns)
-        last_run = _last_brief_run.get(company_id) if company_id else None
-        if not should_run_weekly_brief(
-            now, tz, last_run, weekday=weekday, hour=hour, minute=minute
-        ):
-            continue
+        # Schedule / timezone / entitlement are COMPANY-level decisions; the
+        # generation fans out per workspace (each workspace's dataset slug is
+        # its own corpus). The once-per-week ledger is keyed per workspace so
+        # a mid-week workspace addition can't skip or double anyone.
+        for ledger_key, ws_slug in _company_workspace_slugs(company_id, slug):
+            last_run = _last_brief_run.get(ledger_key)
+            if not should_run_weekly_brief(
+                now, tz, last_run, weekday=weekday, hour=hour, minute=minute
+            ):
+                continue
 
-        logger.info(
-            "Weekly brief tick: company=%s (slug=%s, tz=%s) is due — generating",
-            company_id, slug, tz.key,
-        )
-        try:
-            await _generate_weekly_brief_for_company(company_id, slug)
-            if company_id:
-                _last_brief_run[company_id] = now.astimezone(timezone.utc)
-            logger.info("Weekly brief tick: brief for %s → ok", slug)
-        except Exception as exc:  # noqa: BLE001 — per-company isolation
-            logger.error("Weekly brief tick: brief failed for %s: %s", slug, exc)
+            logger.info(
+                "Weekly brief tick: company=%s (dataset=%s, tz=%s) is due — generating",
+                company_id, ws_slug, tz.key,
+            )
+            try:
+                await _generate_weekly_brief_for_company(company_id, ws_slug)
+                _last_brief_run[ledger_key] = now.astimezone(timezone.utc)
+                logger.info("Weekly brief tick: brief for %s → ok", ws_slug)
+            except Exception as exc:  # noqa: BLE001 — per-workspace isolation
+                logger.error("Weekly brief tick: brief failed for %s: %s", ws_slug, exc)
 
 
 async def _generate_weekly_brief_for_company(company_id: str | None, slug: str) -> None:

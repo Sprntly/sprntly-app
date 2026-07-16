@@ -64,6 +64,7 @@ from app.routes import (
     synthesis,
     team,
     tickets,
+    workspaces as workspaces_routes,
     evidence,
     health,
     internal,
@@ -312,6 +313,7 @@ app.include_router(tickets.router)
 app.include_router(conversations.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
+app.include_router(workspaces_routes.router)
 app.include_router(admin.router)
 app.include_router(staff_admin.router)
 app.include_router(staff_admin.claim_router)

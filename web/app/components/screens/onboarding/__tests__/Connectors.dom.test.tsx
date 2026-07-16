@@ -10,9 +10,10 @@
 //   - live connections render a non-togglable "Live" card (and keep an
 //     otherwise-unsupported provider/category visible)
 //   - connectable cards open the connect modal with the right provider
-//   - Continue advances to step 4 and routes to /onboarding/business-context
-//   - "Connect later" marks skipped fields first, then advances
-//   - NO required-Analytics gate: Continue is enabled with zero selections
+//   - Continue advances to step 6 and routes to /onboarding/team
+//   - "Connect later" (personal accounts) marks skipped fields, then advances
+//   - COMPANY accounts are gated: Continue disabled until a live connection
+//     exists; PERSONAL accounts continue freely with zero selections
 //   - the no-workspace redirect happens in an EFFECT, never during render
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
@@ -56,20 +57,26 @@ vi.mock("../../../connectors/ConnectorConnectModal", () => ({
 
 import { Connectors } from "../Connectors"
 import { wizardCategories } from "../../../../lib/onboarding/connectorsWizard"
-import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
+import { makeWorkspace, makeOnboardingCtx, makeProfile } from "./fixtures"
 
 // What onboarding actually renders: supported connectors only, empty
 // categories dropped. (Analytics has no supported connector today, so the
 // whole category — Mixpanel/PostHog/etc — is hidden.)
 const SHOWN_CATEGORIES = wizardCategories()
 
-function mountLoaded(connections: unknown[] = []) {
+function mountLoaded(
+  connections: unknown[] = [],
+  accountType: "company" | "personal" = "company",
+) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   onboardingMock.mockReturnValue(
-    makeOnboardingCtx({ workspace: makeWorkspace({ onboarding_step: 3 }) }),
+    makeOnboardingCtx({
+      workspace: makeWorkspace({ onboarding_step: 5 }),
+      profile: makeProfile({ account_type: accountType }),
+    }),
   )
   listMock.mockResolvedValue({ connections })
-  advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 4 }))
+  advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 6 }))
   markSkippedMock.mockResolvedValue(undefined)
   return render(React.createElement(Connectors))
 }
@@ -111,10 +118,11 @@ describe("Connectors (container) — design-v4 accordion", () => {
     const h = container.querySelector(".onb-card .onb-h") as HTMLElement
     expect(h.textContent).toBe("Connect your tools.")
     expect((h.querySelector("em") as HTMLElement).textContent).toBe("tools.")
-    // Sub copy, verbatim from the design kit.
+    // Sub copy (the "skip" sentence dropped — connectors are mandatory for
+    // company accounts now).
     const sub = container.querySelector(".onb-card .onb-sub") as HTMLElement
     expect(sub.textContent).toBe(
-      "The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later.",
+      "The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next.",
     )
     // Design accordion shell: onb-card → conn-steps → conn-step rows.
     expect(container.querySelector(".onb-card .conn-steps")).not.toBeNull()
@@ -260,28 +268,38 @@ describe("Connectors (container) — design-v4 accordion", () => {
     expect(screen.queryByText("Heap")).toBeNull()
   })
 
-  it("Continue advances to step 4 and routes to business-context (no skip marking)", async () => {
-    mountLoaded()
+  it("Continue advances to step 6 and routes to team once a connection is live (no skip marking)", async () => {
+    // Mixpanel sits in the Analytics category, which renders open first — its
+    // "Live" chip is visible without walking the accordion.
+    mountLoaded([{ provider: "mixpanel", status: "active" }])
+    await screen.findByText("Live")
     fireEvent.click(screen.getByText("Continue").closest("button") as HTMLElement)
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/business-context")
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/team")
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
 
-  it("'Connect later' marks connectors skipped, then advances", async () => {
-    mountLoaded()
+  it("'Connect later' (personal account) marks connectors skipped, then advances", async () => {
+    mountLoaded([], "personal")
     fireEvent.click(screen.getByText("Connect later"))
     await waitFor(() => {
       expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/business-context")
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/team")
     })
   })
 
-  it("has NO analytics requirement gate — Continue enabled with zero selections", () => {
-    mountLoaded()
+  it("gates COMPANY accounts: Continue disabled with zero live connections, no skip link", () => {
+    mountLoaded([], "company")
+    const btn = screen.getByText("Continue").closest("button") as HTMLButtonElement
+    expect(btn.disabled).toBe(true)
+    expect(screen.queryByText("Connect later")).toBeNull()
+  })
+
+  it("PERSONAL accounts have no gate — Continue enabled with zero selections", () => {
+    mountLoaded([], "personal")
     const btn = screen.getByText("Continue").closest("button") as HTMLButtonElement
     expect(btn.disabled).toBe(false)
   })
@@ -310,7 +328,7 @@ describe("Connectors (container) — design-v4 accordion", () => {
     render(React.createElement(Connectors))
     spy.mockRestore()
 
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/business-info")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/company")
     expect(screen.getByText("Loading…")).not.toBeNull()
     const sideEffectInRender = errors
       .map(String)

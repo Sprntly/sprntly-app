@@ -5,16 +5,8 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { useContent } from "../../../context/ContentContext"
-import { completeOnboarding } from "../../../lib/onboarding/store"
+import { advanceOnboardingStep } from "../../../lib/onboarding/store"
 import { clearDraft } from "../../../lib/onboarding/useFormDraft"
-import { briefToContentPatch } from "../../../lib/brief-adapter"
-import {
-  ensureDatasetForWorkspace,
-  fetchBriefWhenReady,
-  seedWorkspaceContextFiles,
-  startBriefGeneration,
-} from "../../../lib/workspace-brief"
 import { companyDocsApi, roadmapDocApi, type CompanyDocType } from "../../../lib/api"
 import { FileText, Check } from "../../auth/icons"
 
@@ -59,13 +51,13 @@ const DOC_CARDS: {
 ]
 
 /**
- * Onboarding step 05 — "Strategy, leadership & your roadmap" (scene onbstrat).
+ * Onboarding step 07 — "Strategy, leadership & your roadmap" (scene onbstrat).
  *
- * The FINAL step: it COMPLETES onboarding and enters the app. (The workspace
- * step moved EARLY in the redesign; completion + first-brief kickoff relocated
- * here from it.)
+ * No longer the closing step: completion + the first-brief kickoff moved to
+ * the new final workspace step (WorkspaceStep). This step only collects the
+ * strategy documents and advances.
  *
- * Content (this PR rebuilds it to match the design):
+ * Content:
  *   - a 2×2 grid of typed document-upload cards (CEO memo, team priorities,
  *     research, company strategy) — each posts to `POST /v1/company/documents`
  *     with its doc_type. STORED only for now (a follow-up wires them into agent
@@ -75,23 +67,13 @@ const DOC_CARDS: {
  *     stored roadmap feeds the weekly brief as a high-weight priorities signal
  *     and renders read-only as the `roadmapdoc` artifact view.
  *
- * On "Finish setup" we:
- *   1. kick the first weekly brief generation (fire-and-forget; it lands on the
- *      Brief page when ready),
- *   2. completeOnboarding → set the active company → router.replace("/brief").
- * Brief-generation is best-effort: a failure there must NOT trap the user on the
- * last step. completeOnboarding is the only hard requirement. (The free-text
- * priorities field was removed with the redesign — leadership direction is now
- * captured as the CEO-memo / company-strategy document uploads.)
- *
  * Every upload card shows the design's "uploaded" confirmation state on success;
  * a failure is caught as a non-blocking notice — uploads are optional and the
  * whole step is skippable.
  */
 export function Strategy() {
   const auth = useAuth()
-  const { workspace, loading } = useOnboarding()
-  const { setContent } = useContent()
+  const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
   // ── Roadmap-doc card state (its own dedicated upload, like before) ──────────
   const [roadmapFileName, setRoadmapFileName] = useState<string | null>(null)
@@ -125,7 +107,7 @@ export function Strategy() {
 
   // Redirect when there's no workspace to anchor the step.
   useEffect(() => {
-    if (!loading && !workspace) router.replace("/onboarding/business-info")
+    if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
 
   function patchDocState(docType: CompanyDocType, patch: Partial<CardState>) {
@@ -176,38 +158,21 @@ export function Strategy() {
     }
   }
 
-  // The closing step: kick the first brief, COMPLETE onboarding, and enter the
-  // app. The strategy documents + roadmap are uploaded inline as the PM picks
-  // them, so finishing has nothing extra to persist — `skipped` and "Finish
-  // setup" differ only by intent; completion always runs.
+  // Advance to the closing workspace step. The strategy documents + roadmap
+  // are uploaded inline as the PM picks them, so continuing has nothing extra
+  // to persist — Skip and Continue differ only by intent.
   async function finish() {
     if (!workspace || auth.kind !== "authed") return
     setError(null)
     setFinishing(true)
     try {
       clearDraft(DRAFT_KEY)
-
-      // 1) Kick the first brief (fire-and-forget). It lands on the Brief page.
-      void (async () => {
-        try {
-          await ensureDatasetForWorkspace(workspace)
-          await seedWorkspaceContextFiles(workspace)
-          const existing = await fetchBriefWhenReady(workspace.slug)
-          if (existing) setContent(briefToContentPatch(existing))
-          else await startBriefGeneration(workspace.slug)
-        } catch {
-          /* generation runs server-side; the Brief page reflects status */
-        }
-      })()
-
-      // 2) Complete onboarding and enter the app.
-      await completeOnboarding(workspace.id, auth.user.id)
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("sprntly_active_company", workspace.slug)
-      }
-      router.replace("/brief")
+      // Next numbered step is workspace (index 8 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 8)
+      setWorkspace(updated)
+      router.push("/onboarding/workspace")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Couldn't finish setting up your workspace.")
+      setError(e instanceof Error ? e.message : "Couldn't save your progress.")
       setFinishing(false)
     }
   }
@@ -216,7 +181,7 @@ export function Strategy() {
 
   return (
     <OnboardingChrome
-      step={6}
+      step={7}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -226,7 +191,7 @@ export function Strategy() {
       subtitle="Give the agents what shapes your priorities. The more you add, the sharper every brief and roadmap gets — you can always add more in Settings."
       footerMeta={
         <>
-          Step 5 of 5 · strategy —{" "}
+          All uploads optional —{" "}
           <button
             type="button"
             className="onb-skip-link"
@@ -235,12 +200,11 @@ export function Strategy() {
           >
             Skip
           </button>{" "}
-          · your first Brief starts generating when you finish
+          · one step left: name your workspace
         </>
       }
-      onBack={() => router.push("/onboarding/business-context")}
+      onBack={() => router.push("/onboarding/team")}
       onContinue={() => void finish()}
-      continueLabel="Finish setup"
       continueDisabled={finishing}
       loading={finishing}
     >
