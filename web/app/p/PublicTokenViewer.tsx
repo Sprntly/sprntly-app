@@ -14,12 +14,59 @@
 // runGenerateFlow. Relative imports (not `@/…`) match the codebase + vitest.
 import { useEffect, useState } from "react"
 import { notFound } from "next/navigation"
+import { API_URL } from "../lib/api"
 import { PasscodeGate } from "./PasscodeGate"
 import { PublicPrototypeChrome } from "./PublicPrototypeChrome"
 import { resolveToken, type ResolvedView } from "./resolveToken"
 import { shareTokenFromLocation } from "./shareTokenFromPathname"
 
 export type { ResolvedView }
+
+// ─── PWA head tags (mobile installability) ──────────────────────────────────
+//
+// The app is a static export, so the per-prototype manifest (name/start_url/
+// scope distinct per share link) is API-served and linked here CLIENT-SIDE,
+// only after a token resolves to a READY view — a loading/passcode-gated/404
+// state must never expose a manifest link. Chromium-based mobile browsers
+// re-evaluate installability on late-injected manifests and need no service worker (none is
+// registered — no offline; the bundle rides short-lived signed-URL proxying).
+// Tags are keyed by `data-da-pwa` so application is idempotent: apply removes
+// any prior instance first (token change → the href is replaced), and the
+// effect cleanup removes them on unmount. The manifest link is a PLAIN tag (no
+// crossorigin attribute): no credentials ride the fetch — the token is in the
+// URL — and the API's CORS middleware covers the app origin.
+const PWA_TAG_MARKER = "data-da-pwa"
+
+export function removePwaHeadTags(): void {
+  document.head
+    .querySelectorAll(`[${PWA_TAG_MARKER}]`)
+    .forEach((el) => el.remove())
+}
+
+export function applyPwaHeadTags(token: string): void {
+  removePwaHeadTags()
+  const tags: Array<[tag: string, attrs: Record<string, string>]> = [
+    [
+      "link",
+      {
+        rel: "manifest",
+        href: `${API_URL}/v1/design-agent/by-token/${encodeURIComponent(token)}/manifest.webmanifest`,
+      },
+    ],
+    ["meta", { name: "theme-color", content: "#f6f7f6" }],
+    // iOS gets add-to-home-screen basics via the apple tags; full manifest
+    // semantics belong to Chromium-based mobile browsers — a stated
+    // limitation, not a defect.
+    ["link", { rel: "apple-touch-icon", href: "/pwa/prototype-icon-192.png" }],
+    ["meta", { name: "apple-mobile-web-app-capable", content: "yes" }],
+  ]
+  for (const [tag, attrs] of tags) {
+    const el = document.createElement(tag)
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v)
+    el.setAttribute(PWA_TAG_MARKER, "")
+    document.head.appendChild(el)
+  }
+}
 
 export type ViewerState =
   | { kind: "loading" }
@@ -75,6 +122,16 @@ export function PublicTokenViewer() {
       active = false
     }
   }, [token])
+
+  // Inject the PWA head tags only once the token has resolved to a READY view
+  // (public, or passcode after a successful verify). The effect re-runs on a
+  // token change (apply replaces the prior tag set) and its cleanup removes the
+  // tags on unmount / when the state leaves "ready".
+  useEffect(() => {
+    if (state.kind !== "ready" || !token) return
+    applyPwaHeadTags(token)
+    return removePwaHeadTags
+  }, [state.kind, token])
 
   // notFound() during render is the supported client-component pattern (it
   // throws into the nearest not-found boundary).
