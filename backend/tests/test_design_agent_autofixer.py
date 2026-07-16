@@ -246,6 +246,11 @@ def test_subprocess_returncode_nonzero_returns_ok_with_warning(monkeypatch, tmp_
     fail_js = tmp_path / "fail.js"
     fail_js.write_text("process.stdin.resume(); process.stdin.on('end', () => process.exit(2));\n")
     monkeypatch.setattr(autofixer, "_AUTOFIXER_JS", fail_js)
+    # This test is about the EXIT-CODE path, not the timeout path. On a starved
+    # 2-vCPU CI runner node's cold start can blow the default 8s budget and the
+    # run logs autofixer_timeout instead — pin a generous budget so the
+    # subprocess always reaches its exit(2).
+    monkeypatch.setattr(autofixer, "_SUBPROCESS_TIMEOUT_S", 60.0)
     with caplog.at_level(logging.WARNING, logger=AUTOFIXER_LOGGER):
         result = _run(autofixer.run("src/App.tsx", "export const a = 1;", _vfs("src/App.tsx")))
     assert result == {"ok": True}
@@ -260,6 +265,9 @@ def test_subprocess_invalid_json_returns_ok_with_warning(monkeypatch, tmp_path, 
         " process.stdin.on('end', () => { process.stdout.write('this is not json'); process.exit(0); });\n"
     )
     monkeypatch.setattr(autofixer, "_AUTOFIXER_JS", bad_js)
+    # Same starvation guard as the exit-code test above: this exercises the
+    # invalid-JSON path, so the subprocess must never be cut off by the timeout.
+    monkeypatch.setattr(autofixer, "_SUBPROCESS_TIMEOUT_S", 60.0)
     with caplog.at_level(logging.WARNING, logger=AUTOFIXER_LOGGER):
         result = _run(autofixer.run("src/App.tsx", "export const a = 1;", _vfs("src/App.tsx")))
     assert result == {"ok": True}
