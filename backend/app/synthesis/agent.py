@@ -384,8 +384,16 @@ def run_synthesis(
     *,
     dataset_slug: str,
     agent: str = "synthesis",
+    deliver: bool = True,
 ) -> dict:
-    """Generate + persist a KG-driven brief. Returns the brief payload."""
+    """Generate + persist a KG-driven brief. Returns the brief payload.
+
+    ``deliver=False`` suppresses the on-generation Slack/email push — used by
+    callers that own delivery themselves: the weekly scheduler (which generates
+    ahead of the configured send time and must not deliver early) and the
+    user-triggered regenerate paths (which send a short "brief is ready" ping
+    instead of the full brief message).
+    """
     convergence = compute_convergence(facade, enterprise_id)
     if not convergence:
         raise EmptyKnowledgeGraphError(
@@ -692,14 +700,18 @@ def run_synthesis(
         logger.exception("backlog sequencing failed (brief unaffected)")
         brief["_backlog_count"] = None
 
-    # Deliver on generation — this is the mid-week "a new brief was produced"
-    # push (Slack + email). The weekly scheduler tick ALSO delivers the current
-    # brief at the user's configured day/time so a quiet, unchanged-KG week
-    # still gets its scheduled push; to avoid a double send when the tick itself
-    # regenerated, the tick only delivers a brief it got from CACHE (see
-    # app.scheduler + synthesis_brief.generate_brief_for's `_from_cache`).
-    _delivery = deliver_brief(enterprise_id, brief)
-    brief["_slack_delivery"] = _delivery["slack"]
-    brief["_email_delivery"] = _delivery["email"]
+    # Deliver on generation — the "a new brief was produced" push (Slack +
+    # email) for autonomous fresh briefs (startup pass, new-dataset seed).
+    # Suppressed (deliver=False) when the caller owns delivery: the weekly
+    # scheduler generates GENERATION_LEAD early and delivers exactly at the
+    # configured fire time, and the user-triggered regenerate paths send a
+    # short "brief is ready" ping instead of this full brief message.
+    if deliver:
+        _delivery = deliver_brief(enterprise_id, brief)
+        brief["_slack_delivery"] = _delivery["slack"]
+        brief["_email_delivery"] = _delivery["email"]
+    else:
+        brief["_slack_delivery"] = {"delivered": False, "reason": "deferred"}
+        brief["_email_delivery"] = {"delivered": False, "reason": "deferred"}
 
     return brief
