@@ -66,7 +66,7 @@ const resumePrdGeneration = vi.fn().mockResolvedValue({
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (...args: unknown[]) => runPrdGeneration(...args),
   resumePrdGeneration: (...args: unknown[]) => resumePrdGeneration(...args),
-  runPrdGenerationFromBacklog: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
+  runPrdGenerationFromIdeation: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
   loadPrdById: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
 }))
 

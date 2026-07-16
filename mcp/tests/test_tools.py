@@ -29,7 +29,7 @@ def company_ctx(monkeypatch):
 @pytest.fixture
 def developer_ctx(monkeypatch):
     """A context resolved from a developer-role token: ticket + PRD tools
-    only; datasets/backlog/brief must refuse."""
+    only; datasets/ideation/brief must refuse."""
     ctx = auth.CompanyContext(
         company_id="co-1", user_id="u-1", role="owner", token_role="developer"
     )
@@ -74,9 +74,9 @@ async def test_get_current_brief_friendly_when_none(company_ctx, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_backlog_passthrough(company_ctx, monkeypatch):
-    _stub_backend(monkeypatch, {"/backlog": {"items": [], "count": 0}})
-    result = await tools._get_backlog_impl()
+async def test_get_ideation_passthrough(company_ctx, monkeypatch):
+    _stub_backend(monkeypatch, {"/ideation": {"items": [], "count": 0}})
+    result = await tools._get_ideation_impl()
     assert result == {"items": [], "count": 0}
 
 
@@ -303,7 +303,7 @@ async def test_write_tools_raise_without_company_context(monkeypatch):
     [
         tools._list_datasets_impl,
         tools._get_current_brief_impl,
-        tools._get_backlog_impl,
+        tools._get_ideation_impl,
         tools._get_latest_prd_impl,
     ],
 )
@@ -344,16 +344,16 @@ async def test_pm_only_tools_pass_for_pm_token(company_ctx, monkeypatch):
         {
             "/datasets": {"datasets": []},
             "/brief/current": {"week_label": "Wk 1"},
-            "/backlog": {"items": [], "count": 0},
+            "/ideation": {"items": [], "count": 0},
             "/prd/latest": {"title": "PRD"},
         },
     )
     await tools._list_datasets_impl()
     await tools._get_current_brief_impl()
-    await tools._get_backlog_impl()
+    await tools._get_ideation_impl()
     await tools._get_latest_prd_impl()
     assert [path for path, _ in calls] == [
-        "/datasets", "/brief/current", "/backlog", "/prd/latest",
+        "/datasets", "/brief/current", "/ideation", "/prd/latest",
     ]
 
 
@@ -361,5 +361,5 @@ def test_pm_only_tools_constant_matches_registered_names():
     """PM_ONLY_TOOLS drives list filtering in app.py — a typo'd name there
     would silently filter nothing, so pin the exact set."""
     assert tools.PM_ONLY_TOOLS == {
-        "list_datasets", "get_current_brief", "get_backlog", "get_latest_prd",
+        "list_datasets", "get_current_brief", "get_ideation", "get_latest_prd",
     }

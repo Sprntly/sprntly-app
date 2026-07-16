@@ -1,7 +1,7 @@
-"use client"
+import { redirect } from "next/navigation"
 
-import { BacklogScreen } from "../../components/screens/app/BacklogScreen"
-
-export default function BacklogPage() {
-  return <BacklogScreen />
+// The Backlog page was renamed to Ideation. Old links and bookmarks keep
+// working via this permanent redirect.
+export default function BacklogRedirect() {
+  redirect("/ideation")
 }

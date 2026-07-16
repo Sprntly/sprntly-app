@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 //
-// Behavior tests for the Backlog screen's WIRED actions — the buttons that were
-// stubs before and now drive the real pipeline / persistence:
-//   • Generate PRD       → runPrdGenerationFromBacklog + PRD content panel
+// Behavior tests for the Ideation screen's WIRED actions — the buttons that
+// drive the real pipeline / persistence:
+//   • Generate PRD       → openPrdTab (generateIdeation) handoff
 //   • Generate prototype → ensure PRD, then navigate to /prototype?...&generate=1
-//   • + Add idea         → backlogApi.create (persisted)
-//   • Re-sequence        → backlogApi.reorder (persisted, by impact score)
-//   • Sync with backlog  → re-fetch backlogApi.list
+//   • + Add idea         → ideationApi.create (persisted)
+//   • Re-sequence        → ideationApi.reorder (persisted, by impact score)
+//   • Sync ideas         → re-fetch ideationApi.list
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -15,20 +15,20 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import type { BacklogItem, BacklogList, CompletedList } from "../../../../lib/api"
+import type { IdeationItem, IdeationList, CompletedList } from "../../../../lib/api"
 
-const listMock = vi.fn<() => Promise<BacklogList>>()
+const listMock = vi.fn<() => Promise<IdeationList>>()
 const completedMock = vi.fn<() => Promise<CompletedList>>()
 const createMock = vi.fn()
 const reorderMock = vi.fn()
-const runFromBacklogMock = vi.fn()
+const runFromIdeationMock = vi.fn()
 const pushMock = vi.fn()
 const setContentMock = vi.fn()
 const openContentPanelMock = vi.fn()
 const openPrdTabMock = vi.fn()
 
 vi.mock("../../../../lib/api", () => ({
-  backlogApi: {
+  ideationApi: {
     list: () => listMock(),
     completed: () => completedMock(),
     setStatus: vi.fn(),
@@ -38,7 +38,7 @@ vi.mock("../../../../lib/api", () => ({
 }))
 
 vi.mock("../../../../lib/runPrdGeneration", () => ({
-  runPrdGenerationFromBacklog: (id: string) => runFromBacklogMock(id),
+  runPrdGenerationFromIdeation: (id: string) => runFromIdeationMock(id),
 }))
 
 vi.mock("next/navigation", () => ({
@@ -61,22 +61,23 @@ vi.mock("../../../../context/ContentContext", () => ({
   useContent: () => ({ content: {}, setContent: setContentMock, resetContent: vi.fn() }),
 }))
 
-import { BacklogScreen } from "../BacklogScreen"
+import { IdeationScreen } from "../IdeationScreen"
 
-function item(overrides: Partial<BacklogItem>): BacklogItem {
+function item(overrides: Partial<IdeationItem>): IdeationItem {
   return {
-    id: "id-1", theme_id: "t1", title: "Backlog item", tag: "something_new",
-    rank: 4, score: 0.5, status: "backlog", reasoning: "reason", ...overrides,
+    id: "id-1", theme_id: "t1", title: "Ideation item", tag: "something_new",
+    rank: 4, score: 0.5, status: "proposed", shortlisted: true,
+    reasoning: "reason", ...overrides,
   }
 }
 
-async function renderWith(items: BacklogItem[]) {
+async function renderWith(items: IdeationItem[]) {
   listMock.mockResolvedValue({ items, count: items.length })
-  render(<BacklogScreen />)
+  render(<IdeationScreen />)
   if (items.length) {
     await waitFor(() => expect(screen.getByText(items[0].title)).toBeTruthy())
   } else {
-    await waitFor(() => expect(screen.getByText("No backlog yet")).toBeTruthy())
+    await waitFor(() => expect(screen.getByText("No ideas yet")).toBeTruthy())
   }
 }
 
@@ -89,7 +90,7 @@ beforeEach(() => {
   completedMock.mockReset().mockResolvedValue({ items: [], count: 0 })
   createMock.mockReset().mockResolvedValue(item({ id: "new-1", title: "Fresh idea" }))
   reorderMock.mockReset().mockResolvedValue({ items: [], count: 0 })
-  runFromBacklogMock.mockReset()
+  runFromIdeationMock.mockReset()
   pushMock.mockReset()
   setContentMock.mockReset()
   openContentPanelMock.mockReset()
@@ -98,28 +99,28 @@ beforeEach(() => {
 
 afterEach(() => cleanup())
 
-describe("BacklogScreen — wired actions", () => {
+describe("IdeationScreen — wired actions", () => {
   it("Generate PRD opens the PRD as a new chat tab (openPrdTab handoff)", async () => {
     await renderWith([item({ id: "a", theme_id: "t4", title: "Bulk onboarding", rank: 4 })])
     await selectFirstIdea("Bulk onboarding")
 
     await act(async () => { fireEvent.click(screen.getByText("Generate PRD")) })
 
-    // A backlog PRD now opens as a NEW chat tab (with the Evidence/PRD/Tickets
-    // panel over it) — BacklogScreen hands the generation off via openPrdTab, and
-    // ChatScreen drives it — instead of streaming into an in-place panel here.
+    // An ideation PRD opens as a NEW chat tab (with the Evidence/PRD/Tickets
+    // panel over it) — IdeationScreen hands the generation off via openPrdTab,
+    // and ChatScreen drives it — instead of streaming into an in-place panel.
     await waitFor(() => expect(openPrdTabMock).toHaveBeenCalledTimes(1))
     expect(openPrdTabMock).toHaveBeenCalledWith({
       title: "PRD · Bulk onboarding",
-      source: { kind: "generateBacklog", backlogItemId: "a" },
+      source: { kind: "generateIdeation", ideationItemId: "a" },
     })
-    // Generation no longer runs on the backlog surface itself.
-    expect(runFromBacklogMock).not.toHaveBeenCalled()
+    // Generation no longer runs on the ideation surface itself.
+    expect(runFromIdeationMock).not.toHaveBeenCalled()
     expect(openContentPanelMock).not.toHaveBeenCalled()
   })
 
   it("Generate prototype ensures a PRD then navigates to the prototype route", async () => {
-    runFromBacklogMock.mockResolvedValue({
+    runFromIdeationMock.mockResolvedValue({
       ok: true, prd: { prd_id: 99, briefId: 7, insightIndex: 0 },
     })
     await renderWith([item({ id: "a", theme_id: "t4", title: "Bulk onboarding", rank: 4 })])
@@ -127,14 +128,14 @@ describe("BacklogScreen — wired actions", () => {
 
     await act(async () => { fireEvent.click(screen.getByText("Generate prototype")) })
 
-    await waitFor(() => expect(runFromBacklogMock).toHaveBeenCalledWith("a"))
+    await waitFor(() => expect(runFromIdeationMock).toHaveBeenCalledWith("a"))
     // Prototype builds from the PRD → route carries ?prd=99 and kicks generation.
     const dest = pushMock.mock.calls.at(-1)?.[0] as string
     expect(dest).toContain("prd=99")
     expect(dest).toContain("generate=1")
   })
 
-  it("+ Add idea persists via backlogApi.create", async () => {
+  it("+ Add idea persists via ideationApi.create", async () => {
     await renderWith([item({ id: "a", theme_id: "t4", title: "Existing", rank: 4 })])
 
     await act(async () => { fireEvent.click(screen.getByText("+ Add idea")) })
@@ -158,11 +159,11 @@ describe("BacklogScreen — wired actions", () => {
     await waitFor(() => expect(reorderMock).toHaveBeenCalledWith(["b", "a"]))
   })
 
-  it("Sync with backlog re-fetches the list", async () => {
+  it("Sync ideas re-fetches the list", async () => {
     await renderWith([item({ id: "a", theme_id: "t4", title: "Existing", rank: 4 })])
     expect(listMock).toHaveBeenCalledTimes(1)
 
-    await act(async () => { fireEvent.click(screen.getByText("Sync with backlog")) })
+    await act(async () => { fireEvent.click(screen.getByText("Sync ideas")) })
 
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2))
   })

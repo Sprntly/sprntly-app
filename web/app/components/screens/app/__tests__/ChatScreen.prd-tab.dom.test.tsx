@@ -3,7 +3,7 @@
 // ChatScreen — "a PRD opens as a NEW CHAT TAB with the content panel over it".
 //
 // Every "view/generate PRD" affordance (brief finding cards, brief composer,
-// backlog item) hands the PRD off via NavigationContext.openPrdTab, which stores
+// ideation item) hands the PRD off via NavigationContext.openPrdTab, which stores
 // a pending request and routes to `/`. ChatScreen consumes it once (openPrdInTab),
 // spawning a fresh chat tab, driving the (generate | ready | load) source into
 // the shared ContentContext, and flagging the content panel (Evidence / PRD /
@@ -66,8 +66,8 @@ const runPrdGeneration = vi.fn().mockResolvedValue({
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (...args: unknown[]) => runPrdGeneration(...args),
   resumePrdGeneration: vi.fn(),
-  runPrdGenerationFromBacklog: vi.fn().mockResolvedValue({
-    ok: true, prd: { prd_id: 88, title: "Backlog PRD", metaLine: "", sections: [] },
+  runPrdGenerationFromIdeation: vi.fn().mockResolvedValue({
+    ok: true, prd: { prd_id: 88, title: "Ideation PRD", metaLine: "", sections: [] },
   }),
   loadPrdById: vi.fn().mockResolvedValue({
     ok: true, prd: { prd_id: 99, title: "Loaded PRD", metaLine: "", sections: [] },

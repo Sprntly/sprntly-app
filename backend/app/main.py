@@ -40,7 +40,6 @@ from app.routes import (
     agent_chat,
     artifacts,
     ask,
-    backlog,
     brief,
     business_context as business_context_routes,
     company,
@@ -51,6 +50,7 @@ from app.routes import (
     design_agent_bundle,
     design_agent_comments,
     feedback,
+    ideation,
     ingest,
     internal_mcp,
     metrics,
@@ -280,7 +280,7 @@ app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(artifacts.router)
-app.include_router(backlog.router)
+app.include_router(ideation.router)
 app.include_router(ask.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)

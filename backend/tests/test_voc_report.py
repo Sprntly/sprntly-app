@@ -78,7 +78,7 @@ def test_render_html_table_columns_and_pills():
 def test_render_html_gate_line_uses_real_counts():
     html = vr.render_html(_data())
     assert "PRIORITIZATION GATE PASSED ✓ — 12 candidate actions identified · 5 selected" in html
-    assert "7 routed to monitor/backlog" in html
+    assert "7 routed to monitor/ideation" in html
 
 
 def test_render_html_silent_killer_flag():
@@ -88,9 +88,9 @@ def test_render_html_silent_killer_flag():
 
 def test_render_html_investigation_only_has_no_prd_cta():
     html = vr.render_html(_data())
-    # One normal rec (Generate PRD) + one investigation-only (backlog only).
+    # One normal rec (Generate PRD) + one investigation-only (ideation only).
     assert html.count("Generate PRD") == 1
-    assert html.count("Move to backlog") == 2
+    assert html.count("Move to ideation") == 2
 
 
 def test_render_html_revenue_unknown_styles_na():

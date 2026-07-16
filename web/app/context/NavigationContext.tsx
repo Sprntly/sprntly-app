@@ -25,20 +25,20 @@ export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: 
  *  tab seeded with the query (one new tab per chat started from the brief). */
 export type PendingChatHandoff = { query: string }
 
-/** The brief-insight pointer a PRD is generated from / anchored to. Null for a
- *  backlog PRD (no insight_index) — it renders from the PRD payload alone. */
+/** The brief-insight pointer a PRD is generated from / anchored to. Null for
+ *  an ideation PRD (no insight_index) — it renders from the PRD payload alone. */
 export type PrdTabMeta = { briefId: number; insightIndex: number }
 
 /** A request to open a PRD as a NEW CHAT TAB on the chat surface, with the
  *  right-side content panel (Evidence / PRD / Tickets) sliding over it. Every
  *  "view PRD" / "generate PRD" affordance (brief finding cards, the brief
- *  composer, a backlog item) hands one of these off via `openPrdTab`; ChatScreen
+ *  composer, an ideation item) hands one of these off via `openPrdTab`; ChatScreen
  *  consumes it once, spawns a fresh chat tab, drives the source, and opens the
  *  panel. `title` labels the tab. The `source` discriminant says where the PRD
  *  comes from:
  *   - `ready`          — the caller already holds the PrdState (just show it)
  *   - `generate`       — kick off brief-insight PRD generation (runPrdGeneration)
- *   - `generateBacklog`— kick off backlog PRD generation (runPrdGenerationFromBacklog)
+ *   - `generateIdeation`— kick off ideation PRD generation (runPrdGenerationFromIdeation)
  *   - `load`           — fetch an already-generated PRD by id (loadPrdById)
  *   - `resume`         — poll a PRD whose generation was already kicked off
  *                        elsewhere (Artifacts upload, chat PRD-import command) */
@@ -47,7 +47,7 @@ export type PrdTabRequest = {
   /** The insight's body/description text (from the originating brief finding),
    *  shown under the title in the chat insight message so the opening card
    *  carries the finding's content, not just its heading. Optional — only the
-   *  brief-card paths (view/generate PRD) carry it; backlog / ready-from-content
+   *  brief-card paths (view/generate PRD) carry it; ideation / ready-from-content
    *  paths omit it and the body simply isn't rendered. */
   insightBody?: string
   /** The user's typed command that opened this PRD tab (e.g. "convert this PRD
@@ -58,7 +58,7 @@ export type PrdTabRequest = {
   source:
     | { kind: "ready"; prd: PrdState; meta: PrdTabMeta | null }
     | { kind: "generate"; meta: PrdTabMeta }
-    | { kind: "generateBacklog"; backlogItemId: string }
+    | { kind: "generateIdeation"; ideationItemId: string }
     | { kind: "load"; prdId: number; meta: PrdTabMeta | null }
     // Generation was ALREADY kicked off elsewhere (e.g. the PRD-import endpoint
     // returns a 'generating' prd_id): open the tab immediately and re-enter
@@ -369,7 +369,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     // This navigation to `/` is *for* opening the PRD panel — tell the
     // route-change effect not to close the panel when we land there.
     skipPanelCloseOnNavRef.current = true
-    // Route to the chat surface so ChatScreen mounts (from /brief, /backlog, …)
+    // Route to the chat surface so ChatScreen mounts (from /brief, /ideation, …)
     // and its pending-PRD-tab effect consumes the request — spawning the tab and
     // opening the panel. Harmless when already on `/` (the state change alone
     // drives consumption). ChatScreen defers the panel-open past the route

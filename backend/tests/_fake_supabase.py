@@ -116,6 +116,7 @@ _BOOL_COLUMNS: dict[str, set[str]] = {
     "github_pull_requests": {"is_draft"},
     "workspaces":           {"is_default"},
     "products":             {"is_primary"},
+    "ideation_items":       {"shortlisted"},
 }
 
 

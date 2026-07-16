@@ -276,10 +276,10 @@ def _theme(t: dict) -> str:
 
 def _rec(i: int, r: dict) -> str:
     if r.get("investigation_only"):
-        ctas = '<span class="cta ghost">Move to backlog</span>'
+        ctas = '<span class="cta ghost">Move to ideation</span>'
     else:
         ctas = ('<span class="cta primary">Generate PRD</span>'
-                '<span class="cta ghost">Move to backlog</span>')
+                '<span class="cta ghost">Move to ideation</span>')
     return (
         '<div class="rec">'
         f'<div class="rank">R{i}</div>'
@@ -310,7 +310,7 @@ def render_html(data: dict) -> str:
     gate_line = (
         f"PRIORITIZATION GATE PASSED ✓ — {_e(cand)} candidate actions identified · "
         f"{_e(sel)} selected · cap 5–7 unless impacts tie at the cut · "
-        f"{_e(routed)} routed to monitor/backlog, not listed here"
+        f"{_e(routed)} routed to monitor/ideation, not listed here"
     )
     goals = data.get("goals_note")
     rec_eyebrow = "Recommendations"

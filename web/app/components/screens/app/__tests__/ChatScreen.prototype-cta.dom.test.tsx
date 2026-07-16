@@ -58,7 +58,7 @@ vi.mock("../../../../lib/api", () => {
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
   resumePrdGeneration: vi.fn(),
-  runPrdGenerationFromBacklog: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
+  runPrdGenerationFromIdeation: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
   loadPrdById: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
 }))
 vi.mock("../../../../lib/runEvidenceGeneration", () => ({

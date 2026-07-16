@@ -38,7 +38,7 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\b(prioriti[sz]e|rank|rice|wsjf|ice\s+score|moscow)\b", re.I),
      "prioritize", "Prioritize ideas", 0.90),
     (re.compile(r"\b(re-?prioriti[sz]e|re-?rank|re-?sequence)\b", re.I),
-     "prioritize", "Re-prioritize backlog", 0.90),
+     "prioritize", "Re-prioritize ideas", 0.90),
 
     # User stories / tickets
     (re.compile(r"\b(create|generate|write)\b.{0,20}\b(ticket|story|stories|task)\b", re.I),
@@ -46,9 +46,9 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\b(user\s+stor|acceptance\s+criteria|ac\s+for)\b", re.I),
      "user-stories", "Generate user stories", 0.85),
 
-    # Backlog triage
-    (re.compile(r"\b(triage|clean\s*up|dedupe|duplicate).{0,20}\bbacklog\b", re.I),
-     "backlog-triage", "Triage backlog", 0.85),
+    # Ideation prioritize ("backlog" kept as a chat alias for the old name)
+    (re.compile(r"\b(triage|clean\s*up|dedupe|duplicate|prioriti[sz]e).{0,20}\b(ideation|ideas|backlog)\b", re.I),
+     "ideation-prioritize", "Prioritize ideation", 0.85),
 
     # Decision memo
     (re.compile(r"\b(decision|build\s+vs?\s+buy|pivot|persevere|trade-?off)\b", re.I),

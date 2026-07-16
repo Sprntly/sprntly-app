@@ -571,10 +571,10 @@ export interface PrdState extends PrdContent {
   briefId?: number
   insightIndex?: number
   /** How this PRD was created (`PrdRecord.source`). Only `'brief'` PRDs carry
-   *  their own research Evidence; `'backlog'` and `'upload'` PRDs have none, so
+   *  their own research Evidence; `'ideation'` and `'upload'` PRDs have none, so
    *  the right-panel Evidence tab is hidden for them. Absent on legacy rows —
    *  treat missing as `'brief'` (show the tab). */
-  source?: "brief" | "backlog" | "upload"
+  source?: "brief" | "ideation" | "backlog" | "upload"
 }
 
 export interface AppContentState {

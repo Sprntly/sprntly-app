@@ -119,9 +119,9 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     expect(screen.queryByLabelText("Sign out")).toBeNull()
   })
 
-  it("no longer renders the Backlog rail icon (functionality kept, icon removed)", () => {
+  it("no longer renders the Ideation rail icon (functionality kept, icon removed)", () => {
     render(React.createElement(Sidebar))
-    expect(screen.queryByLabelText("Backlog Projects")).toBeNull()
+    expect(screen.queryByLabelText("Ideation")).toBeNull()
   })
 
   it("Feedback opens the feedback modal (not a nav)", () => {

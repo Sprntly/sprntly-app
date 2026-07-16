@@ -1,6 +1,6 @@
 # Sprntly MCP Server
 
-A customer-facing [Model Context Protocol](https://modelcontextprotocol.io) server: lets a Sprntly customer connect their own AI client (Claude Desktop, Claude Code, claude.ai custom connectors) to **their own** Sprntly workspace — tickets, PRDs, prototypes, evidence, briefs, backlog — the same trust model as the existing OAuth connectors (Google Drive/Figma/Slack/etc.), just inbound instead of outbound. What a token can see is scoped by its **role** (`developer` or `pm`, chosen when the token is minted — see [Token roles](#token-roles)).
+A customer-facing [Model Context Protocol](https://modelcontextprotocol.io) server: lets a Sprntly customer connect their own AI client (Claude Desktop, Claude Code, claude.ai custom connectors) to **their own** Sprntly workspace — tickets, PRDs, prototypes, evidence, briefs, ideation — the same trust model as the existing OAuth connectors (Google Drive/Figma/Slack/etc.), just inbound instead of outbound. What a token can see is scoped by its **role** (`developer` or `pm`, chosen when the token is minted — see [Token roles](#token-roles)).
 
 ## Layout
 
@@ -28,7 +28,7 @@ None of the tools take a `dataset`/`company` parameter — the company scope is 
 A token is minted as **`developer`** or **`pm`** (picked in Settings → MCP Access, immutable after creation; stored as `mcp_tokens.token_role`):
 
 - **developer** — the ticket-centric tool set only: your assigned tickets, their PRDs, prototypes, and evidence.
-- **pm** — everything: the developer set plus the workspace-level product surfaces (`list_datasets`, `get_current_brief`, `get_backlog`, `get_latest_prd`).
+- **pm** — everything: the developer set plus the workspace-level product surfaces (`list_datasets`, `get_current_brief`, `get_ideation`, `get_latest_prd`).
 
 Tokens minted before roles existed default to `pm` (they keep the full tool set they were created with). Enforcement is two-layer: `RoleScopedFastMCP` (app.py) filters `tools/list` per request so a developer token's client never sees the PM-only tools, and every PM-only tool impl re-checks the role before touching the backend — a client calling a hidden tool anyway gets a refusal, not data.
 
@@ -99,7 +99,7 @@ Zero-touch: the workflow also creates `mcp/.env` on the box on first deploy — 
 | `add_ticket_comment(ticket_key, body)` | Comment on a ticket, attributed to the token owner. |
 | `add_ticket_attachment(ticket_key, label, sub?)` | Link a PR/branch to a ticket. |
 
-**PM tokens only:** `list_datasets`, `get_current_brief` (weekly brief), `get_backlog` (ranked backlog), `get_latest_prd`.
+**PM tokens only:** `list_datasets`, `get_current_brief` (weekly brief), `get_ideation` (the prioritized ideation shortlist), `get_latest_prd`.
 
 All tools are company-scoped from the token — no `dataset`/`company` parameter. The server also sends FastMCP `instructions` on connect to orient the model on the ticket → PRD → prototype/evidence flow.
 
