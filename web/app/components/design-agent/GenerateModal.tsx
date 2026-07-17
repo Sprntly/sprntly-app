@@ -300,6 +300,10 @@ export function GenerateModal({
   // without user interaction and closes itself. Pass null to always show.
   savedPreference,
   onSavePreference,
+  // PRD-declared platform hint (the parsed :::design block's platform_hint).
+  // Seeds the platform selector's INITIAL value only — the user's explicit
+  // toggle always wins, and absent/undefined keeps today's DEFAULT_PLATFORM.
+  platformHint,
   // Pre-build locate phase bridge. Emits the current locate phase so the parent
   // can thread it into the full-screen GenerationLoadingScreen. Accepted here
   // for forward-compat with the locate-in-loading-screen rollout; this version
@@ -351,6 +355,11 @@ export function GenerateModal({
   onCancel?: () => void
   savedPreference?: DesignSourcePreference | null
   onSavePreference?: (pref: DesignSourcePreference) => Promise<void>
+  /** Optional PRD-declared surface hint. Sets the platform DEFAULT only (no
+   *  lock, no badge): the toggle overrides it, and the saved-preference
+   *  auto-skip path INTENTIONALLY inherits it — the PRD knows its surface, so
+   *  a zero-interaction auto-skipped generation carries the hinted platform. */
+  platformHint?: TargetPlatform | null
   /** Emits the current pre-build locate phase so the parent can thread it into
    *  the full-screen GenerationLoadingScreen. This version drives locate in-modal;
    *  the callback is accepted for forward-compat and is a no-op here. */
@@ -381,7 +390,9 @@ export function GenerateModal({
 }) {
   const { showToast } = useNavigation()
 
-  const [platform, setPlatform] = useState<TargetPlatform>(DEFAULT_PLATFORM)
+  const [platform, setPlatform] = useState<TargetPlatform>(
+    platformHint ?? DEFAULT_PLATFORM,
+  )
   const [designSource, setDesignSource] = useState<ModalDesignSource>(
     _testInitSource ?? "website",
   )

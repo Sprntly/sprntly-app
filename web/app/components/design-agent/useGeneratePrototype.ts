@@ -38,6 +38,7 @@ import { useWorkspace } from "../../context/WorkspaceContext"
 import { updateWorkspace } from "../../lib/onboarding/store"
 import type { DesignSourcePreference } from "../../lib/onboarding/types"
 import { designAgentApi, type PrototypeRecord } from "../../lib/api"
+import type { TargetPlatform } from "./DesignAgentDrawer"
 import { prototypePath } from "../../lib/routes"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 import { reasonCopy } from "./GenerationErrorBanner"
@@ -82,6 +83,10 @@ export function generatePrototypeCtaLabel(cta: GeneratePrototypeCtaState): strin
 
 export type UseGeneratePrototypeOptions = {
   figmaFileKey?: string | null
+  /** PRD-declared surface hint (the parsed :::design block's platform_hint),
+   *  threaded through to the GenerateModal, where it seeds the platform
+   *  selector's DEFAULT only — the user's explicit toggle always wins. */
+  platformHint?: TargetPlatform | null
   /** Default false. When true, the hook performs NO getByPrd existence check —
    *  `existing` stays permanently null, `cta` is permanently "generate", and
    *  handleCtaClick always opens the GenerateModal (never navigates). Set this
@@ -155,6 +160,7 @@ export type GenerateModalWiredProps = {
   onCancel: () => void
   savedPreference: DesignSourcePreference | null
   onSavePreference: (pref: DesignSourcePreference) => Promise<void>
+  platformHint: TargetPlatform | null
 }
 
 /** Spread onto <GenerationLoadingScreen>. */
@@ -549,6 +555,7 @@ export function useGeneratePrototype(
     onCancel: handleCancel,
     savedPreference,
     onSavePreference: handleSavePreference,
+    platformHint: options?.platformHint ?? null,
   }
 
   const loadingScreenProps: GenerationLoadingScreenWiredProps = {

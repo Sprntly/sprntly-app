@@ -182,3 +182,20 @@ describe("Mutual exclusivity", () => {
     expect(params.design_source).toBe("figma")
   })
 })
+
+// ─── Platform threading (buildGenerateParams level) ──────────────────────────
+
+describe("Platform threading", () => {
+  it("test_platform_threads_to_target_platform — each platform value lands verbatim as target_platform in the body", () => {
+    for (const platform of ["desktop", "mobile", "both"] as const) {
+      const params = buildGenerateParams({
+        ...BASE,
+        platform,
+        figmaFileKey: null,
+        githubRepo: undefined,
+        designSource: "website",
+      })
+      expect(params.target_platform).toBe(platform)
+    }
+  })
+})

@@ -24,6 +24,7 @@ import type { PrototypeRecord } from "../../lib/api"
 export function GeneratePrototypeCTA({
   prdId,
   figmaFileKey,
+  platformHint,
   skipExistenceCheck,
   listenForCrossSurfaceGenerating,
   onSuccess,
@@ -32,6 +33,9 @@ export function GeneratePrototypeCTA({
 }: {
   prdId: number | null
   figmaFileKey?: string | null
+  /** PRD-declared surface hint (the parsed :::design block's platform_hint),
+   *  threaded to the GenerateModal as its platform DEFAULT. */
+  platformHint?: "desktop" | "mobile" | "both" | null
   skipExistenceCheck?: boolean
   listenForCrossSurfaceGenerating?: boolean
   onSuccess?: (prototype: PrototypeRecord) => void
@@ -50,6 +54,7 @@ export function GeneratePrototypeCTA({
 }): ReactElement {
   const gen = useGeneratePrototype(prdId, {
     figmaFileKey,
+    platformHint,
     skipExistenceCheck,
     listenForCrossSurfaceGenerating,
     onSuccess,

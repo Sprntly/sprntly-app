@@ -24,7 +24,7 @@ import {
   IconRedo,
   IconUndo,
 } from "./app-icons"
-import type { PrdSection, PrdState } from "../../types/content"
+import type { PrdDesignBlock, PrdSection, PrdState } from "../../types/content"
 
 const PRD_DRAFT_KEY = (prdId: number) => `sprntly_prd_draft_${prdId}`
 function loadDraft(prdId: number): string | null {
@@ -395,6 +395,16 @@ export function PrdPanelContent() {
             <GeneratePrototypeCTA
               prdId={prd.prd_id}
               figmaFileKey={prd.figma_file_key ?? null}
+              // The PRD's own :::design platform_hint (already parsed into the
+              // sections in scope here) seeds the generate panel's platform
+              // default; the toggle still overrides.
+              platformHint={
+                // Optional-chained: a PRD hydrated without parsed sections
+                // (e.g. a bare record) simply yields no hint.
+                prd.sections?.find(
+                  (s): s is PrdDesignBlock => s.type === "prd-design",
+                )?.platformHint ?? null
+              }
               // Safe here: the panel shows ONE current PRD at a time (like
               // ApproveModal), so the unscoped da:generating signal can't
               // mislabel a different PRD's run. Gives the footer a live
