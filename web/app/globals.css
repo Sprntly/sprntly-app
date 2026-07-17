@@ -18934,19 +18934,3 @@
 .tkv2-cfcheck { width: 15px; height: 15px; accent-color: var(--green); cursor: pointer; display: block; margin-top: 3px; }
 /* Option dot inside pickers + values (status/priority colors reuse this). */
 .tkv2-cfdot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-
-
-/* Route-transition fallback ((app)/loading.tsx): centered spinner shown the
-   instant a navigation starts, while the destination route's chunk loads.
-   Reuses .onb-spinner. --bare = full-viewport variant for chrome-less routes
-   (onboarding), which render without the AppLayout frame. */
-.route-loading {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 60vh;
-}
-.route-loading--bare {
-  min-height: 100vh;
-}

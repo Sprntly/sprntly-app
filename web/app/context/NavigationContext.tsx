@@ -14,7 +14,7 @@ import { usePathname, useRouter } from "next/navigation"
 import type { ScreenId } from "../types"
 import type { AskResponse } from "../lib/api"
 import type { PrdState } from "../types/content"
-import { NAV_PREFETCH_PATHS, pathForScreen, screenIdFromPathname } from "../lib/routes"
+import { pathForScreen, screenIdFromPathname } from "../lib/routes"
 
 /** Top search hands off `/v1/ask` results to Ask Sprntly (in-page thread) without a second request. */
 export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: string }
@@ -206,17 +206,6 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   /** Previous pathname, so the route-change effect can tell a genuine navigation
    *  from a no-op re-run and only act on real changes. */
   const prevPathnameRef = useRef(pathname)
-
-  // Sidebar tabs and the ⌘K palette navigate via buttons + router.push, so Next
-  // never auto-prefetches their destinations (that's a <Link>-only behavior).
-  // Warm every chrome-reachable route once so a tab click swaps screens
-  // immediately instead of downloading the route chunk at click time. No-op in
-  // dev (prefetch is production-only) and idempotent via the router cache.
-  // Guarded: test router doubles routinely stub only push/replace.
-  useEffect(() => {
-    if (typeof router.prefetch !== "function") return
-    for (const path of NAV_PREFETCH_PATHS) router.prefetch(path)
-  }, [router])
 
   useEffect(() => {
     try {
