@@ -4136,3 +4136,61 @@
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* === public-pin variant + clusters (start) =================================
+ * Appended block (append-only convention — no edits inside earlier blocks).
+ * The public-origin pin variant rides the EXISTING Lightfield `--info` blue
+ * tokens (globals.css) — one blue, no literal hexes, no new palette. The
+ * cluster marker aggregates nearby pins into a count badge (same teardrop
+ * geometry + drop animation as `.pc-pin`) and is the one interactive element
+ * in the otherwise pointer-inert pin layer.
+ * =========================================================================== */
+
+/* Public-origin pin (anon share-link viewers — hydrated + just-dropped):
+   blue fill in place of the internal accent green. */
+.design-agent-surface .pc-pin.pc-pin--public {
+  background: var(--info);
+  box-shadow: 0 2px 8px var(--info-soft);
+}
+
+/* Cluster marker: a slightly larger teardrop whose number is the MEMBER COUNT.
+   Rendered as a button (click expands/collapses) — reset button chrome and
+   re-enable pointer events (the layer is pointer-events: none). */
+.design-agent-surface .pc-pin-cluster {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  margin-left: -16px;
+  margin-top: -32px;
+  padding: 0;
+  border: 0;
+  background: var(--accent);
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  box-shadow: 0 2px 8px var(--accent-alpha-40);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.design-agent-surface .pc-pin-cluster.pc-pin--public {
+  background: var(--info);
+  box-shadow: 0 2px 8px var(--info-soft);
+}
+.design-agent-surface .pc-pin-cluster .pc-pin-num {
+  transform: rotate(45deg);
+  color: var(--surface-2);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+.design-agent-surface .pc-pin-cluster.placed {
+  animation: pinDrop 0.3s ease;
+}
+/* Expanded: the members render individually; the marker stays mounted as the
+   collapse affordance, de-emphasised so the member pins read as primary. */
+.design-agent-surface .pc-pin-cluster.expanded {
+  opacity: 0.55;
+}
+/* === public-pin variant + clusters (end) =================================== */
