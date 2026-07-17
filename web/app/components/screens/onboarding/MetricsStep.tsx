@@ -6,11 +6,15 @@ import { useAuth } from "../../../lib/auth"
 import { useFieldValidation } from "../../onboarding/InterviewLayout"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { requiredFor } from "../../../lib/onboarding/validation"
-import { INDUSTRIES, BUSINESS_TYPES } from "../../../lib/onboarding/types"
+import {
+  INDUSTRIES,
+  BUSINESS_TYPES,
+  ONBOARDING_STEP_COUNT,
+  PRIORITIZATION_FRAMEWORKS,
+} from "../../../lib/onboarding/types"
 import {
   advanceOnboardingStep,
-  markSkippedFields,
+  updateWorkspace,
 } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import {
@@ -29,26 +33,27 @@ import { Check, InfoCircle, Plus } from "../../auth/icons"
 
 const DRAFT_KEY = "metrics-step"
 
-/** The picker selects EXACTLY this many success metrics (design onb1 rule). */
-const METRIC_PICKS = 3
+/** v6: pick UP TO this many success metrics (at least one to continue). */
+const METRIC_PICKS = 5
 
 function canSaveMetrics(picked: SupportingMetric[]): boolean {
-  return picked.filter((m) => m.name.trim().length > 0).length === METRIC_PICKS
+  const n = picked.filter((m) => m.name.trim().length > 0).length
+  return n >= 1 && n <= METRIC_PICKS
 }
 
 /**
- * Onboarding step 03 — "Your metrics" (split out of the old combined
- * business-info step; same pick-exactly-3 picker + seeding).
+ * Onboarding step 03 — "Your metrics" (v6 screenshot spec 2026-07-17).
  *
- * Mandatory for COMPANY accounts (Continue blocks until 3 picked); PERSONAL
- * accounts get a skip link (no KPI PUT, recorded in skipped_fields).
+ * Pick up to 5 success metrics (at least one), plus "How does your team
+ * prioritize?"* — the prioritization framework moved here from the old team
+ * step so metrics and how they're weighed live on one screen.
  *
  * Seeding order: saved KPI tree → website-analysis suggestions → business-type
- * / industry defaults — identical to the old business-info behavior.
+ * / industry defaults — unchanged from the previous flow.
  */
 export function MetricsStep() {
   const auth = useAuth()
-  const { workspace, profile, setWorkspace, websiteAnalysis, loading } = useOnboarding()
+  const { workspace, setWorkspace, websiteAnalysis, loading } = useOnboarding()
   const router = useRouter()
 
   const draft = loadDraft(DRAFT_KEY)
@@ -57,14 +62,13 @@ export function MetricsStep() {
   )
   const [selected, setSelected] = useState<string[]>((draft?.selected as string[]) ?? [])
   const [customMetric, setCustomMetric] = useState("")
+  const [framework, setFramework] = useState((draft?.framework as string) ?? "")
   const candidatesSeeded = useRef(false)
   const [limitWarning, setLimitWarning] = useState<string | null>(null)
   const [limitNonce, setLimitNonce] = useState(0)
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const isCompany = (profile?.account_type ?? "company") === "company"
 
   const resolvedIndustry =
     workspace?.industry || websiteAnalysis?.industry || INDUSTRIES[0]
@@ -83,16 +87,23 @@ export function MetricsStep() {
 
   useEffect(() => {
     const onHide = () => {
-      if (document.hidden) saveDraft(DRAFT_KEY, { candidates, selected })
+      if (document.hidden) saveDraft(DRAFT_KEY, { candidates, selected, framework })
     }
     document.addEventListener("visibilitychange", onHide)
     return () => document.removeEventListener("visibilitychange", onHide)
-  }, [candidates, selected])
+  }, [candidates, selected, framework])
 
   // Redirect when there's no workspace to anchor the step.
   useEffect(() => {
     if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
+
+  // Seed the framework from the saved workspace (draft takes priority).
+  useEffect(() => {
+    if (!workspace) return
+    if (draft?.framework) return
+    setFramework(workspace.prioritization_framework ?? "")
+  }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Hydrate the picker from a KPI tree already saved on the workspace.
   useEffect(() => {
@@ -115,7 +126,8 @@ export function MetricsStep() {
 
   const suggestedMetrics = websiteAnalysis?.suggested_metrics ?? []
 
-  // Seed the candidate pool from analysis suggestions, else defaults.
+  // Seed the candidate pool from analysis suggestions, else defaults. Preselect
+  // the first 3 (the screenshot's "3 of 5" default) — up to 5 are allowed.
   useEffect(() => {
     if (candidatesSeeded.current) return
 
@@ -134,15 +146,20 @@ export function MetricsStep() {
     if (pool.length === 0) return
     candidatesSeeded.current = true
     setCandidates(pool)
-    setSelected(pool.slice(0, METRIC_PICKS).map((c) => c.name))
+    setSelected(pool.slice(0, 3).map((c) => c.name))
   }, [suggestedMetrics, resolvedBusinessType, resolvedIndustry])
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(() => [
-    requiredFor(isCompany, {
+    {
       key: "metrics",
       valid: canSaveMetrics(selectedAsMetrics(candidates, selected)),
-      message: `Pick exactly ${METRIC_PICKS} metrics to continue.`,
-    }),
+      message: "Pick at least one metric to continue.",
+    },
+    {
+      key: "framework",
+      valid: framework.trim().length > 0,
+      message: "Pick how your team prioritizes.",
+    },
   ])
 
   function toggle(name: string) {
@@ -186,33 +203,43 @@ export function MetricsStep() {
     setCustomMetric("")
   }
 
-  async function go(skipped: boolean) {
-    if (!workspace || auth.kind !== "authed") return
+  async function persist(): Promise<boolean> {
+    if (!workspace || auth.kind !== "authed") return false
     setError(null)
-    if (!skipped && !validate().ok) return
+    if (!validate().ok) return false
     setSaving(true)
     try {
-      if (skipped) {
-        await markSkippedFields(auth.user.id, ["metrics"])
-      } else {
-        const picks: SupportingMetric[] = selectedAsMetrics(candidates, selected)
-        if (canSaveMetrics(picks)) {
-          await kpiTreeApi.putFromSelection(buildSelectionPayload(picks))
-        }
+      const picks: SupportingMetric[] = selectedAsMetrics(candidates, selected)
+      if (canSaveMetrics(picks)) {
+        await kpiTreeApi.putFromSelection(buildSelectionPayload(picks))
       }
-      const updated = await advanceOnboardingStep(workspace.id, 4)
+      const updated = await updateWorkspace(workspace.id, {
+        prioritization_framework: framework || null,
+        onboarding_step: 4,
+      })
       setWorkspace(updated)
       clearDraft(DRAFT_KEY)
-      router.push("/onboarding/api-key")
+      return true
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your metrics.")
       setSaving(false)
+      return false
+    }
+  }
+
+  async function go() {
+    if (await persist()) router.push("/onboarding/connectors")
+  }
+
+  async function skipToEnd() {
+    if (!workspace) return
+    if (await persist()) {
+      await advanceOnboardingStep(workspace.id, ONBOARDING_STEP_COUNT)
+      router.push("/onboarding/review")
     }
   }
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
-
-  const ready = selected.length === METRIC_PICKS
 
   return (
     <OnboardingChrome
@@ -223,32 +250,11 @@ export function MetricsStep() {
           Your <em>metrics.</em>
         </>
       }
-      subtitle="Pick the numbers that define success — every brief is ranked by impact on these."
-      footerMeta={
-        isCompany ? (
-          ready ? (
-            `${selected.length} of ${METRIC_PICKS} metrics selected — ready to continue`
-          ) : (
-            `Pick ${Math.max(METRIC_PICKS - selected.length, 0)} more metric${
-              METRIC_PICKS - selected.length === 1 ? "" : "s"
-            } to continue`
-          )
-        ) : (
-          <>
-            Optional for personal accounts —{" "}
-            <button
-              type="button"
-              className="onb-skip-link"
-              onClick={() => void go(true)}
-              disabled={saving}
-            >
-              skip for now
-            </button>
-          </>
-        )
-      }
+      subtitle="Pick up to 5 that matter most. Every brief is ranked by impact on these."
+      footerMeta={`${selected.length} of ${METRIC_PICKS} metrics selected`}
       onBack={() => router.push("/onboarding/product")}
-      onContinue={() => void go(false)}
+      onContinue={() => void go()}
+      onSkipToEnd={() => void skipToEnd()}
       continueDisabled={saving}
       loading={saving}
     >
@@ -256,11 +262,6 @@ export function MetricsStep() {
         {error && <div className="onb-form-error">{error}</div>}
 
         <div className="onb-section" data-field="metrics">
-          <div className="onb-section-h">
-            Your metrics{" "}
-            <span className="opt">— pick up to {METRIC_PICKS} that matter most</span>
-          </div>
-
           {errors.metrics && <p className="onb-field-error">{errors.metrics}</p>}
 
           <div className="metric-chips" id="suggestedMetrics" data-max={METRIC_PICKS}>
@@ -338,6 +339,35 @@ export function MetricsStep() {
               <strong>prioritizes which issues and ideas to surface</strong> —
               every brief is ranked by impact on the metrics you pick.
             </span>
+          </div>
+        </div>
+
+        <div className="onb-section" style={{ marginTop: 18 }} data-field="framework">
+          <div className="onb-section-h">
+            How does your team prioritize? <span className="req">*</span>
+          </div>
+          {errors.framework && <p className="onb-field-error">{errors.framework}</p>}
+          <select
+            className={`inp ${errors.framework ? "has-error" : ""}`}
+            value={framework}
+            onChange={(e) => {
+              setFramework(e.target.value)
+              clearError("framework")
+            }}
+            aria-label="Prioritization framework"
+          >
+            <option value="">Select a framework</option>
+            {PRIORITIZATION_FRAMEWORKS.map((f) => (
+              <option key={f.value} value={f.value}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+          <div className="metric-note" style={{ marginTop: 10 }}>
+            <span className="mt-ic" aria-hidden>
+              <InfoCircle style={{ width: 14, height: 14 }} />
+            </span>
+            <span>Sprntly weighs recommendations using your framework.</span>
           </div>
         </div>
       </div>

@@ -4,14 +4,11 @@ import { Suspense, useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
-import { isPersonalDomain, validatePassword, validateWorkEmail } from "../lib/auth-validation"
+import { validatePassword, validateWorkEmail } from "../lib/auth-validation"
+import { signupApi } from "../lib/api"
 import { publicPath } from "../lib/public-path"
 import { AuthShell } from "../components/auth/AuthShell"
-import {
-  SignUpStep1View,
-  SignUpStep2View,
-  type SignUpAccountType,
-} from "../components/auth/SignUpView"
+import { SignUpStep1View, SignUpStep2View } from "../components/auth/SignUpView"
 
 export default function SignUpPage() {
   return (
@@ -44,28 +41,10 @@ function SignUpForm() {
   const [firstName, setFirstName] = useState("")
   const [lastName, setLastName] = useState("")
   const [role, setRole] = useState("Product Manager")
-  // Explicit company-vs-personal choice. Until the user clicks a card we
-  // SUGGEST a value from the email domain (gmail/yahoo/… → personal); an
-  // explicit click pins the choice and stops the suggestion.
-  const [accountType, setAccountType] = useState<SignUpAccountType>(
-    prefillEmail && isPersonalDomain(prefillEmail) ? "personal" : "company",
-  )
-  const [accountTypeTouched, setAccountTypeTouched] = useState(false)
+  const [priorities, setPriorities] = useState("")
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  function onEmailChange(v: string) {
-    setEmail(v)
-    if (!accountTypeTouched) {
-      setAccountType(isPersonalDomain(v) ? "personal" : "company")
-    }
-  }
-
-  function onAccountTypeChange(v: SignUpAccountType) {
-    setAccountTypeTouched(true)
-    setAccountType(v)
-  }
 
   useEffect(() => {
     if (auth.kind === "authed") {
@@ -73,8 +52,9 @@ function SignUpForm() {
     }
   }, [auth, router])
 
-  function onStep1(e: React.FormEvent) {
+  async function onStep1(e: React.FormEvent) {
     e.preventDefault()
+    if (submitting) return
     setError(null)
     const emailErr = validateWorkEmail(email)
     if (emailErr) {
@@ -85,6 +65,21 @@ function SignUpForm() {
     if (pwErr) {
       setError(pwErr)
       return
+    }
+    // Early duplicate check so a returning user is stopped HERE, not after
+    // filling the about-you step. Fail-open on network/API errors — the
+    // signUpWithPassword "already_registered" handling remains the backstop.
+    setSubmitting(true)
+    try {
+      const { exists } = await signupApi.emailExists(email)
+      if (exists) {
+        setError("An account with this email already exists. Try signing in.")
+        return
+      }
+    } catch {
+      /* availability check only — proceed; the final signup call re-checks */
+    } finally {
+      setSubmitting(false)
     }
     setStep(2)
   }
@@ -117,7 +112,9 @@ function SignUpForm() {
         firstName,
         lastName,
         role,
-        accountType,
+        priorities,
+        // The company/personal split is retired (v6) — every signup is company.
+        accountType: "company",
       })
       if (result === "already_registered") {
         setError("An account with this email already exists. Try signing in.")
@@ -156,11 +153,13 @@ function SignUpForm() {
         firstName={firstName}
         lastName={lastName}
         role={role}
+        priorities={priorities}
         submitting={submitting}
         error={error}
         onFirstNameChange={setFirstName}
         onLastNameChange={setLastName}
         onRoleChange={setRole}
+        onPrioritiesChange={setPriorities}
         onSubmit={onCreate}
         onBack={() => {
           setError(null)
@@ -174,16 +173,14 @@ function SignUpForm() {
     <SignUpStep1View
       email={email}
       password={password}
-      accountType={accountType}
       showPassword={showPassword}
       error={error}
       termsHref={publicPath("/terms")}
       privacyHref={publicPath("/privacy")}
-      onEmailChange={onEmailChange}
+      onEmailChange={setEmail}
       onPasswordChange={setPassword}
-      onAccountTypeChange={onAccountTypeChange}
       onToggleShowPassword={() => setShowPassword((v) => !v)}
-      onSubmit={onStep1}
+      onSubmit={(e) => void onStep1(e)}
       onGoogle={onGoogle}
     />
   )

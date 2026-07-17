@@ -148,7 +148,7 @@ default so counts are hidden until you set them.
 
 - All 18 screens from the HTML prototype
 - Full UI interactivity: modals, drawers, toasts, toggles, connector wizard
-- AI bar with `⌘K` focus; suggestion chips only when you set `aiScreenChips`
+- Global search palette on `⌘K` (pages, settings, skills, chats, artifacts…); AI bar focus moved to `⌘⇧K`; suggestion chips only when you set `aiScreenChips`
 - Share menu, review-past dropdown (disabled until `pastWeeks` has data)
 - **Empty product surfaces** with dashed placeholders until `setContent` runs
 

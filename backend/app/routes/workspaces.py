@@ -90,7 +90,11 @@ def get_workspaces(company: CompanyContext = Depends(require_company)):
             # before the binding row exists (pre-migration data).
             ds = company_slug
         out.append({**_public(w, role=w.get("role")), "dataset": ds})
-    return {"workspaces": out}
+    # org_role: the caller's COMPANY-level role. Distinct from the per-
+    # workspace effective roles above — workspace creation is org-admin
+    # gated, and the frontend needs this to show/hide create affordances
+    # (a workspace-level admin who is a plain org member must not see them).
+    return {"workspaces": out, "org_role": company.role}
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

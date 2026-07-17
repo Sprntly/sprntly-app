@@ -14,7 +14,7 @@ import { usePathname, useRouter } from "next/navigation"
 import type { ScreenId } from "../types"
 import type { AskResponse } from "../lib/api"
 import type { PrdState } from "../types/content"
-import { pathForScreen, screenIdFromPathname } from "../lib/routes"
+import { NAV_PREFETCH_PATHS, pathForScreen, screenIdFromPathname } from "../lib/routes"
 
 /** Top search hands off `/v1/ask` results to Ask Sprntly (in-page thread) without a second request. */
 export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: string }
@@ -149,6 +149,13 @@ interface NavigationContextType {
    *  and consumes it. The single entry point for "PRD opens in a new chat". */
   openPrdTab: (request: PrdTabRequest) => void
 
+  /** Global search / command palette (⌘K). Rendered once by AppShell; the
+   *  sidebar trigger and the global hotkey both drive this shared state. */
+  paletteOpen: boolean
+  openPalette: () => void
+  closePalette: () => void
+  togglePalette: () => void
+
   /** Narrow icon-only rail vs full labels */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
@@ -180,6 +187,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
   const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
   const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   // Default to the collapsed icon rail; a saved "0" preference (see the init
   // effect) expands it on load. Users toggle via the sidebar chevron.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
@@ -198,6 +206,15 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   /** Previous pathname, so the route-change effect can tell a genuine navigation
    *  from a no-op re-run and only act on real changes. */
   const prevPathnameRef = useRef(pathname)
+
+  // Sidebar tabs and the ⌘K palette navigate via buttons + router.push, so Next
+  // never auto-prefetches their destinations (that's a <Link>-only behavior).
+  // Warm every chrome-reachable route once so a tab click swaps screens
+  // immediately instead of downloading the route chunk at click time. No-op in
+  // dev (prefetch is production-only) and idempotent via the router cache.
+  useEffect(() => {
+    for (const path of NAV_PREFETCH_PATHS) router.prefetch(path)
+  }, [router])
 
   useEffect(() => {
     try {
@@ -370,6 +387,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [router])
 
+  const openPalette = useCallback(() => setPaletteOpen(true), [])
+  const closePalette = useCallback(() => setPaletteOpen(false), [])
+  const togglePalette = useCallback(() => setPaletteOpen((v) => !v), [])
+
   const openDrawer = useCallback((drawer: "claude" | "ticket" | "design-agent") => {
     setActiveDrawer(drawer)
   }, [])
@@ -438,6 +459,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         pendingPrdTab,
         setPendingPrdTab,
         openPrdTab,
+        paletteOpen,
+        openPalette,
+        closePalette,
+        togglePalette,
         sidebarCollapsed,
         toggleSidebar,
         aiPanelWidth,

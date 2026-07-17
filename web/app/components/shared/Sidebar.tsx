@@ -7,7 +7,7 @@ import { useAuth } from "../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch } from "@tabler/icons-react"
 import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 
@@ -17,7 +17,7 @@ interface SidebarProps {
 }
 
 export function Sidebar(_props: SidebarProps = {}) {
-  const { currentScreen, goTo, goToNewChat, sidebarCollapsed, toggleSidebar } = useNavigation()
+  const { currentScreen, goTo, goToNewChat, sidebarCollapsed, toggleSidebar, openPalette } = useNavigation()
   const { content } = useContent()
   const auth = useAuth()
   const {
@@ -25,6 +25,7 @@ export function Sidebar(_props: SidebarProps = {}) {
     workspace,
     workspaces = [],
     activeWorkspace,
+    orgRole,
     setActiveWorkspace,
   } = useWorkspace()
   const [feedbackOpen, setFeedbackOpen] = useState(false)
@@ -87,8 +88,10 @@ export function Sidebar(_props: SidebarProps = {}) {
     content.homeHeadline ??
     "Sprntly"
   const companyInitial = brandName.charAt(0).toUpperCase()
-  const isWsAdmin = (activeWorkspace?.role ?? "member") === "admin"
-  const wsInteractive = workspaces.length > 1 || isWsAdmin
+  // Workspace creation is ORG owner/admin only (backend-enforced) — a
+  // workspace-level admin who is a plain org member doesn't get the button.
+  const canCreateWs = orgRole === "owner" || orgRole === "admin"
+  const wsInteractive = workspaces.length > 1 || canCreateWs
 
   return (
     <aside className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : "sidebar--expanded"}`}>
@@ -142,7 +145,7 @@ export function Sidebar(_props: SidebarProps = {}) {
                   )}
                 </button>
               ))}
-              {isWsAdmin && (
+              {canCreateWs && (
                 <>
                   <div className="sb-ws-sep" />
                   <button
@@ -171,6 +174,22 @@ export function Sidebar(_props: SidebarProps = {}) {
           <ChevronIcon collapsed={sidebarCollapsed} />
         </button>
       </div>
+
+      {/* Global search (⌘K) — the modal itself is rendered by AppShell so the
+          hotkey works even when the sidebar is collapsed or hidden. */}
+      <button
+        type="button"
+        className="sb-rail-search"
+        title="Search"
+        aria-label="Search (Ctrl+K)"
+        onClick={openPalette}
+        data-testid="palette-trigger"
+      >
+        <IconSearch size={18} />
+        <span className="sb-rail-label">Search</span>
+        <kbd className="sb-rail-search-kbd">⌘K</kbd>
+        <span className="nav-tooltip">Search</span>
+      </button>
 
       {/* New chat */}
       <button

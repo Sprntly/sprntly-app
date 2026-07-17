@@ -364,6 +364,46 @@ def login(body: LoginIn, response: Response):
     return {"ok": True, "audience": body.audience}
 
 
+class EmailExistsIn(BaseModel):
+    email: str
+
+
+@router.post("/email-exists")
+def email_exists(body: EmailExistsIn):
+    """PUBLIC (pre-auth) — true iff an account already exists for this email.
+
+    The v6 sign-up step 1 calls this on "Create account" so a returning user is
+    told "already registered — sign in" IMMEDIATELY instead of after filling the
+    about-you step (supabase.auth.signUp only reveals it at the very end).
+
+    Checks `profiles` (a row exists for every auth user, confirmed or not, via
+    the handle_new_user trigger) with the service-role client. GoTrue stores
+    emails lowercased, so an eq on the normalized needle suffices. Existence
+    disclosure is acceptable: the signup flow's final response already reveals
+    the same fact. Fail-open on any error — the end-of-flow check remains the
+    backstop.
+    """
+    needle = body.email.strip().lower()
+    if not needle or "@" not in needle:
+        return {"exists": False}
+    try:
+        from app.db.client import require_client
+
+        rows = (
+            require_client()
+            .table("profiles")
+            .select("id")
+            .eq("email", needle)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return {"exists": bool(rows)}
+    except Exception:  # noqa: BLE001 — availability check only, never blocks signup
+        return {"exists": False}
+
+
 @router.post("/logout")
 def logout(
     response: Response,

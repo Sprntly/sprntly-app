@@ -65,6 +65,11 @@ type WorkspaceCtx = {
   /** The ACTIVE workspace — every backend call carries its id as
    *  X-Workspace-Id (set into lib/api before consumers render). */
   activeWorkspace: WorkspaceSummary | null
+  /** The caller's COMPANY-level role (owner/admin/member/viewer). Workspace
+   *  creation is org-admin gated, unlike each workspace's per-row `role`
+   *  (a plain org member can be a workspace-level admin). Null until the
+   *  workspaces list lands. */
+  orgRole: string | null
   setActiveWorkspace: (id: string) => void
   refresh: () => Promise<void>
 }
@@ -97,6 +102,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([])
   const [activeWorkspace, setActiveWorkspaceState] =
     useState<WorkspaceSummary | null>(null)
+  const [orgRole, setOrgRole] = useState<string | null>(null)
 
   // Tracks whether the FIRST authed load has completed, so subsequent refreshes
   // (e.g. a Supabase token refresh on tab refocus) re-fetch in the background
@@ -121,6 +127,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setWorkspaces([])
       setActiveWorkspaceState(null)
       setActiveWorkspaceId(null)
+      setOrgRole(null)
       setLoading(false)
       setRefreshing(false)
       return
@@ -147,8 +154,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       // carry the header.
       if (w) {
         try {
-          const { workspaces: list } = await workspacesApi.list()
+          const { workspaces: list, org_role } = await workspacesApi.list()
           setWorkspaces(list)
+          setOrgRole(org_role ?? null)
           const storedId = readStoredActiveWorkspace(authUserId)
           const active =
             list.find((x) => x.id === storedId) ??
@@ -161,11 +169,13 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
           setWorkspaces([])
           setActiveWorkspaceState(null)
           setActiveWorkspaceId(null)
+          setOrgRole(null)
         }
       } else {
         setWorkspaces([])
         setActiveWorkspaceState(null)
         setActiveWorkspaceId(null)
+        setOrgRole(null)
       }
       hasLoadedRef.current = true
     } finally {
@@ -202,6 +212,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       workspace,
       workspaces,
       activeWorkspace,
+      orgRole,
       setActiveWorkspace,
       refresh,
     }),
@@ -212,6 +223,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       workspace,
       workspaces,
       activeWorkspace,
+      orgRole,
       setActiveWorkspace,
       refresh,
     ],

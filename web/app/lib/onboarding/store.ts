@@ -12,16 +12,18 @@ import {
   parseDesignSourcePreference,
   parseFeatureFlags,
   parseKpiTree,
+  parseMetricDefinitions,
   type AccountType,
   type FeatureFlags,
   type KpiTree,
+  type MetricDefinition,
   type UserProfile,
   type WorkspaceCompany,
   type WorkspaceProduct,
 } from "./types"
 
 const PRODUCT_COLUMNS =
-  "id, company_id, name, website, description, is_primary, surfaces, personas, positioning, monetization, maturity"
+  "id, company_id, name, website, description, is_primary, surfaces, personas, positioning, monetization, users_description, maturity"
 
 function rowToProduct(row: Record<string, unknown>): WorkspaceProduct {
   const strArr = (v: unknown) =>
@@ -37,6 +39,7 @@ function rowToProduct(row: Record<string, unknown>): WorkspaceProduct {
     personas: strArr(row.personas),
     positioning: (row.positioning as string | null) ?? null,
     monetization: strArr(row.monetization),
+    users_description: (row.users_description as string | null) ?? null,
     maturity: (row.maturity as string | null) ?? null,
   }
 }
@@ -68,9 +71,19 @@ function rowToCompany(
     icp: parseCompanyIcp(row.icp),
     tone_voice: parseCompanyToneVoice(row.tone_voice),
     planning_cycle: (row.planning_cycle as string | null) ?? null,
+    team_name: (row.team_name as string | null) ?? null,
     team_scope: (row.team_scope as string | null) ?? null,
     prioritization_framework: (row.prioritization_framework as string | null) ?? null,
     sizing_methodology: (row.sizing_methodology as string | null) ?? null,
+    team_strategy: (row.team_strategy as string | null) ?? null,
+    team_roadmap: (row.team_roadmap as string | null) ?? null,
+    decision_process: (row.decision_process as string | null) ?? null,
+    additional_context: (row.additional_context as string | null) ?? null,
+    business_context_summary:
+      (row.business_context_summary as string | null) ?? null,
+    business_context_accepted_at:
+      (row.business_context_accepted_at as string | null) ?? null,
+    metric_definitions: parseMetricDefinitions(row.metric_definitions),
     recent_decisions: (row.recent_decisions as string | null) ?? null,
     dead_ends: Array.isArray(row.dead_ends) ? (row.dead_ends as string[]) : [],
     biggest_risk: (row.biggest_risk as string | null) ?? null,
@@ -91,7 +104,7 @@ function rowToCompany(
 }
 
 const PROFILE_COLUMNS =
-  "id, email, first_name, last_name, role, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields"
+  "id, email, first_name, last_name, role, priorities, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields"
 
 function rowToProfile(row: Record<string, unknown>): UserProfile {
   return {
@@ -100,6 +113,7 @@ function rowToProfile(row: Record<string, unknown>): UserProfile {
     first_name: (row.first_name as string | null) ?? null,
     last_name: (row.last_name as string | null) ?? null,
     role: (row.role as string | null) ?? null,
+    priorities: (row.priorities as string | null) ?? null,
     timezone: (row.timezone as string | null) ?? null,
     account_type: parseAccountType(row.account_type),
     onboarding_step: Number(row.onboarding_step) || 0,
@@ -125,10 +139,12 @@ export async function updateUserProfile(
     first_name: string
     last_name: string
     role: string | null
+    /** "Your priorities" free text; omit to leave unchanged, pass null to clear. */
+    priorities?: string | null
     /** IANA timezone; omit to leave unchanged, pass null to clear. */
     timezone?: string | null
-    /** Signup choice; omit to leave unchanged (set once at sign-up / the
-     *  your-name gate — Google SSO users have none until they pick). */
+    /** Legacy signup choice; omit to leave unchanged. The v6 flow always
+     *  writes "company". */
     account_type?: AccountType
   },
 ): Promise<UserProfile> {
@@ -144,6 +160,9 @@ export async function updateUserProfile(
       last_name: last,
       full_name: full_name || null,
       role: patch.role?.trim() || null,
+      ...(patch.priorities !== undefined
+        ? { priorities: patch.priorities?.trim() || null }
+        : {}),
       ...(patch.timezone !== undefined
         ? { timezone: patch.timezone?.trim() || null }
         : {}),
@@ -185,6 +204,7 @@ export async function upsertPrimaryProduct(
     personas?: string[]
     positioning?: string | null
     monetization?: string[]
+    usersDescription?: string | null
     maturity?: string | null
   },
 ): Promise<WorkspaceProduct> {
@@ -199,6 +219,9 @@ export async function upsertPrimaryProduct(
       ? { positioning: input.positioning?.trim() || null }
       : {}),
     ...(input.monetization !== undefined ? { monetization: input.monetization } : {}),
+    ...(input.usersDescription !== undefined
+      ? { users_description: input.usersDescription?.trim() || null }
+      : {}),
     ...(input.maturity !== undefined ? { maturity: input.maturity || null } : {}),
   }
 
@@ -446,6 +469,35 @@ export async function saveNotificationBriefDay(
       : {}
   return updateWorkspace(companyId, {
     notification_settings: { ...current, brief_weekday: weekday },
+  })
+}
+
+/**
+ * Persist the confirmed metric definitions (define-metrics sub-flow / the
+ * Settings KPI pane). Normalized through parseMetricDefinitions so only
+ * well-formed `{metric, definition, mapping, baseline}` entries are stored.
+ */
+export async function saveMetricDefinitions(
+  companyId: string,
+  definitions: MetricDefinition[],
+) {
+  return updateWorkspace(companyId, {
+    metric_definitions: parseMetricDefinitions(definitions),
+  })
+}
+
+/**
+ * Persist the accepted business-context prose (step 9 "Here's what we
+ * learned"). Stamps business_context_accepted_at when `accepted`.
+ */
+export async function saveBusinessContextSummary(
+  companyId: string,
+  summary: string,
+  accepted: boolean,
+) {
+  return updateWorkspace(companyId, {
+    business_context_summary: summary.trim() || null,
+    ...(accepted ? { business_context_accepted_at: new Date().toISOString() } : {}),
   })
 }
 

@@ -12,6 +12,11 @@
 import type { ConnectorCategoryRow, ConnectorItemRow, ConnectorType } from "../types/content"
 import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 
+// Category order follows the v6 onboarding screenshot spec (2026-07-17):
+// Analytics → Voice → CRM → Project Management → Monitoring → Design →
+// Codebase → Communications, with the settings-only extras (docs, revenue)
+// appended. The onboarding wizard shows only ONBOARDING_CONNECTOR_CATEGORIES
+// (lib/onboarding/connectorsWizard.ts).
 export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "analytics",
@@ -25,9 +30,43 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       { id: "google_analytics", name: "Google Analytics", logo: "G", logoText: "G", logoColor: "#F9AB00", logoSvg: "/connectors/google_analytics.svg", oauth: false, types: ["analytics"] },
       { id: "heap",             name: "Heap",             logo: "H", logoText: "H", logoColor: "#FF6E6E", oauth: false, types: ["analytics"] },
       { id: "posthog",          name: "PostHog",          logo: "P", logoText: "P", logoColor: "#0CC1AE", logoSvg: "/connectors/posthog.svg", oauth: false, types: ["analytics"] },
+      { id: "segment",          name: "Segment",          logo: "S", logoText: "S", logoColor: "#52BD94", oauth: false, types: ["analytics"] },
       // Self-hosted BI — connects with instance URL + service-account login
       // (authType "credentials"), the first wired Analytics connector.
       { id: "superset",         name: "Superset",         logo: "S", logoText: "S", logoColor: "#20A7C9", oauth: false, authType: "credentials", types: ["analytics"] },
+    ],
+  },
+  {
+    key: "voice",
+    title: "Voice of Customer & Support",
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
+    items: [
+      { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", logoSvg: "/connectors/zendesk.svg", oauth: false, types: ["customer-voice"] },
+      { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false, types: ["communication"] },
+      { id: "dovetail",   name: "Dovetail",   logo: "D", logoText: "D", logoColor: "#9B59B6", oauth: false, types: ["customer-voice"] },
+      { id: "app_store",  name: "App Store",  logo: "A", logoText: "A", logoColor: "#0D96F6", oauth: false, types: ["customer-voice"] },
+      { id: "play_store", name: "Play Store", logo: "P", logoText: "P", logoColor: "#01875F", oauth: false, types: ["customer-voice"] },
+      // No bundled SVG mark yet — brand-color letter glyph like Fireflies.
+      { id: "sprinklr",   name: "Sprinklr",   logo: "S", logoText: "S", logoColor: "#107EFF", oauth: true, types: ["customer-voice"] },
+      // Fireflies has no official SVG mark we could bundle, so it keeps the
+      // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
+      { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings"] },
+      { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, types: ["meetings"] },
+    ],
+  },
+  {
+    key: "crm",
+    title: "Customer Relationship (CRM)",
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
+    items: [
+      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", logoSvg: "/connectors/hubspot.svg", oauth: true, types: ["crm"] },
+      { id: "salesforce", name: "Salesforce", logo: "S", logoText: "S", logoColor: "#00A1E0", logoSvg: "/connectors/salesforce.svg", oauth: false, types: ["crm"] },
+      { id: "pipedrive",  name: "Pipedrive",  logo: "P", logoText: "P", logoColor: "#017737", oauth: false, types: ["crm"] },
+      { id: "attio",      name: "Attio",      logo: "A", logoText: "A", logoColor: "#F5B301", oauth: false, types: ["crm"] },
+      { id: "close",      name: "Close",      logo: "C", logoText: "C", logoColor: "#1463FF", oauth: false, types: ["crm"] },
+      { id: "zoho_crm",   name: "Zoho CRM",   logo: "Z", logoText: "Z", logoColor: "#E42527", oauth: false, types: ["crm"] },
     ],
   },
   {
@@ -42,61 +81,6 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // OAuth connect only for now — deliberately NOT in TICKET_SYNC_IMPLEMENTED
       // (no backend sync-engine branch yet), so it never shows on the sync button.
       { id: "asana",        name: "Asana",       logo: "A", logoText: "A", logoColor: "#F06A6A", logoSvg: "/connectors/asana.svg", oauth: true, types: ["task-management"] },
-    ],
-  },
-  {
-    // Notion and Google Docs are documentation tools, not project trackers —
-    // they were previously miscategorized under "Project Management".
-    key: "docs",
-    title: "Business documentation",
-    uploadAccept: UPLOAD_ACCEPT_HINT,
-    uploadExtensions: UPLOAD_EXTENSIONS,
-    items: [
-      { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", logoSvg: "/connectors/notion.svg", oauth: false, types: ["documents"] },
-      // Backend provider is `google_drive` (existing OAuth + sync). Surface
-      // it as "Google Docs" per design — the connector pulls Google Docs
-      // out of Drive folders, so the label matches user expectation.
-      { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoSvg: "/connectors/google_drive.svg", oauth: true, types: ["documents"] },
-    ],
-  },
-  {
-    key: "voice",
-    title: "Customer Voice & Support",
-    uploadAccept: UPLOAD_ACCEPT_HINT,
-    uploadExtensions: UPLOAD_EXTENSIONS,
-    items: [
-      { id: "intercom",   name: "Intercom",   logo: "I", logoText: "I", logoColor: "#1F8DED", logoSvg: "/connectors/intercom.svg", oauth: false, types: ["communication"] },
-      { id: "zendesk",    name: "Zendesk",    logo: "Z", logoText: "Z", logoColor: "#03363D", logoSvg: "/connectors/zendesk.svg", oauth: false, types: ["customer-voice"] },
-      // No bundled SVG mark yet — brand-color letter glyph like Fireflies.
-      { id: "sprinklr",   name: "Sprinklr",   logo: "S", logoText: "S", logoColor: "#107EFF", oauth: true, types: ["customer-voice"] },
-      // Fireflies has no official SVG mark we could bundle, so it keeps the
-      // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
-      { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings"] },
-      { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, types: ["meetings"] },
-      { id: "dovetail",   name: "Dovetail",   logo: "D", logoText: "D", logoColor: "#9B59B6", oauth: false, types: ["customer-voice"] },
-      { id: "salesforce", name: "Salesforce", logo: "S", logoText: "S", logoColor: "#00A1E0", logoSvg: "/connectors/salesforce.svg", oauth: false, types: ["crm"] },
-    ],
-  },
-  {
-    key: "revenue",
-    title: "Revenue",
-    uploadAccept: UPLOAD_ACCEPT_HINT,
-    uploadExtensions: UPLOAD_EXTENSIONS,
-    items: [
-      { id: "stripe",     name: "Stripe",     logo: "S", logoText: "S", logoColor: "#635BFF", logoSvg: "/connectors/stripe.svg", oauth: false, types: ["revenue"] },
-      { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false, types: ["revenue"] },
-      { id: "hubspot",    name: "HubSpot",    logo: "H", logoText: "H", logoColor: "#FF7A59", logoSvg: "/connectors/hubspot.svg", oauth: true, types: ["crm"] },
-    ],
-  },
-  {
-    key: "code",
-    title: "Code",
-    uploadAccept: UPLOAD_ACCEPT_HINT,
-    uploadExtensions: UPLOAD_EXTENSIONS,
-    items: [
-      { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", logoSvg: "/connectors/github.svg", oauth: true, types: ["code"] },
-      { id: "gitlab",    name: "GitLab",    logo: "G", logoText: "G", logoColor: "#FC6D26", logoSvg: "/connectors/gitlab.svg", oauth: false, types: ["code"] },
-      { id: "bitbucket", name: "Bitbucket", logo: "B", logoText: "B", logoColor: "#205081", logoSvg: "/connectors/bitbucket.svg", oauth: false, types: ["code"] },
     ],
   },
   {
@@ -126,8 +110,19 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     ],
   },
   {
+    key: "code",
+    title: "Codebase",
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
+    items: [
+      { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", logoSvg: "/connectors/github.svg", oauth: true, types: ["code"] },
+      { id: "gitlab",    name: "GitLab",    logo: "G", logoText: "G", logoColor: "#FC6D26", logoSvg: "/connectors/gitlab.svg", oauth: false, types: ["code"] },
+      { id: "bitbucket", name: "Bitbucket", logo: "B", logoText: "B", logoColor: "#205081", logoSvg: "/connectors/bitbucket.svg", oauth: false, types: ["code"] },
+    ],
+  },
+  {
     key: "comms",
-    title: "Communication",
+    title: "Communications",
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
@@ -135,6 +130,33 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // (Slack Marketplace requires OAuth install, not a pasted bot token).
       { id: "slack",   name: "Slack",    logo: "S", logoText: "S", logoColor: "#4A154B", logoSvg: "/connectors/slack.svg", oauth: true, types: ["communication"] },
       { id: "msteams", name: "MS Teams", logo: "M", logoText: "M", logoColor: "#5059C9", logoSvg: "/connectors/msteams.svg", oauth: false, types: ["communication"] },
+    ],
+  },
+  {
+    // Notion and Google Docs are documentation tools, not project trackers —
+    // settings-only (not an onboarding wizard category since v6).
+    key: "docs",
+    title: "Business documentation",
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
+    items: [
+      { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", logoSvg: "/connectors/notion.svg", oauth: false, types: ["documents"] },
+      // Backend provider is `google_drive` (existing OAuth + sync). Surface
+      // it as "Google Docs" per design — the connector pulls Google Docs
+      // out of Drive folders, so the label matches user expectation.
+      { id: "google_drive", name: "Google Docs", logo: "G", logoText: "G", logoColor: "#4285F4", logoSvg: "/connectors/google_drive.svg", oauth: true, types: ["documents"] },
+    ],
+  },
+  {
+    // Billing/subscription analytics — settings-only since v6 (the CRM
+    // category above carries the customer-relationship tools).
+    key: "revenue",
+    title: "Revenue",
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
+    items: [
+      { id: "stripe",     name: "Stripe",     logo: "S", logoText: "S", logoColor: "#635BFF", logoSvg: "/connectors/stripe.svg", oauth: false, types: ["revenue"] },
+      { id: "chartmogul", name: "ChartMogul", logo: "C", logoText: "C", logoColor: "#0066FF", oauth: false, types: ["revenue"] },
     ],
   },
 ]

@@ -9,6 +9,7 @@ import { ProfileSettings } from "./settings/ProfileSettings"
 import { WorkspaceSettings } from "./settings/WorkspaceSettings"
 import { CompanyProfileSettings } from "./settings/CompanyProfileSettings"
 import { ProcessSettings } from "./settings/ProcessSettings"
+import { KpiSettings } from "./settings/KpiSettings"
 import { WorkspacesSettings } from "./settings/WorkspacesSettings"
 import { BusinessContextSettings } from "./settings/BusinessContextSettings"
 import { StrategicSettings } from "./settings/StrategicSettings"
@@ -42,6 +43,9 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
       return <CompanyProfileSettings />
     case "process":
       return <ProcessSettings />
+    // Onboarding v6: metrics + definitions picked in the wizard, editable here.
+    case "metrics":
+      return <KpiSettings />
     case "workspaces":
       return <WorkspacesSettings />
     case "business-context":

@@ -1,15 +1,17 @@
 export type ScreenId =
-  // Numbered onboarding steps, keyed by their semantic slug (2026-07
-  // registration spec, 8 steps), in flow order: company → product → metrics →
-  // api-key → connectors → team → strategy → workspace (workspace closes).
+  // Numbered onboarding steps, keyed by their semantic slug (v6 screenshot
+  // spec 2026-07-17, 9 steps), in flow order: company → product → metrics →
+  // connectors → team → strategy → decisions → invite → review (review closes
+  // via the unnumbered define-metrics sub-flow).
   | "ob-company"
   | "ob-product"
   | "ob-metrics"
-  | "ob-api-key"
   | "ob-connectors"
   | "ob-team"
   | "ob-strategy"
-  | "ob-workspace"
+  | "ob-decisions"
+  | "ob-invite"
+  | "ob-review"
   | "chat"
   | "chats"
   // The Artifacts library — a dedicated left-nav surface listing durable outputs
@@ -42,11 +44,12 @@ export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-company",
   "ob-product",
   "ob-metrics",
-  "ob-api-key",
   "ob-connectors",
   "ob-team",
   "ob-strategy",
-  "ob-workspace",
+  "ob-decisions",
+  "ob-invite",
+  "ob-review",
 ]
 
 export const APP_SCREENS: ScreenId[] = [
@@ -73,14 +76,15 @@ export const APP_SCREENS: ScreenId[] = [
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-company": "Setup · Step 1 of 8",
-  "ob-product": "Setup · Step 2 of 8",
-  "ob-metrics": "Setup · Step 3 of 8",
-  "ob-api-key": "Setup · Step 4 of 8",
-  "ob-connectors": "Setup · Step 5 of 8",
-  "ob-team": "Setup · Step 6 of 8",
-  "ob-strategy": "Setup · Step 7 of 8",
-  "ob-workspace": "Setup · Step 8 of 8",
+  "ob-company": "Setup · Step 1 of 9",
+  "ob-product": "Setup · Step 2 of 9",
+  "ob-metrics": "Setup · Step 3 of 9",
+  "ob-connectors": "Setup · Step 4 of 9",
+  "ob-team": "Setup · Step 5 of 9",
+  "ob-strategy": "Setup · Step 6 of 9",
+  "ob-decisions": "Setup · Step 7 of 9",
+  "ob-invite": "Setup · Step 8 of 9",
+  "ob-review": "Setup · Step 9 of 9",
   chat: "Home",
   chats: "History",
   artifacts: "Artifacts",

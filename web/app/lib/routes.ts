@@ -47,11 +47,12 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-company": "/onboarding/company",
   "ob-product": "/onboarding/product",
   "ob-metrics": "/onboarding/metrics",
-  "ob-api-key": "/onboarding/api-key",
   "ob-connectors": "/onboarding/connectors",
   "ob-team": "/onboarding/team",
   "ob-strategy": "/onboarding/strategy",
-  "ob-workspace": "/onboarding/workspace",
+  "ob-decisions": "/onboarding/decisions",
+  "ob-invite": "/onboarding/invite",
+  "ob-review": "/onboarding/review",
   chat: "/",
   chats: "/history",
   artifacts: "/artifacts",
@@ -76,6 +77,29 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   templates: "/templates",
   skills: "/skills",
 }
+
+/** Destinations reachable from the always-visible chrome (sidebar tabs, logo,
+ *  new chat, ⌘K palette screens). The sidebar navigates via buttons + goTo, not
+ *  <Link>, so Next never auto-prefetches these routes — NavigationProvider
+ *  prefetches them once on mount so a tab click doesn't pay the route-chunk
+ *  download (the silent old-screen-lingers delay) at click time. Deduped:
+ *  "chat" is `/`. */
+export const NAV_PREFETCH_PATHS: string[] = [
+  ...new Set(
+    (
+      [
+        "chat",
+        "brief",
+        "chats",
+        "artifacts",
+        "templates",
+        "skills",
+        "sources",
+        "settings",
+      ] as ScreenId[]
+    ).map((s) => SCREEN_PATH[s]),
+  ),
+]
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
   "/": "chat",

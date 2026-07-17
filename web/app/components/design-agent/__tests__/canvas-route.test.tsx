@@ -70,7 +70,9 @@ describe("non-prototype routes unchanged (no nav regression)", () => {
     ["/team", "team"],
     ["/sources", "sources"],
     ["/onboarding/company", "ob-company"],
-    ["/onboarding/workspace", "ob-workspace"],
+    ["/onboarding/review", "ob-review"],
+    // The workspace-naming step was retired in onboarding v6 — falls through.
+    ["/onboarding/workspace", "chat"],
     // business-info was split into company/product/metrics — falls through.
     ["/onboarding/business-info", "chat"],
     // connectors standalone route removed in commit A — still falls through.

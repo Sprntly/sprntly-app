@@ -53,6 +53,9 @@ def test_list_workspaces_self_heals_default(isolated_settings, monkeypatch):
 
     r = ctx.client.get("/v1/workspaces")
     assert r.status_code == 200
+    # The caller's COMPANY-level role rides along — the frontend gates its
+    # create-workspace affordances on this, not the per-workspace roles.
+    assert r.json()["org_role"] == "owner"
     ws = r.json()["workspaces"]
     assert len(ws) == 1
     assert ws[0]["is_default"] is True

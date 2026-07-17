@@ -36,15 +36,29 @@ export type WorkspaceProduct = {
   is_primary: boolean
   /** Where the product ships (registration spec 2026-07): 'web','mobile','api','hardware'. */
   surfaces: string[]
-  /** User personas, free-text chips. */
+  /** User personas, free-text chips (legacy — v6 collects users_description prose instead). */
   personas: string[]
   /** Product positioning (settings-only). */
   positioning: string | null
-  /** 'subscription','seat','usage','transaction-fee','advertising'. */
+  /** Single pick in the v6 wizard (stored as a 0/1-element array for column
+   *  compat): see MONETIZATION_OPTIONS. */
   monetization: string[]
+  /** "Tell us about your users" — free prose (v6 step 2). */
+  users_description: string | null
   /** Spec's "State" — 'enterprise','mid-market','startup','early-stage'
    *  (settings-only; named to avoid the companies.stage collision). */
   maturity: string | null
+}
+
+/** Metric definition confirmed in the post-wizard sub-flow: the plain-English
+ *  definition plus the analytics event mapping (both fully editable), and the
+ *  best-effort current value shown on the review screen (null → "—"). Stored
+ *  on companies.metric_definitions jsonb. */
+export type MetricDefinition = {
+  metric: string
+  definition: string
+  mapping: string
+  baseline: string | null
 }
 
 export type DesignSourcePreference = {
@@ -91,9 +105,22 @@ export type WorkspaceCompany = {
   icp: CompanyIcp
   tone_voice: CompanyToneVoice
   planning_cycle: string | null
+  /** v6 step 5 — the team's name (a company field, NOT the workspaces row,
+   *  which stays "Default" until renamed in Settings → Workspaces). */
+  team_name: string | null
   team_scope: string | null
   prioritization_framework: string | null
   sizing_methodology: string | null
+  /** v6 steps 6-7 typed (not uploaded) blocks. */
+  team_strategy: string | null
+  team_roadmap: string | null
+  decision_process: string | null
+  additional_context: string | null
+  /** v6 step 9 — the accepted AI-drafted business-context prose. */
+  business_context_summary: string | null
+  business_context_accepted_at: string | null
+  /** v6 metric sub-flow — confirmed per-metric definitions/mappings. */
+  metric_definitions: MetricDefinition[]
   recent_decisions: string | null
   dead_ends: string[]
   biggest_risk: string | null
@@ -109,12 +136,10 @@ export type WorkspaceCompany = {
   use_platform_key: boolean
 }
 
-/** The signup choice (registration spec 2026-07): "company" accounts get
- *  mandatory starred onboarding fields; "personal" (gmail/yahoo-style)
- *  accounts see the same wizard with everything skippable. Chosen EXPLICITLY
- *  at sign-up (email flow) or at the your-name gate (Google SSO). null =
- *  not chosen yet — treat as "company" (the strict interpretation) anywhere
- *  a default is needed. */
+/** RETIRED from the UI (onboarding v6, 2026-07-17): the company/personal
+ *  split is gone — every new signup is "company" and the wizard's starred
+ *  fields are mandatory for everyone. The type + column survive for existing
+ *  'personal' rows; nothing reads them for branching anymore. */
 export type AccountType = "company" | "personal"
 
 export function parseAccountType(raw: unknown): AccountType | null {
@@ -127,6 +152,9 @@ export type UserProfile = {
   first_name: string | null
   last_name: string | null
   role: string | null
+  /** "Your priorities — what you're focused on right now" (sign-up About-you,
+   *  v6). Free text, optional. */
+  priorities: string | null
   /** IANA timezone (e.g. "America/New_York"); drives the weekly brief send time.
    *  null until captured at signup or set in settings → backend falls back to UTC. */
   timezone: string | null
@@ -174,17 +202,37 @@ export const ROLE_OPTIONS = [
 
 export const SURFACE_OPTIONS = [
   { value: "web", label: "Web" },
-  { value: "mobile", label: "Mobile" },
+  { value: "mobile", label: "Mobile app" },
   { value: "api", label: "API" },
   { value: "hardware", label: "Hardware" },
 ] as const
 
+/** v6: a SINGLE dropdown pick in the wizard (stored as a 0/1-element array
+ *  for products.monetization column compat). Values are client-validated —
+ *  no DB CHECK — so the three v6 additions need no migration. */
 export const MONETIZATION_OPTIONS = [
   { value: "subscription", label: "Subscription" },
   { value: "seat", label: "Seat-based" },
   { value: "usage", label: "Usage-based" },
   { value: "transaction-fee", label: "Transaction fee" },
   { value: "advertising", label: "Advertising" },
+  { value: "partner-rev-share", label: "Partner rev-share" },
+  { value: "one-time", label: "One-time purchase" },
+  { value: "free", label: "Free" },
+] as const
+
+/** Job roles for step-8 teammate invites (distinct from the member/admin/viewer
+ *  permission). Display-only free text on workspace_invites.job_role. */
+export const JOB_ROLE_OPTIONS = [
+  "Product Manager",
+  "Engineer",
+  "Data Science",
+  "Designer",
+  "Founder / CEO",
+  "Customer Success",
+  "Marketing",
+  "Operations",
+  "Other",
 ] as const
 
 export const PRIORITIZATION_FRAMEWORKS = [
@@ -206,6 +254,7 @@ export const MATURITY_OPTIONS = [
 export const PLANNING_CYCLES = [
   { value: "half", label: "Every half" },
   { value: "quarterly", label: "Quarterly" },
+  { value: "annual", label: "Annual" },
   { value: "monthly", label: "Monthly" },
 ] as const
 
@@ -223,35 +272,37 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
 /**
  * The semantic slugs of the numbered onboarding steps, in flow order. This is
  * the single source of truth for the onboarding route order. The flow follows
- * the 2026-07 registration spec (Company / Product / Team sections; starred
- * fields mandatory for COMPANY accounts, everything skippable for PERSONAL —
- * see AccountType):
+ * the 2026-07-17 screenshot spec (9 steps + the define-metrics sub-flow):
  *
- *   1. company     → CompanyStep    (company name* + website*; mission/strategy
- *                                    behind an optional disclosure. Kicks the
- *                                    website analysis in the BACKGROUND on
- *                                    Continue.)
- *   2. product     → ProductStep    (product name + URL* + surfaces*; personas/
- *                                    monetization behind a disclosure)
- *   3. metrics     → MetricsStep    (pick-3 success metrics — split out of the
- *                                    old combined business-info step)
- *   4. api-key     → ApiKey         (company Claude key, BEFORE connectors so
- *                                    the token-heavy KG build runs on their key)
- *   5. connectors  → Connectors     (onb4: connect your tools*)
- *   6. team        → TeamStep       (team scope* + prioritization framework*;
- *                                    invites + weekly-brief day behind a
- *                                    disclosure)
- *   7. strategy    → Strategy       (docs + roadmap upload — no longer the
- *                                    closing step)
- *   8. workspace   → WorkspaceStep  (name your workspace — the FINAL step that
- *                                    COMPLETES onboarding + kicks the first
- *                                    brief)
+ *   1. company     → CompanyStep         (name* + website + mission + strategy/
+ *                                         OKRs; portfolio + planning cycle
+ *                                         behind "Add more". Kicks the website
+ *                                         analysis in the BACKGROUND.)
+ *   2. product     → ProductStep         (name* + website + surfaces* +
+ *                                         monetization + users; competitors
+ *                                         behind a disclosure)
+ *   3. metrics     → MetricsStep         (pick up to 5 success metrics* +
+ *                                         prioritization framework*)
+ *   4. connectors  → Connectors          (connect your tools — ≥1 live
+ *                                         connection required)
+ *   5. team        → TeamStep            (team name* + scope of work*)
+ *   6. strategy    → StrategyRoadmapStep (team strategy + team roadmap —
+ *                                         upload OR type; optional, skippable)
+ *   7. decisions   → DecisionsStep       (how the team decides + anything
+ *                                         else — upload OR type; optional)
+ *   8. invite      → InviteStep          (teammates: email + job role +
+ *                                         permission, CSV import; skippable)
+ *   9. review      → ReviewStep          (AI-drafted business context — read,
+ *                                         edit, accept → define metrics)
  *
- * The previous 6-step flow's `business-info` split into company/product/
- * metrics; the old early name-only `workspace` step was folded away and the
- * slug now names the NEW closing create-your-workspace step; the onboarding
- * `business-context` review step moved to Settings (the auto-draft still runs
- * in the background).
+ * After step 9 the UNNUMBERED define-metrics sub-flow (route
+ * /onboarding/define-metrics, no progress dots — like the your-name gate)
+ * confirms a definition + analytics mapping per picked metric, reviews them,
+ * and "generate knowledge graph" COMPLETES onboarding + kicks the first brief.
+ *
+ * Retired in v6: api-key (settings-only — Settings → Admin) and workspace
+ * (the default workspace stays "Default"; renameable in Settings →
+ * Workspaces). Step-5 team NAME is a company field, not the workspaces row.
  *
  * `onboarding_step` (the integer DB column) is the 1-based INDEX into this
  * array. Use `slugForStep` / `stepForSlug` to convert, and `clampStep` to keep
@@ -261,11 +312,12 @@ export const ONBOARDING_STEP_SLUGS = [
   "company",
   "product",
   "metrics",
-  "api-key",
   "connectors",
   "team",
   "strategy",
-  "workspace",
+  "decisions",
+  "invite",
+  "review",
 ] as const
 
 export type OnboardingStepSlug = (typeof ONBOARDING_STEP_SLUGS)[number]
@@ -375,6 +427,24 @@ export function parseCompanyToneVoice(raw: unknown): CompanyToneVoice {
     tone: str(o.tone),
     colors: Array.isArray(o.colors) ? o.colors.map(String).filter(Boolean) : [],
   }
+}
+
+/** Parse companies.metric_definitions jsonb (unknown/legacy shapes → []). */
+export function parseMetricDefinitions(raw: unknown): MetricDefinition[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .map((m) => {
+      const o = m && typeof m === "object" ? (m as Record<string, unknown>) : {}
+      const metric = typeof o.metric === "string" ? o.metric.trim() : ""
+      return {
+        metric,
+        definition: typeof o.definition === "string" ? o.definition : "",
+        mapping: typeof o.mapping === "string" ? o.mapping : "",
+        baseline:
+          typeof o.baseline === "string" && o.baseline.trim() ? o.baseline : null,
+      }
+    })
+    .filter((m) => m.metric.length > 0)
 }
 
 export function parseDesignSourcePreference(raw: unknown): DesignSourcePreference | null {

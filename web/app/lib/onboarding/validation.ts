@@ -47,11 +47,9 @@ export function requireText(
 }
 
 /**
- * Account-type branching (registration spec 2026-07): starred fields are
- * mandatory for COMPANY accounts only. Wrap a check in this so PERSONAL
- * accounts sail through — the check is forced valid, never blocking Continue.
- * Callers derive `isCompany` from the profile's account_type, treating a
- * missing value as "company" (the strict interpretation).
+ * @deprecated Onboarding v6 (2026-07-17) retired the company/personal split —
+ * starred fields are mandatory for everyone, so steps use plain checks now.
+ * Kept only so stale imports fail loudly at review rather than at runtime.
  */
 export function requiredFor(isCompany: boolean, check: FieldCheck): FieldCheck {
   return isCompany ? check : { ...check, valid: true }

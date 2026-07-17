@@ -49,9 +49,11 @@ export type SignUpInput = {
   lastName: string
   /** v4 page 03 "about you" — optional self-reported role. */
   role?: string
-  /** The explicit signup choice: "company" (starred onboarding fields are
-   *  mandatory) or "personal" (everything skippable). Persisted to
-   *  profiles.account_type by the handle_new_user trigger. */
+  /** "Your priorities — what you're focused on right now" (v6 about-you).
+   *  Persisted to profiles.priorities by the handle_new_user trigger. */
+  priorities?: string
+  /** Legacy signup choice — the v6 flow always sends "company" (the
+   *  company/personal split is retired from the UI). */
   accountType?: "company" | "personal"
   /** IANA timezone (e.g. "America/New_York"). Optional override; when absent we
    *  auto-detect from the browser so the weekly brief fires Monday 06:00 local. */
@@ -165,6 +167,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             first_name: input.firstName.trim(),
             last_name: input.lastName.trim(),
             ...(input.role?.trim() ? { role: input.role.trim() } : {}),
+            ...(input.priorities?.trim() ? { priorities: input.priorities.trim() } : {}),
             ...(input.accountType ? { account_type: input.accountType } : {}),
             ...(timezone ? { timezone } : {}),
           },

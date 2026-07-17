@@ -28,7 +28,7 @@ import { SettingsMessage, SettingsSection } from "./SettingsLayout"
 const ROLES = ["admin", "member", "viewer"] as const
 
 export function WorkspacesSettings() {
-  const { workspaces, activeWorkspace, profile, refresh } = useWorkspace()
+  const { workspaces, activeWorkspace, orgRole, profile, refresh } = useWorkspace()
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
@@ -126,7 +126,9 @@ export function WorkspacesSettings() {
     [profileDisplayName(profile ?? null, profile?.email), profile?.email]
       .filter(Boolean)
       .join(" · ") || null
-  const canCreate = (activeWorkspace?.role ?? "member") === "admin"
+  // Workspace creation is ORG owner/admin only (backend-enforced) — a
+  // workspace-level admin who is a plain org member doesn't get the button.
+  const canCreate = orgRole === "owner" || orgRole === "admin"
 
   return (
     <div className="pset">

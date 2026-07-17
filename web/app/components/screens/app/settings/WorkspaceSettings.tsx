@@ -11,34 +11,35 @@ import {
   upsertPrimaryProduct,
 } from "../../../../lib/onboarding/store"
 import {
-  BUSINESS_TYPES,
-  INDUSTRIES,
-  MATURITY_OPTIONS,
   MONETIZATION_OPTIONS,
-  STAGES,
   SURFACE_OPTIONS,
-  TECH_STACK_OPTIONS,
 } from "../../../../lib/onboarding/types"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
 const WORKSPACE_FORM_ID = "pset-workspace-form"
 
+/**
+ * Product & Category pane — mirrors onboarding v6 step 2 (product name,
+ * website, surfaces, monetization, users, competitors) plus the two
+ * deliberately Settings-only product fields the wizard points here for:
+ * product position, and ongoing competitor upkeep. Company name rides along
+ * (it anchors the workspace).
+ *
+ * Pruned in v6 (no longer collected anywhere): industry / stage / business
+ * type / team size / tech stack / personas / product state — the columns
+ * survive and the research agents still infer industry & business type from
+ * the website analysis.
+ */
+
 type WorkspaceFields = {
   companyName: string
   productName: string
   productWebsite: string
-  industry: string
-  industryOther: string
-  stage: string
-  businessType: string
-  teamSize: string
-  techStack: string[]
   competitors: string
   surfaces: string[]
-  personas: string
+  usersDescription: string
   positioning: string
-  monetization: string[]
-  maturity: string
+  monetization: string
 }
 
 export function WorkspaceSettings() {
@@ -50,18 +51,11 @@ export function WorkspaceSettings() {
   const [companyName, setCompanyName] = useState("")
   const [productName, setProductName] = useState("")
   const [productWebsite, setProductWebsite] = useState("")
-  const [industry, setIndustry] = useState("B2B SaaS")
-  const [industryOther, setIndustryOther] = useState("")
-  const [stage, setStage] = useState("Growth")
-  const [businessType, setBusinessType] = useState("SaaS")
-  const [teamSize, setTeamSize] = useState("")
-  const [techStack, setTechStack] = useState<string[]>([])
   const [competitors, setCompetitors] = useState("")
   const [surfaces, setSurfaces] = useState<string[]>([])
-  const [personas, setPersonas] = useState("")
+  const [usersDescription, setUsersDescription] = useState("")
   const [positioning, setPositioning] = useState("")
-  const [monetization, setMonetization] = useState<string[]>([])
-  const [maturity, setMaturity] = useState("")
+  const [monetization, setMonetization] = useState("")
   // The last loaded/saved values — "Discard" restores these, and any deviation
   // from them arms the Save/Discard actions in the top bar.
   const [snapshot, setSnapshot] = useState<WorkspaceFields | null>(null)
@@ -72,34 +66,20 @@ export function WorkspaceSettings() {
       companyName: workspace.display_name,
       productName: workspace.product?.name ?? "",
       productWebsite: workspace.product?.website ?? "",
-      industry: workspace.industry ?? "B2B SaaS",
-      industryOther: "",
-      stage: workspace.stage ?? "Growth",
-      businessType: workspace.business_type ?? "SaaS",
-      teamSize: workspace.team_size ? String(workspace.team_size) : "",
-      techStack: workspace.tech_stack ?? [],
       competitors: (workspace.competitors ?? []).join(", "),
       surfaces: workspace.product?.surfaces ?? [],
-      personas: (workspace.product?.personas ?? []).join(", "),
+      usersDescription: workspace.product?.users_description ?? "",
       positioning: workspace.product?.positioning ?? "",
-      monetization: workspace.product?.monetization ?? [],
-      maturity: workspace.product?.maturity ?? "",
+      monetization: workspace.product?.monetization?.[0] ?? "",
     }
     setCompanyName(loaded.companyName)
     setProductName(loaded.productName)
     setProductWebsite(loaded.productWebsite)
-    setIndustry(loaded.industry)
-    setIndustryOther(loaded.industryOther)
-    setStage(loaded.stage)
-    setBusinessType(loaded.businessType)
-    setTeamSize(loaded.teamSize)
-    setTechStack(loaded.techStack)
     setCompetitors(loaded.competitors)
     setSurfaces(loaded.surfaces)
-    setPersonas(loaded.personas)
+    setUsersDescription(loaded.usersDescription)
     setPositioning(loaded.positioning)
     setMonetization(loaded.monetization)
-    setMaturity(loaded.maturity)
     setSnapshot(loaded)
   }, [workspace])
 
@@ -108,40 +88,24 @@ export function WorkspaceSettings() {
     (companyName !== snapshot.companyName ||
       productName !== snapshot.productName ||
       productWebsite !== snapshot.productWebsite ||
-      industry !== snapshot.industry ||
-      industryOther !== snapshot.industryOther ||
-      stage !== snapshot.stage ||
-      businessType !== snapshot.businessType ||
-      teamSize !== snapshot.teamSize ||
-      techStack.join(" ") !== snapshot.techStack.join(" ") ||
       competitors !== snapshot.competitors ||
       surfaces.join(" ") !== snapshot.surfaces.join(" ") ||
-      personas !== snapshot.personas ||
+      usersDescription !== snapshot.usersDescription ||
       positioning !== snapshot.positioning ||
-      monetization.join(" ") !== snapshot.monetization.join(" ") ||
-      maturity !== snapshot.maturity)
+      monetization !== snapshot.monetization)
 
   function onDiscard() {
     if (!snapshot) return
     setCompanyName(snapshot.companyName)
     setProductName(snapshot.productName)
     setProductWebsite(snapshot.productWebsite)
-    setIndustry(snapshot.industry)
-    setIndustryOther(snapshot.industryOther)
-    setStage(snapshot.stage)
-    setBusinessType(snapshot.businessType)
-    setTeamSize(snapshot.teamSize)
-    setTechStack(snapshot.techStack)
     setCompetitors(snapshot.competitors)
     setSurfaces(snapshot.surfaces)
-    setPersonas(snapshot.personas)
+    setUsersDescription(snapshot.usersDescription)
     setPositioning(snapshot.positioning)
     setMonetization(snapshot.monetization)
-    setMaturity(snapshot.maturity)
     setError(null)
   }
-
-  const resolvedIndustry = industry === "Other" ? industryOther.trim() : industry
 
   async function onSave(e: React.FormEvent) {
     e.preventDefault()
@@ -157,33 +121,22 @@ export function WorkspaceSettings() {
     try {
       await updateWorkspace(workspace.id, {
         display_name: companyName.trim(),
-        industry: resolvedIndustry,
-        stage,
-        business_type: businessType,
-        team_size: teamSize ? Number(teamSize) : null,
-        tech_stack: techStack,
         competitors: competitors
           .split(",")
           .map((s) => s.trim())
-          .filter(Boolean)
-          .slice(0, 5),
+          .filter(Boolean),
       })
       await upsertPrimaryProduct(workspace.id, {
         name: productName.trim(),
         website: normalizeProductWebsite(productWebsite),
         surfaces,
-        personas: personas
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean),
         positioning: positioning.trim() || null,
-        monetization,
-        maturity: maturity || null,
+        monetization: monetization ? [monetization] : [],
+        usersDescription: usersDescription.trim() || null,
       })
       setSnapshot({
-        companyName, productName, productWebsite, industry, industryOther,
-        stage, businessType, teamSize, techStack, competitors,
-        surfaces, personas, positioning, monetization, maturity,
+        companyName, productName, productWebsite, competitors,
+        surfaces, usersDescription, positioning, monetization,
       })
       setSaved(true)
       await refresh()
@@ -276,94 +229,21 @@ export function WorkspaceSettings() {
               />
             </div>
             <div className="pset-field">
-              <label className="pset-label" htmlFor="ws-industry">Industry</label>
+              <label className="pset-label" htmlFor="ws-monetization">Monetization</label>
               <select
-                id="ws-industry"
+                id="ws-monetization"
                 className="input"
-                value={industry}
-                onChange={(e) => setIndustry(e.target.value)}
+                value={monetization}
+                onChange={(e) => setMonetization(e.target.value)}
               >
-                {INDUSTRIES.map((i) => (
-                  <option key={i}>{i}</option>
-                ))}
-              </select>
-              {industry === "Other" && (
-                <input
-                  className="input"
-                  style={{ marginTop: 8 }}
-                  value={industryOther}
-                  onChange={(e) => setIndustryOther(e.target.value)}
-                />
-              )}
-            </div>
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="ws-stage">Stage</label>
-              <select
-                id="ws-stage"
-                className="input"
-                value={stage}
-                onChange={(e) => setStage(e.target.value)}
-              >
-                {STAGES.map((s) => (
-                  <option key={s}>{s}</option>
+                <option value="">Not set</option>
+                {MONETIZATION_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
                 ))}
               </select>
             </div>
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="ws-business-type">Business type</label>
-              <select
-                id="ws-business-type"
-                className="input"
-                value={businessType}
-                onChange={(e) => setBusinessType(e.target.value)}
-              >
-                {BUSINESS_TYPES.map((b) => (
-                  <option key={b}>{b}</option>
-                ))}
-              </select>
-            </div>
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="ws-team-size">Team size</label>
-              <input
-                id="ws-team-size"
-                type="number"
-                className="input"
-                min={1}
-                value={teamSize}
-                onChange={(e) => setTeamSize(e.target.value)}
-              />
-            </div>
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="ws-competitors">Primary competitors</label>
-              <input
-                id="ws-competitors"
-                className="input"
-                value={competitors}
-                onChange={(e) => setCompetitors(e.target.value)}
-                placeholder="Up to 5, comma-separated"
-              />
-            </div>
-            <div className="pset-field pset-field--full">
-              <label className="pset-label">Tech stack</label>
-              <div className="ob-chip-row">
-                {TECH_STACK_OPTIONS.map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    className={`metric-chip ${techStack.includes(t) ? "selected" : ""}`}
-                    onClick={() =>
-                      setTechStack((prev) =>
-                        prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t],
-                      )
-                    }
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Registration-spec (2026-07) product fields. */}
             <div className="pset-field pset-field--full">
               <label className="pset-label">Surfaces</label>
               <div className="ob-chip-row">
@@ -386,51 +266,26 @@ export function WorkspaceSettings() {
               </div>
             </div>
             <div className="pset-field pset-field--full">
-              <label className="pset-label">Monetization</label>
-              <div className="ob-chip-row">
-                {MONETIZATION_OPTIONS.map((opt) => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    className={`metric-chip ${monetization.includes(opt.value) ? "selected" : ""}`}
-                    onClick={() =>
-                      setMonetization((prev) =>
-                        prev.includes(opt.value)
-                          ? prev.filter((x) => x !== opt.value)
-                          : [...prev, opt.value],
-                      )
-                    }
-                  >
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="ws-personas">User personas</label>
-              <input
-                id="ws-personas"
+              <label className="pset-label" htmlFor="ws-users">Your users</label>
+              <textarea
+                id="ws-users"
                 className="input"
-                value={personas}
-                onChange={(e) => setPersonas(e.target.value)}
-                placeholder="Comma-separated, e.g. Growth PM, Support lead"
+                rows={3}
+                value={usersDescription}
+                onChange={(e) => setUsersDescription(e.target.value)}
+                maxLength={1000}
+                placeholder="Who your users or customers are, in your own words"
               />
             </div>
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="ws-maturity">Product state</label>
-              <select
-                id="ws-maturity"
+            <div className="pset-field pset-field--full">
+              <label className="pset-label" htmlFor="ws-competitors">Competitors</label>
+              <input
+                id="ws-competitors"
                 className="input"
-                value={maturity}
-                onChange={(e) => setMaturity(e.target.value)}
-              >
-                <option value="">Not set</option>
-                {MATURITY_OPTIONS.map((m) => (
-                  <option key={m.value} value={m.value}>
-                    {m.label}
-                  </option>
-                ))}
-              </select>
+                value={competitors}
+                onChange={(e) => setCompetitors(e.target.value)}
+                placeholder="Comma-separated, e.g. Apple Health, Fitbit, Oura"
+              />
             </div>
             <div className="pset-field pset-field--full">
               <label className="pset-label" htmlFor="ws-positioning">Product position</label>

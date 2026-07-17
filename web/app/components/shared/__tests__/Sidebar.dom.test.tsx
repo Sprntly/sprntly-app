@@ -44,6 +44,9 @@ let workspacesState: Array<{
   role: string
 }> = []
 let activeWorkspaceState: (typeof workspacesState)[number] | null = null
+// Company-level role — workspace creation gates on THIS, not the
+// per-workspace effective role each summary row carries.
+let orgRoleState: string | null = null
 
 vi.mock("../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
@@ -52,6 +55,7 @@ vi.mock("../../../context/WorkspaceContext", () => ({
     workspace: null,
     workspaces: workspacesState,
     activeWorkspace: activeWorkspaceState,
+    orgRole: orgRoleState,
     setActiveWorkspace,
     refresh: vi.fn(),
   }),
@@ -67,6 +71,7 @@ beforeEach(() => {
   sidebarCollapsed = true
   workspacesState = []
   activeWorkspaceState = null
+  orgRoleState = null
 })
 afterEach(() => cleanup())
 
@@ -141,6 +146,7 @@ describe("Sidebar — workspace switcher", () => {
       { id: "ws-b", name: "Notifications", slug: "notifications", is_default: false, product_id: null, dataset: "acme--notifications", role: "admin" },
     ]
     activeWorkspaceState = workspacesState[0]
+    orgRoleState = "admin"
     sidebarCollapsed = false
   }
 
@@ -162,7 +168,7 @@ describe("Sidebar — workspace switcher", () => {
     expect(container.querySelector(".sb-ws-menu")).toBeNull()
   })
 
-  it("admins see '+ New workspace'; the trigger is static for a lone non-admin workspace", () => {
+  it("org admins see '+ New workspace'; the trigger is static for a lone non-admin workspace", () => {
     twoWorkspaces()
     render(React.createElement(Sidebar))
     fireEvent.click(screen.getByTestId("workspace-switcher"))
@@ -173,10 +179,28 @@ describe("Sidebar — workspace switcher", () => {
       { id: "ws-a", name: "Acme App", slug: "default", is_default: true, product_id: null, dataset: "acme", role: "member" },
     ]
     activeWorkspaceState = workspacesState[0]
+    orgRoleState = "member"
     const { container } = render(React.createElement(Sidebar))
     expect(
       container.querySelector(".sb-ws-trigger--static"),
     ).toBeTruthy()
+  })
+
+  it("a WORKSPACE-level admin who is a plain org member gets no create button (org-admin gated)", () => {
+    twoWorkspaces()
+    // Effective role on the rows is admin, but the company-level role is not.
+    orgRoleState = "member"
+    render(React.createElement(Sidebar))
+    fireEvent.click(screen.getByTestId("workspace-switcher"))
+    expect(screen.queryByText("+ New workspace")).toBeNull()
+  })
+
+  it("an org OWNER sees the create button (owner ⊇ admin)", () => {
+    twoWorkspaces()
+    orgRoleState = "owner"
+    render(React.createElement(Sidebar))
+    fireEvent.click(screen.getByTestId("workspace-switcher"))
+    expect(screen.getByText("+ New workspace")).toBeTruthy()
   })
 })
 

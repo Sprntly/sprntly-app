@@ -7,6 +7,7 @@ import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
+import { ONBOARDING_STEP_COUNT } from "../../../lib/onboarding/types"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedSignal"
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
@@ -45,7 +46,8 @@ const CATEGORY_DESCRIPTIONS: Record<string, string> = {
   analytics: "Product behaviour & cohort data — powers your brief",
   pm: "Roadmap, sprints, capacity",
   docs: "Specs, docs & wikis — product context the agent can read",
-  voice: "Tickets, transcripts, NPS, CSAT",
+  voice: "Tickets, transcripts, reviews, NPS, CSAT",
+  crm: "Accounts, pipeline, lifecycle & revenue signals",
   revenue: "Billing & subscription data — ties work to revenue",
   code: "Repos & PRs — so the agent reads real code and ships fixes",
   monitoring: "Error tracking, APM, paging — powers the On-Call agent",
@@ -88,6 +90,14 @@ const CATEGORY_ICONS: Record<string, (props: SVGProps<SVGSVGElement>) => ReactEl
   voice: (p) => (
     <svg {...iconProps(p)}>
       <path d="M3 20l1.3-3.9A8 8 0 1 1 7.9 19z" />
+    </svg>
+  ),
+  crm: (p) => (
+    <svg {...iconProps(p)}>
+      <circle cx="9" cy="7" r="3" />
+      <path d="M4 21v-2a4 4 0 0 1 4-4h2a4 4 0 0 1 4 4v2" />
+      <path d="M16 3.9a3 3 0 0 1 0 6.2" />
+      <path d="M21 21v-2a4 4 0 0 0-3-3.85" />
     </svg>
   ),
   revenue: (p) => (
@@ -169,9 +179,8 @@ function ArrowDownIcon(props: SVGProps<SVGSVGElement>) {
 
 export function Connectors() {
   const auth = useAuth()
-  const { workspace, profile, setWorkspace, loading } = useOnboarding()
+  const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
-  const isCompany = (profile?.account_type ?? "company") === "company"
   // Accordion state: which categories are done/skipped + which is expanded.
   const [doneCats, setDoneCats] = useState<Set<number>>(new Set())
   const [openCat, setOpenCat] = useState<number | null>(0)
@@ -259,15 +268,27 @@ export function Connectors() {
     setOpenCat(firstIncompleteCategory(nextDone, categories.length))
   }
 
-  async function go(skipped: boolean) {
+  async function go() {
     if (!workspace || auth.kind !== "authed") return
     setSaving(true)
     try {
-      if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
-      // Next numbered step is team (index 6 in ONBOARDING_STEP_SLUGS).
-      const updated = await advanceOnboardingStep(workspace.id, 6)
+      // Next numbered step is team (index 5 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 5)
       setWorkspace(updated)
       router.push("/onboarding/team")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function skipToEnd() {
+    if (!workspace || auth.kind !== "authed") return
+    setSaving(true)
+    try {
+      await markSkippedFields(auth.user.id, ["connectors"])
+      const updated = await advanceOnboardingStep(workspace.id, ONBOARDING_STEP_COUNT)
+      setWorkspace(updated)
+      router.push("/onboarding/review")
     } finally {
       setSaving(false)
     }
@@ -291,39 +312,23 @@ export function Connectors() {
 
   return (
     <OnboardingChrome
-      step={5}
+      step={4}
       saveLabel="Saved · auto-saves"
       title={
         <>
           Connect your <em>tools.</em>
         </>
       }
-      subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next."
+      subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
       footerMeta={
-        isCompany ? (
-          hasLiveConnection ? (
-            `${selectedCount} connector${selectedCount === 1 ? "" : "s"} selected — ready to continue`
-          ) : (
-            "Connect at least one source to continue — it's what your briefs are built from."
-          )
-        ) : (
-          <>
-            {selectedCount} connector{selectedCount === 1 ? "" : "s"} selected ·
-            all optional —{" "}
-            <button
-              type="button"
-              className="onb-skip-link"
-              onClick={() => go(true)}
-              disabled={saving}
-            >
-              Connect later
-            </button>
-          </>
-        )
+        hasLiveConnection
+          ? `${selectedCount} connector${selectedCount === 1 ? "" : "s"} selected — ready to continue`
+          : "Connect at least one source to continue — it's what your briefs are built from."
       }
-      onBack={() => router.push("/onboarding/api-key")}
-      onContinue={() => go(false)}
-      continueDisabled={saving || (isCompany && !hasLiveConnection)}
+      onBack={() => router.push("/onboarding/metrics")}
+      onContinue={() => void go()}
+      onSkipToEnd={() => void skipToEnd()}
+      continueDisabled={saving || !hasLiveConnection}
       loading={saving}
     >
       <div className="conn-steps">

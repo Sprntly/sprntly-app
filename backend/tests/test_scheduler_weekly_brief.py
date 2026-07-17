@@ -12,7 +12,7 @@ unit-tested in test_brief_schedule.py.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
@@ -167,6 +167,73 @@ def test_tick_honors_custom_schedule_from_notification_settings():
     assert generated == ["acme"]
     assert delivered == []
     assert exact == [("acme", datetime(2026, 6, 10, 15, 0, tzinfo=UTC))]
+
+
+def test_tick_recurs_across_consecutive_weeks_honoring_custom_minute():
+    """The brief recurs EVERY week at the exact user-configured instant:
+    generation 3h before each week's fire, delivery at each week's fire, and
+    week N's ledgers never suppress week N+1. Uses a non-zero brief_minute
+    (Wednesday 15:45) to pin the minute, and an owner timezone that differs
+    from notification_settings.timezone to pin the settings-tz precedence."""
+    from app import scheduler as sched_mod
+
+    companies = [{
+        "id": "co-x", "slug": "acme", "owner_timezone": "America/New_York",
+        "notification_settings": {
+            "brief_weekday": 2, "brief_hour": 15, "brief_minute": 45,
+            "timezone": "UTC",
+        },
+    }]
+
+    # Week 1, Wednesday 2026-06-10 12:45 UTC = fire (15:45) − 3h: generate and
+    # register the one-shot for the exact fire instant; deliver nothing yet.
+    generated, delivered, exact = _run_tick(
+        datetime(2026, 6, 10, 12, 45, tzinfo=UTC), companies)
+    assert (generated, delivered) == (["acme"], [])
+    assert exact == [("acme", datetime(2026, 6, 10, 15, 45, tzinfo=UTC))]
+    fire_w1 = exact[0][1]
+
+    # Week 1 fire instant: the fallback delivers (no real one-shot job in
+    # tests); its catch-up generation before delivering is by design.
+    generated, delivered, exact = _run_tick(fire_w1, companies)
+    assert (generated, delivered, exact) == (["acme"], ["acme"], [])
+
+    # Mid-cycle Saturday: nothing runs between weeks.
+    assert _run_tick(
+        datetime(2026, 6, 13, 12, 45, tzinfo=UTC), companies) == ([], [], [])
+
+    # Week 2, Wednesday 2026-06-17: last week's ledgers do NOT suppress this
+    # cycle — generation is due again 3h before the new fire...
+    generated, delivered, exact = _run_tick(
+        datetime(2026, 6, 17, 12, 45, tzinfo=UTC), companies)
+    assert (generated, delivered) == (["acme"], [])
+    assert exact == [("acme", datetime(2026, 6, 17, 15, 45, tzinfo=UTC))]
+    fire_w2 = exact[0][1]
+
+    # ...and delivery fires again at week 2's exact instant.
+    generated, delivered, exact = _run_tick(fire_w2, companies)
+    assert (generated, delivered, exact) == (["acme"], ["acme"], [])
+    assert sched_mod._last_brief_delivery["co-x"] == fire_w2
+
+    # The two fire instants are the same local schedule, exactly a week apart.
+    assert fire_w2 - fire_w1 == timedelta(days=7)
+    assert fire_w1.minute == fire_w2.minute == 45
+    assert fire_w1.weekday() == fire_w2.weekday() == 2  # Wednesday
+
+
+def test_tick_dead_zone_between_generation_window_and_fire_does_nothing():
+    """After the generation window closes (fire − 2h) and right up to the last
+    minute before the fire, the tick neither generates nor delivers — delivery
+    happens AT the configured time, never early. Complements
+    test_tick_defaults_missing_timezone_to_utc (past the delivery window) and
+    test_delivery_fallback_fires_at_the_configured_time (at the fire itself)."""
+    companies = [{"id": "co-x", "slug": "initech", "owner_timezone": None}]
+    # Default schedule Monday 06:00 UTC: gen window [03:00, 04:00], fire 06:00.
+    for now in (
+        datetime(2026, 6, 8, 4, 30, tzinfo=UTC),  # dead zone
+        datetime(2026, 6, 8, 5, 59, tzinfo=UTC),  # fire − 1 minute
+    ):
+        assert _run_tick(now, companies) == ([], [], [])
 
 
 def test_tick_off_schedule_does_nothing():
@@ -351,3 +418,57 @@ def test_deliver_weekly_brief_pushes_current_brief():
             sched_mod._deliver_weekly_brief_for_company("co-1", "acme"))
     assert ok is False
     push.assert_not_called()
+
+
+# ── the exact-time one-shot job, against a real APScheduler ──────────────────
+
+
+def test_delivery_pending_false_and_schedule_noop_without_scheduler(monkeypatch):
+    """Without a running APScheduler (tests / manual invocation) the pending
+    check is False and registering an exact delivery is a silent no-op — the
+    tick's post-fire fallback owns delivery then."""
+    from app import scheduler as sched_mod
+
+    monkeypatch.setattr(sched_mod, "_scheduler", None)
+    assert sched_mod._delivery_job_pending("ws-1") is False
+    sched_mod._schedule_exact_delivery(
+        "co-1", "acme", datetime(2030, 1, 7, 6, 0, tzinfo=UTC),
+        ledger_key="ws-1")
+    assert sched_mod._delivery_job_pending("ws-1") is False
+
+
+async def test_schedule_exact_delivery_registers_one_shot_on_real_apscheduler():
+    """_schedule_exact_delivery registers a real one-shot DateTrigger job AT
+    the exact fire instant (per-workspace id, misfire grace, replace_existing)
+    and _delivery_job_pending sees it — the seam every tick test mocks, closed
+    against a real (paused, so never executing) scheduler."""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from app import scheduler as sched_mod
+
+    s = AsyncIOScheduler()
+    s.start(paused=True)  # real jobstore writes, nothing ever executes
+    sched_mod._scheduler = s
+    try:
+        fire1 = datetime(2030, 1, 7, 6, 0, tzinfo=UTC)
+        sched_mod._schedule_exact_delivery(
+            "co-1", "acme", fire1, ledger_key="ws-1")
+
+        job = s.get_job("weekly_brief_delivery_ws-1")
+        assert job is not None
+        assert job.trigger.run_date == fire1  # exactly AT the fire instant
+        assert job.misfire_grace_time == 3600  # busy loop delays, never drops
+        assert job.args == ("co-1", "acme", fire1, "ws-1")
+        assert sched_mod._delivery_job_pending("ws-1") is True
+        assert sched_mod._delivery_job_pending("ws-other") is False  # per-ws
+
+        # Re-generation inside one window REPLACES the one-shot (no dupes).
+        fire2 = fire1 + timedelta(minutes=30)
+        sched_mod._schedule_exact_delivery(
+            "co-1", "acme", fire2, ledger_key="ws-1")
+        jobs = s.get_jobs()
+        assert [j.id for j in jobs] == ["weekly_brief_delivery_ws-1"]
+        assert jobs[0].trigger.run_date == fire2
+    finally:
+        sched_mod._scheduler = None  # every other test assumes no scheduler
+        s.shutdown(wait=False)

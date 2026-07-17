@@ -8,24 +8,17 @@ import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLay
 const FORM_ID = "pset-company-profile-form"
 
 /**
- * Settings → Company Profile (registration spec 2026-07).
- *
- * The Company-section fields that are settings-only (blue in the spec) plus
- * the optional onboarding ones: mission, strategy, portfolio, ICP (segment /
- * buyer persona / buyer), and tone & voice (brand, tone, colors). Saved to
- * first-class companies columns (+ icp / tone_voice jsonb) via updateWorkspace.
+ * Settings → Company Profile — mirrors onboarding v6 step 1's company fields:
+ * mission & vision, strategy / OKRs, and portfolio (planning cycle lives in
+ * Process & Planning). Saved to first-class companies columns via
+ * updateWorkspace. The ICP and tone & voice editors were pruned in v6 — the
+ * flow no longer collects them and nothing downstream consumed them.
  */
 
 type Fields = {
   mission: string
   strategy: string
   portfolio: string
-  icpSegment: string
-  icpBuyerPersona: string
-  icpBuyer: string
-  toneBrand: string
-  toneTone: string
-  toneColors: string
 }
 
 export function CompanyProfileSettings() {
@@ -37,12 +30,6 @@ export function CompanyProfileSettings() {
   const [mission, setMission] = useState("")
   const [strategy, setStrategy] = useState("")
   const [portfolio, setPortfolio] = useState("")
-  const [icpSegment, setIcpSegment] = useState("")
-  const [icpBuyerPersona, setIcpBuyerPersona] = useState("")
-  const [icpBuyer, setIcpBuyer] = useState("")
-  const [toneBrand, setToneBrand] = useState("")
-  const [toneTone, setToneTone] = useState("")
-  const [toneColors, setToneColors] = useState("")
   const [snapshot, setSnapshot] = useState<Fields | null>(null)
 
   useEffect(() => {
@@ -51,29 +38,14 @@ export function CompanyProfileSettings() {
       mission: workspace.mission ?? "",
       strategy: workspace.strategy ?? "",
       portfolio: workspace.portfolio ?? "",
-      icpSegment: workspace.icp.segment ?? "",
-      icpBuyerPersona: workspace.icp.buyer_persona ?? "",
-      icpBuyer: workspace.icp.buyer ?? "",
-      toneBrand: workspace.tone_voice.brand ?? "",
-      toneTone: workspace.tone_voice.tone ?? "",
-      toneColors: workspace.tone_voice.colors.join(", "),
     }
     setMission(loaded.mission)
     setStrategy(loaded.strategy)
     setPortfolio(loaded.portfolio)
-    setIcpSegment(loaded.icpSegment)
-    setIcpBuyerPersona(loaded.icpBuyerPersona)
-    setIcpBuyer(loaded.icpBuyer)
-    setToneBrand(loaded.toneBrand)
-    setToneTone(loaded.toneTone)
-    setToneColors(loaded.toneColors)
     setSnapshot(loaded)
   }, [workspace])
 
-  const current: Fields = {
-    mission, strategy, portfolio, icpSegment, icpBuyerPersona, icpBuyer,
-    toneBrand, toneTone, toneColors,
-  }
+  const current: Fields = { mission, strategy, portfolio }
   const dirty =
     snapshot != null &&
     (Object.keys(current) as (keyof Fields)[]).some((k) => current[k] !== snapshot[k])
@@ -83,12 +55,6 @@ export function CompanyProfileSettings() {
     setMission(snapshot.mission)
     setStrategy(snapshot.strategy)
     setPortfolio(snapshot.portfolio)
-    setIcpSegment(snapshot.icpSegment)
-    setIcpBuyerPersona(snapshot.icpBuyerPersona)
-    setIcpBuyer(snapshot.icpBuyer)
-    setToneBrand(snapshot.toneBrand)
-    setToneTone(snapshot.toneTone)
-    setToneColors(snapshot.toneColors)
     setError(null)
   }
 
@@ -103,19 +69,6 @@ export function CompanyProfileSettings() {
         mission: mission.trim() || null,
         strategy: strategy.trim() || null,
         portfolio: portfolio.trim() || null,
-        icp: {
-          segment: icpSegment.trim() || null,
-          buyer_persona: icpBuyerPersona.trim() || null,
-          buyer: icpBuyer.trim() || null,
-        },
-        tone_voice: {
-          brand: toneBrand.trim() || null,
-          tone: toneTone.trim() || null,
-          colors: toneColors
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean),
-        },
       })
       setSnapshot(current)
       setSaved(true)
@@ -188,11 +141,11 @@ export function CompanyProfileSettings() {
                 value={mission}
                 onChange={(e) => setMission(e.target.value)}
                 maxLength={500}
-                placeholder="Why the company exists"
+                placeholder="Why the company exists — mission and vision"
               />
             </div>
             <div className="pset-field pset-field--full">
-              <label className="pset-label" htmlFor="cp-strategy">Strategy</label>
+              <label className="pset-label" htmlFor="cp-strategy">Strategy / OKRs</label>
               <textarea
                 id="cp-strategy"
                 className="input"
@@ -200,7 +153,7 @@ export function CompanyProfileSettings() {
                 value={strategy}
                 onChange={(e) => setStrategy(e.target.value)}
                 maxLength={500}
-                placeholder="How you plan to win"
+                placeholder="How you plan to win — current strategy and OKRs"
               />
             </div>
             <div className="pset-field pset-field--full">
@@ -216,72 +169,6 @@ export function CompanyProfileSettings() {
               />
             </div>
 
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="cp-icp-segment">ICP · Segment</label>
-              <input
-                id="cp-icp-segment"
-                className="input"
-                value={icpSegment}
-                onChange={(e) => setIcpSegment(e.target.value)}
-                maxLength={200}
-                placeholder="e.g. Mid-market B2B SaaS"
-              />
-            </div>
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="cp-icp-persona">ICP · Buyer persona</label>
-              <input
-                id="cp-icp-persona"
-                className="input"
-                value={icpBuyerPersona}
-                onChange={(e) => setIcpBuyerPersona(e.target.value)}
-                maxLength={200}
-                placeholder="e.g. Head of Product"
-              />
-            </div>
-            <div className="pset-field pset-field--full">
-              <label className="pset-label" htmlFor="cp-icp-buyer">ICP · Who is the buyer</label>
-              <input
-                id="cp-icp-buyer"
-                className="input"
-                value={icpBuyer}
-                onChange={(e) => setIcpBuyer(e.target.value)}
-                maxLength={200}
-                placeholder="Who signs off on the purchase"
-              />
-            </div>
-
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="cp-tone-brand">Tone &amp; Voice · Brand</label>
-              <input
-                id="cp-tone-brand"
-                className="input"
-                value={toneBrand}
-                onChange={(e) => setToneBrand(e.target.value)}
-                maxLength={200}
-                placeholder="Brand personality in a phrase"
-              />
-            </div>
-            <div className="pset-field">
-              <label className="pset-label" htmlFor="cp-tone-tone">Tone &amp; Voice · Tone</label>
-              <input
-                id="cp-tone-tone"
-                className="input"
-                value={toneTone}
-                onChange={(e) => setToneTone(e.target.value)}
-                maxLength={200}
-                placeholder="e.g. plain-spoken, confident, playful"
-              />
-            </div>
-            <div className="pset-field pset-field--full">
-              <label className="pset-label" htmlFor="cp-tone-colors">Tone &amp; Voice · Colors</label>
-              <input
-                id="cp-tone-colors"
-                className="input"
-                value={toneColors}
-                onChange={(e) => setToneColors(e.target.value)}
-                placeholder="Comma-separated, e.g. #179463, #15201B"
-              />
-            </div>
           </div>
 
           {error && (

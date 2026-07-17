@@ -1,14 +1,16 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 06 — "Your team" (registration
-// spec 2026-07, Team section). Covers: the scope input + prioritization-
-// framework select (options from PRIORITIZATION_FRAMEWORKS) render; COMPANY
-// accounts are blocked on an empty scope (error, no persistence, no
-// navigation); a filled scope + framework persists via updateWorkspace
-// (team_scope + prioritization_framework + onboarding_step 7) and routes to
-// /onboarding/strategy; the optional disclosure reveals the invite inputs and
-// a queued invite is sent through teamApi.invite on Continue; PERSONAL
-// accounts continue with everything empty and record the skipped fields.
+// Container mount test for onboarding step 05 — "Your team" (v6 screenshot
+// spec 2026-07-17). The step is now team name* + scope of work* ONLY: the
+// prioritization framework moved to the metrics step, teammate invites to the
+// invite step (08), and the weekly-brief day to Settings. The team name is a
+// COMPANY field (companies.team_name), not the workspaces row.
+//
+// Covers: the two fields render (no framework select, no invite disclosure);
+// empty fields block Continue (error, no persistence, no navigation); a valid
+// Continue persists via updateWorkspace (team_name + team_scope +
+// onboarding_step 6) and routes to /onboarding/strategy; Back goes to the
+// connectors step; "Skip to end ⇥" persists then jumps to review.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -20,10 +22,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
+const advanceStepMock = vi.fn()
 const updateWorkspaceMock = vi.fn()
-const saveBriefDayMock = vi.fn()
-const markSkippedMock = vi.fn()
-const inviteMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
@@ -31,12 +31,8 @@ vi.mock("../../../../context/OnboardingContext", () => ({
 }))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
+  advanceOnboardingStep: (...a: unknown[]) => advanceStepMock(...a),
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
-  saveNotificationBriefDay: (...a: unknown[]) => saveBriefDayMock(...a),
-  markSkippedFields: (...a: unknown[]) => markSkippedMock(...a),
-}))
-vi.mock("../../../../lib/teamApi", () => ({
-  teamApi: { invite: (...a: unknown[]) => inviteMock(...a) },
 }))
 vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
   saveDraft: vi.fn(),
@@ -45,37 +41,34 @@ vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
 }))
 
 import { TeamStep } from "../TeamStep"
-import { PRIORITIZATION_FRAMEWORKS } from "../../../../lib/onboarding/types"
-import { makeWorkspace, makeOnboardingCtx, makeProfile } from "./fixtures"
+import { ONBOARDING_STEP_COUNT } from "../../../../lib/onboarding/types"
+import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
-function mount(accountType: "company" | "personal" = "company") {
-  onboardingMock.mockReturnValue(
-    makeOnboardingCtx({
-      workspace: makeWorkspace({ onboarding_step: 6 }),
-      profile: makeProfile({ account_type: accountType }),
-    }),
-  )
+function mount(workspace = makeWorkspace({ onboarding_step: 5 })) {
+  onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace }))
   return render(React.createElement(TeamStep))
 }
 
-function scopeInput(): HTMLInputElement {
-  return document.querySelector('input[placeholder="e.g. notifications"]') as HTMLInputElement
+function nameInput(): HTMLInputElement {
+  return document.querySelector(
+    'input[placeholder="e.g. Nutrition & Sleep"]',
+  ) as HTMLInputElement
 }
 
-function frameworkSelect(): HTMLSelectElement {
-  return document.querySelector(
-    'select[aria-label="Prioritization framework"]',
-  ) as HTMLSelectElement
+function scopeTextarea(): HTMLTextAreaElement {
+  return document.querySelector('[data-field="teamScope"] textarea') as HTMLTextAreaElement
 }
 
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
-    /^continue$/i.test((b.textContent ?? "").trim()),
+    /^next$/i.test((b.textContent ?? "").trim()),
   ) as HTMLButtonElement
 }
 
-function openDisclosure() {
-  fireEvent.click(screen.getByText("Invite teammates & pick your brief day"))
+function skipToEndBtn(): HTMLButtonElement {
+  return Array.from(document.querySelectorAll("button")).find((b) =>
+    /Skip to end/.test(b.textContent ?? ""),
+  ) as HTMLButtonElement
 }
 
 beforeEach(() => {
@@ -86,39 +79,66 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("TeamStep (onboarding step 06 — scope + framework + invites)", () => {
-  it("renders the scope input and the framework select with the PRIORITIZATION_FRAMEWORKS options", () => {
-    mount("company")
-    expect(scopeInput()).not.toBeNull()
-    const sel = frameworkSelect()
-    expect(sel).not.toBeNull()
-    const options = Array.from(sel.options)
-    // Placeholder first, then the framework vocabulary in order.
-    expect(options[0].value).toBe("")
-    expect(options.slice(1).map((o) => o.value)).toEqual(
-      PRIORITIZATION_FRAMEWORKS.map((f) => f.value),
-    )
-    expect(options.slice(1).map((o) => o.textContent)).toEqual(
-      PRIORITIZATION_FRAMEWORKS.map((f) => f.label),
-    )
+describe("TeamStep (onboarding step 05 — team name* + scope*)", () => {
+  it("renders ONLY the team-name input and scope textarea — no framework, no invites, no brief day", () => {
+    mount()
+    expect(nameInput()).not.toBeNull()
+    expect(scopeTextarea()).not.toBeNull()
+    // Both fields are starred.
+    expect(
+      (document.querySelector('[data-field="teamName"]') as HTMLElement).querySelector(".req"),
+    ).not.toBeNull()
+    expect(
+      (document.querySelector('[data-field="teamScope"]') as HTMLElement).querySelector(".req"),
+    ).not.toBeNull()
+    // The framework select moved to the metrics step, invites to step 08, the
+    // brief day to Settings.
+    expect(
+      document.querySelector('select[aria-label="Prioritization framework"]'),
+    ).toBeNull()
+    expect(document.querySelector('input[aria-label="Teammate email"]')).toBeNull()
+    expect(screen.queryByText(/brief day/i)).toBeNull()
   })
 
-  it("COMPANY: Continue with an empty scope shows an error and does NOT persist or navigate", async () => {
-    mount("company")
+  it("seeds from the saved workspace", () => {
+    mount(
+      makeWorkspace({
+        onboarding_step: 5,
+        team_name: "Growth",
+        team_scope: "Activation & onboarding funnels",
+      }),
+    )
+    expect(nameInput().value).toBe("Growth")
+    expect(scopeTextarea().value).toBe("Activation & onboarding funnels")
+  })
+
+  it("Continue with empty fields shows errors and does NOT persist or navigate", async () => {
+    mount()
     await act(async () => {
       continueBtn().click()
     })
-    expect(screen.getByText("Name the product area this team owns.")).not.toBeNull()
+    expect(screen.getByText("Name your team.")).not.toBeNull()
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("COMPANY: a filled scope + framework persists and routes to the strategy step", async () => {
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 7 }))
-    mount("company")
+  it("Continue with a name but no scope still blocks", async () => {
+    mount()
+    fireEvent.change(nameInput(), { target: { value: "Growth" } })
+    await act(async () => {
+      continueBtn().click()
+    })
+    expect(screen.getByText("Describe the area this team owns.")).not.toBeNull()
+    expect(updateWorkspaceMock).not.toHaveBeenCalled()
+    expect(routerMock.push).not.toHaveBeenCalled()
+  })
 
-    fireEvent.change(scopeInput(), { target: { value: "notifications" } })
-    fireEvent.change(frameworkSelect(), { target: { value: "rice" } })
+  it("a valid Continue persists team_name + team_scope (step 6) and routes to strategy", async () => {
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 6 }))
+    mount()
+
+    fireEvent.change(nameInput(), { target: { value: "Growth" } })
+    fireEvent.change(scopeTextarea(), { target: { value: "notifications" } })
     await act(async () => {
       continueBtn().click()
     })
@@ -127,71 +147,39 @@ describe("TeamStep (onboarding step 06 — scope + framework + invites)", () => 
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
+      team_name: "Growth",
       team_scope: "notifications",
-      prioritization_framework: "rice",
-      onboarding_step: 7,
+      onboarding_step: 6,
     })
-    // No brief day was picked, so the notification settings stay untouched.
-    expect(saveBriefDayMock).not.toHaveBeenCalled()
-    expect(markSkippedMock).not.toHaveBeenCalled()
-    expect(inviteMock).not.toHaveBeenCalled()
+    expect(advanceStepMock).not.toHaveBeenCalled()
   })
 
-  it("the disclosure opens to reveal the invite inputs; a queued invite sends via teamApi.invite on Continue", async () => {
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 7 }))
-    inviteMock.mockResolvedValue({ id: "inv-1", email: "teammate@acme.com", role: "member" })
-    mount("company")
+  it("Back routes to the connectors step", () => {
+    mount()
+    fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+  })
 
-    // Hidden until the disclosure opens.
-    expect(document.querySelector('input[aria-label="Teammate email"]')).toBeNull()
-    openDisclosure()
-    const emailInput = document.querySelector(
-      'input[aria-label="Teammate email"]',
-    ) as HTMLInputElement
-    expect(emailInput).not.toBeNull()
-    expect(document.querySelector('select[aria-label="Teammate role"]')).not.toBeNull()
+  it("'Skip to end ⇥' persists with step 9 and routes to review", async () => {
+    updateWorkspaceMock.mockResolvedValue(
+      makeWorkspace({ onboarding_step: ONBOARDING_STEP_COUNT }),
+    )
+    mount()
 
-    // Queue an invite chip.
-    fireEvent.change(emailInput, { target: { value: "teammate@acme.com" } })
-    const addBtn = Array.from(document.querySelectorAll("button")).find(
-      (b) => (b.textContent ?? "").trim() === "Add",
-    ) as HTMLButtonElement
-    fireEvent.click(addBtn)
-    expect(screen.getByText(/teammate@acme\.com · member/)).not.toBeNull()
-
-    fireEvent.change(scopeInput(), { target: { value: "notifications" } })
-    fireEvent.change(frameworkSelect(), { target: { value: "goal-based" } })
+    fireEvent.change(nameInput(), { target: { value: "Growth" } })
+    fireEvent.change(scopeTextarea(), { target: { value: "notifications" } })
     await act(async () => {
-      continueBtn().click()
+      skipToEndBtn().click()
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
-    })
-    expect(inviteMock).toHaveBeenCalledWith("teammate@acme.com", "member")
-  })
-
-  it("PERSONAL: continues with everything empty and records the skipped fields", async () => {
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 7 }))
-    markSkippedMock.mockResolvedValue(undefined)
-    mount("personal")
-
-    await act(async () => {
-      continueBtn().click()
-    })
-
-    await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
-      team_scope: null,
-      prioritization_framework: null,
-      onboarding_step: 7,
+      team_name: "Growth",
+      team_scope: "notifications",
+      onboarding_step: ONBOARDING_STEP_COUNT,
     })
-    expect(markSkippedMock).toHaveBeenCalledWith("u-1", [
-      "team_scope",
-      "prioritization_framework",
-    ])
   })
 
   it("shows the loading shell while the workspace is loading", () => {

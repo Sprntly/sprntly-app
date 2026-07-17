@@ -162,6 +162,7 @@ def create_invite(
     role: str,
     invited_by: str | None,
     workspace_ids: list[str] | None = None,
+    job_role: str | None = None,
 ) -> dict:
     """Insert a workspace_invites row. Caller must have validated email +
     role + workspace ownership; this helper performs no validation. Returns
@@ -184,6 +185,9 @@ def create_invite(
         "role": role,
         "invited_by": invited_by,
         "workspace_ids": workspace_ids or [],
+        # The invitee's JOB role (Data Science, Engineer…) from the v6 invite
+        # step — display-only, distinct from the permission `role`.
+        "job_role": job_role,
     }
     client.table("workspace_invites").insert(payload).execute()
     # Re-read so we return the actual created_at the DB stamped.

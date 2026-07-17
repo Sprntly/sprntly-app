@@ -37,11 +37,18 @@ export type TeamInvitesResp = { invites: TeamInvite[] }
 export const teamApi = {
   listMembers: () => api.get<TeamMembersResp>("/v1/team/members"),
   listInvites: () => api.get<TeamInvitesResp>("/v1/team/invites"),
-  invite: (email: string, role: InviteRole, workspaceIds: string[] = []) =>
+  invite: (
+    email: string,
+    role: InviteRole,
+    workspaceIds: string[] = [],
+    /** The teammate's JOB role (Data Science, Engineer…) — display-only. */
+    jobRole?: string,
+  ) =>
     api.post<TeamInvite>("/v1/team/invites", {
       email,
       role,
       workspace_ids: workspaceIds,
+      ...(jobRole?.trim() ? { job_role: jobRole.trim() } : {}),
     }),
   revokeInvite: (id: string) =>
     api.delete<void>(`/v1/team/invites/${encodeURIComponent(id)}`),
