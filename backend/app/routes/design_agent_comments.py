@@ -41,6 +41,8 @@ module, so the dependency is one-directional with no circular-import risk).
 from __future__ import annotations
 
 import logging
+import re
+import secrets
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -48,6 +50,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
 from app.auth import CompanyContext, require_company
+from app.config import settings
 from app.design_agent.client import get_design_agent_client
 from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
 from app.db.prototype_comments import (
@@ -70,6 +73,47 @@ from app.routes.design_agent import (
 logger = logging.getLogger("app.routes.design_agent")
 
 router = APIRouter(prefix="/v1/design-agent", tags=["design-agent"])
+
+
+# ─── Anonymous visitor identity (public by-token surface) ──────────────────
+#
+# A durable, server-minted opaque identity for anonymous share-link visitors,
+# carried in an HttpOnly cookie so the public list can mark a visitor's OWN
+# comments (`mine`). HttpOnly is the load-bearing property: page JS (including
+# a hostile embedded prototype bundle or an XSS in the viewer) can never read
+# or exfiltrate the identity. Mint-on-write, not mint-on-read: the cookie is
+# set by the public comment WRITE (and re-sent on subsequent writes); the
+# public list only READS it — a read-only visitor needs no identity, and
+# minting on read would tag every passive viewer.
+
+VISITOR_COOKIE = "da_visitor"
+
+# Server-minted values are secrets.token_urlsafe(32) (43 urlsafe chars). An
+# inbound cookie value is attacker-controlled bytes; anything outside this
+# shape is discarded and re-minted rather than stored.
+_VISITOR_ID_RE = re.compile(r"[A-Za-z0-9_-]{16,64}\Z")
+
+
+def _visitor_cookie_kwargs() -> dict:
+    """Cookie attrs for the visitor identity — mirrors the grant-cookie design
+    (design_agent_bundle._grant_cookie_kwargs). SameSite=Lax works here because
+    app.sprntly.ai → api.sprntly.ai is same-SITE (registrable domain sprntly.ai)
+    and the web client already sends credentials: 'include'. HttpOnly so page JS
+    never reads it; Secure in prod (settings.cookie_secure).
+
+    domain=None UNCONDITIONALLY (host-only, same rationale as the grant cookie):
+    the identity is minted AND consumed only on the API origin — using
+    settings.cookie_domain (`.sprntly.ai`) would broadcast it to every
+    subdomain. Path-scoped to the public by-token surface so it is never sent
+    to authed routes."""
+    return {
+        "max_age": 31536000,  # 1 year — durable across visits
+        "httponly": True,
+        "secure": settings.cookie_secure,
+        "samesite": "lax",
+        "path": "/v1/design-agent/by-token",
+        "domain": None,
+    }
 
 
 # ─── Anchored comments ──────────────────────────────────────────────────────
@@ -129,6 +173,12 @@ class CommentOut(BaseModel):
     pin_x_pct: float | None = None
     pin_y_pct: float | None = None
     resolved_anchor_id: str | None = None
+    origin: str = "internal"   # 'internal' | 'public' — who created the comment
+    # Public list only: True when the row was created by THIS visitor (HttpOnly
+    # visitor-cookie match, computed server-side). None on the authed surface —
+    # internal users act by role, not visitor identity. The underlying
+    # visitor_id is NEVER serialized.
+    mine: bool | None = None
 
 
 def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
@@ -148,6 +198,10 @@ def _comment_to_out(row: dict[str, Any]) -> dict[str, Any]:
         "pin_x_pct": row.get("pin_x_pct"),
         "pin_y_pct": row.get("pin_y_pct"),
         "resolved_anchor_id": row.get("resolved_anchor_id"),
+        # Defensive .get: rows read through paths that predate the origin
+        # column must project as internal, never KeyError. visitor_id is
+        # deliberately NOT projected — it never leaves the server.
+        "origin": row.get("origin", "internal"),
     }
 
 
@@ -182,6 +236,7 @@ def post_comment(
         pin_x_pct=body.pin_x_pct,
         pin_y_pct=body.pin_y_pct,
         resolved_anchor_id=body.resolved_anchor_id,
+        origin="internal",   # explicit: authed surface, never caller-supplied
     )
     return CommentOut(**_comment_to_out(row))
 
@@ -248,7 +303,12 @@ def delete_comment_route(
 
 
 @router.post("/by-token/{token}/comments", response_model=CommentOut)
-def post_comment_public(token: str, body: CommentCreate, request: Request) -> CommentOut:
+def post_comment_public(
+    token: str,
+    body: CommentCreate,
+    request: Request,
+    response: Response = None,  # injected by FastAPI over HTTP; None on direct calls
+) -> CommentOut:
     """Public comment write. Resolves token → prototype; rejects when the
     prototype is private or not ready (404, matching get_by_token's posture).
     The comment is attributed to the viewer's self-supplied name (or
@@ -291,6 +351,12 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
     # Viewer-supplied display name → the existing `author` column. Trimmed and
     # falling back to "Anonymous" for blank/omitted names. NEVER logged (PII).
     author = (body.viewer_name or "").strip() or "Anonymous"
+    # Visitor identity: reuse the inbound cookie when it matches the server-mint
+    # shape; otherwise (first write, or a tampered/foreign value) mint fresh.
+    # The value is stored server-side and carried in the HttpOnly cookie only —
+    # never serialized in a response body, never logged.
+    inbound = request.cookies.get(VISITOR_COOKIE)
+    visitor_id = inbound if inbound and _VISITOR_ID_RE.fullmatch(inbound) else secrets.token_urlsafe(32)
     row = insert_comment(
         prototype_id=proto["id"],
         workspace_id=proto["workspace_id"],   # from the resolved row, not a session
@@ -300,29 +366,50 @@ def post_comment_public(token: str, body: CommentCreate, request: Request) -> Co
         pin_x_pct=body.pin_x_pct,
         pin_y_pct=body.pin_y_pct,
         resolved_anchor_id=body.resolved_anchor_id,
+        origin="public",     # set server-side per route, never caller-supplied
+        visitor_id=visitor_id,
     )
+    # Mint-on-write: (re-)send the visitor cookie on every public write. The
+    # None-guard covers direct handler invocation (no injected Response).
+    if response is not None:
+        response.set_cookie(VISITOR_COOKIE, visitor_id, **_visitor_cookie_kwargs())
     # Token hashed, never raw (the token is the access primitive); no
     # comment body in the log line (PII). insert_comment emits its own
     # `comment_created` line; this adds the public-surface correlation marker.
+    # origin is a closed enum, safe to log; visitor_id is NOT logged.
     logger.info(
-        "comment_created_public token_hash=%s prototype_id=%s comment_id=%s",
-        _share_token_hash(token), proto["id"], row["id"],
+        "comment_created_public token_hash=%s prototype_id=%s comment_id=%s origin=%s",
+        _share_token_hash(token), proto["id"], row["id"], "public",
     )
     return CommentOut(**_comment_to_out(row))
 
 
 @router.get("/by-token/{token}/comments", response_model=list[CommentOut])
-def get_comments_public(token: str) -> list[CommentOut]:
-    """Public comment read. All viewers can read existing comments (spec §4).
-    Same 404 posture as the public write for missing / private / not-ready."""
+def get_comments_public(token: str, request: Request) -> list[CommentOut]:
+    """Public comment read — PUBLIC-origin rows only. Internal team comments
+    (and the display names resolved for them) are never served to an anonymous
+    share-link holder; the authed list is the surface that returns everything.
+    Same 404 posture as the public write for missing / private / not-ready.
+
+    `mine` marks the rows this visitor created (HttpOnly visitor-cookie match).
+    READ-only: a visitor with no cookie gets mine=False everywhere and no
+    cookie is minted here (mint-on-write)."""
     _require_feature_enabled()
     proto = find_prototype_by_share_token(token)
     if not proto or proto.get("share_mode") == "private" or proto.get("status") != "ready":
         raise HTTPException(status_code=404, detail="Not found")
-    return [
-        CommentOut(**_comment_to_out(r))
-        for r in list_comments(prototype_id=proto["id"], workspace_id=proto["workspace_id"])
-    ]
+    visitor = request.cookies.get(VISITOR_COOKIE)
+    out: list[CommentOut] = []
+    for r in list_comments(
+        prototype_id=proto["id"], workspace_id=proto["workspace_id"], origin="public",
+    ):
+        projected = _comment_to_out(r)
+        # Comparison stays server-side; the visitor_id value itself is never
+        # serialized. No cookie → False on every row (None == None must not
+        # mark a visitor-less legacy row as mine).
+        projected["mine"] = bool(visitor) and r.get("visitor_id") == visitor
+        out.append(CommentOut(**projected))
+    return out
 
 
 # ─── Comment clarify ────────────────────────────────────────────────────────────

@@ -1482,6 +1482,14 @@ export type CommentRecord = {
   pin_x_pct?: number | null
   pin_y_pct?: number | null
   resolved_anchor_id?: string | null
+  /** Comment provenance: 'internal' (authed team surface) or 'public'
+   *  (anonymous share-link viewer). Optional for back-compat — absent means
+   *  internal. The public by-token list only ever returns 'public' rows. */
+  origin?: "internal" | "public"
+  /** Public by-token list only: true when this visitor created the row
+   *  (HttpOnly visitor-cookie match, computed server-side). Null on the
+   *  authed list — internal users act by role, not visitor identity. */
+  mine?: boolean | null
 }
 
 /** A proposed PRD patch. Wire shape mirrors the backend

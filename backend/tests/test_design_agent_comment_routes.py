@@ -95,6 +95,9 @@ CREATE TABLE prototype_comments (
     pin_y_pct          REAL,
     resolved_anchor_id TEXT,
     user_id            TEXT,
+    origin        TEXT NOT NULL DEFAULT 'internal'
+                  CHECK (origin IN ('internal', 'public')),
+    visitor_id    TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT
 );
@@ -176,15 +179,19 @@ def _seed_comment(
     author: str = "demo",
     status: str = "open",
     created_at: str = "2026-01-01 00:00:00",
+    origin: str = "internal",
+    visitor_id: str | None = None,
 ) -> int:
     """Insert one comment row directly; return its id."""
     from tests import _fake_supabase
 
     cur = _fake_supabase.get_fake_db().execute(
         "INSERT INTO prototype_comments "
-        "(prototype_id, workspace_id, anchor_id, body, author, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        [prototype_id, workspace_id, anchor_id, body, author, status, created_at],
+        "(prototype_id, workspace_id, anchor_id, body, author, status, created_at, "
+        " origin, visitor_id) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        [prototype_id, workspace_id, anchor_id, body, author, status, created_at,
+         origin, visitor_id],
     )
     return cur.lastrowid
 
@@ -367,8 +374,11 @@ def test_post_comment_public_missing_token_returns_404(unauth):
 
 def test_get_comments_public_no_auth_returns_list(unauth):
     # AC7 — no-auth GET returns the comment list for a public/ready prototype.
+    # The public list now serves PUBLIC-origin rows only, so the seed is a
+    # public-origin comment — same behaviour under the current invariant.
     proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
-    _seed_comment(prototype_id=proto.id, workspace_id="tenant-x", body="hi", status="open")
+    _seed_comment(prototype_id=proto.id, workspace_id="tenant-x", body="hi", status="open",
+                  origin="public")
     resp = unauth.get(f"/v1/design-agent/by-token/{proto.token}/comments")
     assert resp.status_code == 200, resp.text
     rows = resp.json()
@@ -846,6 +856,233 @@ def test_backfill_general_sentinel_to_null(env_general):
     assert backfilled["anchor_id"] is None
     untouched = next(r for r in rows if r["body"] == "unrelated pinned row")
     assert untouched["anchor_id"] == "deadbeef"  # the backfill does not touch real anchors
+
+
+# ─── Public/internal comment isolation + visitor identity ──────────────────
+#
+# The public by-token list serves PUBLIC-origin rows only: internal team
+# comments (and the display names resolved for them) must never reach an
+# anonymous share-link holder. Anonymous visitors get a durable HttpOnly
+# cookie identity minted on their first public WRITE, and the public list
+# marks their own rows `mine` — without ever serializing the identity itself.
+
+
+def test_public_list_excludes_internal_comments(client, unauth):
+    # Regression (the leak): one internal comment (authed route) + one public
+    # comment (by-token route) → the public list returns ONLY the public one.
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID, share_mode="public", status="ready")
+    internal = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "int-1", "body": "internal-only roadmap discussion"},
+    )
+    assert internal.status_code == 200, internal.text
+    pub = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "pub-1", "body": "love the hero", "viewer_name": "Visitor V"},
+    )
+    assert pub.status_code == 200, pub.text
+
+    resp = unauth.get(f"/v1/design-agent/by-token/{proto.token}/comments")
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["body"] == "love the hero"
+    assert rows[0]["origin"] == "public"
+    # The internal comment's body appears NOWHERE in the serialized response.
+    assert "internal-only roadmap discussion" not in resp.text
+
+
+def test_public_list_never_contains_internal_author_names(client, unauth):
+    # Regression (the leak, author half): the internal author's name never
+    # appears anywhere in the public-list JSON.
+    proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
+    _seed_comment(
+        prototype_id=proto.id, workspace_id="tenant-x",
+        author="Ivy Internal", body="team-only note",
+    )
+    pub = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "pub-1", "body": "nice palette", "viewer_name": "Pat Public"},
+    )
+    assert pub.status_code == 200, pub.text
+
+    resp = unauth.get(f"/v1/design-agent/by-token/{proto.token}/comments")
+    assert resp.status_code == 200, resp.text
+    assert "Ivy Internal" not in resp.text
+    assert "team-only note" not in resp.text
+    assert [r["author"] for r in resp.json()] == ["Pat Public"]
+
+
+def test_public_write_sets_origin_public_and_visitor_id(unauth):
+    # The public write persists origin='public' + the minted cookie's visitor_id.
+    from tests import _fake_supabase
+
+    proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
+    resp = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "pub-1", "body": "ship it"},
+    )
+    assert resp.status_code == 200, resp.text
+    cookie_value = resp.cookies.get("da_visitor")
+    assert cookie_value
+
+    row = _fake_supabase.get_fake_db().execute(
+        "SELECT origin, visitor_id FROM prototype_comments WHERE id = ?",
+        [resp.json()["id"]],
+    ).fetchone()
+    assert row[0] == "public"
+    assert row[1] == cookie_value
+
+    # A SECOND write from the same client reuses the same identity (durable).
+    resp2 = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "pub-2", "body": "still shipping"},
+    )
+    assert resp2.status_code == 200, resp2.text
+    row2 = _fake_supabase.get_fake_db().execute(
+        "SELECT visitor_id FROM prototype_comments WHERE id = ?",
+        [resp2.json()["id"]],
+    ).fetchone()
+    assert row2[0] == cookie_value
+
+
+def test_public_write_mints_httponly_lax_pathscoped_cookie(unauth):
+    # Set-Cookie attributes exactly per _visitor_cookie_kwargs: HttpOnly,
+    # SameSite=Lax, path-scoped to the public by-token surface, HOST-ONLY
+    # (no Domain attribute), 1-year max-age.
+    proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
+    resp = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "pub-1", "body": "hello"},
+    )
+    assert resp.status_code == 200, resp.text
+    set_cookie = resp.headers.get("set-cookie", "")
+    lowered = set_cookie.lower()
+    assert "da_visitor=" in lowered
+    assert "httponly" in lowered
+    assert "samesite=lax" in lowered
+    assert "path=/v1/design-agent/by-token" in lowered
+    assert "domain=" not in lowered          # host-only, like the grant cookie
+    assert "max-age=31536000" in lowered     # 1 year
+
+
+def test_public_list_mine_true_for_cookie_owner_false_otherwise(unauth, env):
+    # With the cookie: the visitor's own comments are mine=true, other public
+    # comments mine=false. With no cookie: mine=false on every row.
+    proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
+    write = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "pub-1", "body": "my own comment"},
+    )
+    assert write.status_code == 200, write.text
+    _seed_comment(
+        prototype_id=proto.id, workspace_id="tenant-x",
+        anchor_id="pub-2", body="someone else's comment",
+        origin="public", visitor_id="someone-else-visitor-000001",
+    )
+
+    listed = unauth.get(f"/v1/design-agent/by-token/{proto.token}/comments")
+    assert listed.status_code == 200, listed.text
+    mine_by_body = {r["body"]: r["mine"] for r in listed.json()}
+    assert mine_by_body == {
+        "my own comment": True,
+        "someone else's comment": False,
+    }
+
+    cookieless = TestClient(env.main.app)   # fresh jar — no visitor cookie
+    bare = cookieless.get(f"/v1/design-agent/by-token/{proto.token}/comments")
+    assert bare.status_code == 200, bare.text
+    assert all(r["mine"] is False for r in bare.json())
+
+
+def test_cookieless_public_list_all_mine_false(unauth, env):
+    # No cookie → mine=false everywhere, and the GET mints NO cookie
+    # (mint-on-write only — passive viewers are never tagged).
+    proto = _seed_prototype(workspace_id="tenant-x", share_mode="public", status="ready")
+    _seed_comment(
+        prototype_id=proto.id, workspace_id="tenant-x",
+        origin="public", visitor_id="somebody-visitor-0000001",
+        body="a public comment",
+    )
+    fresh = TestClient(env.main.app)
+    resp = fresh.get(f"/v1/design-agent/by-token/{proto.token}/comments")
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert len(rows) == 1
+    assert rows[0]["mine"] is False
+    assert "set-cookie" not in resp.headers  # the read mints nothing
+
+
+def test_authed_list_returns_both_origins_with_origin_field(client, unauth):
+    # Team view unchanged: the authed list returns BOTH comments, each carrying
+    # its origin; `mine` stays null on the authed surface.
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID, share_mode="public", status="ready")
+    internal = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "int-1", "body": "internal note"},
+    )
+    assert internal.status_code == 200, internal.text
+    pub = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "pub-1", "body": "public note", "viewer_name": "Pat Public"},
+    )
+    assert pub.status_code == 200, pub.text
+
+    resp = client.get(f"/v1/design-agent/{proto.id}/comments")
+    assert resp.status_code == 200, resp.text
+    rows = resp.json()
+    assert len(rows) == 2
+    assert {r["origin"] for r in rows} == {"internal", "public"}
+    assert all(r["mine"] is None for r in rows)   # authed surface: role, not visitor
+
+
+def test_public_routes_404_posture_unchanged(unauth):
+    # Missing / private / not-ready tokens still 404 on BOTH public routes.
+    missing = str(uuid.uuid4())
+    assert unauth.get(f"/v1/design-agent/by-token/{missing}/comments").status_code == 404
+    assert unauth.post(
+        f"/v1/design-agent/by-token/{missing}/comments",
+        json={"anchor_id": "a1", "body": "x"},
+    ).status_code == 404
+
+    private_proto = _seed_prototype(share_mode="private", status="ready")
+    assert unauth.get(f"/v1/design-agent/by-token/{private_proto.token}/comments").status_code == 404
+    assert unauth.post(
+        f"/v1/design-agent/by-token/{private_proto.token}/comments",
+        json={"anchor_id": "a1", "body": "x"},
+    ).status_code == 404
+
+    not_ready = _seed_prototype(share_mode="public", status="generating")
+    assert unauth.get(f"/v1/design-agent/by-token/{not_ready.token}/comments").status_code == 404
+    assert unauth.post(
+        f"/v1/design-agent/by-token/{not_ready.token}/comments",
+        json={"anchor_id": "a1", "body": "x"},
+    ).status_code == 404
+
+
+def test_visitor_id_absent_from_all_serialized_responses(client, unauth):
+    # No response body from ANY comment route contains a visitor_id key or the
+    # stored visitor value — public write, public list, authed list.
+    proto = _seed_prototype(workspace_id=_TEST_COMPANY_ID, share_mode="public", status="ready")
+    write = unauth.post(
+        f"/v1/design-agent/by-token/{proto.token}/comments",
+        json={"anchor_id": "pub-1", "body": "public note"},
+    )
+    assert write.status_code == 200, write.text
+    visitor_value = write.cookies.get("da_visitor")
+    assert visitor_value
+    authed_write = client.post(
+        f"/v1/design-agent/{proto.id}/comments",
+        json={"anchor_id": "int-1", "body": "internal note"},
+    )
+    assert authed_write.status_code == 200, authed_write.text
+
+    public_list = unauth.get(f"/v1/design-agent/by-token/{proto.token}/comments")
+    authed_list = client.get(f"/v1/design-agent/{proto.id}/comments")
+    assert public_list.status_code == 200 and authed_list.status_code == 200
+    for resp in (write, authed_write, public_list, authed_list):
+        assert "visitor_id" not in resp.text
+        assert visitor_value not in resp.text
 
 
 def test_position_not_leaked_cross_workspace(client):
