@@ -18,6 +18,9 @@ key, exactly as before.
 """
 from __future__ import annotations
 
+import functools
+
+import anyio
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.auth import company_id_for_request
@@ -53,10 +56,15 @@ class CompanyLLMKeyMiddleware:
 
         company_id: str | None = None
         try:
-            company_id = company_id_for_request(
-                authorization=_header(scope, b"authorization"),
-                sprntly_app_session=_cookie(scope, "sprntly_app_session"),
-                sprntly_demo_session=_cookie(scope, "sprntly_demo_session"),
+            # company_id_for_request does blocking I/O (JWT/JWKS + PostgREST
+            # membership lookup) — run it on the threadpool, never the loop.
+            company_id = await anyio.to_thread.run_sync(
+                functools.partial(
+                    company_id_for_request,
+                    authorization=_header(scope, b"authorization"),
+                    sprntly_app_session=_cookie(scope, "sprntly_app_session"),
+                    sprntly_demo_session=_cookie(scope, "sprntly_demo_session"),
+                )
             )
         except Exception:  # noqa: BLE001 — binding must never break a request
             company_id = None

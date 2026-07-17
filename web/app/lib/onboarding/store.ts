@@ -258,7 +258,12 @@ export async function upsertPrimaryProduct(
   return rowToProduct(data as Record<string, unknown>)
 }
 
-export async function fetchWorkspaceForUser(
+/**
+ * The pre-embed workspace resolution: membership → company → primary product,
+ * three sequential round-trips. Kept as the fallback for fetchWorkspaceForUser
+ * when the single embedded select errors or returns an unexpected shape.
+ */
+async function fetchWorkspaceForUserSequential(
   userId: string,
 ): Promise<WorkspaceCompany | null> {
   const supabase = getSupabase()
@@ -279,6 +284,47 @@ export async function fetchWorkspaceForUser(
   const companyId = String(data.id)
   const product = await fetchPrimaryProduct(companyId)
   return rowToCompany(data as Record<string, unknown>, product)
+}
+
+export async function fetchWorkspaceForUser(
+  userId: string,
+): Promise<WorkspaceCompany | null> {
+  const supabase = getSupabase()
+  // Single round-trip: membership + company + products via one PostgREST
+  // embedded select, replacing the three sequential queries that sat on the
+  // authed-refresh critical path. Any error or unexpected embed shape falls
+  // back to the sequential implementation, so a relationship quirk (e.g. an
+  // ambiguous FK needing a `companies!<fk>` hint) can never break workspace
+  // resolution — it just costs the old round-trips.
+  try {
+    const { data, error } = await supabase
+      .from("company_members")
+      .select("company_id, companies(*, products(*))")
+      .eq("user_id", userId)
+      .limit(1)
+      .maybeSingle()
+    if (error) return fetchWorkspaceForUserSequential(userId)
+    // No membership row at all — genuinely workspace-less (matches the
+    // sequential path's null).
+    if (!data) return null
+    const embedded = (data as Record<string, unknown>).companies
+    // A to-one embed arrives as an object; tolerate an array shape too.
+    const companyRow = Array.isArray(embedded) ? embedded[0] : embedded
+    if (!companyRow || typeof companyRow !== "object") {
+      return fetchWorkspaceForUserSequential(userId)
+    }
+    const products = (companyRow as Record<string, unknown>).products
+    const productRows = Array.isArray(products)
+      ? (products as Record<string, unknown>[])
+      : []
+    // Same semantics as fetchPrimaryProduct (eq is_primary=true + maybeSingle):
+    // exactly one primary row → that product; zero OR multiple → null.
+    const primaries = productRows.filter((p) => p.is_primary === true)
+    const product = primaries.length === 1 ? rowToProduct(primaries[0]) : null
+    return rowToCompany(companyRow as Record<string, unknown>, product)
+  } catch {
+    return fetchWorkspaceForUserSequential(userId)
+  }
 }
 
 export async function createWorkspace(input: {

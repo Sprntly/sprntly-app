@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
+from app.db.authcache import invalidate_workspace_caches
 from app.db.companies import slug_for_company_id
 from app.db.workspaces import (
     create_workspace,
@@ -114,6 +115,7 @@ def post_workspace(
     dataset = None
     if company_slug:
         dataset = register_workspace_dataset(ws, company_slug=company_slug)
+    invalidate_workspace_caches()
     return {**_public(ws, role="admin"), "dataset": dataset}
 
 
@@ -131,6 +133,7 @@ def patch_workspace(
     if not name:
         raise HTTPException(422, "Workspace name cannot be empty")
     updated = update_workspace(workspace_id, name=name) or {**ws, "name": name}
+    invalidate_workspace_caches()
     return _public(updated)
 
 
@@ -153,6 +156,7 @@ def delete_workspace_route(
 
     slug = dataset_slug_for_workspace(workspace_id)
     delete_workspace(workspace_id)
+    invalidate_workspace_caches()
     if slug:
         # Best-effort cleanup of the dataset-text world. A failure leaves
         # orphan rows keyed by a slug nothing references — harmless, and an

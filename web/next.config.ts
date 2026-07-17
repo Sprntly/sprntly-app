@@ -14,6 +14,12 @@ const nextConfig: NextConfig = {
   images: {
     unoptimized: true,
   },
+  experimental: {
+    // Rewrite `import { IconX } from "@tabler/icons-react"` to per-icon deep
+    // imports at compile time — keeps the ~5k-icon barrel out of dev graphs
+    // and client bundles.
+    optimizePackageImports: ["@tabler/icons-react"],
+  },
 }
 
 export default nextConfig
