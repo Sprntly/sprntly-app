@@ -40,6 +40,7 @@ vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
 }))
 
 import { ReviewStep } from "../ReviewStep"
+import { _resetDraftPrefetchForTests } from "../../../../lib/onboarding/draftPrefetch"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 const DRAFT_TEXT =
@@ -67,6 +68,7 @@ function continueBtn(): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  _resetDraftPrefetchForTests()
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
 })
 afterEach(() => {

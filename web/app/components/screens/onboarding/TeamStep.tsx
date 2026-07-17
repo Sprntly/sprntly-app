@@ -6,11 +6,7 @@ import { useAuth } from "../../../lib/auth"
 import { useFieldValidation } from "../../onboarding/InterviewLayout"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import {
-  advanceOnboardingStep,
-  updateWorkspace,
-} from "../../../lib/onboarding/store"
-import { ONBOARDING_STEP_COUNT } from "../../../lib/onboarding/types"
+import { updateWorkspace } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 
 const DRAFT_KEY = "team-step"
@@ -97,11 +93,6 @@ export function TeamStep() {
     if (await persist(6)) router.push("/onboarding/strategy")
   }
 
-  async function skipToEnd() {
-    if (!workspace) return
-    if (await persist(ONBOARDING_STEP_COUNT)) router.push("/onboarding/review")
-  }
-
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
@@ -117,7 +108,6 @@ export function TeamStep() {
       footerMeta="Team"
       onBack={() => router.push("/onboarding/connectors")}
       onContinue={() => void save()}
-      onSkipToEnd={() => void skipToEnd()}
       continueLabel="Next"
       continueDisabled={saving}
       loading={saving}

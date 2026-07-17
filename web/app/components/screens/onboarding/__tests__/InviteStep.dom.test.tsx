@@ -39,6 +39,12 @@ vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
   loadDraft: () => null,
   clearDraft: vi.fn(),
 }))
+// The mount effect kicks the step-9 business-context draft prefetch in the
+// background — stub it so no real API call fires from these tests.
+const prefetchDraftMock = vi.fn((..._a: unknown[]) => Promise.resolve("drafted"))
+vi.mock("../../../../lib/onboarding/draftPrefetch", () => ({
+  prefetchBusinessContextDraft: (...a: unknown[]) => prefetchDraftMock(...a),
+}))
 
 import { InviteStep, parseInvitesCsv } from "../InviteStep"
 import { JOB_ROLE_OPTIONS, ONBOARDING_STEP_COUNT } from "../../../../lib/onboarding/types"

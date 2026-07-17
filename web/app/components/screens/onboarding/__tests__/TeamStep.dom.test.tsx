@@ -10,7 +10,6 @@
 // empty fields block Continue (error, no persistence, no navigation); a valid
 // Continue persists via updateWorkspace (team_name + team_scope +
 // onboarding_step 6) and routes to /onboarding/strategy; Back goes to the
-// connectors step; "Skip to end ⇥" persists then jumps to review.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -62,12 +61,6 @@ function scopeTextarea(): HTMLTextAreaElement {
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
     /^next$/i.test((b.textContent ?? "").trim()),
-  ) as HTMLButtonElement
-}
-
-function skipToEndBtn(): HTMLButtonElement {
-  return Array.from(document.querySelectorAll("button")).find((b) =>
-    /Skip to end/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
 }
 
@@ -158,28 +151,6 @@ describe("TeamStep (onboarding step 05 — team name* + scope*)", () => {
     mount()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
-  })
-
-  it("'Skip to end ⇥' persists with step 9 and routes to review", async () => {
-    updateWorkspaceMock.mockResolvedValue(
-      makeWorkspace({ onboarding_step: ONBOARDING_STEP_COUNT }),
-    )
-    mount()
-
-    fireEvent.change(nameInput(), { target: { value: "Growth" } })
-    fireEvent.change(scopeTextarea(), { target: { value: "notifications" } })
-    await act(async () => {
-      skipToEndBtn().click()
-    })
-
-    await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
-    })
-    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
-      team_name: "Growth",
-      team_scope: "notifications",
-      onboarding_step: ONBOARDING_STEP_COUNT,
-    })
   })
 
   it("shows the loading shell while the workspace is loading", () => {

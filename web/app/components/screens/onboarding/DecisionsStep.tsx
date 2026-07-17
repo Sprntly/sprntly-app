@@ -10,7 +10,6 @@ import {
   advanceOnboardingStep,
   updateWorkspace,
 } from "../../../lib/onboarding/store"
-import { ONBOARDING_STEP_COUNT } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { companyDocsApi, type CompanyDocType } from "../../../lib/api"
 
@@ -157,9 +156,6 @@ export function DecisionsStep() {
     }
   }
 
-  async function skipToEnd() {
-    if (await persist(ONBOARDING_STEP_COUNT)) router.push("/onboarding/review")
-  }
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
@@ -188,7 +184,6 @@ export function DecisionsStep() {
       }
       onBack={() => router.push("/onboarding/strategy")}
       onContinue={() => void next()}
-      onSkipToEnd={() => void skipToEnd()}
       continueLabel="Next"
       continueDisabled={saving}
       loading={saving}

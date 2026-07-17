@@ -9,13 +9,9 @@ import { useOnboarding } from "../../../context/OnboardingContext"
 import {
   INDUSTRIES,
   BUSINESS_TYPES,
-  ONBOARDING_STEP_COUNT,
   PRIORITIZATION_FRAMEWORKS,
 } from "../../../lib/onboarding/types"
-import {
-  advanceOnboardingStep,
-  updateWorkspace,
-} from "../../../lib/onboarding/store"
+import { updateWorkspace } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import {
   buildSelectionPayload,
@@ -231,14 +227,6 @@ export function MetricsStep() {
     if (await persist()) router.push("/onboarding/connectors")
   }
 
-  async function skipToEnd() {
-    if (!workspace) return
-    if (await persist()) {
-      await advanceOnboardingStep(workspace.id, ONBOARDING_STEP_COUNT)
-      router.push("/onboarding/review")
-    }
-  }
-
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
@@ -254,7 +242,6 @@ export function MetricsStep() {
       footerMeta={`${selected.length} of ${METRIC_PICKS} metrics selected`}
       onBack={() => router.push("/onboarding/product")}
       onContinue={() => void go()}
-      onSkipToEnd={() => void skipToEnd()}
       continueDisabled={saving}
       loading={saving}
     >

@@ -17,7 +17,7 @@ import {
   seedWorkspaceContextFiles,
   startBriefGeneration,
 } from "../../../lib/workspace-brief"
-import { onboardingApi } from "../../../lib/api"
+import { prefetchMetricDefinitions } from "../../../lib/onboarding/draftPrefetch"
 import { ArrowLeft, ArrowRight } from "../../auth/icons"
 
 /**
@@ -75,11 +75,12 @@ export function DefineMetrics() {
       setDefs([])
       return
     }
-    onboardingApi
-      .draftMetricDefinitions(names)
-      .then((r) => {
+    // Joins the memoized prefetch the review step kicked while the user was
+    // reading the business context — usually already resolved by now.
+    prefetchMetricDefinitions(workspace.id, names)
+      .then((drafted) => {
         const byName = new Map(
-          r.definitions.map((d) => [d.metric.toLowerCase(), d] as const),
+          drafted.map((d) => [d.metric.toLowerCase(), d] as const),
         )
         setDefs(
           names.map((n) => {

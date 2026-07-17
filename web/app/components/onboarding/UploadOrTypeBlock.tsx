@@ -1,7 +1,41 @@
 "use client"
 
-import { useRef, type ReactNode } from "react"
+import { useRef, type ReactNode, type SVGProps } from "react"
 import { Check, FileText } from "../auth/icons"
+
+function PencilIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      {...props}
+    >
+      <path d="M17 3a2.85 2.85 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5z" />
+    </svg>
+  )
+}
+
+function PaperclipIcon(props: SVGProps<SVGSVGElement>) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+      {...props}
+    >
+      <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+    </svg>
+  )
+}
 
 /**
  * One "upload OR type" block for the v6 onboarding steps 6-7 (Strategy &
@@ -96,8 +130,16 @@ export function UploadOrTypeBlock({
         onChange={(e) => onPickFile(e.target.files?.[0] ?? null)}
         aria-label={`${title} file`}
       />
-      <button type="button" className="onb-skip-link" onClick={onToggleTyped}>
-        {typedOpen ? "📎 Upload instead" : "✏️ Type instead"}
+      <button type="button" className="onb-toggle-link" onClick={onToggleTyped}>
+        {typedOpen ? (
+          <>
+            <PaperclipIcon /> Upload instead
+          </>
+        ) : (
+          <>
+            <PencilIcon /> Type instead
+          </>
+        )}
       </button>
       {notice && (
         <p className="onb-field-hint" role="status">

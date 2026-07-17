@@ -6,8 +6,7 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
-import { ONBOARDING_STEP_COUNT } from "../../../lib/onboarding/types"
+import { advanceOnboardingStep } from "../../../lib/onboarding/store"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedSignal"
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
@@ -281,18 +280,6 @@ export function Connectors() {
     }
   }
 
-  async function skipToEnd() {
-    if (!workspace || auth.kind !== "authed") return
-    setSaving(true)
-    try {
-      await markSkippedFields(auth.user.id, ["connectors"])
-      const updated = await advanceOnboardingStep(workspace.id, ONBOARDING_STEP_COUNT)
-      setWorkspace(updated)
-      router.push("/onboarding/review")
-    } finally {
-      setSaving(false)
-    }
-  }
 
   // Redirect when there's no workspace to anchor the step. Done in an effect
   // (not during render) so navigation never fires as a render side-effect —
@@ -327,7 +314,6 @@ export function Connectors() {
       }
       onBack={() => router.push("/onboarding/metrics")}
       onContinue={() => void go()}
-      onSkipToEnd={() => void skipToEnd()}
       continueDisabled={saving || !hasLiveConnection}
       loading={saving}
     >

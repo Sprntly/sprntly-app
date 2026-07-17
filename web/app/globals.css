@@ -15348,6 +15348,35 @@
     min-width: 0;
   }
 
+  /* "Type instead" / "Upload instead" toggle under an upload-or-type block —
+     a small icon+text link hugging the card's bottom-left, highlighting green
+     on hover (screenshot spec 2026-07-17). */
+  .onb-card .onb-toggle-link {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 2px 0;
+    background: none;
+    border: 0;
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink-3);
+    cursor: pointer;
+    transition: color 0.12s;
+  }
+
+  .onb-card .onb-toggle-link:hover {
+    color: var(--accent-ink);
+  }
+
+  .onb-card .onb-toggle-link svg {
+    width: 13px;
+    height: 13px;
+  }
+
   .onb-card .onb-up {
     display: flex;
     align-items: center;

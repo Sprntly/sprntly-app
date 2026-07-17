@@ -6,6 +6,7 @@ import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep } from "../../../lib/onboarding/store"
+import { prefetchBusinessContextDraft } from "../../../lib/onboarding/draftPrefetch"
 import { JOB_ROLE_OPTIONS, ONBOARDING_STEP_COUNT } from "../../../lib/onboarding/types"
 import { teamApi, type InviteRole } from "../../../lib/teamApi"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
@@ -88,6 +89,19 @@ export function InviteStep() {
   useEffect(() => {
     if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
+
+  // Kick the step-9 business-context draft in the BACKGROUND now — every
+  // input it reads (company, product, metrics, team, strategy, decisions) is
+  // saved by this step, and invites don't affect it. By the time the user
+  // reaches the review screen the prose is usually already generated (the
+  // review screen joins this same memoized request). Fire-and-forget; a
+  // failure here just means the review screen retries on mount.
+  const workspaceId = workspace?.id ?? null
+  const hasSavedSummary = Boolean(workspace?.business_context_summary)
+  useEffect(() => {
+    if (!workspaceId || hasSavedSummary) return
+    prefetchBusinessContextDraft(workspaceId).catch(() => {})
+  }, [workspaceId, hasSavedSummary])
 
   function patchRow(i: number, patch: Partial<InviteRow>) {
     setRows((prev) => prev.map((r, j) => (j === i ? { ...r, ...patch } : r)))
@@ -285,10 +299,10 @@ export function InviteStep() {
         </button>
         <button
           type="button"
-          className="onb-skip-link"
+          className="btn btn-ghost"
           onClick={() => csvRef.current?.click()}
         >
-          📄 Import CSV
+          Import CSV
         </button>
         <input
           ref={csvRef}

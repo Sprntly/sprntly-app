@@ -189,6 +189,28 @@ def test_post_list_roundtrip_per_doc_type(isolated_settings):
     assert [m["filename"] for m in memos] == ["memo.md"]
 
 
+def test_post_accepts_v6_upload_or_type_doc_types(isolated_settings):
+    """The v6 steps-6/7 upload-or-type blocks (+ step 1's strategy upload)
+    upload under the four NEW doc_types — the route + storage constraint must
+    accept every one of them end-to-end."""
+    client, route = _route_client(isolated_settings, "co-v6")
+    try:
+        for doc_type in (
+            "team_strategy", "team_roadmap", "decision_process", "additional_context",
+        ):
+            r = client.post(
+                "/v1/company/documents",
+                files={"file": (f"{doc_type}.md", io.BytesIO(b"content"), "text/markdown")},
+                data={"doc_type": doc_type},
+            )
+            assert r.status_code == 200, f"{doc_type}: {r.text}"
+            assert r.json()["doc_type"] == doc_type
+        listed = client.get("/v1/company/documents")
+    finally:
+        _clear(route)
+    assert len(listed.json()["documents"]) == 4
+
+
 def test_post_rejects_invalid_doc_type(isolated_settings):
     client, route = _route_client(isolated_settings, "co-bad")
     try:

@@ -205,33 +205,17 @@ describe("OnboardingChrome — progress dots", () => {
     expect(labels.some((l) => /^Back$/.test(l))).toBe(false)
   })
 
-  it("renders the 'Skip to end ⇥' header link only when onSkipToEnd is provided", () => {
-    const onSkipToEnd = vi.fn()
-    const withSkip = render(
+  it("never renders a 'Skip to end' header link (removed 2026-07-17)", () => {
+    const { container } = render(
       React.createElement(OnboardingChrome, {
         step: 2,
         title: "T",
         children: null,
-        onSkipToEnd,
-      }),
-    )
-    const skipBtn = Array.from(withSkip.container.querySelectorAll("button")).find(
-      (b) => /Skip to end/.test(b.textContent ?? ""),
-    ) as HTMLButtonElement
-    expect(skipBtn).not.toBeUndefined()
-    skipBtn.click()
-    expect(onSkipToEnd).toHaveBeenCalledTimes(1)
-    withSkip.unmount()
-
-    const withoutSkip = render(
-      React.createElement(OnboardingChrome, {
-        step: 2,
-        title: "T",
-        children: null,
+        onContinue: vi.fn(),
       }),
     )
     expect(
-      Array.from(withoutSkip.container.querySelectorAll("button")).some((b) =>
+      Array.from(container.querySelectorAll("button")).some((b) =>
         /Skip to end/.test(b.textContent ?? ""),
       ),
     ).toBe(false)
