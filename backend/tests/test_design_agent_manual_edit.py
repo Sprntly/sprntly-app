@@ -73,9 +73,9 @@ def test_manual_edit_system_renders_shadcn_inventory():
     assert "{shadcn_inventory}" not in DESIGN_AGENT_MANUAL_EDIT_SYSTEM
 
 
-def test_template_version_is_5():
-    # Bumped to 5 by the recreate-discipline append (codebase-context wave).
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 7
+def test_template_version_is_current():
+    # Now 8 — the screenshot design-reference directive (template-invalidating).
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 8
 
 
 def test_manual_edit_system_prompt_prefers_tailwind_class_swap():
@@ -420,6 +420,7 @@ CREATE TABLE prototypes (
     figma_file_key         TEXT,
     website_url            TEXT,
     github_installation_id INTEGER,
+    screenshot_key         TEXT,
     bundle_url             TEXT,
     current_checkpoint_id  INTEGER,
     error                  TEXT,
@@ -869,6 +870,48 @@ def test_comment_routes_reachable_after_split(env, client, monkeypatch):
     assert resp.status_code == 200, resp.text
     question = resp.json()["question"]
     assert isinstance(question, str) and question
+
+
+@pytest.mark.asyncio
+async def test_manual_edit_never_attaches_screenshot(env, monkeypatch):
+    # Boundary pin: a manual edit is a mechanical commit-back of a change the
+    # user already saw — it gets NO design reference. Even when the row carries
+    # screenshot_key, the manual-edit user message stays text-only and the
+    # stored image is never read.
+    key = f"uploads/{_TEST_COMPANY_ID}/feedface.png"
+    pid = env.proto.start_prototype(
+        prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1,
+        screenshot_key=key,
+    )
+    env.proto.complete_prototype(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        bundle_url="https://bundle/original", current_checkpoint_id=None,
+    )
+
+    captured: dict = {}
+
+    async def _fake_manual(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            status="error", iters=1, error_message=None, error_class=None,
+        ), {}
+
+    monkeypatch.setattr(env.routes, "manual_edit_prototype", _fake_manual)
+
+    reads: list[str] = []
+
+    async def _spy_read(*, key, workspace_id):
+        reads.append(key)
+        return b"never", "image/png"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _spy_read)
+
+    await env.routes._run_manual_edit_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        body=env.routes.ManualEditRequest(**_GOOD_BODY),
+    )
+    assert reads == []  # the stored image is never even read
+    assert all(b.get("type") == "text" for b in captured["user_message"]["content"])
 
 
 def test_design_agent_router_no_longer_defines_comment_routes(env):

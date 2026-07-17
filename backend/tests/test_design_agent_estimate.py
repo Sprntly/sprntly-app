@@ -165,6 +165,30 @@ def test_estimate_missing_checkpoint_yields_empty_bundle(monkeypatch):
     assert out["model"] == "claude-sonnet-4-6"
 
 
+def test_estimate_adds_flat_image_tokens(monkeypatch):
+    # A prototype carrying a reference screenshot estimates a flat
+    # _SCREENSHOT_EST_INPUT_TOKENS more CACHED input (the image rides the
+    # cacheable prefix, re-entering every iterate turn); everything else is
+    # identical, so the screenshot estimate is ≥ the no-screenshot estimate by
+    # exactly the documented constant.
+    _patch_calc(monkeypatch, source={"App.tsx": "x" * 4000})
+    base = asyncio.run(
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hello")
+    )
+    monkeypatch.setattr(
+        runner,
+        "get_prototype",
+        lambda **_k: {"current_checkpoint_id": 10, "screenshot_key": "uploads/ws/ref.png"},
+    )
+    shot = asyncio.run(
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hello")
+    )
+    assert runner._SCREENSHOT_EST_INPUT_TOKENS == 1600
+    assert shot["cached_input_tokens"] == base["cached_input_tokens"] + runner._SCREENSHOT_EST_INPUT_TOKENS
+    assert shot["new_input_tokens"] == base["new_input_tokens"]
+    assert shot["est_cost_usd"] >= base["est_cost_usd"]
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Route — POST /v1/design-agent/{id}/iterate/estimate (conftest harness)
 # ═══════════════════════════════════════════════════════════════════════════

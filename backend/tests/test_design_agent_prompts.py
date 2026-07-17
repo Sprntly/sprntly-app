@@ -49,9 +49,11 @@ def test_template_version_is_current():
     # DESIGN_AGENT_MANUAL_EDIT_SYSTEM commit-only family lands); v5 =
     # recreate-discipline append (codebase-context wave); v6 = scoped-interactivity
     # axis appended to the recreate discipline (changes which handlers the agent
-    # emits → template-invalidating). Each invalidates cached prototypes so they
-    # regenerate.
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 7
+    # emits → template-invalidating); v7 = semantic palette capture + the
+    # shell-grounded fallback; v8 = the screenshot design-reference directive
+    # (vision context for screenshot-sourced runs). Each invalidates cached
+    # prototypes so they regenerate.
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 8
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
@@ -196,6 +198,54 @@ def test_render_scaffold_user_empty_figma_falls_back_to_no_source_detected():
     assert "(no Figma source detected)" in out
 
 
+# ---- screenshot design-reference directive ----------------------------------
+
+
+def test_scaffold_user_includes_screenshot_directive_when_flagged():
+    kwargs = dict(prd_md="# X", target_platform="both", instructions="", figma_frames="")
+    with_shot = p.render_scaffold_user(**kwargs, has_screenshot=True)
+    without = p.render_scaffold_user(**kwargs, has_screenshot=False)
+    default = p.render_scaffold_user(**kwargs)
+
+    assert p.DESIGN_AGENT_SCREENSHOT_DIRECTIVE in with_shot
+    assert p.DESIGN_AGENT_SCREENSHOT_DIRECTIVE not in without
+    # Flag off (and omitted — the default) is byte-identical to the plain
+    # template render: existing callers see EXACTLY the pre-flag output.
+    assert without == default
+    assert without == p.DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE.format(
+        prd_md="# X",
+        platform_directive=p._platform_directive("both"),
+        instructions="(none)",
+        figma_frames="(no Figma source detected)",
+        codebase_repo="(no codebase source)",
+    )
+    # The directive is appended (the PRD/context body renders first, unchanged).
+    assert with_shot.startswith(without)
+
+
+def test_screenshot_directive_length_and_required_content():
+    # LLM-facing text property tests: enough substance to steer the agent, and
+    # the load-bearing nouns present. ≥300 chars per the authored floor.
+    d = p.DESIGN_AGENT_SCREENSHOT_DIRECTIVE
+    assert len(d) >= 300
+    low = d.lower()
+    for required in ("reference", "layout", "palette", "typography"):
+        assert required in low, f"directive missing {required!r}"
+    # Conflict precedence: the PRD wins over the screenshot, stated explicitly.
+    assert "PRD" in d
+    assert "win" in low
+
+
+def test_screenshot_directive_negative_space():
+    # The "when NOT to follow it" clause: literal copy/data reproduction is
+    # explicitly out of scope (the screenshot is reference, not spec).
+    low = p.DESIGN_AGENT_SCREENSHOT_DIRECTIVE.lower()
+    assert "do not" in low
+    assert "copy" in low
+    assert "data" in low
+    assert "not spec" in low
+
+
 # ---- form-factor directive --------------------------------------------------
 #
 # The rendered user prompt must not merely LABEL the selected form factor — it
@@ -331,8 +381,9 @@ def test_inert_affordance_default_documented_as_pending():
 
 
 def test_recreate_discipline_append_only_and_version_line():
-    # The change is template-invalidating → version bumped to 6, owned here.
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 7
+    # Template-invalidating changes move the version (currently 8 — the
+    # screenshot design-reference directive).
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 8
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
     # Append-only: the pre-existing discipline halves are all still present.
     assert "RE-EXPRESS, DON'T PARAPHRASE." in DISCIPLINE

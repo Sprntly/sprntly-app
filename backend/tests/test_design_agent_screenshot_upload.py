@@ -18,7 +18,9 @@ bundles) is unrelated to the user-uploaded screenshots exercised here.
 """
 from __future__ import annotations
 
+import base64
 import importlib
+import logging
 import re
 import uuid
 from pathlib import Path
@@ -367,6 +369,218 @@ def test_generate_without_screenshot_key_unchanged(env, client, monkeypatch):
         prototype_id=body["prototype_id"], workspace_id=_TEST_COMPANY_ID
     )
     assert row["screenshot_key"] is None
+
+
+def test_generate_403_on_traversal_screenshot_key(env, client, fs_storage, monkeypatch):
+    # A `..` segment can satisfy the literal workspace prefix yet resolve into
+    # another workspace's directory on the filesystem backend — refused at the
+    # ROUTE (same 403 shape as a foreign key), not just at read time.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    for hostile in (
+        f"uploads/{_TEST_COMPANY_ID}/../other-ws/evil.png",
+        f"uploads/{_TEST_COMPANY_ID}/a/../../other-ws/evil.png",
+        f"uploads/{_TEST_COMPANY_ID}/..",
+    ):
+        resp = client.post(
+            "/v1/design-agent/generate",
+            json={"prd_id": prd_id, "screenshot_key": hostile},
+        )
+        assert resp.status_code == 403, (hostile, resp.text)
+        assert resp.json()["detail"] == {"error": "screenshot_key_forbidden"}
+
+
+# ─── generation engine: vision wiring (scaffold) ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_generate_user_message_prepends_image_block(env, monkeypatch):
+    # The stored screenshot rides the FIRST user message as a base64 image
+    # block PRECEDING the text block, and the text block carries the directive.
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    key = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id=_TEST_COMPANY_ID, template_version=1,
+        screenshot_key=key,
+    )
+
+    async def _fake_read(*, key, workspace_id):
+        return b"png-reference-bytes", "image/png"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _fake_read)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        design_source="screenshot", screenshot_key=key,
+    )
+    content = calls[0]["user_message"]["content"]
+    assert len(content) == 2
+    assert content[0]["type"] == "image"
+    assert content[0]["source"]["type"] == "base64"
+    assert content[0]["source"]["media_type"] == "image/png"
+    assert content[0]["source"]["data"] == base64.b64encode(b"png-reference-bytes").decode("ascii")
+    assert content[1]["type"] == "text"
+    from app.design_agent.prompts import DESIGN_AGENT_SCREENSHOT_DIRECTIVE
+
+    assert DESIGN_AGENT_SCREENSHOT_DIRECTIVE in content[1]["text"]
+
+
+@pytest.mark.asyncio
+async def test_generate_message_without_key_is_single_text_block(env, monkeypatch):
+    # No screenshot_key → the user message is the pre-ticket single text block:
+    # no image, no directive, and the storage read never fires.
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id=_TEST_COMPANY_ID, template_version=1,
+    )
+    reads: list[str] = []
+
+    async def _spy_read(*, key, workspace_id):
+        reads.append(key)
+        return b"", "image/png"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _spy_read)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+    )
+    content = calls[0]["user_message"]["content"]
+    assert [b["type"] for b in content] == ["text"]
+    from app.design_agent.prompts import DESIGN_AGENT_SCREENSHOT_DIRECTIVE
+
+    assert DESIGN_AGENT_SCREENSHOT_DIRECTIVE not in content[0]["text"]
+    assert reads == []
+
+
+@pytest.mark.asyncio
+async def test_generate_proceeds_without_missing_screenshot(env, monkeypatch, caplog):
+    # FAIL-OPEN reference at generate time: an unreadable stored object logs ONE
+    # WARNING (identifiers only) and generation proceeds image-less — with the
+    # directive withheld (it must not talk about an image that is not attached).
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    key = f"uploads/{_TEST_COMPANY_ID}/gone.png"
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id=_TEST_COMPANY_ID, template_version=1,
+        screenshot_key=key,
+    )
+
+    async def _boom(*, key, workspace_id):
+        raise FileNotFoundError(key)
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        await env.routes._run_generation_bg(
+            prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prd_id=prd_id,
+            target_platform="both", instructions="", figma_file_key=None,
+            design_source="screenshot", screenshot_key=key,
+        )
+    content = calls[0]["user_message"]["content"]
+    assert [b["type"] for b in content] == ["text"]
+    from app.design_agent.prompts import DESIGN_AGENT_SCREENSHOT_DIRECTIVE
+
+    assert DESIGN_AGENT_SCREENSHOT_DIRECTIVE not in content[0]["text"]
+    warnings = [
+        r for r in caplog.records if "screenshot_context_unavailable" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "gone.png" in warnings[0].getMessage()          # key suffix only
+    assert _TEST_COMPANY_ID not in warnings[0].getMessage()  # never the prefix
+
+
+# ─── source selection: the screenshot arm ────────────────────────────────────
+
+
+def test_screenshot_source_skips_design_system_resolver():
+    # Even with EVERY other arm satisfiable, design_source="screenshot" returns
+    # the un-seeded tuple — provider None makes _resolve_design_system a no-op
+    # (early return), so no extractor runs and no design_systems row is written.
+    from app.design_agent.runner import _design_source_for_generation
+
+    provider, source_ref, raw_factory, version_factory = _design_source_for_generation(
+        figma_file_key="figkey",
+        figma_access_token="tok",
+        website_url="https://brand.example",
+        website_sample={"colors": []},
+        github_repo="org/repo",
+        github_installation_id=7,
+        design_source="screenshot",
+    )
+    assert (provider, source_ref, raw_factory, version_factory) == (None, None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_generate_screenshot_source_skips_website_extractor(env, monkeypatch):
+    # Route-side arm behaviour: a screenshot-sourced generate never runs the
+    # website extractor (the image IS the design context), and the runner sees
+    # design_source="screenshot" with no website sample.
+    calls = _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    key = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
+    pid = env.proto.start_prototype(
+        prd_id=prd_id, workspace_id=_TEST_COMPANY_ID, template_version=1,
+        screenshot_key=key,
+    )
+
+    async def _fake_read(*, key, workspace_id):
+        return b"shot", "image/png"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _fake_read)
+
+    extractor_calls: list = []
+
+    async def _spy_extract(url):
+        extractor_calls.append(url)
+        return None
+
+    monkeypatch.setattr(env.routes, "_extract_website_sample", _spy_extract)
+
+    await env.routes._run_generation_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prd_id=prd_id,
+        target_platform="both", instructions="", figma_file_key=None,
+        website_url="https://brand.example",
+        design_source="screenshot", screenshot_key=key,
+    )
+    assert extractor_calls == []
+    assert calls[0]["design_source"] == "screenshot"
+    assert calls[0]["website_sample"] is None
+
+
+# ─── template-version bump + dedupe keying ───────────────────────────────────
+
+
+def test_template_version_bumped_and_dedupe_keys_on_it(env, client, monkeypatch):
+    from app.design_agent.prompts import DESIGN_AGENT_TEMPLATE_VERSION
+
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 8  # the screenshot-context bump
+
+    # Deterministic bg: the fired task must not mutate row status mid-test.
+    async def _noop_bg(**kwargs):
+        return None
+
+    monkeypatch.setattr(env.routes, "_run_generation_bg", _noop_bg)
+    prd_id = _seed_prd(env.db)
+
+    r1 = client.post("/v1/design-agent/generate", json={"prd_id": prd_id})
+    assert r1.status_code == 200, r1.text
+    pid = r1.json()["prototype_id"]
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["template_version"] == DESIGN_AGENT_TEMPLATE_VERSION
+
+    # find_existing dedupe keys on the NEW version: a second identical generate
+    # returns the same prototype, and the prior version no longer matches.
+    r2 = client.post("/v1/design-agent/generate", json={"prd_id": prd_id})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["prototype_id"] == pid
+    assert env.proto.find_existing_prototype(
+        prd_id=prd_id, workspace_id=_TEST_COMPANY_ID,
+        template_version=DESIGN_AGENT_TEMPLATE_VERSION - 1, variant="v1",
+    ) is None
 
 
 # ─── start_prototype threading (AC4, conditional-write pin) ──────────────────

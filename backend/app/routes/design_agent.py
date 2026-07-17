@@ -35,6 +35,7 @@ SCOPE (what this initial slice does NOT do):
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -121,6 +122,7 @@ from app.design_agent.storage import (
     authed_bundle_url,
     fresh_bundle_url,
     public_bundle_proxy_url,
+    read_screenshot,
     repair_unresolved_relative_imports,
     stage_bundle,
     stage_preview_image,
@@ -535,8 +537,13 @@ async def generate(
     # another tenant's upload space (or any non-upload key) is refused outright.
     # 403 — the caller referenced an object it does not own; not invisibility
     # (the route itself already resolved past the feature gate).
-    if body.screenshot_key is not None and not body.screenshot_key.startswith(
-        f"uploads/{workspace_id}/"
+    # A `..` segment is refused too: it can satisfy the literal prefix yet
+    # resolve into another workspace's directory on the filesystem backend. The
+    # write side never produces one, so it is always hostile — reject it at the
+    # source rather than letting the key persist and fail only at read time.
+    if body.screenshot_key is not None and (
+        not body.screenshot_key.startswith(f"uploads/{workspace_id}/")
+        or ".." in body.screenshot_key.split("/")
     ):
         raise HTTPException(status_code=403, detail={"error": "screenshot_key_forbidden"})
 
@@ -648,6 +655,9 @@ async def generate(
         github_repo=repo,  # normalised connected-repo full_name; prompt context only
         github_installation_id=github_installation_id,
         design_source=body.design_source,
+        # Same ownership-checked snapshot start_prototype persisted; a plain
+        # str/None → round-trips losslessly through the Tier-2 job payload.
+        screenshot_key=body.screenshot_key,
         chosen_screen_route=body.chosen_screen_route,
         chosen_screen_id=body.chosen_screen_id,
         map_commit_sha=body.map_commit_sha,
@@ -1623,6 +1633,44 @@ def _finalize_usage_event_failed(
         )
 
 
+async def _screenshot_reference_block(
+    screenshot_key: str | None, *, prototype_id: int, workspace_id: str
+) -> dict | None:
+    """Load the uploaded reference screenshot into an Anthropic base64 image
+    content block; None when there is no key.
+
+    FAIL-OPEN by decision: a missing/unreadable screenshot logs ONE WARNING
+    (identifiers only — never the key's workspace prefix or the bytes) and the
+    run proceeds WITHOUT the image. This is deliberately the OPPOSITE policy
+    from the empty-seed guard in `_run_iterate_bg`, which is fail-closed: a
+    blank seed would let an execute run REPLACE the whole prototype, while a
+    lost reference image only loses styling context and must never brick
+    generation or iteration. Different assets, different blast radii — do not
+    "harmonise" the two policies.
+    """
+    if not screenshot_key:
+        return None
+    try:
+        data, media_type = await read_screenshot(
+            key=screenshot_key, workspace_id=workspace_id
+        )
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.b64encode(data).decode("ascii"),
+            },
+        }
+    except Exception:  # noqa: BLE001 — fail-open reference; identifiers only.
+        logger.warning(
+            "screenshot_context_unavailable prototype_id=%s key_suffix=%s",
+            prototype_id,
+            screenshot_key.rsplit("/", 1)[-1],
+        )
+        return None
+
+
 async def _run_generation_bg(
     *,
     prototype_id: int,
@@ -1637,6 +1685,7 @@ async def _run_generation_bg(
     github_repo: str | None = None,
     github_installation_id: int | None = None,
     design_source: str | None = None,
+    screenshot_key: str | None = None,
     chosen_screen_route: str | None = None,
     chosen_screen_id: str | None = None,
     map_commit_sha: str | None = None,
@@ -1665,11 +1714,18 @@ async def _run_generation_bg(
         # reach the prototype the same way Scenario A's do — via a pre-seeded
         # `src/index.css` — without a second browser run. Skipped entirely when a
         # Figma file is present (Figma wins the single design-source slot).
+        # design_source == "screenshot" is its own arm: NO website extraction
+        # and NO design-system resolution — the attached image IS the design
+        # context (see _design_source_for_generation's screenshot arm, which
+        # returns the un-seeded tuple for the same reason). Scenario inference
+        # below is unchanged: a screenshot alone is Scenario 0-with-context,
+        # never a new label.
+        screenshot_selected = design_source == "screenshot"
         website_sample: dict | None = None
-        if not figma_file_key:
+        if not figma_file_key and not screenshot_selected:
             website_sample = await _extract_website_sample(website_url)
         website_block = (
-            None if figma_file_key
+            None if (figma_file_key or screenshot_selected)
             else await _website_context_block(
                 website_url,
                 manual_design,
@@ -1687,16 +1743,31 @@ async def _run_generation_bg(
             "text": DESIGN_AGENT_SCAFFOLD_SYSTEM,
             "cache_control": {"type": "ephemeral", "ttl": "1h"},
         }]
+        # Uploaded screenshot as the DESIGN REFERENCE (vision context). Keyed on
+        # the ownership-checked screenshot_key snapshot, whatever the selected
+        # design_source. Fail-open: a lost/unreadable object logs one WARNING
+        # and the run proceeds image-less (see _screenshot_reference_block) —
+        # the directive is only appended when the image really attached.
+        screenshot_block = await _screenshot_reference_block(
+            screenshot_key, prototype_id=prototype_id, workspace_id=workspace_id
+        )
         user_text = render_scaffold_user(
             prd_md=prd_md,
             target_platform=target_platform,
             instructions=instructions,
             figma_frames=source_block,
             codebase_repo=github_repo,  # one-line "match this codebase" context; None -> "(no codebase source)"
+            has_screenshot=screenshot_block is not None,
         )
+        user_content: list[dict] = [{"type": "text", "text": user_text}]
+        if screenshot_block is not None:
+            # Vision-first ordering: the image block PRECEDES the text block so
+            # the directive's "the attached screenshot" reads against an image
+            # the model has already seen.
+            user_content.insert(0, screenshot_block)
         user_message = {
             "role": "user",
-            "content": [{"type": "text", "text": user_text}],
+            "content": user_content,
         }
 
         # Derive the scenario label once at the call boundary so the runner can
@@ -3659,11 +3730,24 @@ async def _run_iterate_bg(
                 None,
             )
 
+        # Screenshot design-reference RE-ENTRY: the stored image re-enters every
+        # iterate AND plan turn inside the cacheable prefix (immutable per
+        # prototype → prefix-stable; render_iterate_user moves the cache
+        # breakpoint onto it). The manual-edit path deliberately does NOT
+        # attach it — mechanical commit-backs need no design reference.
+        # Fail-open on a lost object (see _screenshot_reference_block).
+        screenshot_block = await _screenshot_reference_block(
+            proto.get("screenshot_key"),
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+        )
+
         cacheable_blocks, volatile_block = render_iterate_user(
             current_source=current_source,
             open_comments=open_comments,
             iterate_prompt=body.prompt,
             applied_comment=applied_comment,
+            screenshot_block=screenshot_block,
         )
         # System block(s) cached at the END of the stable prefix, mirroring
         # _run_generation_bg. The bundle+comments user prefix is cached too (its
