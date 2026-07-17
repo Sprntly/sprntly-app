@@ -62,6 +62,34 @@ const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "both", label: "Both" },
 ]
 
+/** The modal's generate-time design-source union: the three durable sources
+ *  plus the per-run "screenshot" source. Screenshot is deliberately NOT part
+ *  of `DesignSourcePreference` — a file is per-run context, not a durable
+ *  source preference — so the widening lives here, not in the shared types. */
+type ModalDesignSource = "figma" | "github" | "website" | "screenshot"
+
+/** The four source pills, in the canonical order (the shared component's three
+ *  defaults, then the per-run Screenshot option). Screenshot needs no
+ *  connector — always selectable. */
+const MODAL_SOURCE_OPTIONS: { value: ModalDesignSource; label: string }[] = [
+  { value: "github", label: "From our codebase" },
+  { value: "figma", label: "Figma" },
+  { value: "website", label: "Website" },
+  { value: "screenshot", label: "Screenshot" },
+]
+
+// SourceTypePills is a SHARED component (settings pane + this modal) whose
+// props are typed to the three durable sources. Its runtime is value-agnostic
+// (it maps `options` and echoes the clicked value back), so the modal widens
+// it at the call-site to carry the per-run screenshot option instead of
+// widening the shared component's own contract (out of this change's scope —
+// the settings pane must never offer a non-persistable source).
+const ModalSourcePills = SourceTypePills as unknown as (props: {
+  value: ModalDesignSource
+  onChange: (v: ModalDesignSource) => void
+  options?: { value: ModalDesignSource; label: string }[]
+}) => ReturnType<typeof SourceTypePills>
+
 /**
  * Single-modal phase machine for the generate-entry flow.
  *
@@ -220,6 +248,21 @@ async function downscaleImageToDataUrl(file: File): Promise<string> {
   return canvas.toDataURL(outType, 0.9)
 }
 
+/** Decode a base64 data URL into a Blob — the DOWNSCALED bytes the screenshot
+ *  upload sends (never the raw file: consistent with the steer flow, caps
+ *  vision-token cost, and stays far under the server's 8 MB guard). Manual
+ *  atob decode rather than fetch("data:…") so the conversion is dependency-free
+ *  and deterministic under jsdom. */
+function dataUrlToBlob(dataUrl: string): Blob {
+  const comma = dataUrl.indexOf(",")
+  const meta = dataUrl.slice(0, Math.max(comma, 0))
+  const mime = /^data:([^;,]+)/.exec(meta)?.[1] ?? "application/octet-stream"
+  const bin = atob(dataUrl.slice(comma + 1))
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return new Blob([bytes], { type: mime })
+}
+
 /** Maps LocateCandidate[] to the shape LocateConfirmView expects. */
 export function mapLocateCandidates(ranked: LocateCandidate[]): LocateConfirmCandidate[] {
   return ranked.map((c, i) => ({
@@ -314,7 +357,7 @@ export function GenerateModal({
   onLocatePhase?: (phase: LocatePhaseState | null) => void
   _testConnections?: ConnectionSummary[] | null
   _testRepos?: GitHubRepo[] | null
-  _testInitSource?: "figma" | "github" | "website"
+  _testInitSource?: ModalDesignSource
   _testInitRepoSel?: string
   // Phase-state injection for node-env vitest (bypasses async effects so a
   // given phase can be rendered directly without driving the resolve call).
@@ -339,7 +382,7 @@ export function GenerateModal({
   const { showToast } = useNavigation()
 
   const [platform, setPlatform] = useState<TargetPlatform>(DEFAULT_PLATFORM)
-  const [designSource, setDesignSource] = useState<"figma" | "github" | "website">(
+  const [designSource, setDesignSource] = useState<ModalDesignSource>(
     _testInitSource ?? "website",
   )
   const [instructions, setInstructions] = useState("")
@@ -404,6 +447,37 @@ export function GenerateModal({
   const flowTokenRef = useRef(0)
   // Hidden file input for the image-as-steer attach control.
   const steerImageInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Screenshot-as-context (the fourth design source). Per-run only — nothing
+  // here is ever written to DesignSourcePreference.
+  //   - screenshotKey: staged storage key from POST /uploads/screenshot; null
+  //     until an upload has SUCCEEDED. This is the Generate gate in screenshot
+  //     mode (and a fresh pick nulls it immediately, so the gate holds while a
+  //     replacement uploads).
+  //   - screenshotPreview: the downscaled data URL shown as the thumbnail.
+  //   - screenshotName: the picked filename, for the inline label.
+  //   - screenshotUploading: in-flight flag (disables the picker).
+  //   - screenshotError: client-side reject or server 4xx message (verbatim).
+  const [screenshotKey, setScreenshotKey] = useState<string | null>(null)
+  const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null)
+  const [screenshotName, setScreenshotName] = useState<string | null>(null)
+  const [screenshotUploading, setScreenshotUploading] = useState(false)
+  const [screenshotError, setScreenshotError] = useState<string | null>(null)
+  // Hidden file input for the screenshot-source picker.
+  const screenshotInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Closing the modal discards any staged screenshot: the key is per-run
+  // context, not a preference — the next open starts clean. (The now-orphaned
+  // server-side upload is the parked-cleanup class; nothing to do here.)
+  useEffect(() => {
+    if (!open) {
+      setScreenshotKey(null)
+      setScreenshotPreview(null)
+      setScreenshotName(null)
+      setScreenshotUploading(false)
+      setScreenshotError(null)
+    }
+  }, [open])
 
   // One-shot gate for the saved-preference AUTO-SKIP effect. The effect
   // re-runs on every dep churn (connections / repos / savedPreference identity
@@ -873,6 +947,10 @@ export function GenerateModal({
       manualFont: "",
       githubRepo: codebaseGenerate ? effectiveRepo : "",
       designSource: effectiveSource,
+      // The staged upload key rides ONLY the screenshot source; every other
+      // source omits the field entirely (buildGenerateParams drops a null —
+      // wire back-compat, byte-identical to today).
+      screenshotKey: effectiveSource === "screenshot" ? screenshotKey : null,
     })
     // Fire the recreate wiring when EITHER a route or a stable id was chosen —
     // a non-route host (the app shell, an in-page section) has an empty route,
@@ -998,6 +1076,55 @@ export function GenerateModal({
     setSteerImageError(null)
     setImageStatus("absent")
     setSteerCues([])
+  }
+
+  // Screenshot-as-context picker. Validates client-side (same bounds as the
+  // steer flow), downscales via the SAME seam (`_testDownscale` under jsdom),
+  // uploads the DOWNSCALED bytes via POST /uploads/screenshot, and holds the
+  // returned key for the generate body. Re-picking replaces the pending key
+  // client-side; any failure returns the picker to a re-pickable, pre-upload
+  // state — a server 4xx (413 oversize / 422 type) surfaces its user-readable
+  // message verbatim.
+  async function handleScreenshotSelected(file: File) {
+    setScreenshotError(null)
+    if (
+      !STEER_IMAGE_ACCEPTED_TYPES.includes(
+        file.type as (typeof STEER_IMAGE_ACCEPTED_TYPES)[number],
+      )
+    ) {
+      setScreenshotError(
+        "That's not an image — attach a PNG, JPEG, or WebP screenshot.",
+      )
+      return
+    }
+    if (file.size > STEER_IMAGE_MAX_BYTES) {
+      setScreenshotError("That screenshot is over 5 MB — attach a smaller one.")
+      return
+    }
+    // A fresh pick invalidates any previously staged key IMMEDIATELY, so the
+    // Generate gate holds while the replacement uploads (the orphaned prior
+    // upload is the server-side parked-cleanup class — nothing to do here).
+    setScreenshotKey(null)
+    setScreenshotUploading(true)
+    try {
+      const dataUrl = await (_testDownscale ?? downscaleImageToDataUrl)(file)
+      setScreenshotPreview(dataUrl)
+      setScreenshotName(file.name)
+      const res = await designAgentApi.uploadScreenshot(dataUrlToBlob(dataUrl))
+      setScreenshotKey(res.screenshot_key)
+    } catch (err) {
+      // Reset to the pre-upload state (re-pickable) on ANY failure.
+      setScreenshotKey(null)
+      setScreenshotPreview(null)
+      setScreenshotName(null)
+      setScreenshotError(
+        err instanceof ApiError
+          ? err.message
+          : "Couldn't upload that screenshot — check your connection and try again.",
+      )
+    } finally {
+      setScreenshotUploading(false)
+    }
   }
 
   function handleLocateResult(
@@ -1253,12 +1380,17 @@ export function GenerateModal({
     }
 
     // Non-codebase path — runs as before, chosenScreenRoute is null.
-    void onSavePreference?.({
-      design_source: designSource,
-      figma_file_key: designSource === "figma" ? (figmaUrlKey || figmaFileKey || null) : null,
-      github_repo: designSource === "github" ? (repoSel || null) : null,
-      website_url: null,
-    })
+    // Screenshot is per-run context, never a durable preference (locked
+    // decision): the saved-preference union stays untouched, so the next open
+    // restores the previous non-screenshot preference.
+    if (designSource !== "screenshot") {
+      void onSavePreference?.({
+        design_source: designSource,
+        figma_file_key: designSource === "figma" ? (figmaUrlKey || figmaFileKey || null) : null,
+        github_repo: designSource === "github" ? (repoSel || null) : null,
+        website_url: null,
+      })
+    }
     runGenerateForRoute(null)
   }
 
@@ -1553,7 +1685,11 @@ export function GenerateModal({
               input beneath each row is gated on the matching selection. */}
           <div className="field">
             <label className="field-label">Design source</label>
-            <SourceTypePills value={designSource} onChange={setDesignSource} />
+            <ModalSourcePills
+              value={designSource}
+              onChange={setDesignSource}
+              options={MODAL_SOURCE_OPTIONS}
+            />
 
             {/* Figma connector status — shown only when Figma is the selected
                 source. Displays connected state or a connect affordance when
@@ -1663,6 +1799,98 @@ export function GenerateModal({
               <p className="src-fallback-line">
                 We&apos;ll infer a style from the brand website.
               </p>
+            )}
+
+            {/* Screenshot source — per-run upload; no connector, always
+                selectable. The hidden input + visible button mirror the
+                image-as-steer control's vocabulary; the picked file is
+                client-downscaled and uploaded on choice, and Generate stays
+                disabled until the upload has succeeded. */}
+            {designSource === "screenshot" && (
+              <>
+                <input
+                  ref={screenshotInputRef}
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  data-testid="screenshot-file-input"
+                  className="locate-image-input"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    if (file) void handleScreenshotSelected(file)
+                    // Reset so re-selecting the same file fires onChange again.
+                    e.target.value = ""
+                  }}
+                />
+                <div className="src-row-compact">
+                  <span className="src-bullet" aria-hidden="true" />
+                  <span className="src-name">Screenshot</span>
+                  <button
+                    type="button"
+                    className="btn locate-image-attach"
+                    data-testid="screenshot-pick"
+                    disabled={screenshotUploading}
+                    onClick={() => screenshotInputRef.current?.click()}
+                  >
+                    <IconImage size={16} />
+                    {screenshotPreview ? "Replace image" : "Choose image"}
+                  </button>
+                  {screenshotUploading && (
+                    <span
+                      className="da-generate-hint"
+                      data-testid="screenshot-uploading"
+                    >
+                      Uploading…
+                    </span>
+                  )}
+                </div>
+                {screenshotPreview && (
+                  // The downscaled data URL doubles as the preview thumbnail —
+                  // in-memory only, exactly the bytes that were uploaded.
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={screenshotPreview}
+                    alt={
+                      screenshotName
+                        ? `Screenshot preview — ${screenshotName}`
+                        : "Screenshot preview"
+                    }
+                    data-testid="screenshot-preview"
+                    style={{
+                      display: "block",
+                      maxWidth: "100%",
+                      maxHeight: 140,
+                      marginTop: 8,
+                      borderRadius: 6,
+                      border: "1px solid var(--border, rgba(128,128,128,.35))",
+                    }}
+                  />
+                )}
+                {screenshotPreview && screenshotName && !screenshotUploading && (
+                  <span
+                    className="da-generate-hint da-generate-hint--ok"
+                    data-testid="screenshot-ready-hint"
+                  >
+                    {screenshotKey ? `✓ ${screenshotName}` : screenshotName}
+                  </span>
+                )}
+                {screenshotError && (
+                  <p
+                    className="locate-image-error"
+                    data-testid="screenshot-error"
+                    role="alert"
+                  >
+                    {screenshotError}
+                  </p>
+                )}
+                {!screenshotPreview &&
+                  !screenshotError &&
+                  !screenshotUploading && (
+                    <p className="src-fallback-line">
+                      Upload a screenshot of a design you like — we&apos;ll
+                      match its look.
+                    </p>
+                  )}
+              </>
             )}
           </div>
 
@@ -1815,7 +2043,11 @@ export function GenerateModal({
               disabled={
                 submitting ||
                 prdId == null ||
-                (codebaseMode && !repoSel)
+                (codebaseMode && !repoSel) ||
+                // Screenshot mode gates on a SUCCEEDED upload: the staged key
+                // is nulled on pick and set only when the upload resolves, so
+                // this also covers the in-flight window.
+                (designSource === "screenshot" && !screenshotKey)
               }
             >
               {submitting ? "Generating…" : "Generate →"}
