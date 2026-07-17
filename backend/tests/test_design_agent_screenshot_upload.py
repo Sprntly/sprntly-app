@@ -49,6 +49,7 @@ CREATE TABLE prototypes (
     website_url            TEXT,
     github_installation_id INTEGER,
     screenshot_key         TEXT,
+    created_by_user_id     TEXT,
     bundle_url             TEXT,
     current_checkpoint_id  INTEGER,
     error                  TEXT,

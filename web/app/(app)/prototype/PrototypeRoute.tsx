@@ -577,6 +577,33 @@ export function PrototypeRoute() {
     setGenLoading(true)
   }, [handoffPrototypeId])
 
+  // Deep-link resolution for the `pid` hint: the prototype-ready notification
+  // links `/prototype?pid=<id>` (no `?prd=`), and that link arrives AFTER the
+  // row is ready — not the just-started shape the seed effect above serves.
+  // Resolve the row by id and, when it is READY, select it directly (the
+  // ready render branch below wins even without a `?prd=` context). Any other
+  // status, or a failed/foreign lookup, changes nothing: with `?prd=` present
+  // the PRD-level lookup stays authoritative, and a pid-only URL falls back to
+  // the existing no-PRD empty state.
+  useEffect(() => {
+    if (handoffPrototypeId == null) return
+    let cancelled = false
+    designAgentApi
+      .get(handoffPrototypeId)
+      .then((row) => {
+        if (cancelled || !row || row.status !== "ready") return
+        setProto(row)
+        genLoadingRef.current = false
+        setGenLoading(false)
+      })
+      .catch(() => {
+        /* degrade — the seed/lookup effects own every non-ready path. */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [handoffPrototypeId])
+
   // Resolve the PRD's prototype read-only on prd change, and RE-ATTACH to an
   // in-flight generation. getActiveByPrd returns the newest ready-OR-generating
   // row (swallows 404→null), so a (re)load mid-generation no longer strands the
@@ -827,8 +854,10 @@ export function PrototypeRoute() {
 
   // No PRD context (bare /prototype): there is nothing to generate from. Send the
   // user to the weekly brief, where a PRD opens in the right-rail card and offers
-  // "Generate Prototype".
-  if (prdId == null) {
+  // "Generate Prototype". EXCEPT when a resolved prototype exists — a pid-only
+  // deep link (the prototype-ready notification) selects a ready prototype with
+  // no `?prd=` in the URL, so the ready branch below must win over this one.
+  if (prdId == null && proto == null) {
     return (
       <AppLayout>
         <PrototypeEmptyState
