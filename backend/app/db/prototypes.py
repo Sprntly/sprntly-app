@@ -124,6 +124,7 @@ def start_prototype(
     website_url: str | None = None,
     github_installation_id: int | None = None,
     screenshot_key: str | None = None,
+    created_by_user_id: str | None = None,
 ) -> int:
     """Insert a generating row, return its id. State transition: prototype_created.
 
@@ -160,6 +161,12 @@ def start_prototype(
     # the column keep working and the null stays an honest "no screenshot" signal.
     if screenshot_key is not None:
         payload["screenshot_key"] = screenshot_key
+    # created_by_user_id (the generating user, for the prototype-ready
+    # notification) follows the same optional-column convention: written only
+    # when the caller supplied an identity, so schemas that predate the column
+    # keep inserting cleanly and legacy rows stay an honest NULL ("no recipient").
+    if created_by_user_id is not None:
+        payload["created_by_user_id"] = created_by_user_id
     resp = c.table(_TABLE).insert(payload).execute()
     row_id = resp.data[0]["id"]
     # Inferred-scenario logged for observability; never written to the row.

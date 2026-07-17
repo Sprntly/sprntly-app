@@ -8,6 +8,7 @@ vi.hoisted(() => {
 })
 
 const apiMocks = vi.hoisted(() => ({
+  get: vi.fn(),
   getActiveByPrd: vi.fn(),
   getLatestByPrd: vi.fn(),
   getByPrd: vi.fn(),
@@ -88,6 +89,7 @@ vi.mock("../../../lib/api", async () => {
     ...actual,
     designAgentApi: {
       ...actual.designAgentApi,
+      get: apiMocks.get,
       getActiveByPrd: apiMocks.getActiveByPrd,
       getLatestByPrd: apiMocks.getLatestByPrd,
       getByPrd: apiMocks.getByPrd,
@@ -110,11 +112,15 @@ beforeEach(() => {
   searchString = "prd=1&pid=250"
   routerBack.mockClear()
   goTo.mockClear()
+  apiMocks.get.mockReset()
   apiMocks.getActiveByPrd.mockReset()
   apiMocks.getLatestByPrd.mockReset()
   apiMocks.getByPrd.mockReset()
   apiMocks.runDesignAgentGeneration.mockReset()
   apiMocks.getLatestByPrd.mockResolvedValue(null)
+  // Default: the by-id lookup resolves nothing, so the pre-existing handoff
+  // tests exercise exactly the PRD-lookup-authoritative paths they always did.
+  apiMocks.get.mockResolvedValue(null)
 })
 
 afterEach(() => {
@@ -174,6 +180,35 @@ describe("PrototypeRoute pid handoff", () => {
     expect(screen.queryByTestId("pid-loading")).toBeNull()
     expect(apiMocks.getActiveByPrd).toHaveBeenCalledWith(1)
     expect(apiMocks.getLatestByPrd).toHaveBeenCalledWith(1)
+  })
+
+  it("test_pid_param_resolves_ready_prototype", async () => {
+    // The prototype-ready notification's deep link: `?pid=` ONLY (no `?prd=`),
+    // clicked AFTER the prototype is ready. The route must resolve the row by
+    // id and select it — not the loading state, not the no-PRD empty state.
+    searchString = "pid=250"
+    apiMocks.get.mockResolvedValue(readyProto)
+
+    render(React.createElement(PrototypeRoute))
+
+    await waitFor(() =>
+      expect(screen.getByTestId("rendered-prototype").textContent).toContain("250"),
+    )
+    expect(apiMocks.get).toHaveBeenCalledWith(250)
+    expect(screen.queryByTestId("prototype-route-empty")).toBeNull()
+    expect(screen.queryByTestId("pid-loading")).toBeNull()
+  })
+
+  it("test_pid_only_non_ready_falls_back_to_empty_state", async () => {
+    // A pid-only URL whose row is NOT ready (still generating / deleted /
+    // foreign) keeps today's behaviour: the no-PRD empty state, no crash.
+    searchString = "pid=250"
+    apiMocks.get.mockResolvedValue({ ...readyProto, status: "generating" })
+
+    render(React.createElement(PrototypeRoute))
+
+    await screen.findByTestId("prototype-route-empty")
+    expect(screen.queryByTestId("rendered-prototype")).toBeNull()
   })
 
   it.each(["prd=1&pid=abc", "prd=1&pid="])(

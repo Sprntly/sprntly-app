@@ -99,6 +99,7 @@ from app.design_agent.prompts import (
     render_scaffold_user,
 )
 from app.design_agent.event_stream import publish_step, subscribe as _sse_subscribe
+from app.design_agent.notify import notify_prototype_ready  # prototype-ready ping (best-effort)
 from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
 from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_build_run
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
@@ -602,6 +603,9 @@ async def generate(
         website_url=effective_website_url,  # snapshot; resolved value incl. onboarding fallback
         github_installation_id=github_installation_id,
         screenshot_key=body.screenshot_key,  # snapshot; ownership-checked above
+        # The generating user's identity (require_company), snapshotted so the
+        # prototype-ready notification (design_agent/notify.py) can DM them.
+        created_by_user_id=company.user_id,
     )
 
     # Open a usage-ledger row for this generation (billing/observability). The id
@@ -1885,6 +1889,26 @@ async def _run_generation_bg(
                     # pass's usage into this so the ledger captures primary + repair.
                     repair_usage=repair_usage,
                 )
+                # Prototype-ready notification (best-effort side effect): fires
+                # ONLY on a successful FIRST-completion stage — iterate/manual
+                # edits advance checkpoints elsewhere and deliberately do not
+                # notify. The notifier's reads + post_to_target are synchronous
+                # → to_thread (CALL-STYLE NOTE). notify_prototype_ready itself
+                # never raises; this guard also catches anything above it (e.g.
+                # a to_thread scheduling error) so a notify failure can NEVER
+                # fail the prototype.
+                if staged_ok:
+                    try:
+                        await asyncio.to_thread(
+                            notify_prototype_ready,
+                            prototype_id=prototype_id,
+                            workspace_id=workspace_id,
+                        )
+                    except Exception:  # noqa: BLE001 — side effect, never fatal.
+                        logger.warning(
+                            "prototype_ready_notify_hook_failed prototype_id=%s",
+                            prototype_id,
+                        )
                 # Finalize the usage ledger. _stage_complete_run owns the prototype
                 # status write (ready on success, failed on build-exhaustion), so we
                 # mirror it: succeeded only when it staged. Tokens = primary run +
