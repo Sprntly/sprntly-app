@@ -1,12 +1,15 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 02 — "Your product" (registration
-// spec 2026-07, Product section). Covers: the product name/URL fields and the
-// 4 surface chips (Web / Mobile / API / Hardware) render; COMPANY accounts are
-// blocked with no surfaces picked (error, no persistence, no navigation);
-// picking a surface + URL persists via upsertPrimaryProduct (with surfaces),
-// advances to step 3 and routes to /onboarding/metrics; PERSONAL accounts
-// skip URL + surfaces freely and record the skipped fields.
+// Container mount test for onboarding step 02 — "Your product" (v6 screenshot
+// spec 2026-07-17). Covers: the product name/URL fields, the 4 surface chips
+// (Web / Mobile app / API / Hardware), the SINGLE monetization select and the
+// users textarea render; name + surfaces are required for EVERYONE (error, no
+// persistence, no navigation when missing); a valid Continue persists the
+// product via upsertPrimaryProduct (surfaces + 0/1-element monetization array
+// + usersDescription) and the competitors via updateWorkspace (parsed from the
+// comma-separated disclosure field, onboarding_step 3), then routes to
+// /onboarding/metrics; "Skip to end ⇥" persists then jumps to the review step.
+// Plus unit coverage for the exported parseCompetitors helper.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -19,7 +22,7 @@ const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const advanceStepMock = vi.fn()
-const markSkippedMock = vi.fn()
+const updateWorkspaceMock = vi.fn()
 const upsertProductMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
@@ -29,7 +32,7 @@ vi.mock("../../../../context/OnboardingContext", () => ({
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   advanceOnboardingStep: (...a: unknown[]) => advanceStepMock(...a),
-  markSkippedFields: (...a: unknown[]) => markSkippedMock(...a),
+  updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
   upsertPrimaryProduct: (...a: unknown[]) => upsertProductMock(...a),
 }))
 vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
@@ -38,10 +41,14 @@ vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
   clearDraft: vi.fn(),
 }))
 
-import { ProductStep } from "../ProductStep"
-import { makeWorkspace, makeOnboardingCtx, makeProfile } from "./fixtures"
+import { ProductStep, parseCompetitors } from "../ProductStep"
+import {
+  MONETIZATION_OPTIONS,
+  ONBOARDING_STEP_COUNT,
+} from "../../../../lib/onboarding/types"
+import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
-const SURFACE_LABELS = ["Web", "Mobile", "API", "Hardware"]
+const SURFACE_LABELS = ["Web", "Mobile app", "API", "Hardware"]
 
 function makeProduct(over: Record<string, unknown> = {}) {
   return {
@@ -55,18 +62,14 @@ function makeProduct(over: Record<string, unknown> = {}) {
     personas: [],
     positioning: null,
     monetization: [],
+    users_description: null,
     maturity: null,
     ...over,
   }
 }
 
-function mount(accountType: "company" | "personal" = "company") {
-  onboardingMock.mockReturnValue(
-    makeOnboardingCtx({
-      workspace: makeWorkspace({ onboarding_step: 2 }),
-      profile: makeProfile({ account_type: accountType }),
-    }),
-  )
+function mount(workspace = makeWorkspace({ onboarding_step: 2 })) {
+  onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace }))
   return render(React.createElement(ProductStep))
 }
 
@@ -86,9 +89,27 @@ function surfaceChip(label: string): HTMLButtonElement {
   return screen.getByText(label).closest("button") as HTMLButtonElement
 }
 
+function monetizationSelect(): HTMLSelectElement {
+  return document.querySelector(
+    'select[aria-label="Monetization"]',
+  ) as HTMLSelectElement
+}
+
+function usersTextarea(): HTMLTextAreaElement {
+  return document.querySelector(
+    'textarea[placeholder="Your main user or customer types, in your own words"]',
+  ) as HTMLTextAreaElement
+}
+
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
-    /^continue$/i.test((b.textContent ?? "").trim()),
+    /^next$/i.test((b.textContent ?? "").trim()),
+  ) as HTMLButtonElement
+}
+
+function skipToEndBtn(): HTMLButtonElement {
+  return Array.from(document.querySelectorAll("button")).find((b) =>
+    /Skip to end/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
 }
 
@@ -100,9 +121,28 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("ProductStep (onboarding step 02 — product URL + surfaces)", () => {
-  it("renders the product name/URL fields and the 4 surface chips", () => {
-    const { container } = mount("company")
+describe("parseCompetitors — comma-separated competitors field", () => {
+  it("splits, trims, and drops empty segments", () => {
+    expect(parseCompetitors("Fitbit, Oura ,  Garmin")).toEqual([
+      "Fitbit",
+      "Oura",
+      "Garmin",
+    ])
+    expect(parseCompetitors("  ,, ,")).toEqual([])
+    expect(parseCompetitors("")).toEqual([])
+  })
+
+  it("dedupes case-insensitively, keeping the first casing", () => {
+    expect(parseCompetitors("Fitbit, fitbit, FITBIT, Oura")).toEqual([
+      "Fitbit",
+      "Oura",
+    ])
+  })
+})
+
+describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization + users)", () => {
+  it("renders name/URL, the 4 surface chips, the single monetization select and the users textarea", () => {
+    const { container } = mount()
     expect(nameInput()).not.toBeNull()
     // Seeded from the workspace: display_name is the natural product name.
     expect(nameInput().value).toBe("Acme")
@@ -115,31 +155,69 @@ describe("ProductStep (onboarding step 02 — product URL + surfaces)", () => {
       expect(chip.getAttribute("aria-pressed")).toBe("false")
     }
     expect(container.querySelectorAll(".metric-chips .metric.sel").length).toBe(0)
+    // Monetization is a SINGLE select: placeholder + the full vocabulary.
+    const sel = monetizationSelect()
+    expect(sel).not.toBeNull()
+    const options = Array.from(sel.options)
+    expect(options[0].value).toBe("")
+    expect(options.slice(1).map((o) => o.value)).toEqual(
+      MONETIZATION_OPTIONS.map((o) => o.value),
+    )
+    expect(sel.value).toBe("")
+    // The users prose textarea is visible; competitors sit behind a disclosure.
+    expect(usersTextarea()).not.toBeNull()
+    expect(screen.getByText(/Add competitors/)).not.toBeNull()
   })
 
-  it("COMPANY: Continue with no surfaces shows an error and does NOT persist or navigate", async () => {
-    mount("company")
+  it("Continue with no surfaces shows an error and does NOT persist or navigate (required for everyone)", async () => {
+    mount()
     fireEvent.change(urlInput(), { target: { value: "https://acme.com" } })
     await act(async () => {
       continueBtn().click()
     })
     expect(screen.getByText("Pick at least one surface.")).not.toBeNull()
     expect(upsertProductMock).not.toHaveBeenCalled()
+    expect(updateWorkspaceMock).not.toHaveBeenCalled()
     expect(advanceStepMock).not.toHaveBeenCalled()
-    expect(markSkippedMock).not.toHaveBeenCalled()
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("COMPANY: a surface + URL persists surfaces via upsertPrimaryProduct, advances to 3 and routes to metrics", async () => {
+  it("Continue with an empty product name shows an error and does NOT persist", async () => {
+    mount()
+    fireEvent.change(nameInput(), { target: { value: "" } })
+    fireEvent.click(surfaceChip("Web"))
+    await act(async () => {
+      continueBtn().click()
+    })
+    expect(screen.getByText("Enter your product name.")).not.toBeNull()
+    expect(upsertProductMock).not.toHaveBeenCalled()
+    expect(routerMock.push).not.toHaveBeenCalled()
+  })
+
+  it("a valid Continue persists the product + competitors and routes to metrics", async () => {
     upsertProductMock.mockResolvedValue(
-      makeProduct({ website: "https://acme.com", surfaces: ["web"] }),
+      makeProduct({
+        website: "https://acme.com",
+        surfaces: ["web"],
+        monetization: ["subscription"],
+      }),
     )
-    advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
-    mount("company")
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
+    mount()
 
     fireEvent.click(surfaceChip("Web"))
     expect(surfaceChip("Web").getAttribute("aria-pressed")).toBe("true")
     fireEvent.change(urlInput(), { target: { value: "https://acme.com" } })
+    fireEvent.change(monetizationSelect(), { target: { value: "subscription" } })
+    fireEvent.change(usersTextarea(), {
+      target: { value: "Ops leads at SMB fintechs" },
+    })
+    // Competitors live behind the disclosure, comma-separated.
+    fireEvent.click(screen.getByText(/Add competitors/))
+    fireEvent.change(
+      document.querySelector('[data-field="competitors"] textarea') as HTMLTextAreaElement,
+      { target: { value: "Fitbit, Oura, fitbit" } },
+    )
 
     await act(async () => {
       continueBtn().click()
@@ -148,43 +226,40 @@ describe("ProductStep (onboarding step 02 — product URL + surfaces)", () => {
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
     })
+    // The single monetization pick is stored as a 1-element array.
     expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
       name: "Acme",
       website: "https://acme.com",
       surfaces: ["web"],
-      personas: [],
-      monetization: [],
+      monetization: ["subscription"],
+      usersDescription: "Ops leads at SMB fintechs",
     })
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
-    // Nothing was skipped on the mandatory path.
-    expect(markSkippedMock).not.toHaveBeenCalled()
+    // Competitors are parsed/deduped onto the company row with the step bump.
+    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
+      competitors: ["Fitbit", "Oura"],
+      onboarding_step: 3,
+    })
+    expect(advanceStepMock).not.toHaveBeenCalled()
   })
 
-  it("PERSONAL: skips URL + surfaces freely and records the skipped fields", async () => {
-    upsertProductMock.mockResolvedValue(makeProduct())
-    advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
-    markSkippedMock.mockResolvedValue(undefined)
-    mount("personal")
+  it("'Skip to end ⇥' persists the step, jumps to step 9 and routes to review", async () => {
+    upsertProductMock.mockResolvedValue(makeProduct({ surfaces: ["web"] }))
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
+    advanceStepMock.mockResolvedValue(
+      makeWorkspace({ onboarding_step: ONBOARDING_STEP_COUNT }),
+    )
+    mount()
 
+    fireEvent.click(surfaceChip("Web"))
     await act(async () => {
-      continueBtn().click()
+      skipToEndBtn().click()
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
     })
-    expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
-      name: "Acme",
-      website: null,
-      surfaces: [],
-      personas: [],
-      monetization: [],
-    })
-    expect(markSkippedMock).toHaveBeenCalledWith("u-1", [
-      "product_url",
-      "product_surfaces",
-    ])
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+    expect(upsertProductMock).toHaveBeenCalledTimes(1)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", ONBOARDING_STEP_COUNT)
   })
 
   it("shows the loading shell while the workspace is loading", () => {

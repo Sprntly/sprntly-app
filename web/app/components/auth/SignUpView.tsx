@@ -19,32 +19,19 @@ export const V4_ROLES = [
   "Other",
 ] as const
 
-export type SignUpAccountType = "company" | "personal"
-
 export type SignUpStep1ViewProps = {
   email: string
   password: string
-  accountType: SignUpAccountType
   showPassword: boolean
   error: string | null
   termsHref: string
   privacyHref: string
   onEmailChange: (v: string) => void
   onPasswordChange: (v: string) => void
-  onAccountTypeChange: (v: SignUpAccountType) => void
   onToggleShowPassword: () => void
   onSubmit: (e: React.FormEvent) => void
   onGoogle: () => void
 }
-
-const ACCOUNT_TYPE_OPTIONS: Array<{
-  value: SignUpAccountType
-  title: string
-  sub: string
-}> = [
-  { value: "company", title: "For a company", sub: "My team's product work" },
-  { value: "personal", title: "For personal use", sub: "Just me, exploring" },
-]
 
 export function SignUpStep1View(props: SignUpStep1ViewProps) {
   return (
@@ -54,32 +41,8 @@ export function SignUpStep1View(props: SignUpStep1ViewProps) {
 
       <form onSubmit={props.onSubmit}>
         <div className="field">
-          <div className="field-l">How will you use Sprntly?</div>
-          <div className="auth-acct-row" role="radiogroup" aria-label="Account type">
-            {ACCOUNT_TYPE_OPTIONS.map((opt) => (
-              <button
-                key={opt.value}
-                type="button"
-                role="radio"
-                aria-checked={props.accountType === opt.value}
-                className={
-                  "auth-acct-card" +
-                  (props.accountType === opt.value ? " auth-acct-card-active" : "")
-                }
-                onClick={() => props.onAccountTypeChange(opt.value)}
-              >
-                <span className="t">{opt.title}</span>
-                <span className="s">{opt.sub}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="field">
           <div className="field-l">
-            <label htmlFor="email">
-              {props.accountType === "personal" ? "Email" : "Work email"}
-            </label>{" "}
-            <span className="req">*</span>
+            <label htmlFor="email">Email</label> <span className="req">*</span>
           </div>
           <input
             id="email"
@@ -151,11 +114,13 @@ export type SignUpStep2ViewProps = {
   firstName: string
   lastName: string
   role: string
+  priorities: string
   submitting: boolean
   error: string | null
   onFirstNameChange: (v: string) => void
   onLastNameChange: (v: string) => void
   onRoleChange: (v: string) => void
+  onPrioritiesChange: (v: string) => void
   onSubmit: (e: React.FormEvent) => void
   onBack: () => void
 }
@@ -221,6 +186,21 @@ export function SignUpStep2View(props: SignUpStep2ViewProps) {
                 </option>
               ))}
             </select>
+          </div>
+          <div className="field full">
+            <div className="field-l">
+              <label htmlFor="priorities">Your priorities</label>{" "}
+              <span className="opt">— what you&apos;re focused on right now</span>
+            </div>
+            <textarea
+              id="priorities"
+              className="inp"
+              rows={3}
+              value={props.priorities}
+              onChange={(e) => props.onPrioritiesChange(e.target.value)}
+              maxLength={500}
+              placeholder="e.g. grow MAU, recover the redesign dip, ship the calorie deficit before Watch 9…"
+            />
           </div>
         </div>
         {props.error && <div className="auth-error">{props.error}</div>}

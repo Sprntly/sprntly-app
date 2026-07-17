@@ -31,6 +31,13 @@ vi.mock("../../../../context/NavigationContext", () => ({
   }),
 }))
 
+// The screen reads the `?q=` deep-link param (global search palette) via
+// useSearchParams; swap the URL by reassigning this between renders.
+let searchParamsMock = new URLSearchParams()
+vi.mock("next/navigation", () => ({
+  useSearchParams: () => searchParamsMock,
+}))
+
 // AppLayout drags in app contexts; the screen logic under test doesn't need it.
 vi.mock("../AppLayout", () => ({
   AppLayout: ({ children }: { children: React.ReactNode }) =>
@@ -68,6 +75,7 @@ const POSITIONING: SkillInfo = {
 beforeEach(() => {
   // Deliberately NOT in display order — the screen must impose it.
   skillsMock.mockResolvedValue({ skills: [STAKEHOLDER_MAP, POSITIONING, JOURNEY_MAP] })
+  searchParamsMock = new URLSearchParams()
 })
 
 afterEach(() => {
@@ -163,6 +171,19 @@ describe("SkillsScreen", () => {
     // Only one section remains and its number re-flows to 1.
     const headings = screen.getAllByRole("heading").map((h) => h.textContent)
     expect(headings).toEqual(["1 · Stakeholder & Communication"])
+  })
+
+  it("seeds the filter from the ?q= deep link (global search palette)", async () => {
+    searchParamsMock = new URLSearchParams("q=Journey map")
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Journey map")).toBeTruthy())
+
+    const input = screen.getByRole("searchbox", { name: /search skills/i }) as HTMLInputElement
+    expect(input.value).toBe("Journey map")
+    expect(screen.queryByText("Stakeholder map")).toBeNull()
+    expect(screen.queryByText("Positioning")).toBeNull()
   })
 
   it("shows a no-match placeholder and restores the list when cleared", async () => {

@@ -4,8 +4,12 @@ import { useEffect, useState } from "react"
 import { KpiTreeEditor, cleanKpiMetrics } from "../../../onboarding/KpiTreeEditor"
 import { KpiTreePreview } from "../../../onboarding/KpiTreePreview"
 import { useWorkspace } from "../../../../context/WorkspaceContext"
-import { saveKpiTree } from "../../../../lib/onboarding/store"
-import type { KpiMetric, KpiTree } from "../../../../lib/onboarding/types"
+import { saveKpiTree, saveMetricDefinitions } from "../../../../lib/onboarding/store"
+import type {
+  KpiMetric,
+  KpiTree,
+  MetricDefinition,
+} from "../../../../lib/onboarding/types"
 import { SettingsMessage, SettingsSection } from "./SettingsLayout"
 
 const NORTH_STAR_HINTS: Record<string, string[]> = {
@@ -26,12 +30,51 @@ export function KpiSettings() {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // Metric definitions (onboarding v6 define-metrics sub-flow): one row per
+  // picked metric — the plain-English definition + analytics mapping.
+  const [defs, setDefs] = useState<MetricDefinition[]>([])
+  const [defsSaving, setDefsSaving] = useState(false)
+  const [defsSaved, setDefsSaved] = useState(false)
+  const [defsError, setDefsError] = useState<string | null>(null)
+
   useEffect(() => {
     if (!workspace) return
     setNorthStar(workspace.kpi_tree.north_star)
     setNorthStarDescription(workspace.kpi_tree.north_star_description)
     if (workspace.kpi_tree.metrics.length) setMetrics(workspace.kpi_tree.metrics)
+    // Saved definitions first, then editable empty rows for any picked metric
+    // still missing one.
+    const saved = workspace.metric_definitions
+    const have = new Set(saved.map((d) => d.metric.toLowerCase()))
+    const missing = workspace.kpi_tree.metrics
+      .map((m) => m.name.trim())
+      .filter((n) => n && !have.has(n.toLowerCase()))
+      .map((n) => ({ metric: n, definition: "", mapping: "", baseline: null }))
+    setDefs([...saved, ...missing])
   }, [workspace])
+
+  function patchDef(i: number, patch: Partial<MetricDefinition>) {
+    setDefs((prev) => prev.map((d, j) => (j === i ? { ...d, ...patch } : d)))
+  }
+
+  async function onSaveDefs(e: React.FormEvent) {
+    e.preventDefault()
+    if (!workspace) return
+    setDefsSaving(true)
+    setDefsError(null)
+    setDefsSaved(false)
+    try {
+      await saveMetricDefinitions(workspace.id, defs)
+      await refresh()
+      setDefsSaved(true)
+    } catch (e) {
+      setDefsError(
+        e instanceof Error ? e.message : "Could not save metric definitions",
+      )
+    } finally {
+      setDefsSaving(false)
+    }
+  }
 
   const hints =
     NORTH_STAR_HINTS[workspace?.industry ?? ""] ?? NORTH_STAR_HINTS.default
@@ -98,6 +141,51 @@ export function KpiSettings() {
             {saving ? "Saving…" : "Save KPI tree"}
           </button>
         </form>
+      </SettingsSection>
+      <SettingsSection
+        title="Metric definitions"
+        sub="How Sprntly measures each metric — the plain-English definition and the analytics event mapping confirmed at onboarding."
+      >
+        {defs.length === 0 ? (
+          <p className="settings-placeholder">
+            Pick metrics above first — definitions attach to them.
+          </p>
+        ) : (
+          <form onSubmit={onSaveDefs}>
+            {defs.map((d, i) => (
+              <div key={d.metric} className="pset-grid" style={{ marginBottom: 14 }}>
+                <div className="pset-field pset-field--full">
+                  <label className="pset-label">{d.metric}</label>
+                  <textarea
+                    className="input"
+                    rows={2}
+                    value={d.definition}
+                    onChange={(e) => patchDef(i, { definition: e.target.value })}
+                    maxLength={500}
+                    placeholder={`Plain-English definition of "${d.metric}"`}
+                    aria-label={`${d.metric} definition`}
+                  />
+                  <input
+                    className="input"
+                    style={{ marginTop: 8, fontFamily: "var(--font-mono, monospace)" }}
+                    value={d.mapping}
+                    onChange={(e) => patchDef(i, { mapping: e.target.value })}
+                    maxLength={300}
+                    placeholder="event: session_start where feature_engaged = true"
+                    aria-label={`${d.metric} analytics mapping`}
+                  />
+                </div>
+              </div>
+            ))}
+            {defsError && <SettingsMessage kind="error">{defsError}</SettingsMessage>}
+            {defsSaved && (
+              <SettingsMessage kind="success">Metric definitions saved.</SettingsMessage>
+            )}
+            <button type="submit" className="btn btn-primary" disabled={defsSaving}>
+              {defsSaving ? "Saving…" : "Save definitions"}
+            </button>
+          </form>
+        )}
       </SettingsSection>
       <SettingsSection title="Preview" sub="How your tree appears in Briefs.">
         <KpiTreePreview tree={tree} />

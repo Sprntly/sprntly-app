@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 //
-// Integrity tests for the semantic-slug onboarding flow (2026-07 registration
-// spec, 8 steps):
-//   company → product → metrics → api-key → connectors → team → strategy →
-//   workspace
-// (The old combined business-info split into company/product/metrics; the old
-//  early name-only workspace step was folded away — the slug now names the NEW
-//  closing create-your-workspace step; the onboarding business-context review
-//  moved to Settings.)
+// Integrity tests for the semantic-slug onboarding flow (v6 screenshot spec
+// 2026-07-17, 9 steps):
+//   company → product → metrics → connectors → team → strategy → decisions →
+//   invite → review
+// (Retired in v6: the api-key step — Settings → Admin — and the closing
+//  workspace-naming step; the new decisions/invite/review steps close the
+//  numbered flow, then the UNNUMBERED define-metrics sub-flow completes
+//  onboarding.)
 //
 // Asserts the slug→screen map renders the right component per numbered step (in
 // the right order, no gaps), that an unknown slug falls back to the first step,
@@ -28,11 +28,12 @@ vi.mock("../../screens/onboarding", () => ({
   CompanyStep: () => React.createElement("div", { "data-screen": "company" }),
   ProductStep: () => React.createElement("div", { "data-screen": "product" }),
   MetricsStep: () => React.createElement("div", { "data-screen": "metrics" }),
-  ApiKey: () => React.createElement("div", { "data-screen": "api-key" }),
   Connectors: () => React.createElement("div", { "data-screen": "connectors" }),
   TeamStep: () => React.createElement("div", { "data-screen": "team" }),
   Strategy: () => React.createElement("div", { "data-screen": "strategy" }),
-  WorkspaceStep: () => React.createElement("div", { "data-screen": "workspace" }),
+  DecisionsStep: () => React.createElement("div", { "data-screen": "decisions" }),
+  InviteStep: () => React.createElement("div", { "data-screen": "invite" }),
+  ReviewStep: () => React.createElement("div", { "data-screen": "review" }),
 }))
 
 import { OnboardingStep } from "../../../(app)/onboarding/[slug]/OnboardingStep"
@@ -54,25 +55,26 @@ const EXPECTED_ORDER = [
   "company",
   "product",
   "metrics",
-  "api-key",
   "connectors",
   "team",
   "strategy",
-  "workspace",
+  "decisions",
+  "invite",
+  "review",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 8 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(8)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 9 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(9)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
-  it("renders the closing workspace page at the 'workspace' slug (the last step)", () => {
+  it("renders the closing review page at the 'review' slug (the last step)", () => {
     const { container } = render(
-      React.createElement(OnboardingStep, { slug: "workspace" }),
+      React.createElement(OnboardingStep, { slug: "review" }),
     )
-    expect(container.querySelector('[data-screen="workspace"]')).not.toBeNull()
-    expect(ONBOARDING_STEP_SLUGS[ONBOARDING_STEP_COUNT - 1]).toBe("workspace")
+    expect(container.querySelector('[data-screen="review"]')).not.toBeNull()
+    expect(ONBOARDING_STEP_SLUGS[ONBOARDING_STEP_COUNT - 1]).toBe("review")
   })
 
   it("maps every numbered slug to the expected screen, in order, with no gaps", () => {
@@ -99,12 +101,15 @@ describe("onboarding flow order — slug → screen", () => {
     )
   })
 
-  it("does not expose the dropped business-info/business-context/first-brief/coworkers pages as steps", () => {
-    // business-info split into company/product/metrics; the business-context
-    // review moved to Settings; first-brief/coworkers stay retired.
+  it("does not expose the dropped api-key/workspace/business-info/first-brief/coworkers pages as steps", () => {
+    // api-key moved to Settings → Admin and the workspace-naming closer was
+    // retired in v6; business-info split into company/product/metrics; the
+    // business-context review became the numbered review step;
+    // first-brief/coworkers stay retired.
     for (const slug of [
+      "api-key",
+      "workspace",
       "business-info",
-      "business-context",
       "strategic-context",
       "first-brief",
       "optimizing",
@@ -125,6 +130,16 @@ describe("onboarding flow order — slug → screen", () => {
       React.createElement(OnboardingStep, { slug: "analyzing" }),
     )
     expect(container.querySelector('[data-screen="analyzing"]')).toBeNull()
+  })
+
+  it("does NOT render the define-metrics sub-flow as a numbered step (own route, no dots)", () => {
+    // /onboarding/define-metrics is an unnumbered route with its own page —
+    // it must not resolve through the numbered [slug] map.
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("define-metrics")
+    const { container } = render(
+      React.createElement(OnboardingStep, { slug: "define-metrics" }),
+    )
+    expect(container.querySelector("[data-screen]")).toBeNull()
   })
 })
 
@@ -188,5 +203,37 @@ describe("OnboardingChrome — progress dots", () => {
       (b.textContent ?? "").trim(),
     )
     expect(labels.some((l) => /^Back$/.test(l))).toBe(false)
+  })
+
+  it("renders the 'Skip to end ⇥' header link only when onSkipToEnd is provided", () => {
+    const onSkipToEnd = vi.fn()
+    const withSkip = render(
+      React.createElement(OnboardingChrome, {
+        step: 2,
+        title: "T",
+        children: null,
+        onSkipToEnd,
+      }),
+    )
+    const skipBtn = Array.from(withSkip.container.querySelectorAll("button")).find(
+      (b) => /Skip to end/.test(b.textContent ?? ""),
+    ) as HTMLButtonElement
+    expect(skipBtn).not.toBeUndefined()
+    skipBtn.click()
+    expect(onSkipToEnd).toHaveBeenCalledTimes(1)
+    withSkip.unmount()
+
+    const withoutSkip = render(
+      React.createElement(OnboardingChrome, {
+        step: 2,
+        title: "T",
+        children: null,
+      }),
+    )
+    expect(
+      Array.from(withoutSkip.container.querySelectorAll("button")).some((b) =>
+        /Skip to end/.test(b.textContent ?? ""),
+      ),
+    ).toBe(false)
   })
 })

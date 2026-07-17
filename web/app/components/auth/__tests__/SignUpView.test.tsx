@@ -20,14 +20,12 @@ function renderStep1(override: Partial<SignUpStep1ViewProps> = {}): string {
   const defaults: SignUpStep1ViewProps = {
     email: "",
     password: "",
-    accountType: "company",
     showPassword: false,
     error: null,
     termsHref: "/terms",
     privacyHref: "/privacy",
     onEmailChange: noop,
     onPasswordChange: noop,
-    onAccountTypeChange: noop,
     onToggleShowPassword: noop,
     onSubmit: noop,
     onGoogle: noop,
@@ -41,11 +39,13 @@ function renderStep2(override: Partial<SignUpStep2ViewProps> = {}): string {
     firstName: "",
     lastName: "",
     role: "Product Manager",
+    priorities: "",
     submitting: false,
     error: null,
     onFirstNameChange: noop,
     onLastNameChange: noop,
     onRoleChange: noop,
+    onPrioritiesChange: noop,
     onSubmit: noop,
     onBack: noop,
   }
@@ -80,16 +80,17 @@ describe("SignUpStep1View (v4 page 02)", () => {
     expect(html).toContain("Sign up with Google")
   })
 
-  it("renders the company/personal account-type cards with the active one checked", () => {
-    const html = renderStep1({ accountType: "company" })
-    expect(html).toContain("For a company")
-    expect(html).toContain("For personal use")
-    expect(html).toContain("auth-acct-card-active")
+  it("has no account-type cards (the company/personal split is retired in v6)", () => {
+    const html = renderStep1()
+    expect(html).not.toContain("For a company")
+    expect(html).not.toContain("For personal use")
+    expect(html).not.toContain("auth-acct-card")
   })
 
-  it("labels the email field by account type", () => {
-    expect(renderStep1({ accountType: "company" })).toContain("Work email")
-    expect(renderStep1({ accountType: "personal" })).not.toContain("Work email")
+  it("labels the email field plainly", () => {
+    const html = renderStep1()
+    expect(html).toContain("Email")
+    expect(html).not.toContain("Work email")
   })
 })
 
@@ -121,5 +122,12 @@ describe("SignUpStep2View (v4 page 03 — about you)", () => {
 
   it("renders the 'Who are you?' serif heading", () => {
     expect(renderStep2()).toContain("<em>you?</em>")
+  })
+
+  it("renders the optional priorities textarea (v6)", () => {
+    const html = renderStep2({ priorities: "grow MAU" })
+    expect(html).toContain('id="priorities"')
+    expect(html).toContain("Your priorities")
+    expect(html).toContain("grow MAU")
   })
 })

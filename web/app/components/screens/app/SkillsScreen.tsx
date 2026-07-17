@@ -19,7 +19,8 @@
 // The view layer (SkillsView) is pure and prop-driven so it can be
 // markup-tested without the API; SkillsScreen owns state, API, and navigation.
 
-import { useEffect, useMemo, useState } from "react"
+import { Suspense, useEffect, useMemo, useState } from "react"
+import { useSearchParams } from "next/navigation"
 import {
   IconChartLine,
   IconCompass,
@@ -207,12 +208,23 @@ export function SkillsView({
   )
 }
 
-export function SkillsScreen() {
+function SkillsScreenContent() {
   const { goTo, setPendingOndemandDraft, showToast } = useNavigation()
+  const searchParams = useSearchParams()
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const [query, setQuery] = useState("")
+  // `?q=` seeds the filter so the global search palette can deep-link a
+  // specific skill (`/skills?q=<label>`); after mount the input owns it.
+  const qParam = searchParams.get("q")
+  const [query, setQuery] = useState(() => qParam ?? "")
+
+  // Already on /skills when the palette pushes a new ?q= → no remount, so the
+  // initializer above won't re-run. Adopt the changed param; typing in the
+  // input doesn't change the param, so this never fights the user.
+  useEffect(() => {
+    if (qParam != null) setQuery(qParam)
+  }, [qParam])
 
   useEffect(() => {
     let cancelled = false
@@ -282,5 +294,15 @@ export function SkillsScreen() {
         onCreate={onCreate}
       />
     </AppLayout>
+  )
+}
+
+export function SkillsScreen() {
+  // useSearchParams (the ?q= deep link) needs a Suspense boundary in Next 15 —
+  // same pattern as SettingsScreen.
+  return (
+    <Suspense fallback={<AppLayout mainClassName="main--skills" hideChromeStrip><p>Loading skills…</p></AppLayout>}>
+      <SkillsScreenContent />
+    </Suspense>
   )
 }

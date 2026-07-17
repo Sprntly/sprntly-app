@@ -659,14 +659,6 @@ export function ChatsScreen() {
                 background: "var(--surface-3, #EEF0EE)", color: "var(--ink, #1A1A17)",
               }}
             />
-            <span style={{
-              position: "absolute", right: 12, top: "50%", transform: "translateY(-50%)",
-              fontSize: 10, color: "var(--ink-4, #B0AEA6)", border: "1px solid var(--line, #E8E6E0)",
-              borderRadius: 4, padding: "1px 5px", fontFamily: "var(--font-mono, monospace)",
-              background: "var(--surface-2, #fff)",
-            }}>
-              ⌘K
-            </span>
           </div>
         </div>
 

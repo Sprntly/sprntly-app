@@ -89,6 +89,9 @@ class InviteIn(BaseModel):
     # default workspace, resolved at accept time. Each id is validated
     # against the caller's company in the route.
     workspace_ids: list[str] = Field(default_factory=list)
+    # The invitee's JOB role (Data Science, Engineer…) from the v6 onboarding
+    # invite step. Display-only free text — the permission is `role` above.
+    job_role: str | None = Field(default=None, max_length=60)
 
     @field_validator("email")
     @classmethod
@@ -180,6 +183,7 @@ def _public_invite(
         "id": row.get("id"),
         "email": row.get("email"),
         "role": row.get("role"),
+        "job_role": row.get("job_role"),
         "invited_by": row.get("invited_by"),
         "created_at": row.get("created_at"),
         "workspace_ids": row.get("workspace_ids") or [],
@@ -244,6 +248,7 @@ def post_team_invite(
         role=body.role,
         invited_by=company.user_id,
         workspace_ids=body.workspace_ids,
+        job_role=(body.job_role or "").strip() or None,
     )
     # Fire the invite email. Best-effort: if it fails we still return 201 so
     # the workspace_invites row stays visible in the UI, but `email_sent:

@@ -4,11 +4,13 @@
 // "What should we call you?" (the unnumbered /onboarding/your-name route).
 // Mounts the real component under jsdom with mocked auth / workspace / router
 // and a stubbed updateUserProfile, covering: rendering the first/last name
-// inputs + the required account-type cards; prefilling from
+// inputs + the optional priorities textarea (the account-type radio is GONE —
+// every v6 signup is a company account); prefilling from
 // auth.user.user_metadata (first_name/last_name first, then Google's
 // given_name/family_name); submit with a first name → updateUserProfile
-// called with the right args (incl. account_type) → workspace refresh →
-// navigate to the first numbered step; and empty-first-name blocks submit.
+// called with the right args (priorities + account_type always "company") →
+// workspace refresh → navigate to the first numbered step; and
+// empty-first-name blocks submit.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -53,6 +55,9 @@ function firstInput(): HTMLInputElement {
 function lastInput(): HTMLInputElement {
   return screen.getByLabelText("Last name") as HTMLInputElement
 }
+function prioritiesInput(): HTMLTextAreaElement {
+  return screen.getByLabelText("Your priorities") as HTMLTextAreaElement
+}
 function continueButton(): HTMLButtonElement {
   const btn = Array.from(document.querySelectorAll("button")).find((b) =>
     /Continue|Saving/.test(b.textContent ?? ""),
@@ -62,7 +67,7 @@ function continueButton(): HTMLButtonElement {
 }
 
 describe("YourName (pre-onboarding profile gate)", () => {
-  it("renders the unnumbered chrome with first + last name inputs and no progress dots", () => {
+  it("renders the unnumbered chrome with name inputs + priorities, and NO account-type cards or dots", () => {
     authedWith({})
     const { container } = render(React.createElement(YourName))
 
@@ -72,6 +77,11 @@ describe("YourName (pre-onboarding profile gate)", () => {
     )
     expect(firstInput()).not.toBeNull()
     expect(lastInput()).not.toBeNull()
+    // v6: the optional priorities textarea replaced the account-type radio.
+    expect(prioritiesInput()).not.toBeNull()
+    expect(container.querySelectorAll(".auth-acct-card").length).toBe(0)
+    expect(screen.queryByText("For a company")).toBeNull()
+    expect(screen.queryByText("For personal use")).toBeNull()
     // Deliberately NOT a numbered step → no progress dots.
     expect(container.querySelector(".onb-dots")).toBeNull()
   })
@@ -97,16 +107,7 @@ describe("YourName (pre-onboarding profile gate)", () => {
     expect(lastInput().value).toBe("Mathison Turing")
   })
 
-  it("renders the required account-type cards (default: company for a work email)", () => {
-    authedWith({})
-    const { container } = render(React.createElement(YourName))
-    const cards = container.querySelectorAll(".auth-acct-card")
-    expect(cards.length).toBe(2)
-    const active = container.querySelector(".auth-acct-card-active")
-    expect(active?.textContent).toContain("For a company")
-  })
-
-  it("submitting with a first name saves the profile (incl. account type), refreshes, and navigates to the first step", async () => {
+  it("submitting with a first name saves the profile (account_type always 'company'), refreshes, and navigates to the first step", async () => {
     authedWith({ given_name: "Grace", family_name: "Hopper" })
     updateProfileMock.mockResolvedValue({})
     refreshMock.mockResolvedValue(undefined)
@@ -121,6 +122,7 @@ describe("YourName (pre-onboarding profile gate)", () => {
       first_name: "Grace",
       last_name: "Hopper",
       role: null,
+      priorities: null,
       account_type: "company",
     })
     expect(refreshMock).toHaveBeenCalledTimes(1)
@@ -128,17 +130,15 @@ describe("YourName (pre-onboarding profile gate)", () => {
     expect(String(routerMock.push.mock.calls[0][0])).toMatch(/^\/onboarding\//)
   })
 
-  it("saves the picked account type (personal)", async () => {
+  it("saves the trimmed priorities text when provided", async () => {
     authedWith({ first_name: "Ada" })
     updateProfileMock.mockResolvedValue({})
     refreshMock.mockResolvedValue(undefined)
 
-    const { container } = render(React.createElement(YourName))
-    const personalCard = Array.from(
-      container.querySelectorAll(".auth-acct-card"),
-    ).find((b) => b.textContent?.includes("For personal use"))
-    expect(personalCard).toBeTruthy()
-    fireEvent.click(personalCard as HTMLButtonElement)
+    render(React.createElement(YourName))
+    fireEvent.change(prioritiesInput(), {
+      target: { value: "  grow MAU, recover the redesign dip  " },
+    })
 
     await act(async () => {
       fireEvent.click(continueButton())
@@ -146,7 +146,10 @@ describe("YourName (pre-onboarding profile gate)", () => {
 
     expect(updateProfileMock).toHaveBeenCalledWith(
       "user-1",
-      expect.objectContaining({ account_type: "personal" }),
+      expect.objectContaining({
+        priorities: "grow MAU, recover the redesign dip",
+        account_type: "company",
+      }),
     )
   })
 
@@ -168,6 +171,7 @@ describe("YourName (pre-onboarding profile gate)", () => {
       first_name: "Ada",
       last_name: "",
       role: "PM",
+      priorities: null,
       account_type: "company",
     })
   })

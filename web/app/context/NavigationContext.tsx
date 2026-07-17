@@ -149,6 +149,13 @@ interface NavigationContextType {
    *  and consumes it. The single entry point for "PRD opens in a new chat". */
   openPrdTab: (request: PrdTabRequest) => void
 
+  /** Global search / command palette (⌘K). Rendered once by AppShell; the
+   *  sidebar trigger and the global hotkey both drive this shared state. */
+  paletteOpen: boolean
+  openPalette: () => void
+  closePalette: () => void
+  togglePalette: () => void
+
   /** Narrow icon-only rail vs full labels */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
@@ -180,6 +187,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
   const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
   const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   // Default to the collapsed icon rail; a saved "0" preference (see the init
   // effect) expands it on load. Users toggle via the sidebar chevron.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
@@ -370,6 +378,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [router])
 
+  const openPalette = useCallback(() => setPaletteOpen(true), [])
+  const closePalette = useCallback(() => setPaletteOpen(false), [])
+  const togglePalette = useCallback(() => setPaletteOpen((v) => !v), [])
+
   const openDrawer = useCallback((drawer: "claude" | "ticket" | "design-agent") => {
     setActiveDrawer(drawer)
   }, [])
@@ -438,6 +450,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         pendingPrdTab,
         setPendingPrdTab,
         openPrdTab,
+        paletteOpen,
+        openPalette,
+        closePalette,
+        togglePalette,
         sidebarCollapsed,
         toggleSidebar,
         aiPanelWidth,

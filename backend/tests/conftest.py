@@ -376,6 +376,17 @@ CREATE TABLE companies (
     team_scope          TEXT,
     prioritization_framework TEXT,
     sizing_methodology  TEXT,
+    -- Onboarding v6 columns (mirrors 20260717120000_onboarding_v6.sql):
+    -- team name + the steps-6/7 typed blocks + the accepted business-context
+    -- prose + the define-metrics sub-flow definitions.
+    team_name           TEXT,
+    team_strategy       TEXT,
+    team_roadmap        TEXT,
+    decision_process    TEXT,
+    additional_context  TEXT,
+    business_context_summary TEXT,
+    business_context_accepted_at TEXT,
+    metric_definitions  TEXT NOT NULL DEFAULT '[]',
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -468,6 +479,8 @@ CREATE TABLE products (
     personas     TEXT NOT NULL DEFAULT '[]',
     positioning  TEXT,
     monetization TEXT NOT NULL DEFAULT '[]',
+    -- v6 "tell us about your users" prose (mirrors 20260717120000_onboarding_v6.sql).
+    users_description TEXT,
     maturity     TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -519,6 +532,8 @@ CREATE TABLE workspace_invites (
     company_id    TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
     email         TEXT NOT NULL,
     role          TEXT NOT NULL DEFAULT 'member',
+    -- v6 invite step's JOB role (mirrors 20260717120000_onboarding_v6.sql).
+    job_role      TEXT,
     invited_by    TEXT,
     workspace_ids TEXT NOT NULL DEFAULT '[]',
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
@@ -932,7 +947,9 @@ CREATE TABLE company_document (
     workspace_id   TEXT,
     doc_type       TEXT NOT NULL
                      CHECK (doc_type IN (
-                       'ceo_memo', 'team_priorities', 'research', 'company_strategy'
+                       'ceo_memo', 'team_priorities', 'research', 'company_strategy',
+                       'team_strategy', 'team_roadmap', 'decision_process',
+                       'additional_context'
                      )),
     filename       TEXT NOT NULL,
     content_type   TEXT,

@@ -23,8 +23,12 @@ describe("wizard categories", () => {
     // category connectable, so it now surfaces first in catalog order.
     expect(cats[0].key).toBe(REQUIRED_CATEGORY_KEY)
     expect(cats[0].items.map((i) => i.id)).toEqual(["superset"])
-    // Project Management follows (its ClickUp is OAuth-wired).
-    expect(cats[1].key).toBe("pm")
+    // v6 order: Voice follows (Sprinklr OAuth + Fireflies API-key wired),
+    // then CRM (HubSpot). Settings-only extras (docs, revenue) never appear.
+    expect(cats[1].key).toBe("voice")
+    expect(cats.map((c) => c.key)).toEqual([
+      "analytics", "voice", "crm", "pm", "design", "code", "comms",
+    ])
   })
 
   it("drops connectors we don't support yet (e.g. Linear, MS Teams)", () => {

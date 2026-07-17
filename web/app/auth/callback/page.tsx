@@ -3,9 +3,10 @@
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { getSupabase, isSupabaseConfigured, postLoginPath } from "../../lib/supabase/client"
-import { isRecoveryFlow } from "../../lib/authRecovery"
+import { isInviteFlow, isRecoveryFlow } from "../../lib/authRecovery"
 
 const RESET_PASSWORD_PATH = "/reset-password"
+const SET_PASSWORD_PATH = "/set-password"
 
 export default function AuthCallbackPage() {
   const router = useRouter()
@@ -21,12 +22,18 @@ export default function AuthCallbackPage() {
     let subscription: { unsubscribe: () => void } | null = null
     let timeoutId: ReturnType<typeof setTimeout> | null = null
     let cancelled = false
-    // Capture the recovery flag from the URL once — supabase strips the
+    // Capture the flow flags from the URL once — supabase strips the
     // hash after detectSessionInUrl runs, so we can't re-read it later.
     const recovery = isRecoveryFlow(window.location.href)
+    // Workspace-invite landing (admin invite link): the brand-new invitee is
+    // authenticated by the link but has NO password yet — force them through
+    // /set-password before the app (2026-07-17 invite rules).
+    const invite = isInviteFlow(window.location.href)
 
     async function nextPath(): Promise<string> {
-      return recovery ? RESET_PASSWORD_PATH : await postLoginPath()
+      if (recovery) return RESET_PASSWORD_PATH
+      if (invite) return SET_PASSWORD_PATH
+      return await postLoginPath()
     }
 
     async function finish() {

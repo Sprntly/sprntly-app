@@ -12,22 +12,27 @@ import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLay
 const FORM_ID = "pset-process-form"
 
 /**
- * Settings → Process & Planning (registration spec 2026-07).
- *
- * Team-section process choices: team scope, prioritization framework (also
- * collected in onboarding for company accounts), plus the settings-only
- * planning cycle and sizing methodology (a select with an Other free-text —
- * the spec resolved it to settings-only, OPTIONAL).
+ * Settings → Process & Planning — the team/process fields the v6 wizard
+ * collects: team name + scope of work (step 5), prioritization framework
+ * (step 3), planning cycle (step 1), the steps-6/7 typed blocks (team
+ * strategy, team roadmap, decision process, additional context), plus the
+ * deliberately settings-only sizing methodology (July 16 decision: optional,
+ * never in onboarding).
  */
 
 const SIZING_PRESETS = ["T-shirt sizes", "Story points", "Person-weeks"] as const
 
 type Fields = {
+  teamName: string
   teamScope: string
   framework: string
   planningCycle: string
   sizing: string
   sizingOther: string
+  teamStrategy: string
+  teamRoadmap: string
+  decisionProcess: string
+  additionalContext: string
 }
 
 /** Split a stored sizing value into (preset, other) for the select+input pair. */
@@ -45,43 +50,66 @@ export function ProcessSettings() {
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const [teamName, setTeamName] = useState("")
   const [teamScope, setTeamScope] = useState("")
   const [framework, setFramework] = useState("")
   const [planningCycle, setPlanningCycle] = useState("")
   const [sizing, setSizing] = useState("")
   const [sizingOther, setSizingOther] = useState("")
+  const [teamStrategy, setTeamStrategy] = useState("")
+  const [teamRoadmap, setTeamRoadmap] = useState("")
+  const [decisionProcess, setDecisionProcess] = useState("")
+  const [additionalContext, setAdditionalContext] = useState("")
   const [snapshot, setSnapshot] = useState<Fields | null>(null)
 
   useEffect(() => {
     if (!workspace) return
     const split = splitSizing(workspace.sizing_methodology ?? "")
     const loaded: Fields = {
+      teamName: workspace.team_name ?? "",
       teamScope: workspace.team_scope ?? "",
       framework: workspace.prioritization_framework ?? "",
       planningCycle: workspace.planning_cycle ?? "",
       sizing: split.sizing,
       sizingOther: split.sizingOther,
+      teamStrategy: workspace.team_strategy ?? "",
+      teamRoadmap: workspace.team_roadmap ?? "",
+      decisionProcess: workspace.decision_process ?? "",
+      additionalContext: workspace.additional_context ?? "",
     }
+    setTeamName(loaded.teamName)
     setTeamScope(loaded.teamScope)
     setFramework(loaded.framework)
     setPlanningCycle(loaded.planningCycle)
     setSizing(loaded.sizing)
     setSizingOther(loaded.sizingOther)
+    setTeamStrategy(loaded.teamStrategy)
+    setTeamRoadmap(loaded.teamRoadmap)
+    setDecisionProcess(loaded.decisionProcess)
+    setAdditionalContext(loaded.additionalContext)
     setSnapshot(loaded)
   }, [workspace])
 
-  const current: Fields = { teamScope, framework, planningCycle, sizing, sizingOther }
+  const current: Fields = {
+    teamName, teamScope, framework, planningCycle, sizing, sizingOther,
+    teamStrategy, teamRoadmap, decisionProcess, additionalContext,
+  }
   const dirty =
     snapshot != null &&
     (Object.keys(current) as (keyof Fields)[]).some((k) => current[k] !== snapshot[k])
 
   function onDiscard() {
     if (!snapshot) return
+    setTeamName(snapshot.teamName)
     setTeamScope(snapshot.teamScope)
     setFramework(snapshot.framework)
     setPlanningCycle(snapshot.planningCycle)
     setSizing(snapshot.sizing)
     setSizingOther(snapshot.sizingOther)
+    setTeamStrategy(snapshot.teamStrategy)
+    setTeamRoadmap(snapshot.teamRoadmap)
+    setDecisionProcess(snapshot.decisionProcess)
+    setAdditionalContext(snapshot.additionalContext)
     setError(null)
   }
 
@@ -95,10 +123,15 @@ export function ProcessSettings() {
       const resolvedSizing =
         sizing === "Other" ? sizingOther.trim() : sizing.trim()
       await updateWorkspace(workspace.id, {
+        team_name: teamName.trim() || null,
         team_scope: teamScope.trim() || null,
         prioritization_framework: framework || null,
         planning_cycle: planningCycle || null,
         sizing_methodology: resolvedSizing || null,
+        team_strategy: teamStrategy.trim() || null,
+        team_roadmap: teamRoadmap.trim() || null,
+        decision_process: decisionProcess.trim() || null,
+        additional_context: additionalContext.trim() || null,
       })
       setSnapshot(current)
       setSaved(true)
@@ -163,14 +196,25 @@ export function ProcessSettings() {
         <form id={FORM_ID} className="pset-card" onSubmit={onSave}>
           <div className="pset-grid">
             <div className="pset-field">
-              <label className="pset-label" htmlFor="pr-scope">Team scope</label>
+              <label className="pset-label" htmlFor="pr-team-name">Team name</label>
+              <input
+                id="pr-team-name"
+                className="input"
+                value={teamName}
+                onChange={(e) => setTeamName(e.target.value)}
+                maxLength={100}
+                placeholder="e.g. Nutrition & Sleep"
+              />
+            </div>
+            <div className="pset-field">
+              <label className="pset-label" htmlFor="pr-scope">Scope of work</label>
               <input
                 id="pr-scope"
                 className="input"
                 value={teamScope}
                 onChange={(e) => setTeamScope(e.target.value)}
-                maxLength={100}
-                placeholder="The exact product area, e.g. notifications"
+                maxLength={1000}
+                placeholder="What this team owns end to end"
               />
             </div>
             <div className="pset-field">
@@ -232,6 +276,54 @@ export function ProcessSettings() {
                   aria-label="Sizing methodology (other)"
                 />
               )}
+            </div>
+            <div className="pset-field pset-field--full">
+              <label className="pset-label" htmlFor="pr-team-strategy">Team strategy</label>
+              <textarea
+                id="pr-team-strategy"
+                className="input"
+                rows={3}
+                value={teamStrategy}
+                onChange={(e) => setTeamStrategy(e.target.value)}
+                maxLength={4000}
+                placeholder="What the team is trying to achieve this half, and why"
+              />
+            </div>
+            <div className="pset-field pset-field--full">
+              <label className="pset-label" htmlFor="pr-team-roadmap">Team roadmap</label>
+              <textarea
+                id="pr-team-roadmap"
+                className="input"
+                rows={3}
+                value={teamRoadmap}
+                onChange={(e) => setTeamRoadmap(e.target.value)}
+                maxLength={4000}
+                placeholder="What is committed, in progress, and planned"
+              />
+            </div>
+            <div className="pset-field pset-field--full">
+              <label className="pset-label" htmlFor="pr-decisions">How the team decides</label>
+              <textarea
+                id="pr-decisions"
+                className="input"
+                rows={3}
+                value={decisionProcess}
+                onChange={(e) => setDecisionProcess(e.target.value)}
+                maxLength={4000}
+                placeholder="How you weigh trade-offs, who approves, how disagreements resolve"
+              />
+            </div>
+            <div className="pset-field pset-field--full">
+              <label className="pset-label" htmlFor="pr-extra">Anything else</label>
+              <textarea
+                id="pr-extra"
+                className="input"
+                rows={3}
+                value={additionalContext}
+                onChange={(e) => setAdditionalContext(e.target.value)}
+                maxLength={4000}
+                placeholder="Sizing detail, glossary & terminology, key technologies, research"
+              />
             </div>
           </div>
 

@@ -11,32 +11,47 @@ import {
   validateProductWebsite,
   normalizeProductWebsite,
 } from "../../../lib/onboarding/product-helpers"
-import { requiredFor } from "../../../lib/onboarding/validation"
 import {
   advanceOnboardingStep,
-  markSkippedFields,
+  updateWorkspace,
   upsertPrimaryProduct,
 } from "../../../lib/onboarding/store"
 import {
   MONETIZATION_OPTIONS,
+  ONBOARDING_STEP_COUNT,
   SURFACE_OPTIONS,
 } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
-import { Check, Plus } from "../../auth/icons"
+import { Check } from "../../auth/icons"
 
 const DRAFT_KEY = "product-step"
 
+/** Parse the comma-separated competitors field into a clean, deduped list. */
+export function parseCompetitors(raw: string): string[] {
+  const seen = new Set<string>()
+  const out: string[] = []
+  for (const part of raw.split(",")) {
+    const name = part.trim()
+    if (!name) continue
+    const key = name.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(name)
+  }
+  return out
+}
+
 /**
- * Onboarding step 02 — "Your product" (registration spec 2026-07, Product
- * section). Product URL* and surfaces* are mandatory for COMPANY accounts;
- * user personas + monetization live behind an optional disclosure. Product
- * position / state / competitors are settings-only (blue in the spec).
+ * Onboarding step 02 — "Your product" (v6 screenshot spec 2026-07-17).
  *
- * Persists via the extended upsertPrimaryProduct and advances to metrics.
+ * Product name* and surfaces* are mandatory; website, monetization (single
+ * dropdown), and the "tell us about your users" prose are optional, with
+ * competitors (comma-separated → companies.competitors) behind a disclosure.
+ * Product position lives in Settings only.
  */
 export function ProductStep() {
   const auth = useAuth()
-  const { workspace, profile, setWorkspace, loading } = useOnboarding()
+  const { workspace, setWorkspace, loading } = useOnboarding()
   const router = useRouter()
 
   const draft = loadDraft(DRAFT_KEY)
@@ -45,18 +60,14 @@ export function ProductStep() {
   const [surfaces, setSurfaces] = useState<string[]>(
     (draft?.surfaces as string[]) ?? [],
   )
-  const [personas, setPersonas] = useState<string[]>(
-    (draft?.personas as string[]) ?? [],
+  const [monetization, setMonetization] = useState((draft?.monetization as string) ?? "")
+  const [usersDescription, setUsersDescription] = useState(
+    (draft?.usersDescription as string) ?? "",
   )
-  const [personaInput, setPersonaInput] = useState("")
-  const [monetization, setMonetization] = useState<string[]>(
-    (draft?.monetization as string[]) ?? [],
-  )
+  const [competitors, setCompetitors] = useState((draft?.competitors as string) ?? "")
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
-
-  const isCompany = (profile?.account_type ?? "company") === "company"
 
   // Seed from the saved workspace/product (draft takes priority).
   useEffect(() => {
@@ -65,18 +76,26 @@ export function ProductStep() {
     setProductName(workspace.product?.name ?? workspace.display_name)
     setProductUrl(workspace.product?.website ?? "")
     setSurfaces(workspace.product?.surfaces ?? [])
-    setPersonas(workspace.product?.personas ?? [])
-    setMonetization(workspace.product?.monetization ?? [])
+    setMonetization(workspace.product?.monetization?.[0] ?? "")
+    setUsersDescription(workspace.product?.users_description ?? "")
+    setCompetitors((workspace.competitors ?? []).join(", "))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onHide = () => {
       if (document.hidden)
-        saveDraft(DRAFT_KEY, { productName, productUrl, surfaces, personas, monetization })
+        saveDraft(DRAFT_KEY, {
+          productName,
+          productUrl,
+          surfaces,
+          monetization,
+          usersDescription,
+          competitors,
+        })
     }
     document.addEventListener("visibilitychange", onHide)
     return () => document.removeEventListener("visibilitychange", onHide)
-  }, [productName, productUrl, surfaces, personas, monetization])
+  }, [productName, productUrl, surfaces, monetization, usersDescription, competitors])
 
   // Redirect when there's no workspace to anchor the step.
   useEffect(() => {
@@ -89,16 +108,11 @@ export function ProductStep() {
       valid: productName.trim().length > 0,
       message: "Enter your product name.",
     },
-    requiredFor(isCompany, {
-      key: "productUrl",
-      valid: productUrl.trim().length > 0,
-      message: "Enter your product URL.",
-    }),
-    requiredFor(isCompany, {
+    {
       key: "surfaces",
       valid: surfaces.length > 0,
       message: "Pick at least one surface.",
-    }),
+    },
   ])
 
   function toggleSurface(value: string) {
@@ -108,52 +122,47 @@ export function ProductStep() {
     )
   }
 
-  function toggleMonetization(value: string) {
-    setMonetization((prev) =>
-      prev.includes(value) ? prev.filter((s) => s !== value) : [...prev, value],
-    )
-  }
-
-  function addPersona() {
-    const p = personaInput.trim()
-    if (!p) return
-    setPersonas((prev) =>
-      prev.some((x) => x.toLowerCase() === p.toLowerCase()) ? prev : [...prev, p],
-    )
-    setPersonaInput("")
-  }
-
-  async function save() {
-    if (!workspace || auth.kind !== "authed") return
+  async function persist(): Promise<boolean> {
+    if (!workspace || auth.kind !== "authed") return false
     setError(null)
-    if (!validate().ok) return
+    if (!validate().ok) return false
     const urlErr = validateProductWebsite(productUrl)
     if (urlErr) {
       setError(urlErr)
-      return
+      return false
     }
     setSaving(true)
     try {
-      const skipped: string[] = []
-      if (!isCompany) {
-        if (!productUrl.trim()) skipped.push("product_url")
-        if (!surfaces.length) skipped.push("product_surfaces")
-      }
       const product = await upsertPrimaryProduct(workspace.id, {
         name: productName.trim() || workspace.display_name,
         website: normalizeProductWebsite(productUrl) || null,
         surfaces,
-        personas,
-        monetization,
+        monetization: monetization ? [monetization] : [],
+        usersDescription: usersDescription.trim() || null,
       })
-      const updated = await advanceOnboardingStep(workspace.id, 3)
+      const updated = await updateWorkspace(workspace.id, {
+        competitors: parseCompetitors(competitors),
+        onboarding_step: 3,
+      })
       setWorkspace({ ...updated, product })
-      if (skipped.length) await markSkippedFields(auth.user.id, skipped)
       clearDraft(DRAFT_KEY)
-      router.push("/onboarding/metrics")
+      return true
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your product.")
       setSaving(false)
+      return false
+    }
+  }
+
+  async function save() {
+    if (await persist()) router.push("/onboarding/metrics")
+  }
+
+  async function skipToEnd() {
+    if (!workspace) return
+    if (await persist()) {
+      await advanceOnboardingStep(workspace.id, ONBOARDING_STEP_COUNT)
+      router.push("/onboarding/review")
     }
   }
 
@@ -168,14 +177,12 @@ export function ProductStep() {
           Your <em>product.</em>
         </>
       }
-      subtitle="Where it lives and who it's for. Positioning, competitors, and stage can all be added later in Settings."
-      footerMeta={
-        isCompany
-          ? "URL and surfaces are required — personas and monetization are optional."
-          : "Everything here is optional — add what you like."
-      }
+      subtitle="Name, where it lives, and how it makes money. Product position and competitors live in Settings."
+      footerMeta="Product"
       onBack={() => router.push("/onboarding/company")}
       onContinue={() => void save()}
+      onSkipToEnd={() => void skipToEnd()}
+      continueLabel="Next"
       continueDisabled={saving}
       loading={saving}
     >
@@ -183,7 +190,7 @@ export function ProductStep() {
         {error && <div className="onb-form-error">{error}</div>}
 
         <div className="form-grid">
-          <div className="field full" data-field="productName">
+          <div className="field" data-field="productName">
             <div className="field-l">
               Product name <span className="req">*</span>
             </div>
@@ -202,41 +209,25 @@ export function ProductStep() {
             )}
           </div>
 
-          <div className="field full" data-field="productUrl">
+          <div className="field" data-field="productUrl">
             <div className="field-l">
-              Product URL{" "}
-              {isCompany ? (
-                <span className="req">*</span>
-              ) : (
-                <span className="opt">optional</span>
-              )}
+              Website <span className="opt">optional</span>
             </div>
             <input
-              className={`inp ${errors.productUrl ? "has-error" : ""}`}
+              className="inp"
               type="url"
               value={productUrl}
-              onChange={(e) => {
-                setProductUrl(e.target.value)
-                clearError("productUrl")
-              }}
+              onChange={(e) => setProductUrl(e.target.value)}
               placeholder="https://yourproduct.com"
               autoComplete="url"
             />
-            {errors.productUrl && (
-              <p className="onb-field-error">{errors.productUrl}</p>
-            )}
           </div>
         </div>
 
         <div className="onb-section" style={{ marginTop: 18 }} data-field="surfaces">
           <div className="onb-section-h">
-            Surfaces{" "}
-            {isCompany ? (
-              <span className="req">*</span>
-            ) : (
-              <span className="opt">optional</span>
-            )}{" "}
-            <span className="opt">— where does it run?</span>
+            Surfaces <span className="req">*</span>{" "}
+            <span className="opt">— select all that apply</span>
           </div>
           {errors.surfaces && <p className="onb-field-error">{errors.surfaces}</p>}
           <div className="metric-chips">
@@ -262,79 +253,55 @@ export function ProductStep() {
           </div>
         </div>
 
-        <OptionalDisclosure label="Add personas & monetization">
-          <div className="onb-section">
-            <div className="onb-section-h">
-              User personas <span className="opt">— who uses it?</span>
+        <div className="form-grid" style={{ marginTop: 18 }}>
+          <div className="field full" data-field="monetization">
+            <div className="field-l">
+              Monetization <span className="opt">optional</span>
             </div>
-            <div className="metric-chips">
-              {personas.map((p) => (
-                <button
-                  type="button"
-                  key={p}
-                  className="metric sel"
-                  aria-pressed
-                  onClick={() => setPersonas((prev) => prev.filter((x) => x !== p))}
-                  title="Remove"
-                >
-                  <span className="mt-ic" aria-hidden>
-                    <Check style={{ width: 11, height: 11 }} />
-                  </span>
-                  {p}
-                </button>
+            <select
+              className="inp"
+              value={monetization}
+              onChange={(e) => setMonetization(e.target.value)}
+              aria-label="Monetization"
+            >
+              <option value="">How does it earn?</option>
+              {MONETIZATION_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
               ))}
-            </div>
-            <div className="metric-other-row" style={{ marginTop: 10 }}>
-              <input
-                className="inp"
-                value={personaInput}
-                onChange={(e) => setPersonaInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault()
-                    addPersona()
-                  }
-                }}
-                placeholder="e.g. Growth PM, Support lead…"
-                maxLength={60}
-                aria-label="Add a user persona"
-              />
-              <button
-                type="button"
-                className="btn btn-secondary"
-                onClick={addPersona}
-                disabled={!personaInput.trim()}
-              >
-                <Plus style={{ width: 13, height: 13 }} aria-hidden /> Add
-              </button>
-            </div>
+            </select>
           </div>
 
-          <div className="onb-section" style={{ marginTop: 16 }}>
-            <div className="onb-section-h">
-              Monetization <span className="opt">— how does it earn?</span>
+          <div className="field full" data-field="usersDescription">
+            <div className="field-l">
+              Tell us about your users{" "}
+              <span className="opt">— who are your users or customers?</span>
             </div>
-            <div className="metric-chips">
-              {MONETIZATION_OPTIONS.map((opt) => {
-                const isSel = monetization.includes(opt.value)
-                return (
-                  <button
-                    type="button"
-                    key={opt.value}
-                    className={`metric ${isSel ? "sel" : ""}`}
-                    aria-pressed={isSel}
-                    onClick={() => toggleMonetization(opt.value)}
-                  >
-                    {isSel && (
-                      <span className="mt-ic" aria-hidden>
-                        <Check style={{ width: 11, height: 11 }} />
-                      </span>
-                    )}
-                    {opt.label}
-                  </button>
-                )
-              })}
+            <textarea
+              className="inp"
+              rows={3}
+              value={usersDescription}
+              onChange={(e) => setUsersDescription(e.target.value)}
+              maxLength={1000}
+              placeholder="Your main user or customer types, in your own words"
+            />
+          </div>
+        </div>
+
+        <OptionalDisclosure label="Add competitors — who you're up against (optional)">
+          <div className="field full" data-field="competitors">
+            <div className="field-l">
+              Competitors <span className="opt">— comma-separated</span>
             </div>
+            <textarea
+              className="inp"
+              rows={2}
+              value={competitors}
+              onChange={(e) => setCompetitors(e.target.value)}
+              maxLength={500}
+              placeholder="e.g. Apple Health, Fitbit, Oura, Garmin"
+            />
           </div>
         </OptionalDisclosure>
       </div>

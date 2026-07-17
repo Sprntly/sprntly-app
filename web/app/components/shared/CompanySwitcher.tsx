@@ -23,7 +23,7 @@ interface Props {
  *  slug), and lets admins create a new workspace inline. Falls back to a
  *  static label while the list loads or when only the default exists. */
 function WorkspaceSwitcher({ displayName }: { displayName: string }) {
-  const { workspaces, activeWorkspace, setActiveWorkspace, refresh } = useWorkspace()
+  const { workspaces, activeWorkspace, orgRole, setActiveWorkspace, refresh } = useWorkspace()
   const [open, setOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState("")
@@ -41,7 +41,9 @@ function WorkspaceSwitcher({ displayName }: { displayName: string }) {
   }, [open])
 
   const label = activeWorkspace?.name ?? displayName
-  const isAdmin = (activeWorkspace?.role ?? "member") === "admin"
+  // Workspace creation is ORG owner/admin only (backend-enforced) — a
+  // workspace-level admin who is a plain org member doesn't get the button.
+  const isAdmin = orgRole === "owner" || orgRole === "admin"
   const interactive = workspaces.length > 1 || isAdmin
 
   async function createWorkspace() {

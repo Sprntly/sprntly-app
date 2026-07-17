@@ -11,6 +11,7 @@ import {
   TicketDrawer,
   ContentPanel,
 } from "../components/shared"
+import { CommandPalette } from "../components/shared/CommandPalette"
 import { useCompany } from "../context/CompanyContext"
 import { useContent } from "../context/ContentContext"
 import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
@@ -105,7 +106,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .catch(() => {})
   }, [setContent, workspace?.id])
 
-  const { closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen } = useNavigation()
+  const {
+    closeDrawers,
+    closeModal,
+    setShareMenuOpen,
+    setReviewPastOpen,
+    paletteOpen,
+    closePalette,
+    togglePalette,
+  } = useNavigation()
 
   useEffect(() => {
     const handleKeydown = (e: KeyboardEvent) => {
@@ -114,11 +123,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         closeModal()
         setShareMenuOpen(false)
         setReviewPastOpen(false)
+        closePalette()
+      }
+      // Global search (⌘K / Ctrl+K). Shift+K stays with the AI bar's
+      // focus shortcut (see AIBar.tsx), so require shiftKey to be off.
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "k") {
+        e.preventDefault()
+        togglePalette()
       }
     }
     document.addEventListener("keydown", handleKeydown)
     return () => document.removeEventListener("keydown", handleKeydown)
-  }, [closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen])
+  }, [closeDrawers, closeModal, setShareMenuOpen, setReviewPastOpen, closePalette, togglePalette])
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
@@ -145,6 +161,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <DesignAgentNotificationReplay />
       <ApproveModal />
       <InviteModal />
+      <CommandPalette open={paletteOpen} onClose={closePalette} />
       <ClaudeDrawer />
       <TicketDrawer />
       <ContentPanel />

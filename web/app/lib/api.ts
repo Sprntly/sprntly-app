@@ -584,6 +584,18 @@ export type AnalyzeWebsiteStatusResponse = {
   error: string | null
 }
 
+export const signupApi = {
+  /**
+   * PUBLIC (pre-auth): does an account already exist for this email? Called
+   * from sign-up step 1 so returning users are stopped with "already
+   * registered — sign in" before filling the about-you step. The backend
+   * fails open (exists: false) — the end-of-signup already_registered check
+   * remains the backstop.
+   */
+  emailExists: (email: string) =>
+    api.post<{ exists: boolean }>("/v1/auth/email-exists", { email }),
+}
+
 export const onboardingApi = {
   /**
    * Kick off a website analysis to infer industry / business type / stage and
@@ -603,15 +615,37 @@ export const onboardingApi = {
       `/v1/onboarding/analyze-website/${jobId}`,
     ),
   /**
-   * Final onboarding step: name the workspace. Server-side this renames the
-   * company's default `workspaces` row (never creates a second), grants the
-   * caller a workspace-admin membership, and binds the company dataset to it.
+   * Names the default workspace (renames the company's default `workspaces`
+   * row — never creates a second — grants the caller workspace-admin, and
+   * binds the company dataset). No longer an onboarding step since v6; kept
+   * for Settings-side callers.
    */
   createWorkspace: (name: string) =>
     api.post<{ id: string; name: string; slug: string; is_default: boolean }>(
       "/v1/onboarding/workspace",
       { name },
     ),
+  /**
+   * Step 9 "Here's what we learned": draft the business-context prose from
+   * everything collected (company/product/metrics rows + website analysis +
+   * connected sources). Synchronous — a spinner-length call; re-request on
+   * remount if lost. Fully editable client-side before accept.
+   */
+  draftBusinessContext: () =>
+    api.post<{ draft: string }>("/v1/onboarding/business-context-draft", {}),
+  /**
+   * Define-metrics sub-flow: AI-draft a plain-English definition + analytics
+   * event mapping (+ best-effort current value) for each picked metric.
+   */
+  draftMetricDefinitions: (metrics: string[]) =>
+    api.post<{
+      definitions: {
+        metric: string
+        definition: string
+        mapping: string
+        baseline: string | null
+      }[]
+    }>("/v1/onboarding/metric-definitions", { metrics }),
 }
 
 // ── Workspaces (multi-workspace 2026-07) ────────────────────────────────────
@@ -639,7 +673,13 @@ export type WorkspaceMemberRecord = {
 }
 
 export const workspacesApi = {
-  list: () => api.get<{ workspaces: WorkspaceSummary[] }>("/v1/workspaces"),
+  // org_role: the caller's COMPANY-level role (owner/admin/member/viewer) —
+  // workspace creation is org-admin gated, unlike the per-workspace `role`
+  // each summary row carries.
+  list: () =>
+    api.get<{ workspaces: WorkspaceSummary[]; org_role?: string | null }>(
+      "/v1/workspaces",
+    ),
   create: (name: string) =>
     api.post<WorkspaceSummary>("/v1/workspaces", { name }),
   rename: (id: string, name: string) =>
@@ -946,6 +986,11 @@ export type CompanyDocType =
   | "team_priorities"
   | "research"
   | "company_strategy"
+  // v6 onboarding steps 6-7 upload-or-type blocks.
+  | "team_strategy"
+  | "team_roadmap"
+  | "decision_process"
+  | "additional_context"
 
 /** One stored company document, as the list view reads it. Never carries the
  *  raw file bytes — only metadata + the extracted-char count. */

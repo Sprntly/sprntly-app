@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.synthesis.delivery import (
     READY_PING_CTA_LABEL,
@@ -164,6 +164,51 @@ def test_regenerate_bg_no_ping_when_generation_fails(isolated_settings):
                       side_effect=RuntimeError("boom")), \
          patch.object(brief_routes, "_notify_brief_ready") as ping:
         asyncio.run(brief_routes._synthesis_generate_bg("acme"))  # no raise
+    ping.assert_not_called()
+
+
+def test_regenerate_all_bg_suppresses_full_delivery_and_pings(
+        isolated_settings, monkeypatch):
+    """The /regenerate-all background body (full digest→brief→PRD→evidence
+    chain) also generates with deliver=False and announces the fresh brief
+    with the short ping — the full weekly message never fires on a
+    user-triggered regeneration."""
+    from app.routes import brief as brief_routes
+
+    calls: list[tuple] = []
+    pings: list[tuple] = []
+    monkeypatch.setattr(brief_routes, "resolve_company", lambda d: ("co-1", d))
+    monkeypatch.setattr(brief_routes, "kickoff_corpus_seed",
+                        lambda cid, slug: True)
+    with patch.object(brief_routes, "generate_brief_for",
+                      side_effect=lambda slug, **kw: calls.append((slug, kw))
+                      or {"id": 5}), \
+         patch.object(brief_routes, "_notify_brief_ready",
+                      side_effect=lambda d, b: pings.append((d, b))), \
+         patch.object(brief_routes, "_generate_downstream_docs",
+                      new_callable=AsyncMock), \
+         patch.object(brief_routes, "warm_synthesis_drilldowns"), \
+         patch("app.synthesis.delivery.deliver_brief") as full_push:
+        asyncio.run(brief_routes._full_pipeline_bg("acme"))
+
+    assert calls == [("acme", {"deliver": False})]  # full message suppressed
+    assert pings == [("acme", {"id": 5})]  # ready ping once, with fresh brief
+    full_push.assert_not_called()  # the full weekly push NEVER fires here
+
+
+def test_regenerate_all_bg_no_ping_when_generation_fails(
+        isolated_settings, monkeypatch):
+    """A failed /regenerate-all produces no ping — nothing fresh to announce
+    (and the PRD/evidence fan-out is never reached)."""
+    from app.routes import brief as brief_routes
+
+    monkeypatch.setattr(brief_routes, "resolve_company", lambda d: ("co-1", d))
+    monkeypatch.setattr(brief_routes, "kickoff_corpus_seed",
+                        lambda cid, slug: True)
+    with patch.object(brief_routes, "generate_brief_for",
+                      side_effect=RuntimeError("boom")), \
+         patch.object(brief_routes, "_notify_brief_ready") as ping:
+        asyncio.run(brief_routes._full_pipeline_bg("acme"))  # no raise
     ping.assert_not_called()
 
 

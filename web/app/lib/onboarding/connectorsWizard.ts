@@ -17,7 +17,24 @@ import type { ConnectorCategoryRow } from "../../types/content"
 export const REQUIRED_CATEGORY_KEY = "analytics"
 
 /**
- * Categories surfaced in the onboarding wizard, in catalog order.
+ * The categories the v6 onboarding wizard walks through, in screenshot-spec
+ * order (matches CONNECTOR_CATALOG order). Settings-only extras (docs,
+ * revenue) are deliberately absent — they stay in Settings → Connectors.
+ */
+export const ONBOARDING_CONNECTOR_CATEGORIES: readonly string[] = [
+  "analytics",
+  "voice",
+  "crm",
+  "pm",
+  "monitoring",
+  "design",
+  "code",
+  "comms",
+]
+
+/**
+ * Categories surfaced in the onboarding wizard, in catalog order, limited to
+ * ONBOARDING_CONNECTOR_CATEGORIES.
  *
  * Mirrors Settings → Connectors: only connectors we actually support today
  * (OAuth or API-key wired, per `isConnectableConnector`) are shown, and any
@@ -31,7 +48,9 @@ export const REQUIRED_CATEGORY_KEY = "analytics"
 export function wizardCategories(
   alsoKeepIds: ReadonlySet<string> = new Set(),
 ): ConnectorCategoryRow[] {
-  return connectableCatalog(alsoKeepIds)
+  return connectableCatalog(alsoKeepIds).filter((c) =>
+    ONBOARDING_CONNECTOR_CATEGORIES.includes(c.key),
+  )
 }
 
 /** Connector ids belonging to the required (Analytics) category. */

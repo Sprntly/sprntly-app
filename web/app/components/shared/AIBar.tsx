@@ -156,7 +156,9 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
 
   useEffect(() => {
     const handleKeydown = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      // ⌘⇧K / Ctrl+Shift+K focuses the assistant. Plain ⌘K belongs to the
+      // global search palette (AppShell) — don't race it here.
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === "k") {
         if (textareaRef.current && showAIBar) {
           e.preventDefault()
           expandAiPanel()

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { isRecoveryFlow } from "../authRecovery"
+import { authFlowType, isInviteFlow, isRecoveryFlow } from "../authRecovery"
 
 describe("isRecoveryFlow", () => {
   it("detects type=recovery in the query string", () => {
@@ -36,5 +36,36 @@ describe("isRecoveryFlow", () => {
 
   it("does not crash on a malformed URL", () => {
     expect(isRecoveryFlow("not a url")).toBe(false)
+  })
+})
+
+describe("authFlowType / isInviteFlow (workspace-invite landings)", () => {
+  it("reads the type from the query string", () => {
+    expect(
+      authFlowType("https://app.sprntly.ai/auth/callback?code=abc&type=invite"),
+    ).toBe("invite")
+  })
+
+  it("reads the type from the URL hash (implicit flow)", () => {
+    expect(
+      authFlowType(
+        "https://app.sprntly.ai/auth/callback#access_token=x&type=invite",
+      ),
+    ).toBe("invite")
+  })
+
+  it("isInviteFlow is true only for type=invite", () => {
+    expect(
+      isInviteFlow("https://app.sprntly.ai/auth/callback#access_token=x&type=invite"),
+    ).toBe(true)
+    expect(
+      isInviteFlow("https://app.sprntly.ai/auth/callback?type=recovery"),
+    ).toBe(false)
+    expect(isInviteFlow("https://app.sprntly.ai/auth/callback")).toBe(false)
+    expect(isInviteFlow("not a url")).toBe(false)
+  })
+
+  it("returns null when no type is carried", () => {
+    expect(authFlowType("https://app.sprntly.ai/auth/callback?code=abc")).toBe(null)
   })
 })

@@ -2,8 +2,10 @@
 the onboarding strategy step (design scene onbstrat): storage (save/list, per
 doc_type) + the POST/GET /v1/company/documents routes.
 
-Sibling of test_company_template.py. The 4 doc_types are the onbstrat upload
-cards: ceo_memo | team_priorities | research | company_strategy. These docs are
+Sibling of test_company_template.py. The doc_types are the onbstrat upload
+cards (ceo_memo | team_priorities | research | company_strategy) plus the v6
+steps-6/7 upload-or-type blocks (team_strategy | team_roadmap |
+decision_process | additional_context). These docs are
 STORED only for now (feeding them into agent context is a follow-up), so there is
 no render_for_prompt / synthesis coverage here."""
 from __future__ import annotations
@@ -33,10 +35,16 @@ def _seed_company(db, company_id="co-1"):
 
 def test_doc_types_are_the_onbstrat_cards():
     assert set(DOC_TYPES) == {
+        # base four (v5 onbstrat cards)
         "ceo_memo",
         "team_priorities",
         "research",
         "company_strategy",
+        # v6 steps-6/7 upload-or-type blocks
+        "team_strategy",
+        "team_roadmap",
+        "decision_process",
+        "additional_context",
     }
     assert is_valid_doc_type("ceo_memo")
     assert not is_valid_doc_type("not_a_type")
