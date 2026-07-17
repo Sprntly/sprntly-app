@@ -57,8 +57,15 @@ def _prototype(
     pid: int = 1,
     bundle_url: str | None = "https://x.example/p/1/index.html",
     figma_file_key: str | None = None,
+    screenshot_key: str | None = None,
 ) -> dict:
-    return {"id": pid, "prd_id": 1, "bundle_url": bundle_url, "figma_file_key": figma_file_key}
+    return {
+        "id": pid,
+        "prd_id": 1,
+        "bundle_url": bundle_url,
+        "figma_file_key": figma_file_key,
+        "screenshot_key": screenshot_key,
+    }
 
 
 def _checkpoint(*, cid: int = 7, prototype_id: int = 1, prompt_history=None) -> dict:
@@ -612,6 +619,64 @@ def test_assemble_omits_design_source_when_figma_key_absent():
     """AC5: figma_file_key None → no `## Design Source` header."""
     out = _assemble(prototype=_prototype(figma_file_key=None))
     assert "## Design Source" not in out
+
+
+# ─── Design Source: screenshot provenance (pure _assemble) ────────────────────
+
+
+def test_design_source_screenshot_line():
+    """screenshot_key set (no figma) → Design Source section with exactly the
+    provenance sentence; no Figma line."""
+    out = _assemble(
+        prototype=_prototype(screenshot_key="uploads/ws-1/0f3a9d2e.png")
+    )
+    assert "## Design Source" in out
+    ds = out.split("## Design Source", 1)[1]
+    assert "Generated from an uploaded screenshot reference." in ds
+    assert "Figma" not in ds
+
+
+def test_design_source_both_sources_figma_first():
+    """figma + screenshot both set → ONE Design Source section carrying both
+    lines, Figma first."""
+    out = _assemble(
+        prototype=_prototype(
+            figma_file_key="abc123XYZ",
+            screenshot_key="uploads/ws-1/0f3a9d2e.png",
+        )
+    )
+    assert out.count("## Design Source") == 1
+    ds = out.split("## Design Source", 1)[1]
+    i_figma = ds.index("Generated from Figma file `abc123XYZ`.")
+    i_shot = ds.index("Generated from an uploaded screenshot reference.")
+    assert i_figma < i_shot
+
+
+def test_export_never_leaks_screenshot_key():
+    """The storage key embeds the workspace id and a storage-internal path;
+    the export gets pasted into third-party coding agents. Neither the key
+    value nor any `uploads/` path fragment may appear in the output."""
+    key = "uploads/ws-secret-tenant/9b1c4e77-aaaa-bbbb-cccc-000011112222.png"
+    out = _assemble(
+        prototype=_prototype(figma_file_key="abc123XYZ", screenshot_key=key)
+    )
+    assert key not in out
+    assert "ws-secret-tenant" not in out
+    assert "uploads/" not in out
+
+
+def test_export_byte_identical_without_sources():
+    """Contract pin: with neither source field set the Design Source section is
+    wholly absent, and a row carrying screenshot_key=None renders byte-identical
+    to a legacy row that predates the column entirely."""
+    modern = _assemble(
+        prototype=_prototype(figma_file_key=None, screenshot_key=None)
+    )
+    legacy_row = _prototype(figma_file_key=None)
+    legacy_row.pop("screenshot_key")
+    legacy = _assemble(prototype=legacy_row)
+    assert modern == legacy
+    assert "## Design Source" not in modern
 
 
 # ─── P4-07: placement + markdown lint ─────────────────────────────────────────
