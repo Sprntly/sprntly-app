@@ -214,10 +214,10 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders 33 connector rows total (29 design + ClickUp + Fireflies + Sprinklr + Superset)", () => {
+  it("renders 40 connector rows total (v6 catalog: + Segment, App/Play Store, CRM roster)", () => {
     const html = render()
     const matches = html.match(/class="set-conn-row"/g) ?? []
-    expect(matches.length).toBe(33)
+    expect(matches.length).toBe(40)
   })
 
   it("Asana row is wired for OAuth connect (no sync-engine support yet)", () => {

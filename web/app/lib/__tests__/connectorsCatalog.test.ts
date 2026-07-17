@@ -1,6 +1,6 @@
 /**
- * Catalog shape + content tests for the sprntly_Design-3 reset (commit C).
- * Source of truth: sprntly_Design-3/Sprntly.html lines 2266-2333.
+ * Catalog shape + content tests — onboarding v6 (screenshot spec 2026-07-17)
+ * category order, with the settings-only extras (docs, revenue) appended.
  */
 import { describe, expect, it } from "vitest"
 import {
@@ -13,24 +13,25 @@ import {
 
 const EXPECTED_CATEGORIES = [
   "Analytics",
+  "Voice of Customer & Support",
+  "Customer Relationship (CRM)",
   "Project Management",
-  "Business documentation",
-  "Customer Voice & Support",
-  "Revenue",
-  "Code",
   "Monitoring & Reliability",
   "Design",
-  "Communication",
+  "Codebase",
+  "Communications",
+  "Business documentation",
+  "Revenue",
 ] as const
 
 describe("CONNECTOR_CATALOG — design-3 shape", () => {
-  it("has exactly the 9 categories, in order (Business documentation added)", () => {
+  it("has exactly the 10 categories, in v6 order (CRM added; docs + revenue appended)", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 33 connector rows across all categories (29 design + ClickUp + Fireflies + Sprinklr + Superset)", () => {
+  it("totals 40 connector rows across all categories (v6: + Segment, App/Play Store, CRM roster)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(33)
+    expect(total).toBe(40)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -88,9 +89,10 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     return cat.items.map((i) => i.name)
   }
 
-  it("Analytics: Mixpanel, Amplitude, Google Analytics, Heap, PostHog, Superset", () => {
+  it("Analytics: Mixpanel, Amplitude, Google Analytics, Heap, PostHog, Segment, Superset", () => {
     expect(items("Analytics")).toEqual([
-      "Mixpanel", "Amplitude", "Google Analytics", "Heap", "PostHog", "Superset",
+      "Mixpanel", "Amplitude", "Google Analytics", "Heap", "PostHog", "Segment",
+      "Superset",
     ])
   })
 
@@ -104,18 +106,25 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     expect(items("Business documentation")).toEqual(["Notion", "Google Docs"])
   })
 
-  it("Customer Voice & Support: Intercom, Zendesk, Sprinklr, Fireflies, Gong, Dovetail, Salesforce", () => {
-    expect(items("Customer Voice & Support")).toEqual([
-      "Intercom", "Zendesk", "Sprinklr", "Fireflies", "Gong", "Dovetail", "Salesforce",
+  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong", () => {
+    expect(items("Voice of Customer & Support")).toEqual([
+      "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store", "Sprinklr",
+      "Fireflies", "Gong",
     ])
   })
 
-  it("Revenue: Stripe, ChartMogul, HubSpot", () => {
-    expect(items("Revenue")).toEqual(["Stripe", "ChartMogul", "HubSpot"])
+  it("Customer Relationship (CRM): HubSpot, Salesforce, Pipedrive, Attio, Close, Zoho CRM", () => {
+    expect(items("Customer Relationship (CRM)")).toEqual([
+      "HubSpot", "Salesforce", "Pipedrive", "Attio", "Close", "Zoho CRM",
+    ])
   })
 
-  it("Code: GitHub, GitLab, Bitbucket", () => {
-    expect(items("Code")).toEqual(["GitHub", "GitLab", "Bitbucket"])
+  it("Revenue: Stripe, ChartMogul (HubSpot moved to CRM)", () => {
+    expect(items("Revenue")).toEqual(["Stripe", "ChartMogul"])
+  })
+
+  it("Codebase: GitHub, GitLab, Bitbucket", () => {
+    expect(items("Codebase")).toEqual(["GitHub", "GitLab", "Bitbucket"])
   })
 
   it("Monitoring & Reliability: Sentry, Datadog, New Relic, PagerDuty", () => {
@@ -128,8 +137,8 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     expect(items("Design")).toEqual(["Figma", "Framer"])
   })
 
-  it("Communication: Slack, MS Teams", () => {
-    expect(items("Communication")).toEqual(["Slack", "MS Teams"])
+  it("Communications: Slack, MS Teams", () => {
+    expect(items("Communications")).toEqual(["Slack", "MS Teams"])
   })
 })
 
@@ -202,13 +211,13 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
   it("keeps only the categories that still have a wired connector, in order", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
       "Analytics",
+      "Voice of Customer & Support",
+      "Customer Relationship (CRM)",
       "Project Management",
-      "Business documentation",
-      "Customer Voice & Support",
-      "Revenue",
-      "Code",
       "Design",
-      "Communication",
+      "Codebase",
+      "Communications",
+      "Business documentation",
     ])
   })
 
@@ -234,16 +243,19 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     )
   })
 
-  it("drops categories that end up with no connectors (Monitoring)", () => {
+  it("drops categories that end up with no connectors (Monitoring, Revenue)", () => {
     const titles = connectableCatalog().map((c) => c.title)
     expect(titles).not.toContain("Monitoring & Reliability")
+    expect(titles).not.toContain("Revenue")
     const byTitle = (t: string) =>
       connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
     expect(byTitle("Analytics")).toEqual(["superset"])
+    expect(byTitle("Voice of Customer & Support")).toEqual(["sprinklr", "fireflies"])
+    expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
     expect(byTitle("Business documentation")).toEqual(["google_drive"])
-    expect(byTitle("Code")).toEqual(["github"])
-    expect(byTitle("Communication")).toEqual(["slack"])
+    expect(byTitle("Codebase")).toEqual(["github"])
+    expect(byTitle("Communications")).toEqual(["slack"])
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {

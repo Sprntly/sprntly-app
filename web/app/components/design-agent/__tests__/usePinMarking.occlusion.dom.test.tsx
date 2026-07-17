@@ -439,25 +439,33 @@ describe("usePinMarking — comment-pin occlusion lifecycle", () => {
     const windowRemove = vi.spyOn(window, "removeEventListener")
     const iframeRemove = vi.spyOn(iframe, "removeEventListener")
     const disconnect = vi.spyOn(MutationObserver.prototype, "disconnect")
-    const clearTimer = vi.spyOn(window, "clearTimeout")
     const view = render(React.createElement(Harness))
     await dropPin()
 
-    // Leave a recompute pending so cleanup has a timer to clear: the in-iframe
-    // mutation fires the content observer (microtask) which SCHEDULES the setTimeout(0);
-    // flush ONLY microtasks so the macrotask timer is still pending (not yet run) at
-    // unmount — a microtask flush never runs a queued setTimeout.
-    const modal = doc.createElement("div")
-    doc.body.appendChild(modal)
-    topEl = modal
-    await flushMicrotasks()
+    try {
+      // Leave a recompute pending so cleanup has a timer to clear: the
+      // in-iframe mutation fires the content observer (microtask) which
+      // SCHEDULES the setTimeout(0). Freeze macrotasks with fake timers so
+      // that timer is GUARANTEED still pending at unmount — under a loaded
+      // worker the real setTimeout(0) could otherwise fire before unmount and
+      // the clearTimeout assertion raced (observer delivery is microtask-based
+      // and unaffected by fake timers).
+      vi.useFakeTimers()
+      const clearTimer = vi.spyOn(window, "clearTimeout")
+      const modal = doc.createElement("div")
+      doc.body.appendChild(modal)
+      topEl = modal
+      await flushMicrotasks()
 
-    view.unmount()
-    expect(winRemove).toHaveBeenCalledWith("scroll", expect.any(Function))
-    expect(windowRemove).toHaveBeenCalledWith("resize", expect.any(Function))
-    expect(iframeRemove).toHaveBeenCalledWith("load", expect.any(Function))
-    expect(disconnect).toHaveBeenCalled() // content observer + body watcher
-    expect(clearTimer).toHaveBeenCalled()
+      view.unmount()
+      expect(winRemove).toHaveBeenCalledWith("scroll", expect.any(Function))
+      expect(windowRemove).toHaveBeenCalledWith("resize", expect.any(Function))
+      expect(iframeRemove).toHaveBeenCalledWith("load", expect.any(Function))
+      expect(disconnect).toHaveBeenCalled() // content observer + body watcher
+      expect(clearTimer).toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it("cleanup — the mount watcher is dead after unmount (no bind on a late iframe)", async () => {

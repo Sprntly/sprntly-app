@@ -212,7 +212,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   // Warm every chrome-reachable route once so a tab click swaps screens
   // immediately instead of downloading the route chunk at click time. No-op in
   // dev (prefetch is production-only) and idempotent via the router cache.
+  // Guarded: test router doubles routinely stub only push/replace.
   useEffect(() => {
+    if (typeof router.prefetch !== "function") return
     for (const path of NAV_PREFETCH_PATHS) router.prefetch(path)
   }, [router])
 
