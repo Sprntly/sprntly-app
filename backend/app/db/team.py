@@ -155,6 +155,43 @@ def member_exists_for_email(*, company_id: str, email: str) -> bool:
     return any(m["user_id"] in matching_user_ids for m in member_rows)
 
 
+@retry_on_disconnect
+def email_belongs_to_other_company(*, company_id: str, email: str) -> bool:
+    """True iff this email's profile is a member of a company OTHER than
+    `company_id` (case-insensitive). Used to refuse invites at send time:
+    the one-user-one-company invariant means such an invitee could never
+    accept, so the inviter gets the clear reason immediately instead of an
+    invite that dangles forever (its accept would 409)."""
+    client = require_client()
+    needle = email.strip().lower()
+    if not needle:
+        return False
+    profile_rows = (
+        client.table("profiles")
+        .select("id, email")
+        .execute()
+        .data
+        or []
+    )
+    matching_user_ids = {
+        p["id"] for p in profile_rows
+        if (p.get("email") or "").strip().lower() == needle
+    }
+    if not matching_user_ids:
+        return False
+    member_rows = (
+        client.table("company_members")
+        .select("user_id, company_id")
+        .execute()
+        .data
+        or []
+    )
+    return any(
+        m["user_id"] in matching_user_ids and m.get("company_id") != company_id
+        for m in member_rows
+    )
+
+
 def create_invite(
     *,
     company_id: str,

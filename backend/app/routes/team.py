@@ -40,6 +40,7 @@ from app.db.team import (
     create_invite,
     delete_invite,
     delete_member,
+    email_belongs_to_other_company,
     get_invite,
     get_member,
     get_pending_invite_by_email,
@@ -221,6 +222,19 @@ def post_team_invite(
     # the error message is clearer here than at accept time).
     if member_exists_for_email(company_id=company.company_id, email=body.email):
         raise HTTPException(409, "That email is already a member of this team")
+
+    # One-user-one-company: an email already on a DIFFERENT company could
+    # never accept this invite (its /v1/invites/accept would 409), so refuse
+    # at send time with the reason instead of creating a forever-pending row.
+    if email_belongs_to_other_company(
+        company_id=company.company_id, email=body.email
+    ):
+        raise HTTPException(
+            409,
+            "That email already belongs to another company on Sprntly. An "
+            "account can only be part of one company for now, so they can't "
+            "be invited to this workspace — try a different email for them.",
+        )
 
     # Duplicate pending invite → unique(company_id, email).
     if get_pending_invite_by_email(

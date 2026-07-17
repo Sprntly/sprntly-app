@@ -132,7 +132,7 @@ export function InviteStep() {
     const valid = rows.filter((r) => EMAIL_RE.test(r.email.trim().toLowerCase()))
     setSaving(true)
     try {
-      const failures: string[] = []
+      const failures: { email: string; reason: string | null }[] = []
       for (const row of valid) {
         try {
           await teamApi.invite(
@@ -141,13 +141,22 @@ export function InviteStep() {
             [],
             row.jobRole,
           )
-        } catch {
-          failures.push(row.email)
+        } catch (err) {
+          failures.push({
+            email: row.email,
+            reason: err instanceof Error && err.message ? err.message : null,
+          })
         }
       }
       if (failures.length) {
+        // A single refusal carries the backend's reason (e.g. "already
+        // belongs to another company") — show it; multiple failures get the
+        // compact list form.
+        const [first] = failures
         setNotice(
-          `Couldn't invite ${failures.join(", ")} — you can re-invite them in Settings → Team.`,
+          failures.length === 1 && first.reason
+            ? `Couldn't invite ${first.email}: ${first.reason}`
+            : `Couldn't invite ${failures.map((f) => f.email).join(", ")} — you can re-invite them in Settings → Team.`,
         )
       }
       const updated = await advanceOnboardingStep(workspace.id, nextStep)

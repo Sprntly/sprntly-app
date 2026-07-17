@@ -50,6 +50,7 @@ vi.mock("../../teamApi", () => ({
 
 import { postLoginPath } from "../client"
 import { ONBOARDING_STEP_SLUGS } from "../../onboarding/types"
+import { ApiError } from "../../api"
 
 const FIRST_STEP = `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
 
@@ -63,6 +64,19 @@ function newConfirmedUser() {
   })
   fetchWorkspaceMock.mockResolvedValue(null) // no workspace
   acceptInviteMock.mockRejectedValue(new Error("no invite")) // no auto-accept
+}
+
+/** A signed-in user who already belongs to a company (workspace resolves). */
+function existingMemberUser(workspace: Record<string, unknown> = {}) {
+  getUserMock.mockResolvedValue({
+    data: { user: { id: "user-1", email_confirmed_at: "2026-01-01T00:00:00Z" } },
+  })
+  fetchWorkspaceMock.mockResolvedValue({
+    id: "ws-1",
+    onboarding_completed_at: "2026-01-02T00:00:00Z",
+    onboarding_step: 0,
+    ...workspace,
+  })
 }
 
 describe("postLoginPath — pre-onboarding profile gate", () => {
@@ -97,5 +111,41 @@ describe("postLoginPath — pre-onboarding profile gate", () => {
       error: null,
     })
     expect(await postLoginPath()).toBe(FIRST_STEP)
+  })
+})
+
+describe("postLoginPath — pending-invite resolution for existing members", () => {
+  it("routes to /invite-conflict when the pending invite is from ANOTHER company (409)", async () => {
+    existingMemberUser()
+    acceptInviteMock.mockRejectedValue(
+      new ApiError(409, { detail: "already in another company" }),
+    )
+    expect(await postLoginPath()).toBe("/invite-conflict")
+  })
+
+  it("continues into the app when there is no pending invite (404)", async () => {
+    existingMemberUser()
+    acceptInviteMock.mockRejectedValue(new ApiError(404, { detail: "no invite" }))
+    expect(await postLoginPath()).toBe("/")
+  })
+
+  it("continues into the app after a same-company accept succeeds (extra workspaces granted)", async () => {
+    existingMemberUser()
+    acceptInviteMock.mockResolvedValue({ company_id: "co-1", role: "member" })
+    expect(await postLoginPath()).toBe("/")
+  })
+
+  it("treats a network failure as best-effort and continues into the app", async () => {
+    existingMemberUser()
+    acceptInviteMock.mockRejectedValue(new Error("network down"))
+    expect(await postLoginPath()).toBe("/")
+  })
+
+  it("still surfaces the conflict for a member whose onboarding is unfinished", async () => {
+    existingMemberUser({ onboarding_completed_at: null, onboarding_step: 2 })
+    acceptInviteMock.mockRejectedValue(
+      new ApiError(409, { detail: "already in another company" }),
+    )
+    expect(await postLoginPath()).toBe("/invite-conflict")
   })
 })
