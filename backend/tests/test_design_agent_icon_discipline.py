@@ -50,8 +50,9 @@ def test_recreate_discipline_mentions_icon_reuse_no_emoji():
 
 
 def test_template_version_bumped():
-    """The icon-discipline change is template-invalidating → version is 7."""
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 7
+    """Template-invalidating changes move the version (now 8 — the screenshot
+    design-reference directive)."""
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 8
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 

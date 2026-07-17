@@ -118,6 +118,13 @@ _CHARS_PER_TOKEN = 4
 # Median iterate output (agent-build-research.md §3.2). A fixed heuristic keeps the
 # estimate deterministic (AC4); actual output is whatever the run produces.
 _EXPECTED_OUTPUT_TOKENS = 2000
+# Flat vision-input estimate for an attached reference screenshot. Anthropic
+# vision costs ≈ (width × height) / 750 tokens; at the ~1568px max long edge the
+# API downscales to, a full-size image lands ≈ 1600 tokens — a flat worst-case
+# constant, because uploads are never decoded server-side (no dimensions to
+# compute from). The image rides the CACHEABLE prefix, so it counts as cached
+# input in the estimate split.
+_SCREENSHOT_EST_INPUT_TOKENS = 1600
 
 # ── AD12 orphan / re-attach: anchor-id extraction from the BUILT bundle ──────
 #
@@ -794,6 +801,16 @@ def _design_source_for_generation(
 
     figma_ready = bool(figma_file_key and figma_access_token)
     github_ready = bool(github_repo and github_installation_id)
+
+    if design_source == "screenshot":
+        # Screenshot-as-context: the uploaded image itself rides the prompt as
+        # vision context — a strictly richer signal than any derived palette —
+        # so there is NO extractor and NO design_systems cache row for this arm
+        # (the deterministic-extractor contract has no image decoder). Returning
+        # the un-seeded tuple makes _resolve_design_system a no-op (provider is
+        # None) and leaves the virtual filesystem un-seeded. The
+        # unsatisfiable-degrade rules for the other arms are unchanged.
+        return None, None, None, None
 
     if design_source in ("figma", "github", "website"):
         if design_source == "figma" and figma_ready:
@@ -1986,7 +2003,9 @@ async def estimate_iterate_cost(
     nothing (the iterate route is only hit on Continue).
 
     Counts the CACHEABLE prefix (iterate system prompt + the current bundle source +
-    the open comment threads) and the VOLATILE suffix (the user's iterate prompt),
+    the open comment threads, plus a flat `_SCREENSHOT_EST_INPUT_TOKENS` when the
+    prototype carries a reference screenshot — the image rides that prefix) and
+    the VOLATILE suffix (the user's iterate prompt),
     converts chars→tokens via the chars/4 heuristic (`_CHARS_PER_TOKEN`), then prices
     via `llm_telemetry.MODEL_PRICING[MODEL]` — the SAME constants `RunUsage.est_cost_usd`
     uses (no second pricing table, AC1). The estimate prices the cache-READ path for
@@ -2023,6 +2042,11 @@ async def estimate_iterate_cost(
     cacheable_chars = len(DESIGN_AGENT_ITERATE_SYSTEM) + _chars(source) + _chars_comments(open_comments)
     volatile_chars = len(prompt)
     cached_input_tokens = cacheable_chars // _CHARS_PER_TOKEN
+    if proto and proto.get("screenshot_key"):
+        # The stored reference screenshot re-enters every iterate turn inside
+        # the cacheable prefix; count it as a flat vision-input constant (see
+        # _SCREENSHOT_EST_INPUT_TOKENS — the image is never decoded here).
+        cached_input_tokens += _SCREENSHOT_EST_INPUT_TOKENS
     new_input_tokens = volatile_chars // _CHARS_PER_TOKEN
 
     p = MODEL_PRICING[MODEL]
