@@ -9,7 +9,6 @@
 // limit warning; Continue requires ≥1 metric AND a framework; a valid Continue
 // PUTs the picks to the from-selection endpoint, persists the framework via
 // updateWorkspace (onboarding_step 4) and routes to /onboarding/connectors;
-// "Skip to end ⇥" persists then jumps to the review step.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -98,12 +97,6 @@ function frameworkSelect(): HTMLSelectElement {
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
     /^continue$/i.test((b.textContent ?? "").trim()),
-  ) as HTMLButtonElement
-}
-
-function skipToEndBtn(): HTMLButtonElement {
-  return Array.from(document.querySelectorAll("button")).find((b) =>
-    /Skip to end/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
 }
 
@@ -246,26 +239,6 @@ describe("MetricsStep (onboarding step 03 — up to 5 metrics + framework)", () 
       onboarding_step: 4,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
-  })
-
-  it("'Skip to end ⇥' persists the picks + framework, jumps to step 9 and routes to review", async () => {
-    kpiSelectionMock.mockResolvedValue({ ok: true, version: 1, north_star: "x" })
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 4 }))
-    advanceStepMock.mockResolvedValue(
-      makeWorkspace({ onboarding_step: ONBOARDING_STEP_COUNT }),
-    )
-    mount()
-    fireEvent.change(frameworkSelect(), { target: { value: "wsjf" } })
-
-    await act(async () => {
-      skipToEndBtn().click()
-    })
-
-    await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
-    })
-    expect(kpiSelectionMock).toHaveBeenCalledTimes(1)
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", ONBOARDING_STEP_COUNT)
   })
 
   it("shows the loading shell while the workspace is loading", () => {

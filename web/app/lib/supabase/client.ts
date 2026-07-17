@@ -81,11 +81,10 @@ export async function postLoginPath(): Promise<string> {
   // check the backend for a pending invite that matches their verified
   // email. On success the backend creates their company_members row, so
   // the next workspace fetch resolves to a real company. Best-effort —
-  // any failure (404 = no invite, 409 = already in another company,
-  // network glitch) falls through to onboarding without surfacing an
-  // error here.
+  // any failure (404 = no invite, network glitch) falls through to
+  // onboarding without surfacing an error here.
   if (!workspace) {
-    const accepted = await tryAutoAcceptInvite()
+    const accepted = (await tryAcceptInvite()) === "accepted"
     if (accepted) {
       const fresh = await fetchWorkspaceForUser(user.id)
       if (fresh) {
@@ -107,6 +106,16 @@ export async function postLoginPath(): Promise<string> {
     }
     return `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
   }
+  // The user already belongs to a company. A pending invite for their email
+  // still needs resolving at sign-in:
+  //  - same company, more workspaces → the backend accept grants them
+  //    (idempotent "second invite" semantics), then continue in normally;
+  //  - a DIFFERENT company → the one-user-one-company invariant means they
+  //    can never accept it, and silently ignoring the invite leaves both
+  //    sides confused — route to the explanatory blocked-invite page instead.
+  //  - no invite (404) / transient error → normal flow.
+  if ((await tryAcceptInvite()) === "conflict") return "/invite-conflict"
+
   if (workspace.onboarding_completed_at) return "/"
   return `/onboarding/${slugForStep(workspace.onboarding_step)}`
 }
@@ -136,14 +145,27 @@ async function hasCompleteSignupProfile(userId: string): Promise<boolean> {
   }
 }
 
-async function tryAutoAcceptInvite(): Promise<boolean> {
+/** Outcome of the sign-in invite-accept attempt:
+ *  - accepted — the backend materialised the invite (membership/workspaces)
+ *  - none     — no pending invite for this email (404)
+ *  - conflict — the invite is from ANOTHER company; the one-user-one-company
+ *               invariant blocks acceptance (409)
+ *  - error    — network/other failure; treated as best-effort no-op */
+type InviteAcceptOutcome = "accepted" | "none" | "conflict" | "error"
+
+async function tryAcceptInvite(): Promise<InviteAcceptOutcome> {
   try {
     // Lazy import keeps the api module out of the cold-start path of
     // postLoginPath (teamApi now lives in lib/teamApi, not TeamSettings).
     const { teamApi } = await import("../teamApi")
     await teamApi.acceptInvite()
-    return true
-  } catch {
-    return false
+    return "accepted"
+  } catch (err) {
+    const { ApiError } = await import("../api")
+    if (err instanceof ApiError) {
+      if (err.status === 409) return "conflict"
+      if (err.status === 404) return "none"
+    }
+    return "error"
   }
 }

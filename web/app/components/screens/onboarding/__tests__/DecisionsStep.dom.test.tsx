@@ -12,7 +12,6 @@
 // doc_type; typed text persists on Continue via updateWorkspace
 // (decision_process/additional_context + onboarding_step 8) →
 // /onboarding/invite; the footer "Skip" advances without persisting text;
-// "Skip to end ⇥" persists then jumps to review.
 //
 // Matchers: native DOM only.
 import * as React from "react"
@@ -79,12 +78,6 @@ function continueBtn(): HTMLButtonElement {
 function skipLink(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find(
     (b) => (b.textContent ?? "").trim() === "Skip",
-  ) as HTMLButtonElement
-}
-
-function skipToEndBtn(): HTMLButtonElement {
-  return Array.from(document.querySelectorAll("button")).find((b) =>
-    /Skip to end/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
 }
 
@@ -222,26 +215,6 @@ describe("DecisionsStep (onboarding step 07 — decisions + extra context, uploa
     })
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 8)
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
-  })
-
-  it("'Skip to end ⇥' persists with step 9 and routes to review", async () => {
-    updateWorkspaceMock.mockResolvedValue(
-      makeWorkspace({ onboarding_step: ONBOARDING_STEP_COUNT }),
-    )
-    mount()
-
-    await act(async () => {
-      skipToEndBtn().click()
-    })
-
-    await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
-    })
-    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
-      decision_process: null,
-      additional_context: null,
-      onboarding_step: ONBOARDING_STEP_COUNT,
-    })
   })
 
   it("Back routes to the strategy step", () => {

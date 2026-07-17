@@ -140,6 +140,37 @@ def test_invite_409_if_email_already_a_member(isolated_settings, monkeypatch):
     assert "already" in r.json()["detail"].lower()
 
 
+def test_invite_409_if_email_belongs_to_another_company(isolated_settings, monkeypatch):
+    """Send-time guard (2026-07): an email already on a DIFFERENT company can
+    never accept (one-user-one-company — its /v1/invites/accept would 409), so
+    the invite is refused immediately with the reason instead of dangling."""
+    ctx = company_client(monkeypatch)
+    other_company = seed_company(user_id="outsider-1", slug="rival")
+    _seed_profile(user_id="outsider-1", email="bob@rival.com")
+
+    r = ctx.client.post(
+        "/v1/team/invites", json={"email": "bob@rival.com", "role": "member"}
+    )
+    assert r.status_code == 409
+    assert "another company" in r.json()["detail"].lower()
+    # No pending row was created for the refused invite.
+    assert _list_invites(ctx.company_id) == []
+    # Sanity: the outsider really is on the other company, untouched.
+    assert other_company != ctx.company_id
+
+
+def test_invite_201_when_email_has_profile_but_no_company(isolated_settings, monkeypatch):
+    """A profile without any company membership (e.g. signed up, never
+    onboarded) is NOT 'another company' — the invite must go through."""
+    ctx = company_client(monkeypatch)
+    _seed_profile(user_id="floating-user-1", email="free@agent.com")
+
+    r = ctx.client.post(
+        "/v1/team/invites", json={"email": "free@agent.com", "role": "member"}
+    )
+    assert r.status_code == 201, r.text
+
+
 def test_invite_409_if_duplicate_pending(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
     r1 = ctx.client.post(

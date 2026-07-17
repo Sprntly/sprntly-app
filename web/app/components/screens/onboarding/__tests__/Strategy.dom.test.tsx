@@ -12,7 +12,6 @@
 // uploaded state; a failed upload surfaces a non-blocking notice; typed text
 // persists on Continue via updateWorkspace (team_strategy/team_roadmap +
 // onboarding_step 7) → /onboarding/decisions; the footer "Skip" advances
-// WITHOUT persisting text; "Skip to end ⇥" persists then jumps to review.
 //
 // Matchers: native DOM only.
 import * as React from "react"
@@ -76,12 +75,6 @@ function continueBtn(): HTMLButtonElement {
 function skipLink(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find(
     (b) => (b.textContent ?? "").trim() === "Skip",
-  ) as HTMLButtonElement
-}
-
-function skipToEndBtn(): HTMLButtonElement {
-  return Array.from(document.querySelectorAll("button")).find((b) =>
-    /Skip to end/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
 }
 
@@ -220,26 +213,6 @@ describe("Strategy (onboarding step 06 — 'Strategy & roadmap' upload-or-type)"
     })
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 7)
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
-  })
-
-  it("'Skip to end ⇥' persists with step 9 and routes to review", async () => {
-    updateWorkspaceMock.mockResolvedValue(
-      makeWorkspace({ onboarding_step: ONBOARDING_STEP_COUNT }),
-    )
-    mount()
-
-    await act(async () => {
-      skipToEndBtn().click()
-    })
-
-    await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
-    })
-    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
-      team_strategy: null,
-      team_roadmap: null,
-      onboarding_step: ONBOARDING_STEP_COUNT,
-    })
   })
 
   it("Back routes to the team step", () => {

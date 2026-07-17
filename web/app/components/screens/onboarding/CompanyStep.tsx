@@ -252,15 +252,24 @@ export function CompanyStep() {
           </div>
 
           <div className="field full" data-field="strategy">
-            <div className="field-l">
-              Strategy / OKRs <span className="opt">optional</span>{" "}
+            <div
+              className="field-l"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+              }}
+            >
+              <span>
+                Strategy / OKRs <span className="opt">optional</span>
+              </span>
               <button
                 type="button"
-                className="onb-skip-link"
+                className="btn btn-ghost"
                 onClick={() => strategyFileRef.current?.click()}
                 disabled={strategyDocUploading}
               >
-                {strategyDocUploading ? "Uploading…" : "📎 Upload"}
+                {strategyDocUploading ? "Uploading…" : "Upload"}
               </button>
             </div>
             <textarea

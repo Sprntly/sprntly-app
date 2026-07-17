@@ -59,6 +59,7 @@ vi.mock("../../../../lib/workspace-brief", () => ({
 }))
 
 import { DefineMetrics } from "../DefineMetrics"
+import { _resetDraftPrefetchForTests } from "../../../../lib/onboarding/draftPrefetch"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 const TWO_METRIC_TREE = {
@@ -103,6 +104,7 @@ function finishBtn(): HTMLButtonElement {
 }
 
 beforeEach(() => {
+  _resetDraftPrefetchForTests()
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   ensureDatasetMock.mockResolvedValue(undefined)
   seedContextMock.mockResolvedValue(undefined)

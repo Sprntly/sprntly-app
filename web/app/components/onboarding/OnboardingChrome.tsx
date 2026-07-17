@@ -24,7 +24,6 @@ export function OnboardingChrome({
   children,
   onBack,
   onContinue,
-  onSkipToEnd,
   continueLabel = "Continue",
   continueDisabled,
   loading,
@@ -39,9 +38,6 @@ export function OnboardingChrome({
   children: ReactNode
   onBack?: () => void
   onContinue?: () => void
-  /** "Skip to end ⏭" header link — jumps straight to the closing review step
-   *  (v6). Steps that must anchor a workspace first (step 1) omit it. */
-  onSkipToEnd?: () => void
   continueLabel?: string
   continueDisabled?: boolean
   loading?: boolean
@@ -64,16 +60,6 @@ export function OnboardingChrome({
             />
           ))}
         </div>
-        {onSkipToEnd && (
-          <button
-            type="button"
-            className="onb-skip-link"
-            onClick={onSkipToEnd}
-            disabled={loading}
-          >
-            Skip to end ⇥
-          </button>
-        )}
         <span className="save">
           <span className="pulse" />
           {saveLabel}

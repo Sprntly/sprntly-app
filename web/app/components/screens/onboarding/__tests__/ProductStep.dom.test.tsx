@@ -8,7 +8,6 @@
 // product via upsertPrimaryProduct (surfaces + 0/1-element monetization array
 // + usersDescription) and the competitors via updateWorkspace (parsed from the
 // comma-separated disclosure field, onboarding_step 3), then routes to
-// /onboarding/metrics; "Skip to end ⇥" persists then jumps to the review step.
 // Plus unit coverage for the exported parseCompetitors helper.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
@@ -104,12 +103,6 @@ function usersTextarea(): HTMLTextAreaElement {
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
     /^next$/i.test((b.textContent ?? "").trim()),
-  ) as HTMLButtonElement
-}
-
-function skipToEndBtn(): HTMLButtonElement {
-  return Array.from(document.querySelectorAll("button")).find((b) =>
-    /Skip to end/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
 }
 
@@ -240,26 +233,6 @@ describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization +
       onboarding_step: 3,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
-  })
-
-  it("'Skip to end ⇥' persists the step, jumps to step 9 and routes to review", async () => {
-    upsertProductMock.mockResolvedValue(makeProduct({ surfaces: ["web"] }))
-    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 3 }))
-    advanceStepMock.mockResolvedValue(
-      makeWorkspace({ onboarding_step: ONBOARDING_STEP_COUNT }),
-    )
-    mount()
-
-    fireEvent.click(surfaceChip("Web"))
-    await act(async () => {
-      skipToEndBtn().click()
-    })
-
-    await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
-    })
-    expect(upsertProductMock).toHaveBeenCalledTimes(1)
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", ONBOARDING_STEP_COUNT)
   })
 
   it("shows the loading shell while the workspace is loading", () => {

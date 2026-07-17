@@ -14,7 +14,6 @@
 //   - the ≥1-live-connection gate applies to EVERYONE (no "Connect later")
 //   - Continue advances to step 5 and routes to /onboarding/team; Back goes
 //     to /onboarding/metrics
-//   - "Skip to end ⇥" marks skipped_fields ["connectors"], jumps to step 9
 //     and routes to /onboarding/review
 //   - the no-workspace redirect happens in an EFFECT, never during render
 //
@@ -90,12 +89,6 @@ function doneNextButton(container: HTMLElement): HTMLButtonElement {
   ) as HTMLButtonElement
   expect(btn).not.toBeNull()
   return btn
-}
-
-function skipToEndBtn(): HTMLButtonElement {
-  return Array.from(document.querySelectorAll("button")).find((b) =>
-    /Skip to end/.test(b.textContent ?? ""),
-  ) as HTMLButtonElement
 }
 
 afterEach(() => {
@@ -311,16 +304,6 @@ describe("Connectors (container) — v6 step 04 accordion", () => {
         "Connect at least one source to continue — it's what your briefs are built from.",
       ),
     ).not.toBeNull()
-  })
-
-  it("'Skip to end ⇥' marks connectors skipped, jumps to step 9 and routes to review", async () => {
-    mountLoaded([])
-    fireEvent.click(skipToEndBtn())
-    await waitFor(() => {
-      expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", ONBOARDING_STEP_COUNT)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
-    })
   })
 
   it("Back routes to the metrics step", () => {

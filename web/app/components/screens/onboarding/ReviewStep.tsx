@@ -6,7 +6,10 @@ import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { saveBusinessContextSummary } from "../../../lib/onboarding/store"
-import { onboardingApi } from "../../../lib/api"
+import {
+  prefetchBusinessContextDraft,
+  prefetchMetricDefinitions,
+} from "../../../lib/onboarding/draftPrefetch"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 
 const DRAFT_KEY = "review-step"
@@ -53,7 +56,10 @@ export function ReviewStep() {
     if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
 
-  // Resolve the draft: local draft → saved summary → fresh backend draft.
+  // Resolve the draft: local draft → saved summary → the backend draft. The
+  // invite step already kicked the memoized prefetch in the background, so
+  // this usually resolves INSTANTLY (we join the in-flight/settled promise);
+  // when the user got here without passing invite, this call starts it.
   useEffect(() => {
     if (!workspace || requested.current) return
     requested.current = true
@@ -63,12 +69,24 @@ export function ReviewStep() {
       return
     }
     setDrafting(true)
-    onboardingApi
-      .draftBusinessContext()
-      .then((r) => setSummary((prev) => prev || r.draft))
+    prefetchBusinessContextDraft(workspace.id)
+      .then((d) => setSummary((prev) => prev || d))
       .catch(() => setDraftFailed(true))
       .finally(() => setDrafting(false))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // While the user reads/edits the prose, draft the metric definitions in the
+  // BACKGROUND so the define-metrics screens open pre-filled instead of
+  // spinning. Same memoized request DefineMetrics joins; fire-and-forget.
+  useEffect(() => {
+    if (!workspace) return
+    if (workspace.metric_definitions.length) return
+    const names = workspace.kpi_tree.metrics
+      .map((m) => m.name.trim())
+      .filter(Boolean)
+    if (!names.length) return
+    prefetchMetricDefinitions(workspace.id, names).catch(() => {})
+  }, [workspace])
 
   async function accept() {
     if (!workspace || auth.kind !== "authed") return

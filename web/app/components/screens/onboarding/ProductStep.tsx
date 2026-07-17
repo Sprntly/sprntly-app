@@ -12,13 +12,11 @@ import {
   normalizeProductWebsite,
 } from "../../../lib/onboarding/product-helpers"
 import {
-  advanceOnboardingStep,
   updateWorkspace,
   upsertPrimaryProduct,
 } from "../../../lib/onboarding/store"
 import {
   MONETIZATION_OPTIONS,
-  ONBOARDING_STEP_COUNT,
   SURFACE_OPTIONS,
 } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
@@ -158,14 +156,6 @@ export function ProductStep() {
     if (await persist()) router.push("/onboarding/metrics")
   }
 
-  async function skipToEnd() {
-    if (!workspace) return
-    if (await persist()) {
-      await advanceOnboardingStep(workspace.id, ONBOARDING_STEP_COUNT)
-      router.push("/onboarding/review")
-    }
-  }
-
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
@@ -181,7 +171,6 @@ export function ProductStep() {
       footerMeta="Product"
       onBack={() => router.push("/onboarding/company")}
       onContinue={() => void save()}
-      onSkipToEnd={() => void skipToEnd()}
       continueLabel="Next"
       continueDisabled={saving}
       loading={saving}
