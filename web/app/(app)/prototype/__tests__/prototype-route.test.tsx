@@ -20,6 +20,7 @@ import {
 } from "../../../lib/routes"
 import {
   figmaKeyForPrototype,
+  platformHintForPrototype,
   buildGatedOnClose,
   prototypeTabState,
   fsParamToFullscreen,
@@ -255,6 +256,31 @@ describe("prototype route — figma source resolver (figmaKeyForPrototype)", () 
   it("returns null when the matching PRD has no figma key set", () => {
     expect(figmaKeyForPrototype(42, { prd_id: 42 })).toBeNull()
     expect(figmaKeyForPrototype(42, { prd_id: 42, figma_file_key: null })).toBeNull()
+  })
+})
+
+describe("prototype route — platform hint resolver (platformHintForPrototype)", () => {
+  const sections = [
+    { type: "p" },
+    { type: "prd-design", platformHint: "mobile" as const },
+  ]
+
+  it("returns the design block's platform_hint when the content PRD matches the URL", () => {
+    expect(platformHintForPrototype(42, { prd_id: 42, sections })).toBe("mobile")
+  })
+
+  it("returns null when the loaded PRD is for a DIFFERENT id (no stale hint leak)", () => {
+    expect(platformHintForPrototype(42, { prd_id: 7, sections })).toBeNull()
+  })
+
+  it("returns null with no URL prd id, no loaded PRD, no sections, or no design block/hint", () => {
+    expect(platformHintForPrototype(null, { prd_id: 42, sections })).toBeNull()
+    expect(platformHintForPrototype(42, null)).toBeNull()
+    expect(platformHintForPrototype(42, { prd_id: 42 })).toBeNull()
+    expect(platformHintForPrototype(42, { prd_id: 42, sections: [{ type: "p" }] })).toBeNull()
+    expect(
+      platformHintForPrototype(42, { prd_id: 42, sections: [{ type: "prd-design" }] }),
+    ).toBeNull()
   })
 })
 

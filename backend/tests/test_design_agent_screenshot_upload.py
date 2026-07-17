@@ -557,7 +557,7 @@ async def test_generate_screenshot_source_skips_website_extractor(env, monkeypat
 def test_template_version_bumped_and_dedupe_keys_on_it(env, client, monkeypatch):
     from app.design_agent.prompts import DESIGN_AGENT_TEMPLATE_VERSION
 
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 8  # the screenshot-context bump
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 9  # the mobile-capability bump
 
     # Deterministic bg: the fired task must not mutate row status mid-test.
     async def _noop_bg(**kwargs):

@@ -114,6 +114,26 @@ export function figmaKeyForPrototype(
   return contentPrd.figma_file_key ?? null
 }
 
+/** Pure: resolve the PRD's declared platform hint (the parsed :::design block's
+ *  platform_hint) to seed the generate panel's platform DEFAULT, given the URL's
+ *  prd id and the PRD currently loaded in ContentContext. Mirrors
+ *  figmaKeyForPrototype's stale-PRD guard: the hint is read ONLY when the
+ *  content PRD's prd_id matches the URL (a stale PRD from a prior screen never
+ *  leaks its hint), else null. Direct-nav/refresh (no PRD in ContentContext)
+ *  yields null — no supplemental fetch is added for the hint. */
+export function platformHintForPrototype(
+  urlPrdId: number | null,
+  contentPrd: {
+    prd_id: number
+    sections?: { type: string; platformHint?: "desktop" | "mobile" | "both" }[]
+  } | null,
+): "desktop" | "mobile" | "both" | null {
+  if (urlPrdId == null || !contentPrd) return null
+  if (contentPrd.prd_id !== urlPrdId) return null
+  const design = contentPrd.sections?.find((s) => s.type === "prd-design")
+  return design?.platformHint ?? null
+}
+
 /** Pure: resolve the PRD TITLE for the breadcrumb / in-tab title bar / left
  *  header. Prefers ContentContext when it holds the matching PRD; on direct-nav /
  *  refresh ContentContext is empty (no PRD loaded for `?prd=<id>`), so we fall
@@ -505,6 +525,7 @@ export function PrototypeRoute() {
   const prdId = prdIdFromPrototypeSearch(search.get("prd"))
   const handoffPrototypeId = prototypeHintFromSearch(search.get("pid"))
   const figmaFileKey = figmaKeyForPrototype(prdId, content.prd)
+  const platformHint = platformHintForPrototype(prdId, content.prd)
   const savedPreference = workspace?.design_source ?? null
 
   // Explicit-generate-intent signal carried by a "Generate Prototype" navigation
@@ -1068,6 +1089,7 @@ export function PrototypeRoute() {
             )}
             prdId={prdId}
             figmaFileKey={figmaFileKey}
+            platformHint={platformHint}
             onGenStart={handleGenStart}
             onKickoff={(id) => setGenProtoId(id)}
             onGenDone={handleGenDone}

@@ -57,6 +57,7 @@ function makeResult(
       onCancel: vi.fn(),
       savedPreference: null,
       onSavePreference: vi.fn(async () => {}),
+      platformHint: null,
     },
     loadingScreenProps: {
       open: false,
@@ -124,5 +125,36 @@ describe("GeneratePrototypeCTA — child mounts", () => {
     rerender(<GeneratePrototypeCTA prdId={1} render={renderTrigger} />)
     expect(screen.getAllByTestId("generate-modal-mount")).toHaveLength(1)
     expect(screen.getAllByTestId("loading-screen-mount")).toHaveLength(1)
+  })
+})
+
+describe("GeneratePrototypeCTA — platform hint forwarding", () => {
+  it("forwards the platformHint prop into the hook's options", () => {
+    mockResult = makeResult({ cta: "generate" })
+    render(
+      <GeneratePrototypeCTA
+        prdId={1}
+        platformHint="mobile"
+        render={() => <div data-testid="trigger">trigger</div>}
+      />,
+    )
+    expect(useGeneratePrototypeSpy).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ platformHint: "mobile" }),
+    )
+  })
+
+  it("omitted platformHint reaches the hook as undefined (prop optional, no behaviour change)", () => {
+    mockResult = makeResult({ cta: "generate" })
+    render(
+      <GeneratePrototypeCTA
+        prdId={2}
+        render={() => <div data-testid="trigger">trigger</div>}
+      />,
+    )
+    const opts = useGeneratePrototypeSpy.mock.calls.at(-1)?.[1] as
+      | { platformHint?: string | null }
+      | undefined
+    expect(opts?.platformHint).toBeUndefined()
   })
 })

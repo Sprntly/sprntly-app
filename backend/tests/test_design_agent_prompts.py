@@ -51,9 +51,10 @@ def test_template_version_is_current():
     # axis appended to the recreate discipline (changes which handlers the agent
     # emits → template-invalidating); v7 = semantic palette capture + the
     # shell-grounded fallback; v8 = the screenshot design-reference directive
-    # (vision context for screenshot-sourced runs). Each invalidates cached
-    # prototypes so they regenerate.
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 8
+    # (vision context for screenshot-sourced runs); v9 = mobile-capability
+    # requirements in the mobile/both platform directives. Each invalidates
+    # cached prototypes so they regenerate.
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 9
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
 
 
@@ -328,6 +329,89 @@ def test_platform_directive_helper_is_case_insensitive_and_pure():
     assert p._platform_directive(None) == p._PLATFORM_DIRECTIVE["both"]
 
 
+# ---- mobile-capability directives (LLM-facing text property tests) ----------
+#
+# The mobile/both directives are not layout-only: they carry concrete mobile
+# CAPABILITY requirements so a mobile-flagged run produces a mobile-shaped
+# prototype, not a narrowed desktop page. Substring/property assertions per the
+# standing rule for LLM-facing text (length + required content + negative
+# space), never a full-text hash.
+
+_MOBILE_CAPABILITY_REQUIRED = (
+    "44px",          # touch-target floor
+    "tap",           # hover→tap equivalence clause
+    "tab bar",       # bottom/tab navigation pattern
+    "bottom",        # thumb-reach / bottom-anchored placement
+    "safe-area",     # notch/inset respect
+    "keyboard",      # keyboard-aware form inputs
+    "scroll",        # scroll-based (not hover-revealed) content
+)
+
+
+def test_mobile_directive_length_and_required_content():
+    d = p._PLATFORM_DIRECTIVE["mobile"]
+    assert len(d) >= 400
+    low = d.lower()
+    for required in _MOBILE_CAPABILITY_REQUIRED:
+        assert required in low, f"mobile directive missing {required!r}"
+    # The hover-equivalence clause names hover explicitly.
+    assert "hover" in low
+
+
+def test_both_directive_carries_mobile_capabilities():
+    d = p._PLATFORM_DIRECTIVE["both"]
+    low = d.lower()
+    for required in _MOBILE_CAPABILITY_REQUIRED:
+        assert required in low, f"both directive missing {required!r}"
+    # Scoped to mobile widths — the responsive framing stays intact.
+    assert "mobile width" in low
+    assert "responsive" in low
+
+
+def test_desktop_directive_unchanged():
+    # Byte-pin: the desktop directive is deliberately untouched by the
+    # mobile-capability extension.
+    assert p._PLATFORM_DIRECTIVE["desktop"] == (
+        "Target platform: DESKTOP ONLY. Build a single desktop layout designed "
+        "for a ~1440px-wide viewport. Do NOT include a mobile or tablet layout, "
+        "and do NOT add responsive breakpoints that reflow, stack, or collapse "
+        "the design for small screens. This prototype is desktop-only."
+    )
+
+
+def test_directives_negative_space():
+    # Explicit do-not clause: no hover-only affordances on mobile.
+    low = p._PLATFORM_DIRECTIVE["mobile"].lower()
+    assert "no hover-only" in low
+    assert "do not" in low
+
+
+def test_scaffold_render_byte_stable():
+    # Directives are static strings inside the cacheable prefix: two renders
+    # with identical inputs must be byte-identical (cache stability).
+    for platform in ("desktop", "mobile", "both"):
+        a = p.render_scaffold_user("prd body", platform, "instr", "figma")
+        b = p.render_scaffold_user("prd body", platform, "instr", "figma")
+        assert a == b
+
+
+def test_design_agent_template_version_bumped_once():
+    # The mobile-capability directive change is template-invalidating: exactly
+    # one increment (8 → 9) against the screenshot design-reference version.
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 9
+
+
+def test_prd_side_frozen_version_and_marker():
+    # New-PRDs-only boundary: the PRD-side prompt is untouched — version still
+    # 7 and the :::design marker spec still present. Deliberately NOT a
+    # full-content hash: PRD_SYSTEM is a client-owned prompt other teams edit.
+    from app import prompts as prd_prompts
+
+    assert prd_prompts.PRD_TEMPLATE_VERSION == 7
+    assert ":::design" in prd_prompts.PRD_SYSTEM
+    assert "platform_hint" in prd_prompts.PRD_SYSTEM
+
+
 # ---- cache readiness --------------------------------------------------------
 
 def test_system_prompt_meets_sonnet_min_cacheable_length():
@@ -381,9 +465,9 @@ def test_inert_affordance_default_documented_as_pending():
 
 
 def test_recreate_discipline_append_only_and_version_line():
-    # Template-invalidating changes move the version (currently 8 — the
-    # screenshot design-reference directive).
-    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 8
+    # Template-invalidating changes move the version (currently 9 — the
+    # mobile-capability platform directives).
+    assert p.DESIGN_AGENT_TEMPLATE_VERSION == 9
     assert isinstance(p.DESIGN_AGENT_TEMPLATE_VERSION, int)
     # Append-only: the pre-existing discipline halves are all still present.
     assert "RE-EXPRESS, DON'T PARAPHRASE." in DISCIPLINE

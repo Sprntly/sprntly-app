@@ -603,3 +603,31 @@ describe("useGeneratePrototype — onCancel wiring (locating-phase Cancel contro
     expect(latest.loadingScreenProps.open).toBe(false)
   })
 })
+
+describe("useGeneratePrototype — platform hint threading", () => {
+  it("threads options.platformHint into generateModalProps verbatim", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={31}
+        options={{ skipExistenceCheck: true, platformHint: "mobile" }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+    expect(latest.generateModalProps.platformHint).toBe("mobile")
+  })
+
+  it("defaults generateModalProps.platformHint to null when the option is absent", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={32}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+    expect(latest.generateModalProps.platformHint).toBeNull()
+  })
+})

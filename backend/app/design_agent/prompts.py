@@ -51,7 +51,13 @@ from __future__ import annotations
 # the iterate cacheable prefix can carry the same stored image. The directive
 # changes the assembled prompt text for that class of run, so it is
 # template-invalidating.
-DESIGN_AGENT_TEMPLATE_VERSION = 8
+# v9 (mobile capability directives): the mobile and responsive ("both")
+# platform directives gain concrete mobile-capability requirements (44px touch
+# targets, no hover-only affordances, thumb-reach placement, mobile navigation
+# patterns, safe-area insets, keyboard-aware inputs, scroll-based content) so
+# mobile-flagged runs stop producing desktop-shaped layouts. Changes the
+# scaffold user prompt for mobile/both runs → template-invalidating.
+DESIGN_AGENT_TEMPLATE_VERSION = 9
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the
@@ -324,13 +330,32 @@ _PLATFORM_DIRECTIVE: dict[str, str] = {
         "Target platform: MOBILE ONLY. Build a single mobile layout designed for "
         "a ~390px-wide viewport. Do NOT include a desktop or tablet layout, and "
         "do NOT add responsive breakpoints that expand or widen the design for "
-        "large screens. This prototype is mobile-only."
+        "large screens. This prototype is mobile-only. Build it with real mobile "
+        "capabilities, not a narrowed desktop page: touch targets at least 44px "
+        "tall; no hover-only affordances (every hover interaction must have a tap "
+        "equivalent — do NOT gate any content or action on hover alone); primary "
+        "actions placed within thumb reach (bottom-anchored CTAs or a bottom tab "
+        "bar); mobile navigation patterns (a bottom tab bar or a "
+        "hamburger-triggered sheet, never a desktop-style top navigation bar); "
+        "safe-area/notch insets respected on fixed top and bottom bars; form "
+        "inputs sized for the on-screen keyboard (full-width fields, no tiny "
+        "inline inputs); and content revealed by scrolling, never by "
+        "hover-revealed or cursor-dependent interactions."
     ),
     "both": (
         "Target platform: RESPONSIVE (desktop + mobile). Build one fully "
         "responsive, mobile-first design that adapts gracefully from a ~390px "
         "mobile viewport up to a ~1440px desktop viewport. Include the responsive "
-        "breakpoints needed for both form factors."
+        "breakpoints needed for both form factors. On mobile widths, apply real "
+        "mobile capabilities rather than a compressed desktop layout: touch "
+        "targets at least 44px tall; no hover-only affordances (every hover "
+        "interaction must have a tap equivalent on touch screens); primary "
+        "actions within thumb reach (bottom-anchored CTAs or a bottom tab bar); "
+        "mobile navigation patterns (a bottom tab bar or a hamburger-triggered "
+        "sheet replacing the desktop top navigation); safe-area/notch insets "
+        "respected on fixed bars; form inputs sized for the on-screen keyboard; "
+        "and content revealed by scrolling on touch, never by hover-revealed or "
+        "cursor-dependent interactions."
     ),
 }
 
