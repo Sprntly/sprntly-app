@@ -103,7 +103,11 @@ type GenerateFlowDeps = {
     github_repo?: string | null
     /** Explicit single-source selector. When set, overrides the implicit
      *  precedence in the backend. Absent (null) = old-client back-compat. */
-    design_source?: "figma" | "github" | "website" | null
+    design_source?: "figma" | "github" | "website" | "screenshot" | null
+    /** Staged upload key from POST /uploads/screenshot. Present ONLY on the
+     *  screenshot source — every other source omits the field entirely so its
+     *  wire body is byte-identical to the pre-screenshot shape. */
+    screenshot_key?: string | null
     /** The PM-confirmed screen route from the locate gate. Sent only on the
      *  codebase generation path; the backend resolves it to a node on the
      *  pinned map snapshot and feeds the recreate pre-seed branch. */
@@ -159,6 +163,7 @@ export function buildGenerateParams({
   manualFont,
   githubRepo,
   designSource,
+  screenshotKey,
 }: {
   prdId: number
   platform: TargetPlatform
@@ -176,7 +181,11 @@ export function buildGenerateParams({
   /** Explicit design-source selection from the single-select picker. Absent
    *  (undefined) means no explicit choice was made — the backend preserves the
    *  prior implicit precedence (back-compat for the drawer's own generate path). */
-  designSource?: "figma" | "github" | "website"
+  designSource?: "figma" | "github" | "website" | "screenshot"
+  /** Staged upload key from POST /uploads/screenshot (screenshot source only).
+   *  Threaded into the body ONLY when set, so every other source's body stays
+   *  byte-identical to the pre-screenshot wire shape. */
+  screenshotKey?: string | null
 }): GenerateFlowDeps["params"] {
   return {
     prd_id: prdId,
@@ -191,6 +200,7 @@ export function buildGenerateParams({
         : null,
     github_repo: githubRepo?.trim() || null,
     design_source: designSource ?? null,
+    ...(screenshotKey ? { screenshot_key: screenshotKey } : {}),
   }
 }
 

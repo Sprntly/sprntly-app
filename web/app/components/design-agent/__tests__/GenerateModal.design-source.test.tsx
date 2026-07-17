@@ -109,6 +109,50 @@ describe("Back-compat: no designSource arg", () => {
   })
 })
 
+// ─── Screenshot selection ─────────────────────────────────────────────────────
+
+describe("Screenshot source selection", () => {
+  it("test_build_generate_params_carries_screenshot_source_and_key — designSource=screenshot + screenshotKey → design_source=screenshot, screenshot_key threaded", () => {
+    const params = buildGenerateParams({
+      ...BASE,
+      figmaFileKey: null,
+      designSource: "screenshot",
+      screenshotKey: "da-upload/ws1/abc123.png",
+    })
+    expect(params.design_source).toBe("screenshot")
+    expect(params.screenshot_key).toBe("da-upload/ws1/abc123.png")
+    // The other single-source inputs stay clean.
+    expect(params.figma_file_key).toBeNull()
+    expect(params.github_repo).toBeNull()
+  })
+
+  it("test_build_generate_params_other_sources_omit_screenshot_key — figma/github/website/back-compat bodies carry NO screenshot_key property at all", () => {
+    const bodies = [
+      buildGenerateParams({ ...BASE, figmaFileKey: "abc", designSource: "figma" }),
+      buildGenerateParams({ ...BASE, githubRepo: "org/repo", designSource: "github" }),
+      buildGenerateParams({ ...BASE, designSource: "website" }),
+      // Back-compat: no designSource at all (the drawer's own generate path).
+      buildGenerateParams({ ...BASE }),
+    ]
+    for (const body of bodies) {
+      // Byte-identical to the pre-screenshot wire shape: the key must be
+      // ABSENT (not present with a null/undefined value) so these sources
+      // serialize exactly as they did before the widening.
+      expect("screenshot_key" in body).toBe(false)
+    }
+  })
+
+  it("screenshot source with a null key omits the field too (the UI gates Generate on a staged key; the builder stays clean regardless)", () => {
+    const params = buildGenerateParams({
+      ...BASE,
+      designSource: "screenshot",
+      screenshotKey: null,
+    })
+    expect(params.design_source).toBe("screenshot")
+    expect("screenshot_key" in params).toBe(false)
+  })
+})
+
 // ─── Mutual exclusivity round-trip ───────────────────────────────────────────
 
 describe("Mutual exclusivity", () => {

@@ -1553,7 +1553,10 @@ export const designAgentApi = {
     website_url?: string | null  // Scenario B fallback source
     manual_design?: { primary_color: string; font_family: string } | null  // manual floor
     github_repo?: string | null  // connected-repo full_name ("org/repo"); prompt context only
-    design_source?: "figma" | "github" | "website" | null  // explicit source selector; null = back-compat implicit precedence
+    design_source?: "figma" | "github" | "website" | "screenshot" | null  // explicit source selector; null = back-compat implicit precedence
+    /** Staged upload key returned by `uploadScreenshot` (screenshot source
+     *  only). Absent/omitted for every other source. */
+    screenshot_key?: string | null
     /** The screen route the PM confirmed in the locate UX. Sent only on the
      *  codebase generation path so the backend can resolve it into a recreate
      *  pre-seed. Absent / null = blank-canvas generation. */
@@ -1883,6 +1886,26 @@ export const designAgentApi = {
     api.get<BriefPrototypeMap>(
       `/v1/design-agent/brief-prototype-map?brief_id=${encodeURIComponent(String(briefId))}`,
     ),
+  /** Stage a user-uploaded screenshot as generate-time design context.
+   *  Multipart POST via the shared helper's FormData branch (the runtime sets
+   *  the multipart boundary; no manual Content-Type), credentialed like every
+   *  other authed mutation. Returns the storage key the generate body threads
+   *  as `screenshot_key`. The server sniffs the REAL media type from the
+   *  bytes — the response's `media_type` is authoritative, not the filename. */
+  uploadScreenshot: (
+    file: File | Blob,
+  ): Promise<{ screenshot_key: string; media_type: string }> => {
+    const form = new FormData()
+    form.append(
+      "file",
+      file,
+      typeof File !== "undefined" && file instanceof File ? file.name : "screenshot",
+    )
+    return api.post<{ screenshot_key: string; media_type: string }>(
+      "/v1/design-agent/uploads/screenshot",
+      form,
+    )
+  },
 }
 
 /** One ranked screen candidate from the locate pipeline (map → LLM → gate). */
