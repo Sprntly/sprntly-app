@@ -504,7 +504,7 @@ def require_company(
         # resolved to a company membership.
         raise HTTPException(403, "Company context requires a signed-in user")
 
-    from app.db.companies import memberships_for_user
+    from app.db.companies import memberships_for_user, profile_name_for_user
 
     memberships = memberships_for_user(user_id)
     if not memberships:
@@ -520,20 +520,9 @@ def require_company(
         raise HTTPException(500, "Membership data integrity error — contact support")
 
     only = memberships[0]
-    try:
-        from app.db.client import require_client
-        c = require_client()
-        profile_resp = c.table("profiles").select("full_name, first_name, last_name").eq("id", user_id).limit(1).execute()
-        profile = profile_resp.data[0] if profile_resp.data else {}
-        _first = profile.get("first_name") or ""
-        _last = profile.get("last_name") or ""
-        user_name = (
-            profile.get("full_name")
-            or f"{_first} {_last}".strip()
-            or None
-        )
-    except Exception:
-        user_name = None
+    # Cached (profile_name_cache) + best-effort: returns None on any lookup
+    # failure — name resolution must never fail the request.
+    user_name = profile_name_for_user(user_id)
     return CompanyContext(
         company_id=only["company_id"], role=only["role"], user_id=user_id,
         user_email=session.get("email"),

@@ -140,38 +140,35 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setLoading(true)
     }
     try {
-      const [p, w] = await Promise.all([
+      // The workspaces list rides in the same parallel wave as the profile and
+      // workspace fetches (best-effort → null: an unreachable backend leaves
+      // the app in single-workspace mode via the header-absent default
+      // fallback) instead of adding a serial round-trip after them.
+      const [p, w, listRes] = await Promise.all([
         fetchUserProfile(authUserId),
         fetchWorkspaceForUser(authUserId),
+        workspacesApi.list().catch(() => null),
       ])
       setProfile(p)
       setWorkspace(w)
-      // Workspaces list (best-effort: an unreachable backend leaves the app
-      // in single-workspace mode via the header-absent default fallback).
       // Restore the persisted active choice when it's still in the list;
       // otherwise fall back to the default workspace. setActiveWorkspaceId
       // runs BEFORE `loading` clears so the first consumer fetches already
       // carry the header.
-      if (w) {
-        try {
-          const { workspaces: list, org_role } = await workspacesApi.list()
-          setWorkspaces(list)
-          setOrgRole(org_role ?? null)
-          const storedId = readStoredActiveWorkspace(authUserId)
-          const active =
-            list.find((x) => x.id === storedId) ??
-            list.find((x) => x.is_default) ??
-            list[0] ??
-            null
-          setActiveWorkspaceState(active)
-          setActiveWorkspaceId(active?.id ?? null)
-        } catch {
-          setWorkspaces([])
-          setActiveWorkspaceState(null)
-          setActiveWorkspaceId(null)
-          setOrgRole(null)
-        }
+      if (w && listRes) {
+        const { workspaces: list, org_role } = listRes
+        setWorkspaces(list)
+        setOrgRole(org_role ?? null)
+        const storedId = readStoredActiveWorkspace(authUserId)
+        const active =
+          list.find((x) => x.id === storedId) ??
+          list.find((x) => x.is_default) ??
+          list[0] ??
+          null
+        setActiveWorkspaceState(active)
+        setActiveWorkspaceId(active?.id ?? null)
       } else {
+        // No workspace yet, or the list fetch failed — same reset either way.
         setWorkspaces([])
         setActiveWorkspaceState(null)
         setActiveWorkspaceId(null)

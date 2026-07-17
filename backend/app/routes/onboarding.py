@@ -195,6 +195,7 @@ def post_onboarding_workspace(
     if len(name) > 100:
         raise HTTPException(422, "Workspace name is too long")
 
+    from app.db.authcache import invalidate_workspace_caches
     from app.db.companies import slug_for_company_id
     from app.db.workspaces import (
         ensure_default_workspace,
@@ -209,6 +210,7 @@ def post_onboarding_workspace(
     company_slug = slug_for_company_id(company.company_id)
     if company_slug:
         register_workspace_dataset(updated, company_slug=company_slug)
+    invalidate_workspace_caches()
     return {
         "id": updated["id"],
         "name": updated["name"],

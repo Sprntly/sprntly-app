@@ -1188,6 +1188,32 @@ def _reset_iterate_limiter():
 
 
 @pytest.fixture(autouse=True)
+def _clear_auth_caches():
+    """Per-test isolation for the in-process auth/tenancy TTL caches.
+
+    `app.db.authcache` holds module-level TTLMap singletons (memberships,
+    profile names, workspace rows) that survive the per-test module reloads
+    (authcache is not in _RELOAD_ORDER, and nothing resets it). Tests reuse
+    the same user/company/workspace ids against a FRESH fake DB each test,
+    so an entry cached in one test would leak stale rows — or worse, rows
+    that no longer exist — into the next. Clear on both sides of each test
+    so a test's own cache writes can't outlive it either."""
+    try:
+        from app.db import authcache
+
+        authcache.clear_all()
+    except Exception:
+        pass
+    yield
+    try:
+        from app.db import authcache
+
+        authcache.clear_all()
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
 def _no_real_browser_in_preview_capture(monkeypatch):
     """Keep real Chromium out of the test session.
 

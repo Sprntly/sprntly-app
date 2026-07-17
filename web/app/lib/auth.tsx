@@ -86,6 +86,15 @@ type AuthCtx = AuthState & {
 
 const Ctx = createContext<AuthCtx | null>(null)
 
+// The last session observed from Supabase, kept current by refresh() and the
+// onAuthStateChange subscription (and cleared on sign-out). Lets the
+// accessTokenProvider hand out the current token WITHOUT calling
+// supabase.auth.getSession() — which acquires a navigator.locks mutex on every
+// call and serialized all concurrent API requests behind one LockManager
+// queue. Module-level (not state) so the provider closure always reads the
+// freshest value.
+let cachedSession: Session | null = null
+
 function sessionToState(session: Session | null): AuthState {
   if (!session?.user) return { kind: "anonymous" }
   return { kind: "authed", user: session.user, session }
@@ -107,6 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const {
       data: { session },
     } = await supabase.auth.getSession()
+    cachedSession = session
     setState(sessionToState(session))
   }, [])
 
@@ -119,9 +129,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const supabase = getSupabase()
 
     setAccessTokenProvider(async () => {
+      // Fast path: serve the cached token while it has >30s of life left, so
+      // parallel API calls don't serialize behind getSession()'s LockManager
+      // lock. Near/past expiry, fall through to getSession(), which refreshes
+      // the token if needed.
+      if (
+        cachedSession?.access_token &&
+        (cachedSession.expires_at ?? 0) * 1000 - Date.now() > 30_000
+      ) {
+        return cachedSession.access_token
+      }
       const {
         data: { session },
       } = await supabase.auth.getSession()
+      cachedSession = session
       return session?.access_token ?? null
     })
 
@@ -130,6 +151,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
+      cachedSession = session
       setState(sessionToState(session))
     })
 
@@ -206,6 +228,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await supabase.auth.signOut()
     } finally {
+      // Drop the token cache immediately — the next user must never inherit a
+      // still-valid bearer from the previous session.
+      cachedSession = null
       // Wipe all session-scoped localStorage so a different user logging in
       // on the same browser never sees the previous user's data (chat tabs,
       // active company, conversation resume, etc.).

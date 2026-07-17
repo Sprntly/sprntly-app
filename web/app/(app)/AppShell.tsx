@@ -1,17 +1,28 @@
 "use client"
 
 import { useEffect } from "react"
+import dynamic from "next/dynamic"
 import { useNavigation } from "../context/NavigationContext"
-import {
-  AIBar,
-  Toast,
-  ApproveModal,
-  InviteModal,
-  ClaudeDrawer,
-  TicketDrawer,
-  ContentPanel,
-} from "../components/shared"
-import { CommandPalette } from "../components/shared/CommandPalette"
+import { AIBar, Toast, ApproveModal, ContentPanel } from "../components/shared"
+
+// Conditionally-visible overlays: each renders null until opened, so load them
+// as separate async chunks from their concrete files (bypassing the shared
+// barrel) to keep them out of the first-paint shell chunk. ApproveModal is NOT
+// split: even while the approve modal is closed it renders the GenerateModal /
+// GenerationLoadingScreen subtree and hosts useGeneratePrototype's
+// cross-surface `da:generating` listener, so it must be live immediately.
+const InviteModal = dynamic(() =>
+  import("../components/shared/InviteModal").then((m) => m.InviteModal)
+)
+const ClaudeDrawer = dynamic(() =>
+  import("../components/shared/ClaudeDrawer").then((m) => m.ClaudeDrawer)
+)
+const TicketDrawer = dynamic(() =>
+  import("../components/shared/TicketDrawer").then((m) => m.TicketDrawer)
+)
+const CommandPalette = dynamic(() =>
+  import("../components/shared/CommandPalette").then((m) => m.CommandPalette)
+)
 import { useCompany } from "../context/CompanyContext"
 import { useContent } from "../context/ContentContext"
 import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"

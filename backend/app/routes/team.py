@@ -25,6 +25,7 @@ UX); team writes are gated to admin/owner. The accept endpoint uses
 """
 from __future__ import annotations
 
+import asyncio
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -33,6 +34,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.auth import CompanyContext, require_company, require_session
 from app import team_email as team_email_mod
 from app.team_email import send_invite_email
+from app.db.authcache import invalidate_user, invalidate_workspace_caches
 from app.db.companies import get_seat_limit
 from app.db.team import (
     accept_invite_for_user,
@@ -129,13 +131,17 @@ router = APIRouter(prefix="/v1/team", tags=["team"])
 
 
 @router.get("/members")
-def get_team_members(company: CompanyContext = Depends(require_company)):
-    rows = list_company_members(company.company_id)
-    # Explicit workspace grants per member. Org owners/admins typically have
-    # none — their access is implicit across every workspace.
+async def get_team_members(company: CompanyContext = Depends(require_company)):
+    # Two independent query chains (members+profiles, workspaces+grants) —
+    # run them concurrently on the threadpool instead of 4 serial roundtrips.
     from app.db.workspaces import workspace_ids_by_user
 
-    ws_by_user = workspace_ids_by_user(company.company_id)
+    rows, ws_by_user = await asyncio.gather(
+        asyncio.to_thread(list_company_members, company.company_id),
+        asyncio.to_thread(workspace_ids_by_user, company.company_id),
+    )
+    # Explicit workspace grants per member. Org owners/admins typically have
+    # none — their access is implicit across every workspace.
     return {
         "members": [
             {
@@ -351,6 +357,8 @@ def patch_team_member(
     updated = update_member_role(
         company_id=company.company_id, user_id=user_id, role=body.role
     )
+    # The target's cached membership now carries a stale role.
+    invalidate_user(user_id)
     return _public_member(updated or {"user_id": user_id, "role": body.role})
 
 
@@ -398,6 +406,7 @@ def put_team_member_workspaces(
     result = set_member_workspaces(
         company.company_id, user_id, body.workspace_ids
     )
+    invalidate_workspace_caches()
     return {"user_id": user_id, "workspace_ids": result}
 
 
@@ -419,6 +428,9 @@ def remove_team_member(
         )
 
     delete_member(company_id=company.company_id, user_id=user_id)
+    # The removed member's cached membership would keep them resolving into
+    # this company for a full TTL.
+    invalidate_user(user_id)
     return None
 
 
@@ -486,6 +498,7 @@ def put_workspace_member(
     from app.db.workspaces import upsert_workspace_member
 
     row = upsert_workspace_member(workspace_id, user_id, body.role)
+    invalidate_workspace_caches()
     return {"user_id": row["user_id"], "role": row["role"]}
 
 
@@ -503,6 +516,7 @@ def remove_workspace_member(
     from app.db.workspaces import delete_workspace_member
 
     delete_workspace_member(workspace_id, user_id)
+    invalidate_workspace_caches()
     return None
 
 
@@ -559,4 +573,8 @@ def post_accept_invite(
 
     if result is None:
         raise HTTPException(404, "No pending invite for your email")
+    # Accept wrote a company_members row (and possibly workspace grants) —
+    # drop the accepting user's cached (non-)membership and the workspace maps.
+    invalidate_user(user_id)
+    invalidate_workspace_caches()
     return result

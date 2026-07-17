@@ -28,11 +28,19 @@ import logging
 import re
 import uuid
 
+from app.db.authcache import default_ws_cache, workspace_cache, workspace_member_cache
 from app.db.client import require_client, retry_on_disconnect
 
 logger = logging.getLogger(__name__)
 
 _WORKSPACE_COLUMNS = "id, company_id, product_id, name, slug, is_default, created_at"
+
+# Cached "no workspace_members row" marker. A sentinel object (never a string
+# or dict — real rows are dicts) so it can't collide with row data. Caching
+# absence is safe HERE because every workspace-member write goes through a
+# backend route, which invalidates (unlike company_members — see
+# app.db.authcache's docstring).
+_ABSENT = object()
 
 # Must satisfy the DB CHECK: '^[a-z0-9][a-z0-9_-]{0,62}$'
 _SLUG_STRIP_RE = re.compile(r"[^a-z0-9_-]+")
@@ -51,6 +59,9 @@ def slugify_workspace_name(name: str) -> str:
 
 @retry_on_disconnect
 def get_workspace(workspace_id: str) -> dict | None:
+    cached = workspace_cache.get(workspace_id)
+    if cached is not None:
+        return cached
     rows = (
         require_client()
         .table("workspaces")
@@ -61,7 +72,10 @@ def get_workspace(workspace_id: str) -> dict | None:
         .data
         or []
     )
-    return rows[0] if rows else None
+    ws = rows[0] if rows else None
+    if ws is not None:
+        workspace_cache.set(workspace_id, ws)
+    return ws
 
 
 @retry_on_disconnect
@@ -82,6 +96,9 @@ def list_workspaces_for_company(company_id: str) -> list[dict]:
 
 @retry_on_disconnect
 def default_workspace_for_company(company_id: str) -> dict | None:
+    cached = default_ws_cache.get(company_id)
+    if cached is not None:
+        return cached
     rows = (
         require_client()
         .table("workspaces")
@@ -93,7 +110,10 @@ def default_workspace_for_company(company_id: str) -> dict | None:
         .data
         or []
     )
-    return rows[0] if rows else None
+    ws = rows[0] if rows else None
+    if ws is not None:
+        default_ws_cache.set(company_id, ws)
+    return ws
 
 
 def ensure_default_workspace(company_id: str) -> dict:
@@ -167,6 +187,10 @@ def update_workspace(workspace_id: str, *, name: str) -> dict | None:
     require_client().table("workspaces").update({"name": name.strip()}).eq(
         "id", workspace_id
     ).execute()
+    # Drop the cached pre-rename row so the re-read below (and the route's
+    # response) reflects the new name; the route's coarse invalidation runs
+    # only after this returns.
+    workspace_cache.invalidate(workspace_id)
     return get_workspace(workspace_id)
 
 
@@ -182,6 +206,10 @@ def delete_workspace(workspace_id: str) -> None:
 
 @retry_on_disconnect
 def get_workspace_member(workspace_id: str, user_id: str) -> dict | None:
+    key = (workspace_id, user_id)
+    cached = workspace_member_cache.get(key)
+    if cached is not None:
+        return None if cached is _ABSENT else cached
     rows = (
         require_client()
         .table("workspace_members")
@@ -193,7 +221,9 @@ def get_workspace_member(workspace_id: str, user_id: str) -> dict | None:
         .data
         or []
     )
-    return rows[0] if rows else None
+    row = rows[0] if rows else None
+    workspace_member_cache.set(key, _ABSENT if row is None else row)
+    return row
 
 
 @retry_on_disconnect
@@ -253,6 +283,7 @@ def upsert_workspace_member(workspace_id: str, user_id: str, role: str) -> dict:
                 "id", existing["id"]
             ).execute()
             existing = {**existing, "role": role}
+            workspace_member_cache.invalidate((workspace_id, user_id))
         return existing
     row = {
         "id": str(uuid.uuid4()),
@@ -267,6 +298,9 @@ def upsert_workspace_member(workspace_id: str, user_id: str, role: str) -> dict:
         if found:
             return found
         raise
+    # Drop the cached "absent" marker set by the get above, so the next read
+    # sees the new grant (matters for direct-helper callers, not just routes).
+    workspace_member_cache.invalidate((workspace_id, user_id))
     return row
 
 
@@ -274,6 +308,7 @@ def delete_workspace_member(workspace_id: str, user_id: str) -> None:
     require_client().table("workspace_members").delete().eq(
         "workspace_id", workspace_id
     ).eq("user_id", user_id).execute()
+    workspace_member_cache.invalidate((workspace_id, user_id))
 
 
 @retry_on_disconnect

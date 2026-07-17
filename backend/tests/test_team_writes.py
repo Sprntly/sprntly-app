@@ -65,6 +65,11 @@ def _set_role(*, company_id: str, user_id: str, role: str) -> None:
     require_client().table("company_members").update(
         {"role": role}
     ).eq("company_id", company_id).eq("user_id", user_id).execute()
+    # The app now caches memberships/roles; the real role-change route
+    # invalidates on write, so this direct-DB simulation of it must too.
+    from app.db.authcache import invalidate_user
+
+    invalidate_user(user_id)
 
 
 def _list_invites(company_id: str) -> list[dict]:

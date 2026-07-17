@@ -197,15 +197,24 @@ class _Query:
         self._eqs.append((col, val))
         return self
 
+    def neq(self, col: str, val: Any) -> "_Query":
+        """`col != ?` (PostgREST `.neq`). NULL columns are excluded in both
+        engines (NULL != x is NULL → false), matching Postgres."""
+        self._raw_where.append(f"{col} != ?")
+        self._raw_args.append(val)
+        return self
+
     def in_(self, col: str, vals: Iterable) -> "_Query":
         self._ins.append((col, list(vals)))
         return self
 
     def ilike(self, col: str, val: Any) -> "_Query":
         """Case-insensitive match. SQLite's LIKE is ASCII case-insensitive,
-        which mirrors PostgREST `.ilike` for the GitHub-login lookup that uses
-        it (logins carry no %/_ wildcards)."""
-        self._raw_where.append(f"{col} LIKE ?")
+        which mirrors PostgREST `.ilike`. ESCAPE '\\' matches Postgres' default
+        escape character so backslash-escaped patterns (the team email lookup
+        escapes %/_ in emails) behave identically; patterns without
+        backslashes (the GitHub-login lookup) are unaffected."""
+        self._raw_where.append(f"{col} LIKE ? ESCAPE '\\'")
         self._raw_args.append(val)
         return self
 
