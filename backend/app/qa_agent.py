@@ -28,7 +28,12 @@ from app.ask_runner import _ASK_RESPONSE_SCHEMA, _retrieve_kg_bundle, compose_as
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
 from app.prompts import ASK_SYSTEM, ASK_SYSTEM_KG_ADDENDUM
-from app.skill_router import detect_intent, is_call_digest, is_voc_report_request
+from app.skill_router import (
+    detect_intent,
+    is_call_digest,
+    is_data_analysis_request,
+    is_voc_report_request,
+)
 from app.skills.catalog import COST_GATED, NON_ROUTABLE, routable_manifest
 from app.skills.loader import get_skill, list_skills
 from app.skills.scripts import SCRIPT_TOOLS
@@ -401,6 +406,18 @@ def answer(
             return call_digest.answer(
                 enterprise_id=enterprise_id, question=question, history=history
             )
+
+    # "Analyze my data" is a COMMAND to run the deterministic DS engine over the
+    # company's uploaded CSV/Excel exports — not a question for the corpus/KG.
+    # Intercept before generic routing for the same reason as the call digest:
+    # the keyword rules would send it to a synthesis skill, which answers from
+    # the KG instead of computing over the actual data.
+    if not pinned_skill and is_data_analysis_request(question):
+        from app.ds import chat_analysis
+
+        return chat_analysis.answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
 
     if pinned_skill and _routable(pinned_skill):
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)

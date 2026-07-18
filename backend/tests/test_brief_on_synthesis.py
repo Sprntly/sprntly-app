@@ -362,6 +362,46 @@ def test_has_signals_since_is_tenant_scoped(isolated_settings):
     assert facade.has_signals_since("co-2", cutoff) is False  # co-1's s-new invisible
 
 
+def test_has_signals_since_survives_server_page_caps(isolated_settings, monkeypatch):
+    """Regression (prod bug, Lab X 12k+ signals): PostgREST caps an unlimited
+    select at ~1000 rows, and the old full-table scan could get a page holding
+    only OLD signals — the gate then reported "unchanged" forever and the brief
+    never regenerated. The facade must fetch newest-first with a limit, so the
+    answer is correct no matter how many rows the tenant has."""
+    from tests import _fake_supabase as fake
+    from app.graph.facade import GraphFacade
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    db = isolated_settings["supabase"]
+    # 1200 pre-cutoff signals inserted FIRST (so an unordered capped page is
+    # all-old), then one post-cutoff signal.
+    rows = [{
+        "id": f"s-{i}", "enterprise_id": "co-1", "source_type": "revenue",
+        "kind": "x", "content": "y",
+        "valid_at": "2026-06-01T00:00:00+00:00",
+        "transaction_at": "2026-06-01T00:00:00+00:00",
+        "created_at": "2026-06-09T00:00:00+00:00",
+    } for i in range(1200)]
+    rows.append({**rows[0], "id": "s-new",
+                 "created_at": "2026-06-11T00:00:00+00:00"})
+    db.table("kg_signal").insert(rows).execute()
+
+    # Mimic the server-side page cap: an execute() with no explicit limit
+    # returns at most 1000 rows (exactly PostgREST's behavior).
+    orig_execute = fake._Query.execute
+
+    def capped_execute(self):
+        res = orig_execute(self)
+        if getattr(self, "_limit", None) is None and isinstance(res.data, list):
+            res.data = res.data[:1000]
+        return res
+
+    monkeypatch.setattr(fake._Query, "execute", capped_execute)
+
+    assert GraphFacade().has_signals_since(
+        "co-1", "2026-06-10T00:00:00+00:00") is True
+
+
 def test_generate_brief_for_resolves_slug_to_company_id(isolated_settings):
     _seed_company(isolated_settings["supabase"], company_id="co-xyz", slug="globex")
     cid, slug = sb.resolve_company("globex")

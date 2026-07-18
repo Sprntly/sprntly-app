@@ -155,6 +155,43 @@ def is_voc_report_request(question: str) -> bool:
     return bool(_VOC_REPORT_RULE.search(question))
 
 
+# ── Data-analysis intent (DS agent) ─────────────────────────────────────────
+# "analyze my data", "what does our usage data show", "run a data analysis" →
+# the deterministic DS engine over the company's uploaded CSV/Excel exports
+# (app/ds/chat_analysis.py). Like call-digest, qa_agent checks this BEFORE the
+# generic skill router: the generic rules would misroute these to a synthesis
+# skill and answer from the KG instead of actually computing over the data.
+_DATA_NOUN = r"(?:data(?:set)?s?|csvs?|spreadsheets?|analytics|product\s+usage|usage\s+data|metrics\s+data|export(?:ed)?\s+(?:data|files?)|exports?)"
+_ANALYZE_VERB = r"(?:analy[sz]e|analysis|dig\s+into|crunch|mine|explore|profile|run\s+the\s+numbers\s+on)"
+_DATA_ANALYSIS_RULES: list[re.Pattern] = [
+    # verb ... noun ("analyze my product data", "crunch the exported CSVs")
+    re.compile(r"\b" + _ANALYZE_VERB + r"\b.{0,40}\b" + _DATA_NOUN + r"\b", re.I),
+    # noun ... verb/insight ("my usage data — any insights?")
+    re.compile(r"\b" + _DATA_NOUN + r"\b.{0,40}\b(?:analy[sz]e|analysis|insights?|patterns?|findings?|anomal(?:y|ies))\b", re.I),
+    # insight ... noun ("any patterns in our dataset?", "insights from the CSVs")
+    re.compile(r"\b(?:insights?|patterns?|findings?|anomal(?:y|ies))\b.{0,40}\b" + _DATA_NOUN + r"\b", re.I),
+    # "what does the data say/show/tell us"
+    re.compile(r"\bwhat\b.{0,30}\b(?:data|numbers|metrics)\b.{0,25}\b(?:say|show|tell|reveal)", re.I),
+    # explicit ask for the DS agent / data-science pass
+    re.compile(r"\b(?:data[\s-]science|ds)\s+(?:agent|analysis|report)\b", re.I),
+]
+# These asks belong to the synthesis/VoC/interview skills even when they contain
+# a data-noun ("analyze the survey data") — qualitative corpora, not tabular
+# exports. Presence of any of them vetoes the DS route.
+_DATA_ANALYSIS_VETO = re.compile(
+    r"\b(?:interviews?|feedback|nps|csat|surveys?|reviews?|calls?|meetings?|transcripts?|tickets?|complaints?)\b",
+    re.I,
+)
+
+
+def is_data_analysis_request(question: str) -> bool:
+    """True if the question asks to analyze the company's uploaded tabular data —
+    the trigger for the DS-engine path (see app/ds/chat_analysis.py)."""
+    if _DATA_ANALYSIS_VETO.search(question):
+        return False
+    return any(p.search(question) for p in _DATA_ANALYSIS_RULES)
+
+
 def detect_intent(question: str) -> SkillMatch | None:
     """Match a user question to a skill via keyword rules.
 
