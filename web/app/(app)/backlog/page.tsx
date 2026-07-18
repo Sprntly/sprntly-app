@@ -1,15 +1,16 @@
 "use client"
 
 import { useEffect } from "react"
-import { useRouter } from "next/navigation"
 
 // The Backlog page was renamed to Ideation. Old links and bookmarks keep
-// working via this client-side redirect (the app is a static export, so a
-// server redirect() would not survive `next build`).
+// working via this client-side redirect. A HARD location.replace (not
+// router.replace): on a cold first visit the app shell rewrites the URL to
+// append ?company= during hydration, and an App-Router navigation racing that
+// rewrite gets aborted, leaving a blank page (seen on staging). A full
+// document navigation can't be cancelled by history rewrites.
 export default function BacklogRedirect() {
-  const router = useRouter()
   useEffect(() => {
-    router.replace("/ideation")
-  }, [router])
+    window.location.replace("/ideation")
+  }, [])
   return null
 }
