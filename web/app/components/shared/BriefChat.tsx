@@ -1063,7 +1063,7 @@ export function BriefChat() {
                 <span className="bc-agent-name">{AGENT_NAME}</span>
                 <span className="bc-agent-badge">
                   <IconSparkle size={10} />
-                  PM COWORKER
+                  Product Coworker
                 </span>
                 {briefTimeLabel ? (
                   <span className="bc-agent-status">Monday brief · {briefTimeLabel}</span>
@@ -1224,7 +1224,7 @@ function AgentTurn({
   busy: boolean
 }) {
   const personaName = turn.persona === "pm" ? AGENT_NAME : "DS Agent"
-  const badge = turn.persona === "pm" ? "PM COWORKER" : "DS COWORKER"
+  const badge = turn.persona === "pm" ? "Product Coworker" : "DS COWORKER"
   return (
     <div className="bc-turn">
       <div className="bc-agent-head">

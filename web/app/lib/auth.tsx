@@ -231,9 +231,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Drop the token cache immediately — the next user must never inherit a
       // still-valid bearer from the previous session.
       cachedSession = null
-      // Wipe all session-scoped localStorage so a different user logging in
-      // on the same browser never sees the previous user's data (chat tabs,
-      // active company, conversation resume, etc.).
+      // Wipe all session-scoped storage so a different user logging in on the
+      // same browser never sees the previous user's data (chat tabs, active
+      // company, conversation resume, etc.). Chat tabs now live in
+      // sessionStorage (session-scoped by design — see ChatScreen); we clear
+      // BOTH storages: sessionStorage so a same-tab re-login starts fresh, and
+      // localStorage to sweep any stale tab entries written before that move.
       try {
         // Fixed keys
         const SESSION_KEYS = [
@@ -244,20 +247,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ]
         for (const key of SESSION_KEYS) {
           localStorage.removeItem(key)
+          sessionStorage.removeItem(key)
         }
-        // Company-scoped keys (sprntly_chat_tabs_<slug>, etc.)
-        const toRemove: string[] = []
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i)
-          if (key && (key.startsWith("sprntly_chat_tabs_") || key.startsWith("sprntly_chat_active_tab_"))) {
-            toRemove.push(key)
+        // Company-scoped keys (sprntly_chat_tabs_<slug>, etc.) across both stores.
+        const isTabKey = (key: string | null): key is string =>
+          !!key && (key.startsWith("sprntly_chat_tabs_") || key.startsWith("sprntly_chat_active_tab_"))
+        for (const store of [localStorage, sessionStorage]) {
+          const toRemove: string[] = []
+          for (let i = 0; i < store.length; i++) {
+            const key = store.key(i)
+            if (isTabKey(key)) toRemove.push(key)
           }
-        }
-        for (const key of toRemove) {
-          localStorage.removeItem(key)
+          for (const key of toRemove) store.removeItem(key)
         }
       } catch {
-        // localStorage may be disabled; not fatal.
+        // storage may be disabled; not fatal.
       }
       // In-memory settings-pane caches (Connectors/MCP/Team/Admin) survive
       // localStorage wipes — clear them too so the next user never flashes the

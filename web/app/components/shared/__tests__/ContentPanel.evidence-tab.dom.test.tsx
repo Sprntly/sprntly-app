@@ -133,6 +133,18 @@ describe("ContentPanel — Evidence tab visibility", () => {
     expect(evidenceTab()).toBeNull()
   })
 
+  it("orders the tabs Evidence → PRD → Tickets (the pipeline order) for a brief PRD", () => {
+    renderPanel({ tab: "prd", prd: prd("brief") })
+    const labels = Array.from(document.querySelectorAll(".cpanel-tab")).map((b) => b.textContent?.trim())
+    expect(labels).toEqual(["Evidence", "PRD", "Tickets"])
+  })
+
+  it("shows PRD → Tickets only for an uploaded PRD (Evidence tab absent)", () => {
+    renderPanel({ tab: "prd", prd: prd("upload") })
+    const labels = Array.from(document.querySelectorAll(".cpanel-tab")).map((b) => b.textContent?.trim())
+    expect(labels).toEqual(["PRD", "Tickets"])
+  })
+
   it("redirects to the PRD tab when parked on Evidence for an uploaded PRD", () => {
     renderPanel({ tab: "evidence", prd: prd("upload") })
     // Evidence tab gone from the bar…

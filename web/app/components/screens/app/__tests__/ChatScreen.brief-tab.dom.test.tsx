@@ -215,7 +215,7 @@ describe("ChatScreen — pinned brief tab", () => {
     // insight lives in the opening insight card, not a thread turn — so briefMeta
     // (not thread length) is what marks it non-disposable and keeps it alive. A
     // genuinely blank tab (no thread, no briefMeta) is still pruned.
-    localStorage.setItem(
+    sessionStorage.setItem(
       "sprntly_chat_tabs_anon_acme",
       JSON.stringify([
         { id: "t-prd", title: "My PRD", thread: [], dbConvId: null, briefMeta: { briefId: 1, insightIndex: 0 } },
@@ -294,7 +294,7 @@ describe("ChatScreen — pinned brief tab", () => {
 // ── Brief-tab gap coverage (B5–B8) ──────────────────────────────────────────
 // These extend the suite above with behaviours NOT already covered here OR in
 // the pure-logic parallel-chats / concurrent-asks suites (which don't render
-// the surface at all): per-company localStorage persistence with the brief tab
+// the surface at all): per-company sessionStorage persistence with the brief tab
 // EXCLUDED, thread preservation across a brief↔chat switch, route-driven brief
 // activation while mounted on a chat tab, and the ?new=1 one-shot latch.
 const tabsKey = "sprntly_chat_tabs_anon_acme"
@@ -313,13 +313,13 @@ function seedPersistedChatTab(opts?: { withReply?: boolean }) {
         : {}),
     },
   ]
-  localStorage.setItem(tabsKey, JSON.stringify([{ id: tabId, title: "Persisted chat", thread, dbConvId: null, briefMeta: null }]))
-  localStorage.setItem(activeTabKey, tabId)
+  sessionStorage.setItem(tabsKey, JSON.stringify([{ id: tabId, title: "Persisted chat", thread, dbConvId: null, briefMeta: null }]))
+  sessionStorage.setItem(activeTabKey, tabId)
   return tabId
 }
 
 describe("ChatScreen — brief tab gaps (B5–B8)", () => {
-  // B5: open chat tabs persist to the per-company localStorage and restore on
+  // B5: open chat tabs persist to the per-company sessionStorage and restore on
   // remount; the pinned brief tab is synthesized first and is NEVER written into
   // the persisted tabs array or the persisted active-tab.
   it("persists chat tabs (brief excluded) and restores them on remount", () => {
@@ -335,12 +335,12 @@ describe("ChatScreen — brief tab gaps (B5–B8)", () => {
     expect(screen.getByText("persisted question")).toBeTruthy()
 
     // The persisted `tabs` array contains ONLY the chat tab — the synthesized
-    // brief tab is never written to localStorage.
-    const persistedTabs = JSON.parse(localStorage.getItem(tabsKey) || "[]") as Array<{ id: string }>
+    // brief tab is never written to sessionStorage.
+    const persistedTabs = JSON.parse(sessionStorage.getItem(tabsKey) || "[]") as Array<{ id: string }>
     expect(persistedTabs.map((t) => t.id)).toContain(tabId)
     expect(persistedTabs.some((t) => t.id === "brief")).toBe(false)
     // The persisted active tab is the chat tab id, never the brief sentinel.
-    expect(localStorage.getItem(activeTabKey)).toBe(tabId)
+    expect(sessionStorage.getItem(activeTabKey)).toBe(tabId)
 
     unmount()
     // Remount → the tab is restored again from the same storage.

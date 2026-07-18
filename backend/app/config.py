@@ -414,6 +414,19 @@ class Settings(BaseSettings):
     # Max concurrent agent calls during multi-agent orchestration.
     multi_agent_concurrency: int = 6
 
+    # ── Sentry (error tracking) ──
+    # DSN for this backend's Sentry project. EMPTY = Sentry fully disabled
+    # (local dev, CI, tests never send anything). Set per-environment via the
+    # systemd EnvironmentFile / .env. See app/sentry.py.
+    sentry_dsn: str = ""
+    # Logical environment tag shown in Sentry ("production", "staging", …).
+    sentry_environment: str = "development"
+    # Tracing sample rate. Default 0.0 = errors only (no perf overhead / cost).
+    # Raise (e.g. 0.1) to sample transactions for performance monitoring.
+    sentry_traces_sample_rate: float = 0.0
+    # Optional release identifier (git sha / version) for grouping regressions.
+    sentry_release: str = ""
+
     @property
     def github_app_private_key_pem(self) -> str:
         """Return a clean PEM regardless of how the .env value was written.

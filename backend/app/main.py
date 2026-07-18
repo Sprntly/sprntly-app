@@ -20,6 +20,12 @@ from fastapi.staticfiles import StaticFiles
 
 from app import auth, db, datasets as datasets_service
 from app.config import settings
+from app.sentry import init_sentry
+
+# Initialise error tracking as early as possible (no-op unless SENTRY_DSN is
+# set) so exceptions raised while importing routes / during startup are caught.
+init_sentry()
+
 from app.db.prototypes import (
     invalidate_orphan_generating_prototypes,
     invalidate_stale_prototypes,

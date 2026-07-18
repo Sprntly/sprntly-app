@@ -64,6 +64,7 @@ vi.mock("../../../../lib/runPrdGeneration", () => ({
 vi.mock("../../../../lib/runEvidenceGeneration", () => ({
   runEvidenceGeneration: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
   resumeEvidenceGeneration: vi.fn(),
+  loadEvidenceByInsight: vi.fn().mockResolvedValue(null),
 }))
 vi.mock("../../../../lib/runAskGeneration", () => ({
   runAskGeneration: vi.fn().mockResolvedValue({
@@ -121,10 +122,10 @@ import { ChatScreen } from "../ChatScreen"
 const PRD_ID = 796
 
 function seedRestoredTab() {
-  localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
+  sessionStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
     { id: "tab-reload", title: "PRD · Enterprise expansion is stalled", dbConvId: null, briefMeta: { briefId: 7, insightIndex: 0 } },
   ]))
-  localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
+  sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
 }
 
 function seedMapEntry(prototype: unknown) {
@@ -159,41 +160,47 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("ChatScreen — prototype CTA is absent until a ready prototype exists", () => {
-  it("test_no_prototype_button_while_map_is_loading", async () => {
+// The chat's 2nd action button is ALWAYS the prototype trigger: "Generate
+// Prototype" until a ready prototype exists (disabled until a PRD is in scope,
+// since a prototype is built FROM a PRD), then "View Prototype" which navigates.
+const protoBtn = () => within(insightMsg()).getByTestId("chat-prototype-cta")
+
+describe("ChatScreen — prototype button: Generate until a prototype is ready", () => {
+  it("is present but DISABLED while the map is still loading (no PRD known yet)", async () => {
     seedRestoredTab()
     mapState.loading = true
     await act(async () => { renderChatScreen() })
 
-    const msg = insightMsg()
-    expect(within(msg).queryByRole("button", { name: /generate prototype/i })).toBeNull()
-    expect(within(msg).queryByRole("button", { name: /view prototype/i })).toBeNull()
+    const btn = protoBtn() as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    expect(btn.disabled).toBe(true)
+    expect(btn.textContent).toBe("Generate Prototype")
   })
 
-  it("test_no_prototype_button_when_prd_has_no_ready_prototype", async () => {
+  it("reads 'Generate Prototype' and is ENABLED when the insight has a PRD but no ready prototype", async () => {
     seedRestoredTab()
-    seedMapEntry(null) // PRD exists, no prototype
+    seedMapEntry(null) // PRD exists (prd_id), no prototype
     await act(async () => { renderChatScreen() })
 
-    const msg = insightMsg()
-    // NEVER "Generate prototype" on the chat surface — the PRD panel owns that.
-    expect(within(msg).queryByRole("button", { name: /generate prototype/i })).toBeNull()
-    expect(within(msg).queryByRole("button", { name: /view prototype/i })).toBeNull()
+    const btn = protoBtn() as HTMLButtonElement
+    expect(btn.disabled).toBe(false)
+    expect(btn.textContent).toBe("Generate Prototype")
+    expect(within(insightMsg()).queryByRole("button", { name: "View Prototype" })).toBeNull()
   })
 })
 
-describe("ChatScreen — View prototype appears only when ready, and navigates", () => {
-  it("test_view_prototype_navigates_to_the_prototype_canvas", async () => {
+describe("ChatScreen — View Prototype appears only when ready, and navigates", () => {
+  it("navigates to the prototype canvas", async () => {
     seedRestoredTab()
     seedMapEntry({ ready: true, preview_image_url: null })
     await act(async () => { renderChatScreen() })
 
-    const btn = within(insightMsg()).getByRole("button", { name: "View prototype" })
+    const btn = within(insightMsg()).getByRole("button", { name: "View Prototype" })
     fireEvent.click(btn)
     expect(pushSpy).toHaveBeenCalledWith(prototypePath(PRD_ID))
   })
 
-  it("test_view_prototype_uses_the_prototypes_own_prd_after_a_regeneration", async () => {
+  it("uses the prototype's OWN prd after a regeneration", async () => {
     const OLD_PRD_ID = 700
     seedRestoredTab()
     // The insight's newest PRD is PRD_ID, but the ready prototype is attached
@@ -201,7 +208,7 @@ describe("ChatScreen — View prototype appears only when ready, and navigates",
     seedMapEntry({ ready: true, preview_image_url: null, prd_id: OLD_PRD_ID })
     await act(async () => { renderChatScreen() })
 
-    const btn = within(insightMsg()).getByRole("button", { name: "View prototype" })
+    const btn = within(insightMsg()).getByRole("button", { name: "View Prototype" })
     fireEvent.click(btn)
     expect(pushSpy).toHaveBeenCalledWith(prototypePath(OLD_PRD_ID))
   })

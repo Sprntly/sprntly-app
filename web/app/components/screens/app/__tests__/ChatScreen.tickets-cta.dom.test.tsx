@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
 //
-// ChatScreen — the post-reply action row's ticket CTA relabels to "View tickets"
-// when the PRD already has persisted tickets in the DB (storiesApi.getForPrd →
-// status "ready" with stories), else stays "Create tickets".
+// ChatScreen — tickets are NOT exposed in the chat at all. Ticket creation moved
+// to the PRD panel's footer (Create/View tickets), so the chat's post-reply row
+// shows exactly two buttons — the PRD action and the prototype action — and never
+// queries the tickets API.
 import * as React from "react"
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -79,7 +80,7 @@ import { ChatScreen } from "../ChatScreen"
 // prd, the insight card at the top hosts the actions and the post-reply row
 // is suppressed as duplicate noise.
 function seedTabWithReply(prdId: number) {
-  localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
+  sessionStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
     {
       id: "tab-reload",
       title: "PRD · Bulk onboarding",
@@ -92,7 +93,7 @@ function seedTabWithReply(prdId: number) {
       }],
     },
   ]))
-  localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
+  sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
 }
 
 function renderRestored() {
@@ -105,23 +106,19 @@ function renderRestored() {
 beforeEach(() => { localStorage.clear(); storiesGetForPrd.mockReset() })
 afterEach(() => { cleanup(); localStorage.clear() })
 
-describe("ChatScreen — ticket CTA reflects whether the PRD already has tickets", () => {
-  it("labels the action 'View tickets' when the DB has tickets for the PRD", async () => {
-    storiesGetForPrd.mockResolvedValue({ status: "ready", fresh: true, stories: [{ id: "s1" }] })
+describe("ChatScreen — tickets are not exposed in the chat (they live in the PRD panel)", () => {
+  it("the post-reply action row shows the PRD + prototype buttons, never a ticket button", async () => {
     seedTabWithReply(796)
     await act(async () => { renderRestored() })
 
-    await waitFor(() => expect(storiesGetForPrd).toHaveBeenCalledWith(796))
-    await waitFor(() => expect(screen.getByRole("button", { name: "View tickets" })).toBeTruthy())
+    // The two-button row: the PRD action (a PRD is loaded on the tab → "View PRD")
+    // and the prototype action. Ticket creation lives in the PRD panel now.
+    await waitFor(() => expect(screen.getByRole("button", { name: "View PRD" })).toBeTruthy())
+    expect(screen.getByTestId("chat-prototype-cta")).toBeTruthy()
+    // No ticket affordance anywhere in the chat…
     expect(screen.queryByRole("button", { name: "Create tickets" })).toBeNull()
-  })
-
-  it("labels the action 'Create tickets' when the PRD has no tickets yet", async () => {
-    storiesGetForPrd.mockResolvedValue({ status: "none", fresh: false, stories: [] })
-    seedTabWithReply(796)
-    await act(async () => { renderRestored() })
-
-    await waitFor(() => expect(screen.getByRole("button", { name: "Create tickets" })).toBeTruthy())
     expect(screen.queryByRole("button", { name: "View tickets" })).toBeNull()
+    // …and the chat never queries the tickets API (that's the PRD panel's job).
+    expect(storiesGetForPrd).not.toHaveBeenCalled()
   })
 })
