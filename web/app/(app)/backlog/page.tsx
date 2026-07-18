@@ -1,7 +1,15 @@
 "use client"
 
-import { BacklogScreen } from "../../components/screens/app/BacklogScreen"
+import { useEffect } from "react"
+import { useRouter } from "next/navigation"
 
-export default function BacklogPage() {
-  return <BacklogScreen />
+// The Backlog page was renamed to Ideation. Old links and bookmarks keep
+// working via this client-side redirect (the app is a static export, so a
+// server redirect() would not survive `next build`).
+export default function BacklogRedirect() {
+  const router = useRouter()
+  useEffect(() => {
+    router.replace("/ideation")
+  }, [router])
+  return null
 }

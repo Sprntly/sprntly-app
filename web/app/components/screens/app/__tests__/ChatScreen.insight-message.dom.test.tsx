@@ -57,8 +57,8 @@ const loadPrdById = vi.fn().mockResolvedValue({
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (...args: unknown[]) => runPrdGeneration(...args),
   resumePrdGeneration: vi.fn(),
-  runPrdGenerationFromBacklog: vi.fn().mockResolvedValue({
-    ok: true, prd: { prd_id: 88, title: "Backlog PRD", metaLine: "", sections: [] },
+  runPrdGenerationFromIdeation: vi.fn().mockResolvedValue({
+    ok: true, prd: { prd_id: 88, title: "Ideation PRD", metaLine: "", sections: [] },
   }),
   loadPrdById: (...args: unknown[]) => loadPrdById(...args),
 }))

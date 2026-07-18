@@ -6,7 +6,7 @@ previously-surfaced theme has changed enough to resurface; `run_synthesis`
 upserts one per surfaced theme after a brief is saved.
 
 Unique on (enterprise_id, theme_id) — a re-surface refreshes the fingerprint in
-place. Mirrors the db/backlog.py upsert pattern.
+place. Mirrors the db/ideation.py upsert pattern.
 """
 from __future__ import annotations
 

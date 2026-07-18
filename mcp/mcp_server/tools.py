@@ -25,14 +25,14 @@ from .backend_client import get_json, request_json
 # A token is minted in Settings as 'developer' or 'pm' (see backend
 # app/db/mcp_tokens.py). Developer tokens get ONLY the ticket tools plus
 # get_prd/list_prd_tickets for the specific PRDs behind their tickets; the
-# workspace-level product surfaces (datasets, backlog, weekly brief, the
+# workspace-level product surfaces (datasets, ideation, weekly brief, the
 # latest-PRD browse) are PM-only. Enforced twice: each PM-only impl checks
 # the caller's token_role before touching the backend (the hard gate — a
 # client can call a tool it was never shown), and RoleScopedFastMCP (app.py)
 # hides these tools from tools/list for developer tokens so their client
 # never offers them.
 PM_ONLY_TOOLS = frozenset(
-    {"list_datasets", "get_current_brief", "get_backlog", "get_latest_prd"}
+    {"list_datasets", "get_current_brief", "get_ideation", "get_latest_prd"}
 )
 
 _PM_ONLY_MESSAGE = (
@@ -66,11 +66,11 @@ async def _get_current_brief_impl() -> dict:
     return result
 
 
-async def _get_backlog_impl() -> dict:
+async def _get_ideation_impl() -> dict:
     ctx = require_current_company()
     if denied := _pm_only_denial(ctx):
         return denied
-    return await get_json("/backlog", company_id=ctx.company_id)
+    return await get_json("/ideation", company_id=ctx.company_id)
 
 
 async def _get_latest_prd_impl() -> dict:
@@ -245,10 +245,11 @@ def register_tools(mcp: FastMCP) -> None:
         return await _get_current_brief_impl()
 
     @mcp.tool()
-    async def get_backlog() -> dict:
-        """List the ranked product backlog — prioritized items beyond the
-        weekly brief's top findings."""
-        return await _get_backlog_impl()
+    async def get_ideation() -> dict:
+        """List the ideation shortlist — the 25-30 prioritized product ideas
+        beyond the weekly brief's top findings (picked by the weekly
+        prioritization pass; formerly get_backlog)."""
+        return await _get_ideation_impl()
 
     @mcp.tool()
     async def get_latest_prd() -> dict:

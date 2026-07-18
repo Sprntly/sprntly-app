@@ -19,7 +19,7 @@ shift:
                     falsely resurface an untouched issue every week).
 
 Suppressed (unchanged, already-surfaced) themes simply don't enter brief
-candidacy; they still flow to the backlog via the normal sequencer.
+candidacy; they still flow to the ideation pool via the normal sequencer.
 """
 from __future__ import annotations
 

@@ -295,31 +295,38 @@ export const briefApi = {
       .then((b) => ({ ...briefFromWire(b), brief_id: b.brief_id })),
 }
 
-// ---- backlog ----------------------------------------------------------------
+// ---- ideation ---------------------------------------------------------------
 //
-// The backlog is the REMAINDER of the same weekly-analysis ranking that feeds
-// the brief: the top 3 ranked insights go into the brief, ranks 4..N are
-// sequenced into the backlog. The backend gates the list on a brief existing,
-// so a company that has never had a brief returns an empty backlog.
+// The ideation pool is the REMAINDER of the same weekly-analysis ranking that
+// feeds the brief: the top 3 ranked insights go into the brief, ranks 4..N are
+// sequenced into the pool, and a weekly prioritization pass shortlists the
+// 25-30 ideas worth showing — the list route returns ONLY that visible set.
+// The backend gates the list on a brief existing, so a company that has never
+// had a brief returns an empty list.
 //
 // The route is tenant-scoped via the session (no company param) — the backend
 // resolves the company from the authenticated user.
 
-export type BacklogTag = "something_new" | "something_better" | "something_broken"
-export type BacklogStatus = "backlog" | "in_progress" | "done" | "dismissed"
+export type IdeationTag = "something_new" | "something_better" | "something_broken"
+// 'backlog' is the legacy spelling of 'proposed' (rows written by pre-rename
+// prod until cutover) — treat the two as the same landing state.
+export type IdeationStatus = "proposed" | "backlog" | "in_progress" | "done" | "dismissed"
 
-export type BacklogItem = {
+export type IdeationItem = {
   id: string
   theme_id: string
   title: string
-  tag: BacklogTag | null
+  tag: IdeationTag | null
   rank: number
   score: number
-  status: BacklogStatus
+  status: IdeationStatus
+  /** Picked by the weekly prioritization pass (manual ideas are born true). */
+  shortlisted?: boolean
   reasoning: string | null
+  updated_at?: string
 }
 
-export type BacklogList = { items: BacklogItem[]; count: number }
+export type IdeationList = { items: IdeationItem[]; count: number }
 
 /** A completed brief finding — a theme whose action is prd_created or done. */
 export type CompletedItem = {
@@ -331,22 +338,23 @@ export type CompletedItem = {
 
 export type CompletedList = { items: CompletedItem[]; count: number }
 
-export const backlogApi = {
-  /** Ranked backlog items (rank-ascending). Empty when no brief exists. */
-  list: () => api.get<BacklogList>("/v1/backlog"),
+export const ideationApi = {
+  /** The visible ideas (rank-ascending): the weekly shortlist + user-pinned
+   *  rows. Empty when no brief exists. */
+  list: () => api.get<IdeationList>("/v1/ideation"),
   /** Completed findings (prd_created | done) for the Completed tab. */
-  completed: () => api.get<CompletedList>("/v1/backlog/completed"),
+  completed: () => api.get<CompletedList>("/v1/ideation/completed"),
   /** Move one item to a new status (in_progress | done | dismissed). */
-  setStatus: (itemId: string, status: Exclude<BacklogStatus, "backlog">) =>
-    api.patch<BacklogItem>(`/v1/backlog/${encodeURIComponent(itemId)}`, { status }),
-  /** Create a user-added backlog item ("+ Add idea"). `tag` is an optional
-   *  BacklogTag when the idea-type maps cleanly, else null. Returns the row. */
-  create: (title: string, tag: BacklogTag | null = null) =>
-    api.post<BacklogItem>("/v1/backlog", { title, tag }),
+  setStatus: (itemId: string, status: "in_progress" | "done" | "dismissed") =>
+    api.patch<IdeationItem>(`/v1/ideation/${encodeURIComponent(itemId)}`, { status }),
+  /** Create a user-added idea ("+ Add idea"). `tag` is an optional
+   *  IdeationTag when the idea-type maps cleanly, else null. Returns the row. */
+  create: (title: string, tag: IdeationTag | null = null) =>
+    api.post<IdeationItem>("/v1/ideation", { title, tag }),
   /** Persist a new rank order (drag-to-rerank / Re-sequence). `orderedIds` is
    *  the full visible order; each item's rank becomes its position. */
   reorder: (orderedIds: string[]) =>
-    api.post<BacklogList>("/v1/backlog/reorder", { ordered_ids: orderedIds }),
+    api.post<IdeationList>("/v1/ideation/reorder", { ordered_ids: orderedIds }),
 }
 
 export type AskCitation = { source: string; evidence: string }
@@ -441,9 +449,9 @@ export type PrdRecord = {
   variant?: string
   /** How this PRD was created — returned by the GET routes' `select("*")`.
    *  Only `'brief'` PRDs carry their own research Evidence (keyed at
-   *  `(brief_id, insight_index)`); `'backlog'` and `'upload'` PRDs have none.
+   *  `(brief_id, insight_index)`); `'ideation'` and `'upload'` PRDs have none.
    *  Absent on legacy rows — treat missing as `'brief'` (the DB default). */
-  source?: "brief" | "backlog" | "upload"
+  source?: "brief" | "ideation" | "backlog" | "upload"
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable
@@ -1435,13 +1443,13 @@ export const prdApi = {
     (activeWorkspaceId
       ? `&workspace_id=${encodeURIComponent(activeWorkspaceId)}`
       : ""),
-  /** Kick off PRD generation for a BACKLOG item (a theme ranked ≥ 4, not in the
-   *  brief's top-3). Same fire-and-forget contract as `generate`: returns a
+  /** Kick off PRD generation for an IDEATION item (a theme ranked ≥ 4, not in
+   *  the brief's top-3). Same fire-and-forget contract as `generate`: returns a
    *  prd_id to poll via prdApi.get(id). The backend synthesizes the insight from
-   *  the backlog row and grounds it on the company's current brief. */
-  generateFromBacklog: (backlogItemId: string, force = false) =>
-    api.post<PrdStartResponse>("/v1/prd/generate-from-backlog", {
-      backlog_item_id: backlogItemId,
+   *  the ideation row and grounds it on the company's current brief. */
+  generateFromIdeation: (ideationItemId: string, force = false) =>
+    api.post<PrdStartResponse>("/v1/prd/generate-from-ideation", {
+      ideation_item_id: ideationItemId,
       force,
     }),
   /** Import an existing PRD from an uploaded file (PDF/PPT/DOCX/…). The backend

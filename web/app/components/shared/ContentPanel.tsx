@@ -139,7 +139,7 @@ function ShareMenu({
  * Whether to hide the right-panel Evidence tab for the current content.
  *
  * Only brief-insight PRDs carry their own research Evidence (keyed at
- * `(brief_id, insight_index)`). Backlog and uploaded PRDs have none — an
+ * `(brief_id, insight_index)`). Ideation and uploaded PRDs have none — an
  * uploaded PRD may genuinely have no evidence at all — so the Evidence tab is
  * hidden for them. We still show it while evidence is loaded/generating into
  * context (e.g. a brief-finding flow), and a missing `source` (legacy rows) is

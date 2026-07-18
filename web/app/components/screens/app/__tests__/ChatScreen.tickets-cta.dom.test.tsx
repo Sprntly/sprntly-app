@@ -45,7 +45,7 @@ vi.mock("../../../../lib/api", () => {
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
   resumePrdGeneration: vi.fn(),
-  runPrdGenerationFromBacklog: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
+  runPrdGenerationFromIdeation: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
   loadPrdById: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
 }))
 vi.mock("../../../../lib/runAskGeneration", () => ({
@@ -76,7 +76,7 @@ import { ChatScreen } from "../ChatScreen"
 
 // A restored PRD tab (prd stripped, prdId + a replied thread turn kept) — the
 // reload state that renders the post-reply action row with the ticket CTA.
-// briefMeta is null (a backlog/import-style tab): with briefMeta or a cached
+// briefMeta is null (an ideation/import-style tab): with briefMeta or a cached
 // prd, the insight card at the top hosts the actions and the post-reply row
 // is suppressed as duplicate noise.
 function seedTabWithReply(prdId: number) {

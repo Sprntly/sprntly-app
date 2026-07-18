@@ -100,20 +100,20 @@ export async function runPrdGeneration(
 }
 
 /**
- * Kick off + poll PRD generation for a BACKLOG item (a theme ranked ≥ 4 that
+ * Kick off + poll PRD generation for an IDEATION item (a theme ranked ≥ 4 that
  * isn't in the brief's top-3, so it has no insight_index). Mirrors
- * `runPrdGeneration` but starts from a backlog_item_id — the backend synthesizes
- * the insight and anchors the PRD to the company's current brief. Polling,
- * pending-job persistence, and the result shape are identical, so the content
- * panel renders a backlog PRD exactly like a brief PRD.
+ * `runPrdGeneration` but starts from an ideation_item_id — the backend
+ * synthesizes the insight and anchors the PRD to the company's current brief.
+ * Polling, pending-job persistence, and the result shape are identical, so the
+ * content panel renders an ideation PRD exactly like a brief PRD.
  */
-export async function runPrdGenerationFromBacklog(
-  backlogItemId: string,
+export async function runPrdGenerationFromIdeation(
+  ideationItemId: string,
 ): Promise<PrdGenResult> {
-  const start = await prdApi.generateFromBacklog(backlogItemId)
-  // Scope the pending-job marker by the backlog item — backlog PRDs share a
+  const start = await prdApi.generateFromIdeation(ideationItemId)
+  // Scope the pending-job marker by the ideation item — ideation PRDs share a
   // sentinel insight_index, so the item id is the unambiguous resume key.
-  const scope = `backlog:${backlogItemId}`
+  const scope = `ideation:${ideationItemId}`
   setPendingJob("prd", "_", scope, start.prd_id)
   return pollPrdToResult(start.prd_id, scope)
 }

@@ -20,7 +20,7 @@ import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-ic
 import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
-import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
+import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
 // resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight } from "../../../lib/runEvidenceGeneration"
@@ -541,7 +541,7 @@ export function ChatScreen() {
   // the consumer can persist a seeded command turn against it.
   const openPrdInTab = useCallback((req: PrdTabRequest): string => {
     const { title, source } = req
-    const meta = source.kind === "generateBacklog" ? null : source.meta
+    const meta = source.kind === "generateIdeation" ? null : source.meta
     const existing = tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",
@@ -596,7 +596,7 @@ export function ChatScreen() {
       setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
       return tabId
     }
-    // generate | generateBacklog | load | resume — kick off, show the panel's
+    // generate | generateIdeation | load | resume — kick off, show the panel's
     // spinner, then land the result on the tab (and shared content while active).
     setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, briefMeta: meta, prdGenerating: true } : t))
     setContent({ prd: null, prdMeta: meta, prdGenerating: true })
@@ -604,7 +604,7 @@ export function ChatScreen() {
       try {
         const result =
           source.kind === "generate" ? await runPrdGeneration(source.meta)
-          : source.kind === "generateBacklog" ? await runPrdGenerationFromBacklog(source.backlogItemId)
+          : source.kind === "generateIdeation" ? await runPrdGenerationFromIdeation(source.ideationItemId)
           : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined)
           : await loadPrdById(source.prdId)
         if (result.ok) {
@@ -617,7 +617,7 @@ export function ChatScreen() {
           if (source.kind === "resume" && source.openTickets && activeTabIdRef.current === tabId) {
             openContentPanel("tickets")
           }
-          // The prd_id was UNKNOWN upfront (generate | generateBacklog — including
+          // The prd_id was UNKNOWN upfront (generate | generateIdeation — including
           // "View PRD" find-or-create, which resolves an EXISTING PRD). Now that we
           // have it, rehydrate the tab's chat by prd_id. New PRDs return no
           // conversation (no-op); an existing one restores the user's prior turns.
@@ -906,7 +906,7 @@ export function ChatScreen() {
   }
   const persistence = persistenceRef.current
 
-  // Resume a conversation from ChatsScreen or BacklogScreen. Two payload
+  // Resume a conversation from ChatsScreen or IdeationScreen. Two payload
   // shapes: with `turns` (built locally / legacy) the tab opens pre-filled;
   // with only a `dbId` (All-chats row click) the tab opens INSTANTLY in a
   // `hydrating` state and the turns are fetched here in the background — the
@@ -940,7 +940,7 @@ export function ChatScreen() {
         return restored
       }
 
-      // Pre-fetched turns → open filled (BacklogScreen + no-dbId fallback).
+      // Pre-fetched turns → open filled (IdeationScreen + no-dbId fallback).
       const preloaded = buildRestored(data.turns ?? [], "resumed")
       if (preloaded.length > 0) {
         // The resumed tab's dbConvId is set via openTab(..., data.dbId) —
@@ -2045,7 +2045,7 @@ export function ChatScreen() {
 
             {/* The composer renders whenever the thread view is shown — including
                 an insight-bound tab whose thread is still empty (opened from the
-                brief/backlog): the user must be able to talk to Sprntly about that
+                brief/ideation): the user must be able to talk to Sprntly about that
                 PRD right away. `hasThread` alone hid it there; `showThreadView`
                 (hasThread || an insight message) restores it. A plain empty chat
                 still uses the landing composer (showThreadView is false), so

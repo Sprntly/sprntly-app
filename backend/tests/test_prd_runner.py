@@ -201,7 +201,7 @@ def test_generate_prd_async_makes_one_call_no_part_b(isolated_settings, monkeypa
 
 
 def test_generate_prd_and_warm_pre_warms_part_b(isolated_settings, monkeypatch):
-    """generate_prd_and_warm (the interactive/backlog entry point) generates the
+    """generate_prd_and_warm (the interactive/ideation entry point) generates the
     human PRD, then pre-warms the Implementation Spec (Part B) so tickets inherit
     AC — the spec is cached in llm_part without ever being shown to the user."""
     _seed_corpus(isolated_settings["data_dir"])

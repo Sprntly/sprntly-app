@@ -2,7 +2,7 @@
 
   - POST /v1/prd/generate records the insight's theme as 'prd_created'
   - POST /v1/brief/dismiss records the finding as 'dismissed'
-  - GET  /v1/backlog/completed returns only prd_created/done, scoped to the company
+  - GET  /v1/ideation/completed returns only prd_created/done, scoped to the company
 
 The owning company of a brief is resolved via brief.dataset (slug) → company, so
 each test seeds a company whose slug equals the brief's dataset (the tenant_client
@@ -124,38 +124,38 @@ def test_completed_returns_only_prd_created_and_done(tenant_client, isolated_set
     set_finding_action(t.company_id, "t-dismissed", "dismissed", client=db)
     set_finding_action(t.company_id, "t-surfaced", "surfaced", client=db)
 
-    resp = t.client.get("/v1/backlog/completed")
+    resp = t.client.get("/v1/ideation/completed")
     assert resp.status_code == 200
     body = resp.json()
     assert body["count"] == 2
     theme_ids = {i["theme_id"] for i in body["items"]}
     assert theme_ids == {"t-prd", "t-done"}
-    # Title falls back to theme_id when there's no backlog row.
+    # Title falls back to theme_id when there's no ideation row.
     for item in body["items"]:
         assert item["title"] == item["theme_id"]
         assert item["action"] in ("prd_created", "done")
         assert "last_surfaced_at" in item
 
 
-def test_completed_uses_backlog_title_when_available(tenant_client, isolated_settings):
+def test_completed_uses_ideation_title_when_available(tenant_client, isolated_settings):
     from app.db.finding_state import set_finding_action
 
     t = tenant_client.make(slug="acme")
     db = isolated_settings["supabase"]
-    db.table("backlog_items").insert({
+    db.table("ideation_items").insert({
         "id": "bi-1", "enterprise_id": t.company_id, "theme_id": "t-prd",
-        "rank": 1, "score": 1.0, "title": "SSO support", "status": "backlog",
+        "rank": 1, "score": 1.0, "title": "SSO support", "status": "proposed",
     }).execute()
     set_finding_action(t.company_id, "t-prd", "prd_created", client=db)
 
-    resp = t.client.get("/v1/backlog/completed")
+    resp = t.client.get("/v1/ideation/completed")
     item = resp.json()["items"][0]
     assert item["title"] == "SSO support"
 
 
 def test_completed_is_empty_for_new_company(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
-    resp = t.client.get("/v1/backlog/completed")
+    resp = t.client.get("/v1/ideation/completed")
     assert resp.status_code == 200
     assert resp.json() == {"items": [], "count": 0}
 
@@ -170,10 +170,10 @@ def test_completed_scoped_to_company(tenant_client, isolated_settings):
     b = tenant_client.make(slug="company-b")
     set_finding_action(b.company_id, "t-b", "done", client=db)
 
-    resp = b.client.get("/v1/backlog/completed")
+    resp = b.client.get("/v1/ideation/completed")
     body = resp.json()
     assert {i["theme_id"] for i in body["items"]} == {"t-b"}
 
 
 def test_completed_requires_auth(unauth_client, isolated_settings):
-    assert unauth_client.get("/v1/backlog/completed").status_code == 401
+    assert unauth_client.get("/v1/ideation/completed").status_code == 401

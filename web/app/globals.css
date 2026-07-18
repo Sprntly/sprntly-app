@@ -16921,7 +16921,7 @@
      Backlog Projects screen  (BacklogScreen.tsx)
   ═══════════════════════════════════════════════════════════════════════════ */
 
-  .main--backlog {
+  .main--ideation {
     padding: 0;
     display: flex;
     flex-direction: column;
@@ -17716,7 +17716,7 @@
   }
 
   /* ── Task 4: Hide main chrome strip on Backlog page ── */
-  .main-column:has(.main--backlog) .app-main-chrome {
+  .main-column:has(.main--ideation) .app-main-chrome {
     display: none;
   }
 

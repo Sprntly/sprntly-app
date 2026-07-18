@@ -9,7 +9,7 @@ Each group pins one fixed behaviour so a regression re-surfaces it:
   3. datasets.insert_dataset: a duplicate slug is idempotent (no raise) even
      when the check-then-insert race loses to a concurrent insert; the unique
      constraint is present in the migration.
-  4. backlog upsert: created_at is NOT in the upsert payload, so a re-upsert
+  4. ideation upsert: created_at is NOT in the upsert payload, so a re-upsert
      can't overwrite the original insert time.
   5. synthesis startup: the empty-KG case logs at INFO (not ERROR/exception);
      a genuine failure still logs at error.
@@ -279,12 +279,12 @@ def test_datasets_slug_unique_migration_exists():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. backlog upsert — created_at not in payload
+# 4. ideation upsert — created_at not in payload
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def test_backlog_upsert_payload_omits_created_at():
-    import app.db.backlog as backlog_mod
+def test_ideation_upsert_payload_omits_created_at():
+    import app.db.ideation as ideation_mod
 
     captured = {}
 
@@ -300,7 +300,7 @@ def test_backlog_upsert_payload_omits_created_at():
         def execute(self):
             return self
 
-    backlog_mod.upsert_backlog_item(
+    ideation_mod.upsert_ideation_item(
         "ent-1", theme_id="t1", title="Login bug", rank=1, score=9.0, client=_Cli())
 
     assert "created_at" not in captured["payload"], (
@@ -310,32 +310,32 @@ def test_backlog_upsert_payload_omits_created_at():
     assert captured["on_conflict"] == "enterprise_id,theme_id"
 
 
-def test_backlog_reupsert_preserves_original_created_at(isolated_settings):
+def test_ideation_reupsert_preserves_original_created_at(isolated_settings):
     """End-to-end against the fake DB: a re-upsert keeps the original
     created_at (set by the DB default on first insert)."""
-    from app.db.backlog import list_backlog_items, upsert_backlog_item
+    from app.db.ideation import list_ideation_items, upsert_ideation_item
 
-    # backlog_items.enterprise_id FKs into companies(id) — seed it first.
+    # ideation_items.enterprise_id FKs into companies(id) — seed it first.
     db = isolated_settings["supabase"]
     db.table("companies").insert(
         {"id": "ent-1", "slug": "slug-ent-1", "display_name": "Ent 1"}
     ).execute()
 
-    upsert_backlog_item("ent-1", theme_id="t1", title="First",
+    upsert_ideation_item("ent-1", theme_id="t1", title="First",
                         rank=1, score=5.0)
-    first = list_backlog_items("ent-1")[0]
+    first = list_ideation_items("ent-1")[0]
     assert first.get("created_at")  # DB default populated it
 
     # Pin a distinct, known created_at so a re-upsert that (wrongly) wrote it
     # would be detectable even within the same wall-clock second.
     sentinel = "2000-01-01 00:00:00"
-    db.table("backlog_items").update({"created_at": sentinel}) \
+    db.table("ideation_items").update({"created_at": sentinel}) \
         .eq("enterprise_id", "ent-1").eq("theme_id", "t1").execute()
 
     # Re-sequence: same (enterprise_id, theme_id), new rank/score.
-    upsert_backlog_item("ent-1", theme_id="t1", title="First (re-ranked)",
+    upsert_ideation_item("ent-1", theme_id="t1", title="First (re-ranked)",
                         rank=3, score=8.0)
-    refreshed = list_backlog_items("ent-1")[0]
+    refreshed = list_ideation_items("ent-1")[0]
 
     assert refreshed["created_at"] == sentinel, (
         "re-upsert must not overwrite created_at")
