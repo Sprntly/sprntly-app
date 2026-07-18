@@ -323,9 +323,13 @@ class GraphFacade:
         can be skipped. Tenant-scoped — only this enterprise's signals are
         considered, never another tenant's.
 
-        Filtered in Python (mirrors `active_signals`) so it works against both
+        Only the newest few signals are fetched (order created_at desc,
+        small limit) and compared in Python — `order`/`limit` work against both
         real Supabase and the in-memory test fake (which has no `gt`/`OR`).
-        Per-enterprise volumes are bounded (§20 NFR), so the scan is fine.
+        The old unordered full-select scan silently broke past Supabase's
+        1000-row page: a tenant with >1000 signals could get a page containing
+        none of its recent rows, so the gate reported "unchanged" forever and
+        regeneration never ran again.
         """
         cutoff = _parse_iso(iso_ts)
         if cutoff is None:
@@ -334,6 +338,8 @@ class GraphFacade:
         rows = (
             self._tbl("kg_signal").select("created_at")
             .eq("enterprise_id", enterprise_id)
+            .order("created_at", desc=True)
+            .limit(5)
             .execute().data or []
         )
         for r in rows:
