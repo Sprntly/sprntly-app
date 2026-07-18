@@ -35,3 +35,10 @@ tzdata>=2024.1
 networkx>=3.0
 beautifulsoup4>=4.12
 httpx>=0.27
+# DS engine (app/ds/engine — the deterministic analysis battery behind the
+# chat "analyze my data" command): dataframe ops, stats gates (Mann-Whitney,
+# chi-square, BH-FDR), and the logistic-regression shadow-removal dedup.
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+scikit-learn>=1.3
