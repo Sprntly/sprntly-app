@@ -204,7 +204,7 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await clickOpenPrd()
 
     // The tab opens ON its insight: the opening insight card carries the finding
-    // body. That card IS Spiky presenting the insight, so there is NO separate
+    // body. That card IS Sprntly presenting the insight, so there is NO separate
     // seeded thread turn repeating the same text below it (the duplication bug).
     const card = await screen.findByTestId("chat-insight-msg")
     expect(within(card).getByText(/Users churn early\./)).toBeTruthy()

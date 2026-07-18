@@ -21,6 +21,7 @@ from starlette.responses import PlainTextResponse
 
 from .auth import current_company_or_none
 from .middleware import BearerAuthMiddleware
+from .sentry import init_sentry
 from .tools import PM_ONLY_TOOLS, register_tools
 
 # Shown to the MCP client/model on connect (FastMCP `instructions`) to orient
@@ -131,6 +132,8 @@ def _stateless_http() -> bool:
 
 
 def create_app():
+    # No-op unless SENTRY_DSN is set (loaded from .env by __main__).
+    init_sentry()
     mcp = RoleScopedFastMCP(
         "sprntly",
         instructions=_INSTRUCTIONS,

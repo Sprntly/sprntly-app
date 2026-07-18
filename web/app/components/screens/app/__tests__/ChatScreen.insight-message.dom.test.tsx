@@ -165,11 +165,12 @@ describe("ChatScreen — insight renders as an in-chat message (not a pinned hea
     // A saved PRD is loaded on the tab → the PRD CTA reads "View PRD" (not "Open").
     expect(within(msg).getByRole("button", { name: "View PRD" })).toBeTruthy()
     expect(within(msg).queryByRole("button", { name: /open prd/i })).toBeNull()
-    // No prototype built yet → NO prototype CTA at all. The chat surface never
-    // offers "Generate prototype" (the PRD panel owns generation); the button
-    // appears only as "View prototype" once one is ready.
-    expect(within(msg).queryByRole("button", { name: /generate prototype/i })).toBeNull()
-    expect(within(msg).queryByRole("button", { name: /view prototype/i })).toBeNull()
+    // No prototype built yet → the prototype CTA is present as "Generate
+    // Prototype" (it's always the 2nd action; it flips to "View Prototype" only
+    // once one is ready in the DB).
+    const proto = within(msg).getByTestId("chat-prototype-cta")
+    expect(proto.textContent).toBe("Generate Prototype")
+    expect(within(msg).queryByRole("button", { name: "View Prototype" })).toBeNull()
 
     // …and the chat composer is present even though the thread is empty — the
     // user can immediately ask Sprntly about this PRD. (Regression: the dock
@@ -243,9 +244,9 @@ describe("ChatScreen — insight renders as an in-chat message (not a pinned hea
 
     // Generation resolves (mock) → PRD loads on the tab → "View PRD".
     await waitFor(() => expect(within(insightMsg()).getByRole("button", { name: "View PRD" })).toBeTruthy())
-    // The seeded ready prototype flips the prototype CTA to "View prototype".
-    await waitFor(() => expect(within(insightMsg()).getByRole("button", { name: "View prototype" })).toBeTruthy())
-    expect(within(insightMsg()).queryByRole("button", { name: "Generate prototype" })).toBeNull()
+    // The seeded ready prototype flips the prototype CTA to "View Prototype".
+    await waitFor(() => expect(within(insightMsg()).getByRole("button", { name: "View Prototype" })).toBeTruthy())
+    expect(within(insightMsg()).queryByRole("button", { name: "Generate Prototype" })).toBeNull()
   })
 })
 
@@ -269,10 +270,10 @@ describe("ChatScreen — insight PRD CTA survives a reload (DB-backed)", () => {
 
   it("shows 'View PRD' and loads the existing PRD (no regeneration) when the DB has one", async () => {
     // Persisted tab (prd stripped, briefMeta kept) — exactly what a reload restores.
-    localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
+    sessionStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
       { id: "tab-reload", title: "PRD · Enterprise expansion is stalled", dbConvId: null, briefMeta: { briefId: 7, insightIndex: 0 } },
     ]))
-    localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
+    sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
     // The DB map says insight 0 already has PRD #796 (no prototype yet).
     protoMap.set(0, {
       insight_index: 0,
@@ -298,10 +299,10 @@ describe("ChatScreen — insight PRD CTA survives a reload (DB-backed)", () => {
     // Map still in flight → we don't yet know if a PRD exists. The CTA must not
     // flash "Generate PRD" (it would flip to "View PRD" the instant the map lands).
     mapState.loading = true
-    localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
+    sessionStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
       { id: "tab-reload", title: "PRD · Enterprise expansion is stalled", dbConvId: null, briefMeta: { briefId: 7, insightIndex: 0 } },
     ]))
-    localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
+    sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-reload")
 
     await act(async () => { renderRestored() })
 

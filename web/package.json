@@ -11,6 +11,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@sentry/nextjs": "^10.66.0",
     "@supabase/supabase-js": "^2.106.2",
     "@tabler/icons-react": "^3.44.0",
     "docx": "^9.7.1",

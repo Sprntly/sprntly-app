@@ -2422,9 +2422,18 @@
     box-shadow: var(--shadow-sm);
   }
 
+  /* Once there's a sendable message (the button is enabled), the send turns
+     green — an at-a-glance "ready to send" affordance in a new chat. An empty or
+     too-short draft keeps it neutral (and faded via :disabled below). */
+  .chat-home-composer-send:not(:disabled) {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
   .chat-home-composer-send:hover:not(:disabled) {
-    background: var(--accent-muted);
-    border-color: var(--accent-alpha-40);
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
     box-shadow: var(--shadow-md);
   }
 
@@ -4829,6 +4838,27 @@
     background: var(--surface-2, #fff);
   }
 
+  /* Shared pipeline bar for the Evidence + Tickets tabs (the PRD tab keeps its
+     own .prd-footer-bar). Pinned to the panel's bottom edge; the single
+     next-step button sits on the right, matching the PRD footer's CTA. */
+  .cpanel-bottom-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-shrink: 0;
+    padding: 12px 24px;
+    border-top: 1px solid var(--line);
+    background: var(--surface-2, #fff);
+  }
+
+  .cpanel-next-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+  }
+
   /* Inside the content panel the PRD fills the (now wide) panel instead of
      being capped at the 820px centered reading column. */
   /* Cap the document width in the panel so wide viewports keep comfortable
@@ -5975,9 +6005,12 @@
     min-width: 0;
   }
 
-  /* User turn */
+  /* User turn — right-aligned (the user's message sits on the RIGHT, the agent
+     reply on the left). row-reverse packs the head to the right edge with the
+     avatar outermost, mirroring the agent head on the left. */
   .bc-user-head {
     display: flex;
+    flex-direction: row-reverse;
     align-items: center;
     gap: 8px;
   }
@@ -6009,11 +6042,11 @@
   }
 
   .bc-user-bubble {
-    align-self: flex-start;
+    align-self: flex-end;
     max-width: 100%;
-    margin-left: 34px;
+    margin-right: 34px;
     padding: 10px 14px;
-    border-radius: 4px 14px 14px 14px;
+    border-radius: 14px 4px 14px 14px;
     background: var(--surface-3);
     color: var(--ink);
     font-size: 14px;
@@ -6070,7 +6103,9 @@
     font-size: 9.5px;
     font-weight: 700;
     letter-spacing: 0.06em;
-    text-transform: uppercase;
+    /* No text-transform: badge text renders as authored, so "Product Coworker"
+       shows in title case. Role badges whose source is already caps
+       (DS COWORKER, DECISION, INPUT) are unaffected. */
     background: var(--accent-soft);
     color: var(--accent-ink);
     padding: 2px 9px;

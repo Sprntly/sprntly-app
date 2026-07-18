@@ -23,12 +23,13 @@ import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
 // resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
-import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
+import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight } from "../../../lib/runEvidenceGeneration"
 import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { PrdState, PrdContent } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
+import { GeneratePrototypeCTA } from "../../design-agent/GeneratePrototypeCTA"
 import { prototypePath } from "../../../lib/routes"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
@@ -135,6 +136,78 @@ const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
   { kind: "starter", card: { id: "def-proto", icon: "rocket", title: "Prototype", desc: "", target: "ondemand", prompt: "Help me prototype the top feature in our product roadmap." } },
 ]
 
+// The chat surface's artifact action row — EXACTLY two buttons. The first opens
+// the first available artifact (View Evidence when the insight has evidence, else
+// Generate/View PRD); the second is the Generate/View Prototype trigger, disabled
+// until a PRD exists (a prototype is always built FROM a PRD). Shared by the
+// insight-card row and the reply-footer row so the two never drift.
+//
+// The prototype button follows BriefChat's pattern: the shared GeneratePrototypeCTA
+// with `skipExistenceCheck` (the batch prototype map — chatInsightState — is the
+// existence source of truth, so no redundant per-tab getByPrd), driving Generate
+// (open the modal) vs View (navigate) from `prototypeReady`.
+function ChatArtifactActions({
+  evidenceExists,
+  prdExists,
+  prdWaiting,
+  prdGenerating,
+  onViewEvidence,
+  onOpenPrd,
+  prototypePrdId,
+  prototypeReady,
+  onViewPrototype,
+}: {
+  evidenceExists: boolean
+  prdExists: boolean
+  prdWaiting: boolean
+  prdGenerating: boolean
+  onViewEvidence: () => void
+  onOpenPrd: () => void
+  prototypePrdId: number | null
+  prototypeReady: boolean
+  onViewPrototype: () => void
+}) {
+  const first = evidenceExists
+    ? { label: "View Evidence", onClick: onViewEvidence, disabled: false }
+    : {
+        label: prdGenerating
+          ? "Generating PRD…"
+          : prdWaiting ? "Loading…"
+          : prdExists ? "View PRD" : "Generate PRD",
+        onClick: onOpenPrd,
+        disabled: prdGenerating || prdWaiting,
+      }
+  const canPrototype = prototypePrdId != null
+  return (
+    <div className="bc-actions">
+      <button
+        type="button"
+        className="bc-action-btn bc-action-btn--primary"
+        disabled={first.disabled}
+        onClick={first.onClick}
+      >
+        {first.label}
+      </button>
+      <GeneratePrototypeCTA
+        prdId={prototypePrdId}
+        skipExistenceCheck
+        render={({ onClick }) => (
+          <button
+            type="button"
+            className="bc-action-btn"
+            data-testid="chat-prototype-cta"
+            disabled={!canPrototype}
+            title={canPrototype ? undefined : "Generate a PRD first"}
+            onClick={canPrototype && prototypeReady ? onViewPrototype : onClick}
+          >
+            {canPrototype && prototypeReady ? "View Prototype" : "Generate Prototype"}
+          </button>
+        )}
+      />
+    </div>
+  )
+}
+
 export function ChatScreen() {
   const {
     currentScreen,
@@ -163,17 +236,21 @@ export function ChatScreen() {
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
-  // User+company-scoped localStorage keys: chats are per-user, so neither a
-  // different tenant NOR a different member of the same workspace signing in
-  // on this browser may see these tabs. (Sign-out also purges the
-  // sprntly_chat_tabs_* prefix — this key is the defense in depth.)
+  // Per-tab chat state is SESSION-scoped: it lives in sessionStorage, not
+  // localStorage. So a fresh open (new browser tab/window, or reopening the app
+  // after closing it) starts with ONLY the pinned Weekly-brief tab — never last
+  // session's accumulated chat tabs. It still survives an in-session reload or a
+  // navigate-away-and-back, so clicking around the app never nukes open chats.
+  // Keys are ALSO user+company scoped so neither a different tenant nor a
+  // different teammate signing in on this browser can see these tabs; sign-out
+  // clears them outright (both storages) as defense in depth.
   const authUserId = auth.kind === "authed" ? auth.user.id : "anon"
   const tabsKey = `sprntly_chat_tabs_${authUserId}_${activeCompany}`
   const activeTabKey = `sprntly_chat_active_tab_${authUserId}_${activeCompany}`
 
   const [tabs, setTabs] = useState<ChatTab[]>(() => {
     try {
-      const saved = localStorage.getItem(tabsKey)
+      const saved = sessionStorage.getItem(tabsKey)
       if (!saved) return []
       // Restore with defaults for fields not persisted (prd/evidence are large — re-generate on reload)
       return (JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
@@ -199,7 +276,7 @@ export function ChatScreen() {
   const animatedTurnIds = useRef<Set<string>>(new Set())
   const [activeTabId, setActiveTabId] = useState<string | null>(() => {
     try {
-      const stored = localStorage.getItem(activeTabKey)
+      const stored = sessionStorage.getItem(activeTabKey)
       // First load (no persisted active tab) → default to the pinned brief tab.
       // A persisted "" means the user was on the chat landing/new-chat (active
       // tab = null), so we honour that and DON'T fall back to the brief tab.
@@ -227,14 +304,14 @@ export function ChatScreen() {
   const [prdPanelPending, setPrdPanelPending] = useState(false)
 
   // When the storage key changes (workspace switch OR a different user signs
-  // in), reload tabs from the new user+company-scoped storage so we never
-  // show another tenant's — or another teammate's — chat threads.
+  // in), reload tabs from the new user+company-scoped session storage so we
+  // never show another tenant's — or another teammate's — chat threads.
   const prevTabsKeyRef = useRef(tabsKey)
   useEffect(() => {
     if (prevTabsKeyRef.current === tabsKey) return
     prevTabsKeyRef.current = tabsKey
     try {
-      const saved = localStorage.getItem(tabsKey)
+      const saved = sessionStorage.getItem(tabsKey)
       if (saved) {
         setTabs((JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
           id: t.id ?? "", title: t.title ?? "", thread: t.thread ?? [],
@@ -245,7 +322,7 @@ export function ChatScreen() {
       } else {
         setTabs([])
       }
-      const storedActive = localStorage.getItem(activeTabKey)
+      const storedActive = sessionStorage.getItem(activeTabKey)
       // No persisted active tab for this company → default to the pinned brief
       // tab; a persisted "" honours the chat landing (active tab = null).
       setActiveTabId(storedActive == null ? BRIEF_TAB_ID : storedActive || null)
@@ -255,15 +332,16 @@ export function ChatScreen() {
     }
   }, [activeCompany, tabsKey, activeTabKey])
 
-  // Persist tabs to localStorage — strip large/transient fields (prd, evidence, *Generating)
+  // Persist tabs to sessionStorage (session-scoped; see the key comment above) —
+  // strip large/transient fields (prd, evidence, *Generating)
   useEffect(() => {
     try {
       const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, hydrating: _h, ...rest }) => rest)
-      localStorage.setItem(tabsKey, JSON.stringify(slim))
+      sessionStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
   }, [tabs, tabsKey])
   useEffect(() => {
-    try { localStorage.setItem(activeTabKey, activeTabId ?? "") } catch { /* ignore */ }
+    try { sessionStorage.setItem(activeTabKey, activeTabId ?? "") } catch { /* ignore */ }
   }, [activeTabId, activeTabKey])
 
   // The pinned brief tab is synthesized (not in `tabs`), so when it's active
@@ -282,18 +360,6 @@ export function ChatScreen() {
     if (!activeTab?.briefMeta) return null
     return prototypeStateForInsight(chatEntriesByInsight, activeTab.briefMeta.insightIndex)
   }, [activeTab?.briefMeta, chatEntriesByInsight])
-
-  // VIEW-only prototype affordance. The chat surface never offers "Generate
-  // prototype" — generation lives in the PRD panel — so this button only
-  // renders once the batch map confirms a ready prototype, and clicking it
-  // always navigates. prototypePrdId: the PRD the prototype is actually
-  // attached to (may be an older PRD than the insight's newest after a PRD
-  // regeneration).
-  const handleChatPrototype = useCallback(() => {
-    if (chatInsightState?.prototypeReady && chatInsightState.prdId != null) {
-      router.push(prototypePath(chatInsightState.prototypePrdId ?? chatInsightState.prdId))
-    }
-  }, [chatInsightState, router])
 
   const setThread = useCallback((updater: ThreadTurn[] | ((prev: ThreadTurn[]) => ThreadTurn[])) => {
     setTabs((prev) => prev.map((t) => {
@@ -315,11 +381,11 @@ export function ChatScreen() {
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
   // composer even while another tab is still loading.
   const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
-  // PRD ids known to already have persisted tickets in the DB — flips the chat
-  // action's "Create tickets" label to "View tickets". Populated per active PRD
-  // via storiesApi.getForPrd (see effect below).
-  const [prdsWithTickets, setPrdsWithTickets] = useState<ReadonlySet<number>>(new Set())
-  const checkedTicketPrdsRef = useRef<Set<number>>(new Set())
+  // Insight keys ("briefId:insightIndex") known to already have a saved evidence
+  // brief — flips the chat's first action to "View Evidence" (else it offers the
+  // PRD). Populated per active insight via loadEvidenceByInsight (see effect below).
+  const [insightsWithEvidence, setInsightsWithEvidence] = useState<ReadonlySet<string>>(new Set())
+  const checkedEvidenceRef = useRef<Set<string>>(new Set())
   // Composer busy/disabled + "thinking" indicator reflect ONLY the active tab's
   // in-flight status. Another tab being mid-ask must not disable this composer.
   const busy = isComposerBusy(busyTabs, activeTabId)
@@ -345,14 +411,12 @@ export function ChatScreen() {
     Array.from(files).forEach((file) => {
       if (/\.(pdf|pptx|docx|doc)$/i.test(file.name)) {
         setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
-        showToast("Attached", `"${file.name}" ready — ask about it, or say "import this as a PRD" / "convert this PRD into tickets".`)
         return
       }
       const reader = new FileReader()
       reader.onload = () => {
         const content = reader.result as string
         setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000) }])
-        showToast("Attached", `"${file.name}" added as context.`)
       }
       reader.readAsText(file)
     })
@@ -410,7 +474,7 @@ export function ChatScreen() {
   // Rehydrate a PRD tab's chat thread from its saved conversation. A PRD's chat
   // is keyed by prd_id in Supabase (conversationsApi.byPrd), so reopening a PRD —
   // even on a new device or after the localStorage tab is gone — restores the
-  // user's earlier questions + Spiky's answers instead of an empty thread. Only
+  // user's earlier questions + Sprntly's answers instead of an empty thread. Only
   // ever fills a still-empty, unconverted tab (guarded again inside the setter so
   // a race with live typing can't clobber it); non-fatal on any failure.
   const hydratePrdThread = useCallback(async (tabId: string, prdId: number) => {
@@ -649,9 +713,10 @@ export function ChatScreen() {
     if (!activeTabId) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
     if (!tab || tab.evidenceGenerating) return
-    // Already generated — sync to context and open panel
+    // Already generated — sync to context and open panel. Stamp the insight meta
+    // so the Evidence tab's "Generate/View PRD" bar knows which insight to act on.
     if (tab.evidence) {
-      setContent({ evidence: tab.evidence })
+      setContent({ evidence: tab.evidence, ...(tab.briefMeta ? { prdMeta: tab.briefMeta } : {}) })
       openContentPanel("evidence")
       return
     }
@@ -664,13 +729,13 @@ export function ChatScreen() {
       return
     }
     setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: true } : t))
-    setContent({ evidence: null, evidenceGenerating: true })
+    setContent({ evidence: null, evidenceGenerating: true, prdMeta: meta })
     openContentPanel("evidence")
     try {
       const result = await runEvidenceGeneration(meta)
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
-        setContent({ evidence: result.evidence, evidenceGenerating: false })
+        setContent({ evidence: result.evidence, evidenceGenerating: false, prdMeta: meta })
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
         setContent({ evidenceGenerating: false })
@@ -1577,26 +1642,42 @@ export function ChatScreen() {
   // know — but only for an insight-bound tab that has no PRD loaded on it yet
   // (a tab already carrying its prd is authoritative, no wait needed).
   const chatPrdCtaWaiting = !chatPrdExists && !!activeTab?.briefMeta && chatMapLoading
-  // Does the active tab's PRD already have persisted tickets? Check once per PRD
-  // (cache-read only, no generation) so the action reads "View tickets" for a PRD
-  // that's already been broken into stories, else "Create tickets".
-  const activeTicketPrdId = activeTab?.prdId ?? null
+  // Does the active tab's insight already have a saved evidence brief? Check once
+  // per insight (cache-read only, no generation) so the chat's first action reads
+  // "View Evidence" when evidence exists. Uploaded PRDs / plain chats carry no
+  // insight (no briefMeta), so they fall through to the PRD action.
+  const activeEvidenceKey = activeTab?.briefMeta
+    ? `${activeTab.briefMeta.briefId}:${activeTab.briefMeta.insightIndex}`
+    : null
   useEffect(() => {
-    if (activeTicketPrdId == null || checkedTicketPrdsRef.current.has(activeTicketPrdId)) return
-    checkedTicketPrdsRef.current.add(activeTicketPrdId)
+    if (!activeEvidenceKey || checkedEvidenceRef.current.has(activeEvidenceKey)) return
+    checkedEvidenceRef.current.add(activeEvidenceKey)
+    const [bId, iIdx] = activeEvidenceKey.split(":").map(Number)
     let cancelled = false
     void (async () => {
       try {
-        const { storiesApi } = await import("../../../lib/api")
-        const cache = await storiesApi.getForPrd(activeTicketPrdId)
-        if (!cancelled && cache.status === "ready" && cache.stories.length > 0) {
-          setPrdsWithTickets((prev) => new Set(prev).add(activeTicketPrdId))
+        const ev = await loadEvidenceByInsight(bId, iIdx)
+        if (!cancelled && ev) {
+          setInsightsWithEvidence((prev) => new Set(prev).add(activeEvidenceKey))
         }
-      } catch { /* non-fatal: default to "Create tickets" */ }
+      } catch { /* non-fatal: default to the PRD action */ }
     })()
     return () => { cancelled = true }
-  }, [activeTicketPrdId])
-  const chatTicketsExist = activeTicketPrdId != null && prdsWithTickets.has(activeTicketPrdId)
+  }, [activeEvidenceKey])
+  // Evidence exists if it's cached on the tab OR the insight has a saved brief.
+  const chatEvidenceExists =
+    !!activeTab?.evidence || (activeEvidenceKey != null && insightsWithEvidence.has(activeEvidenceKey))
+  // The PRD the chat's prototype button generates/views from (null → disabled).
+  const chatProtoPrdId = activeTab?.prdId ?? chatInsightState?.prdId ?? null
+  // Whether a ready prototype already exists (from the batch map) — drives the
+  // prototype button's View vs Generate face.
+  const chatPrototypeReady = !!chatInsightState?.prototypeReady
+  // Navigate to an already-built prototype (the CTA's skipExistenceCheck path
+  // only GENERATES; the batch map tells us when to VIEW instead).
+  const handleViewPrototype = useCallback(() => {
+    const pid = chatInsightState?.prototypePrdId ?? chatInsightState?.prdId ?? null
+    if (pid != null) router.push(prototypePath(pid))
+  }, [chatInsightState, router])
   const displayChips = useMemo(() => {
     const chips = buildHomeChips(homeCards, starters)
     return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
@@ -1852,7 +1933,7 @@ export function ChatScreen() {
                           <span className="bc-agent-name">{AGENT_NAME}</span>
                           <span className="bc-agent-badge">
                             <IconSparkle size={10} />
-                            PM COWORKER
+                            Product Coworker
                           </span>
                         </div>
                         <div className="bc-agent-body">
@@ -1868,33 +1949,17 @@ export function ChatScreen() {
                             </div>
                           ) : null}
                         </div>
-                        <div className="bc-actions">
-                          <button
-                            type="button"
-                            className="bc-action-btn bc-action-btn--primary"
-                            disabled={!!activeTab?.prdGenerating || chatPrdCtaWaiting}
-                            onClick={handleOpenPrd}
-                          >
-                            {activeTab?.prdGenerating
-                              ? "Generating PRD…"
-                              : chatPrdCtaWaiting ? "Loading…"
-                              : chatPrdExists ? "View PRD" : "Generate PRD"}
-                          </button>
-                          {/* View-only: rendered ONLY once a ready prototype is
-                              confirmed. Never "Generate prototype" here — the PRD
-                              panel already owns the generate affordance, and while
-                              the map is still loading we show nothing rather than
-                              a label that flips after the fetch lands. */}
-                          {chatInsightState?.prototypeReady ? (
-                            <button
-                              type="button"
-                              className="bc-action-btn"
-                              onClick={handleChatPrototype}
-                            >
-                              View prototype
-                            </button>
-                          ) : null}
-                        </div>
+                        <ChatArtifactActions
+                          evidenceExists={chatEvidenceExists}
+                          prdExists={chatPrdExists}
+                          prdWaiting={chatPrdCtaWaiting}
+                          prdGenerating={!!activeTab?.prdGenerating}
+                          onViewEvidence={handleOpenEvidence}
+                          onOpenPrd={handleOpenPrd}
+                          prototypePrdId={chatProtoPrdId}
+                          prototypeReady={chatPrototypeReady}
+                          onViewPrototype={handleViewPrototype}
+                        />
                       </div>
                     ) : null}
                     {/* "User input needed" items from the PRD, surfaced as chat
@@ -1940,7 +2005,7 @@ export function ChatScreen() {
                             <span className="bc-agent-name">{AGENT_NAME}</span>
                             <span className="bc-agent-badge">
                               <IconSparkle size={10} />
-                              PM COWORKER
+                              Product Coworker
                             </span>
                           </div>
                           <div className="bc-agent-body">
@@ -1958,56 +2023,17 @@ export function ChatScreen() {
                               top of the thread — it already hosts these actions, and
                               rendering both reads as duplicate button noise. */}
                           {isLast && turn.reply && !showInsightMsg ? (
-                            <div className="bc-actions">
-                              <button
-                                type="button"
-                                className="bc-action-btn bc-action-btn--primary"
-                                disabled={!!activeTab?.prdGenerating || chatPrdCtaWaiting}
-                                onClick={handleOpenPrd}
-                              >
-                                {activeTab?.prdGenerating
-                                  ? "Generating PRD…"
-                                  : chatPrdCtaWaiting ? "Loading…"
-                                  : chatPrdExists ? "View PRD" : "Generate PRD"}
-                              </button>
-                              <button
-                                type="button"
-                                className="bc-action-btn"
-                                disabled={!!activeTab?.prdGenerating || !activeTab?.prd}
-                                onClick={() => {
-                                  if (activeTab?.prd) {
-                                    setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-                                    openContentPanel("tickets")
-                                  }
-                                }}
-                                title={!activeTab?.prd ? "Generate a PRD first" : undefined}
-                              >
-                                {chatTicketsExist ? "View tickets" : "Create tickets"}
-                              </button>
-                              <button
-                                type="button"
-                                className="bc-action-btn"
-                                disabled={!!activeTab?.evidenceGenerating}
-                                onClick={handleOpenEvidence}
-                              >
-                                {activeTab?.evidenceGenerating
-                                  ? "Generating…"
-                                  : activeTab?.evidence ? "Open evidence" : "View evidence"}
-                              </button>
-                              {/* View-only — same rule as the insight header:
-                                  no "Generate prototype" on the chat surface,
-                                  and nothing at all until the map confirms a
-                                  ready prototype. */}
-                              {chatInsightState?.prototypeReady ? (
-                                <button
-                                  type="button"
-                                  className="bc-action-btn"
-                                  onClick={handleChatPrototype}
-                                >
-                                  View prototype
-                                </button>
-                              ) : null}
-                            </div>
+                            <ChatArtifactActions
+                              evidenceExists={chatEvidenceExists}
+                              prdExists={chatPrdExists}
+                              prdWaiting={chatPrdCtaWaiting}
+                              prdGenerating={!!activeTab?.prdGenerating}
+                              onViewEvidence={handleOpenEvidence}
+                              onOpenPrd={handleOpenPrd}
+                              prototypePrdId={chatProtoPrdId}
+                              prototypeReady={chatPrototypeReady}
+                              onViewPrototype={handleViewPrototype}
+                            />
                           ) : null}
                         </div>
                       )

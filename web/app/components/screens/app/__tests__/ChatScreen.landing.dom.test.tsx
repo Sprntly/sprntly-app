@@ -119,10 +119,10 @@ function renderScreen() {
 
 // Seed a persisted chat tab WITH a thread so the THREAD composer renders on
 // mount (active tab = a tab that already has a turn). Mirrors the persisted
-// shape ChatScreen restores from localStorage.
+// shape ChatScreen restores from sessionStorage.
 function seedThreadTab() {
   const tabId = "tab-seed-1"
-  localStorage.setItem(
+  sessionStorage.setItem(
     "sprntly_chat_tabs_anon_acme",
     JSON.stringify([
       {
@@ -140,7 +140,7 @@ function seedThreadTab() {
       },
     ]),
   )
-  localStorage.setItem("sprntly_chat_active_tab_anon_acme", tabId)
+  sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", tabId)
 }
 
 beforeEach(() => {

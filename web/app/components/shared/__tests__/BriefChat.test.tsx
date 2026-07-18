@@ -606,31 +606,31 @@ describe("BriefChat header — top bar removed", () => {
   })
 })
 
-// ── Fixed agent name "Spiky" ──────────────────────────────────────────────────
-// The PM agent is no longer user-named: there is ONE fixed display name, "Spiky",
-// sourced from the AGENT_NAME constant. The brief/chat header must render that
-// name (next to the sparkle mark) — never the old hardcoded "PM Agent". The
-// "PM COWORKER" pill is a *role* badge and is intentionally unaffected.
-describe("BriefChat header — fixed agent name 'Spiky'", () => {
-  it("renders the agent display name as 'Spiky' (not 'PM Agent')", async () => {
+// ── Fixed agent name "Sprntly" ────────────────────────────────────────────────
+// The PM agent is no longer user-named: there is ONE fixed display name,
+// "Sprntly", sourced from the AGENT_NAME constant. The brief/chat header must
+// render that name (next to the sparkle mark) — never the old hardcoded
+// "PM Agent". The "Product Coworker" pill is a *role* badge.
+describe("BriefChat header — fixed agent name 'Sprntly'", () => {
+  it("renders the agent display name as 'Sprntly' (not 'PM Agent')", async () => {
     await act(async () => {
       renderBrief()
     })
     // The brief's agent head carries the agent's NAME + role badge.
     const head = document.querySelector(".bc-agent-head") as HTMLElement | null
     expect(head).not.toBeNull()
-    // The agent's NAME (the .bc-agent-name span) reads "Spiky".
+    // The agent's NAME (the .bc-agent-name span) reads "Sprntly".
     const name = head!.querySelector(".bc-agent-name") as HTMLElement | null
     expect(name).not.toBeNull()
     expect(name!.textContent).toBe(AGENT_NAME)
-    expect(name!.textContent).toBe("Spiky")
+    expect(name!.textContent).toBe("Sprntly")
     // The old hardcoded name is gone everywhere.
     expect(screen.queryByText("PM Agent")).toBeNull()
-    // The role pill ("PM COWORKER") is unaffected.
-    expect(within(head!).getByText("PM COWORKER")).not.toBeNull()
+    // The role pill ("Product Coworker") is present.
+    expect(within(head!).getByText("Product Coworker")).not.toBeNull()
   })
 
-  it("greeting still renders below the Spiky header", async () => {
+  it("greeting still renders below the Sprntly header", async () => {
     await act(async () => {
       renderBrief()
     })

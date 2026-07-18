@@ -1,16 +1,13 @@
 // @vitest-environment jsdom
 //
-// The PRD panel footer's prototype CTA is BACK: the weekly brief no longer
-// offers "Generate prototype" on its finding cards, so the PRD panel footer is
-// the canonical home for the affordance — mounted via the shared
-// <GeneratePrototypeCTA> (existence check inside the hook decides
-// "Generate Prototype" vs "View Prototype"; its behavior is covered by
-// GeneratePrototypeCTA.test.tsx + useGeneratePrototype tests, so it is mocked
-// here and we assert the WIRING: mounted in the footer, keyed to the open
-// PRD). "Send to Claude Code" remains removed from this surface (it lives with
-// the Tickets flow; SendToClaudeCode.dom.test.tsx covers the component).
+// The PRD panel footer's next-pipeline-step button is TICKETS: it reads "Create
+// tickets" until the PRD has been broken into stories, then "View tickets", and
+// clicking it opens the Tickets tab. The prototype affordance MOVED OFF this
+// footer to the Tickets tab's own bottom bar (ContentPanel), so the PRD footer no
+// longer mounts GeneratePrototypeCTA. "Send to Claude Code" remains removed from
+// this surface (it lives with the Tickets flow).
 import * as React from "react"
-import { cleanup, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
@@ -23,6 +20,7 @@ vi.hoisted(() => {
 const mocks = vi.hoisted(() => ({
   showToast: vi.fn(),
   setContent: vi.fn(),
+  openContentPanel: vi.fn(),
 }))
 
 let content: Record<string, unknown>
@@ -32,7 +30,7 @@ vi.mock("next/navigation", () => ({
 }))
 
 vi.mock("../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ showToast: mocks.showToast }),
+  useNavigation: () => ({ showToast: mocks.showToast, openContentPanel: mocks.openContentPanel }),
 }))
 
 vi.mock("../../../context/ContentContext", () => ({
@@ -41,32 +39,6 @@ vi.mock("../../../context/ContentContext", () => ({
 
 vi.mock("../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme" }),
-}))
-
-// The CTA composite (hook + GenerateModal + loading overlay) is exercised by
-// its own suites — here it's a lightweight stand-in that records its prdId and
-// drives the host's render prop, so these tests assert the panel's wiring.
-vi.mock("../../design-agent/GeneratePrototypeCTA", () => ({
-  GeneratePrototypeCTA: (props: {
-    prdId: number | null
-    render: (state: {
-      label: string
-      onClick: () => void
-      disabled: boolean
-      cta: string
-      existing: null
-    }) => React.ReactNode
-  }) => (
-    <div data-testid="prd-proto-cta-mount" data-prd-id={String(props.prdId)}>
-      {props.render({
-        label: "Generate Prototype",
-        onClick: () => {},
-        disabled: false,
-        cta: "generate",
-        existing: null,
-      })}
-    </div>
-  ),
 }))
 
 vi.mock("../../../lib/api", () => {
@@ -84,6 +56,10 @@ vi.mock("../../../lib/api", () => {
     },
     multiAgentApi: {
       getQaScenarios: vi.fn(async () => ({ doc: null })),
+    },
+    // The footer's "Create tickets" ↔ "View tickets" label reads this.
+    storiesApi: {
+      getForPrd: vi.fn(async () => ({ status: "none", fresh: false, stories: [] })),
     },
     prdApi: {
       latest: vi.fn(async () => { throw new ApiError(404, "none") }),
@@ -111,23 +87,28 @@ beforeEach(() => {
 
 afterEach(cleanup)
 
-describe("PrdPanelContent — footer prototype CTA", () => {
-  it("mounts the shared prototype CTA in the bottom bar, wired to the open PRD", () => {
+describe("PrdPanelContent — footer tickets CTA (prototype moved to the Tickets tab)", () => {
+  it("mounts the Create/View tickets button in the footer, and NOT the prototype CTA", () => {
     const { container } = render(<PrdPanelContent />)
-    const mount = screen.getByTestId("prd-proto-cta-mount")
-    // Keyed to THIS PRD's id, not a hardcoded/latest one.
-    expect(mount.getAttribute("data-prd-id")).toBe("42")
-    // The host renders the trigger via the render prop, inside the bottom bar.
-    const btn = screen.getByTestId("prd-footer-prototype-cta")
-    expect(btn.textContent).toContain("Generate Prototype")
-    expect(btn.closest(".prd-bottom-bar")).not.toBeNull()
+    const btn = screen.getByTestId("prd-footer-tickets-cta")
+    // Defaults to "Create tickets" (the PRD has no stories yet).
+    expect(btn.textContent).toContain("Create tickets")
+    expect(btn.closest(".prd-footer-bar")).not.toBeNull()
     expect(container.querySelector(".prd-bottom-bar")).not.toBeNull()
+    // Prototype generation no longer lives in the PRD footer.
+    expect(screen.queryByTestId("prd-footer-prototype-cta")).toBeNull()
   })
 
-  it("renders no CTA at all when no PRD is loaded (empty panel)", () => {
+  it("clicking the tickets button opens the Tickets tab", () => {
+    render(<PrdPanelContent />)
+    fireEvent.click(screen.getByTestId("prd-footer-tickets-cta"))
+    expect(mocks.openContentPanel).toHaveBeenCalledWith("tickets")
+  })
+
+  it("renders no footer CTA at all when no PRD is loaded (empty panel)", () => {
     content = { prd: null, prdGenerating: false }
     render(<PrdPanelContent />)
-    expect(screen.queryByTestId("prd-proto-cta-mount")).toBeNull()
+    expect(screen.queryByTestId("prd-footer-tickets-cta")).toBeNull()
     expect(screen.queryByTestId("prd-footer-prototype-cta")).toBeNull()
   })
 
@@ -137,14 +118,15 @@ describe("PrdPanelContent — footer prototype CTA", () => {
     expect(screen.queryByText(/Send to Claude Code/i)).toBeNull()
   })
 
-  it("imports the canonical GeneratePrototypeCTA (never a hand-rolled copy) and still no Send to Claude Code", () => {
+  it("the PRD footer no longer hosts the prototype CTA (it moved to the Tickets tab)", () => {
     const src = readFileSync(
       resolve(process.cwd(), "app/components/shared/PrdPanelContent.tsx"),
       "utf8",
     )
-    expect(src).toContain("GeneratePrototypeCTA")
+    // Prototype generation moved off the PRD footer onto the Tickets tab's bar.
+    expect(src).not.toContain("GeneratePrototypeCTA")
+    expect(src).toContain("prd-footer-tickets-cta")
     expect(src).not.toContain("SendToClaudeCode")
     expect(src).not.toContain("ViewPrototypeButton")
-    expect(src).not.toMatch(/pid=/)
   })
 })

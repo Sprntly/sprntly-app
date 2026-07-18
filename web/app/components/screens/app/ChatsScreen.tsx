@@ -641,7 +641,7 @@ export function ChatsScreen() {
       {/* Sticky top bar — full width, matching the settings pane bars. */}
       <div className="pset-bar">
         <div style={{ display: "flex", alignItems: "center", gap: 18, flex: 1, minWidth: 0 }}>
-          <span className="pset-bar-title" style={{ whiteSpace: "nowrap" }}>History</span>
+          <span className="pset-bar-title" style={{ whiteSpace: "nowrap" }}>Chat history</span>
           {/* Search */}
           <div style={{ position: "relative", flex: 1, maxWidth: 440 }}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8C8A84" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"

@@ -8,6 +8,7 @@ import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
+import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { useRouter } from "next/navigation"
 import {
   ApiError, storiesApi,
@@ -16,6 +17,7 @@ import {
   type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { TicketDetail } from "./TicketDetail"
 import { DestinationPicker } from "./DestinationPicker"
 import { JiraPushModal, type JiraPushChoice } from "./JiraPushModal"
@@ -28,9 +30,12 @@ import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
 import { printCombined } from "../../lib/combinedExport"
 import type { PrdState, PrdContent, AppContentState } from "../../types/content"
 
+// Tab order mirrors the pipeline: Evidence → PRD → Tickets (each tab's bottom
+// bar launches the NEXT artifact). Evidence is hidden for non-brief PRDs (see
+// isEvidenceTabHidden), so uploads show PRD → Tickets.
 const TABS = [
-  { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
+  { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
 ] as const
 
@@ -266,11 +271,103 @@ export function ContentPanel() {
 
         <div className="cpanel-body">
           {activeTab === "evidence" && <EvidenceTab />}
-          {activeTab === "prd" && <PrdPanelContent />}
+          {activeTab === "prd" && <PrdPanelContent evidenceTabAvailable={!evidenceHidden} />}
           {activeTab === "tickets" && <TicketsTab />}
         </div>
+
+        {/* Fixed pipeline bar — each tab's bottom launches the NEXT artifact.
+            The PRD tab keeps its OWN footer (autosave + version history + the
+            tickets button), so the shared bar is only for Evidence and Tickets. */}
+        {activeTab === "evidence" && <EvidenceBottomBar />}
+        {activeTab === "tickets" && <TicketsBottomBar />}
       </aside>
     </>
+  )
+}
+
+// ── Fixed bottom bar: Evidence tab → Generate / View PRD ──────────────────────
+// The Evidence tab's next pipeline step is the PRD. "View PRD" (one is already
+// loaded for this context) just switches tabs; otherwise "Generate PRD" runs the
+// generation for the current insight, flips to the PRD tab, and lands the doc
+// there. Disabled when there's no insight meta to generate from.
+function EvidenceBottomBar() {
+  const { openContentPanel, showToast } = useNavigation()
+  const { content, setContent } = useContent()
+  const prd = content.prd
+  const meta = content.detail?.meta ?? content.prdMeta ?? null
+  const [generating, setGenerating] = useState(false)
+
+  const generate = useCallback(async () => {
+    if (!meta || generating) return
+    setGenerating(true)
+    // Reveal the PRD tab with its generating spinner right away.
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true })
+    openContentPanel("prd")
+    try {
+      const result = await runPrdGeneration(meta)
+      if (result.ok) {
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+      } else {
+        setContent({ prdGenerating: false })
+        showToast("PRD generation failed", result.message)
+      }
+    } catch (e) {
+      setContent({ prdGenerating: false })
+      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+    } finally {
+      setGenerating(false)
+    }
+  }, [meta, generating, setContent, openContentPanel, showToast])
+
+  return (
+    <div className="cpanel-bottom-bar">
+      {prd ? (
+        <button type="button" className="btn btn-primary btn-sm cpanel-next-btn" onClick={() => openContentPanel("prd")}>
+          View PRD
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="btn btn-primary btn-sm cpanel-next-btn"
+          data-testid="evidence-footer-prd-cta"
+          disabled={generating || !meta}
+          onClick={generate}
+        >
+          {generating ? "Generating PRD…" : "Generate PRD"}
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Fixed bottom bar: Tickets tab → Generate / View Prototype ─────────────────
+// The Tickets tab's next pipeline step is the prototype, driven by the canonical
+// GeneratePrototypeCTA (the only sanctioned generate/view-prototype trigger). A
+// Tickets tab always has a PRD in scope, so the button is never disabled here.
+function TicketsBottomBar() {
+  const { content } = useContent()
+  const prdId = content.prd?.prd_id ?? null
+  return (
+    <div className="cpanel-bottom-bar">
+      <GeneratePrototypeCTA
+        prdId={prdId}
+        figmaFileKey={content.prd?.figma_file_key ?? null}
+        // Safe: the panel shows ONE current PRD at a time, so the unscoped
+        // da:generating signal can't mislabel a different PRD's run.
+        listenForCrossSurfaceGenerating
+        render={({ label, onClick, disabled }) => (
+          <button
+            type="button"
+            className="btn btn-primary btn-sm cpanel-next-btn"
+            data-testid="tickets-footer-prototype-cta"
+            disabled={disabled || prdId == null}
+            onClick={onClick}
+          >
+            {label}
+          </button>
+        )}
+      />
+    </div>
   )
 }
 
