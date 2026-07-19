@@ -57,13 +57,23 @@ def _data(**over) -> dict:
 def test_render_html_is_a_self_contained_document():
     html = vr.render_html(_data())
     assert html.startswith("<!DOCTYPE html>")
-    assert "<style>" in html and "voice-of-customer-report" in html
+    assert "<style>" in html and "Voice of Customer — Q2 2026" in html
 
 
 def test_render_html_no_demo_chrome():
     html = vr.render_html(_data())
     assert "sample-banner" not in html
     assert "VoidAI" not in html and 'class="brand"' not in html
+
+
+def test_render_html_no_meta_chips_row():
+    # The reference design's top chips (skill name / curation / basis /
+    # coverage) are internal chrome — the report starts at the page title.
+    html = vr.render_html(_data())
+    assert 'class="chips"' not in html
+    assert "voice-of-customer-report" not in html
+    assert "curated, direct-access sources only" not in html
+    assert "coverage: 94% of items tagged" not in html
 
 
 def test_render_html_table_columns_and_pills():
@@ -86,11 +96,21 @@ def test_render_html_silent_killer_flag():
     assert "🔇" in html  # applied on the low-vol / high-sev finding
 
 
-def test_render_html_investigation_only_has_no_prd_cta():
+def test_render_html_has_no_cta_buttons():
+    # The report renders in a script-less sandboxed iframe where nothing is
+    # clickable — it must carry NO dead CTA buttons; the app panel hosts the
+    # real Generate PRD action outside the document.
     html = vr.render_html(_data())
-    # One normal rec (Generate PRD) + one investigation-only (ideation only).
-    assert html.count("Generate PRD") == 1
-    assert html.count("Move to ideation") == 2
+    assert "Generate PRD" not in html
+    assert "Move to ideation" not in html and "Move to backlog" not in html
+    assert 'class="cta' not in html
+
+
+def test_render_html_tldr_side_column_is_auto_sized():
+    # Regression: a fixed 172px side column let wide VOL/SEV pills overflow
+    # left over the finding title in narrow panels.
+    assert "minmax(0,1fr) auto" in vr._STYLE
+    assert "1fr 172px" not in vr._STYLE
 
 
 def test_render_html_revenue_unknown_styles_na():
