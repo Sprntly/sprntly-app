@@ -45,6 +45,12 @@ export function subscribeToGenerationStream(
       }
       if (frame.kind === "delta" && frame.text) {
         acc += frame.text
+        // A backend mid-generation retry re-emits the document from zero on
+        // the same channel. A second document open (a doctype past position 0)
+        // marks that restart — reset the accumulator to the fresh document so
+        // the preview doesn't show the two attempts glued together.
+        const restart = acc.toLowerCase().lastIndexOf("<!doctype")
+        if (restart > 0) acc = acc.slice(restart)
         handlers.onDelta(acc, frame.text)
       } else if (frame.kind === "done") {
         handlers.onDone?.()

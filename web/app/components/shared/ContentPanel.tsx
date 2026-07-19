@@ -347,19 +347,19 @@ function ReportBottomBar() {
   const generate = useCallback(async () => {
     if (!meta || generating) return
     setGenerating(true)
-    // Reveal the PRD tab with its generating spinner right away.
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true })
+    // Reveal the PRD tab right away — it live-renders the draft as it streams.
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     openContentPanel("prd")
     try {
-      const result = await runPrdGeneration(meta)
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
       if (result.ok) {
-        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
       } else {
-        setContent({ prdGenerating: false })
+        setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", result.message)
       }
     } catch (e) {
-      setContent({ prdGenerating: false })
+      setContent({ prdGenerating: false, prdPartialHtml: null })
       showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     } finally {
       setGenerating(false)
@@ -403,19 +403,19 @@ function EvidenceBottomBar() {
   const generate = useCallback(async () => {
     if (!meta || generating) return
     setGenerating(true)
-    // Reveal the PRD tab with its generating spinner right away.
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true })
+    // Reveal the PRD tab right away — it live-renders the draft as it streams.
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     openContentPanel("prd")
     try {
-      const result = await runPrdGeneration(meta)
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
       if (result.ok) {
-        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
       } else {
-        setContent({ prdGenerating: false })
+        setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", result.message)
       }
     } catch (e) {
-      setContent({ prdGenerating: false })
+      setContent({ prdGenerating: false, prdPartialHtml: null })
       showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     } finally {
       setGenerating(false)

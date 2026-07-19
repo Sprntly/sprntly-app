@@ -255,17 +255,22 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
       const insightIndex = 0
       const insight = insights[insightIndex]
 
-      const result = await runPrdGeneration({
-        briefId: brief.id,
-        insightIndex,
-      })
+      // Open the PRD rail immediately and stream the draft into it live as the
+      // Part A HTML arrives, instead of only announcing it when finished.
+      setContent({ prd: null, prdMeta: { briefId: brief.id, insightIndex }, prdGenerating: true, prdPartialHtml: null })
+      openContentPanel("prd")
+      const result = await runPrdGeneration(
+        { briefId: brief.id, insightIndex },
+        (html) => setContent({ prdPartialHtml: html }),
+      )
 
       if (!result.ok) {
+        setContent({ prdGenerating: false, prdPartialHtml: null })
         setAskError(result.message)
         return
       }
 
-      setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex } })
+      setContent({ prd: result.prd, prdMeta: { briefId: brief.id, insightIndex }, prdGenerating: false, prdPartialHtml: null })
       setAgentAction({
         kind: "prd",
         prdId: result.prd.prd_id,
@@ -273,12 +278,13 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
         message: `Drafted the PRD from the "${insight.title}" insight. Opened it on the right — fully editable, auto-saving. **Goal:** ${insight.recommendation?.slice(0, 120) || insight.title}.`,
       })
     } catch (e) {
+      setContent({ prdGenerating: false, prdPartialHtml: null })
       const msg = e instanceof Error ? e.message : "PRD generation failed"
       setAskError(msg)
     } finally {
       setAgentWorking(false)
     }
-  }, [activeCompany, expandAiPanel, setAIBarValue, setContent])
+  }, [activeCompany, expandAiPanel, openContentPanel, setAIBarValue, setContent])
 
   const handleMultiAgentCommand = useCallback(async () => {
     expandAiPanel()

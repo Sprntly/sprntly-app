@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 PROMPT_VERSION = "user-stories-v4"
 # The fan-out path decomposes then enriches in parallel; version its two legs
 # distinctly so the decision log pins which method produced a given batch.
-PLAN_PROMPT_VERSION = "user-stories-plan-v1"
-ENRICH_PROMPT_VERSION = "user-stories-enrich-v1"
+PLAN_PROMPT_VERSION = "user-stories-plan-v2"
+ENRICH_PROMPT_VERSION = "user-stories-enrich-v2"
 
 # Fan-out defaults. A batch is one enrich call; batches run concurrently up to
 # max_parallel, itself bounded by the process-wide LLM concurrency gate
@@ -626,14 +626,21 @@ def _plan_tickets(
     purpose: str,
     model: Optional[str],
 ) -> tuple[list[dict], Any]:
-    """Phase 1: enumerate the full ticket set as lightweight stubs (fast)."""
+    """Phase 1: enumerate the full ticket set as lightweight stubs (fast).
+
+    The PRD rides `user_cacheable_prefix` (not `input`) so the ~5-15 KB document
+    lands in a prompt-cache block instead of being re-processed as fresh input.
+    Plan and enrich use different tools/system prompts so they never share an
+    entry with each other — the sharing is among the ENRICH calls (see
+    `_enrich_once`), which all send an identical prefix."""
     result = llm_call(
         enterprise_id=enterprise_id,
         agent="user_stories",
         purpose=f"{purpose}_plan",
         prompt_version=PLAN_PROMPT_VERSION,
         system=_PLAN_SYSTEM,
-        input=prd_input,
+        input="Plan the full ticket set for the PRD above.",
+        user_cacheable_prefix=prd_input,
         json_schema=_PLAN_SCHEMA,
         skill="user-stories",
         model=model,
@@ -649,9 +656,11 @@ def _plan_tickets(
     return clean, result
 
 
-def _enrich_input(prd_input: str, all_titles: list[str], batch: list[dict]) -> str:
-    """Assemble the enrich-batch input: the full PRD, the complete title roster
-    (for cross-ticket dependency linking), and the stubs to expand now."""
+def _enrich_input(all_titles: list[str], batch: list[dict]) -> str:
+    """Assemble the enrich-batch input tail: the complete title roster (for
+    cross-ticket dependency linking) and the stubs to expand now. The PRD itself
+    is NOT here — it goes in `user_cacheable_prefix` (see `_enrich_once`), so
+    every batch shares one prompt-cached copy instead of re-sending it."""
     roster = "\n".join(f"- {t}" for t in all_titles)
     lines: list[str] = []
     for s in batch:
@@ -666,7 +675,6 @@ def _enrich_input(prd_input: str, all_titles: list[str], batch: list[dict]) -> s
             head += f"  ({meta})"
         lines.append(head)
     return (
-        f"{prd_input}\n\n"
         f"## Full ticket roster (for dependency linking; do not expand these here)\n"
         f"{roster}\n\n"
         f"## Tickets to expand in THIS batch\n"
@@ -690,14 +698,20 @@ def _enrich_once(
     model: Optional[str],
     temperature: float,
 ) -> tuple[list[Story], Any]:
-    """One enrich call over a batch of stubs → parsed tickets + the raw result."""
+    """One enrich call over a batch of stubs → parsed tickets + the raw result.
+
+    All batches (and the shortfall retry) send the PRD as an IDENTICAL
+    `user_cacheable_prefix`, so any enrich call that starts after another's
+    prefill completes — gate-queued shards, later batches, retries — cache-reads
+    the PRD instead of re-processing it, cutting its time-to-first-token."""
     result = llm_call(
         enterprise_id=enterprise_id,
         agent="user_stories",
         purpose=f"{purpose}_enrich",
         prompt_version=ENRICH_PROMPT_VERSION,
         system=_ENRICH_SYSTEM,
-        input=_enrich_input(prd_input, all_titles, batch),
+        input=_enrich_input(all_titles, batch),
+        user_cacheable_prefix=prd_input,
         json_schema=_SCHEMA,
         skill="user-stories",
         model=model,

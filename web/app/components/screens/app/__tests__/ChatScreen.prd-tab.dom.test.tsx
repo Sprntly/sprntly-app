@@ -190,8 +190,9 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await clickOpenPrd()
 
     await waitFor(() => expect(tabBar().getByText("PRD · Retention")).toBeTruthy())
-    // ChatScreen (not the caller) runs the generation for the new PRD tab.
-    await waitFor(() => expect(runPrdGeneration).toHaveBeenCalledWith({ briefId: 7, insightIndex: 0 }))
+    // ChatScreen (not the caller) runs the generation for the new PRD tab; the
+    // second arg is the live-preview onPartial callback.
+    await waitFor(() => expect(runPrdGeneration).toHaveBeenCalledWith({ briefId: 7, insightIndex: 0 }, expect.any(Function)))
     await waitFor(() => expect(panelProbe()).toBe("prd"))
   })
 

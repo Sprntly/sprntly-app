@@ -17,7 +17,7 @@ import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleto
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { PrdInputQuestions } from "../../shared/PrdInputQuestions"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
-import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, briefApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -602,20 +602,32 @@ export function ChatScreen() {
     // generate | generateIdeation | load | resume — kick off, show the panel's
     // spinner, then land the result on the tab (and shared content while active).
     setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, briefMeta: meta, prdGenerating: true } : t))
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true })
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     void (async () => {
+      // Live preview: forward the accumulating Part A HTML (throttled inside
+      // runPrdGeneration) into shared content so PrdPanelContent renders the
+      // draft as it streams — only while this tab is still the active one.
+      const onPartial = (html: string) => {
+        if (activeTabIdRef.current === tabId) setContent({ prdPartialHtml: html })
+      }
       try {
         const result =
-          source.kind === "generate" ? await runPrdGeneration(source.meta)
-          : source.kind === "generateIdeation" ? await runPrdGenerationFromIdeation(source.ideationItemId)
-          : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined)
+          source.kind === "generate" ? await runPrdGeneration(source.meta, onPartial)
+          : source.kind === "generateIdeation" ? await runPrdGenerationFromIdeation(source.ideationItemId, onPartial)
+          : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined, onPartial)
           : await loadPrdById(source.prdId)
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
-          if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
-          // "convert this PRD into tickets": the user asked for TICKETS — once the
-          // imported PRD is ready, switch the panel to the Tickets tab (which
-          // kicks off user-stories generation for it). Only while this tab is
+          if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+          // "convert this PRD into tickets": the user asked for TICKETS — once
+          // the imported PRD is ready, kick the user-stories generation NOW
+          // (fire-and-forget; the backend dedups in-flight jobs) so work starts
+          // before the Tickets tab even mounts and does its cache-read→generate
+          // round-trip. The tab's own poll picks the job up.
+          if (source.kind === "resume" && source.openTickets) {
+            void storiesApi.generate(result.prd.prd_id).catch(() => {})
+          }
+          // …then switch the panel to the Tickets tab. Only while this tab is
           // still active — never yank the panel out from under another tab.
           if (source.kind === "resume" && source.openTickets && activeTabIdRef.current === tabId) {
             openContentPanel("tickets")
@@ -628,12 +640,12 @@ export function ChatScreen() {
           if (knownPrdId == null) void hydratePrdThread(tabId, result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
-          if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })
+          if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
           showToast("PRD unavailable", result.message.slice(0, 200))
         }
       } catch (e) {
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
-        if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })
+        if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
@@ -701,21 +713,21 @@ export function ChatScreen() {
     setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
     // Drive the panel's generating spinner via content too (not just per-tab),
     // so the right rail shows in-progress PRD state immediately on open.
-    setContent({ prd: null, prdMeta: null, prdGenerating: true })
+    setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
     openContentPanel("prd")
     try {
-      const result = await runPrdGeneration(meta)
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
-        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-        setContent({ prdGenerating: false })
+        setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", result.message)
       }
     } catch (e) {
       setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-      setContent({ prdGenerating: false })
+      setContent({ prdGenerating: false, prdPartialHtml: null })
       showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
     }
   }, [activeTabId, chatInsightState, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
@@ -782,20 +794,20 @@ export function ChatScreen() {
       const prdId = Number(pendingPrd.id)
       if (Number.isFinite(prdId)) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
-        setContent({ prd: null, prdMeta: null, prdGenerating: true })
+        setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
         void (async () => {
           try {
-            const result = await resumePrdGeneration(prdId, meta)
+            const result = await resumePrdGeneration(prdId, meta, (html) => setContent({ prdPartialHtml: html }))
             if (result.ok) {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
-              setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+              setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
             } else {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-              setContent({ prdGenerating: false })
+              setContent({ prdGenerating: false, prdPartialHtml: null })
             }
           } catch {
             setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-            setContent({ prdGenerating: false })
+            setContent({ prdGenerating: false, prdPartialHtml: null })
           }
         })()
       }

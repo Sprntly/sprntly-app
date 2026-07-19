@@ -14,6 +14,7 @@ import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
 import { EmptyPane } from "./EmptyPane"
 import { ApiError, multiAgentApi, prdApi } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
+import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
 import { IconTicket } from "@tabler/icons-react"
@@ -35,6 +36,67 @@ function saveDraft(prdId: number, html: string) {
 }
 
 type SaveStatus = "saved" | "saving" | "unsaved"
+
+// Mid-stream the doc may open with a ```html fence line whose closing fence
+// hasn't arrived yet — stripHtmlCodeFence requires BOTH fences, so shave a
+// dangling leading fence line here before handing the partial to the iframe.
+function stripLeadingFence(s: string): string {
+  return s.replace(/^\s*```[a-zA-Z]*\r?\n?/, "")
+}
+
+/**
+ * Read-only live preview of the PRD's Part A HTML while it streams in. The
+ * accumulating (possibly mid-tag) document is fed to a sandboxed iframe via
+ * incremental document.write — only the NEW suffix is written on each update,
+ * so the browser parses progressively and the user's scroll position survives
+ * (a srcDoc swap would reload + jump to top every tick). Scripts never execute
+ * (sandbox without allow-scripts). A restart (the accumulated doc no longer
+ * extends what we wrote — a backend retry re-emitted from zero) reopens the
+ * document and rewrites from scratch. Updates are already throttled upstream
+ * (runPrdGeneration), so writes land at most every ~400ms.
+ */
+function PrdStreamingPreview({ html }: { html: string }) {
+  const ref = useRef<HTMLIFrameElement>(null)
+  const writtenRef = useRef("")
+  const [height, setHeight] = useState(480)
+
+  useEffect(() => {
+    const cdoc = ref.current?.contentDocument
+    if (!cdoc) return
+    const written = writtenRef.current
+    try {
+      if (!written || !html.startsWith(written)) {
+        cdoc.open()
+        cdoc.write(html)
+      } else if (html.length > written.length) {
+        cdoc.write(html.slice(written.length))
+      }
+      writtenRef.current = html
+      const h = Math.max(cdoc.body?.scrollHeight ?? 0, cdoc.documentElement?.scrollHeight ?? 0)
+      if (h > 0) setHeight(h)
+    } catch {
+      /* a mid-write parser hiccup only affects the preview; the poll result wins */
+    }
+  }, [html])
+
+  return (
+    <iframe
+      ref={ref}
+      title="PRD draft (generating)"
+      data-testid="prd-streaming-preview"
+      sandbox="allow-same-origin"
+      style={{
+        width: "100%",
+        height,
+        border: "1px solid var(--line, #E8E6E0)",
+        borderRadius: 0,
+        display: "block",
+        colorScheme: "light",
+        background: "#ffffff",
+      }}
+    />
+  )
+}
 
 function PrdSummaryStrip({ prd }: { prd: PrdState }) {
   const tldr = prd.sections.find((s) => s.type === "prd-tldr")
@@ -308,6 +370,16 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
               )}
             </div>
           </>
+        ) : content.prdGenerating && content.prdPartialHtml ? (
+          // Live streaming preview: partial Part A HTML is already arriving —
+          // render it as it grows, with a slim pulsing indicator instead of the
+          // full-pane spinner. The finished PRD (poll result) replaces this.
+          <div className="prd-body" style={{ minHeight: 280 }}>
+            <div data-testid="prd-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
+              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
+            </div>
+            <PrdStreamingPreview html={stripLeadingFence(stripHtmlCodeFence(content.prdPartialHtml))} />
+          </div>
         ) : (
           <div className="prd-body" style={{ minHeight: 280 }}>
             {content.prdGenerating ? (
