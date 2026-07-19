@@ -267,6 +267,8 @@ CREATE TABLE ask_jobs (
     question        TEXT NOT NULL,
     conversation_id INTEGER,
     pinned_skill    TEXT,
+    -- PRD-tab grounding (mirrors 20260718120000_ask_jobs_prd_id.sql).
+    prd_id          INTEGER,
     status          TEXT NOT NULL DEFAULT 'generating',
     response        TEXT NOT NULL DEFAULT '{}',
     error           TEXT,

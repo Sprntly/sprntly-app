@@ -17,7 +17,7 @@ from app.db import (
     get_ask_job,
     start_ask_job,
 )
-from app.deps.ownership import require_owned_dataset
+from app.deps.ownership import require_owned_dataset, require_owned_prd
 from app.entitlements import require_agents_module
 from app.skill_router import list_available_skills
 
@@ -99,6 +99,10 @@ class AskIn(BaseModel):
     # Optional: skip routing and force this skill — used when a confirm-gate
     # follow-up has already chosen the skill.
     pinned_skill: str | None = None
+    # Optional PRD-tab grounding: when the chat runs beside an open PRD, the
+    # tab sends its prd_id so the answer sees the PRD (+ its insight, evidence,
+    # tickets, prototype). Ownership-gated in the route.
+    prd_id: int | None = Field(default=None, ge=1)
 
 
 def _strip_citations(payload: dict) -> dict:
@@ -204,6 +208,11 @@ async def ask(
     # corpus/dataset half. 404 on mismatch.
     require_owned_dataset(body.dataset, company.company_id, company.workspace_id)
     enterprise_id = company.company_id
+    # PRD-tab ask: the prd must belong to the caller's company/workspace, or a
+    # crafted prd_id would seed a FOREIGN tenant's PRD (+ evidence/tickets)
+    # into the answer context. 404 on mismatch, same as the dataset gate.
+    if body.prd_id is not None:
+        require_owned_prd(body.prd_id, company.company_id, company.workspace_id)
 
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
@@ -211,8 +220,12 @@ async def ask(
     # inline) so the POST contract is uniform — the client always gets an ask_id
     # and reads the body from the status endpoint, cached or generated. The
     # user-visible result is identical (same payload, same synthetic delay).
-    cached_payload = await asyncio.to_thread(
-        _resolve_cache_hit, body.dataset, body.question
+    # SKIPPED for PRD-tab asks: the cache is keyed on (dataset, question) only,
+    # so it would serve a context-free answer for a question about the open PRD.
+    cached_payload = (
+        await asyncio.to_thread(_resolve_cache_hit, body.dataset, body.question)
+        if body.prd_id is None
+        else None
     )
     if cached_payload is not None:
         ask_id = start_ask_job(
@@ -235,6 +248,7 @@ async def ask(
         question=body.question,
         conversation_id=body.conversation_id,
         pinned_skill=body.pinned_skill,
+        prd_id=body.prd_id,
     )
     if "pytest" in sys.modules:
         # The TestClient does not keep the app's event loop alive between
@@ -249,6 +263,7 @@ async def ask(
             dataset=body.dataset,
             history=history,
             pinned_skill=body.pinned_skill,
+            prd_id=body.prd_id,
         )
         row = get_ask_job(ask_id)
         return {"ask_id": ask_id, "status": (row or {}).get("status", "ready")}
@@ -261,6 +276,7 @@ async def ask(
             dataset=body.dataset,
             history=history,
             pinned_skill=body.pinned_skill,
+            prd_id=body.prd_id,
         )
     )
     _inflight_tasks.add(task)

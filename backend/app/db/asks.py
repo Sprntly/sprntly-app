@@ -137,6 +137,7 @@ def start_ask_job(
     question: str,
     conversation_id: int | None = None,
     pinned_skill: str | None = None,
+    prd_id: int | None = None,
 ) -> int:
     """Persist a `generating` Ask job row and return its id. The POST returns
     this id immediately; the background worker fills `response` and flips the
@@ -148,6 +149,7 @@ def start_ask_job(
         "question": question,
         "conversation_id": conversation_id,
         "pinned_skill": pinned_skill,
+        "prd_id": prd_id,
         "status": "generating",
         "response": {},
     }).execute()

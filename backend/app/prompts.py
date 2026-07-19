@@ -450,6 +450,22 @@ When your different sources agree, say so; when only one has the answer, ground 
 the claim in whichever supports it."""
 
 
+# ── Ask × open PRD (PRD-tab chat grounding) ─────────────────────────────────
+# When the chat runs next to an open PRD, app.prd_context assembles a
+# "CURRENT PRD CONTEXT" block (the PRD + its source insight, evidence,
+# tickets, prototype) and this clause is appended to ASK_SYSTEM. Additive:
+# plain chats (no prd_id) keep the unmodified prompt.
+ASK_SYSTEM_PRD_ADDENDUM = """\
+
+You also have a "CURRENT PRD CONTEXT" section: the PRD document the user has \
+open beside this chat, plus the insight it came from and its related \
+evidence, tickets, and prototype. When the user says "this PRD" / "this \
+document" — or asks about requirements, metrics, scope, tickets, or the \
+prototype without naming a document — answer from that section first. The \
+same grounding rules apply: quote the PRD's own content, never invent, and \
+say so when the PRD doesn't cover what was asked."""
+
+
 # Post-corpus user template used when a KG context section is composed in.
 # The corpus (cacheable prefix) sits above; this block carries the KG section
 # then the schema + question. Mirrors ASK_USER_TEMPLATE_QUESTION_ONLY's schema.

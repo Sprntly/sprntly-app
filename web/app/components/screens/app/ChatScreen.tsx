@@ -1257,7 +1257,23 @@ export function ChatScreen() {
         // generating server-side, and the active ask_id is persisted per tab
         // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
         // resume effect instead of re-asking.
-        ask: () => runAskGeneration(query, activeCompany, targetTabId, { isCancelled: () => !mountedRef.current }),
+        ask: () => {
+          // PRD-tab chat: send the tab's PRD id (and its conversation for
+          // follow-up history) so the answer is grounded on the open PRD +
+          // its insight/evidence/tickets/prototype. Resolved at send time —
+          // tabsRef, not the closure — so a PRD that finished generating
+          // after the tab opened is still picked up.
+          const targetTab = tabsRef.current.find((t) => t.id === targetTabId)
+          return runAskGeneration(query, activeCompany, targetTabId, {
+            isCancelled: () => !mountedRef.current,
+            ...(targetTab?.prdId != null
+              ? {
+                  prd_id: targetTab.prdId,
+                  ...(targetTab.dbConvId != null ? { conversation_id: targetTab.dbConvId } : {}),
+                }
+              : {}),
+          })
+        },
         onResult: (tabId, res) => {
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {

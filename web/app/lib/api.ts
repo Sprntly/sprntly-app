@@ -400,13 +400,16 @@ export const askApi = {
   start: (
     question: string,
     company: string = "asurion",
-    opts?: { conversation_id?: number; pinned_skill?: string },
+    opts?: { conversation_id?: number; pinned_skill?: string; prd_id?: number },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
       question,
       dataset: company,
       ...(opts?.conversation_id != null ? { conversation_id: opts.conversation_id } : {}),
       ...(opts?.pinned_skill != null ? { pinned_skill: opts.pinned_skill } : {}),
+      // PRD-tab chat: ground the answer on the PRD open beside this chat
+      // (+ its insight, evidence, tickets, prototype).
+      ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
