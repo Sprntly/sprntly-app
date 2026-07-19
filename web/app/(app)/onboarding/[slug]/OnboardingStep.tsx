@@ -3,6 +3,7 @@
 import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import {
+  ApiKey,
   CompanyStep,
   Connectors,
   DecisionsStep,
@@ -28,12 +29,14 @@ import {
  *   2. product     → ProductStep   (name* + surfaces*; monetization/users/
  *                                   competitors optional)
  *   3. metrics     → MetricsStep   (pick up to 5 metrics* + framework*)
- *   4. connectors  → Connectors    (connect your tools — ≥1 live required)
- *   5. team        → TeamStep      (team name* + scope of work*)
- *   6. strategy    → Strategy      (team strategy + roadmap — upload or type)
- *   7. decisions   → DecisionsStep (decision process + extras — upload or type)
- *   8. invite      → InviteStep    (email + job role + permission, CSV)
- *   9. review      → ReviewStep    (accept the AI business context → hands off
+ *   4. api-key     → ApiKey        (own Claude/Anthropic key — OPTIONAL,
+ *                                   skippable; also in Settings → Admin)
+ *   5. connectors  → Connectors    (connect your tools — ≥1 live required)
+ *   6. team        → TeamStep      (team name* + scope of work*)
+ *   7. strategy    → Strategy      (team strategy + roadmap — upload or type)
+ *   8. decisions   → DecisionsStep (decision process + extras — upload or type)
+ *   9. invite      → InviteStep    (email + job role + permission, CSV)
+ *  10. review      → ReviewStep    (accept the AI business context → hands off
  *                                   to /onboarding/define-metrics, which
  *                                   completes onboarding)
  *
@@ -47,6 +50,7 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   { slug: "company", Component: CompanyStep },
   { slug: "product", Component: ProductStep },
   { slug: "metrics", Component: MetricsStep },
+  { slug: "api-key", Component: ApiKey },
   { slug: "connectors", Component: Connectors },
   { slug: "team", Component: TeamStep },
   { slug: "strategy", Component: Strategy },

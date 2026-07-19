@@ -115,7 +115,7 @@ export function ReviewStep() {
 
   return (
     <OnboardingChrome
-      step={9}
+      step={10}
       saveLabel="Saved · auto-saves"
       title={
         <>

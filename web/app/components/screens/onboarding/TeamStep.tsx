@@ -90,14 +90,14 @@ export function TeamStep() {
   }
 
   async function save() {
-    if (await persist(6)) router.push("/onboarding/strategy")
+    if (await persist(7)) router.push("/onboarding/strategy")
   }
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
     <OnboardingChrome
-      step={5}
+      step={6}
       saveLabel="Saved · auto-saves"
       title={
         <>

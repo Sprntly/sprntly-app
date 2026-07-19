@@ -47,6 +47,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-company": "/onboarding/company",
   "ob-product": "/onboarding/product",
   "ob-metrics": "/onboarding/metrics",
+  "ob-api-key": "/onboarding/api-key",
   "ob-connectors": "/onboarding/connectors",
   "ob-team": "/onboarding/team",
   "ob-strategy": "/onboarding/strategy",

@@ -413,6 +413,36 @@ def test_generate_brief_for_unknown_slug_raises(isolated_settings):
         sb.resolve_company("nope-not-here")
 
 
+def test_resolve_company_resolves_nondefault_workspace_dataset_slug(isolated_settings):
+    """A non-default workspace's dataset slug ('<company>--<workspace>') lives in
+    the `datasets` table, not `companies` — resolve_company must still map it to
+    the parent company via the datasets→workspaces binding.
+
+    Regression: the weekly brief tick fans out per workspace and passed each
+    workspace's dataset slug to generate_brief_for → resolve_company, which only
+    consulted the companies table and raised 'No company for slug ...' for every
+    non-default workspace, so those workspaces never got a brief.
+    """
+    from app.db.authcache import workspace_cache
+
+    db = isolated_settings["supabase"]
+    workspace_cache.invalidate("ws-team2")  # no cross-test cache bleed
+    _seed_company(db, company_id="co-1", slug="acme")
+    db.table("workspaces").insert(
+        {"id": "ws-team2", "company_id": "co-1", "name": "Team 2",
+         "slug": "team2", "is_default": False}
+    ).execute()
+    db.table("datasets").insert(
+        {"slug": "acme--team2", "display_name": "Team 2",
+         "workspace_id": "ws-team2"}
+    ).execute()
+
+    cid, slug = sb.resolve_company("acme--team2")
+    assert cid == "co-1"
+    # The dataset slug is preserved (KG is company-scoped; corpus/brief slug-scoped).
+    assert slug == "acme--team2"
+
+
 def test_seed_from_corpus_is_bounded(isolated_settings, monkeypatch):
     """Seeding caps NEW corpus extractions at MAX_SEED_DOCS so it can't hang
     the request."""

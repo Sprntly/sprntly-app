@@ -22,6 +22,7 @@ import logging
 
 from app import db
 from app.brief_nudge import brief_deep_link, generate_nudge, nudge_slack_blocks
+from app.config import settings
 from app.connectors import slack_oauth
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 
@@ -33,6 +34,11 @@ logger = logging.getLogger(__name__)
 # message carries.
 READY_PING_TEXT = "Hey, your brief is generated."
 READY_PING_CTA_LABEL = "Open your brief"
+
+# The "your PRD is ready" ping, sent to the requester once a PRD finishes
+# generating (see app.prd_runner.generate_prd_and_warm). Static copy — a
+# notification, not the PRD itself.
+PRD_READY_CTA_LABEL = "View PRD here"
 
 
 def _deliver_to_one(row: dict, text: str, blocks: list[dict]) -> dict:
@@ -199,4 +205,66 @@ def deliver_ready_ping_to_slack(enterprise_id: str) -> dict:
     except Exception as e:  # noqa: BLE001 — delivery never breaks generation
         logger.exception("brief ready-ping slack delivery failed for %s",
                          enterprise_id)
+        return {"delivered": False, "reason": f"error: {e}", "recipients": []}
+
+
+# ── PRD-ready ping ────────────────────────────────────────────────────────────
+
+
+def prd_deep_link(prd_id: int) -> str:
+    """The CTA target for a generated PRD. Carries the prd id on the app's brief
+    surface so the button lands the user in the app (mirrors brief_deep_link's
+    frontend_url handling)."""
+    base = (settings.frontend_url or "https://app.sprntly.ai").rstrip("/")
+    return f"{base}/brief?prd={prd_id}"
+
+
+def prd_ready_slack_blocks(prd_title: str | None, prd_id: int) -> tuple[str, list[dict]]:
+    """(plain-text fallback, Slack Block Kit blocks) for the "your PRD is ready"
+    ping: one line naming the PRD + a "View PRD here" CTA button. Static copy —
+    no LLM draft, this is a notification, not the PRD itself."""
+    name = (prd_title or "").strip() or "your latest insight"
+    text = (
+        f"Hey, your PRD for {name} has been generated successfully, "
+        "view it by clicking the button below."
+    )
+    blocks: list[dict] = [
+        {"type": "section",
+         "text": {"type": "mrkdwn", "text": text}},
+        {"type": "actions",
+         "elements": [
+             {"type": "button",
+              "text": {"type": "plain_text", "text": PRD_READY_CTA_LABEL},
+              "url": prd_deep_link(prd_id),
+              "style": "primary"},
+         ]},
+    ]
+    return text, blocks
+
+
+def deliver_prd_ready_to_slack(
+    company_id: str, user_id: str, prd_id: int, prd_title: str | None,
+) -> dict:
+    """Ping the PRD's requester on THEIR configured Slack target (DM or channel)
+    that the PRD is ready, with a "View PRD here" button.
+
+    Unlike the brief delivery (which fans out to every connected member), a PRD
+    belongs to the one user who generated it — the copy is "your PRD" — so this
+    delivers to that user's own connection only. Best-effort, never raises: a
+    Slack hiccup must never affect the finished PRD."""
+    try:
+        row = db.get_slack_connection(company_id, user_id)
+        if not row:
+            return {"delivered": False, "reason": "slack_not_connected",
+                    "recipients": []}
+        text, blocks = prd_ready_slack_blocks(prd_title, prd_id)
+        result = _deliver_to_one(row, text, blocks)
+        out: dict = {"delivered": bool(result.get("delivered")),
+                     "recipients": [result]}
+        if not out["delivered"]:
+            out["reason"] = result.get("reason", "not_delivered")
+        return out
+    except Exception as e:  # noqa: BLE001 — delivery never breaks generation
+        logger.exception("prd-ready slack delivery failed for %s/%s",
+                         company_id, user_id)
         return {"delivered": False, "reason": f"error: {e}", "recipients": []}

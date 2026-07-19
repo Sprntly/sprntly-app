@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
+from typing import Callable, Optional
 
 from app.ask_runner import _ASK_RESPONSE_SCHEMA, _retrieve_kg_bundle, compose_ask_answer
 from app.graph.gateway import llm_call
@@ -39,6 +39,23 @@ from app.skills.loader import get_skill, list_skills
 from app.skills.scripts import SCRIPT_TOOLS
 
 logger = logging.getLogger(__name__)
+
+
+class AskCancelled(Exception):
+    """Raised at a cooperative cancellation checkpoint when the caller's
+    `is_cancelled()` reports the Ask has been stopped by the user. The worker
+    (ask_job_runner) catches it and leaves the job row in its `cancelled` state
+    WITHOUT marking it `error` — the answer is simply abandoned. Raising it
+    between LLM steps is what lets a Stop that lands before the expensive answer
+    call actually save that call, rather than only discarding the result."""
+
+
+def _check_cancelled(is_cancelled: Optional[Callable[[], bool]]) -> None:
+    """Abort the answer pipeline if the Ask was stopped. A no-op when no
+    canceller is wired (e.g. direct/test callers) or it returns False."""
+    if is_cancelled is not None and is_cancelled():
+        raise AskCancelled()
+
 
 ROUTER_MODEL = "claude-haiku-4-5"
 ANSWER_MODEL = "claude-sonnet-4-6"
@@ -378,9 +395,18 @@ def answer(
     dataset: str,
     history: Optional[list[dict]] = None,
     pinned_skill: Optional[str] = None,
+    is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """Answer a question via the best skill, or directly. `pinned_skill` skips
-    routing (used when a confirm-gate follow-up has already chosen the skill)."""
+    routing (used when a confirm-gate follow-up has already chosen the skill).
+
+    `is_cancelled`, when supplied, is polled at cheap checkpoints between the
+    routing and answer steps; if it returns True the pipeline raises
+    `AskCancelled` and stops BEFORE the expensive answer LLM call, so a user
+    Stop that lands early actually saves that cost. Callers that don't support
+    cancellation (tests, the direct path) omit it and behave as before."""
+    # Cancelled before we've spent anything → bail immediately.
+    _check_cancelled(is_cancelled)
     # On-demand call digest: "summarize the customer calls from last week" needs a
     # LIVE fetch of every call in a window + a VoC pass over the complete corpus.
     # The generic router would misroute it (e.g. → interview-synthesis) and answer
@@ -423,6 +449,11 @@ def answer(
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)
     else:
         decision = route(question, enterprise_id=enterprise_id, history=history)
+
+    # Routing (a cheap haiku call) is done; the answer/script call below is the
+    # expensive one. This is the highest-value checkpoint: a Stop within the
+    # first second or two lands here and skips the sonnet/opus generation.
+    _check_cancelled(is_cancelled)
 
     if not decision.skill_id:
         # Direct path — corpus + KG, unchanged. Fold history into the question.

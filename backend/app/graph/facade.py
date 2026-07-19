@@ -286,6 +286,41 @@ class GraphFacade:
             q = q.eq("type", type)
         return [self._row_to_relationship(r) for r in (q.execute().data or [])]
 
+    def all_signals(self, enterprise_id: str) -> list[Signal]:
+        """Every signal for the enterprise in ONE query (no stale/superseded
+        filter — callers filter as needed). Lets convergence build its whole
+        signal lookup once instead of a per-theme `get_signals` fetch. Per-
+        enterprise volumes are bounded (§20 NFR), same assumption as
+        `active_signals`."""
+        rows = (
+            self._tbl("kg_signal").select("*")
+            .eq("enterprise_id", enterprise_id)
+            .execute().data or []
+        )
+        return [self._row_to_signal(r) for r in rows]
+
+    def edges_from_many(
+        self, enterprise_id: str, source_ids: list[str]
+    ) -> list[Relationship]:
+        """Every relationship whose `source_id` is in `source_ids`, over a few
+        chunked `.in_()` queries instead of one-per-source. This is what lets
+        convergence fetch all signal→theme edges in a handful of round-trips
+        rather than a query per theme (the old N+1 that made a first-time brief
+        over a large theme set take minutes). De-dups ids; empty → []."""
+        unique = list(dict.fromkeys(source_ids))
+        out: list[Relationship] = []
+        chunk = 150  # keep the `.in_()` URL well under server limits
+        for i in range(0, len(unique), chunk):
+            batch = unique[i:i + chunk]
+            rows = (
+                self._tbl("kg_relationship").select("*")
+                .eq("enterprise_id", enterprise_id)
+                .in_("source_id", batch)
+                .execute().data or []
+            )
+            out.extend(self._row_to_relationship(r) for r in rows)
+        return out
+
     def active_signals(
         self,
         enterprise_id: str,

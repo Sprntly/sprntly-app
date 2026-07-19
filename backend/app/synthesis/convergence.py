@@ -92,6 +92,20 @@ def compute_convergence(
     themes = facade.query_entities(enterprise_id, type="theme")
     out: list[ThemeConvergence] = []
 
+    # Batch ALL the graph reads up front instead of two queries per theme (the
+    # old N+1: `edges_to` + `get_signals` inside the loop). Over a large theme
+    # set — a mature tenant can carry 1000+ themes — the per-theme round-trips
+    # made a first-time brief (no refresh-gate cache to fall back on) take
+    # minutes and die on transient disconnects. One signal fetch + a few chunked
+    # edge fetches, then all per-theme work is in-memory.
+    theme_ids = {t.id for t in themes}
+    signals_by_id = {s.id: s for s in facade.all_signals(enterprise_id)}
+    edges_by_theme: dict[str, list] = {}
+    for edge in facade.edges_from_many(enterprise_id, list(signals_by_id)):
+        if edge.source_kind != "signal" or edge.target_id not in theme_ids:
+            continue
+        edges_by_theme.setdefault(edge.target_id, []).append(edge)
+
     for theme in themes:
         tc = ThemeConvergence(theme_id=theme.id, theme_label=theme.canonical_label)
         scored_evidence: list[tuple[float, dict]] = []
@@ -101,14 +115,8 @@ def compute_convergence(
         # `seen` dedup in evidence_kg's trail builder so the base score is
         # computed over DISTINCT signals.
         seen: set[str] = set()
-        edges = facade.edges_to(enterprise_id, theme.id)
-        # Batch the per-edge signal fetch into ONE query (kills the N+1). The
-        # dedup `seen` semantics below are preserved exactly — only the per-edge
-        # round-trips are collapsed.
-        signals_by_id = facade.get_signals(
-            enterprise_id,
-            [e.source_id for e in edges if e.source_kind == "signal"],
-        )
+        # Prebuilt above (edges_by_theme / signals_by_id) — no per-theme query.
+        edges = edges_by_theme.get(theme.id, [])
         for edge in edges:
             if edge.source_kind != "signal" or edge.source_id in seen:
                 continue

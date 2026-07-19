@@ -22,6 +22,7 @@ Key behaviours covered:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -218,6 +219,104 @@ def test_ask_worker_failure_marks_error_and_does_not_crash(
     assert "kaboom" in (body["error"] or "")
 
 
+# ---- POST /v1/ask/{id}/cancel (stop an in-flight ask) -----------------------
+# The composer's Stop button POSTs here. It flips a `generating` job to
+# `cancelled`; the worker polls that status between LLM steps and aborts before
+# the (expensive) answer call, and a late answer is discarded (complete/fail are
+# guarded on status == 'generating'). Idempotent + race-safe + tenant-scoped.
+
+
+def test_cancel_generating_job_flips_to_cancelled(tenant_client, isolated_settings):
+    """A generating job → cancelled; GET reflects it."""
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    resp = t.client.post(f"/v1/ask/{ask_id}/cancel")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "cancelled"
+    assert db.get_ask_job(ask_id)["status"] == "cancelled"
+    assert t.client.get(f"/v1/ask/{ask_id}").json()["status"] == "cancelled"
+
+
+def test_cancel_already_finished_job_is_noop_returns_terminal(
+    tenant_client, isolated_settings
+):
+    """If the worker already finished (ready), cancel is a race-safe no-op and
+    reports the real terminal status instead of clobbering it to cancelled."""
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    db.complete_ask_job(ask_id, {
+        "answer": "done", "key_points": [], "citations": [],
+        "confidence": 1.0, "unanswered": "",
+    })
+    resp = t.client.post(f"/v1/ask/{ask_id}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ready"
+    assert db.get_ask_job(ask_id)["status"] == "ready"
+
+
+def test_cancel_foreign_job_returns_404_and_leaves_it_running(
+    tenant_client, isolated_settings
+):
+    """A job belonging to another company is not cancellable (404, no
+    disclosure) and stays generating."""
+    a = tenant_client.make(slug="company-a")
+    ask_id = db.start_ask_job(company_id=a.company_id, dataset="company-a", question="q?")
+    b = tenant_client.make(slug="company-b")
+    resp = b.client.post(f"/v1/ask/{ask_id}/cancel")
+    assert resp.status_code == 404
+    assert db.get_ask_job(ask_id)["status"] == "generating"
+
+
+def test_cancel_nonexistent_returns_404(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post("/v1/ask/999999/cancel")
+    assert resp.status_code == 404
+
+
+def test_late_answer_does_not_resurrect_a_cancelled_job(
+    tenant_client, isolated_settings
+):
+    """The un-interruptible final LLM call can finish AFTER a cancel lands. The
+    guarded complete_ask_job must NOT overwrite the cancel and resurface the
+    unwanted answer."""
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    assert db.cancel_ask_job(ask_id) == "cancelled"
+    db.complete_ask_job(ask_id, {
+        "answer": "late unwanted answer", "key_points": [], "citations": [],
+        "confidence": 1.0, "unanswered": "",
+    })
+    row = db.get_ask_job(ask_id)
+    assert row["status"] == "cancelled"
+    assert (row.get("response") or {}).get("answer", "") != "late unwanted answer"
+
+
+def test_worker_aborts_before_llm_when_cancelled(
+    tenant_client, isolated_settings, fake_llm
+):
+    """A pre-cancelled job short-circuits at qa_agent's first checkpoint: the
+    worker leaves the row `cancelled` (NOT error) and never calls the answer
+    LLM, so the Stop actually saves the generation cost."""
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    db.cancel_ask_job(ask_id)
+    fake_llm["calls"].clear()
+
+    from app.ask_job_runner import run_ask_job
+
+    asyncio.run(run_ask_job(
+        ask_id=ask_id,
+        enterprise_id=t.company_id,
+        question="q?",
+        dataset="acme",
+    ))
+
+    row = db.get_ask_job(ask_id)
+    assert row["status"] == "cancelled"  # not 'error', not 'ready'
+    assert fake_llm["calls"] == []       # the expensive answer LLM was skipped
+
+
 # ---- GET status auth/ownership ----------------------------------------------
 
 def test_get_ask_nonexistent_returns_404(tenant_client, isolated_settings):
@@ -354,3 +453,32 @@ def test_ask_accepts_question_with_inlined_attachment_block(tenant_client, isola
     assert resp.status_code == 200, resp.text
     body = _poll_ask(t.client, resp.json()["ask_id"])
     assert body["status"] == "ready"
+
+
+def test_find_cached_ask_skips_oversized_question_without_hitting_the_client():
+    """An oversized question (a chat ask carrying an inlined [Attached files]
+    block — tens of KB) can never match a pre-warmed prompt, and sending it as a
+    PostgREST `?question=eq.<value>` URL filter overflows the request limit → a
+    400 that surfaced as a 500 on the whole ask (the multi-file 'Failed to fetch'
+    bug). find_cached_ask must short-circuit to a miss BEFORE touching the DB.
+
+    The route-level tests can't reproduce this — the test DB enforces no URL
+    limit — so we assert the guard directly: require_client must never be called.
+    """
+    from app.db import asks as asks_mod
+
+    called = False
+
+    def _boom():
+        nonlocal called
+        called = True
+        raise AssertionError("require_client must not be called for an oversized question")
+
+    original = asks_mod.require_client
+    asks_mod.require_client = _boom
+    try:
+        huge = "q " * asks_mod._MAX_CACHE_QUESTION_CHARS  # well over the ceiling
+        assert asks_mod.find_cached_ask("acme", huge) is None
+        assert called is False
+    finally:
+        asks_mod.require_client = original

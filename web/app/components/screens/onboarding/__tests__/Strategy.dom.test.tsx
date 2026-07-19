@@ -195,7 +195,7 @@ describe("Strategy (onboarding step 06 — 'Strategy & roadmap' upload-or-type)"
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       team_strategy: "Win SMB fintech this half.",
       team_roadmap: "Q3: reconciliation v2.",
-      onboarding_step: 7,
+      onboarding_step: 8,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
   })
@@ -211,7 +211,7 @@ describe("Strategy (onboarding step 06 — 'Strategy & roadmap' upload-or-type)"
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/decisions")
     })
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 7)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 8)
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
   })
 

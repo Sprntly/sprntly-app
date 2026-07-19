@@ -1,11 +1,11 @@
 // @vitest-environment jsdom
 //
 // Integrity tests for the semantic-slug onboarding flow (v6 screenshot spec
-// 2026-07-17, 9 steps):
-//   company → product → metrics → connectors → team → strategy → decisions →
-//   invite → review
-// (Retired in v6: the api-key step — Settings → Admin — and the closing
-//  workspace-naming step; the new decisions/invite/review steps close the
+// 2026-07-17 + the restored optional api-key step 2026-07-19, 10 steps):
+//   company → product → metrics → api-key → connectors → team → strategy →
+//   decisions → invite → review
+// (api-key is an OPTIONAL/skippable step — also editable in Settings → Admin.
+//  Still retired: the closing workspace-naming step. The review step closes the
 //  numbered flow, then the UNNUMBERED define-metrics sub-flow completes
 //  onboarding.)
 //
@@ -28,6 +28,7 @@ vi.mock("../../screens/onboarding", () => ({
   CompanyStep: () => React.createElement("div", { "data-screen": "company" }),
   ProductStep: () => React.createElement("div", { "data-screen": "product" }),
   MetricsStep: () => React.createElement("div", { "data-screen": "metrics" }),
+  ApiKey: () => React.createElement("div", { "data-screen": "api-key" }),
   Connectors: () => React.createElement("div", { "data-screen": "connectors" }),
   TeamStep: () => React.createElement("div", { "data-screen": "team" }),
   Strategy: () => React.createElement("div", { "data-screen": "strategy" }),
@@ -55,6 +56,7 @@ const EXPECTED_ORDER = [
   "company",
   "product",
   "metrics",
+  "api-key",
   "connectors",
   "team",
   "strategy",
@@ -64,8 +66,8 @@ const EXPECTED_ORDER = [
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 9 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(9)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 10 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(10)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
@@ -101,13 +103,12 @@ describe("onboarding flow order — slug → screen", () => {
     )
   })
 
-  it("does not expose the dropped api-key/workspace/business-info/first-brief/coworkers pages as steps", () => {
-    // api-key moved to Settings → Admin and the workspace-naming closer was
-    // retired in v6; business-info split into company/product/metrics; the
-    // business-context review became the numbered review step;
-    // first-brief/coworkers stay retired.
+  it("does not expose the dropped workspace/business-info/first-brief/coworkers pages as steps", () => {
+    // api-key is a numbered step again (restored 2026-07-19). The
+    // workspace-naming closer stays retired; business-info split into
+    // company/product/metrics; the business-context review became the numbered
+    // review step; first-brief/coworkers stay retired.
     for (const slug of [
-      "api-key",
       "workspace",
       "business-info",
       "strategic-context",

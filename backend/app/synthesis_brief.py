@@ -58,6 +58,14 @@ def _looks_like_uuid(value: str) -> bool:
 def resolve_company(company_id_or_slug: str) -> tuple[str, str]:
     """Return (company_id, slug) from either a company id or a dataset slug.
 
+    The slug may be a bare company slug (the default workspace's dataset) OR a
+    non-default workspace's dataset slug (``'<company>--<workspace>'``), which
+    lives in the `datasets` table, not `companies`. We try the companies table
+    first, then fall back to the workspace/dataset binding so every workspace's
+    brief resolves to its parent company. Both keep the passed-in slug as the
+    returned dataset slug (the KG is company-scoped; the corpus/brief are
+    slug-scoped).
+
     Raises ValueError if the identifier resolves to no company.
     """
     if _looks_like_uuid(company_id_or_slug):
@@ -66,9 +74,16 @@ def resolve_company(company_id_or_slug: str) -> tuple[str, str]:
             raise ValueError(f"No company for id {company_id_or_slug!r}")
         return company_id_or_slug, slug
     company_id = company_id_for_slug(company_id_or_slug)
-    if company_id is None:
-        raise ValueError(f"No company for slug {company_id_or_slug!r}")
-    return company_id, company_id_or_slug
+    if company_id is not None:
+        return company_id, company_id_or_slug
+    # Not a bare company slug — try a non-default workspace's dataset slug,
+    # which binds to its parent company via the datasets → workspaces tables.
+    from app.db.workspaces import workspace_for_dataset_slug
+
+    binding = workspace_for_dataset_slug(company_id_or_slug)
+    if binding and binding.get("company_id"):
+        return binding["company_id"], company_id_or_slug
+    raise ValueError(f"No company for slug {company_id_or_slug!r}")
 
 
 def _kg_is_empty(facade: GraphFacade, company_id: str) -> bool:

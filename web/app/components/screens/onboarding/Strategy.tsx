@@ -157,14 +157,14 @@ export function Strategy() {
   }
 
   async function next() {
-    if (await persist(7)) router.push("/onboarding/decisions")
+    if (await persist(8)) router.push("/onboarding/decisions")
   }
 
   async function skip() {
     if (!workspace) return
     setSaving(true)
     try {
-      const updated = await advanceOnboardingStep(workspace.id, 7)
+      const updated = await advanceOnboardingStep(workspace.id, 8)
       setWorkspace({ ...updated, product: workspace.product })
       router.push("/onboarding/decisions")
     } finally {
@@ -177,7 +177,7 @@ export function Strategy() {
 
   return (
     <OnboardingChrome
-      step={6}
+      step={7}
       saveLabel="Saved · auto-saves"
       title={
         <>

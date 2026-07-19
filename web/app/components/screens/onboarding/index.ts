@@ -1,12 +1,15 @@
 export { YourName } from "./YourName"
-// v6 flow (screenshot spec 2026-07-17): company → product → metrics →
-// connectors → team → strategy → decisions → invite → review, then the
-// unnumbered define-metrics sub-flow completes onboarding. The api-key step
-// (now Settings → Admin) and the closing workspace-naming step (the default
-// workspace stays "Default"; Settings → Workspaces renames it) are retired.
+// v6 flow (screenshot spec 2026-07-17) + the restored optional api-key step
+// (2026-07-19): company → product → metrics → api-key → connectors → team →
+// strategy → decisions → invite → review, then the unnumbered define-metrics
+// sub-flow completes onboarding. The api-key step is OPTIONAL/skippable (also
+// editable in Settings → Admin). The closing workspace-naming step stays
+// retired (the default workspace stays "Default"; Settings → Workspaces
+// renames it).
 export { CompanyStep } from "./CompanyStep"
 export { ProductStep } from "./ProductStep"
 export { MetricsStep } from "./MetricsStep"
+export { ApiKey } from "./ApiKey"
 // Metrics is not a numbered route — its helpers (candidate seeding/merging)
 // are reused by MetricsStep. Kept exported for that reuse + tests.
 export { Metrics } from "./Metrics"

@@ -148,6 +148,8 @@ async def generate(
         generate_prd_and_warm(
             prd_id, body.brief_id, body.insight_index,
             author=company.user_name,
+            company_id=company.company_id, user_id=company.user_id,
+            prd_title=title,
         )
     )
     _inflight_tasks.add(task)
@@ -241,6 +243,8 @@ async def generate_from_backlog(
         generate_prd_and_warm(
             prd_id, brief_id, _BACKLOG_INSIGHT_INDEX, insight_override=insight,
             author=company.user_name,
+            company_id=company.company_id, user_id=company.user_id,
+            prd_title=title,
         )
     )
     _inflight_tasks.add(task)
@@ -324,6 +328,8 @@ async def import_prd(
             insight_override=insight,
             author=company.user_name,
             import_source_md=extracted,
+            company_id=company.company_id, user_id=company.user_id,
+            prd_title=title,
         )
     )
     _inflight_tasks.add(task)

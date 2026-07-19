@@ -529,60 +529,10 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
   })
 })
 
-// ── Composer "generate a prototype" → carries the open PRD's id in the URL ─────
-// Regression for the gap where the composer prototype command (and the post-build
-// reveal) navigated to a BARE /prototype, dropping the ?prd= context, so the route
-// landed on its "No PRD selected" empty state and the prototype looked lost. With
-// an open PRD in ContentContext, the command must push /prototype?prd=<id>.
-describe("BriefChat composer — 'generate a prototype' navigation", () => {
-  // Seeds a brief AND an open PRD (prd_id) into ContentContext so prototypeFlow
-  // takes its `content.prd` branch (the composer path under test).
-  function InjectBriefWithPrd({ prdId }: { prdId: number }) {
-    const { setContent } = useContent()
-    React.useEffect(() => {
-      setContent({
-        briefV2: BRIEF,
-        userName: "Apurva Jain",
-        // Minimal open-PRD state — prototypeFlow only reads content.prd.prd_id.
-        prd: { prd_id: prdId } as never,
-        prdMeta: { briefId: 1, insightIndex: 0 },
-        briefDetails: {
-          "something_wrong-0": { meta: { briefId: 1, insightIndex: 0 } },
-          "something_wrong-1": { meta: { briefId: 1, insightIndex: 1 } },
-        } as never,
-      })
-    }, [setContent, prdId])
-    return null
-  }
-
-  it("pushes /prototype?prd=<id> (NOT a bare /prototype) when a PRD is open", async () => {
-    await act(async () => {
-      render(
-        React.createElement(
-          NavigationProvider,
-          null,
-          React.createElement(
-            ContentProvider,
-            null,
-            React.createElement(InjectBriefWithPrd, { prdId: 515 }),
-            React.createElement(BriefChat),
-          ),
-        ),
-      )
-    })
-
-    const composer = screen.getByPlaceholderText(/Ask anything/i)
-    await act(async () => {
-      fireEvent.change(composer, { target: { value: "generate a prototype" } })
-      fireEvent.keyDown(composer, { key: "Enter" })
-    })
-
-    // The navigation carries the PRD context — and is NOT the bare path.
-    expect(pushSpy).toHaveBeenCalledWith(prototypePath(515))
-    expect(pushSpy).toHaveBeenCalledWith("/prototype?prd=515")
-    expect(pushSpy).not.toHaveBeenCalledWith("/prototype")
-  })
-})
+// The brief's own composer was removed (chatting now happens in each PRD's own
+// chat tab), so the former "BriefChat composer — 'generate a prototype'
+// navigation" test was dropped — that entry point no longer exists on the brief.
+// prototypeFlow's ?prd= URL-carrying behavior is still covered from the PRD flow.
 
 // ── Brief top bar removed ─────────────────────────────────────────────────────
 // The brief top bar (the .bh <header> with the "Week of … · <Company>" label and

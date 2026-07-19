@@ -372,7 +372,7 @@ export type SkillInfo = {
  *  askApi.get(id) until status leaves 'generating'. */
 export type AskStartResponse = {
   ask_id: number
-  status: "generating" | "ready" | "error"
+  status: "generating" | "ready" | "error" | "cancelled"
 }
 
 /** GET /v1/ask/{id} status + result. Once status === 'ready' the answer /
@@ -380,7 +380,7 @@ export type AskStartResponse = {
  *  citation-stripped shape the old synchronous POST returned, so downstream
  *  rendering is unchanged. `error` is set when status === 'error'. */
 export type AskStatusResponse = AskResponse & {
-  status: "generating" | "ready" | "error"
+  status: "generating" | "ready" | "error" | "cancelled"
   error?: string | null
   /** Extra qa_agent metadata (e.g. routed skill) passed through verbatim. */
   [extra: string]: unknown
@@ -402,6 +402,13 @@ export const askApi = {
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
+  /** Stop an in-flight Ask (the user hit Stop). Flips the job to `cancelled`
+   *  so the worker aborts before the next LLM step and a late answer is
+   *  discarded. Idempotent — returns the job's resulting status. */
+  cancel: (askId: number) =>
+    api.post<{ ask_id: number; status: "generating" | "ready" | "error" | "cancelled" }>(
+      `/v1/ask/${askId}/cancel`,
+    ),
   /** List available skills the chat can route to. */
   skills: () =>
     api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),

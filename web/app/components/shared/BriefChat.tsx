@@ -1139,62 +1139,10 @@ export function BriefChat() {
           </div>
         </div>
 
-        <div className="bc-dock">
-          <div className="bc-composer">
-            <textarea
-              ref={composerRef}
-              className="bc-composer-input"
-              placeholder={'Ask anything, or try "generate PRD", "create tickets", "generate prototype"…'}
-              rows={1}
-              value={draft}
-              onChange={onComposerInput}
-              onKeyDown={onComposerKeyDown}
-            />
-            <div className="bc-composer-bar">
-              <div className="bc-composer-tools">
-                <button
-                  type="button"
-                  className="bc-tool"
-                  onClick={() => showToast("Voice input", "Dictation isn't wired up yet — type your question for now.")}
-                >
-                  <IconMic /> Voice
-                </button>
-                <button type="button" className="bc-tool" onClick={() => showToast("Attach", "File attachments aren't wired up yet.")}>
-                  <IconPaperclip /> Attach
-                </button>
-                <button type="button" className="bc-tool" onClick={insertSourceToken}>
-                  <IconAt /> Source
-                </button>
-                <span className="bc-tool-kbd">
-                  <kbd>⌘</kbd>
-                  <kbd>/</kbd>
-                </span>
-              </div>
-              <button
-                type="button"
-                className="bc-send"
-                aria-label="Send"
-                disabled={busy || draft.trim().length < 3}
-                onClick={() => submitAsk(draft)}
-              >
-                <IconSendUp size={17} />
-              </button>
-            </div>
-          </div>
-          <div className="bc-hints">
-            <span>
-              <kbd>Enter</kbd> send
-            </span>
-            <span>·</span>
-            <span>
-              <kbd>Shift+Enter</kbd> newline
-            </span>
-            <span>·</span>
-            <span>
-              <kbd>⌘+Shift+M</kbd> voice
-            </span>
-          </div>
-        </div>
+        {/* The brief's own chat box (composer/dock) was removed: chatting now
+            happens in each PRD's own chat tab, which carries the chat box. The
+            weekly brief is a read surface — greeting + finding cards whose
+            action buttons (Generate PRD / View prototype) drive the work. */}
       {gen.generateModalProps.open && genPrdId != null && (
         <GenerateModal {...gen.generateModalProps} />
       )}

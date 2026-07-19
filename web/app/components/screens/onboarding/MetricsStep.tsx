@@ -224,7 +224,9 @@ export function MetricsStep() {
   }
 
   async function go() {
-    if (await persist()) router.push("/onboarding/connectors")
+    // Next numbered step is api-key (index 4 in ONBOARDING_STEP_SLUGS — the
+    // value persist() writes); it's optional/skippable and precedes connectors.
+    if (await persist()) router.push("/onboarding/api-key")
   }
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>

@@ -140,9 +140,11 @@ describe("TeamStep (onboarding step 05 — team name* + scope*)", () => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/strategy")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
+      // team persists onboarding_step 7 (strategy is now step 7 after the
+      // restored api-key step).
       team_name: "Growth",
       team_scope: "notifications",
-      onboarding_step: 6,
+      onboarding_step: 7,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
   })

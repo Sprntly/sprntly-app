@@ -16,7 +16,7 @@ import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { PrdInputQuestions } from "../../shared/PrdInputQuestions"
-import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
+import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
 import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -24,7 +24,7 @@ import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loa
 // resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight } from "../../../lib/runEvidenceGeneration"
-import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError } from "../../../lib/runAskGeneration"
+import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { PrdState, PrdContent } from "../../../types/content"
@@ -37,9 +37,19 @@ import { AGENT_NAME } from "../../../lib/agent"
 
 type ThreadTurn = {
   id: string
+  /** DISPLAY text — the user's typed ask only. Attached-document content is NOT
+   *  folded in here (that goes to the backend separately); the thread renders
+   *  this plus a chip per `attachments` entry, the way Claude's chat does. */
   query: string
+  /** Files attached to this turn, shown as clickable cards above the ask. Each
+   *  carries the extracted/plain-text `content` so the card can open a viewer —
+   *  this is the SAME text folded into the backend query, never re-fetched. */
+  attachments?: { name: string; content?: string }[]
   reply?: AskResponse
   error?: string
+  /** The user stopped this ask before it answered (composer Stop button). Renders
+   *  a muted "stopped" note instead of the thinking skeleton or an error bubble. */
+  stopped?: boolean
 }
 
 type BriefMeta = { briefId: number; insightIndex: number }
@@ -124,6 +134,156 @@ function AttachmentChips({ attachments, onRemove }: {
           <button type="button" aria-label={`Remove ${a.name}`} onClick={() => onRemove(i)}
             style={{ background: "none", border: "none", cursor: "pointer", fontSize: 13, color: "var(--ink-4)", padding: 0, lineHeight: 1 }}>×</button>
         </span>
+      ))}
+    </div>
+  )
+}
+
+/** File extension, upper-cased (e.g. "DOCX"). Empty string when there's none. */
+function fileTypeLabel(name: string): string {
+  const dot = name.lastIndexOf(".")
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : ""
+}
+
+/** Human "12 lines" / "3.4 KB" hint from the extracted text, for the card
+ *  subtitle (mirrors how Claude shows a size/dimension line under a file). */
+function attachmentMeta(name: string, content?: string): string {
+  const type = fileTypeLabel(name)
+  if (!content) return type || "File"
+  const lines = content.split("\n").length
+  return [type, `${lines.toLocaleString()} line${lines === 1 ? "" : "s"}`].filter(Boolean).join(" · ")
+}
+
+/** A clickable file card on a user turn — Claude-style: an icon tile, the file
+ *  name, and a type/size sub-line. Clicking opens the content viewer. */
+function TurnAttachmentCard({
+  name,
+  content,
+  onOpen,
+}: {
+  name: string
+  content?: string
+  onOpen: () => void
+}) {
+  const viewable = !!content
+  return (
+    <button
+      type="button"
+      className="bc-file-card"
+      data-testid="turn-attachment-chip"
+      onClick={viewable ? onOpen : undefined}
+      disabled={!viewable}
+      title={viewable ? `View ${name}` : name}
+      aria-label={viewable ? `View ${name}` : name}
+    >
+      <span className="bc-file-card-icon" aria-hidden>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+        </svg>
+      </span>
+      <span className="bc-file-card-text">
+        <span className="bc-file-card-name">{name}</span>
+        <span className="bc-file-card-meta">{attachmentMeta(name, content)}</span>
+      </span>
+    </button>
+  )
+}
+
+/** Full-screen overlay that renders an attachment's extracted content (the same
+ *  text sent to the agent). Opened by clicking a file card on a user turn. */
+function AttachmentViewer({
+  attachment,
+  onClose,
+}: {
+  attachment: { name: string; content: string }
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose()
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  return (
+    <div className="bc-file-viewer-backdrop" role="dialog" aria-modal="true" aria-label={attachment.name} onClick={onClose}>
+      <div className="bc-file-viewer" onClick={(e) => e.stopPropagation()}>
+        <div className="bc-file-viewer-head">
+          <span className="bc-file-viewer-title" title={attachment.name}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+            {attachment.name}
+          </span>
+          <button type="button" className="bc-file-viewer-close" aria-label="Close" onClick={onClose}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div className="bc-file-viewer-body">
+          {attachment.content.trim() ? (
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+          ) : (
+            <p className="bc-file-viewer-empty">No preview available for this file.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Claude-style slash-command palette shown above the composer when the draft
+// starts with "/". Rendered by BOTH composers (landing + thread) — the `inset`
+// prop is the only positional difference (the dock composer is inset 8px).
+// Keyboard-driven: the parent owns `activeIndex` (↑/↓/Enter) and the active row
+// scrolls itself into view.
+function SlashSkillMenu({ skills, activeIndex, onSelect, onHover, inset = false }: {
+  skills: SkillInfo[]
+  activeIndex: number
+  onSelect: (skill: SkillInfo) => void
+  onHover: (index: number) => void
+  inset?: boolean
+}) {
+  const listRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const active = listRef.current?.querySelector<HTMLElement>(".chat-slash-item.is-active")
+    active?.scrollIntoView({ block: "nearest" })
+  }, [activeIndex])
+  if (skills.length === 0) return null
+  return (
+    <div
+      ref={listRef}
+      className={`chat-slash-menu${inset ? " chat-slash-menu--inset" : ""}`}
+      role="listbox"
+      aria-label="Skills"
+    >
+      <div className="chat-slash-head">
+        <span>Skills</span>
+        <span className="chat-slash-count">{skills.length}</span>
+      </div>
+      {skills.map((s, i) => (
+        <button
+          key={s.id}
+          type="button"
+          role="option"
+          aria-selected={i === activeIndex}
+          className={`chat-slash-item${i === activeIndex ? " is-active" : ""}`}
+          // Select on mousedown (before the textarea blurs) so the click always
+          // lands even as focus moves.
+          onMouseDown={(e) => { e.preventDefault(); onSelect(s) }}
+          onMouseEnter={() => onHover(i)}
+        >
+          <span className="chat-slash-trigger">{s.trigger}</span>
+          <span className="chat-slash-text">
+            <span className="chat-slash-label">{s.label}</span>
+            <span className="chat-slash-desc">{s.description}</span>
+          </span>
+          <span className="chat-slash-enter" aria-hidden>↵</span>
+        </button>
       ))}
     </div>
   )
@@ -392,16 +552,99 @@ export function ChatScreen() {
   const [showSlash, setShowSlash] = useState(false)
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
+  // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
+  const [slashActive, setSlashActive] = useState(0)
   // `file` is set for document formats (.pdf/.pptx/.docx/.doc): those can't be
   // inlined as text client-side. The File feeds the PRD-import command
   // ("import this as a PRD" → POST /v1/prd/import) or, for a plain question,
   // server-side text extraction at send time (POST /v1/ask/extract-file).
   const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
+  // The attachment whose content is open in the viewer overlay (click a file
+  // card on a user turn). Null = closed.
+  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string } | null>(null)
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
+  // Per-tab STOP flag — a tab id is present while the user has stopped its
+  // in-flight ask. The ask poller reads this (isStopped) to bail; it's cleared
+  // when a fresh ask starts on that tab so a stop never leaks into the next ask.
+  const stoppedTabsRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // The scrolling thread viewport, so a new question (and the assistant's
+  // thinking/answer under it) is scrolled into view instead of staying hidden
+  // below the fold in a long conversation.
+  const threadScrollRef = useRef<HTMLDivElement>(null)
+  // Whether the user is pinned near the bottom. We only auto-follow streaming
+  // replies while pinned, so scrolling up to read history isn't yanked back.
+  const threadPinnedRef = useRef(true)
+  const prevThreadLenRef = useRef(0)
+
+  const scrollThreadToBottom = useCallback((behavior: ScrollBehavior) => {
+    const el = threadScrollRef.current
+    if (!el) return
+    // Defer to the next frame so the just-added turn (and its thinking skeleton)
+    // is laid out before we measure scrollHeight.
+    requestAnimationFrame(() => {
+      try {
+        el.scrollTo({ top: el.scrollHeight, behavior })
+      } catch {
+        // jsdom / older engines without Element.scrollTo — set position directly.
+        el.scrollTop = el.scrollHeight
+      }
+    })
+  }, [])
+
+  // Track whether the user is pinned near the bottom of the thread. Auto-follow
+  // only applies while pinned, so scrolling up to read earlier turns during a
+  // long answer isn't fought by the follow effect.
+  const handleThreadScroll = useCallback(() => {
+    const el = threadScrollRef.current
+    if (!el) return
+    threadPinnedRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 120
+  }, [])
+
+  // Callback ref on the thread's content column. A ResizeObserver here keeps the
+  // viewport pinned to the bottom as content GROWS — the thinking skeleton
+  // appearing, then the answer typing in — not just on the initial render. That
+  // covers the async growth a one-shot scroll misses. Re-attaches whenever the
+  // content element mounts (tab switch, landing → thread), so it never observes
+  // a stale node.
+  const threadResizeObsRef = useRef<ResizeObserver | null>(null)
+  const setThreadContentEl = useCallback((el: HTMLDivElement | null) => {
+    threadResizeObsRef.current?.disconnect()
+    threadResizeObsRef.current = null
+    if (!el || typeof ResizeObserver === "undefined") return
+    const ro = new ResizeObserver(() => {
+      const scroller = threadScrollRef.current
+      if (scroller && threadPinnedRef.current) scroller.scrollTop = scroller.scrollHeight
+    })
+    ro.observe(el)
+    threadResizeObsRef.current = ro
+  }, [])
+  useEffect(() => () => threadResizeObsRef.current?.disconnect(), [])
+
+  // A new turn (the user just asked) → re-pin and smooth-scroll so the question
+  // + the assistant's thinking sit in view; the ResizeObserver then follows the
+  // answer as it grows. Guard on a real length increase so a reply landing on an
+  // existing turn doesn't double-trigger (the observer already handles growth).
+  useEffect(() => {
+    if (thread.length > prevThreadLenRef.current) {
+      threadPinnedRef.current = true
+      scrollThreadToBottom("smooth")
+    }
+    prevThreadLenRef.current = thread.length
+  }, [thread.length, scrollThreadToBottom])
+
+  // On tab switch/open, land at the bottom (newest turn) without animation and
+  // reset the pinned state for the newly shown thread.
+  useEffect(() => {
+    prevThreadLenRef.current = thread.length
+    threadPinnedRef.current = true
+    scrollThreadToBottom("auto")
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, scrollThreadToBottom])
 
   // Attach: documents keep the real File (for the PRD-import command); plain-text
   // formats are read as text and inlined into the next ask as context.
@@ -961,28 +1204,42 @@ export function ChatScreen() {
       setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, hydrating: true } : t)))
       const fallback = buildRestored(data.fallbackTurns ?? [], `resumed-fb-${data.dbId}`)
       void (async () => {
-        try {
-          const { conversationsApi } = await import("../../../lib/api")
-          const res = await conversationsApi.listTurns(data.dbId)
-          const restored = buildRestored(res.turns ?? [], `resumed-${data.dbId}`)
-          // Empty server history → the preview-derived fallback thread.
-          const finalThread = restored.length > 0 ? restored : fallback
-          // Guarded fill: never clobber a thread the user started meanwhile.
-          setTabs((prev) => prev.map((t) =>
-            t.id === tabId
-              ? { ...t, hydrating: false, thread: t.thread.length === 0 ? finalThread : t.thread }
-              : t))
-        } catch {
-          // Non-fatal: drop the loading state; show the fallback preview
-          // thread (or an empty, still-usable tab when there isn't one).
-          setTabs((prev) => prev.map((t) =>
-            t.id === tabId
-              ? { ...t, hydrating: false, thread: t.thread.length === 0 ? fallback : t.thread }
-              : t))
+        const { conversationsApi } = await import("../../../lib/api")
+        // Fetch the conversation's turns, RETRYING on a transient failure. This
+        // is the whole point of the resume: a single failed request must never
+        // silently collapse a multi-ask chat down to the preview-only fallback
+        // (a lone opening question that looks like a brand-new chat — the exact
+        // reported bug). `restored === null` means every attempt errored; an
+        // empty array is a genuine empty conversation.
+        let restored: ThreadTurn[] | null = null
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const res = await conversationsApi.listTurns(data.dbId)
+            restored = buildRestored(res.turns ?? [], `resumed-${data.dbId}`)
+            break
+          } catch {
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)))
+          }
+        }
+        // Prefer the fetched thread whenever it has turns; otherwise the
+        // preview-derived fallback keeps the tab usable.
+        const finalThread = restored && restored.length > 0 ? restored : fallback
+        // Guarded fill: never clobber a thread the user started meanwhile, and
+        // never REPLACE a fuller thread (e.g. a reused open tab) with a thinner
+        // preview — only fill a still-empty tab.
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId
+            ? { ...t, hydrating: false, thread: t.thread.length === 0 ? finalThread : t.thread }
+            : t))
+        // If every attempt failed, say so instead of silently showing a partial
+        // thread — silence is what made a temporarily-unreachable history look
+        // like the chat had lost its messages.
+        if (restored === null) {
+          showToast("Couldn't load full chat history", "Showing a preview — reopen the chat to retry.")
         }
       })()
     } catch { /* ignore corrupt data */ }
-  }, [openTab])
+  }, [openTab, showToast])
   // Check on mount + whenever we navigate to this screen
   useEffect(() => { checkResume() }, [checkResume])
   // Re-check when the route lands on chat (covers goTo("chat") from ChatsScreen)
@@ -1162,30 +1419,47 @@ export function ChatScreen() {
       // markdown server-side (POST /v1/ask/extract-file) so a deck attached to
       // a plain question reaches the agent too — they used to be silently
       // dropped here, which read as "no document was attached" replies.
-      let query = trimmed
+      // `displayQuery` is what the thread shows (the user's ask, plus a chip per
+      // attachment — never the raw document dump). `sendQuery` is what the ask
+      // agent receives: the same text with the parsed attachment content folded
+      // in, exactly as before. Keeping them separate means the backend is
+      // unaffected while the UI stays clean, the way Claude's chat renders it.
+      const displayQuery = trimmed
+      let turnAttachments: { name: string; content?: string }[] = []
+      let sendQuery = trimmed
       if (attachments.length > 0) {
         let ctx: string
         try {
-          const parts = await Promise.all(
+          // Extract each attachment's text ONCE: plain-text attachments inline
+          // their content; documents (.pdf/.pptx/.docx/.doc) are parsed to
+          // markdown server-side. Order is preserved via the resolved array so
+          // the same text feeds BOTH the backend query and the clickable card's
+          // viewer — the document is never re-fetched to display it.
+          const extracted = await Promise.all(
             attachments.map(async (a) => {
-              if (!a.file) return `--- ${a.name} ---\n${a.content}`
-              const r = await askApi.extractFile(a.file)
-              return `--- ${a.name} ---\n${r.markdown.slice(0, 50000)}`
+              const text = a.file
+                ? (await askApi.extractFile(a.file)).markdown.slice(0, 50000)
+                : a.content
+              return { name: a.name, content: text }
             }),
           )
           // Clamp the TOTAL context so question + attachments stay under the
           // ask endpoint's 120k question cap even with several attachments.
-          ctx = parts.join("\n\n").slice(0, 100000)
+          ctx = extracted
+            .map((e) => `--- ${e.name} ---\n${e.content}`)
+            .join("\n\n")
+            .slice(0, 100000)
+          turnAttachments = extracted.map((e) => ({ name: e.name, content: e.content }))
         } catch (e) {
           // Keep the attachments so the user can retry or remove the bad one —
           // a silent drop is exactly the failure mode this path exists to fix.
           showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
           return
         }
-        query = `${query}\n\n[Attached files]\n${ctx}`
+        sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
         setAttachments([]) // clear after successful extraction only
       }
-      if (query.length < 1) return
+      if (sendQuery.length < 1) return
       // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
       // before doing any work. (Authoritative per-tab guard happens once
       // targetTabId is resolved below — needed for the no-active-tab case where
@@ -1196,26 +1470,39 @@ export function ChatScreen() {
       // Capture the target tab ID up-front so async callbacks always write to
       // the right tab, even if the user switches tabs while the request is in-flight.
       let targetTabId: string
+      // The thread turn shows the ASK (displayQuery) + a chip per attachment,
+      // never the folded-in document content that rides sendQuery to the backend.
+      const newTurn: ThreadTurn = {
+        id,
+        query: displayQuery,
+        ...(turnAttachments.length ? { attachments: turnAttachments } : {}),
+      }
+      // The tab title/handle falls back to the first attachment's name when the
+      // ask itself is empty, so a doc-only send still reads sensibly in the tab.
+      const handle = displayQuery || turnAttachments[0]?.name || "New chat"
       // No active tab, OR the active "tab" is the synthetic, thread-less brief
       // tab → spawn a FRESH chat tab seeded with the query. A chat started from
       // the weekly brief must never thread inline into it (the brief tab carries
       // no `tabs` entry, so appending would silently no-op anyway).
       if (!activeTabId || activeTabId === BRIEF_TAB_ID) {
-        const title = query.length > 40 ? `${query.slice(0, 37)}…` : query
-        targetTabId = openTab(title, [{ id, query }])
+        const title = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
+        targetTabId = openTab(title, [newTurn])
       } else {
         targetTabId = activeTabId
-        const newTitle = query.length > 40 ? `${query.slice(0, 37)}…` : query
+        const newTitle = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
         setTabs((prev) => prev.map((t) => {
           if (t.id !== targetTabId) return t
           // First message in a placeholder "New chat" tab → give it the real
           // title from the query (rename in place; do NOT spawn a second tab).
           const title = t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? newTitle : t.title
-          return { ...t, title, thread: [...t.thread, { id, query }] }
+          return { ...t, title, thread: [...t.thread, newTurn] }
         }))
       }
-      pushPendingConversation(id, query, targetTabId)
+      pushPendingConversation(id, displayQuery, targetTabId)
       setActiveConv(0)
+      // A fresh ask on this tab clears any leftover Stop flag from a prior ask so
+      // the new one is never treated as pre-stopped.
+      stoppedTabsRef.current.delete(targetTabId)
       // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
       // It returns false (running nothing) if this tab already has an ask in
       // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
@@ -1230,7 +1517,10 @@ export function ChatScreen() {
         // generating server-side, and the active ask_id is persisted per tab
         // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
         // resume effect instead of re-asking.
-        ask: () => runAskGeneration(query, activeCompany, targetTabId, { isCancelled: () => !mountedRef.current }),
+        ask: () => runAskGeneration(sendQuery, activeCompany, targetTabId, {
+          isCancelled: () => !mountedRef.current,
+          isStopped: () => stoppedTabsRef.current.has(targetTabId),
+        }),
         onResult: (tabId, res) => {
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
@@ -1244,6 +1534,9 @@ export function ChatScreen() {
           // ask_id is still persisted, so the mount-time resume effect will
           // re-attach and populate on return. Not a failure — no error UI/toast.
           if (e instanceof AskCancelledError) return
+          // User hit Stop: the stopped turn is already rendered by handleStopAsk.
+          // Not a failure — no error bubble/toast.
+          if (e instanceof AskStoppedError) return
           const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
             ? (e.body as { detail: unknown }).detail
             : null
@@ -1273,6 +1566,44 @@ export function ChatScreen() {
     },
     [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdCommandFlow, pushPendingConversation, setContent, showToast],
   )
+
+  // ── Stop an in-flight ask ─────────────────────────────────────────────────
+  // The composer's Send button becomes a Stop button while the active tab's ask
+  // is generating. Stopping is deliberate (unlike a background unmount): it
+  // reclaims the composer AT ONCE, marks the in-flight turn `stopped`, and asks
+  // the backend to cancel so the worker aborts before its next LLM step and any
+  // late answer is discarded server-side.
+  const handleStopAsk = useCallback(() => {
+    const tabId = activeTabId
+    if (!tabId) return
+    // 1) Signal the running poller to bail — it clears the persisted ask_id (so a
+    //    remount won't resume) and rejects with AskStoppedError, which onError
+    //    swallows. Checked on the poll's next tick.
+    stoppedTabsRef.current.add(tabId)
+    // 2) Best-effort backend cancel: the worker polls the job status between LLM
+    //    steps and aborts before the expensive answer call when it lands early.
+    const pending = getPendingAsk(activeCompany, tabId)
+    if (pending) {
+      const askId = Number(pending.id)
+      if (Number.isFinite(askId)) void askApi.cancel(askId).catch(() => {})
+    }
+    // 3) Reclaim the composer immediately rather than waiting for the poll's next
+    //    tick (runTabAsk's finally also clears these — the double-clear is safe).
+    askingTabsRef.current.delete(tabId)
+    setBusyTabs((prev) => removeFromSet(prev, tabId))
+    // 4) Replace the in-flight turn's thinking skeleton with a muted stopped note.
+    //    The in-flight turn is the last one still awaiting a reply.
+    setTabs((prev) => prev.map((t) => {
+      if (t.id !== tabId) return t
+      let idx = -1
+      for (let i = t.thread.length - 1; i >= 0; i--) {
+        const turn = t.thread[i]
+        if (!turn.reply && !turn.error && !turn.stopped) { idx = i; break }
+      }
+      if (idx === -1) return t
+      return { ...t, thread: t.thread.map((turn, i) => i === idx ? { ...turn, stopped: true } : turn) }
+    }))
+  }, [activeTabId, activeCompany, setBusyTabs])
 
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
   // A question typed on the weekly-brief surface must open its OWN chat tab, not
@@ -1426,7 +1757,7 @@ export function ChatScreen() {
       // Re-attach only when the last turn is still awaiting a reply (the
       // canonical "asking…" marker that survives in the persisted thread).
       const last = tab.thread[tab.thread.length - 1]
-      if (!last || last.reply !== undefined || last.error !== undefined) continue
+      if (!last || last.reply !== undefined || last.error !== undefined || last.stopped) continue
       if (askingTabsRef.current.has(tab.id)) continue
       resumedAskTabsRef.current.add(tab.id)
       const turnId = last.id
@@ -1434,9 +1765,16 @@ export function ChatScreen() {
       // Restore the optimistic asking/busy UX for this tab.
       askingTabsRef.current.add(targetTabId)
       setBusyTabs((prev) => addToSet(prev, targetTabId))
+      stoppedTabsRef.current.delete(targetTabId)
       void (async () => {
         try {
-          const res = await resumeAskGeneration(askId, activeCompany, targetTabId, () => !mountedRef.current)
+          const res = await resumeAskGeneration(
+            askId,
+            activeCompany,
+            targetTabId,
+            () => !mountedRef.current,
+            () => stoppedTabsRef.current.has(targetTabId),
+          )
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
               ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, reply: res } : turn),
@@ -1447,6 +1785,9 @@ export function ChatScreen() {
           // Unmounted again mid-resume: leave the marker so the NEXT mount
           // re-attaches. Don't write an error into the thread.
           if (e instanceof AskCancelledError) return
+          // User stopped the resumed ask: the stopped turn is rendered by
+          // handleStopAsk; not a failure, so no error bubble.
+          if (e instanceof AskStoppedError) return
           const msg = e instanceof Error ? e.message : "Something went wrong"
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
@@ -1476,12 +1817,54 @@ export function ChatScreen() {
     void submitAsk(q)
     const ta = composerRef.current
     if (ta) {
-      ta.style.height = "auto"
-      ta.style.height = "24px"
+      // Clear the inline height so the textarea snaps back to its CSS resting
+      // size (min-height + padding). A hardcoded value here is shorter than the
+      // vertical padding and clips the placeholder after sending.
+      ta.style.height = ""
     }
   }
 
+  const filteredSkills = useMemo(
+    () =>
+      skills.filter((s) =>
+        slashFilter === "" ||
+        s.trigger.toLowerCase().includes("/" + slashFilter) ||
+        s.label.toLowerCase().includes(slashFilter) ||
+        s.description.toLowerCase().includes(slashFilter),
+      ),
+    [skills, slashFilter],
+  )
+  const slashOpen = showSlash && filteredSkills.length > 0
+  // Keep the highlight in range as the filtered list shrinks/grows.
+  useEffect(() => {
+    setSlashActive((i) => Math.min(i, Math.max(0, filteredSkills.length - 1)))
+  }, [filteredSkills.length])
+
   const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // When the slash palette is open, arrow keys / Enter / Tab drive it and Esc
+    // dismisses it — the composer's own Enter-to-send yields to the picker.
+    if (slashOpen) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        setSlashActive((i) => (i + 1) % filteredSkills.length)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        setSlashActive((i) => (i - 1 + filteredSkills.length) % filteredSkills.length)
+        return
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault()
+        handleSlashSelect(filteredSkills[slashActive] ?? filteredSkills[0])
+        return
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setShowSlash(false)
+        return
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       handleComposerSubmit()
@@ -1497,6 +1880,7 @@ export function ChatScreen() {
     if (val.startsWith("/")) {
       setShowSlash(true)
       setSlashFilter(val.slice(1).toLowerCase())
+      setSlashActive(0)
     } else {
       setShowSlash(false)
     }
@@ -1507,13 +1891,6 @@ export function ChatScreen() {
     setDraft(skill.trigger + " ")
     composerRef.current?.focus()
   }
-
-  const filteredSkills = skills.filter((s) =>
-    slashFilter === "" ||
-    s.trigger.toLowerCase().includes("/" + slashFilter) ||
-    s.label.toLowerCase().includes(slashFilter) ||
-    s.description.toLowerCase().includes(slashFilter)
-  )
 
   const handleStarterChip = (text: string) => {
     void submitAsk(text)
@@ -1607,6 +1984,26 @@ export function ChatScreen() {
     startNewThread()
     router.replace("/")
   }, [searchParams, startNewThread, router])
+
+  // ── PRD deep-link (`/brief?prd=<id>`) ─────────────────────────────────────
+  // The Slack "your PRD is ready" ping links here carrying the prd id. Open that
+  // PRD as a chat tab + panel via the SAME load flow the command palette / brief
+  // "View PRD" use (openPrdTab → kind:"load"). openPrdTab routes to `/`, which
+  // strips the `?prd=` param, so no separate replace is needed. Latched like the
+  // new-chat handler so it fires once per arrival and re-arms when absent.
+  const consumedPrdRef = useRef(false)
+  useEffect(() => {
+    const raw = searchParams.get("prd")
+    if (raw == null) {
+      consumedPrdRef.current = false
+      return
+    }
+    if (consumedPrdRef.current) return
+    const prdId = Number(raw)
+    if (!Number.isInteger(prdId) || prdId <= 0) return
+    consumedPrdRef.current = true
+    openPrdTab({ title: "PRD", source: { kind: "load", prdId, meta: null } })
+  }, [searchParams, openPrdTab])
 
   const hasThread = thread.length > 0
   // A tab bound to a PRD or brief insight opens with the insight itself as the
@@ -1798,7 +2195,11 @@ export function ChatScreen() {
             <BriefChat />
           ) : (
           <main className={`od-center ${showThreadView ? "od-center--thread" : "od-center--landing"}`}>
-            <div className={`od-center-scroll${!showThreadView ? " od-center-scroll--home-landing" : ""}`}>
+            <div
+              className={`od-center-scroll${!showThreadView ? " od-center-scroll--home-landing" : ""}`}
+              ref={threadScrollRef}
+              onScroll={handleThreadScroll}
+            >
               {!showThreadView ? (
                 <div className="home-landing-eyeline">
                   <div className="od-center-inner od-center-inner--home">
@@ -1813,41 +2214,14 @@ export function ChatScreen() {
 
                     <div className="home-landing-composer">
                       <div className="chat-home-composer" style={{ position: "relative" }}>
-                        {/* Slash command dropdown (home) */}
-                        {showSlash && filteredSkills.length > 0 && (
-                          <div style={{
-                            position: "absolute", bottom: "100%", left: 0, right: 0,
-                            background: "var(--surface, #fff)", borderRadius: 10,
-                            border: "1px solid var(--line, #E8E6E0)",
-                            boxShadow: "0 -4px 20px rgba(0,0,0,0.08)", zIndex: 10,
-                            maxHeight: 280, overflowY: "auto", padding: "6px 0",
-                          }}>
-                            <div style={{ padding: "4px 12px 6px", fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-4)" }}>
-                              Skills
-                            </div>
-                            {filteredSkills.map((s) => (
-                              <button
-                                key={s.id}
-                                type="button"
-                                onClick={() => handleSlashSelect(s)}
-                                style={{
-                                  display: "flex", alignItems: "flex-start", gap: 10, width: "100%",
-                                  padding: "8px 12px", background: "none", border: "none",
-                                  cursor: "pointer", textAlign: "left", fontSize: 13,
-                                }}
-                                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F4F1EA)" }}
-                                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none" }}
-                              >
-                                <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent, #179463)", fontFamily: "var(--font-mono, monospace)", minWidth: 80, flexShrink: 0 }}>
-                                  {s.trigger}
-                                </span>
-                                <span>
-                                  <span style={{ fontWeight: 500, color: "var(--ink)" }}>{s.label}</span>
-                                  <span style={{ display: "block", fontSize: 11.5, color: "var(--ink-3)", marginTop: 1 }}>{s.description}</span>
-                                </span>
-                              </button>
-                            ))}
-                          </div>
+                        {/* Slash command palette (home) */}
+                        {slashOpen && (
+                          <SlashSkillMenu
+                            skills={filteredSkills}
+                            activeIndex={slashActive}
+                            onSelect={handleSlashSelect}
+                            onHover={setSlashActive}
+                          />
                         )}
                         <textarea
                           ref={composerRef}
@@ -1868,15 +2242,26 @@ export function ChatScreen() {
                               Attach
                             </button>
                           </div>
-                          <button
-                            type="button"
-                            className="chat-home-composer-send"
-                            aria-label="Send"
-                            disabled={busy || draft.trim().length < 3}
-                            onClick={handleComposerSubmit}
-                          >
-                            <IconSendUp size={16} />
-                          </button>
+                          {busy ? (
+                            <button
+                              type="button"
+                              className="chat-home-composer-send chat-home-composer-send--stop"
+                              aria-label="Stop generating"
+                              onClick={handleStopAsk}
+                            >
+                              <IconStop size={14} />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="chat-home-composer-send"
+                              aria-label="Send"
+                              disabled={draft.trim().length < 3}
+                              onClick={handleComposerSubmit}
+                            >
+                              <IconSendUp size={16} />
+                            </button>
+                          )}
                         </div>
                         {/* Attached files preview — the landing composer must show
                             what's attached too, not rely on the transient toast */}
@@ -1917,7 +2302,7 @@ export function ChatScreen() {
                 </div>
               ) : (
                 <div className="bc-scroll">
-                  <div className="bc-thread">
+                  <div className="bc-thread" ref={setThreadContentEl}>
                     {/* Insight message — the chat opens with its insight as the
                         agent's first message (in the flow, not a pinned heading).
                         Hosts the Generate/View PRD + Generate/View Prototype
@@ -1997,7 +2382,21 @@ export function ChatScreen() {
                             <span className="bc-avatar">{userInitials}</span>
                             <span className="bc-user-name">{name}</span>
                           </div>
-                          <div className="bc-user-bubble">{turn.query}</div>
+                          {turn.attachments?.length ? (
+                            <div className="bc-user-attachments">
+                              {turn.attachments.map((a, i) => (
+                                <TurnAttachmentCard
+                                  key={i}
+                                  name={a.name}
+                                  content={a.content}
+                                  onOpen={() =>
+                                    setViewerAttachment({ name: a.name, content: a.content ?? "" })
+                                  }
+                                />
+                              ))}
+                            </div>
+                          ) : null}
+                          {turn.query ? <div className="bc-user-bubble">{turn.query}</div> : null}
                           <div className="bc-agent-head">
                             <span className="bc-agent-mark">
                               <IconSparkle size={14} />
@@ -2010,7 +2409,10 @@ export function ChatScreen() {
                           </div>
                           <div className="bc-agent-body">
                             {turn.error ? <div className="bc-error">{turn.error}</div> : null}
-                            {!turn.reply && !turn.error ? <AssistantThinkingSkeleton compact /> : null}
+                            {turn.stopped && !turn.reply ? (
+                              <div className="bc-stopped">You stopped this response.</div>
+                            ) : null}
+                            {!turn.reply && !turn.error && !turn.stopped ? <AssistantThinkingSkeleton compact /> : null}
                             {turn.reply ? (
                               <AskReplyBody
                                 reply={turn.reply}
@@ -2052,44 +2454,15 @@ export function ChatScreen() {
                 there's never a double composer. */}
             {showThreadView ? (
               <div className="bc-dock">
-                {/* Slash command dropdown */}
-                {showSlash && filteredSkills.length > 0 && (
-                  <div style={{
-                    position: "absolute", bottom: "100%", left: 8, right: 8,
-                    background: "var(--surface, #fff)", borderRadius: 10,
-                    border: "1px solid var(--line, #E8E6E0)",
-                    boxShadow: "0 -4px 20px rgba(0,0,0,0.08)", zIndex: 10,
-                    maxHeight: 280, overflowY: "auto", padding: "6px 0",
-                  }}>
-                    <div style={{ padding: "4px 12px 6px", fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-4, #B0AEA6)" }}>
-                      Skills
-                    </div>
-                    {filteredSkills.map((s) => (
-                      <button
-                        key={s.id}
-                        type="button"
-                        onClick={() => handleSlashSelect(s)}
-                        style={{
-                          display: "flex", alignItems: "flex-start", gap: 10, width: "100%",
-                          padding: "8px 12px", background: "none", border: "none",
-                          cursor: "pointer", textAlign: "left", fontSize: 13,
-                        }}
-                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F4F1EA)" }}
-                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none" }}
-                      >
-                        <span style={{
-                          fontSize: 11, fontWeight: 600, color: "var(--accent, #179463)",
-                          fontFamily: "var(--font-mono, monospace)", minWidth: 80, flexShrink: 0,
-                        }}>
-                          {s.trigger}
-                        </span>
-                        <span>
-                          <span style={{ fontWeight: 500, color: "var(--ink, #1A1A17)" }}>{s.label}</span>
-                          <span style={{ display: "block", fontSize: 11.5, color: "var(--ink-3, #8C8A84)", marginTop: 1 }}>{s.description}</span>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
+                {/* Slash command palette */}
+                {slashOpen && (
+                  <SlashSkillMenu
+                    skills={filteredSkills}
+                    activeIndex={slashActive}
+                    onSelect={handleSlashSelect}
+                    onHover={setSlashActive}
+                    inset
+                  />
                 )}
                 <div className="bc-composer">
                   <textarea
@@ -2115,15 +2488,26 @@ export function ChatScreen() {
                         <kbd>/</kbd>
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      className="bc-send"
-                      aria-label="Send"
-                      disabled={busy || draft.trim().length < 3}
-                      onClick={handleComposerSubmit}
-                    >
-                      <IconSendUp size={18} />
-                    </button>
+                    {busy ? (
+                      <button
+                        type="button"
+                        className="bc-send bc-send--stop"
+                        aria-label="Stop generating"
+                        onClick={handleStopAsk}
+                      >
+                        <IconStop size={16} />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="bc-send"
+                        aria-label="Send"
+                        disabled={draft.trim().length < 3}
+                        onClick={handleComposerSubmit}
+                      >
+                        <IconSendUp size={18} />
+                      </button>
+                    )}
                   </div>
                 </div>
                 {/* Attached files preview */}
@@ -2134,6 +2518,9 @@ export function ChatScreen() {
           )}
         </div>
       </div>
+      {viewerAttachment ? (
+        <AttachmentViewer attachment={viewerAttachment} onClose={() => setViewerAttachment(null)} />
+      ) : null}
     </AppLayout>
   )
 }

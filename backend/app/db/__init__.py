@@ -63,6 +63,7 @@ from app.db.evidences import (
 
 # Asks (log + cache)
 from app.db.asks import (
+    cancel_ask_job,
     complete_ask_job,
     complete_cached_ask,
     fail_ask_job,
@@ -71,6 +72,7 @@ from app.db.asks import (
     get_ask_job,
     invalidate_orphan_generating_cached_asks,
     invalidate_stale_cached_asks,
+    is_ask_cancelled,
     log_ask,
     start_ask_job,
     start_cached_ask,
@@ -197,6 +199,7 @@ __all__ = [
     "invalidate_stale_evidences",
     "start_evidence",
     # asks
+    "cancel_ask_job",
     "complete_ask_job",
     "complete_cached_ask",
     "fail_ask_job",
@@ -205,6 +208,7 @@ __all__ = [
     "get_ask_job",
     "invalidate_orphan_generating_cached_asks",
     "invalidate_stale_cached_asks",
+    "is_ask_cancelled",
     "log_ask",
     "start_ask_job",
     "start_cached_ask",

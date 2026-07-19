@@ -200,7 +200,7 @@ export function InviteStep() {
 
   return (
     <OnboardingChrome
-      step={8}
+      step={9}
       saveLabel="Saved · auto-saves"
       title={
         <>
