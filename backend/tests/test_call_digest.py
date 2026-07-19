@@ -49,6 +49,28 @@ def test_is_voc_report_request():
         assert not is_voc_report_request(q), q
 
 
+def test_is_voc_report_request_feedback_from_conversations():
+    # "Feedback from customer conversations" phrasings are VoC by intent — they
+    # carry no "voice of customer" literal and no call-noun, and previously fell
+    # to the haiku router (which misrouted them to a DS-style answer).
+    for q in [
+        "Give me a summary of feedback of recent customer conversations",
+        "Give me a summary of feedback from recent customer conversations",
+        "summarize the feedback in our customer conversations",
+        "what feedback came out of the client discussions last month?",
+        "user conversations this quarter — any feedback themes?",
+    ]:
+        assert is_voc_report_request(q), q
+    # Needs BOTH a feedback word and a customer-conversation noun.
+    for q in [
+        "summarize recent customer conversations",   # no "feedback" → call digest's turf
+        "summarize the feedback from the beta survey",
+        "give me feedback on my PRD draft",
+        "how many customer conversations did we have?",
+    ]:
+        assert not is_voc_report_request(q), q
+
+
 # ── window parsing ───────────────────────────────────────────────────────────
 
 def test_window_default_is_last_7_days():

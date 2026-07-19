@@ -653,14 +653,6 @@ export function ChatScreen() {
   }, [setContent, showToast, hydratePrdThread, openContentPanel])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
-  // An HTML-report answer (e.g. Voice of Customer) opens in the right panel's
-  // Report tab so the user keeps chatting on the left; AskReplyBody renders a
-  // compact reopen card in the thread and auto-invokes this for fresh replies.
-  const handleOpenReport = useCallback((report: { html: string; title: string }) => {
-    setContent({ report })
-    openContentPanel("report")
-  }, [setContent, openContentPanel])
-
   const handleOpenPrd = useCallback(async () => {
     if (!activeTabId) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
@@ -2071,7 +2063,6 @@ export function ChatScreen() {
                                 reply={turn.reply}
                                 animateIn={hasFreshReply}
                                 simulateTyping={hasFreshReply}
-                                onOpenReport={handleOpenReport}
                               />
                             ) : null}
                           </div>
