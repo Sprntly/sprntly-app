@@ -35,6 +35,8 @@ from app.db import (
 )
 from app.db.ideation import get_ideation_item
 from app.db.briefs import ensure_uploads_brief, get_current_brief
+from app.db.evidences import find_existing_evidence_for_theme
+from app.evidence_kg import generate_task_evidence
 from app.ingest import convert
 from app.db.companies import slug_for_company_id
 from app.db.prd_input_questions import (
@@ -57,7 +59,11 @@ from app.prd_runner import (
     PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
     generate_prd_and_warm,
 )
-from app.prompts import PRD_TEMPLATE_VERSION
+from app.prompts import (
+    EVIDENCE_TEMPLATE_VERSION,
+    EVIDENCE_VARIANT,
+    PRD_TEMPLATE_VERSION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -300,10 +306,14 @@ async def generate_from_task(
     import paths use. Grounding is KG-first: with no theme backing, the task
     text drives topic retrieval over the tenant's KG (the same retrieval the
     Ask path uses), and only an empty/unreachable KG falls back to the company
-    corpus. The user's words steer the document either way. Anchors to the company's current brief when one exists (dataset
-    grounding), else to the per-company uploads brief so new accounts can still
-    use the command. Fire-and-forget like /generate: returns the prd_id
-    immediately; poll GET /v1/prd/{prd_id} until status == 'ready'.
+    corpus. The user's words steer the document either way. In parallel, an
+    Evidence artifact is generated from the same semantic retrieval IF it finds
+    backing signals — with no backing the evidence doc is skipped entirely (no
+    row → the Evidence tab stays hidden). Anchors to the company's current
+    brief when one exists (dataset grounding), else to the per-company uploads
+    brief so new accounts can still use the command. Fire-and-forget like
+    /generate: returns the prd_id immediately; poll GET /v1/prd/{prd_id} until
+    status == 'ready'.
     """
     slug = slug_for_company_id(company.company_id)
     if not slug:
@@ -330,10 +340,12 @@ async def generate_from_task(
     # Synthetic insight — mirrors a brief insight so the PRD prompt resolves
     # identically to the brief/ideation paths. No theme_id inside the insight:
     # the synthetic id has no KG backing, so grounding resolves via topic
-    # retrieval over the tenant KG (corpus only as last resort).
+    # retrieval over the tenant KG (corpus only as last resort). `query`
+    # carries the user's raw ask for the parallel Evidence-artifact retrieval.
     insight = {
         "title": title,
         "summary": f"Requested by the user in chat: {task_text}",
+        "query": task_text,
     }
 
     prd_id = start_prd(
@@ -357,12 +369,46 @@ async def generate_from_task(
     )
     _inflight_tasks.add(task)
     task.add_done_callback(_inflight_tasks.discard)
+
+    # In parallel: the Evidence artifact, generated from semantic KG retrieval
+    # over the task — skipped inside (no row) when the KG has no backing signals.
+    ev_task = asyncio.create_task(
+        generate_task_evidence(
+            brief_id, insight, theme_id,
+            template_version=EVIDENCE_TEMPLATE_VERSION, variant=EVIDENCE_VARIANT,
+        )
+    )
+    _inflight_tasks.add(ev_task)
+    ev_task.add_done_callback(_inflight_tasks.discard)
+
     return {
         "prd_id": prd_id,
         "status": "generating",
         "title": title,
         "variant": PRD_VARIANT,
     }
+
+
+@router.get("/{prd_id}/evidence")
+def get_prd_evidence(
+    prd_id: int,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """The Evidence artifact behind a chat-task PRD, or 404.
+
+    Chat-task evidence is keyed (brief_id, theme_id) — not insight_index, which
+    is only a storage sentinel for these rows. 404 covers both "not a chat PRD"
+    and "retrieval found no backing → doc was skipped"; the client hides the
+    Evidence tab in either case. May answer a `generating` row — the client
+    polls GET /v1/evidence/{id} until terminal."""
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
+    theme_id = row.get("theme_id") or ""
+    if row.get("source") != "chat" or not theme_id.startswith("chat:"):
+        raise HTTPException(404, "No evidence for this PRD")
+    doc = find_existing_evidence_for_theme(row["brief_id"], theme_id)
+    if not doc:
+        raise HTTPException(404, "No evidence for this PRD")
+    return doc
 
 
 # Uploaded PRDs don't index a brief (they have no KG lineage). insight_index is a
