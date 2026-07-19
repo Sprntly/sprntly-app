@@ -295,11 +295,22 @@ def _answer_single_shot(
     decision: RouteDecision, enterprise_id, question, history, prd_context: str = ""
 ) -> dict:
     """Skill answer via one gateway call (SKILL.md injected by the gateway),
-    grounded on the KG when the tenant's graph has relevant signal, and on the
-    open PRD (`prd_context`) for PRD-tab chats."""
+    grounded on the KG when the tenant's graph has relevant signal — or, for a
+    PRD-tab chat, on the open PRD alone (`prd_context` rides the cacheable
+    prefix and the KG retrieval is skipped)."""
     model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
-    kg_block, kg_used = _kg_grounding(enterprise_id, question)
-    prd_block = f"{prd_context}\n\n---\n\n" if prd_context else ""
+    if prd_context:
+        # PRD-grounded ask: the PRD context block (~26K tokens) IS the
+        # grounding — skip the KG retrieval (embeddings HTTP call + pgvector
+        # queries, ~0.5-1s serial) entirely. The block rides the CACHEABLE
+        # user prefix instead of plain input: it is byte-stable across turns
+        # of the same PRD conversation, so turns 2+ cache-read it instead of
+        # re-prefilling. The gateway PREPENDS the skill's METHOD block to this
+        # prefix — also byte-stable per (skill, PRD content) — so the whole
+        # prefix stays cache-friendly; history + the question stay uncached.
+        kg_block, kg_used = "", False
+    else:
+        kg_block, kg_used = _kg_grounding(enterprise_id, question)
     system = (
         ASK_SYSTEM
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
@@ -313,7 +324,8 @@ def _answer_single_shot(
         purpose="skill_answer",
         model=model,
         system=system,
-        input=_render_history(history) + prd_block + kg_block + f"Question: {question}",
+        input=_render_history(history) + kg_block + f"Question: {question}",
+        user_cacheable_prefix=prd_context or None,
         prompt_version="qa-skill-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=decision.skill_id,

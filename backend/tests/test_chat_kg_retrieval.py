@@ -514,6 +514,83 @@ def test_compose_ask_answer_empty_kg_falls_back_to_corpus_only(
     assert kg_refs == []
 
 
+def test_compose_ask_answer_prd_grounded_skips_kg_and_corpus(
+    isolated_settings, fake_llm
+):
+    """A PRD-grounded ask (prd_context set) must make NO KG retrieval (the
+    embeddings HTTP call + pgvector queries) and NO corpus load — the PRD block
+    IS the grounding, riding the cacheable user prefix. The decision log still
+    records the ask with prd_grounded=True / kg_used=False."""
+    from app import ask_runner
+
+    ds = isolated_settings["data_dir"] / "asurion"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    retrievals, corpus_loads = [], []
+    with patch.object(
+        ask_runner, "_retrieve_kg_bundle",
+        side_effect=lambda eid, q: retrievals.append(q) or None,
+    ), patch.object(
+        ask_runner, "load_corpus",
+        side_effect=lambda d: corpus_loads.append(d) or None,
+    ):
+        ask_runner.compose_ask_answer(
+            "asurion", "What does this PRD say?", enterprise_id="co-1",
+            prd_context="=== CURRENT PRD CONTEXT ===\nThe open PRD body.",
+        )
+
+    assert retrievals == []     # no embeddings/pgvector call
+    assert corpus_loads == []   # no corpus load either
+    call = fake_llm["calls"][0]
+    # The PRD block rides the CACHEABLE prefix, not the uncached user turn.
+    assert call["kwargs"]["user_cacheable_prefix"] == (
+        "=== CURRENT PRD CONTEXT ===\nThe open PRD body."
+    )
+    assert "CURRENT PRD CONTEXT" not in call["user"]
+    assert "What does this PRD say?" in call["user"]
+    rows = (
+        isolated_settings["supabase"].table("agent_decision_log").select("*").execute().data
+    )
+    assert len(rows) == 1
+    factors = rows[0]["factors"]
+    if isinstance(factors, str):
+        factors = json.loads(factors)
+    assert factors["prd_grounded"] is True
+    assert factors["kg_used"] is False
+
+
+def test_compose_ask_answer_prd_prefix_stable_across_turns(
+    isolated_settings, fake_llm
+):
+    """Turns 2+ of the same PRD conversation send a byte-identical cacheable
+    prefix (same PRD content → prompt-cache read); only the question varies in
+    the uncached user turn."""
+    from app import ask_runner
+
+    fake_llm["payload"] = {
+        "answer": "x", "key_points": [], "citations": [], "confidence": 0.5,
+        "unanswered": "",
+    }
+    block = "=== CURRENT PRD CONTEXT ===\nSame PRD content."
+    ask_runner.compose_ask_answer(
+        "asurion", "first question", enterprise_id="co-1", prd_context=block
+    )
+    ask_runner.compose_ask_answer(
+        "asurion", "second question", enterprise_id="co-1", prd_context=block
+    )
+    first, second = fake_llm["calls"]
+    assert (
+        first["kwargs"]["user_cacheable_prefix"]
+        == second["kwargs"]["user_cacheable_prefix"]
+        == block
+    )
+    assert first["user"] != second["user"]
+
+
 # ─────────────────────────── route: POST /v1/ask ───────────────────────────
 
 

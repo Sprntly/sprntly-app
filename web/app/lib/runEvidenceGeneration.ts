@@ -2,31 +2,86 @@ import { evidenceApi } from "./api"
 import { markdownToEvidenceState } from "./evidence-adapter"
 import { sleepUntilNextPoll } from "./poll"
 import { clearPendingJob, insightScope, setPendingJob } from "./jobResume"
+import { subscribeToGenerationStream } from "./streamGeneration"
+import { throttlePartial } from "./runPrdGeneration"
 import type { DetailState, PrdContent } from "../types/content"
 
 export type EvidenceGenResult =
   | { ok: true; evidence: PrdContent }
   | { ok: false; message: string }
 
+/** Optional live-preview callback: the accumulating evidence HTML as it streams. */
+export type OnEvidencePartial = (html: string) => void
+
 const MAX_MS = 6 * 60 * 1000
+
+/** Signals the poll loop that the stream saw its terminal `done` frame, so the
+ *  next status read happens immediately instead of waiting out the 4s tick. */
+type DoneSignal = { fired: boolean; promise: Promise<void> }
 
 /**
  * Poll an already-kicked-off evidence doc by id until terminal. Shared by
  * `runEvidenceGeneration` (calls generate first) and `resumeEvidenceGeneration`
  * (re-enters against a persisted id on remount). Clears the persisted
  * pending-job marker on every terminal exit.
+ *
+ * `onPartial`, when given, opens an SSE token stream alongside the poll and
+ * forwards the accumulating evidence HTML (throttled) for a live preview —
+ * mirrors runPrdGeneration's pollPrdToResult. The poll stays the authoritative
+ * source of the finished doc; the stream only feeds the preview and is always
+ * torn down before returning. The stream's `done` frame also wakes the poll so
+ * `ready` is picked up right away.
  */
 async function pollEvidenceToResult(
   evidenceId: number,
   scope: string | null,
+  onPartial?: OnEvidencePartial,
+): Promise<EvidenceGenResult> {
+  let wakeDone: (() => void) | null = null
+  const done: DoneSignal = {
+    fired: false,
+    promise: new Promise<void>((resolve) => {
+      wakeDone = () => {
+        done.fired = true
+        resolve()
+      }
+    }),
+  }
+  const throttled = onPartial ? throttlePartial(onPartial) : null
+  const stopStream = throttled
+    ? subscribeToGenerationStream((t) => evidenceApi.streamUrl(evidenceId, t), {
+        onDelta: (full) => throttled.push(full),
+        onDone: () => wakeDone?.(),
+      })
+    : () => {}
+  try {
+    return await _pollEvidenceLoop(evidenceId, scope, done)
+  } finally {
+    throttled?.cancel()
+    stopStream()
+  }
+}
+
+async function _pollEvidenceLoop(
+  evidenceId: number,
+  scope: string | null,
+  done?: DoneSignal,
 ): Promise<EvidenceGenResult> {
   let doc = await evidenceApi.get(evidenceId)
   const startedAt = Date.now()
+  let doneConsumed = false
   while (doc.status === "generating" && Date.now() - startedAt < MAX_MS) {
     // Visibility-aware sleep: a backgrounded tab throttles setTimeout to ~1/min,
     // which stalls polling though the server-side evidence job finishes.
-    // Refocusing wakes immediately and re-reads the real status.
-    await sleepUntilNextPoll(4000)
+    // Refocusing wakes immediately and re-reads the real status. The stream's
+    // `done` frame also wakes the sleep (consumed after one use — a status read
+    // lagging the frame falls back to plain ticks instead of a hot loop).
+    if (done && !doneConsumed) {
+      await Promise.race([sleepUntilNextPoll(4000), done.promise])
+      if (done.fired) doneConsumed = true
+    } else {
+      await sleepUntilNextPoll(4000)
+    }
     doc = await evidenceApi.get(evidenceId)
   }
   if (scope) clearPendingJob("evidence", "_", scope)
@@ -54,6 +109,7 @@ async function pollEvidenceToResult(
 export async function runEvidenceGeneration(
   meta: DetailState["meta"],
   opts?: { force?: boolean },
+  onPartial?: OnEvidencePartial,
 ): Promise<EvidenceGenResult> {
   if (!meta) {
     return { ok: false, message: "Open this evidence from the brief first." }
@@ -74,7 +130,7 @@ export async function runEvidenceGeneration(
   }
   const scope = insightScope(meta.briefId, meta.insightIndex)
   setPendingJob("evidence", "_", scope, start.evidence_id)
-  return pollEvidenceToResult(start.evidence_id, scope)
+  return pollEvidenceToResult(start.evidence_id, scope, onPartial)
 }
 
 /**
@@ -85,9 +141,10 @@ export async function runEvidenceGeneration(
 export async function resumeEvidenceGeneration(
   evidenceId: number,
   meta: DetailState["meta"],
+  onPartial?: OnEvidencePartial,
 ): Promise<EvidenceGenResult> {
   const scope = meta ? insightScope(meta.briefId, meta.insightIndex) : null
-  return pollEvidenceToResult(evidenceId, scope)
+  return pollEvidenceToResult(evidenceId, scope, onPartial)
 }
 
 /** Read-only sibling of runEvidenceGeneration: fetch the EXISTING evidence for a

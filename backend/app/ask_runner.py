@@ -127,7 +127,10 @@ def compose_ask_answer(
     graph (#18 — chat answers from the brain, not only the markdown corpus).
 
     Flow:
-      - Always load the dataset corpus (cacheable prefix; unchanged grounding).
+      - PRD-grounded asks (`prd_context` set — PRD-tab chat) skip BOTH the
+        corpus load and the KG retrieval: the PRD context block is the
+        grounding and rides the cacheable user prefix (see inline comment).
+      - Otherwise, load the dataset corpus (cacheable prefix; unchanged grounding).
       - If a tenant (`enterprise_id`) is resolvable AND its KG has relevant
         signals/entities, retrieve a ranked, budget-capped context bundle and
         inject it as a "LIVE CONTEXT FROM CONNECTED SOURCES" section, with the KG-aware
@@ -138,31 +141,44 @@ def compose_ask_answer(
 
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
-    corpus = load_corpus(dataset)
-    cacheable = f"Source material:\n\n{corpus.joined()}" if corpus.docs else None
-
-    bundle = _retrieve_kg_bundle(enterprise_id, question)
-
-    if bundle:
-        from app.graph.retrieval import render_context_section
-
-        system = ASK_SYSTEM + ASK_SYSTEM_KG_ADDENDUM
-        user = ASK_USER_TEMPLATE_WITH_KG.format(
-            kg_context=render_context_section(bundle), question=question
-        )
-    else:
-        system = ASK_SYSTEM
-        user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
-
-    # PRD-tab chat: the open PRD (+ insight/evidence/tickets/prototype) rides
-    # above the question so "this PRD" asks see the document. Kept OUT of the
-    # cacheable corpus prefix — it varies per PRD (and per applied patch), so
-    # folding it in would fragment the corpus prompt-cache for plain asks.
     if prd_context:
+        # PRD-grounded ask (PRD-tab chat): the PRD context block (PRD + insight
+        # + evidence + tickets + prototype, ~26K tokens) dominates the prompt
+        # and IS the grounding — skip both the corpus load and the KG retrieval
+        # (an OpenAI embeddings HTTP call + pgvector queries, ~0.5-1s serial)
+        # entirely.
+        #
+        # The block rides the CACHEABLE user prefix, not plain `input`: it is
+        # byte-stable across turns of the same PRD conversation (same PRD
+        # content → same string), so turn 1 pays one cache write and turns 2+
+        # cache-read the whole block instead of re-prefilling it. History and
+        # the question stay in the uncached `user` suffix. The old concern
+        # about keeping per-PRD text out of the cacheable prefix was about
+        # fragmenting the SHARED corpus prefix for plain asks — it doesn't
+        # apply here, because this prefix replaces the corpus one and exists
+        # only for PRD-grounded asks.
         from app.prompts import ASK_SYSTEM_PRD_ADDENDUM
 
-        system = system + ASK_SYSTEM_PRD_ADDENDUM
-        user = f"{prd_context}\n\n---\n\n{user}"
+        bundle = None
+        system = ASK_SYSTEM + ASK_SYSTEM_PRD_ADDENDUM
+        user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
+        cacheable = prd_context
+    else:
+        corpus = load_corpus(dataset)
+        cacheable = f"Source material:\n\n{corpus.joined()}" if corpus.docs else None
+
+        bundle = _retrieve_kg_bundle(enterprise_id, question)
+
+        if bundle:
+            from app.graph.retrieval import render_context_section
+
+            system = ASK_SYSTEM + ASK_SYSTEM_KG_ADDENDUM
+            user = ASK_USER_TEMPLATE_WITH_KG.format(
+                kg_context=render_context_section(bundle), question=question
+            )
+        else:
+            system = ASK_SYSTEM
+            user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
     # Bind the tenant's own Claude key (when configured) for this direct
     # (non-gateway) answer call. See app.llm_keys.

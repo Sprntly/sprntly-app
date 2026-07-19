@@ -521,7 +521,9 @@ def test_ask_with_prd_id_grounds_answer_on_prd(
     tenant_client, isolated_settings, fake_llm
 ):
     """The LLM prompt for a PRD-tab ask carries the CURRENT PRD CONTEXT block
-    with the PRD body and its source insight."""
+    with the PRD body and its source insight — riding the CACHEABLE user
+    prefix (byte-stable across turns → prompt-cache reads), with the question
+    kept in the uncached user suffix."""
     t = tenant_client.make(slug="acme")
     _seed_corpus(isolated_settings["data_dir"], dataset="acme")
     _seed_prd(
@@ -540,10 +542,14 @@ def test_ask_with_prd_id_grounds_answer_on_prd(
     body = _poll_ask(t.client, start["ask_id"])
     assert body["status"] == "ready"
     assert len(fake_llm["calls"]) == 1
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert "CURRENT PRD CONTEXT" in prefix
+    assert "Users need CSV export." in prefix
+    assert "Top insight" in prefix
+    # The question stays in the uncached suffix; the PRD block does NOT.
     prompt = fake_llm["calls"][0]["user"]
-    assert "CURRENT PRD CONTEXT" in prompt
-    assert "Users need CSV export." in prompt
-    assert "Top insight" in prompt
+    assert "What is the biggest churn driver?" in prompt
+    assert "CURRENT PRD CONTEXT" not in prompt
     # The job row records the grounding PRD (mirrors conversation_id).
     row = db.get_ask_job(start["ask_id"])
     assert row["prd_id"] == 402

@@ -508,6 +508,16 @@ export const evidenceApi = {
       force,
     }),
   get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
+  /** SSE URL to token-stream an evidence doc's generation as it's written.
+   *  Mirrors prdApi.streamUrl: the bearer rides as ?token= (EventSource can't
+   *  set headers). Frames: {kind:'delta',text} then a terminal
+   *  {kind:'done'|'error'}. Progressive display only — evidenceApi.get(id)
+   *  stays the authoritative finished doc. */
+  streamUrl: (evidenceId: number, token: string): string =>
+    `${API_URL}/v1/evidence/${evidenceId}/stream?token=${encodeURIComponent(token)}` +
+    (activeWorkspaceId
+      ? `&workspace_id=${encodeURIComponent(activeWorkspaceId)}`
+      : ""),
   /** Read the latest evidence for a brief insight (ready or in-flight), or null.
    *  Lets the Evidence tab populate for the insight whose PRD is being viewed /
    *  generated — a pure read, never kicks off generation. Swallows 404→null. */

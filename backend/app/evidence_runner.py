@@ -36,7 +36,12 @@ logger = logging.getLogger(__name__)
 AGENT = "evidence"
 
 
-def _run_sync(evidence_id: int, brief_id: int, insight_index: int) -> None:
+def _run_sync(
+    evidence_id: int, brief_id: int, insight_index: int, on_delta=None
+) -> None:
+    # `on_delta(text)` — optional; forwards each HTML text delta as it streams
+    # (threaded through from the KG runner's fallback so the corpus path
+    # streams over the same `evidence:<id>` channel — see app.graph.token_stream).
     brief = get_brief_by_id(brief_id)
     if not brief:
         raise RuntimeError(f"brief_id={brief_id} not found")
@@ -69,6 +74,7 @@ def _run_sync(evidence_id: int, brief_id: int, insight_index: int) -> None:
         # evidence-brief is a registered long-output skill, so the gateway
         # streams on the long read timeout (the HTML brief is a big generation).
         skill="evidence-brief",
+        on_delta=on_delta,
     )
     raw = result.output if isinstance(result.output, str) else str(result.output)
     # Strip any ```html code fence the model added so the stored payload is raw HTML.
