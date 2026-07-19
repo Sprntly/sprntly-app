@@ -335,17 +335,39 @@ def test_script_skill_uses_tool_loop_not_single_shot(monkeypatch):
     assert loop_calls["tools"][0]["name"] == "prioritize_score"
 
 
-# ── CIR confirm gate ──────────────────────────────────────────────────────────
+# ── CIR runs on a fresh route (no confirm gate) ───────────────────────────────
 
-def test_cost_gated_skill_returns_confirmation(monkeypatch):
+def test_cir_slash_generates_report(monkeypatch):
+    """A fresh /competitive-intelligence-review ask runs the skill and returns a
+    real answer — no needs_confirmation interstitial (the old confirm gate was
+    never consumed by any UI, so it rendered as an empty message)."""
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     out = qa.answer(
         enterprise_id="ent",
         question="/competitive-intelligence-review Linear, Jira, Asana",
         dataset="acme",
     )
-    assert out["type"] == "needs_confirmation"
-    assert out["skill"] == "competitive-intelligence-review"
-    assert {o["id"] for o in out["options"]} == {"quick", "full"}
+    assert out.get("type") != "needs_confirmation"
+    assert out["_skill"] == "competitive-intelligence-review"
+    assert out["answer"] == "ok"
+    assert captured["model"] == qa.HEAVY_MODEL  # CIR is heavy → opus
+
+
+def test_cir_regex_route_generates_report(monkeypatch):
+    """The natural phrasing ('competitor analysis…') regex-routes to CIR and
+    also runs it directly."""
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+    out = qa.answer(
+        enterprise_id="ent",
+        question="run a competitor analysis for my product",
+        dataset="acme",
+    )
+    assert out["_skill"] == "competitive-intelligence-review"
+    assert out["_skill_source"] == "regex"
+    assert out["answer"] == "ok"
+    assert captured["skill"] == "competitive-intelligence-review"
 
 
 def test_verify_pass_off_by_default(monkeypatch):
@@ -370,7 +392,7 @@ def test_verify_pass_when_enabled_annotates(monkeypatch):
     assert "fact_check" in calls
 
 
-def test_cost_gated_skill_runs_when_pinned(monkeypatch):
+def test_cir_runs_when_pinned(monkeypatch):
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     out = qa.answer(
