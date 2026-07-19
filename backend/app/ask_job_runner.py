@@ -36,6 +36,7 @@ def _run_sync(
     dataset: str,
     history: list[dict],
     pinned_skill: str | None,
+    prd_id: int | None,
 ) -> None:
     payload = qa_agent.answer(
         enterprise_id=enterprise_id,
@@ -43,6 +44,7 @@ def _run_sync(
         dataset=dataset,
         history=history,
         pinned_skill=pinned_skill,
+        prd_id=prd_id,
     )
     # Append-only analytics log, same as the old inline path.
     try:
@@ -65,6 +67,7 @@ async def run_ask_job(
     dataset: str,
     history: list[dict] | None = None,
     pinned_skill: str | None = None,
+    prd_id: int | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
     result. A failure marks the row `error` and is swallowed — the worker never
@@ -79,6 +82,7 @@ async def run_ask_job(
             dataset,
             history or [],
             pinned_skill,
+            prd_id,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)
     except Exception as exc:  # noqa: BLE001 — best-effort; never crash the worker

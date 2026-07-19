@@ -350,3 +350,43 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await waitFor(() => expect(panelProbe()).toBe("prd"))
   })
 })
+
+describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
+  const READY: PrdTabRequest = {
+    title: "PRD · Ready doc",
+    source: { kind: "ready", prd: { prd_id: 5, title: "Ready doc", metaLine: "", sections: [] } as never, meta: null },
+  }
+
+  async function sendInThread(text: string) {
+    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
+    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => { fireEvent.click(sendBtn) })
+  }
+
+  it("sends the tab's prd_id with the ask so the backend grounds on the PRD", async () => {
+    renderWith(READY)
+    await clickOpenPrd()
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    await sendInThread("What are the success metrics in this PRD?")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+    const opts = runAskGeneration.mock.calls[0][3] as { prd_id?: number }
+    expect(opts?.prd_id).toBe(5)
+  })
+
+  it("a plain chat tab sends no prd_id (unchanged request shape)", async () => {
+    renderWith(READY)
+    // New plain chat tab, no PRD attached.
+    await act(async () => { fireEvent.click(tabBar().getByLabelText("New chat")) })
+    await waitFor(() => expect(tabBar().getByText("New chat")).toBeTruthy())
+    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => { fireEvent.change(textarea, { target: { value: "What changed last week?" } }) })
+    const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => { fireEvent.click(sendBtn) })
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+    const opts = runAskGeneration.mock.calls[0][3] as { prd_id?: number } | undefined
+    expect(opts?.prd_id).toBeUndefined()
+  })
+})

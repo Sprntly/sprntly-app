@@ -121,6 +121,7 @@ def compose_ask_answer(
     question: str,
     *,
     enterprise_id: str | None = None,
+    prd_context: str = "",
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
     graph (#18 — chat answers from the brain, not only the markdown corpus).
@@ -153,6 +154,16 @@ def compose_ask_answer(
         system = ASK_SYSTEM
         user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
+    # PRD-tab chat: the open PRD (+ insight/evidence/tickets/prototype) rides
+    # above the question so "this PRD" asks see the document. Kept OUT of the
+    # cacheable corpus prefix — it varies per PRD (and per applied patch), so
+    # folding it in would fragment the corpus prompt-cache for plain asks.
+    if prd_context:
+        from app.prompts import ASK_SYSTEM_PRD_ADDENDUM
+
+        system = system + ASK_SYSTEM_PRD_ADDENDUM
+        user = f"{prd_context}\n\n---\n\n{user}"
+
     # Bind the tenant's own Claude key (when configured) for this direct
     # (non-gateway) answer call. See app.llm_keys.
     from app.llm_keys import company_llm_key
@@ -180,6 +191,7 @@ def compose_ask_answer(
                     "dataset": dataset,
                     "question": question,
                     "kg_used": bool(bundle),
+                    "prd_grounded": bool(prd_context),
                     "kg_signals": len(bundle["signals"]) if bundle else 0,
                     "kg_themes": len(bundle["themes"]) if bundle else 0,
                 },

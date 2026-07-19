@@ -95,7 +95,12 @@ export async function runAskGeneration(
   question: string,
   company: string,
   tabId: string,
-  opts?: { conversation_id?: number; pinned_skill?: string; isCancelled?: () => boolean },
+  opts?: {
+    conversation_id?: number
+    pinned_skill?: string
+    prd_id?: number
+    isCancelled?: () => boolean
+  },
 ): Promise<AskResponse> {
   // A POST failure (4xx/5xx) propagates as-is so the route's error detail
   // (e.g. validation / 404 tenant gate) renders unchanged via runTabAsk.onError.

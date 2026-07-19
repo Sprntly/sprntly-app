@@ -30,7 +30,12 @@ from typing import Optional
 from app.ask_runner import _ASK_RESPONSE_SCHEMA, _retrieve_kg_bundle, compose_ask_answer
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
-from app.prompts import ASK_SYSTEM, ASK_SYSTEM_KG_ADDENDUM, OUT_OF_SCOPE_MESSAGE
+from app.prompts import (
+    ASK_SYSTEM,
+    ASK_SYSTEM_KG_ADDENDUM,
+    ASK_SYSTEM_PRD_ADDENDUM,
+    OUT_OF_SCOPE_MESSAGE,
+)
 from app.skill_router import (
     detect_intent,
     is_call_digest,
@@ -269,13 +274,18 @@ def _kg_grounding(enterprise_id, question) -> tuple[str, bool]:
     return f"{render_context_section(bundle)}\n\n---\n\n", True
 
 
-def _answer_single_shot(decision: RouteDecision, enterprise_id, question, history) -> dict:
+def _answer_single_shot(
+    decision: RouteDecision, enterprise_id, question, history, prd_context: str = ""
+) -> dict:
     """Skill answer via one gateway call (SKILL.md injected by the gateway),
-    grounded on the KG when the tenant's graph has relevant signal."""
+    grounded on the KG when the tenant's graph has relevant signal, and on the
+    open PRD (`prd_context`) for PRD-tab chats."""
     model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
     kg_block, kg_used = _kg_grounding(enterprise_id, question)
+    prd_block = f"{prd_context}\n\n---\n\n" if prd_context else ""
     system = (
         ASK_SYSTEM
+        + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + (ASK_SYSTEM_KG_ADDENDUM if kg_used else "")
         + f"\n\nThe user's question maps to the '{decision.skill_id}' skill. "
         "Follow that skill's method to produce a structured, actionable answer."
@@ -286,7 +296,7 @@ def _answer_single_shot(decision: RouteDecision, enterprise_id, question, histor
         purpose="skill_answer",
         model=model,
         system=system,
-        input=_render_history(history) + kg_block + f"Question: {question}",
+        input=_render_history(history) + prd_block + kg_block + f"Question: {question}",
         prompt_version="qa-skill-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=decision.skill_id,
@@ -332,14 +342,18 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
     return _tag(payload, decision)
 
 
-def _answer_with_script(decision: RouteDecision, enterprise_id, question, history) -> dict:
+def _answer_with_script(
+    decision: RouteDecision, enterprise_id, question, history, prd_context: str = ""
+) -> dict:
     """Skill answer via a tool-use loop so the skill's deterministic script runs
     ON OUR INFRA (app.skills.scripts) instead of the model estimating the math."""
     skill_id = decision.skill_id
     tool = SCRIPT_TOOLS[skill_id]
     spec = get_skill(skill_id)
+    prd_block = f"{prd_context}\n\n---\n\n" if prd_context else ""
     system = (
         ASK_SYSTEM
+        + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + f"\n\n## METHOD (skill: {skill_id})\n{spec.method}\n\n"
         f"You have a tool, `{tool.name}`, that runs the skill's deterministic "
         "script. Call it for the math instead of computing it yourself, then "
@@ -352,7 +366,7 @@ def _answer_with_script(decision: RouteDecision, enterprise_id, question, histor
     meta: dict = {}
     text = run_tool_loop(
         system=system,
-        user=_render_history(history) + f"Question: {question}",
+        user=_render_history(history) + prd_block + f"Question: {question}",
         tools=[tool.as_tool()],
         dispatch=dispatch,
         model=HEAVY_MODEL if skill_id in HEAVY_SKILLS else ANSWER_MODEL,
@@ -421,9 +435,13 @@ def answer(
     dataset: str,
     history: Optional[list[dict]] = None,
     pinned_skill: Optional[str] = None,
+    prd_id: Optional[int] = None,
 ) -> dict:
     """Answer a question via the best skill, or directly. `pinned_skill` skips
-    routing (used when a confirm-gate follow-up has already chosen the skill)."""
+    routing (used when a confirm-gate follow-up has already chosen the skill).
+    `prd_id` marks a PRD-tab ask: the open PRD (+ its insight/evidence/tickets/
+    prototype) is assembled into a grounding block so "this PRD" questions
+    actually see the document."""
     # On-demand call digest: "summarize the customer calls from last week" needs a
     # LIVE fetch of every call in a window + a VoC pass over the complete corpus.
     # The generic router would misroute it (e.g. → interview-synthesis) and answer
@@ -473,10 +491,20 @@ def answer(
     if decision.source == "out_of_scope":
         return _out_of_scope_payload()
 
+    # PRD-tab grounding, shared by the direct and skill paths. Best-effort:
+    # build_prd_context returns '' on any failure, degrading to a plain ask.
+    prd_context = ""
+    if prd_id:
+        from app.prd_context import build_prd_context
+
+        prd_context = build_prd_context(enterprise_id, prd_id)
+
     if not decision.skill_id:
         # Direct path — corpus + KG, unchanged. Fold history into the question.
         q = _render_history(history) + question if history else question
-        return compose_ask_answer(dataset, q, enterprise_id=enterprise_id)
+        return compose_ask_answer(
+            dataset, q, enterprise_id=enterprise_id, prd_context=prd_context
+        )
 
     # Cost-gated skill freshly routed → ask before spending (CIR). A pinned
     # follow-up has already confirmed, so it runs.
@@ -492,7 +520,11 @@ def answer(
             return _maybe_verify(voc, enterprise_id)
 
     if decision.skill_id in SCRIPT_TOOLS:
-        payload = _answer_with_script(decision, enterprise_id, question, history)
+        payload = _answer_with_script(
+            decision, enterprise_id, question, history, prd_context=prd_context
+        )
     else:
-        payload = _answer_single_shot(decision, enterprise_id, question, history)
+        payload = _answer_single_shot(
+            decision, enterprise_id, question, history, prd_context=prd_context
+        )
     return _maybe_verify(payload, enterprise_id)

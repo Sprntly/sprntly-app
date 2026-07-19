@@ -234,7 +234,7 @@ def test_answer_direct_path(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id: {
+        lambda dataset, q, *, enterprise_id, prd_context="": {
             "answer": "generic", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -382,3 +382,78 @@ def test_cost_gated_skill_runs_when_pinned(monkeypatch):
     assert out.get("type") != "needs_confirmation"
     assert out["_skill"] == "competitive-intelligence-review"
     assert captured["model"] == qa.HEAVY_MODEL  # CIR is heavy → opus
+
+
+# ── PRD-tab grounding (prd_id) ───────────────────────────────────────────────
+
+def test_answer_prd_id_grounds_skill_answer(monkeypatch):
+    """A PRD-tab ask routed to a skill carries the CURRENT PRD CONTEXT block in
+    the gateway input and the PRD addendum in the system prompt."""
+    calls = []
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: calls.append(k) or _answer_out()
+    )
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod,
+        "build_prd_context",
+        lambda ent, prd_id: f"=== CURRENT PRD CONTEXT ===\nprd {prd_id} for {ent}",
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="anything", dataset="acme",
+        pinned_skill="roadmap", prd_id=7,
+    )
+    assert out["answer"] == "ok"
+    answer_call = calls[-1]
+    assert "CURRENT PRD CONTEXT" in answer_call["input"]
+    assert "prd 7 for ent" in answer_call["input"]
+    assert "CURRENT PRD CONTEXT" in answer_call["system"]
+
+
+def test_answer_prd_id_grounds_direct_answer(monkeypatch):
+    """Router → none: the direct compose_ask_answer path receives the block via
+    prd_context (kept out of the question so decision-log text stays small)."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # router → none
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context", lambda ent, prd_id: "THE PRD BLOCK"
+    )
+    seen = {}
+
+    def _compose(dataset, q, *, enterprise_id, prd_context=""):
+        seen.update(question=q, prd_context=prd_context)
+        return {"answer": "generic", "key_points": [], "citations": [],
+                "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _compose)
+    out = qa.answer(
+        enterprise_id="ent", question="what changed", dataset="acme", prd_id=7
+    )
+    assert out["answer"] == "generic"
+    assert seen["prd_context"] == "THE PRD BLOCK"
+    assert "THE PRD BLOCK" not in seen["question"]
+
+
+def test_answer_prd_context_failure_degrades_to_plain_ask(monkeypatch):
+    """build_prd_context returning '' (missing prd, foreign tenant, read error)
+    must not break the answer — the ask runs exactly as a plain chat."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context", lambda ent, prd_id: ""
+    )
+    monkeypatch.setattr(
+        qa,
+        "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="": {
+            "answer": "plain", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="what changed", dataset="acme", prd_id=404
+    )
+    assert out["answer"] == "plain"
