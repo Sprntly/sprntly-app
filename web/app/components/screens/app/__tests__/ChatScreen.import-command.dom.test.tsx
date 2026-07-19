@@ -23,10 +23,11 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { briefCurrent, importDoc, extractFile } = vi.hoisted(() => ({
+const { briefCurrent, importDoc, extractFile, storiesGenerate } = vi.hoisted(() => ({
   briefCurrent: vi.fn(),
   importDoc: vi.fn(),
   extractFile: vi.fn(),
+  storiesGenerate: vi.fn(),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -46,7 +47,10 @@ vi.mock("../../../../lib/api", () => {
       listInputQuestions: vi.fn().mockResolvedValue([]),
       answerInputQuestion: vi.fn(),
     },
-    storiesApi: { getForPrd: vi.fn().mockResolvedValue({ status: "none", fresh: false, stories: [] }) },
+    storiesApi: {
+      getForPrd: vi.fn().mockResolvedValue({ status: "none", fresh: false, stories: [] }),
+      generate: (...a: unknown[]) => storiesGenerate(...a),
+    },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
@@ -104,7 +108,7 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 }))
 
 import { NavigationProvider, useNavigation } from "../../../../context/NavigationContext"
-import { ContentProvider } from "../../../../context/ContentContext"
+import { ContentProvider, useContent } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
 // The ContentPanel itself renders in AppShell (outside this test's tree), so
@@ -112,6 +116,13 @@ import { ChatScreen } from "../ChatScreen"
 function PanelProbe() {
   const { contentPanelTab } = useNavigation()
   return React.createElement("div", { "data-testid": "panel-probe" }, contentPanelTab ?? "closed")
+}
+
+// Likewise observe the shared content state's live-preview field — the PRD
+// panel (in AppShell) renders whatever lands here during generation.
+function PartialProbe() {
+  const { content } = useContent()
+  return React.createElement("div", { "data-testid": "partial-probe" }, content.prdPartialHtml ?? "")
 }
 
 function renderChat() {
@@ -124,6 +135,7 @@ function renderChat() {
         null,
         React.createElement(ChatScreen),
         React.createElement(PanelProbe),
+        React.createElement(PartialProbe),
       ),
     ),
   )
@@ -159,6 +171,8 @@ beforeEach(() => {
   resumePrdGeneration.mockClear()
   importDoc.mockReset()
   importDoc.mockResolvedValue({ prd_id: 42, status: "generating", title: "Imported PRD" })
+  storiesGenerate.mockReset()
+  storiesGenerate.mockResolvedValue({ job_id: 1, status: "generating" })
   extractFile.mockReset()
   extractFile.mockResolvedValue({ name: "Fraznet Enhancements.pptx", markdown: "## Slide 1\n\nFraznet MRT workflow" })
   briefCurrent.mockReset()
@@ -174,8 +188,12 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
 
     // Uploaded the ORIGINAL file to the import endpoint for the active company…
     await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
-    // …polled the already-kicked-off import to ready…
-    await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined))
+    // …polled the already-kicked-off import to ready (third arg = live-preview
+    // onPartial callback)…
+    await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined, expect.any(Function)))
+    // …kicked the ticket generation immediately (fire-and-forget; the Tickets
+    // tab's poll picks the job up — no cache-read→generate round-trip first)…
+    await waitFor(() => expect(storiesGenerate).toHaveBeenCalledWith(42))
     // …and switched the content panel to the Tickets tab once the PRD landed.
     await waitFor(() => expect(panelTab()).toBe("tickets"))
     // Never a question for the ask agent, never the brief-insight PRD flow.
@@ -216,13 +234,34 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     await typeAndSend("generate a PRD from this")
 
     await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
-    await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined))
-    // The panel stays on the PRD tab — the user asked for a PRD, not tickets.
+    await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined, expect.any(Function)))
+    // The panel stays on the PRD tab — the user asked for a PRD, not tickets —
+    // and no ticket generation is kicked off.
     await waitFor(() => expect(panelTab()).toBe("prd"))
+    expect(storiesGenerate).not.toHaveBeenCalled()
     // The doc replaces the brief-insight source; the old flow must not also run.
     expect(briefCurrent).not.toHaveBeenCalled()
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("threads streamed partial HTML from the generation into shared content state", async () => {
+    // Capture the onPartial callback ChatScreen passes to the poller and keep
+    // the generation in flight, then emit a partial and observe it land in the
+    // shared content state the PRD panel renders from.
+    let capturedOnPartial: ((html: string) => void) | null = null
+    resumePrdGeneration.mockImplementationOnce((...args: unknown[]) => {
+      capturedOnPartial = args[2] as (html: string) => void
+      return new Promise(() => {})
+    })
+    renderChat()
+    await attachDoc()
+    await typeAndSend("Convert this PRD into tickets")
+
+    await waitFor(() => expect(capturedOnPartial).toBeTruthy())
+    await act(async () => { capturedOnPartial!("<!doctype html><h1>Draft PRD</h1>") })
+    expect(document.querySelector('[data-testid="partial-probe"]')?.textContent)
+      .toContain("Draft PRD")
   })
 
   it("a tickets phrasing with NO document falls through to the ask agent", async () => {

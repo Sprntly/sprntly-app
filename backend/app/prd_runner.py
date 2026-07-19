@@ -36,6 +36,7 @@ hard-fails.
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 
@@ -700,6 +701,23 @@ async def generate_prd(
 
 # ── on-demand Implementation Spec (Part B) ───────────────────────────────────
 
+# Per-PRD single-flight locks for `ensure_impl_spec`. Two schedulers can race a
+# cache-miss for the SAME prd (the post-Part-A warm and the ticket route's
+# warm-on-generate), and without a lock both would run the full 16K-token Part B
+# call concurrently — pure duplicate spend that also holds an LLM-gate slot the
+# ticket fan-out wants. The loser blocks on the lock, then re-reads the cache
+# and returns the winner's spec. Locks are keyed by int prd_id and never
+# removed — a few hundred bytes per PRD ever warmed in this process, bounded in
+# practice by process restarts.
+_IMPL_SPEC_LOCKS: dict[int, threading.Lock] = {}
+_IMPL_SPEC_LOCKS_GUARD = threading.Lock()
+
+
+def _impl_spec_lock(prd_id: int) -> threading.Lock:
+    with _IMPL_SPEC_LOCKS_GUARD:
+        return _IMPL_SPEC_LOCKS.setdefault(prd_id, threading.Lock())
+
+
 def ensure_impl_spec(
     prd_id: int, *, background: bool = False, ctx: dict | None = None
 ) -> dict:
@@ -730,6 +748,19 @@ def ensure_impl_spec(
 
     Returns {"llm_part": <markdown>, "cached": <bool>}.
     """
+    # Single-flight: concurrent cache-miss callers for the same prd collapse to
+    # one generation; losers wait on the lock, then re-read the cache and return
+    # the winner's spec.
+    with _impl_spec_lock(prd_id):
+        return _ensure_impl_spec_locked(prd_id, background=background, ctx=ctx)
+
+
+def _ensure_impl_spec_locked(
+    prd_id: int, *, background: bool, ctx: dict | None
+) -> dict:
+    """Body of `ensure_impl_spec`; the caller holds the per-PRD single-flight
+    lock, so the cache check → generate → persist sequence below is atomic per
+    prd_id."""
     row = get_prd_rendered(prd_id)  # human PRD as the user sees it (patches folded)
     if row is None:
         raise RuntimeError(f"prd_id={prd_id} not found")

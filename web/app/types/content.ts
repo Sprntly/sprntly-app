@@ -619,6 +619,12 @@ export interface AppContentState {
    *  immediately and flips this on, so the PRD always surfaces on the right —
    *  never only as a bottom chat message. */
   prdGenerating: boolean
+  /** Live streaming preview: the accumulating Part A HTML forwarded from the
+   *  in-flight PRD generation's SSE stream (already throttled inside
+   *  runPrdGeneration). Rendered by PrdPanelContent while `prdGenerating` and
+   *  no `prd` has landed yet; every generation start resets it to null so a
+   *  previous run's preview can never bleed into a new one. */
+  prdPartialHtml: string | null
   /** Generated Evidence Page doc — shares the `PrdContent` base shape (markdown
    *  sections with tables and `chart` blocks) so it can reuse the markdown
    *  adapter. Evidence carries its own `evidence_id` on the wire and never a

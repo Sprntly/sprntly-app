@@ -118,7 +118,8 @@ describe("ContentPanel — Report tab", () => {
     const btn = screen.getByTestId("report-footer-prd-cta") as HTMLButtonElement
     expect(btn.disabled).toBe(false)
     fireEvent.click(btn)
-    expect(prdGenMock.runPrdGeneration).toHaveBeenCalledWith({ briefId: 1, insightIndex: 0 })
+    // Second arg is the live-preview onPartial callback (streams partial HTML).
+    expect(prdGenMock.runPrdGeneration).toHaveBeenCalledWith({ briefId: 1, insightIndex: 0 }, expect.any(Function))
     expect(navMock.openContentPanel).toHaveBeenCalledWith("prd")
   })
 

@@ -73,18 +73,24 @@ export function DetailScreen() {
       return
     }
     setGeneratingPrd(true)
+    // Open the rail immediately with the live streaming preview — the PRD
+    // renders as its Part A HTML arrives instead of hiding behind the button
+    // spinner for the whole generation.
+    setContent({ prd: null, prdMeta: d.meta, prdGenerating: true, prdPartialHtml: null })
+    openContentPanel("prd")
     try {
-      const result = await runPrdGeneration(d.meta)
+      const result = await runPrdGeneration(d.meta, (html) => setContent({ prdPartialHtml: html }))
       if (!result.ok) {
+        setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", result.message.slice(0, 200))
         return
       }
       // Persist the source pointer so the PRD rail can refetch / regenerate
-      // against the same brief insight, then open it in the content panel
-      // (same rail card as Evidence — no separate PRD page).
-      setContent({ prd: result.prd, prdMeta: d.meta })
-      openContentPanel("prd")
+      // against the same brief insight (same rail card as Evidence — no
+      // separate PRD page).
+      setContent({ prd: result.prd, prdMeta: d.meta, prdGenerating: false, prdPartialHtml: null })
     } catch (e) {
+      setContent({ prdGenerating: false, prdPartialHtml: null })
       const msg = e instanceof Error ? e.message : String(e)
       showToast("PRD generation failed", msg.slice(0, 200))
     } finally {

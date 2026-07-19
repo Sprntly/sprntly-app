@@ -50,6 +50,7 @@ const EMPTY: AppContentState = {
   prd: null,
   prdMeta: null,
   prdGenerating: false,
+  prdPartialHtml: null,
   evidence: null,
   evidenceGenerating: false,
   report: null,

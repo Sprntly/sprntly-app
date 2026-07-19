@@ -350,3 +350,26 @@ def test_generate_user_stories_honors_strategy(isolated_settings, monkeypatch):
 
     assert [s.title for s in stories] == ["X"]
     assert PLAN_PROMPT_VERSION in seen, "fanout strategy reached the plan leg"
+
+
+def test_fanout_prd_rides_cacheable_prefix(isolated_settings, monkeypatch):
+    """Plan and every enrich call send the PRD via `user_cacheable_prefix` (one
+    prompt-cached copy, identical across enrich batches) — never inline in
+    `input`, which carries only the roster + batch stubs."""
+    titles = [f"T{i}" for i in range(6)]
+    calls: list[dict] = []
+    monkeypatch.setattr(gen, "llm_call", _fake_llm(titles, record=calls))
+
+    generate_from_input(
+        "ent-A", prd_input="PRD body", strategy="fanout",
+        batch_size=2, max_parallel=3,
+    )
+
+    plan_calls = [c for c in calls if c["prompt_version"] == PLAN_PROMPT_VERSION]
+    enrich_calls = [c for c in calls if c["prompt_version"] == ENRICH_PROMPT_VERSION]
+    assert len(plan_calls) == 1 and len(enrich_calls) == 3
+    for c in plan_calls + enrich_calls:
+        assert c["user_cacheable_prefix"] == "PRD body"
+        assert "PRD body" not in c["input"]
+    # Cache sharing requires the enrich prefixes to be byte-identical.
+    assert len({c["user_cacheable_prefix"] for c in enrich_calls}) == 1
