@@ -298,6 +298,139 @@ def _run_sync_kg(
     complete_evidence(evidence_id=evidence_id, title=title, md=html)
 
 
+# ── Chat-task evidence (the "generate a PRD for <need>" path) ────────────────
+# The task has no theme/hypothesis to walk, so the trail comes from SEMANTIC
+# retrieval over the KG (graph.retrieval.task_evidence_trail — the same
+# embedding search the Ask path uses over ingested connector signals). Policy:
+# evidence is generated ONLY when retrieval finds signals; with no backing the
+# doc is skipped entirely (no row → no Evidence tab), never corpus-invented.
+
+
+def _run_sync_task(evidence_id: int, insight: dict, trail_signals: list[dict],
+                   enterprise_id: str, kg_refs: list[str]) -> None:
+    """Inner worker for a chat-task evidence doc: render the retrieved signals
+    through the SAME evidence-brief skill call the insight path uses."""
+    trail = [
+        {
+            "signal_id": s.get("signal_id"),
+            "content": s.get("content"),
+            "kind": s.get("kind"),
+            "source_type": s.get("source_type"),
+            "provenance": s.get("provenance"),
+            "confidence": s.get("confidence"),
+            "weight": s.get("rank"),
+            "edge": "RETRIEVED",
+        }
+        for s in trail_signals
+    ]
+    user = EVIDENCE_KG_USER_TEMPLATE.format(
+        insight_json=json.dumps(insight, indent=2),
+        evidence_trail=_render_trail(trail),
+    )
+    result = llm_call(
+        enterprise_id=enterprise_id,
+        agent=AGENT,
+        purpose="generate_evidence",
+        prompt_version=EVIDENCE_KG_PROMPT_VERSION,
+        system=EVIDENCE_KG_SYSTEM,
+        input=user,
+        skill="evidence-brief",
+    )
+    raw = result.output if isinstance(result.output, str) else str(result.output)
+    html = strip_code_fence(raw)
+    html = inject_canonical_css(html, get_skill("evidence-brief").assets["evidence.css"])
+
+    log_agent_decision(
+        enterprise_id=enterprise_id,
+        agent=AGENT,
+        decision_type="generate_evidence",
+        factors={
+            "task": insight.get("query"),
+            "signal_count": len(trail),
+            "source_types": sorted({t["source_type"] for t in trail if t.get("source_type")}),
+            "prompt_version": EVIDENCE_KG_PROMPT_VERSION,
+            "grounding": "kg_retrieval",
+        },
+        reasoning=(
+            f"Chat-task evidence grounded in {len(trail)} retrieved signals for "
+            f"task {insight.get('title')!r}."
+        ),
+        output={"insight_title": insight.get("title")},
+        model=result.model,
+        prompt_version=result.prompt_version,
+        kg_refs=kg_refs,
+    )
+    complete_evidence(
+        evidence_id=evidence_id,
+        title=insight.get("title") or "Chat task",
+        md=html,
+    )
+
+
+async def generate_task_evidence(
+    brief_id: int,
+    insight: dict,
+    theme_id: str,
+    *,
+    template_version: int | None = None,
+    variant: str = "v1",
+) -> None:
+    """Generate the Evidence artifact for a chat-task PRD, IF the KG backs it.
+
+    Retrieval-first: embed the task (insight['query']) and search the KG's
+    themes + connector signals. No matching signals → SKIP entirely (no row is
+    created, the Evidence tab stays hidden). With backing: find-or-create by
+    (brief_id, theme_id) — re-issuing the same task reuses the existing doc —
+    then render the doc from the retrieved trail. Best-effort throughout; a
+    failure marks the row failed and never disturbs the PRD generation running
+    in parallel."""
+    from app.db.evidences import find_existing_evidence_for_theme, start_evidence
+    from app.graph.retrieval import task_evidence_trail
+
+    evidence_id: int | None = None
+    try:
+        brief = get_brief_by_id(brief_id)
+        if not brief:
+            logger.info("task evidence: brief_id=%s not found — skipping", brief_id)
+            return
+        enterprise_id, _slug = resolve_company(brief.get("dataset", "asurion"))
+        if not enterprise_id:
+            logger.info("task evidence: no company for brief_id=%s — skipping", brief_id)
+            return
+
+        if find_existing_evidence_for_theme(brief_id, theme_id):
+            return  # find-or-create: the doc (ready or in-flight) already exists
+
+        task = insight.get("query") or insight.get("title") or ""
+        trail = await asyncio.to_thread(
+            task_evidence_trail, GraphFacade(), enterprise_id, task
+        )
+        if trail is None:
+            logger.info(
+                "task evidence: no KG backing for task %r — skipping doc",
+                (insight.get("title") or "")[:80],
+            )
+            return
+
+        evidence_id = start_evidence(
+            brief_id=brief_id,
+            insight_index=0,
+            title=insight.get("title") or "Chat task",
+            template_version=template_version,
+            variant=variant,
+            theme_id=theme_id,
+        )
+        await asyncio.to_thread(
+            _run_sync_task, evidence_id, insight, trail["signals"],
+            enterprise_id, trail.get("kg_refs") or [],
+        )
+        logger.info("task evidence generation succeeded evidence_id=%s", evidence_id)
+    except Exception as exc:  # noqa: BLE001 — must never propagate
+        logger.exception("task evidence generation failed (brief_id=%s)", brief_id)
+        if evidence_id is not None:
+            fail_evidence(evidence_id, f"{type(exc).__name__}: {exc}")
+
+
 async def generate_evidence_kg(
     evidence_id: int, brief_id: int, insight_index: int
 ) -> None:

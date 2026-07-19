@@ -56,7 +56,11 @@ from app.db.prds import (
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
-from app.graph.retrieval import insight_evidence_trail, render_evidence_trail_section
+from app.graph.retrieval import (
+    insight_evidence_trail,
+    render_evidence_trail_section,
+    task_evidence_trail,
+)
 from app.html_style import inject_canonical_css
 from app.llm import strip_code_fence
 from app.prompts import PRD_VARIANT, VOICE_GUARD
@@ -266,6 +270,28 @@ def _resolve_grounding(
     return _corpus_grounding(dataset), None
 
 
+def _resolve_task_grounding(dataset: str, task: str) -> tuple[str, dict | None]:
+    """Grounding for a chat-task PRD ("generate a PRD for <need>").
+
+    The task has no theme/hypothesis to walk, so evidence comes from SEMANTIC
+    retrieval over the KG (task_evidence_trail — the same embedding search the
+    Ask path uses, over the ingested connector signals). KG-first: a non-empty
+    trail grounds the PRD in real signals (and carries kg_refs into the decision
+    log); only when the KG yields nothing does it fall back to the corpus."""
+    company_id = company_id_for_slug(dataset)
+    if company_id:
+        try:
+            trail = task_evidence_trail(GraphFacade(), company_id, task)
+        except Exception:  # noqa: BLE001 — grounding must never break generation
+            logger.exception(
+                "PRD task grounding failed for slug=%s — corpus fallback", dataset
+            )
+            trail = None
+        if trail is not None:
+            return render_evidence_trail_section(trail), trail
+    return _corpus_grounding(dataset), None
+
+
 # PRD-import framing. The uploaded PRD text is fed as the evidence/source block
 # with an explicit FAITHFUL RE-LAYOUT instruction: the prd-author skill normally
 # authors from signals, but for an import it must restructure existing content,
@@ -354,6 +380,12 @@ def _build_context(
         # it for faithful re-layout and skip KG/corpus grounding (trail=None →
         # empty kg_refs in the decision log).
         evidence, trail = _render_import_source(import_source_md), None
+    elif insight_override is not None and insight_override.get("query"):
+        # Chat-task PRD: the insight carries the user's raw ask in `query`.
+        # Theme/title matching can never resolve a free-typed task, so ground by
+        # semantic retrieval over the task text instead (corpus only when the KG
+        # has nothing relevant).
+        evidence, trail = _resolve_task_grounding(dataset, insight_override["query"])
     elif insight_override is not None:
         evidence, trail = _resolve_grounding(dataset, brief, insight_index, insight)
     else:

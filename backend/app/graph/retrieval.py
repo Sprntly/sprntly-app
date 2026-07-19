@@ -477,6 +477,40 @@ def insight_evidence_trail(
     }
 
 
+def task_evidence_trail(
+    facade: GraphFacade,
+    enterprise_id: str,
+    task: str,
+) -> Optional[dict[str, Any]]:
+    """Best-effort evidence trail for a FREE-TEXT TASK (the chat "generate a
+    PRD for <need>" path) — the task has no theme_id or synthesis-written
+    hypothesis to walk, so evidence is found by SEMANTIC RETRIEVAL instead:
+    `retrieve_context` embeds the task and kNN-matches themes + signals (the
+    ingested connector data), exactly like the Ask path.
+
+    Returns the same trail shape `insight_evidence_trail` produces (so
+    `render_evidence_trail_section` and the kg_refs decision-log plumbing work
+    unchanged), or None when the KG yields nothing / errors — the caller then
+    decides to skip evidence / fall back to the corpus."""
+    try:
+        bundle = retrieve_context(facade, enterprise_id, task)
+    except Exception:  # noqa: BLE001 — retrieval must never break generation
+        logger.exception(
+            "task evidence trail: retrieval failed (enterprise=%s)", enterprise_id
+        )
+        return None
+    if not bundle or bundle.get("empty") or not bundle.get("signals"):
+        return None
+    return {
+        "insight": {"title": task},
+        "theme_id": None,
+        "hypothesis": None,
+        "signals": bundle["signals"],
+        "kg_refs": bundle.get("kg_refs") or [],
+        "empty": False,
+    }
+
+
 def render_evidence_trail_section(trail: dict[str, Any]) -> str:
     """Render an evidence trail into a markdown block the PRD/evidence prompt
     grounds on, under a "KNOWLEDGE GRAPH EVIDENCE" header. Empty trail → "".

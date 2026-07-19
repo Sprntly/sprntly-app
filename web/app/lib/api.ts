@@ -1462,6 +1462,19 @@ export const prdApi = {
    *  poll via prdApi.get(id) until status === 'ready'. */
   generateFromTask: (task: string, force = false) =>
     api.post<PrdStartResponse>("/v1/prd/generate-from-task", { task, force }),
+  /** The Evidence artifact behind a chat-task PRD (generated in parallel with
+   *  the PRD from semantic KG retrieval over the task). Resolves null when the
+   *  PRD isn't chat-sourced OR retrieval found no backing signals and the doc
+   *  was skipped — the Evidence tab stays hidden in either case. May return a
+   *  `generating` row; poll evidenceApi.get(id) until terminal. */
+  evidenceForPrd: async (prdId: number): Promise<EvidenceRecord | null> => {
+    try {
+      return await api.get<EvidenceRecord>(`/v1/prd/${prdId}/evidence`)
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null
+      throw e
+    }
+  },
   /** Import an existing PRD from an uploaded file (PDF/PPT/DOCX/…). The backend
    *  parses it to text and re-lays-it-out into our format via the prd-author
    *  skill. Same fire-and-forget contract as `generate`: returns a prd_id to

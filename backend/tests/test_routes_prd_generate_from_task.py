@@ -193,6 +193,176 @@ def test_generate_from_task_feeds_task_as_insight_override(
     override = captured["insight_override"]
     assert override["title"] == "Dark mode on mobile"
     assert "dark mode on mobile" in override["summary"]
-    # No synthetic theme_id inside the insight — it has no KG backing, so
-    # grounding must take its corpus fallback instead of resolving 'chat:…'.
+    # `query` carries the raw ask — it switches the runner to semantic-retrieval
+    # grounding (prd_runner._resolve_task_grounding).
+    assert override["query"] == "dark mode on mobile"
+    # No synthetic theme_id inside the insight — 'chat:…' must never be walked
+    # as a KG theme.
     assert "theme_id" not in override
+
+
+# ── Semantic-retrieval grounding + the parallel Evidence artifact ────────────
+
+def test_task_grounding_uses_semantic_retrieval(monkeypatch):
+    """An insight carrying `query` grounds via task_evidence_trail (semantic
+    retrieval over the task text), and the trail's signals/kg_refs flow into
+    the build context; without KG backing it falls back to the corpus."""
+    from app import prd_runner
+
+    trail = {
+        "insight": {"title": "dark mode"},
+        "theme_id": None,
+        "hypothesis": None,
+        "signals": [{"signal_id": "s1", "content": "users ask for dark mode",
+                     "kind": "feedback", "source_type": "zendesk",
+                     "provenance": {"source": "ticket-1"}, "confidence": 0.9,
+                     "rank": 1.0}],
+        "kg_refs": ["s1"],
+        "empty": False,
+    }
+    monkeypatch.setattr(prd_runner, "company_id_for_slug", lambda slug: "company-1")
+    monkeypatch.setattr(prd_runner, "task_evidence_trail", lambda f, e, t: trail)
+
+    evidence, got_trail = prd_runner._resolve_task_grounding("acme", "dark mode")
+    assert got_trail is trail
+    assert "users ask for dark mode" in evidence
+
+    # No KG backing → corpus fallback (trail None).
+    monkeypatch.setattr(prd_runner, "task_evidence_trail", lambda f, e, t: None)
+    monkeypatch.setattr(prd_runner, "_corpus_grounding", lambda ds: "CORPUS BLOCK")
+    evidence, got_trail = prd_runner._resolve_task_grounding("acme", "dark mode")
+    assert got_trail is None
+    assert evidence == "CORPUS BLOCK"
+
+
+def _run(coro):
+    import asyncio
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+
+
+def test_generate_task_evidence_skips_without_kg_backing(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """No retrieval hits → NO evidences row at all (the Evidence tab stays
+    hidden) — evidence is never corpus-invented for a chat task."""
+    import app.graph.retrieval as retrieval
+    from app import evidence_kg
+
+    tenant_client.make(slug="acme")
+    brief_id = _save_current_brief(isolated_settings["db"], dataset="acme")
+    monkeypatch.setattr(retrieval, "task_evidence_trail", lambda f, e, t: None)
+
+    insight = {"title": "Dark mode", "summary": "s", "query": "dark mode"}
+    _run(evidence_kg.generate_task_evidence(brief_id, insight, "chat:abc123"))
+
+    rows = (
+        require_client().table("evidences").select("*")
+        .eq("brief_id", brief_id).execute().data
+    )
+    assert rows == []
+
+
+def test_generate_task_evidence_creates_doc_from_retrieved_signals(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """Retrieval hits → an evidences row keyed (brief_id, 'chat:…') is created
+    and completed from the evidence-brief skill call, fed the retrieved trail."""
+    import app.graph.retrieval as retrieval
+    from app import evidence_kg
+    from app.graph.gateway import LLMResult
+
+    tenant_client.make(slug="acme")
+    brief_id = _save_current_brief(isolated_settings["db"], dataset="acme")
+
+    trail = {
+        "insight": {"title": "dark mode"},
+        "theme_id": None,
+        "hypothesis": None,
+        "signals": [{"signal_id": "s1", "content": "users ask for dark mode",
+                     "kind": "feedback", "source_type": "zendesk",
+                     "provenance": {"source": "ticket-1"}, "confidence": 0.9,
+                     "rank": 1.0}],
+        "kg_refs": ["s1"],
+        "empty": False,
+    }
+    monkeypatch.setattr(retrieval, "task_evidence_trail", lambda f, e, t: trail)
+
+    seen_inputs: list[str] = []
+
+    def _fake_llm(**kwargs):
+        seen_inputs.append(kwargs.get("input", ""))
+        return LLMResult(
+            output="<html><style></style><body>evidence</body></html>",
+            model="claude-sonnet-4-6",
+            prompt_version="x+evidence-brief@abc123",
+            input_tokens=1, output_tokens=1, cache_read_input_tokens=0,
+            cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=1,
+            stop_reason="end_turn",
+        )
+
+    monkeypatch.setattr(evidence_kg, "llm_call", _fake_llm)
+
+    insight = {"title": "Dark mode", "summary": "s", "query": "dark mode"}
+    _run(evidence_kg.generate_task_evidence(brief_id, insight, "chat:abc123"))
+
+    rows = (
+        require_client().table("evidences").select("*")
+        .eq("brief_id", brief_id).execute().data
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["theme_id"] == "chat:abc123"
+    assert row["status"] == "ready"
+    assert row["title"] == "Dark mode"
+    # The retrieved signal grounded the skill call.
+    assert seen_inputs and "users ask for dark mode" in seen_inputs[0]
+
+    # Find-or-create: a second run reuses the doc instead of generating again.
+    _run(evidence_kg.generate_task_evidence(brief_id, insight, "chat:abc123"))
+    rows = (
+        require_client().table("evidences").select("*")
+        .eq("brief_id", brief_id).execute().data
+    )
+    assert len(rows) == 1
+
+
+def test_get_prd_evidence_route(tenant_client, isolated_settings):
+    """GET /v1/prd/{id}/evidence: 404 for non-chat PRDs and for chat PRDs whose
+    evidence was skipped; the doc for chat PRDs that have one."""
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    brief_id = _save_current_brief(db_mod, dataset="acme")
+
+    # Non-chat PRD → 404.
+    brief_prd = db_mod.start_prd(
+        brief_id=brief_id, insight_index=0, title="t", template_version=1,
+        variant="v3",
+    )
+    assert t.client.get(f"/v1/prd/{brief_prd}/evidence").status_code == 404
+
+    # Chat PRD without an evidence doc (retrieval skipped) → 404.
+    theme = _chat_task_theme_id("dark mode")
+    chat_prd = db_mod.start_prd(
+        brief_id=brief_id, insight_index=0, title="Dark mode",
+        template_version=1, variant="v3", source="chat", theme_id=theme,
+    )
+    assert t.client.get(f"/v1/prd/{chat_prd}/evidence").status_code == 404
+
+    # With the doc → 200 + the row.
+    from app.db.evidences import start_evidence, complete_evidence
+
+    ev_id = start_evidence(
+        brief_id=brief_id, insight_index=0, title="Dark mode",
+        template_version=1, variant="v3", theme_id=theme,
+    )
+    complete_evidence(ev_id, title="Dark mode", md="<html>e</html>")
+    resp = t.client.get(f"/v1/prd/{chat_prd}/evidence")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["id"] == ev_id
+    assert body["status"] == "ready"
