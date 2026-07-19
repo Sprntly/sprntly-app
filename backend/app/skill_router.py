@@ -147,12 +147,27 @@ def is_call_digest(question: str) -> bool:
 # guidance). Mirrors the router's VoC rule at line ~91.
 _VOC_REPORT_RULE = re.compile(r"\b(voice\s+of\s+customer|voc\s+report)\b", re.I)
 
+# "Summary of feedback from recent customer conversations"-style asks are VoC
+# reports by intent, but carry neither the literal "voice of customer" nor a
+# call-noun — without this rule they fall to the haiku router, which sends them
+# to a synthesis/DS answer instead of the pinned VoC report (user-reported
+# misroute). Requires BOTH a feedback word and a customer-conversation noun, in
+# either order, so plain "customer conversations" questions still route freely.
+_VOC_FEEDBACK_CONVO_RULE = re.compile(
+    r"\bfeedback\b.{0,80}\b(?:customer|user|client)\s+(?:conversations?|discussions?)\b"
+    r"|\b(?:customer|user|client)\s+(?:conversations?|discussions?)\b.{0,80}\bfeedback\b",
+    re.I | re.S,
+)
+
 
 def is_voc_report_request(question: str) -> bool:
-    """True for a bare 'voice of customer' / 'VoC report' request. Distinct from
-    is_call_digest (which needs a call-noun); used by qa_agent to route these to
-    the live call digest when a call source is connected."""
-    return bool(_VOC_REPORT_RULE.search(question))
+    """True for a bare 'voice of customer' / 'VoC report' request, or a
+    feedback-from-customer-conversations phrasing. Distinct from is_call_digest
+    (which needs a call-noun); used by qa_agent to route these to the live call
+    digest when a call source is connected."""
+    return bool(
+        _VOC_REPORT_RULE.search(question) or _VOC_FEEDBACK_CONVO_RULE.search(question)
+    )
 
 
 # ── Data-analysis intent (DS agent) ─────────────────────────────────────────

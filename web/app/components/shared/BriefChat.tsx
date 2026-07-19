@@ -1286,14 +1286,6 @@ function AgentTurn({
   onAction: (a: AgentAction) => void
   busy: boolean
 }) {
-  const { openContentPanel } = useNavigation()
-  const { setContent } = useContent()
-  // HTML-report answers (e.g. Voice of Customer) open in the right panel's
-  // Report tab so the brief chat stays usable on the left.
-  const handleOpenReport = useCallback((report: { html: string; title: string }) => {
-    setContent({ report })
-    openContentPanel("report")
-  }, [setContent, openContentPanel])
   const personaName = turn.persona === "pm" ? AGENT_NAME : "DS Agent"
   const badge = turn.persona === "pm" ? "Product Coworker" : "DS COWORKER"
   return (
@@ -1315,7 +1307,7 @@ function AgentTurn({
         ) : turn.state === "error" ? (
           <div className="bc-error">{turn.error}</div>
         ) : turn.reply ? (
-          <AskReplyBody reply={turn.reply} animateIn={!!turn.fresh} simulateTyping={!!turn.fresh} omitCitations onOpenReport={handleOpenReport} />
+          <AskReplyBody reply={turn.reply} animateIn={!!turn.fresh} simulateTyping={!!turn.fresh} omitCitations />
         ) : turn.message ? (
           <div className="ai-bar-reply-answer">
             <ReactMarkdown remarkPlugins={[remarkGfm]}>{turn.message}</ReactMarkdown>
