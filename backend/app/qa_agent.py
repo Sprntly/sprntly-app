@@ -6,6 +6,9 @@ Pipeline (deterministic control flow; model only where judgement is needed):
        slash fast-path  (`/prioritize …`)            → that skill, conf 1.0
        regex fast-path  (skill_router.detect_intent) → that skill, if routable
        else LLM router  (haiku over the routable manifest) → {skill_id|none}
+       The LLM router also classifies scope: a question clearly outside
+       product / PM / engineering / design short-circuits to the canned
+       OUT_OF_SCOPE_MESSAGE — no answer model runs, so nothing is imagined.
   2. ANSWER  — skill → gateway.llm_call(skill=…) on sonnet, escalating heavy
                skills to opus; direct → compose_ask_answer (corpus + KG).
   3. (history) prior conversation turns are folded in for both the router and
@@ -27,7 +30,7 @@ from typing import Optional
 from app.ask_runner import _ASK_RESPONSE_SCHEMA, _retrieve_kg_bundle, compose_ask_answer
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
-from app.prompts import ASK_SYSTEM, ASK_SYSTEM_KG_ADDENDUM
+from app.prompts import ASK_SYSTEM, ASK_SYSTEM_KG_ADDENDUM, OUT_OF_SCOPE_MESSAGE
 from app.skill_router import (
     detect_intent,
     is_call_digest,
@@ -85,8 +88,16 @@ _ROUTE_SCHEMA: dict = {
         },
         "confidence": {"type": "number", "description": "0..1"},
         "reason": {"type": "string", "description": "One short clause."},
+        "in_scope": {
+            "type": "boolean",
+            "description": (
+                "false ONLY when the question is clearly outside product / PM / "
+                "engineering / design work (see system prompt); when false, "
+                "skill_id must be 'none'."
+            ),
+        },
     },
-    "required": ["skill_id", "confidence", "reason"],
+    "required": ["skill_id", "confidence", "reason", "in_scope"],
 }
 
 _ROUTER_SYSTEM = (
@@ -94,7 +105,15 @@ _ROUTER_SYSTEM = (
     "question (and recent conversation), pick the SINGLE best-fit PM skill from "
     "the menu, or 'none' if the question is general/conversational and no skill "
     "clearly applies. Prefer 'none' over a weak match. Return the skill's exact "
-    "id."
+    "id.\n\n"
+    "Also classify scope. in_scope=true when the question concerns the user's "
+    "product or product work in any way: the product itself, problems, "
+    "evidence, prioritization, tickets, PRDs, user feedback, prototypes, "
+    "design, engineering, data about the business, or project management — or "
+    "is a greeting / a question about this assistant. in_scope=false ONLY when "
+    "the question is clearly outside those domains (general trivia, news, "
+    "weather, sports, entertainment, personal advice, unrelated general "
+    "knowledge). When in doubt, prefer in_scope=true."
 )
 
 
@@ -157,7 +176,7 @@ def route(
             model=ROUTER_MODEL,
             system=_ROUTER_SYSTEM,
             input=_render_history(history) + f"Question: {question}",
-            prompt_version="qa-router-v1",
+            prompt_version="qa-router-v2",
             json_schema=_ROUTE_SCHEMA,
             user_cacheable_prefix=_router_menu(),
             max_tokens=300,
@@ -167,6 +186,13 @@ def route(
         conf = float(out.get("confidence") or 0.0)
         if sid != "none" and _routable(sid) and conf >= _LLM_ROUTE_THRESHOLD:
             return RouteDecision(sid, conf, "llm", sid)
+        # Scope gate: no skill matched AND the router says the question is
+        # outside product/PM/engineering/design → canned refusal instead of a
+        # direct answer the model would have to imagine. Strict `is False` so a
+        # missing/odd field (old cached router rows, partial output) fails open
+        # to the direct path, whose grounding rules still apply.
+        if out.get("in_scope") is False:
+            return RouteDecision(None, conf, "out_of_scope")
     except Exception:  # noqa: BLE001 — routing must never break the answer
         logger.exception("LLM router failed; answering directly")
 
@@ -194,6 +220,23 @@ def _confirm_payload(skill_id: str, question: str) -> dict:
         "confidence": 0.0,
         "unanswered": "",
         "_skill": skill_id,
+    }
+
+
+# Ground truth over imagination: a question outside product/PM/engineering/
+# design gets this fixed payload — no answer-model call, so there is nothing to
+# hallucinate. Standard Ask shape (answer/key_points/citations/confidence/
+# unanswered) so _strip_citations and the UI render it as a normal turn.
+def _out_of_scope_payload() -> dict:
+    return {
+        "type": "out_of_scope",
+        "answer": OUT_OF_SCOPE_MESSAGE,
+        "key_points": [],
+        "citations": [],
+        "confidence": 1.0,
+        "unanswered": "",
+        "_skill": None,
+        "_skill_source": "scope_gate",
     }
 
 
@@ -423,6 +466,12 @@ def answer(
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)
     else:
         decision = route(question, enterprise_id=enterprise_id, history=history)
+
+    # Out-of-domain question (router classified it, no skill matched) → the
+    # canned refusal, deterministically. Never let the answer model improvise
+    # on a topic we hold no ground truth for.
+    if decision.source == "out_of_scope":
+        return _out_of_scope_payload()
 
     if not decision.skill_id:
         # Direct path — corpus + KG, unchanged. Fold history into the question.

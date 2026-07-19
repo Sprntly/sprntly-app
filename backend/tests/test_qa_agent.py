@@ -14,8 +14,11 @@ class _Result:
         self.output = output
 
 
-def _route_out(skill_id="none", confidence=0.0, reason="x"):
-    return _Result({"skill_id": skill_id, "confidence": confidence, "reason": reason})
+def _route_out(skill_id="none", confidence=0.0, reason="x", in_scope=None):
+    out = {"skill_id": skill_id, "confidence": confidence, "reason": reason}
+    if in_scope is not None:
+        out["in_scope"] = in_scope
+    return _Result(out)
 
 
 def _answer_out():
@@ -77,6 +80,64 @@ def test_llm_router_failure_is_direct(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", boom)
     d = qa.route("some ambiguous question about strategy", enterprise_id="ent")
     assert d.skill_id is None and d.source == "none"
+
+
+# ── out-of-scope gate ────────────────────────────────────────────────────────
+
+def test_route_out_of_scope_flag(monkeypatch):
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _route_out("none", 0.9, "trivia", in_scope=False)
+    )
+    d = qa.route("who won the champions league final?", enterprise_id="ent")
+    assert d.skill_id is None and d.source == "out_of_scope"
+
+
+def test_route_missing_in_scope_fails_open(monkeypatch):
+    # Old-shape router output (no in_scope field) must fall through to the
+    # direct path, not the refusal — the gate only fires on an explicit False.
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out("none", 0.0))
+    d = qa.route("what happened last week", enterprise_id="ent")
+    assert d.source == "none"
+
+
+def test_route_skill_match_wins_over_scope_flag(monkeypatch):
+    # A confident routable-skill match is in-scope by construction, even if the
+    # router contradicts itself on the flag.
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _route_out("retention-churn", 0.85, "churn", in_scope=False),
+    )
+    d = qa.route("why do users churn?", enterprise_id="ent")
+    assert d.skill_id == "retention-churn" and d.source == "llm"
+
+
+def test_answer_out_of_scope_returns_canned(monkeypatch):
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _route_out("none", 0.9, "weather", in_scope=False)
+    )
+    def _no_direct(*a, **k):
+        raise AssertionError("compose_ask_answer must not run for out-of-scope")
+    monkeypatch.setattr(qa, "compose_ask_answer", _no_direct)
+    out = qa.answer(
+        enterprise_id="ent", question="what's the weather in tokyo?", dataset="acme"
+    )
+    assert out["answer"] == qa.OUT_OF_SCOPE_MESSAGE
+    assert out["type"] == "out_of_scope"
+    assert out["key_points"] == [] and out["citations"] == []
+    assert out["_skill_source"] == "scope_gate"
+
+
+def test_answer_pinned_skill_bypasses_scope_gate(monkeypatch):
+    # A pinned follow-up has already chosen a PM skill — the router (and its
+    # scope flag) is never consulted.
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _answer_out()
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="anything", dataset="acme",
+        pinned_skill="user-stories",
+    )
+    assert out["_skill"] == "user-stories"
 
 
 # ── answer dispatch ────────────────────────────────────────────────────────────
