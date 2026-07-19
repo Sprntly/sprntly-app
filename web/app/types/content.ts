@@ -628,6 +628,12 @@ export interface AppContentState {
    *  so ContentPanel's EvidenceTab can show a loading state even when
    *  content.detail is null. */
   evidenceGenerating: boolean
+  /** A self-contained HTML report answer (e.g. the voice-of-customer-report
+   *  skill's fixed-template document) currently open in the right panel's
+   *  Report tab. Chat surfaces set this instead of rendering the document
+   *  inline, so the user keeps chatting on the left while reading it on the
+   *  right. `null` = no Report tab shown. */
+  report: { html: string; title: string } | null
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]
