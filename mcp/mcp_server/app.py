@@ -45,7 +45,7 @@ _INSTRUCTIONS = (
     "as returned by list_tickets/get_ticket, never shortened or re-derived. All "
     "data is scoped to this one workspace; you never pass a company or dataset id. "
     "The tools you see match your token's role: developer tokens cover tickets "
-    "and PRDs; workspace tools (datasets, backlog, weekly brief) need a PM token."
+    "and PRDs; workspace tools (datasets, ideation, weekly brief) need a PM token."
 )
 
 

@@ -36,6 +36,7 @@ hard-fails.
 import asyncio
 import json
 import logging
+import threading
 import time
 import uuid
 
@@ -225,7 +226,7 @@ def _kg_trail(
     (when it has KG backing) or None when there's no tenant context, the trail
     is empty, or any read fails — the caller then grounds on the corpus.
 
-    `insight` overrides brief.insights[insight_index] (the backlog PRD path);
+    `insight` overrides brief.insights[insight_index] (the ideation PRD path);
     when None the insight is read from the brief at insight_index.
 
     Resilient by construction: a slug that owns no company, an empty KG, a fake
@@ -257,7 +258,7 @@ def _resolve_grounding(
     when it has backing, else corpus fallback (an empty KG, a legacy corpus
     dataset, or any KG read error). The returned trail (None on the corpus
     fallback) drives kg_refs in the decision log. `insight` overrides
-    brief.insights[insight_index] (backlog PRD path).
+    brief.insights[insight_index] (ideation PRD path).
     """
     trail = _kg_trail(dataset, brief, insight_index, insight)
     if trail is not None:
@@ -312,7 +313,7 @@ def _build_context(
     human-PRD generation and (later) by the on-demand Implementation Spec, so
     both halves are grounded on the SAME facts and stay coherent.
 
-    `insight_override` supplies the insight directly (the backlog PRD path: the
+    `insight_override` supplies the insight directly (the ideation PRD path: the
     theme is NOT in brief.insights, so there is no valid insight_index to read).
     When given, insight_index is only a storage sentinel and is NOT used to index
     the brief. When None, the insight is read from brief.insights[insight_index].
@@ -345,7 +346,7 @@ def _build_context(
     # KG backing or under the legacy engine. `trail` (None on the corpus path)
     # carries the kg_refs for the decision log.
     # Brief path keeps the original 3-arg call (the insight is read from the
-    # brief at insight_index); the backlog path passes the synthesized insight so
+    # brief at insight_index); the ideation path passes the synthesized insight so
     # the trail resolves the right theme. Splitting the call keeps existing
     # monkeypatches of _resolve_grounding (3-arg) working.
     if import_source_md is not None:
@@ -524,14 +525,14 @@ async def _generate_human_prd(
     Runs as clean async (the event loop is never blocked — the synchronous
     `llm_call` runs in a worker thread). The Implementation Spec is NOT produced
     here; it is generated on demand by `ensure_impl_spec`. `insight_override`
-    routes the backlog PRD path (the theme is not in brief.insights). `author`
+    routes the ideation PRD path (the theme is not in brief.insights). `author`
     fills the Part A byline (the logged-in user); None → `[NEED: author]`.
 
     Returns the resolved `ctx` so the caller can hand it to the impl-spec warm
     (`ensure_impl_spec`), which needs the SAME grounding (evidence/exemplars) —
     avoiding a second `_build_context` (a duplicate KG retrieval + corpus load +
     exemplar render) on the warm path. This also keeps Part B grounded on the
-    exact context Part A used, including the backlog `insight_override` case.
+    exact context Part A used, including the ideation `insight_override` case.
     """
     ctx = await asyncio.to_thread(
         _build_context, brief_id, insight_index, insight_override, import_source_md
@@ -624,7 +625,7 @@ async def generate_prd_and_warm(
     """Generate the human PRD, extract its input questions, THEN pre-warm the
     Implementation Spec (Part B).
 
-    This is the entry point the interactive/backlog PRD routes schedule (as one
+    This is the entry point the interactive/ideation PRD routes schedule (as one
     long-lived background task on the app loop): the PRD is marked ready inside
     `generate_prd` — the user's poll never waits on Part B — and Part B then warms
     on the low-priority lane so tickets inherit AC with no added latency. Keeping
@@ -693,7 +694,7 @@ async def generate_prd(
     The Implementation Spec is never produced here — it is on demand
     (`ensure_impl_spec`), so every generation path is human-PRD-only.
 
-    `insight_override` supplies the insight directly (the backlog PRD path):
+    `insight_override` supplies the insight directly (the ideation PRD path):
     insight_index is then a storage sentinel, not a brief index. `author` fills
     the Part A byline (the logged-in user's name); interactive routes pass it,
     warm/multi-agent paths leave it None → the byline renders `[NEED: author]`.
@@ -726,6 +727,23 @@ async def generate_prd(
 
 # ── on-demand Implementation Spec (Part B) ───────────────────────────────────
 
+# Per-PRD single-flight locks for `ensure_impl_spec`. Two schedulers can race a
+# cache-miss for the SAME prd (the post-Part-A warm and the ticket route's
+# warm-on-generate), and without a lock both would run the full 16K-token Part B
+# call concurrently — pure duplicate spend that also holds an LLM-gate slot the
+# ticket fan-out wants. The loser blocks on the lock, then re-reads the cache
+# and returns the winner's spec. Locks are keyed by int prd_id and never
+# removed — a few hundred bytes per PRD ever warmed in this process, bounded in
+# practice by process restarts.
+_IMPL_SPEC_LOCKS: dict[int, threading.Lock] = {}
+_IMPL_SPEC_LOCKS_GUARD = threading.Lock()
+
+
+def _impl_spec_lock(prd_id: int) -> threading.Lock:
+    with _IMPL_SPEC_LOCKS_GUARD:
+        return _IMPL_SPEC_LOCKS.setdefault(prd_id, threading.Lock())
+
+
 def ensure_impl_spec(
     prd_id: int, *, background: bool = False, ctx: dict | None = None
 ) -> dict:
@@ -756,6 +774,19 @@ def ensure_impl_spec(
 
     Returns {"llm_part": <markdown>, "cached": <bool>}.
     """
+    # Single-flight: concurrent cache-miss callers for the same prd collapse to
+    # one generation; losers wait on the lock, then re-read the cache and return
+    # the winner's spec.
+    with _impl_spec_lock(prd_id):
+        return _ensure_impl_spec_locked(prd_id, background=background, ctx=ctx)
+
+
+def _ensure_impl_spec_locked(
+    prd_id: int, *, background: bool, ctx: dict | None
+) -> dict:
+    """Body of `ensure_impl_spec`; the caller holds the per-PRD single-flight
+    lock, so the cache check → generate → persist sequence below is atomic per
+    prd_id."""
     row = get_prd_rendered(prd_id)  # human PRD as the user sees it (patches folded)
     if row is None:
         raise RuntimeError(f"prd_id={prd_id} not found")

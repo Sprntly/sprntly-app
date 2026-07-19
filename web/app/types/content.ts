@@ -571,10 +571,10 @@ export interface PrdState extends PrdContent {
   briefId?: number
   insightIndex?: number
   /** How this PRD was created (`PrdRecord.source`). Only `'brief'` PRDs carry
-   *  their own research Evidence; `'backlog'` and `'upload'` PRDs have none, so
-   *  the right-panel Evidence tab is hidden for them. Absent on legacy rows —
-   *  treat missing as `'brief'` (show the tab). */
-  source?: "brief" | "backlog" | "upload"
+   *  their own research Evidence; `'ideation'`, `'upload'` and `'chat'` PRDs
+   *  have none, so the right-panel Evidence tab is hidden for them. Absent on
+   *  legacy rows — treat missing as `'brief'` (show the tab). */
+  source?: "brief" | "ideation" | "backlog" | "upload" | "chat"
 }
 
 export interface AppContentState {
@@ -619,6 +619,12 @@ export interface AppContentState {
    *  immediately and flips this on, so the PRD always surfaces on the right —
    *  never only as a bottom chat message. */
   prdGenerating: boolean
+  /** Live streaming preview: the accumulating Part A HTML forwarded from the
+   *  in-flight PRD generation's SSE stream (already throttled inside
+   *  runPrdGeneration). Rendered by PrdPanelContent while `prdGenerating` and
+   *  no `prd` has landed yet; every generation start resets it to null so a
+   *  previous run's preview can never bleed into a new one. */
+  prdPartialHtml: string | null
   /** Generated Evidence Page doc — shares the `PrdContent` base shape (markdown
    *  sections with tables and `chart` blocks) so it can reuse the markdown
    *  adapter. Evidence carries its own `evidence_id` on the wire and never a
@@ -628,6 +634,12 @@ export interface AppContentState {
    *  so ContentPanel's EvidenceTab can show a loading state even when
    *  content.detail is null. */
   evidenceGenerating: boolean
+  /** A self-contained HTML report answer (e.g. the voice-of-customer-report
+   *  skill's fixed-template document) currently open in the right panel's
+   *  Report tab. Chat surfaces set this instead of rendering the document
+   *  inline, so the user keeps chatting on the left while reading it on the
+   *  right. `null` = no Report tab shown. */
+  report: { html: string; title: string } | null
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]

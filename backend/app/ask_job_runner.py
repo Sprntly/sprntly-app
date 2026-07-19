@@ -37,6 +37,7 @@ def _run_sync(
     dataset: str,
     history: list[dict],
     pinned_skill: str | None,
+    prd_id: int | None,
 ) -> None:
     payload = qa_agent.answer(
         enterprise_id=enterprise_id,
@@ -44,6 +45,7 @@ def _run_sync(
         dataset=dataset,
         history=history,
         pinned_skill=pinned_skill,
+        prd_id=prd_id,
         # Cooperative cancellation: the user's Stop flips the job row to
         # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
         # steps and raises AskCancelled to abort before the expensive answer call.
@@ -70,6 +72,7 @@ async def run_ask_job(
     dataset: str,
     history: list[dict] | None = None,
     pinned_skill: str | None = None,
+    prd_id: int | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
     result. A failure marks the row `error` and is swallowed — the worker never
@@ -84,6 +87,7 @@ async def run_ask_job(
             dataset,
             history or [],
             pinned_skill,
+            prd_id,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)
     except AskCancelled:

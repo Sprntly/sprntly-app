@@ -5,6 +5,7 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { EvidenceSections } from "./EvidenceSections"
 import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
+import { HtmlReportView } from "./HtmlReportView"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
@@ -24,16 +25,20 @@ import { JiraPushModal, type JiraPushChoice } from "./JiraPushModal"
 import { ticketSyncTrackers } from "../../lib/connectorsCatalog"
 import {
   IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf,
-  IconRefresh, IconChevronDown, IconPlugConnected,
+  IconRefresh, IconChevronDown, IconPlugConnected, IconReportAnalytics,
 } from "@tabler/icons-react"
+import { pickDefaultDetailKey } from "../../lib/brief-adapter"
 import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
 import { printCombined } from "../../lib/combinedExport"
 import type { PrdState, PrdContent, AppContentState } from "../../types/content"
 
-// Tab order mirrors the pipeline: Evidence → PRD → Tickets (each tab's bottom
-// bar launches the NEXT artifact). Evidence is hidden for non-brief PRDs (see
-// isEvidenceTabHidden), so uploads show PRD → Tickets.
+// Tab order mirrors the pipeline: Report → Evidence → PRD → Tickets (each
+// tab's bottom bar launches the NEXT artifact). Report only appears when a
+// chat surface has parked an HTML report answer (content.report) in the panel;
+// Evidence is hidden for non-brief PRDs (see isEvidenceTabHidden), so uploads
+// show PRD → Tickets.
 const TABS = [
+  { icon: <IconReportAnalytics size={11.5} />, id: "report", label: "Report" },
   { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
   { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
@@ -139,7 +144,7 @@ function ShareMenu({
  * Whether to hide the right-panel Evidence tab for the current content.
  *
  * Only brief-insight PRDs carry their own research Evidence (keyed at
- * `(brief_id, insight_index)`). Backlog and uploaded PRDs have none — an
+ * `(brief_id, insight_index)`). Ideation and uploaded PRDs have none — an
  * uploaded PRD may genuinely have no evidence at all — so the Evidence tab is
  * hidden for them. We still show it while evidence is loaded/generating into
  * context (e.g. a brief-finding flow), and a missing `source` (legacy rows) is
@@ -163,16 +168,23 @@ export function ContentPanel() {
   const { content } = useContent()
 
   const evidenceHidden = isEvidenceTabHidden(content)
-  const visibleTabs = evidenceHidden ? TABS.filter((t) => t.id !== "evidence") : TABS
+  const reportHidden = content.report == null
+  const visibleTabs = TABS.filter(
+    (t) => !(evidenceHidden && t.id === "evidence") && !(reportHidden && t.id === "report"),
+  )
 
-  // If the panel is parked on Evidence but that tab just became hidden (a
-  // backlog/upload PRD loaded), render the PRD tab instead of a stranded body.
-  const activeTab = evidenceHidden && contentPanelTab === "evidence" ? "prd" : contentPanelTab
+  // If the panel is parked on Evidence/Report but that tab just became hidden
+  // (a backlog/upload PRD loaded; the report was cleared), render the PRD tab
+  // instead of a stranded body.
+  const hiddenActive =
+    (evidenceHidden && contentPanelTab === "evidence") ||
+    (reportHidden && contentPanelTab === "report")
+  const activeTab = hiddenActive ? "prd" : contentPanelTab
 
   // Persist that fallback into navigation state so re-opens land on a real tab.
   useEffect(() => {
-    if (evidenceHidden && contentPanelTab === "evidence") openContentPanel("prd")
-  }, [evidenceHidden, contentPanelTab, openContentPanel])
+    if (hiddenActive) openContentPanel("prd")
+  }, [hiddenActive, openContentPanel])
 
   // Tracks the live pixel width; null = use the CSS default (60vw).
   const widthRef = useRef<number | null>(null)
@@ -260,7 +272,11 @@ export function ContentPanel() {
               ))}
             </div>
           </div>
-            <span className="cpanel-main-name">{content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}</span>
+            <span className="cpanel-main-name">
+              {activeTab === "report" && content.report
+                ? content.report.title
+                : content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}
+            </span>
           <div className="cpanel-head-actions">
             <ShareMenu prd={content.prd} evidence={content.evidence} onToast={showToast} />
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
@@ -270,6 +286,7 @@ export function ContentPanel() {
         </div>
 
         <div className="cpanel-body">
+          {activeTab === "report" && <ReportTab />}
           {activeTab === "evidence" && <EvidenceTab />}
           {activeTab === "prd" && <PrdPanelContent evidenceTabAvailable={!evidenceHidden} />}
           {activeTab === "tickets" && <TicketsTab />}
@@ -277,11 +294,97 @@ export function ContentPanel() {
 
         {/* Fixed pipeline bar — each tab's bottom launches the NEXT artifact.
             The PRD tab keeps its OWN footer (autosave + version history + the
-            tickets button), so the shared bar is only for Evidence and Tickets. */}
+            tickets button), so the shared bar is only for Report, Evidence and
+            Tickets. */}
+        {activeTab === "report" && <ReportBottomBar />}
         {activeTab === "evidence" && <EvidenceBottomBar />}
         {activeTab === "tickets" && <TicketsBottomBar />}
       </aside>
     </>
+  )
+}
+
+// ── Report tab: a chat surface's HTML report answer (e.g. Voice of Customer) ──
+// The document renders in HtmlReportView's script-less sandboxed iframe, so
+// nothing inside it is clickable — the pipeline action (Generate PRD) lives in
+// ReportBottomBar, outside the iframe.
+function ReportTab() {
+  const { content } = useContent()
+  const report = content.report
+  if (!report) {
+    return (
+      <div className="cpanel-empty">
+        <IconSparkle size={20} />
+        <p>No report open. Ask for one in chat — e.g. a Voice of Customer summary.</p>
+      </div>
+    )
+  }
+  return (
+    <div className="ev-panel">
+      <div className="ev-doc">
+        <HtmlReportView html={report.html} title={report.title} />
+      </div>
+    </div>
+  )
+}
+
+// ── Fixed bottom bar: Report tab → Generate / View PRD ────────────────────────
+// Mirrors EvidenceBottomBar: the report's next pipeline step is a PRD (and from
+// there, tickets). With no explicit insight context (a plain chat asked for the
+// report), fall back to the brief's default insight — the same anchor the chat
+// "generate a PRD" command uses.
+function ReportBottomBar() {
+  const { openContentPanel, showToast } = useNavigation()
+  const { content, setContent } = useContent()
+  const prd = content.prd
+  const defaultKey = pickDefaultDetailKey(content.briefDetails ?? {})
+  const meta =
+    content.detail?.meta
+    ?? content.prdMeta
+    ?? (defaultKey ? content.briefDetails[defaultKey]?.meta ?? null : null)
+  const [generating, setGenerating] = useState(false)
+
+  const generate = useCallback(async () => {
+    if (!meta || generating) return
+    setGenerating(true)
+    // Reveal the PRD tab right away — it live-renders the draft as it streams.
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
+    openContentPanel("prd")
+    try {
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
+      if (result.ok) {
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+      } else {
+        setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD generation failed", result.message)
+      }
+    } catch (e) {
+      setContent({ prdGenerating: false, prdPartialHtml: null })
+      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+    } finally {
+      setGenerating(false)
+    }
+  }, [meta, generating, setContent, openContentPanel, showToast])
+
+  return (
+    <div className="cpanel-bottom-bar">
+      {prd ? (
+        <button type="button" className="btn btn-primary btn-sm cpanel-next-btn" onClick={() => openContentPanel("prd")}>
+          View PRD
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="btn btn-primary btn-sm cpanel-next-btn"
+          data-testid="report-footer-prd-cta"
+          disabled={generating || !meta}
+          title={meta ? undefined : "PRD generation needs a weekly brief — one will appear after your first brief is ready"}
+          onClick={generate}
+        >
+          {generating ? "Generating PRD…" : "Generate PRD"}
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -300,19 +403,19 @@ function EvidenceBottomBar() {
   const generate = useCallback(async () => {
     if (!meta || generating) return
     setGenerating(true)
-    // Reveal the PRD tab with its generating spinner right away.
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true })
+    // Reveal the PRD tab right away — it live-renders the draft as it streams.
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     openContentPanel("prd")
     try {
-      const result = await runPrdGeneration(meta)
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
       if (result.ok) {
-        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
       } else {
-        setContent({ prdGenerating: false })
+        setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", result.message)
       }
     } catch (e) {
-      setContent({ prdGenerating: false })
+      setContent({ prdGenerating: false, prdPartialHtml: null })
       showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     } finally {
       setGenerating(false)

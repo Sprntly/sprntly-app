@@ -77,7 +77,7 @@ def test_routes_401_without_internal_key(isolated_settings, monkeypatch):
     assert client.post("/internal/mcp-tokens/resolve", json={"token": "x"}).status_code == 401
     assert client.get("/internal/mcp/datasets", params={"company_id": "x"}).status_code == 401
     assert client.get("/internal/mcp/brief/current", params={"company_id": "x"}).status_code == 401
-    assert client.get("/internal/mcp/backlog", params={"company_id": "x"}).status_code == 401
+    assert client.get("/internal/mcp/ideation", params={"company_id": "x"}).status_code == 401
     assert client.get("/internal/mcp/prd/latest", params={"company_id": "x"}).status_code == 401
     assert client.get("/internal/mcp/prd/1/prototype", params={"company_id": "x"}).status_code == 401
     assert client.get("/internal/mcp/prd/1/evidence", params={"company_id": "x"}).status_code == 401
@@ -129,12 +129,12 @@ def test_datasets_scoped_to_company(isolated_settings, monkeypatch):
     assert slugs == ["acme"]
 
 
-def test_backlog_empty_when_no_brief(isolated_settings, monkeypatch):
+def test_ideation_empty_when_no_brief(isolated_settings, monkeypatch):
     client = _client(isolated_settings, monkeypatch)
     cid = uuid.uuid4().hex
     _seed_company_and_member(isolated_settings["supabase"], company_id=cid, slug="acme", user_id="u-a")
 
-    r = client.get("/internal/mcp/backlog", params={"company_id": cid}, headers=_headers())
+    r = client.get("/internal/mcp/ideation", params={"company_id": cid}, headers=_headers())
     assert r.status_code == 200, r.text
     assert r.json() == {"items": [], "count": 0}
 

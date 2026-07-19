@@ -51,7 +51,7 @@ const loadPrdById = vi.fn((id: number) =>
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (...a: unknown[]) => runPrdGeneration(...a),
   resumePrdGeneration: vi.fn(),
-  runPrdGenerationFromBacklog: vi.fn(),
+  runPrdGenerationFromIdeation: vi.fn(),
   loadPrdById: (...a: unknown[]) => loadPrdById(...a),
 }))
 
@@ -255,12 +255,12 @@ describe("ChatScreen — PRD panel restore after reload", () => {
   })
 
   it("restores a BACKLOG PRD (no briefMeta) via the tab's own saved prdId", async () => {
-    // Backlog PRD tabs carry no briefMeta, so the brief-map path can't recover
+    // Ideation PRD tabs carry no briefMeta, so the brief-map path can't recover
     // them. The tab's persisted `prdId` is the only recovery path — it must DB-load
     // that exact PRD, never regenerate a duplicate.
     mapState = { entriesByInsight: new Map(), loading: false } // no map help at all
     seedPersistedTab(
-      { id: "tab-bk", title: "PRD · Backlog thing", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 88 },
+      { id: "tab-bk", title: "PRD · Ideation thing", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 88 },
       "tab-bk",
     )
 

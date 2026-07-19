@@ -119,10 +119,11 @@ def test_weekly_brief_synthesis_uses_deep_model(facade, isolated_settings):
     assert captured["model"] == DEEP_MODEL
 
 
-def test_backlog_sequencing_stays_on_default(facade, isolated_settings):
-    """Backlog sequencing ranks the lower-stakes 'rest' (ranks 4+) — a ranking
-    task, not open-ended synthesis, so it stays on the default (sonnet)."""
-    from app.synthesis import backlog as bl
+def test_ideation_sequencing_stays_on_default(facade, isolated_settings):
+    """Ideation sequencing ranks + shortlists the lower-stakes 'rest' (ranks
+    4+) — a ranking task, not open-ended synthesis, so it stays on the default
+    (sonnet)."""
+    from app.synthesis import ideation as bl
 
     _seed_company(isolated_settings["supabase"], "ent-A")
     t = _seed_theme_with_signals(facade, "ent-A", "only",
@@ -136,9 +137,9 @@ def test_backlog_sequencing_stays_on_default(facade, isolated_settings):
                                        "reasoning": "r"}]})
 
     with patch.object(bl, "llm_call", side_effect=_spy):
-        bl.sequence_backlog(facade, "ent-A", exclude_theme_ids=[])
+        bl.sequence_ideation(facade, "ent-A", exclude_theme_ids=[])
 
-    assert captured["purpose"] == "sequence_backlog"
+    assert captured["purpose"] == "sequence_ideation"
     assert captured.get("model") is None   # → gateway uses DEFAULT_MODEL (sonnet)
 
 

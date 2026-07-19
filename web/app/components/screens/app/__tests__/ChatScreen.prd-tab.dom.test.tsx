@@ -3,7 +3,7 @@
 // ChatScreen — "a PRD opens as a NEW CHAT TAB with the content panel over it".
 //
 // Every "view/generate PRD" affordance (brief finding cards, brief composer,
-// backlog item) hands the PRD off via NavigationContext.openPrdTab, which stores
+// ideation item) hands the PRD off via NavigationContext.openPrdTab, which stores
 // a pending request and routes to `/`. ChatScreen consumes it once (openPrdInTab),
 // spawning a fresh chat tab, driving the (generate | ready | load) source into
 // the shared ContentContext, and flagging the content panel (Evidence / PRD /
@@ -66,8 +66,8 @@ const runPrdGeneration = vi.fn().mockResolvedValue({
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (...args: unknown[]) => runPrdGeneration(...args),
   resumePrdGeneration: vi.fn(),
-  runPrdGenerationFromBacklog: vi.fn().mockResolvedValue({
-    ok: true, prd: { prd_id: 88, title: "Backlog PRD", metaLine: "", sections: [] },
+  runPrdGenerationFromIdeation: vi.fn().mockResolvedValue({
+    ok: true, prd: { prd_id: 88, title: "Ideation PRD", metaLine: "", sections: [] },
   }),
   loadPrdById: vi.fn().mockResolvedValue({
     ok: true, prd: { prd_id: 99, title: "Loaded PRD", metaLine: "", sections: [] },
@@ -190,8 +190,9 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await clickOpenPrd()
 
     await waitFor(() => expect(tabBar().getByText("PRD · Retention")).toBeTruthy())
-    // ChatScreen (not the caller) runs the generation for the new PRD tab.
-    await waitFor(() => expect(runPrdGeneration).toHaveBeenCalledWith({ briefId: 7, insightIndex: 0 }))
+    // ChatScreen (not the caller) runs the generation for the new PRD tab; the
+    // second arg is the live-preview onPartial callback.
+    await waitFor(() => expect(runPrdGeneration).toHaveBeenCalledWith({ briefId: 7, insightIndex: 0 }, expect.any(Function)))
     await waitFor(() => expect(panelProbe()).toBe("prd"))
   })
 
@@ -348,5 +349,45 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     // Refocus the PRD tab → the panel comes back.
     await act(async () => { fireEvent.click(tabBar().getByText("PRD · Ready doc")) })
     await waitFor(() => expect(panelProbe()).toBe("prd"))
+  })
+})
+
+describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
+  const READY: PrdTabRequest = {
+    title: "PRD · Ready doc",
+    source: { kind: "ready", prd: { prd_id: 5, title: "Ready doc", metaLine: "", sections: [] } as never, meta: null },
+  }
+
+  async function sendInThread(text: string) {
+    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
+    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => { fireEvent.click(sendBtn) })
+  }
+
+  it("sends the tab's prd_id with the ask so the backend grounds on the PRD", async () => {
+    renderWith(READY)
+    await clickOpenPrd()
+    await waitFor(() => expect(panelProbe()).toBe("prd"))
+    await sendInThread("What are the success metrics in this PRD?")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+    const opts = runAskGeneration.mock.calls[0][3] as { prd_id?: number }
+    expect(opts?.prd_id).toBe(5)
+  })
+
+  it("a plain chat tab sends no prd_id (unchanged request shape)", async () => {
+    renderWith(READY)
+    // New plain chat tab, no PRD attached.
+    await act(async () => { fireEvent.click(tabBar().getByLabelText("New chat")) })
+    await waitFor(() => expect(tabBar().getByText("New chat")).toBeTruthy())
+    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => { fireEvent.change(textarea, { target: { value: "What changed last week?" } }) })
+    const sendBtn = within(document.querySelector(".chat-home-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => { fireEvent.click(sendBtn) })
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalledTimes(1))
+    const opts = runAskGeneration.mock.calls[0][3] as { prd_id?: number } | undefined
+    expect(opts?.prd_id).toBeUndefined()
   })
 })

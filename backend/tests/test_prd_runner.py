@@ -201,7 +201,7 @@ def test_generate_prd_async_makes_one_call_no_part_b(isolated_settings, monkeypa
 
 
 def test_generate_prd_and_warm_pre_warms_part_b(isolated_settings, monkeypatch):
-    """generate_prd_and_warm (the interactive/backlog entry point) generates the
+    """generate_prd_and_warm (the interactive/ideation entry point) generates the
     human PRD, then pre-warms the Implementation Spec (Part B) so tickets inherit
     AC — the spec is cached in llm_part without ever being shown to the user."""
     _seed_corpus(isolated_settings["data_dir"])
@@ -395,6 +395,53 @@ def test_ensure_impl_spec_caches_second_send_reuses(isolated_settings, monkeypat
     assert second["llm_part"] == first["llm_part"]
     # The model was invoked exactly once across both sends.
     assert calls["n"] == 1
+
+
+def test_ensure_impl_spec_single_flight_concurrent_miss(
+    isolated_settings, monkeypatch
+):
+    """Two concurrent cache-miss callers (the post-Part-A warm racing the ticket
+    route's warm-on-generate) collapse to ONE Part B generation: the loser waits
+    on the per-PRD lock, re-reads the cache, and returns the winner's spec."""
+    import threading
+    import time as _time
+
+    db_mod, prd_id = _ready_human_prd(isolated_settings, monkeypatch)
+
+    calls = {"n": 0}
+    entered = threading.Event()
+
+    def _slow_spec_call(**kwargs):
+        calls["n"] += 1
+        entered.set()
+        _time.sleep(0.2)  # hold the generation long enough for the race to form
+        return _llm_result(_PART_B, prompt_version="prd-impl-spec-v1")
+
+    monkeypatch.setattr(prd_runner, "llm_call", _slow_spec_call)
+
+    results: list[dict] = []
+    errors: list[Exception] = []
+
+    def _caller():
+        try:
+            results.append(prd_runner.ensure_impl_spec(prd_id))
+        except Exception as exc:  # noqa: BLE001 — surfaced via the errors list
+            errors.append(exc)
+
+    t1 = threading.Thread(target=_caller)
+    t2 = threading.Thread(target=_caller)
+    t1.start()
+    entered.wait(timeout=2)  # ensure t1 is mid-generation before t2 races it
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    assert not errors
+    assert calls["n"] == 1, "concurrent misses must collapse to one generation"
+    assert len(results) == 2
+    assert results[0]["llm_part"] == results[1]["llm_part"]
+    # One of the two saw the winner's cache; flags are one False, one True.
+    assert sorted(r["cached"] for r in results) == [False, True]
 
 
 def test_editing_human_prd_invalidates_spec_cache(isolated_settings, monkeypatch):

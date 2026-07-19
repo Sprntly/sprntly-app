@@ -1,18 +1,18 @@
-"""Tests for the backlog → PRD/prototype wiring:
+"""Tests for the ideation → PRD/prototype wiring:
 
-  POST /v1/prd/generate-from-backlog   — generate a PRD from a backlog item
-  POST /v1/backlog                      — create a user-added backlog item
-  POST /v1/backlog/reorder              — persist a new rank order
+  POST /v1/prd/generate-from-ideation  — generate a PRD from an ideation item
+  POST /v1/ideation                     — create a user-added idea
+  POST /v1/ideation/reorder             — persist a new rank order
 
-Backlog themes (rank ≥ 4) aren't in brief.insights, so generate-from-backlog
-synthesizes an insight from the backlog row and anchors the PRD to the company's
-current brief. Rows are marked source='backlog' + theme_id so they dedupe and
+Ideation themes (rank ≥ 4) aren't in brief.insights, so generate-from-ideation
+synthesizes an insight from the ideation row and anchors the PRD to the company's
+current brief. Rows are marked source='ideation' + theme_id so they dedupe and
 group per theme (not per insight_index). Ownership resolves via the same
 dataset-slug == company-slug chain the other tenant suites use.
 """
 from __future__ import annotations
 
-from app.db import backlog as bl
+from app.db import ideation as bl
 from app.db.client import require_client
 
 
@@ -33,14 +33,14 @@ def _save_current_brief(db_mod, dataset):
     )
 
 
-def _seed_backlog_theme(company_id, *, theme_id="theme-x", title="Bulk onboarding",
+def _seed_ideation_theme(company_id, *, theme_id="theme-x", title="Bulk onboarding",
                         rank=4, score=9.0, reasoning="Churn evidence."):
-    """Insert a synthesis-style backlog item and return its row (with id)."""
-    bl.upsert_backlog_item(
+    """Insert a synthesis-style (shortlisted) ideation item, return its row."""
+    bl.upsert_ideation_item(
         company_id, theme_id=theme_id, title=title, rank=rank, score=score,
-        reasoning=reasoning,
+        shortlisted=True, reasoning=reasoning,
     )
-    items = bl.list_backlog_items(company_id)
+    items = bl.list_ideation_items(company_id)
     return next(i for i in items if i["theme_id"] == theme_id)
 
 
@@ -48,16 +48,16 @@ def _prd_row(prd_id):
     return require_client().table("prds").select("*").eq("id", prd_id).execute().data[0]
 
 
-# ── POST /v1/prd/generate-from-backlog ──────────────────────────────────────
+# ── POST /v1/prd/generate-from-ideation ─────────────────────────────────────
 
-def test_generate_from_backlog_happy_path(tenant_client, isolated_settings):
+def test_generate_from_ideation_happy_path(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
     _seed_corpus(isolated_settings["data_dir"], dataset="acme")
     _save_current_brief(isolated_settings["db"], dataset="acme")
-    item = _seed_backlog_theme(t.company_id, theme_id="theme-x", title="Bulk onboarding")
+    item = _seed_ideation_theme(t.company_id, theme_id="theme-x", title="Bulk onboarding")
 
     resp = t.client.post(
-        "/v1/prd/generate-from-backlog", json={"backlog_item_id": item["id"]}
+        "/v1/prd/generate-from-ideation", json={"ideation_item_id": item["id"]}
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -65,27 +65,27 @@ def test_generate_from_backlog_happy_path(tenant_client, isolated_settings):
     assert body["title"] == "Bulk onboarding"
     assert body["variant"] == "v3"
 
-    # The row is discriminated as a backlog PRD, keyed on the theme.
+    # The row is discriminated as an ideation PRD, keyed on the theme.
     row = _prd_row(body["prd_id"])
-    assert row["source"] == "backlog"
+    assert row["source"] == "ideation"
     assert row["theme_id"] == "theme-x"
 
 
-def test_generate_from_backlog_dedup_when_not_forced(tenant_client, isolated_settings):
+def test_generate_from_ideation_dedup_when_not_forced(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
     db_mod = isolated_settings["db"]
     brief_id = _save_current_brief(db_mod, dataset="acme")
-    item = _seed_backlog_theme(t.company_id, theme_id="theme-x")
+    item = _seed_ideation_theme(t.company_id, theme_id="theme-x")
 
     existing = db_mod.start_prd(
         brief_id=brief_id, insight_index=0, title="Bulk onboarding",
-        template_version=1, variant="v3", source="backlog", theme_id="theme-x",
+        template_version=1, variant="v3", source="ideation", theme_id="theme-x",
     )
     db_mod.complete_prd(existing, title="Bulk onboarding", md="# Already here")
 
     resp = t.client.post(
-        "/v1/prd/generate-from-backlog",
-        json={"backlog_item_id": item["id"], "force": False},
+        "/v1/prd/generate-from-ideation",
+        json={"ideation_item_id": item["id"], "force": False},
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -93,49 +93,49 @@ def test_generate_from_backlog_dedup_when_not_forced(tenant_client, isolated_set
     assert body["status"] == "ready"
 
 
-def test_generate_from_backlog_no_brief_returns_409(tenant_client, isolated_settings):
+def test_generate_from_ideation_no_brief_returns_409(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
-    item = _seed_backlog_theme(t.company_id, theme_id="theme-x")
+    item = _seed_ideation_theme(t.company_id, theme_id="theme-x")
     # No brief saved for this company → nothing to ground a PRD on.
     resp = t.client.post(
-        "/v1/prd/generate-from-backlog", json={"backlog_item_id": item["id"]}
+        "/v1/prd/generate-from-ideation", json={"ideation_item_id": item["id"]}
     )
     assert resp.status_code == 409
 
 
-def test_generate_from_backlog_unknown_item_returns_404(tenant_client, isolated_settings):
+def test_generate_from_ideation_unknown_item_returns_404(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
     _save_current_brief(isolated_settings["db"], dataset="acme")
     resp = t.client.post(
-        "/v1/prd/generate-from-backlog", json={"backlog_item_id": "does-not-exist"}
+        "/v1/prd/generate-from-ideation", json={"ideation_item_id": "does-not-exist"}
     )
     assert resp.status_code == 404
 
 
-def test_generate_from_backlog_cross_tenant_returns_404(tenant_client, isolated_settings):
+def test_generate_from_ideation_cross_tenant_returns_404(tenant_client, isolated_settings):
     a = tenant_client.make(slug="company-a")
     _save_current_brief(isolated_settings["db"], dataset="company-a")
-    item = _seed_backlog_theme(a.company_id, theme_id="theme-a")
+    item = _seed_ideation_theme(a.company_id, theme_id="theme-a")
 
     b = tenant_client.make(slug="company-b")
     _save_current_brief(isolated_settings["db"], dataset="company-b")
     resp = b.client.post(
-        "/v1/prd/generate-from-backlog", json={"backlog_item_id": item["id"]}
+        "/v1/prd/generate-from-ideation", json={"ideation_item_id": item["id"]}
     )
     assert resp.status_code == 404
 
 
-def test_generate_from_backlog_without_auth_returns_401(unauth_client, isolated_settings):
+def test_generate_from_ideation_without_auth_returns_401(unauth_client, isolated_settings):
     resp = unauth_client.post(
-        "/v1/prd/generate-from-backlog", json={"backlog_item_id": "x"}
+        "/v1/prd/generate-from-ideation", json={"ideation_item_id": "x"}
     )
     assert resp.status_code == 401
 
 
-def test_generate_from_backlog_grounds_on_synthesized_insight(
+def test_generate_from_ideation_grounds_on_synthesized_insight(
     tenant_client, isolated_settings, monkeypatch
 ):
-    """The override path feeds the backlog row's title into the PRD prompt —
+    """The override path feeds the ideation row's title into the PRD prompt —
     proof the synthetic insight (not a brief insight) grounds the generation."""
     import asyncio
     from app import prd_runner
@@ -144,7 +144,7 @@ def test_generate_from_backlog_grounds_on_synthesized_insight(
     t = tenant_client.make(slug="acme")
     _seed_corpus(isolated_settings["data_dir"], dataset="acme")
     brief_id = _save_current_brief(isolated_settings["db"], dataset="acme")
-    item = _seed_backlog_theme(
+    item = _seed_ideation_theme(
         t.company_id, theme_id="theme-x", title="Bulk CSV onboarding"
     )
 
@@ -164,7 +164,7 @@ def test_generate_from_backlog_grounds_on_synthesized_insight(
     monkeypatch.setattr(prd_runner, "llm_call", _capture)
 
     resp = t.client.post(
-        "/v1/prd/generate-from-backlog", json={"backlog_item_id": item["id"]}
+        "/v1/prd/generate-from-ideation", json={"ideation_item_id": item["id"]}
     )
     prd_id = resp.json()["prd_id"]
 
@@ -184,39 +184,39 @@ def test_generate_from_backlog_grounds_on_synthesized_insight(
     assert "Bulk CSV onboarding" in seen_inputs[0]
 
 
-# ── POST /v1/backlog + /v1/backlog/reorder ──────────────────────────────────
+# ── POST /v1/ideation + /v1/ideation/reorder ────────────────────────────────
 
-def test_create_backlog_item_persists(tenant_client, isolated_settings):
+def test_create_ideation_item_persists(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
     _save_current_brief(isolated_settings["db"], dataset="acme")  # GET needs a brief
 
-    resp = t.client.post("/v1/backlog", json={"title": "New idea", "tag": "something_new"})
+    resp = t.client.post("/v1/ideation", json={"title": "New idea", "tag": "something_new"})
     assert resp.status_code == 200
     created = resp.json()
     assert created["title"] == "New idea"
     assert created["tag"] == "something_new"
-    assert created["status"] == "backlog"
+    assert created["status"] == "proposed"
 
-    listed = t.client.get("/v1/backlog").json()["items"]
+    listed = t.client.get("/v1/ideation").json()["items"]
     assert any(i["id"] == created["id"] for i in listed)
 
 
-def test_create_backlog_item_rejects_bad_tag(tenant_client, isolated_settings):
+def test_create_ideation_item_rejects_bad_tag(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
-    resp = t.client.post("/v1/backlog", json={"title": "x", "tag": "nonsense"})
+    resp = t.client.post("/v1/ideation", json={"title": "x", "tag": "nonsense"})
     assert resp.status_code == 400
 
 
-def test_reorder_backlog_persists_new_order(tenant_client, isolated_settings):
+def test_reorder_ideation_persists_new_order(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
     _save_current_brief(isolated_settings["db"], dataset="acme")
-    a = _seed_backlog_theme(t.company_id, theme_id="t-a", title="A", rank=4, score=9)
-    b = _seed_backlog_theme(t.company_id, theme_id="t-b", title="B", rank=5, score=8)
-    c = _seed_backlog_theme(t.company_id, theme_id="t-c", title="C", rank=6, score=7)
+    a = _seed_ideation_theme(t.company_id, theme_id="t-a", title="A", rank=4, score=9)
+    b = _seed_ideation_theme(t.company_id, theme_id="t-b", title="B", rank=5, score=8)
+    c = _seed_ideation_theme(t.company_id, theme_id="t-c", title="C", rank=6, score=7)
 
     # Reverse the order.
     resp = t.client.post(
-        "/v1/backlog/reorder",
+        "/v1/ideation/reorder",
         json={"ordered_ids": [c["id"], b["id"], a["id"]]},
     )
     assert resp.status_code == 200
@@ -229,15 +229,15 @@ def test_reorder_backlog_persists_new_order(tenant_client, isolated_settings):
 def test_reorder_ignores_foreign_ids(tenant_client, isolated_settings):
     a = tenant_client.make(slug="company-a")
     _save_current_brief(isolated_settings["db"], dataset="company-a")
-    mine = _seed_backlog_theme(a.company_id, theme_id="t-a", title="A", rank=4, score=9)
+    mine = _seed_ideation_theme(a.company_id, theme_id="t-a", title="A", rank=4, score=9)
 
     b = tenant_client.make(slug="company-b")
-    other = _seed_backlog_theme(b.company_id, theme_id="t-b", title="B", rank=4, score=9)
+    other = _seed_ideation_theme(b.company_id, theme_id="t-b", title="B", rank=4, score=9)
 
     # company-a reorders with a foreign id mixed in — the foreign row is ignored,
     # never re-ranked into company-a's list.
     resp = a.client.post(
-        "/v1/backlog/reorder",
+        "/v1/ideation/reorder",
         json={"ordered_ids": [other["id"], mine["id"]]},
     )
     assert resp.status_code == 200

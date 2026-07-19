@@ -482,3 +482,100 @@ def test_find_cached_ask_skips_oversized_question_without_hitting_the_client():
         assert called is False
     finally:
         asks_mod.require_client = original
+
+
+# ---- PRD-tab grounding (prd_id) ---------------------------------------------
+# A chat running beside an open PRD sends prd_id; the answer must be grounded
+# on that PRD (+ insight/evidence/tickets), the prd must be ownership-gated,
+# and the (dataset, question)-keyed prewarm cache must be bypassed — it would
+# serve a context-free answer for a question about the open PRD.
+
+def _seed_prd(db, *, slug: str, prd_id: int, payload_md: str = "# PRD body"):
+    brief = db.table("briefs").insert(
+        {"dataset": slug, "week_label": "W",
+         "payload": {"insights": [{"title": "Top insight", "body": "Insight body."}]},
+         "is_current": True}
+    ).execute().data[0]
+    db.table("prds").insert(
+        {"id": prd_id, "brief_id": brief["id"], "insight_index": 0,
+         "title": "The open PRD", "status": "ready", "payload_md": payload_md}
+    ).execute()
+
+
+def test_ask_foreign_prd_id_returns_404(tenant_client, isolated_settings):
+    """prd_id must belong to the caller — otherwise a crafted id would seed a
+    foreign tenant's PRD into the answer context."""
+    tenant_client.make(slug="company-a")
+    _seed_prd(isolated_settings["supabase"], slug="company-a", prd_id=401)
+    b = tenant_client.make(slug="company-b")
+    _seed_corpus(isolated_settings["data_dir"], dataset="company-b")
+    resp = b.client.post(
+        "/v1/ask",
+        json={"question": "What does this PRD say?", "dataset": "company-b",
+              "prd_id": 401},
+    )
+    assert resp.status_code == 404
+
+
+def test_ask_with_prd_id_grounds_answer_on_prd(
+    tenant_client, isolated_settings, fake_llm
+):
+    """The LLM prompt for a PRD-tab ask carries the CURRENT PRD CONTEXT block
+    with the PRD body and its source insight."""
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    _seed_prd(
+        isolated_settings["supabase"], slug="acme", prd_id=402,
+        payload_md="# Export revamp\nUsers need CSV export.",
+    )
+    fake_llm["payload"] = {
+        "answer": "grounded", "key_points": [], "citations": [],
+        "confidence": 0.9, "unanswered": "",
+    }
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": "What is the biggest churn driver?",
+              "dataset": "acme", "prd_id": 402},
+    ).json()
+    body = _poll_ask(t.client, start["ask_id"])
+    assert body["status"] == "ready"
+    assert len(fake_llm["calls"]) == 1
+    prompt = fake_llm["calls"][0]["user"]
+    assert "CURRENT PRD CONTEXT" in prompt
+    assert "Users need CSV export." in prompt
+    assert "Top insight" in prompt
+    # The job row records the grounding PRD (mirrors conversation_id).
+    row = db.get_ask_job(start["ask_id"])
+    assert row["prd_id"] == 402
+
+
+def test_ask_with_prd_id_skips_prewarm_cache(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """A cached (dataset, question) answer is context-free — a PRD-tab ask must
+    generate fresh instead of serving it."""
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MAX_SECONDS", 0.0)
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    _seed_prd(isolated_settings["supabase"], slug="acme", prd_id=403)
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    fake_llm["payload"] = {
+        "answer": "fresh grounded answer", "key_points": [], "citations": [],
+        "confidence": 0.9, "unanswered": "",
+    }
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "prd_id": 403},
+    ).json()
+    body = _poll_ask(t.client, start["ask_id"])
+    assert body["status"] == "ready"
+    assert body["answer"] == "fresh grounded answer"
+    assert len(fake_llm["calls"]) == 1

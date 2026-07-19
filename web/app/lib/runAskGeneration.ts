@@ -153,6 +153,7 @@ export async function runAskGeneration(
   opts?: {
     conversation_id?: number
     pinned_skill?: string
+    prd_id?: number
     isCancelled?: () => boolean
     isStopped?: () => boolean
   },

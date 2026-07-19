@@ -3,10 +3,10 @@
 // NavigationContext — the content panel must survive `openPrdTab`'s navigation.
 //
 // Root cause of the regression this guards (PR 585 follow-up): "View/Generate
-// PRD" from the brief or backlog surface calls `openPrdTab`, which routes to `/`
+// PRD" from the brief or ideation surface calls `openPrdTab`, which routes to `/`
 // so ChatScreen can spawn a chat tab and slide the Evidence/PRD/Tickets panel
 // over it. But NavigationContext closes that panel on EVERY pathname change —
-// and `/brief`→`/` / `/backlog`→`/` is a real pathname change. Next updates
+// and `/brief`→`/` / `/ideation`→`/` is a real pathname change. Next updates
 // usePathname inside a transition, so the close could land after ChatScreen's
 // deferred open and swallow it: the tab opened, the panel never showed.
 //
@@ -113,7 +113,7 @@ describe("NavigationContext — content panel vs navigation", () => {
     expect(screen.getByTestId("panel").textContent).toBe("prd")
 
     // The skip is one-shot: a subsequent real navigation closes normally.
-    navigateTo("/backlog")
+    navigateTo("/ideation")
     expect(screen.getByTestId("panel").textContent).toBe("none")
   })
 })

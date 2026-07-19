@@ -211,7 +211,7 @@ export function Sidebar(_props: SidebarProps = {}) {
         <RailItem screen="brief" icon={<IconMessageCircle size={18} />} label="Weekly brief" />
         <RailItem screen="chats" icon={<IconHistory size={18} />} label="Chat history" />
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
-        {/* <RailItem screen="backlog" icon={<IconBulb size={18} />} label="Backlog Projects" /> */}
+        {/* <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Ideation" /> */}
         {/* <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates" /> */}
         <RailItem screen="skills" icon={<IconWand size={18} />} label="Skills" />
         <RailItem screen="sources" icon={<IconSources />} label="Sources" />

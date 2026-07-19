@@ -60,11 +60,15 @@ know what matters.
    justification ("blocks all value", "workaround exists"). Volume and severity
    always render adjacent so divergence is visible at a glance.
 5. **Quantify impact.** For each problem: the **metric it impacts** (one metric,
-   named) and **by how much** — a delta computed or quoted from the corpus with
-   a confidence tier (🅗 hard / 🅢 soft-stated / 🅘 inferred-unknown).
+   named) and **by how much** — a delta counted from or quoted verbatim in the
+   corpus with a confidence tier (🅗 hard / 🅢 soft-stated / 🅘
+   inferred-unknown). When the corpus contains no quantified movement for the
+   metric, say so qualitatively or write `🅘 unknown — no metric data connected`
+   — a number is NEVER computed, extrapolated, or invented to fill the slot.
    **Revenue impact is always shown**: a sourced figure when stated or when
    commercial data is connected, otherwise `revenue: 🅘 unknown`. Never
-   estimated, never omitted.
+   estimated, never omitted — no CRM spend data means every revenue line is 🅘
+   unknown.
 6. **Flag silent killers 🔇.** Any problem whose volume rating is low but whose
    severity or dollar impact is high gets the flag — impact sizing elevates it
    above its voice volume.
@@ -125,17 +129,20 @@ numbering (#1/#2/#3), the `R1…` ranks, the gate line, and the CTA buttons.
 - **`recommendations`** — ONLY the selected 5–7, ranked: `title` (= the action),
   `description` (1–2 plain sentences a reader with no context understands — what
   gets built and what changes for the user; ranking rationale comes AFTER),
-  `impact_line`, `investigation_only` (true → the card shows only "Move to
-  backlog"; false → "Generate PRD" + "Move to backlog").
+  `impact_line`, `investigation_only` (true when the action is research, not a
+  build — the report renders no CTA buttons; the app's panel hosts the real
+  Generate PRD action outside the document).
 
-No footer: scope and basis live in the header chips; tiers are legended inline.
+No footer and no header chips — the report body carries the signal; tiers are
+legended inline.
 
 ## Hard rules
 
-- **No fabricated data.** Every figure is computed from the corpus, quoted with
-  attribution, or labeled with a tier; unknowns say 🅘 unknown. Tiers: 🅗 hard
-  (counted from the corpus) · 🅢 soft (stated, unverified) · 🅘
-  inferred/unknown.
+- **No fabricated data.** Every figure is counted from the corpus or quoted
+  with attribution; unknowns say 🅘 unknown. A number the corpus doesn't
+  contain is never derived, projected, or "reasonably estimated" — absent
+  analytics/CRM data reads 🅘 unknown, full stop. Tiers: 🅗 hard (counted from
+  the corpus) · 🅢 soft (stated, unverified) · 🅘 inferred/unknown.
 - **Counts, never percentages** for qualitative sources — n is too small.
 - **User-problem framing everywhere** — TL;DR, table, themes, and
   recommendations all name problems from the user's side.

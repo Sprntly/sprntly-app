@@ -53,7 +53,7 @@ def start_prd(
     """Insert an empty PRD row in 'generating' state. Returns the new id.
 
     `run_id` ties the row to a multi-agent run (NULL for single-PRD runs).
-    `source`/`theme_id` mark a backlog-sourced PRD (source='backlog', theme_id
+    `source`/`theme_id` mark an ideation-sourced PRD (source='ideation', theme_id
     set) vs a brief PRD (source='brief', theme_id NULL — its theme resolves from
     brief.insights[insight_index]). See the 20260702 migration.
     """
@@ -204,9 +204,9 @@ def list_prd_generations(prd_id: int) -> list[dict]:
     Version History can offer prior generations. Returns [] when the PRD doesn't
     exist.
 
-    Grouping key: backlog PRDs (theme_id set) group by (brief_id, theme_id) —
+    Grouping key: ideation PRDs (theme_id set) group by (brief_id, theme_id) —
     they share a sentinel insight_index, so the theme is what distinguishes one
-    backlog PRD family from another under the same brief. Brief PRDs group by
+    ideation PRD family from another under the same brief. Brief PRDs group by
     (brief_id, insight_index) as before. Filtered in Python so a NULL
     insight_index groups correctly (mirrors db/artifacts.py)."""
     c = require_client()
@@ -234,8 +234,8 @@ def list_prd_generations(prd_id: int) -> list[dict]:
 def find_existing_prd_for_theme(
     brief_id: int, theme_id: str, variant: str = "v1"
 ) -> dict | None:
-    """Most recent ready/generating backlog PRD (of the given variant) for a
-    (brief, theme). The backlog analogue of find_existing_prd — backlog PRDs
+    """Most recent ready/generating ideation PRD (of the given variant) for a
+    (brief, theme). The ideation analogue of find_existing_prd — ideation PRDs
     dedupe on theme_id rather than insight_index. Variant-scoped so distinct PRD
     formats don't dedupe against each other."""
     c = require_client()
@@ -286,9 +286,17 @@ def latest_prd_for_dataset(dataset: str) -> dict | None:
 def find_existing_prd(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:
-    """Most recent ready/generating PRD (of the given variant) for a
-    (brief, insight). Variant-scoped so distinct PRD formats don't
+    """Most recent ready/generating BRIEF-sourced PRD (of the given variant)
+    for a (brief, insight). Variant-scoped so distinct PRD formats don't
     dedupe against each other.
+
+    theme_id IS NULL is load-bearing: ideation/chat/upload PRDs anchor to the
+    company's current brief with insight_index 0 as a storage sentinel and are
+    keyed by theme_id instead (find_existing_prd_for_theme). Without the
+    filter, the newest themed PRD shadows the brief insight's own PRD here, so
+    the brief card's "View PRD" opens an unrelated chat-generated document
+    (mirrors the Python-side `not r.get("theme_id")` in
+    find_ready_prds_for_brief).
     """
     c = require_client()
     resp = (
@@ -297,6 +305,7 @@ def find_existing_prd(
         .eq("brief_id", brief_id)
         .eq("insight_index", insight_index)
         .eq("variant", variant)
+        .is_("theme_id", "null")
         .in_("status", ["ready", "generating"])
         .order("id", desc=True)
         .limit(1)
@@ -341,7 +350,7 @@ def list_prds_by_brief(
     c = require_client()
     resp = (
         c.table("prds")
-        .select("id, insight_index, title, status")
+        .select("id, insight_index, title, status, theme_id")
         .eq("brief_id", brief_id)
         .eq("variant", variant)
         .eq("status", "ready")
@@ -349,8 +358,14 @@ def list_prds_by_brief(
     )
     # Grouping/ordering done in Python rather than via SQL ordering so the
     # result is deterministic regardless of the driver's tie-break behaviour.
+    # Themed rows (ideation/chat/upload PRDs anchored to this brief with a
+    # sentinel insight_index) are NOT the insight's own PRD — including them
+    # would point the brief card's map at an unrelated document (mirrors
+    # find_existing_prd / find_ready_prds_for_brief).
     rows_by_insight: dict[int, list[dict]] = {}
     for row in resp.data or []:
+        if row.get("theme_id"):
+            continue
         rows_by_insight.setdefault(row["insight_index"], []).append(row)
     for rows in rows_by_insight.values():
         rows.sort(key=lambda r: r["id"], reverse=True)

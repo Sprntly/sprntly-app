@@ -367,7 +367,7 @@ def insight_evidence_trail(
     consumer (evidence OR PRD) can cite the actual data-source signals.
 
     `insight` overrides brief.insights[insight_index] when supplied — used by the
-    backlog PRD path, where the theme is NOT in the brief payload but carries the
+    ideation PRD path, where the theme is NOT in the brief payload but carries the
     same shape ({theme_id, title, ...}). When omitted, the insight is read from
     the brief at insight_index (the brief-insight path). The walk depends only on
     the insight's theme_id/title, so both paths resolve the identical trail.

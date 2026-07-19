@@ -5,17 +5,17 @@ import { useRouter } from "next/navigation"
 import { AppLayout } from "./AppLayout"
 import { useNavigation } from "../../../context/NavigationContext"
 import { useCompany } from "../../../context/CompanyContext"
-import { runPrdGenerationFromBacklog } from "../../../lib/runPrdGeneration"
+import { runPrdGenerationFromIdeation } from "../../../lib/runPrdGeneration"
 import { prototypePath } from "../../../lib/routes"
-import { backlogApi, type BacklogItem, type BacklogTag, type CompletedItem } from "../../../lib/api"
+import { ideationApi, type IdeationItem, type IdeationTag, type CompletedItem } from "../../../lib/api"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type IdeaType = "New initiative" | "UI" | "Infra" | "Bug" | "Research"
-type IdeaSource = "brief" | "backlog" | "person"
-type BacklogTab = "proposed" | "completed"
+type IdeaSource = "brief" | "ideation" | "person"
+type IdeationTab = "proposed" | "completed"
 
-interface BacklogIdea {
+interface IdeationIdea {
   id: string
   rank: number
   title: string
@@ -28,8 +28,7 @@ interface BacklogIdea {
   impact: string
   impactClass: "positive" | "negative" | "neutral"
   /** The analysis score behind the item (0 for user-added ideas). Drives the
-   *  "Re-sequence" action, which re-orders by real impact score. Optional so the
-   *  static mock rows (INITIAL_IDEAS) need not carry it. */
+   *  "Re-sequence" action, which re-orders by real impact score. */
   score?: number
 }
 
@@ -45,96 +44,43 @@ const TYPE_STYLE: Record<IdeaType, { color: string; bg: string; border: string }
   Research:         { color: "#4a7a9b", bg: "#e8f4fc", border: "#a8d1ed" },
 }
 
-const INITIAL_IDEAS: BacklogIdea[] = [
-  { id: "b1",  rank: 1,  title: "First-Handoff Wizard to lift Day-30 activation",  sub: "4 deployments · $480K ARR at risk",        source: "brief",   type: "New initiative", impact: "+11pt Day-30",  impactClass: "positive" },
-  { id: "b2",  rank: 2,  title: "Co-authoring nudge to amplify the viral loop",     sub: "11 deployments · self-spreading pattern",  source: "brief",   type: "UI",             impact: "+$220K exp.",   impactClass: "positive" },
-  { id: "b3",  rank: 3,  title: "Cerner security packet to unblock expansion",      sub: "$580K · 21 days to close",                 source: "brief",   type: "New initiative", impact: "$680K ARR",     impactClass: "positive" },
-  { id: "b4",  rank: 4,  title: "Shift-handoff template presets by unit type",      sub: "Cuts setup time for new units",            source: "backlog", type: "UI",             impact: "-2d ramp",      impactClass: "neutral"  },
-  { id: "b5",  rank: 5,  title: "EHR session-depth insights for ops leads",         sub: "Surfaces under-utilization early",         source: "person",  sourceName: "Marcus Owens", sourceInitials: "MO", sourceColor: "#179463", type: "New initiative", impact: "+6% WAU",  impactClass: "positive" },
-  { id: "b6",  rank: 6,  title: "Cross-location context view for float nurses",     sub: "Helps multi-site clinicians",              source: "brief",   type: "UI",             impact: "+3pt D30",      impactClass: "positive" },
-  { id: "b7",  rank: 7,  title: "Veradigm FHIR connector (phase 1 read)",           sub: "Opens 9-account pipeline",                 source: "backlog", type: "Infra",          impact: "9 accts",       impactClass: "neutral"  },
-  { id: "b8",  rank: 8,  title: "Fix handoff-sync p95 latency regression",          sub: "Affects save reliability at 3 sites",      source: "brief",   type: "Bug",            impact: "-40% errors",   impactClass: "positive" },
-  { id: "b9",  rank: 9,  title: "Bulk care-plan import for new deployments",        sub: "Top ask from 6 enterprise accounts",       source: "person",  sourceName: "Priya Sharma", sourceInitials: "PS", sourceColor: "#c13838", type: "New initiative", impact: "+4 accts", impactClass: "positive" },
-  { id: "b10", rank: 10, title: "Mobile handoff summary for night shift",           sub: "38 complaints · night-shift nurses",       source: "brief",   type: "UI",             impact: "+5pt D30",      impactClass: "positive" },
-  { id: "b11", rank: 11, title: "Role-based dashboards for charge nurses",          sub: "Charge nurses can't see unit-level data",  source: "backlog", type: "New initiative", impact: "+7% WAU",       impactClass: "positive" },
-  { id: "b12", rank: 12, title: "Handoff reminder push notifications",              sub: "Reduces missed shift handoffs",            source: "brief",   type: "UI",             impact: "-22% misses",   impactClass: "positive" },
-]
-
 // ── API → idea mapping ────────────────────────────────────────────────────────
-// Backlog items come from the weekly analysis: ranks ≥ 4 (the top 3 go into the
-// brief). The backend returns an empty list when no brief exists for the
-// company, so an empty backlog here means "no analysis has run yet".
+// Ideas come from the weekly analysis: ranks ≥ 4 (the top 3 go into the brief),
+// with the weekly prioritization pass shortlisting the 25-30 worth showing —
+// the backend returns only that visible set. It returns an empty list when no
+// brief exists for the company, so an empty page means "no analysis yet".
 
-const TAG_TO_TYPE: Record<BacklogTag, IdeaType> = {
+const TAG_TO_TYPE: Record<IdeationTag, IdeaType> = {
   something_broken: "Bug",          // FIX
   something_new:    "New initiative", // BUILD
   something_better: "UI",           // OPTIMIZE
 }
 
 // Reverse of TAG_TO_TYPE for persisting a user-added idea's type. Only the three
-// types that map cleanly to a BacklogTag are stored; Infra/Research have no tag
+// types that map cleanly to an IdeationTag are stored; Infra/Research have no tag
 // (null), so they reload as the default "New initiative" — a known, acceptable
-// fidelity loss for manual items (the backlog taxonomy has three tags).
-const TYPE_TO_TAG: Partial<Record<IdeaType, BacklogTag>> = {
+// fidelity loss for manual items (the ideation taxonomy has three tags).
+const TYPE_TO_TAG: Partial<Record<IdeaType, IdeationTag>> = {
   Bug: "something_broken",
   "New initiative": "something_new",
   UI: "something_better",
 }
 
-function backlogItemToIdea(item: BacklogItem): BacklogIdea {
+function ideationItemToIdea(item: IdeationItem): IdeationIdea {
   return {
     id: item.id,
     rank: item.rank,
     title: item.title,
     sub: item.reasoning ?? "",
-    // Every backlog item is the analysis remainder — sourced from the backlog,
+    // Every listed item is the analysis remainder — sourced from ideation,
     // not a person or the brief top-3.
-    source: "backlog",
+    source: "ideation",
     type: item.tag ? TAG_TO_TYPE[item.tag] : "New initiative",
     impact: "—",
     impactClass: "neutral",
     score: item.score ?? 0,
   }
 }
-
-// ── Prioritization frameworks ─────────────────────────────────────────────────
-// Each framework scores ideas on different dimensions. The user picks a framework
-// from the "Prioritize by" dropdown and the ideas re-sort by that score.
-
-type PrioritizationFramework = "Impact (ranked)" | "RICE" | "ICE" | "MoSCoW" | "Value vs Effort" | "WSJF"
-
-const PRIORITIZE_OPTIONS: { value: PrioritizationFramework; label: string; description: string }[] = [
-  { value: "Impact (ranked)",  label: "Impact (ranked)",  description: "Default Sprntly scoring — VoC volume × severity × strategic fit" },
-  { value: "RICE",             label: "RICE",             description: "Reach × Impact × Confidence ÷ Effort" },
-  { value: "ICE",              label: "ICE",              description: "Impact × Confidence × Ease" },
-  { value: "Value vs Effort",  label: "Value vs Effort",  description: "Business value ÷ implementation effort" },
-  { value: "WSJF",             label: "WSJF",             description: "Weighted Shortest Job First — SAFe framework" },
-  { value: "MoSCoW",           label: "MoSCoW",           description: "Must / Should / Could / Won't classification" },
-]
-
-// Simulated scores per idea per framework (in production these come from the LLM scoring pipeline)
-type FrameworkScores = Record<PrioritizationFramework, number>
-
-function generateScores(idea: BacklogIdea, index: number): FrameworkScores {
-  // Deterministic pseudo-scores based on idea properties
-  const hash = idea.title.length + index * 7
-  const isBrief = idea.source === "brief"
-  const isBug = idea.type === "Bug"
-  const baseImpact = 12 - index // Higher rank = higher impact
-
-  return {
-    "Impact (ranked)": baseImpact,
-    "RICE":            Math.round((isBrief ? 8 : 5) * (baseImpact / 3) * 0.8 / Math.max(1, (hash % 5) + 1) * 10) / 10,
-    "ICE":             Math.round(((baseImpact / 2) * (isBrief ? 0.9 : 0.7) * (isBug ? 9 : 6 + (hash % 4))) * 10) / 10,
-    "Value vs Effort": Math.round((baseImpact * (isBrief ? 1.2 : 0.8)) / ((hash % 4) + 2) * 10) / 10,
-    "WSJF":            Math.round(((isBug ? 10 : 6) + baseImpact * 0.5) / ((hash % 3) + 1) * 10) / 10,
-    "MoSCoW":          isBug ? 4 : isBrief ? (index < 3 ? 4 : 3) : (index < 6 ? 3 : index < 9 ? 2 : 1),
-  }
-}
-
-const MOSCOW_LABELS: Record<number, string> = { 4: "Must", 3: "Should", 2: "Could", 1: "Won't" }
-
-const GROUP_OPTIONS = PRIORITIZE_OPTIONS.map((o) => o.value)
 
 // ── Icon helpers ──────────────────────────────────────────────────────────────
 
@@ -214,7 +160,7 @@ function TypeBadge({ type, onChange }: { type: IdeaType; onChange: (t: IdeaType)
 
 // ── Source cell — updated icons matching reference ────────────────────────────
 
-function SourceCell({ idea }: { idea: BacklogIdea }) {
+function SourceCell({ idea }: { idea: IdeationIdea }) {
   if (idea.source === "person") {
     return (
       <div className="bl-source">
@@ -225,17 +171,17 @@ function SourceCell({ idea }: { idea: BacklogIdea }) {
       </div>
     )
   }
-  if (idea.source === "backlog") {
+  if (idea.source === "ideation") {
     return (
       <div className="bl-source">
-        {/* Orange grid icon for Product backlog */}
+        {/* Orange grid icon for Ideation */}
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
           <rect x="3"  y="3"  width="7" height="7" rx="1.5" fill="#e07d23" />
           <rect x="14" y="3"  width="7" height="7" rx="1.5" fill="#e07d23" opacity="0.7" />
           <rect x="3"  y="14" width="7" height="7" rx="1.5" fill="#e07d23" opacity="0.7" />
           <rect x="14" y="14" width="7" height="7" rx="1.5" fill="#e07d23" opacity="0.45" />
         </svg>
-        <span className="bl-source-name">Product backlog</span>
+        <span className="bl-source-name">Ideation</span>
       </div>
     )
   }
@@ -251,11 +197,11 @@ function SourceCell({ idea }: { idea: BacklogIdea }) {
 // ── Idea row ──────────────────────────────────────────────────────────────────
 
 function IdeaRow({
-  idea, onTypeChange, onSelect, dragHandlers, isDragging, isDragOver, isSelected, framework,
+  idea, onTypeChange, onSelect, dragHandlers, isDragging, isDragOver, isSelected,
 }: {
-  idea: BacklogIdea
+  idea: IdeationIdea
   onTypeChange: (id: string, t: IdeaType) => void
-  onSelect: (idea: BacklogIdea) => void
+  onSelect: (idea: IdeationIdea) => void
   dragHandlers: {
     onDragStart: (e: React.DragEvent, id: string) => void
     onDragOver:  (e: React.DragEvent, id: string) => void
@@ -265,14 +211,9 @@ function IdeaRow({
   isDragging: boolean
   isDragOver: boolean
   isSelected: boolean
-  framework: PrioritizationFramework
 }) {
   const cls = ["bl-row", isDragging ? "bl-row--dragging" : "", isDragOver ? "bl-row--over" : "", isSelected ? "bl-row--selected" : ""].filter(Boolean).join(" ")
   const impactCls = idea.impactClass === "positive" ? "bl-impact--pos" : idea.impactClass === "negative" ? "bl-impact--neg" : ""
-  const origIdx = INITIAL_IDEAS.findIndex((init) => init.id === idea.id)
-  const scores = generateScores(idea, origIdx >= 0 ? origIdx : idea.rank - 1)
-  const fwScore = scores[framework]
-  const showScore = framework !== "Impact (ranked)"
 
   return (
     <div
@@ -296,19 +237,7 @@ function IdeaRow({
         <TypeBadge type={idea.type} onChange={(t) => onTypeChange(idea.id, t)} />
       </div>
       <div className={`bl-cell bl-cell--impact ${impactCls}`}>
-        {showScore ? (
-          <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span style={{
-              fontSize: 11, fontWeight: 600, padding: "2px 7px", borderRadius: 5,
-              background: "var(--accent-muted, #DBF1E7)", color: "var(--accent, #179463)",
-            }}>
-              {framework === "MoSCoW" ? MOSCOW_LABELS[fwScore] ?? fwScore : fwScore}
-            </span>
-            <span style={{ fontSize: 11, color: "var(--ink-4)" }}>{idea.impact}</span>
-          </span>
-        ) : (
-          idea.impact
-        )}
+        {idea.impact}
       </div>
     </div>
   )
@@ -386,7 +315,7 @@ function AddIdeaCard({
   )
 }
 
-// ── Proposed tab — table only (add card rendered outside scroll in BacklogScreen) ──
+// ── Proposed tab — table only (add card rendered outside scroll in IdeationScreen) ──
 
 type LoadState = "loading" | "ready" | "error"
 
@@ -401,33 +330,41 @@ function ProposedContent({
   addHandlerRef: React.MutableRefObject<((title: string, type: IdeaType) => void) | null>
   resequenceHandlerRef: React.MutableRefObject<(() => void) | null>
   reloadKey: number
-  onSelectIdea: (idea: BacklogIdea) => void
+  onSelectIdea: (idea: IdeationIdea) => void
   selectedIdeaId: string | null
   onCountChange?: (count: number) => void
 }) {
   const { showToast }               = useNavigation()
   const { activeCompany }           = useCompany()
-  const [ideas, setIdeas]           = useState<BacklogIdea[]>([])
+  const [ideas, setIdeas]           = useState<IdeationIdea[]>([])
   const [load, setLoad]             = useState<LoadState>("loading")
-  const [group, setGroup]           = useState(GROUP_OPTIONS[0])
+  const [prioritizedAt, setPrioritizedAt] = useState<string | null>(null)
   const dragId                      = useRef<string | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
 
-  // Fetch the backlog (ranks ≥ 4 of the latest analysis). The route is
-  // session-scoped to the company; `activeCompany` and `reloadKey` (bumped by
-  // "Sync with backlog") are re-fetch triggers.
+  // Fetch the visible ideas (the weekly shortlist + user-pinned rows). The
+  // route is session-scoped to the company; `activeCompany` and `reloadKey`
+  // (bumped by "Sync ideas") are re-fetch triggers.
   useEffect(() => {
     let cancelled = false
     setLoad("loading")
-    backlogApi
+    ideationApi
       .list()
       .then((res) => {
         if (cancelled) return
         const mapped = res.items
           .slice()
           .sort((a, b) => a.rank - b.rank)
-          .map(backlogItemToIdea)
+          .map(ideationItemToIdea)
         setIdeas(mapped)
+        // The shortlist refreshes when the weekly brief generates; the newest
+        // updated_at is when this list was last prioritized.
+        const newest = res.items
+          .map((i) => i.updated_at)
+          .filter((d): d is string => Boolean(d))
+          .sort()
+          .pop()
+        setPrioritizedAt(newest ?? null)
         setLoad("ready")
       })
       .catch(() => {
@@ -444,8 +381,8 @@ function ProposedContent({
   // Persist a new rank order to the backend (best-effort — the optimistic UI
   // order already applied; a failed save just warns so a refresh won't surprise
   // the user with the old order).
-  const persistOrder = useCallback((ordered: BacklogIdea[]) => {
-    backlogApi.reorder(ordered.map((i) => i.id)).catch(() => {
+  const persistOrder = useCallback((ordered: IdeationIdea[]) => {
+    ideationApi.reorder(ordered.map((i) => i.id)).catch(() => {
       showToast("Couldn't save order", "Your new order may not persist on refresh.")
     })
   }, [showToast])
@@ -476,11 +413,11 @@ function ProposedContent({
   // always calls the latest closure. Persists the idea to the backend, then
   // appends the returned row (with its real id) so it can be dragged/generated.
   addHandlerRef.current = (title: string, type: IdeaType) => {
-    backlogApi
+    ideationApi
       .create(title, TYPE_TO_TAG[type] ?? null)
       .then((item) => {
-        setIdeas((prev) => [...prev, { ...backlogItemToIdea(item), type }])
-        showToast("Idea added", `"${title}" saved to the backlog.`)
+        setIdeas((prev) => [...prev, { ...ideationItemToIdea(item), type }])
+        showToast("Idea added", `"${title}" saved to ideation.`)
       })
       .catch(() => showToast("Couldn't add idea", "Please try again."))
   }
@@ -493,33 +430,32 @@ function ProposedContent({
       .slice()
       .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
       .map((item, idx) => ({ ...item, rank: idx + 1 }))
-    setGroup("Impact (ranked)")
     setIdeas(ranked)
     persistOrder(ranked)
-    showToast("Re-sequenced", "Backlog re-ordered by impact and saved.")
+    showToast("Re-sequenced", "Ideas re-ordered by impact and saved.")
   }
 
   if (load === "loading") {
     return (
       <div className="bl-empty" role="status" aria-live="polite" style={{ padding: "48px 24px", textAlign: "center", color: "var(--ink-3)" }}>
-        Loading your backlog…
+        Loading your ideas…
       </div>
     )
   }
 
   // Empty state — no weekly brief has been generated yet, so the analysis has
-  // produced no backlog items (the backend returns an empty list with no brief).
+  // produced no ideas (the backend returns an empty list with no brief).
   if (load === "ready" && ideas.length === 0) {
     return (
       <div className="bl-empty" role="status" style={{ padding: "56px 24px", textAlign: "center", maxWidth: 480, margin: "0 auto", color: "var(--ink-2)" }}>
         <h2 style={{ fontSize: 16, fontWeight: 600, color: "var(--ink)", margin: "0 0 8px" }}>
-          No backlog yet
+          No ideas yet
         </h2>
         <p style={{ fontSize: 13, lineHeight: 1.55, margin: 0 }}>
-          Your backlog is built from the weekly analysis — the top 3 insights go
-          into your brief, and the rest land here. Once a brief has been
-          generated for your company, the remaining prioritized ideas will show
-          up automatically.
+          Ideation is built from the weekly analysis — the top 3 insights go
+          into your brief, and the strongest of the rest are shortlisted here.
+          Once a brief has been generated for your company, your prioritized
+          ideas will show up automatically.
         </p>
       </div>
     )
@@ -528,7 +464,7 @@ function ProposedContent({
   if (load === "error") {
     return (
       <div className="bl-empty" role="alert" style={{ padding: "48px 24px", textAlign: "center", color: "var(--ink-3)" }}>
-        Couldn&apos;t load the backlog. Please try again.
+        Couldn&apos;t load your ideas. Please try again.
       </div>
     )
   }
@@ -543,32 +479,15 @@ function ProposedContent({
           </svg>
           <span>
             <strong>{ideas.length} ideas</strong>{" "}
-            surfaced from your data that aren&apos;t being worked on yet — sequenced by {PRIORITIZE_OPTIONS.find((o) => o.value === group)?.label ?? "impact"}. Drag rows to re-rank, change a type inline, or ask Sprntly below to re-prioritize.
+            shortlisted from your data — re-prioritized each week when your
+            brief generates, so only the strongest ideas show. Drag rows to
+            re-rank or change a type inline.
           </span>
         </div>
         <div className="bl-info-right">
-          <span className="bl-group-label">Prioritize by</span>
-          <select className="bl-group-select" value={group} onChange={(e) => {
-            const fw = e.target.value as PrioritizationFramework
-            setGroup(fw)
-            // Re-sort ideas by the selected framework, then persist the new order
-            // so the re-prioritization survives a refresh.
-            const scored = ideas.map((idea, i) => ({
-              ...idea,
-              _score: generateScores(idea, i),
-            }))
-            scored.sort((a, b) => (b._score[fw] ?? 0) - (a._score[fw] ?? 0))
-            const ranked = scored.map(({ _score, ...item }, idx) => {
-              void _score
-              return { ...item, rank: idx + 1 }
-            })
-            setIdeas(ranked)
-            persistOrder(ranked)
-          }}>
-            {PRIORITIZE_OPTIONS.map((o) => (
-              <option key={o.value} value={o.value} title={o.description}>{o.label}</option>
-            ))}
-          </select>
+          <span className="bl-group-label">
+            Prioritized weekly{prioritizedAt ? ` · updated ${formatSurfacedDate(prioritizedAt)}` : ""}
+          </span>
         </div>
       </div>
 
@@ -579,7 +498,7 @@ function ProposedContent({
           <div className="bl-th bl-th--project">Project</div>
           <div className="bl-th bl-th--source">Source</div>
           <div className="bl-th bl-th--type">Type</div>
-          <div className="bl-th bl-th--impact">{group === "Impact (ranked)" ? "Impact" : group}</div>
+          <div className="bl-th bl-th--impact">Impact</div>
         </div>
         <div className="bl-tbody">
           {ideas.map((idea) => (
@@ -591,7 +510,6 @@ function ProposedContent({
               dragHandlers={{ onDragStart: handleDragStart, onDragOver: handleDragOver, onDragEnd: handleDragEnd, onDrop: handleDrop }}
               isDragging={dragId.current === idea.id}
               isSelected={selectedIdeaId === idea.id}
-              framework={group as PrioritizationFramework}
               isDragOver={dragOverId === idea.id}
             />
           ))}
@@ -628,7 +546,7 @@ function CompletedContent({ onCountChange }: { onCountChange?: (count: number) =
   useEffect(() => {
     let cancelled = false
     setLoad("loading")
-    backlogApi
+    ideationApi
       .completed()
       .then((res) => {
         if (cancelled) return
@@ -723,17 +641,17 @@ function SyncingOverlay() {
   return (
     <div className="bl-syncing-overlay" role="status" aria-live="polite">
       <span className="bl-syncing-spinner" aria-hidden />
-      Syncing with your backlog…
+      Syncing your ideas…
     </div>
   )
 }
 
 // ── Main screen ───────────────────────────────────────────────────────────────
 
-export function BacklogScreen() {
+export function IdeationScreen() {
   const { showToast, openPrdTab }           = useNavigation()
   const router                              = useRouter()
-  const [tab, setTab]                       = useState<BacklogTab>("proposed")
+  const [tab, setTab]                       = useState<IdeationTab>("proposed")
   const [proposedCount, setProposedCount]   = useState<number | null>(null)
   const [completedCount, setCompletedCount] = useState<number | null>(null)
   const [showAddIdea, setShowAddIdea]       = useState(false)
@@ -741,17 +659,17 @@ export function BacklogScreen() {
   const [reloadKey, setReloadKey]           = useState(0)
   const [busy, setBusy]                     = useState<null | "prd" | "prototype">(null)
   const [chatValue, setChatValue]           = useState("")
-  const [selectedIdea, setSelectedIdea]     = useState<BacklogIdea | null>(null)
+  const [selectedIdea, setSelectedIdea]     = useState<IdeationIdea | null>(null)
   const textareaRef                         = useRef<HTMLTextAreaElement>(null)
   // Bridges to ProposedContent's handlers without lifting its ideas state.
   const addHandlerRef = useRef<((title: string, type: IdeaType) => void) | null>(null)
   const resequenceHandlerRef = useRef<(() => void) | null>(null)
 
-  const handleSelectIdea = useCallback((idea: BacklogIdea) => {
+  const handleSelectIdea = useCallback((idea: IdeationIdea) => {
     setSelectedIdea(idea)
   }, [])
 
-  // Real sync: re-pull the backlog from the backend (bumps ProposedContent's
+  // Real sync: re-pull the ideas from the backend (bumps ProposedContent's
   // reloadKey). The brief overlay just gives the refetch a visible beat.
   const handleSync = () => {
     if (isSyncing) return
@@ -759,30 +677,30 @@ export function BacklogScreen() {
     setReloadKey((k) => k + 1)
     setTimeout(() => {
       setIsSyncing(false)
-      showToast("Synced", "Your backlog is up to date.")
+      showToast("Synced", "Your ideas are up to date.")
     }, 800)
   }
 
-  // Generate PRD from a backlog item: open it as a NEW CHAT TAB on the chat
-  // surface, with the Evidence / PRD / Tickets panel sliding over it. openPrdTab
-  // routes to `/` and ChatScreen drives runPrdGenerationFromBacklog in that tab.
-  // A backlog PRD isn't at a brief insight_index, so the tab carries no meta —
+  // Generate PRD from an idea: open it as a NEW CHAT TAB on the chat surface,
+  // with the Evidence / PRD / Tickets panel sliding over it. openPrdTab routes
+  // to `/` and ChatScreen drives runPrdGenerationFromIdeation in that tab. An
+  // ideation PRD isn't at a brief insight_index, so the tab carries no meta —
   // it renders from the PRD payload alone.
-  const handleGeneratePrd = useCallback((idea: BacklogIdea) => {
+  const handleGeneratePrd = useCallback((idea: IdeationIdea) => {
     openPrdTab({
       title: `PRD · ${idea.title}`,
-      source: { kind: "generateBacklog", backlogItemId: idea.id },
+      source: { kind: "generateIdeation", ideationItemId: idea.id },
     })
   }, [openPrdTab])
 
-  // Generate a prototype from a backlog item: a prototype builds from a PRD, so
+  // Generate a prototype from an idea: a prototype builds from a PRD, so
   // ensure the theme's PRD exists first (dedup returns it instantly if already
   // generated), then hand off to the prototype route with ?generate=1.
-  const handleGeneratePrototype = useCallback(async (idea: BacklogIdea) => {
+  const handleGeneratePrototype = useCallback(async (idea: IdeationIdea) => {
     setBusy("prototype")
     showToast("Preparing prototype…", "Building the PRD your prototype is based on.")
     try {
-      const result = await runPrdGenerationFromBacklog(idea.id)
+      const result = await runPrdGenerationFromIdeation(idea.id)
       if (!result.ok) {
         showToast("Prototype blocked", result.message)
         return
@@ -806,13 +724,13 @@ export function BacklogScreen() {
   }
 
   return (
-    <AppLayout mainClassName="main--backlog">
+    <AppLayout mainClassName="main--ideation">
       <div className="bl-shell">
 
         {/* ── Single combined top bar ── */}
         <div className="bl-topbar">
           <div className="bl-topbar-left">
-            <h1 className="bl-title">Briefs</h1>
+            <h1 className="bl-title">Ideation</h1>
             <span className="bl-count-badge">
               {tab === "proposed"
                 ? `${proposedCount ?? 0} ideas`
@@ -842,7 +760,7 @@ export function BacklogScreen() {
               onClick={handleSync}
               disabled={isSyncing}
             >
-              <SyncIcon /> Sync with backlog
+              <SyncIcon /> Sync ideas
             </button>
             <button type="button" className="bl-btn-add" onClick={() => { setShowAddIdea(true); setTab("proposed") }}>
               + Add idea

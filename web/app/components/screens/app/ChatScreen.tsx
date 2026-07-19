@@ -11,16 +11,16 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, isTicketsCommand } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isTicketsCommand, prdCommandTask } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { PrdInputQuestions } from "../../shared/PrdInputQuestions"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
-import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, briefApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
-import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
+import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
 // resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight } from "../../../lib/runEvidenceGeneration"
@@ -102,13 +102,16 @@ export const NEW_CHAT_TITLE = "New chat"
 // it (the PRD card above the thread hosts the View PRD button).
 function commandAckReply(req: PrdTabRequest): AskResponse {
   const source = req.source
-  const importing = source.kind === "resume"
+  const importing = source.kind === "resume" && source.origin !== "task"
+  const fromTask = source.kind === "resume" && source.origin === "task"
   const withTickets = source.kind === "resume" && !!source.openTickets
   const answer = withTickets
     ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready. Use the View PRD button above to reopen the panel anytime."
-    : importing
-      ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-      : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+    : fromTask
+      ? "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+      : importing
+        ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+        : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
   return { answer, key_points: [], citations: [], confidence: 1, unanswered: "" }
 }
 
@@ -784,7 +787,7 @@ export function ChatScreen() {
   // the consumer can persist a seeded command turn against it.
   const openPrdInTab = useCallback((req: PrdTabRequest): string => {
     const { title, source } = req
-    const meta = source.kind === "generateBacklog" ? null : source.meta
+    const meta = source.kind === "generateIdeation" ? null : source.meta
     const existing = tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",
@@ -839,28 +842,40 @@ export function ChatScreen() {
       setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
       return tabId
     }
-    // generate | generateBacklog | load | resume — kick off, show the panel's
+    // generate | generateIdeation | load | resume — kick off, show the panel's
     // spinner, then land the result on the tab (and shared content while active).
     setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, briefMeta: meta, prdGenerating: true } : t))
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true })
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     void (async () => {
+      // Live preview: forward the accumulating Part A HTML (throttled inside
+      // runPrdGeneration) into shared content so PrdPanelContent renders the
+      // draft as it streams — only while this tab is still the active one.
+      const onPartial = (html: string) => {
+        if (activeTabIdRef.current === tabId) setContent({ prdPartialHtml: html })
+      }
       try {
         const result =
-          source.kind === "generate" ? await runPrdGeneration(source.meta)
-          : source.kind === "generateBacklog" ? await runPrdGenerationFromBacklog(source.backlogItemId)
-          : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined)
+          source.kind === "generate" ? await runPrdGeneration(source.meta, onPartial)
+          : source.kind === "generateIdeation" ? await runPrdGenerationFromIdeation(source.ideationItemId, onPartial)
+          : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined, onPartial)
           : await loadPrdById(source.prdId)
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
-          if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
-          // "convert this PRD into tickets": the user asked for TICKETS — once the
-          // imported PRD is ready, switch the panel to the Tickets tab (which
-          // kicks off user-stories generation for it). Only while this tab is
+          if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+          // "convert this PRD into tickets": the user asked for TICKETS — once
+          // the imported PRD is ready, kick the user-stories generation NOW
+          // (fire-and-forget; the backend dedups in-flight jobs) so work starts
+          // before the Tickets tab even mounts and does its cache-read→generate
+          // round-trip. The tab's own poll picks the job up.
+          if (source.kind === "resume" && source.openTickets) {
+            void storiesApi.generate(result.prd.prd_id).catch(() => {})
+          }
+          // …then switch the panel to the Tickets tab. Only while this tab is
           // still active — never yank the panel out from under another tab.
           if (source.kind === "resume" && source.openTickets && activeTabIdRef.current === tabId) {
             openContentPanel("tickets")
           }
-          // The prd_id was UNKNOWN upfront (generate | generateBacklog — including
+          // The prd_id was UNKNOWN upfront (generate | generateIdeation — including
           // "View PRD" find-or-create, which resolves an EXISTING PRD). Now that we
           // have it, rehydrate the tab's chat by prd_id. New PRDs return no
           // conversation (no-op); an existing one restores the user's prior turns.
@@ -868,12 +883,12 @@ export function ChatScreen() {
           if (knownPrdId == null) void hydratePrdThread(tabId, result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
-          if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })
+          if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
           showToast("PRD unavailable", result.message.slice(0, 200))
         }
       } catch (e) {
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
-        if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })
+        if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
@@ -881,6 +896,14 @@ export function ChatScreen() {
   }, [setContent, showToast, hydratePrdThread, openContentPanel])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
+  // An HTML-report answer (e.g. Voice of Customer) opens in the right panel's
+  // Report tab so the user keeps chatting on the left; AskReplyBody renders a
+  // compact reopen card in the thread and auto-invokes this for fresh replies.
+  const handleOpenReport = useCallback((report: { html: string; title: string }) => {
+    setContent({ report })
+    openContentPanel("report")
+  }, [setContent, openContentPanel])
+
   const handleOpenPrd = useCallback(async () => {
     if (!activeTabId) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
@@ -933,21 +956,21 @@ export function ChatScreen() {
     setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
     // Drive the panel's generating spinner via content too (not just per-tab),
     // so the right rail shows in-progress PRD state immediately on open.
-    setContent({ prd: null, prdMeta: null, prdGenerating: true })
+    setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
     openContentPanel("prd")
     try {
-      const result = await runPrdGeneration(meta)
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
-        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-        setContent({ prdGenerating: false })
+        setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", result.message)
       }
     } catch (e) {
       setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-      setContent({ prdGenerating: false })
+      setContent({ prdGenerating: false, prdPartialHtml: null })
       showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
     }
   }, [activeTabId, chatInsightState, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
@@ -1014,20 +1037,20 @@ export function ChatScreen() {
       const prdId = Number(pendingPrd.id)
       if (Number.isFinite(prdId)) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
-        setContent({ prd: null, prdMeta: null, prdGenerating: true })
+        setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
         void (async () => {
           try {
-            const result = await resumePrdGeneration(prdId, meta)
+            const result = await resumePrdGeneration(prdId, meta, (html) => setContent({ prdPartialHtml: html }))
             if (result.ok) {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
-              setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+              setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
             } else {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-              setContent({ prdGenerating: false })
+              setContent({ prdGenerating: false, prdPartialHtml: null })
             }
           } catch {
             setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-            setContent({ prdGenerating: false })
+            setContent({ prdGenerating: false, prdPartialHtml: null })
           }
         })()
       }
@@ -1149,7 +1172,7 @@ export function ChatScreen() {
   }
   const persistence = persistenceRef.current
 
-  // Resume a conversation from ChatsScreen or BacklogScreen. Two payload
+  // Resume a conversation from ChatsScreen or IdeationScreen. Two payload
   // shapes: with `turns` (built locally / legacy) the tab opens pre-filled;
   // with only a `dbId` (All-chats row click) the tab opens INSTANTLY in a
   // `hydrating` state and the turns are fetched here in the background — the
@@ -1183,7 +1206,7 @@ export function ChatScreen() {
         return restored
       }
 
-      // Pre-fetched turns → open filled (BacklogScreen + no-dbId fallback).
+      // Pre-fetched turns → open filled (IdeationScreen + no-dbId fallback).
       const preloaded = buildRestored(data.turns ?? [], "resumed")
       if (preloaded.length > 0) {
         // The resumed tab's dbConvId is set via openTab(..., data.dbId) —
@@ -1342,6 +1365,22 @@ export function ChatScreen() {
   // the DB rather than regenerated.
   const prdCommandFlow = useCallback(async (seedQuery?: string) => {
     try {
+      // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
+      // the PRD from the user's own words: the backend synthesizes the insight
+      // (find-or-create keyed on the task text) and returns a generating prd_id
+      // that opens in the standard PRD tab via the resume path. A generic
+      // "generate a PRD" keeps the top-insight behavior below.
+      const task = seedQuery ? prdCommandTask(seedQuery) : null
+      if (task) {
+        const { prdApi } = await import("../../../lib/api")
+        const start = await prdApi.generateFromTask(task)
+        openPrdTab({
+          title: `PRD · ${start.title}`,
+          seedQuery,
+          source: { kind: "resume", prdId: start.prd_id, meta: null, origin: "task" },
+        })
+        return
+      }
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
       if (!insights.length) {
@@ -1517,10 +1556,25 @@ export function ChatScreen() {
         // generating server-side, and the active ask_id is persisted per tab
         // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
         // resume effect instead of re-asking.
-        ask: () => runAskGeneration(sendQuery, activeCompany, targetTabId, {
-          isCancelled: () => !mountedRef.current,
-          isStopped: () => stoppedTabsRef.current.has(targetTabId),
-        }),
+        ask: () => {
+          // PRD-tab chat: send the tab's PRD id (and its conversation for
+          // follow-up history) so the answer is grounded on the open PRD +
+          // its insight/evidence/tickets/prototype. Resolved at send time —
+          // tabsRef, not the closure — so a PRD that finished generating
+          // after the tab opened is still picked up. `sendQuery` carries any
+          // attached-document content; `isStopped` lets the user stop the ask.
+          const targetTab = tabsRef.current.find((t) => t.id === targetTabId)
+          return runAskGeneration(sendQuery, activeCompany, targetTabId, {
+            isCancelled: () => !mountedRef.current,
+            isStopped: () => stoppedTabsRef.current.has(targetTabId),
+            ...(targetTab?.prdId != null
+              ? {
+                  prd_id: targetTab.prdId,
+                  ...(targetTab.dbConvId != null ? { conversation_id: targetTab.dbConvId } : {}),
+                }
+              : {}),
+          })
+        },
         onResult: (tabId, res) => {
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
@@ -2418,6 +2472,7 @@ export function ChatScreen() {
                                 reply={turn.reply}
                                 animateIn={hasFreshReply}
                                 simulateTyping={hasFreshReply}
+                                onOpenReport={handleOpenReport}
                               />
                             ) : null}
                           </div>
@@ -2447,7 +2502,7 @@ export function ChatScreen() {
 
             {/* The composer renders whenever the thread view is shown — including
                 an insight-bound tab whose thread is still empty (opened from the
-                brief/backlog): the user must be able to talk to Sprntly about that
+                brief/ideation): the user must be able to talk to Sprntly about that
                 PRD right away. `hasThread` alone hid it there; `showThreadView`
                 (hasThread || an insight message) restores it. A plain empty chat
                 still uses the landing composer (showThreadView is false), so

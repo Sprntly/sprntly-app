@@ -33,7 +33,7 @@ export type ScreenId =
   // The dedicated full-page prototype surface. The prototype canvas renders
   // in-tab here at `/prototype?prd=<id>`; the PRD context rides as a query param.
   | "prototype"
-  | "backlog"
+  | "ideation"
   // Top-level "what good looks like" surface: the company's gold-standard PRD
   // examples. Design data-view="templates", bookmark icon.
   | "templates"
@@ -72,7 +72,7 @@ export const APP_SCREENS: ScreenId[] = [
   "sources",
   "tickets",
   "prototype",
-  "backlog",
+  "ideation",
   "templates",
   "skills",
 ]
@@ -103,7 +103,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   sources: "Sources",
   tickets: "Project Management",
   prototype: "Prototype",
-  backlog: "Backlog Projects",
+  ideation: "Ideation",
   templates: "Templates",
   skills: "Skills",
 }

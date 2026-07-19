@@ -1,10 +1,11 @@
 // @vitest-environment jsdom
 //
-// Mount tests for the Backlog screen's "Proposed" tab. The backlog is the
-// REMAINDER of the weekly analysis: the top 3 ranked insights go into the
-// brief, ranks ≥ 4 are sequenced into the backlog. The screen renders those
-// items from GET /v1/backlog (backlogApi.list) and shows an empty state when
-// the API returns none — which is exactly the case when no brief has ever been
+// Mount tests for the Ideation screen's "Proposed" tab. The ideation pool is
+// the REMAINDER of the weekly analysis: the top 3 ranked insights go into the
+// brief, ranks ≥ 4 are sequenced into the pool and the weekly prioritization
+// pass shortlists the 25-30 worth showing. The screen renders the visible set
+// from GET /v1/ideation (ideationApi.list) and shows an empty state when the
+// API returns none — which is exactly the case when no brief has ever been
 // generated for the company (the backend gates the list on a brief existing).
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
@@ -14,15 +15,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
-import type { BacklogItem, BacklogList, CompletedList } from "../../../../lib/api"
+import type { IdeationItem, IdeationList, CompletedList } from "../../../../lib/api"
 
-const listMock = vi.fn<() => Promise<BacklogList>>()
+const listMock = vi.fn<() => Promise<IdeationList>>()
 const completedMock = vi.fn<() => Promise<CompletedList>>()
 
-// Mock the API client — the screen reads the backlog through backlogApi.list()
-// and the Completed tab through backlogApi.completed().
+// Mock the API client — the screen reads the ideas through ideationApi.list()
+// and the Completed tab through ideationApi.completed().
 vi.mock("../../../../lib/api", () => ({
-  backlogApi: {
+  ideationApi: {
     list: () => listMock(),
     completed: () => completedMock(),
     setStatus: vi.fn(),
@@ -34,7 +35,7 @@ vi.mock("../../../../lib/api", () => ({
 // The screen wires Generate PRD / prototype through these; stub them so the
 // Proposed/Completed rendering tests mount without a router or real generation.
 vi.mock("../../../../lib/runPrdGeneration", () => ({
-  runPrdGenerationFromBacklog: vi.fn(),
+  runPrdGenerationFromIdeation: vi.fn(),
 }))
 
 vi.mock("next/navigation", () => ({
@@ -46,7 +47,7 @@ vi.mock("../../../../context/ContentContext", () => ({
 }))
 
 // AppLayout pulls in the whole app chrome (sidebar, AI bar, …) — stub it to a
-// passthrough so the test mounts only the backlog content.
+// passthrough so the test mounts only the ideation content.
 vi.mock("../AppLayout", () => ({
   AppLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }))
@@ -61,18 +62,20 @@ vi.mock("../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn() }),
 }))
 
-import { BacklogScreen } from "../BacklogScreen"
+import { IdeationScreen } from "../IdeationScreen"
 
-function item(overrides: Partial<BacklogItem>): BacklogItem {
+function item(overrides: Partial<IdeationItem>): IdeationItem {
   return {
     id: "id-1",
     theme_id: "t1",
-    title: "Backlog item",
+    title: "Ideation item",
     tag: "something_new",
     rank: 4,
     score: 0.5,
-    status: "backlog",
+    status: "proposed",
+    shortlisted: true,
     reasoning: "below the brief top 3 but worth tracking",
+    updated_at: "2026-07-10T00:00:00Z",
     ...overrides,
   }
 }
@@ -89,8 +92,8 @@ afterEach(() => {
   cleanup()
 })
 
-describe("BacklogScreen — Proposed tab", () => {
-  it("renders the backlog items returned by the API (ranks ≥ 4)", async () => {
+describe("IdeationScreen — Proposed tab", () => {
+  it("renders the shortlisted ideas returned by the API (ranks ≥ 4)", async () => {
     listMock.mockResolvedValue({
       items: [
         item({ id: "a", theme_id: "t4", title: "Rank-4 idea", rank: 4 }),
@@ -99,7 +102,7 @@ describe("BacklogScreen — Proposed tab", () => {
       count: 2,
     })
 
-    render(<BacklogScreen />)
+    render(<IdeationScreen />)
 
     await waitFor(() => expect(screen.getByText("Rank-4 idea")).toBeTruthy())
     expect(screen.getByText("Rank-5 idea")).toBeTruthy()
@@ -113,28 +116,28 @@ describe("BacklogScreen — Proposed tab", () => {
   it("shows an empty state (no items) when the API returns none — i.e. no brief", async () => {
     listMock.mockResolvedValue({ items: [], count: 0 })
 
-    render(<BacklogScreen />)
+    render(<IdeationScreen />)
 
-    await waitFor(() => expect(screen.getByText("No backlog yet")).toBeTruthy())
+    await waitFor(() => expect(screen.getByText("No ideas yet")).toBeTruthy())
     // No table rows / seeded placeholder ideas leak through.
     expect(screen.queryByText("Rank-4 idea")).toBeNull()
     // The count badge reads zero — nothing surfaced without an analysis.
     expect(screen.getByText(/0 ideas/)).toBeTruthy()
   })
 
-  it("preserves the empty state when the backlog is empty (no demo items)", async () => {
+  it("preserves the empty state when the pool is empty (no demo items)", async () => {
     listMock.mockResolvedValue({ items: [], count: 0 })
 
-    render(<BacklogScreen />)
+    render(<IdeationScreen />)
 
-    await waitFor(() => expect(screen.getByText("No backlog yet")).toBeTruthy())
-    // The legacy hardcoded demo titles must NOT appear with an empty backlog.
+    await waitFor(() => expect(screen.getByText("No ideas yet")).toBeTruthy())
+    // The legacy hardcoded demo titles must NOT appear with an empty pool.
     expect(screen.queryByText("First-Handoff Wizard to lift Day-30 activation")).toBeNull()
     expect(screen.queryByText("Co-authoring nudge to amplify the viral loop")).toBeNull()
   })
 
   it("opens the restyled idea-detail panel (design .rbd-*) on row click", async () => {
-    // Visual restyle (#475): selecting a backlog idea opens the right-hand
+    // Visual restyle (#475): selecting an idea opens the right-hand
     // detail pane, now styled via the `.bl-detail` / serif `.bl-detail-title`
     // classes. Assert the pane + its design hooks render with the idea's data.
     listMock.mockResolvedValue({
@@ -142,7 +145,7 @@ describe("BacklogScreen — Proposed tab", () => {
       count: 1,
     })
 
-    const { container } = render(<BacklogScreen />)
+    const { container } = render(<IdeationScreen />)
     await waitFor(() => expect(screen.getByText("Rank-4 idea")).toBeTruthy())
 
     await act(async () => {
@@ -156,13 +159,35 @@ describe("BacklogScreen — Proposed tab", () => {
     expect(detail!.querySelector(".bl-detail-rank")?.textContent).toBe("#4")
     expect(detail!.querySelectorAll(".bl-detail-btn").length).toBe(3)
   })
+
+  it("shows the weekly-prioritization indicator, not the old framework dropdown", async () => {
+    // The RICE/ICE/WSJF "Prioritize by" dropdown was fake (client-side
+    // pseudo-scores whose order then PERSISTED) — removed. Its slot now carries
+    // a read-only "Prioritized weekly" indicator dated from the newest item's
+    // updated_at (the last weekly prioritization run).
+    listMock.mockResolvedValue({
+      items: [
+        item({ id: "a", title: "Rank-4 idea", rank: 4, updated_at: "2026-07-01T12:00:00Z" }),
+        item({ id: "b", theme_id: "t5", title: "Rank-5 idea", rank: 5, updated_at: "2026-07-10T12:00:00Z" }),
+      ],
+      count: 2,
+    })
+
+    const { container } = render(<IdeationScreen />)
+    await waitFor(() => expect(screen.getByText("Rank-4 idea")).toBeTruthy())
+
+    expect(container.querySelector(".bl-group-select")).toBeNull()   // dropdown gone
+    expect(screen.queryByText("Prioritize by")).toBeNull()
+    const indicator = screen.getByText(/Prioritized weekly/)
+    expect(indicator.textContent).toContain("Jul 10, 2026")           // newest updated_at
+  })
 })
 
-describe("BacklogScreen — Completed tab", () => {
+describe("IdeationScreen — Completed tab", () => {
   async function openCompletedTab() {
     listMock.mockResolvedValue({ items: [], count: 0 })
-    render(<BacklogScreen />)
-    await waitFor(() => expect(screen.getByText("No backlog yet")).toBeTruthy())
+    render(<IdeationScreen />)
+    await waitFor(() => expect(screen.getByText("No ideas yet")).toBeTruthy())
     await act(async () => {
       fireEvent.click(screen.getByText("Completed initiatives"))
     })

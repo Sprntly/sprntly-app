@@ -307,3 +307,25 @@ describe("resumeAskGeneration", () => {
     expect(getPendingAsk("acme", "tab-remount")).toBeNull()
   })
 })
+
+describe("PRD-tab grounding opts", () => {
+  it("passes prd_id + conversation_id through to askApi.start", async () => {
+    const startSpy = vi
+      .spyOn(askApi, "start")
+      .mockResolvedValue({ ask_id: 7, status: "generating" } as never)
+    vi.spyOn(askApi, "get").mockResolvedValue(READY as never)
+
+    const p = runAskGeneration("What does this PRD say?", "acme", "tab-prd", {
+      prd_id: 42,
+      conversation_id: 9,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    await p
+
+    expect(startSpy).toHaveBeenCalledWith(
+      "What does this PRD say?",
+      "acme",
+      expect.objectContaining({ prd_id: 42, conversation_id: 9 }),
+    )
+  })
+})

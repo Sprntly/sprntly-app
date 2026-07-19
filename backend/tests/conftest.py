@@ -166,9 +166,10 @@ CREATE TABLE prds (
     template_version INTEGER,
     variant          TEXT NOT NULL DEFAULT 'v1',
     run_id           TEXT,
-    -- Backlog-sourced PRDs (mirrors 20260702000000_prds_backlog_source.sql):
-    -- source='backlog' + theme_id set for a PRD generated from a backlog item;
-    -- source='brief' + theme_id NULL for a brief-insight PRD.
+    -- Ideation-sourced PRDs (mirrors 20260702000000_prds_backlog_source.sql,
+    -- values renamed by 20260715000000): source='ideation' + theme_id set for a
+    -- PRD generated from an ideation item; source='brief' + theme_id NULL for a
+    -- brief-insight PRD.
     source           TEXT NOT NULL DEFAULT 'brief',
     theme_id         TEXT
 );
@@ -266,6 +267,8 @@ CREATE TABLE ask_jobs (
     question        TEXT NOT NULL,
     conversation_id INTEGER,
     pinned_skill    TEXT,
+    -- PRD-tab grounding (mirrors 20260718120000_ask_jobs_prd_id.sql).
+    prd_id          INTEGER,
     status          TEXT NOT NULL DEFAULT 'generating',
     response        TEXT NOT NULL DEFAULT '{}',
     error           TEXT,
@@ -723,10 +726,13 @@ CREATE TABLE agent_decision_log (
     timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Sequenced product backlog (mirrors 20260608120000_backlog_items.sql).
--- One row per non-brief theme, carrying its rank/score + triage rationale.
+-- Prioritized ideation pool (mirrors 20260608120000_backlog_items.sql as
+-- renamed + extended by 20260715000000_ideation_rename_shortlist.sql).
+-- One row per non-brief theme, carrying its rank/score + rationale and the
+-- weekly-prioritization `shortlisted` flag. 'backlog' stays an allowed legacy
+-- status (pre-rename prod writes it through the compat view until cutover).
 -- uuid PK / timestamptz are TEXT under SQLite, matching the other seeded tables.
-CREATE TABLE backlog_items (
+CREATE TABLE ideation_items (
     id            TEXT PRIMARY KEY,
     enterprise_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
     theme_id      TEXT NOT NULL,
@@ -735,14 +741,15 @@ CREATE TABLE backlog_items (
     tag           TEXT,
     rank          INTEGER NOT NULL,
     score         REAL NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'backlog'
-                  CHECK (status IN ('backlog', 'in_progress', 'done', 'dismissed')),
+    status        TEXT NOT NULL DEFAULT 'proposed'
+                  CHECK (status IN ('proposed', 'backlog', 'in_progress', 'done', 'dismissed')),
+    shortlisted   INTEGER NOT NULL DEFAULT 0,
     reasoning     TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (enterprise_id, theme_id)
 );
-CREATE INDEX backlog_items_rank_idx ON backlog_items (enterprise_id, rank);
+CREATE INDEX ideation_items_rank_idx ON ideation_items (enterprise_id, rank);
 
 -- Per-theme brief de-dup fingerprint (mirrors 20260616130000_brief_finding_state.sql).
 -- One row per theme ever surfaced in a brief; carries the convergence state at
