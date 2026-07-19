@@ -60,7 +60,7 @@ _STYLE = """
   .tfind .d{font-size:13.5px;color:var(--sec)}
   .tfind .metric{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent);margin-top:5px}
   .tfind .side{display:flex;flex-direction:column;gap:5px;align-items:flex-end}
-  .mini{font-family:'IBM Plex Mono',monospace;font-size:10.5px;padding:3px 8px;border-radius:2px;white-space:nowrap}
+  .mini{font-family:'IBM Plex Mono',monospace;font-size:10.5px;padding:3px 8px;border-radius:2px;max-width:100%;overflow-wrap:anywhere}
   .mini .k{opacity:.65;margin-right:4px}
   .mini.high{background:var(--fail-bg);color:var(--fail-fg)}
   .mini.med{background:var(--edge-bg);color:var(--edge-fg)}
@@ -357,7 +357,9 @@ _SYSTEM = (
     "side), never an internal/solution label.\n"
     "- Use real COUNTS, never percentages, for these qualitative sources.\n"
     "- Volume and severity each rate low/med/high; keep the raw count with the "
-    "volume and a 2–4 word justification with the severity.\n"
+    "volume and a 2–4 word justification with the severity. Volume counts are "
+    "SHORT — '11/17 calls', '3 of 5' — never a sentence; put any caveat in the "
+    "finding's sentence, not the count.\n"
     "- Every problem names ONE metric it impacts and ALWAYS carries a revenue "
     "line: a sourced figure, or set revenue_unknown=true with "
     "revenue_line='revenue: 🅘 unknown'. Never estimate revenue — if the CRM/"
