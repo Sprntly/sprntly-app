@@ -157,7 +157,12 @@ function setContentCalls() {
 }
 
 describe("PRD opens as a new chat tab — composer command path", () => {
-  it("`generate PRD` in the composer resolves the top insight and hands the generation off to a new PRD chat tab (openPrdTab), not the brief surface", async () => {
+  // SKIPPED since #794 removed BriefChat's own composer (the brief surface no
+  // longer renders an input; the `generate PRD` command now enters through
+  // ChatScreen's composer, covered by ChatScreen.import-command tests). This
+  // was failing on main at the time of the removal. If the brief composer
+  // comes back, unskip; otherwise this block can be deleted outright.
+  it.skip("`generate PRD` in the composer resolves the top insight and hands the generation off to a new PRD chat tab (openPrdTab), not the brief surface", async () => {
     render(<BriefChat />)
     const composer = screen.getByPlaceholderText(/Ask anything/i)
     fireEvent.change(composer, { target: { value: "generate PRD" } })
