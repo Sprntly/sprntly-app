@@ -113,6 +113,14 @@ def test_render_html_tldr_side_column_is_auto_sized():
     assert "1fr 172px" not in vr._STYLE
 
 
+def test_render_html_tldr_pills_wrap_instead_of_overflowing():
+    # Regression: nowrap pills carrying a long model-written count pushed past
+    # the page edge in narrow panels; pills must be allowed to wrap.
+    mini = vr._STYLE.split(".mini{")[1].split("}")[0]
+    assert "nowrap" not in mini
+    assert "overflow-wrap:anywhere" in mini
+
+
 def test_render_html_revenue_unknown_styles_na():
     html = vr.render_html(_data())
     assert '<span class="impact-rev na">revenue: 🅘 unknown</span>' in html
