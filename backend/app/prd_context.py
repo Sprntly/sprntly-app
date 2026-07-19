@@ -65,9 +65,12 @@ def _prd_section(prd: dict, rendered: dict) -> str:
 
 
 def _insight_section(prd: dict) -> str | None:
-    """The brief insight this PRD was generated from. Backlog/ideation PRDs use
-    a sentinel index past the real insights and upload PRDs have no meaningful
-    linkage — both simply skip the section."""
+    """The brief insight this PRD was generated from. Themed PRDs
+    (ideation/chat/upload) anchor to the brief with a SENTINEL insight_index —
+    the brief insight at that index is unrelated to them, so they skip the
+    section rather than claim a foreign insight as their source."""
+    if prd.get("theme_id"):
+        return None
     from app.db.briefs import get_brief_by_id
 
     brief = get_brief_by_id(prd["brief_id"])
@@ -90,6 +93,10 @@ def _insight_section(prd: dict) -> str | None:
 
 
 def _evidence_section(prd: dict) -> str | None:
+    # Evidence rows are keyed (brief_id, insight_index); for a themed PRD that
+    # key points at a brief insight's evidence, not this PRD's — skip it.
+    if prd.get("theme_id"):
+        return None
     from app.db.evidences import find_latest_evidence
 
     row = find_latest_evidence(prd["brief_id"], prd["insight_index"])

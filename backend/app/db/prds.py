@@ -286,9 +286,17 @@ def latest_prd_for_dataset(dataset: str) -> dict | None:
 def find_existing_prd(
     brief_id: int, insight_index: int, variant: str = "v1"
 ) -> dict | None:
-    """Most recent ready/generating PRD (of the given variant) for a
-    (brief, insight). Variant-scoped so distinct PRD formats don't
+    """Most recent ready/generating BRIEF-sourced PRD (of the given variant)
+    for a (brief, insight). Variant-scoped so distinct PRD formats don't
     dedupe against each other.
+
+    theme_id IS NULL is load-bearing: ideation/chat/upload PRDs anchor to the
+    company's current brief with insight_index 0 as a storage sentinel and are
+    keyed by theme_id instead (find_existing_prd_for_theme). Without the
+    filter, the newest themed PRD shadows the brief insight's own PRD here, so
+    the brief card's "View PRD" opens an unrelated chat-generated document
+    (mirrors the Python-side `not r.get("theme_id")` in
+    find_ready_prds_for_brief).
     """
     c = require_client()
     resp = (
@@ -297,6 +305,7 @@ def find_existing_prd(
         .eq("brief_id", brief_id)
         .eq("insight_index", insight_index)
         .eq("variant", variant)
+        .is_("theme_id", "null")
         .in_("status", ["ready", "generating"])
         .order("id", desc=True)
         .limit(1)
@@ -341,7 +350,7 @@ def list_prds_by_brief(
     c = require_client()
     resp = (
         c.table("prds")
-        .select("id, insight_index, title, status")
+        .select("id, insight_index, title, status, theme_id")
         .eq("brief_id", brief_id)
         .eq("variant", variant)
         .eq("status", "ready")
@@ -349,8 +358,14 @@ def list_prds_by_brief(
     )
     # Grouping/ordering done in Python rather than via SQL ordering so the
     # result is deterministic regardless of the driver's tie-break behaviour.
+    # Themed rows (ideation/chat/upload PRDs anchored to this brief with a
+    # sentinel insight_index) are NOT the insight's own PRD — including them
+    # would point the brief card's map at an unrelated document (mirrors
+    # find_existing_prd / find_ready_prds_for_brief).
     rows_by_insight: dict[int, list[dict]] = {}
     for row in resp.data or []:
+        if row.get("theme_id"):
+            continue
         rows_by_insight.setdefault(row["insight_index"], []).append(row)
     for rows in rows_by_insight.values():
         rows.sort(key=lambda r: r["id"], reverse=True)

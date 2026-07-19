@@ -141,3 +141,30 @@ def test_missing_artifacts_keep_prd_section(tenant_client, isolated_settings):
     assert "Evidence" not in block
     assert "Tickets" not in block
     assert "Prototype" not in block
+
+
+def test_themed_prd_skips_foreign_insight_and_evidence(tenant_client, isolated_settings):
+    """Chat/ideation PRDs carry a SENTINEL insight_index — the brief insight and
+    evidence at that index belong to a different document and must not be
+    claimed as this PRD's source in the chat grounding block."""
+    t = tenant_client.make(slug="acme")
+    db = isolated_settings["supabase"]
+    brief = _seed_chain(
+        db, slug="acme", prd_id=304,
+        insights=[{"title": "Real insight zero", "body": "Belongs to the brief PRD."}],
+    )
+    db.table("evidences").insert(
+        {"brief_id": brief["id"], "insight_index": 0, "title": "Insight-0 evidence",
+         "payload_md": "evidence body", "status": "ready", "variant": "v3"}
+    ).execute()
+    # A chat-generated PRD anchored to the same brief with the sentinel index.
+    db.table("prds").insert(
+        {"id": 305, "brief_id": brief["id"], "insight_index": 0,
+         "title": "Dark mode option", "status": "ready",
+         "payload_md": "# Dark mode PRD", "theme_id": "chat:deadbeef"}
+    ).execute()
+
+    block = build_prd_context(t.company_id, 305)
+    assert "Dark mode PRD" in block
+    assert "Real insight zero" not in block
+    assert "Insight-0 evidence" not in block
