@@ -65,7 +65,9 @@ export type PrdTabRequest = {
     // polling in-panel until ready, rather than blocking the caller first.
     // `openTickets` (chat "convert this PRD into tickets" over an attached
     // document) lands the panel on the Tickets tab once the PRD is ready.
-    | { kind: "resume"; prdId: number; meta: PrdTabMeta | null; openTickets?: boolean }
+    // `origin` picks the seeded acknowledgment wording: 'task' (a chat
+    // "generate a PRD for <specific need>" command) vs the default doc-import.
+    | { kind: "resume"; prdId: number; meta: PrdTabMeta | null; openTickets?: boolean; origin?: "import" | "task" }
 }
 
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"

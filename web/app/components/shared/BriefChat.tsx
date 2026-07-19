@@ -88,6 +88,54 @@ export const isTicketsCommand = (q: string) =>
 // regardless of check order.
 export const isPrdCommand = (q: string) =>
   /\b(generate|create|write|draft|make|import|convert|upload)\b.*\bprd\b/i.test(q) && !isTicketsCommand(q)
+
+// Courtesy / filler tails that don't name a task ("generate a PRD please").
+const PRD_TASK_TAIL = /\b(please|now|thanks|thank you|asap|for me|for us)\b/gi
+// Filler between the verb and "prd" ("draft me a detailed dark-mode PRD").
+// Matches at end-of-string too so a remainder that is ONLY filler ("a new")
+// strips to empty and falls back, instead of surviving as a bogus task.
+const PRD_TASK_LEAD =
+  /^(?:a|an|the|me|us|new|full|good|nice|proper|detailed|complete|comprehensive|quick|short|simple|sample|draft)(?:\s+|$)/i
+// Deictic remainders that point at the brief/context, not at a named task —
+// these keep the top-insight behavior ("generate a PRD for this", "…for the
+// top insight", "…for our top product opportunity", "…for this week's brief").
+// Prefix match: anything STARTING with a deictic reference is context we don't
+// hold, so fall back rather than generate a PRD about the wrong thing.
+const PRD_TASK_DEICTIC =
+  /^(?:(?:this|that|it)\b|(?:the|our|my)\s+(?:top|first|latest|current|main|biggest)\b|(?:the|our|my)\s+(?:insight|finding|brief|week|opportunity|priority)\b)/i
+
+function cleanPrdTask(raw: string): string | null {
+  let s = raw.replace(PRD_TASK_TAIL, " ")
+  s = s.replace(/\s+/g, " ").trim().replace(/^["'`]+|["'`]+$/g, "").replace(/[.!?,;:\s]+$/g, "")
+  // Deictic check BEFORE filler-stripping — "the top insight" must be caught
+  // as a brief reference, not stripped down to "top insight".
+  if (PRD_TASK_DEICTIC.test(s)) return null
+  while (PRD_TASK_LEAD.test(s)) s = s.replace(PRD_TASK_LEAD, "")
+  if (s.length < 3) return null
+  return s
+}
+
+/** The SPECIFIC task named inside a PRD-command phrasing, or null when the
+ *  command is generic ("generate a PRD") and should keep the existing
+ *  top-insight behavior. Two shapes: the task AFTER "prd" ("generate a PRD for
+ *  dark mode on mobile") or BETWEEN the verb and "prd" ("draft a dark-mode
+ *  PRD"). Exported so ChatScreen and the brief composer split on the SAME rule. */
+export function prdCommandTask(q: string): string | null {
+  if (!isPrdCommand(q)) return null
+  const after = /\bprd\b[\s:,-]*(?:(?:for|about|on|around|covering|regarding|of|to)\b[\s:,-]*)?(.+)$/i.exec(q)
+  if (after) {
+    const task = cleanPrdTask(after[1])
+    if (task) return task
+  }
+  // Only authoring verbs here — import/convert/upload phrasings name a document,
+  // not a task ("import this document as a PRD").
+  const between = /\b(?:generate|create|write|draft|make)\b\s+(.*?)\s*\bprd\b/i.exec(q)
+  if (between) {
+    const task = cleanPrdTask(between[1])
+    if (task) return task
+  }
+  return null
+}
 const isPrototypeCommand = (q: string) =>
   /\b(generate|create|make|build|spin\s*up)\b.*\b(prototype|proto|mock\s*up|mockup)\b/i.test(q)
 
@@ -599,12 +647,27 @@ export function BriefChat() {
   }, [])
 
   // ── Composer agent flows (mirror the old AIBar command logic) ─────────────
-  const prdFlow = useCallback(async () => {
+  const prdFlow = useCallback(async (query?: string) => {
     // PRD generation is a COMMAND, not a conversation. It opens the PRD as its
     // OWN chat tab (with the Evidence / PRD / Tickets panel over it), never as a
     // bottom chat message. Resolve the brief's top insight, then hand off via
     // openPrdTab — ChatScreen drives the generation and opens the panel.
     try {
+      // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
+      // the PRD from the user's own words: the backend synthesizes the insight
+      // (find-or-create keyed on the task text) and returns a generating prd_id
+      // that opens in the standard PRD tab via the resume path.
+      const task = query ? prdCommandTask(query) : null
+      if (task) {
+        const { prdApi } = await import("../../lib/api")
+        const start = await prdApi.generateFromTask(task)
+        openPrdTab({
+          title: `PRD · ${start.title}`,
+          seedQuery: query,
+          source: { kind: "resume", prdId: start.prd_id, meta: null, origin: "task" },
+        })
+        return
+      }
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
       if (!insights.length) {
@@ -766,7 +829,7 @@ export function BriefChat() {
       // echo it as a chat message either — it's a command, not a conversation.
       if (!isPrdCommand(q)) appendUser(q)
       void runGate(() => {
-        if (isPrdCommand(q)) return prdFlow()
+        if (isPrdCommand(q)) return prdFlow(q)
         if (isPrototypeCommand(q)) return prototypeFlow()
         return ticketsFlow()
       })

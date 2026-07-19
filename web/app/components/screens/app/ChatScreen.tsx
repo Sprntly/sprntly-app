@@ -11,7 +11,7 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, isTicketsCommand } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isTicketsCommand, prdCommandTask } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
@@ -92,13 +92,16 @@ export const NEW_CHAT_TITLE = "New chat"
 // it (the PRD card above the thread hosts the View PRD button).
 function commandAckReply(req: PrdTabRequest): AskResponse {
   const source = req.source
-  const importing = source.kind === "resume"
+  const importing = source.kind === "resume" && source.origin !== "task"
+  const fromTask = source.kind === "resume" && source.origin === "task"
   const withTickets = source.kind === "resume" && !!source.openTickets
   const answer = withTickets
     ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready. Use the View PRD button above to reopen the panel anytime."
-    : importing
-      ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-      : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+    : fromTask
+      ? "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+      : importing
+        ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+        : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
   return { answer, key_points: [], citations: [], confidence: 1, unanswered: "" }
 }
 
@@ -1085,6 +1088,22 @@ export function ChatScreen() {
   // the DB rather than regenerated.
   const prdCommandFlow = useCallback(async (seedQuery?: string) => {
     try {
+      // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
+      // the PRD from the user's own words: the backend synthesizes the insight
+      // (find-or-create keyed on the task text) and returns a generating prd_id
+      // that opens in the standard PRD tab via the resume path. A generic
+      // "generate a PRD" keeps the top-insight behavior below.
+      const task = seedQuery ? prdCommandTask(seedQuery) : null
+      if (task) {
+        const { prdApi } = await import("../../../lib/api")
+        const start = await prdApi.generateFromTask(task)
+        openPrdTab({
+          title: `PRD · ${start.title}`,
+          seedQuery,
+          source: { kind: "resume", prdId: start.prd_id, meta: null, origin: "task" },
+        })
+        return
+      }
       const brief = await briefApi.current(activeCompany)
       const insights = brief.insights || []
       if (!insights.length) {
