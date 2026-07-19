@@ -16,6 +16,7 @@ it returns any row by id regardless of variant so old bookmarks keep
 resolving.
 """
 import asyncio
+import hashlib
 import json
 import logging
 
@@ -240,6 +241,111 @@ async def generate_from_ideation(
     task = asyncio.create_task(
         generate_prd_and_warm(
             prd_id, brief_id, _IDEATION_INSIGHT_INDEX, insight_override=insight,
+            author=company.user_name,
+        )
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+    return {
+        "prd_id": prd_id,
+        "status": "generating",
+        "title": title,
+        "variant": PRD_VARIANT,
+    }
+
+
+# Chat-task PRDs: "generate a PRD for <specific need>" typed in chat. The user's
+# own words are the source — there is no brief insight and no KG theme, so
+# insight_index is a storage sentinel and dedup keys on a synthetic theme_id
+# derived from the normalized task text: re-issuing the same ask returns the
+# same PRD (find-or-create, like the brief/ideation paths).
+_CHAT_TASK_INSIGHT_INDEX = 0
+_CHAT_TASK_TITLE_MAX = 90
+
+
+def _chat_task_theme_id(task: str) -> str:
+    """Deterministic dedup key for a chat task ('chat:<sha1[:16]>' of the
+    whitespace-collapsed, lowercased text). Same precedent as ideation's
+    'manual:%' synthetic theme ids — never resolves in the KG."""
+    norm = " ".join(task.lower().split())
+    return "chat:" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def _chat_task_title(task: str) -> str:
+    """A row/tab title derived from the task text: collapsed whitespace,
+    trailing punctuation stripped, first letter capitalized, word-truncated."""
+    title = " ".join(task.split()).strip().rstrip(".!?,;: ")
+    if len(title) > _CHAT_TASK_TITLE_MAX:
+        title = title[:_CHAT_TASK_TITLE_MAX].rsplit(" ", 1)[0].rstrip(".!?,;: ") + "…"
+    return (title[:1].upper() + title[1:]) if title else "Chat PRD"
+
+
+class TaskGenerateIn(BaseModel):
+    task: str = Field(..., min_length=3, max_length=4000)
+    force: bool = False
+
+
+@router.post("/generate-from-task")
+async def generate_from_task(
+    body: TaskGenerateIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Kick off PRD generation for a SPECIFIC TASK the user described in chat
+    ("generate a PRD for dark mode on mobile").
+
+    The task text becomes the synthetic insight (title + summary) fed to the
+    prd-author pipeline — the same insight_override shape the ideation and
+    import paths use. Grounding is KG-first with corpus fallback; with no theme
+    backing it grounds on the company corpus, and the user's words steer the
+    document. Anchors to the company's current brief when one exists (dataset
+    grounding), else to the per-company uploads brief so new accounts can still
+    use the command. Fire-and-forget like /generate: returns the prd_id
+    immediately; poll GET /v1/prd/{prd_id} until status == 'ready'.
+    """
+    slug = slug_for_company_id(company.company_id)
+    if not slug:
+        raise HTTPException(
+            409, "No dataset for this company yet — connect a source first."
+        )
+    brief = get_current_brief(slug)
+    brief_id = brief["id"] if brief else ensure_uploads_brief(slug)
+
+    task_text = body.task.strip()
+    theme_id = _chat_task_theme_id(task_text)
+    title = _chat_task_title(task_text)
+
+    if not body.force:
+        existing = find_existing_prd_for_theme(brief_id, theme_id, variant=PRD_VARIANT)
+        if existing:
+            return {
+                "prd_id": existing["id"],
+                "status": existing["status"],
+                "title": existing["title"],
+                "variant": PRD_VARIANT,
+            }
+
+    # Synthetic insight — mirrors a brief insight so the PRD prompt resolves
+    # identically to the brief/ideation paths. No theme_id inside the insight:
+    # the synthetic id has no KG backing, so grounding takes its corpus fallback.
+    insight = {
+        "title": title,
+        "summary": f"Requested by the user in chat: {task_text}",
+    }
+
+    prd_id = start_prd(
+        brief_id=brief_id,
+        insight_index=_CHAT_TASK_INSIGHT_INDEX,
+        title=title,
+        template_version=PRD_TEMPLATE_VERSION,
+        variant=PRD_VARIANT,
+        source="chat",
+        theme_id=theme_id,
+    )
+    # No _record_prd_action: there is no real theme to advance in the lifecycle.
+
+    task = asyncio.create_task(
+        generate_prd_and_warm(
+            prd_id, brief_id, _CHAT_TASK_INSIGHT_INDEX, insight_override=insight,
             author=company.user_name,
         )
     )

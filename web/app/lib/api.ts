@@ -451,7 +451,7 @@ export type PrdRecord = {
    *  Only `'brief'` PRDs carry their own research Evidence (keyed at
    *  `(brief_id, insight_index)`); `'ideation'` and `'upload'` PRDs have none.
    *  Absent on legacy rows — treat missing as `'brief'` (the DB default). */
-  source?: "brief" | "ideation" | "backlog" | "upload"
+  source?: "brief" | "ideation" | "backlog" | "upload" | "chat"
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable
@@ -1452,6 +1452,13 @@ export const prdApi = {
       ideation_item_id: ideationItemId,
       force,
     }),
+  /** Kick off PRD generation for a SPECIFIC TASK the user described in chat
+   *  ("generate a PRD for dark mode"). The backend synthesizes the insight from
+   *  the task text (find-or-create keyed on it) and grounds on the company's
+   *  data. Same fire-and-forget contract as `generate`: returns a prd_id to
+   *  poll via prdApi.get(id) until status === 'ready'. */
+  generateFromTask: (task: string, force = false) =>
+    api.post<PrdStartResponse>("/v1/prd/generate-from-task", { task, force }),
   /** Import an existing PRD from an uploaded file (PDF/PPT/DOCX/…). The backend
    *  parses it to text and re-lays-it-out into our format via the prd-author
    *  skill. Same fire-and-forget contract as `generate`: returns a prd_id to
