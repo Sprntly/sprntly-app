@@ -131,8 +131,9 @@ export type WorkspaceCompany = {
   onboarding_step: number
   onboarding_completed_at: string | null
   /** DB-only flag (Sprntly sets it for contracted customers): when true the
-   *  workspace may run on the platform key, so the onboarding Claude-key step is
-   *  skippable. Default false ⇒ the key is required. */
+   *  workspace may run on the platform key. The onboarding Claude-key step is
+   *  now skippable for EVERYONE regardless of this flag; the flag only tailors
+   *  the step's copy (platform usage included vs. bring-your-own). */
   use_platform_key: boolean
 }
 
@@ -272,7 +273,8 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
 /**
  * The semantic slugs of the numbered onboarding steps, in flow order. This is
  * the single source of truth for the onboarding route order. The flow follows
- * the 2026-07-17 screenshot spec (9 steps + the define-metrics sub-flow):
+ * the 2026-07-17 screenshot spec + the restored optional api-key step
+ * (2026-07-19) — 10 steps + the define-metrics sub-flow:
  *
  *   1. company     → CompanyStep         (name* + website + mission + strategy/
  *                                         OKRs; portfolio + planning cycle
@@ -283,16 +285,21 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  *                                         behind a disclosure)
  *   3. metrics     → MetricsStep         (pick up to 5 success metrics* +
  *                                         prioritization framework*)
- *   4. connectors  → Connectors          (connect your tools — ≥1 live
+ *   4. api-key     → ApiKey              (the workspace's own Claude/Anthropic
+ *                                         key — OPTIONAL, skippable; set now so
+ *                                         the token-heavy knowledge-graph build
+ *                                         runs on it, or later in Settings →
+ *                                         Admin)
+ *   5. connectors  → Connectors          (connect your tools — ≥1 live
  *                                         connection required)
- *   5. team        → TeamStep            (team name* + scope of work*)
- *   6. strategy    → StrategyRoadmapStep (team strategy + team roadmap —
+ *   6. team        → TeamStep            (team name* + scope of work*)
+ *   7. strategy    → StrategyRoadmapStep (team strategy + team roadmap —
  *                                         upload OR type; optional, skippable)
- *   7. decisions   → DecisionsStep       (how the team decides + anything
+ *   8. decisions   → DecisionsStep       (how the team decides + anything
  *                                         else — upload OR type; optional)
- *   8. invite      → InviteStep          (teammates: email + job role +
+ *   9. invite      → InviteStep          (teammates: email + job role +
  *                                         permission, CSV import; skippable)
- *   9. review      → ReviewStep          (AI-drafted business context — read,
+ *  10. review      → ReviewStep          (AI-drafted business context — read,
  *                                         edit, accept → define metrics)
  *
  * After step 9 the UNNUMBERED define-metrics sub-flow (route
@@ -300,9 +307,11 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  * confirms a definition + analytics mapping per picked metric, reviews them,
  * and "generate knowledge graph" COMPLETES onboarding + kicks the first brief.
  *
- * Retired in v6: api-key (settings-only — Settings → Admin) and workspace
- * (the default workspace stays "Default"; renameable in Settings →
- * Workspaces). Step-5 team NAME is a company field, not the workspaces row.
+ * The api-key step (restored 2026-07-19) is OPTIONAL/skippable for everyone —
+ * skip it and the workspace runs on the platform key until a key is added here
+ * or in Settings → Admin. Retired in v6 and still gone: workspace-naming (the
+ * default workspace stays "Default"; renameable in Settings → Workspaces).
+ * Step-6 team NAME is a company field, not the workspaces row.
  *
  * `onboarding_step` (the integer DB column) is the 1-based INDEX into this
  * array. Use `slugForStep` / `stepForSlug` to convert, and `clampStep` to keep
@@ -312,6 +321,7 @@ export const ONBOARDING_STEP_SLUGS = [
   "company",
   "product",
   "metrics",
+  "api-key",
   "connectors",
   "team",
   "strategy",

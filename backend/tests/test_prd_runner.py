@@ -222,6 +222,52 @@ def test_generate_prd_and_warm_pre_warms_part_b(isolated_settings, monkeypatch):
     assert (row["llm_part"] or "") != ""  # spec cached in the background
 
 
+def test_generate_prd_and_warm_pings_requester_on_success(isolated_settings, monkeypatch):
+    """When the requester's identity is known, a successful generation fires the
+    best-effort Slack "your PRD is ready" ping with the PRD title."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, _ = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+
+    pings: list = []
+
+    async def _fake_notify(company_id, user_id, pid, title):
+        pings.append((company_id, user_id, pid, title))
+
+    monkeypatch.setattr(prd_runner, "_notify_prd_ready_slack", _fake_notify)
+
+    asyncio.run(prd_runner.generate_prd_and_warm(
+        prd_id, brief_id, 0,
+        company_id="ent-A", user_id="user-1", prd_title="Checkout redesign",
+    ))
+    assert pings == [("ent-A", "user-1", prd_id, "Checkout redesign")]
+
+
+def test_generate_prd_and_warm_skips_ping_without_identity(isolated_settings, monkeypatch):
+    """No company_id/user_id (legacy/test callers) → no Slack ping attempted."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id)
+
+    call, _ = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+
+    called: list = []
+
+    async def _fake_notify(*a, **k):
+        called.append(a)
+
+    monkeypatch.setattr(prd_runner, "_notify_prd_ready_slack", _fake_notify)
+
+    asyncio.run(prd_runner.generate_prd_and_warm(prd_id, brief_id, 0))
+    assert called == []
+
+
 def test_generate_prd_and_warm_streams_part_a_over_channel(isolated_settings, monkeypatch):
     """Part A deltas are published to the prd:<id> channel as the HTML streams,
     then a terminal 'done' — the SSE route relays these to the client."""

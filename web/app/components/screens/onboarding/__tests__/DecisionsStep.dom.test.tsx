@@ -101,7 +101,7 @@ describe("DecisionsStep (onboarding step 07 — decisions + extra context, uploa
     expect(typeInsteadToggle("additional-context")).not.toBeUndefined()
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("7")
+    ).toBe("8")
   })
 
   it("a decisions upload calls companyDocsApi.upload with doc_type decision_process", async () => {
@@ -197,7 +197,7 @@ describe("DecisionsStep (onboarding step 07 — decisions + extra context, uploa
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       decision_process: "RICE with a weekly triage.",
       additional_context: "We size in t-shirt sizes.",
-      onboarding_step: 8,
+      onboarding_step: 9,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
   })
@@ -213,7 +213,7 @@ describe("DecisionsStep (onboarding step 07 — decisions + extra context, uploa
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
     })
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 8)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 9)
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
   })
 

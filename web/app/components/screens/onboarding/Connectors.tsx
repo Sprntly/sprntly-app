@@ -271,8 +271,8 @@ export function Connectors() {
     if (!workspace || auth.kind !== "authed") return
     setSaving(true)
     try {
-      // Next numbered step is team (index 5 in ONBOARDING_STEP_SLUGS).
-      const updated = await advanceOnboardingStep(workspace.id, 5)
+      // Next numbered step is team (index 6 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 6)
       setWorkspace(updated)
       router.push("/onboarding/team")
     } finally {
@@ -299,7 +299,7 @@ export function Connectors() {
 
   return (
     <OnboardingChrome
-      step={4}
+      step={5}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -312,7 +312,7 @@ export function Connectors() {
           ? `${selectedCount} connector${selectedCount === 1 ? "" : "s"} selected — ready to continue`
           : "Connect at least one source to continue — it's what your briefs are built from."
       }
-      onBack={() => router.push("/onboarding/metrics")}
+      onBack={() => router.push("/onboarding/api-key")}
       onContinue={() => void go()}
       continueDisabled={saving || !hasLiveConnection}
       loading={saving}

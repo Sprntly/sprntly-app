@@ -1,10 +1,11 @@
 // Slug-routing integrity for the semantic-routes onboarding flow. The flow is
-// the v6 redesign (screenshot spec 2026-07-17): company → product → metrics →
+// the v6 redesign (screenshot spec 2026-07-17) with the restored optional
+// api-key step (2026-07-19): company → product → metrics → api-key →
 // connectors → team → strategy → decisions → invite → review, then the
-// UNNUMBERED define-metrics sub-flow completes onboarding. Retired in v6:
-// api-key (Settings → Admin) and workspace (the default workspace stays
-// "Default"); the old combined `business-info`, the `business-context` review,
-// the agent-naming `coworkers` step and the `analyzing` loader stay removed.
+// UNNUMBERED define-metrics sub-flow completes onboarding. Still retired:
+// workspace naming (the default workspace stays "Default"); the old combined
+// `business-info`, the `business-context` review, the agent-naming `coworkers`
+// step and the `analyzing` loader stay removed.
 // These guard the total step count and the slug↔screen mapping (no gaps,
 // dropped pages gone).
 import { describe, expect, it } from "vitest"
@@ -14,13 +15,14 @@ import { screenIdFromPathname, SCREEN_PATH } from "../../routes"
 import { ONBOARDING_SCREENS } from "../../../types"
 
 describe("onboarding slug routing", () => {
-  it("has exactly 9 numbered steps in flow order (v6 redesign)", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(9)
-    expect(ONBOARDING_SCREENS).toHaveLength(9)
+  it("has exactly 10 numbered steps in flow order (v6 + restored api-key)", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(10)
+    expect(ONBOARDING_SCREENS).toHaveLength(10)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
       "company",
       "product",
       "metrics",
+      "api-key",
       "connectors",
       "team",
       "strategy",
@@ -33,14 +35,12 @@ describe("onboarding slug routing", () => {
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("business-info")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("business-context")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("first-brief")
-    // Retired in v6: the api-key step and the workspace-naming closer.
-    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("api-key")
+    // Still retired: the workspace-naming closer.
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("workspace")
     expect(ONBOARDING_SCREENS).not.toContain("ob-coworkers")
     expect(ONBOARDING_SCREENS).not.toContain("ob-business-info")
     expect(ONBOARDING_SCREENS).not.toContain("ob-business-context")
     expect(ONBOARDING_SCREENS).not.toContain("ob-first-brief")
-    expect(ONBOARDING_SCREENS).not.toContain("ob-api-key")
     expect(ONBOARDING_SCREENS).not.toContain("ob-workspace")
   })
 
@@ -65,8 +65,8 @@ describe("onboarding slug routing", () => {
     expect(screenIdFromPathname("/onboarding/first-brief")).toBe("chat")
     // The removed agent-naming step no longer resolves to a real screen.
     expect(screenIdFromPathname("/onboarding/coworkers")).toBe("chat")
-    // The v6-retired api-key and workspace steps are not numbered routes.
-    expect(screenIdFromPathname("/onboarding/api-key")).toBe("chat")
+    // api-key is a real numbered route again (asserted positively above); only
+    // the workspace-naming step stays a non-route.
     expect(screenIdFromPathname("/onboarding/workspace")).toBe("chat")
   })
 

@@ -89,7 +89,7 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     // Step 9 of the dots, drafting hint visible, Continue disabled meanwhile.
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("9")
+    ).toBe("10")
     expect(draftMock).toHaveBeenCalledTimes(1)
     expect(screen.getByText(/Drafting your business context/)).not.toBeNull()
     expect(continueBtn().disabled).toBe(true)

@@ -12,6 +12,7 @@ from app.ask_job_runner import run_ask_job
 from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.ingest import convert
 from app.db import (
+    cancel_ask_job,
     complete_ask_job,
     find_cached_ask,
     get_ask_job,
@@ -321,6 +322,27 @@ async def extract_file(
             "and legacy .ppt are not supported — export to PDF or .pptx.",
         )
     return {"name": file.filename or "upload", "markdown": markdown}
+
+
+@router.post("/{ask_id}/cancel")
+def cancel_ask(
+    ask_id: int,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Stop an in-flight Ask (the user realized it was the wrong question).
+
+    Flips the job `generating` → `cancelled`; the background worker polls that
+    status between LLM steps and aborts before the next (expensive) call, and a
+    late-finishing answer is discarded rather than shown. Idempotent and
+    race-safe: if the worker already finished, the update no-ops and this
+    returns the real terminal status (`ready`/`error`) instead. 404 if the job
+    doesn't belong to the caller's company (no cross-tenant existence
+    disclosure — mirrors GET /v1/ask/{id})."""
+    row = get_ask_job(ask_id)
+    if not row or row.get("company_id") != company.company_id:
+        raise HTTPException(404, "Ask not found")
+    status = cancel_ask_job(ask_id)
+    return {"ask_id": ask_id, "status": status or "cancelled"}
 
 
 @router.get("/usage")

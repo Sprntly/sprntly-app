@@ -56,18 +56,19 @@ describe("slugForStep — resume index → slug (clamped)", () => {
     expect(slugForStep(1)).toBe("company")
     expect(slugForStep(2)).toBe("product")
     expect(slugForStep(3)).toBe("metrics")
-    expect(slugForStep(4)).toBe("connectors")
-    expect(slugForStep(5)).toBe("team")
-    expect(slugForStep(6)).toBe("strategy")
-    expect(slugForStep(7)).toBe("decisions")
-    expect(slugForStep(8)).toBe("invite")
-    expect(slugForStep(9)).toBe("review")
+    expect(slugForStep(4)).toBe("api-key")
+    expect(slugForStep(5)).toBe("connectors")
+    expect(slugForStep(6)).toBe("team")
+    expect(slugForStep(7)).toBe("strategy")
+    expect(slugForStep(8)).toBe("decisions")
+    expect(slugForStep(9)).toBe("invite")
+    expect(slugForStep(10)).toBe("review")
   })
 
   it("maps a stale out-of-range index to the LAST step (no crash)", () => {
     // Indices past the end (older/longer flows) clamp to the last step
     // (review is now the closing numbered step).
-    expect(slugForStep(10)).toBe("review")
+    expect(slugForStep(11)).toBe("review")
     expect(slugForStep(20)).toBe("review")
     expect(slugForStep(0)).toBe("company")
   })
@@ -88,19 +89,19 @@ describe("stepForSlug — slug → 1-based index", () => {
 })
 
 describe("isOnboardingStepSlug", () => {
-  it("accepts the 9 numbered slugs and rejects analyzing / removed / unknown", () => {
+  it("accepts the 10 numbered slugs (incl. the restored api-key) and rejects analyzing / removed / unknown", () => {
     for (const slug of ONBOARDING_STEP_SLUGS) {
       expect(isOnboardingStepSlug(slug)).toBe(true)
     }
+    // api-key is a numbered step again (restored 2026-07-19 as an optional step).
+    expect(isOnboardingStepSlug("api-key")).toBe(true)
     expect(isOnboardingStepSlug(ANALYZING_SLUG)).toBe(false)
     // The removed agent-naming step + retired routes are no longer numbered.
     expect(isOnboardingStepSlug("coworkers")).toBe(false)
     expect(isOnboardingStepSlug("business-info")).toBe(false)
     expect(isOnboardingStepSlug("business-context")).toBe(false)
     expect(isOnboardingStepSlug("first-brief")).toBe(false)
-    // v6 retirees: api-key lives in Settings → Admin, workspace naming in
-    // Settings → Workspaces.
-    expect(isOnboardingStepSlug("api-key")).toBe(false)
+    // Still retired: workspace naming lives in Settings → Workspaces.
     expect(isOnboardingStepSlug("workspace")).toBe(false)
     expect(isOnboardingStepSlug("does-not-exist")).toBe(false)
   })

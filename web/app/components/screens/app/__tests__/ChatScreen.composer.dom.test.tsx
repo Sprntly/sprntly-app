@@ -254,6 +254,39 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
 })
 
 describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
+  // A sent question must scroll the thread to the newest turn, so a long
+  // conversation doesn't hide the question / thinking / answer below the fold.
+  // jsdom has no layout, so we stub Element.scrollTo and assert the thread
+  // followed (scrollTo invoked again after the new turn renders).
+  it("auto-scrolls the thread to the newest turn when a question is sent", async () => {
+    const orig = (HTMLElement.prototype as unknown as { scrollTo?: unknown }).scrollTo
+    const scrollSpy = vi.fn()
+    ;(HTMLElement.prototype as unknown as { scrollTo: unknown }).scrollTo = scrollSpy
+    try {
+      seedThreadTab()
+      renderScreen()
+      await screen.findByText("first question")
+      const before = scrollSpy.mock.calls.length
+
+      const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+      await act(async () => {
+        fireEvent.change(textarea, { target: { value: "a brand new question" } })
+      })
+      await act(async () => {
+        fireEvent.click(within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send"))
+      })
+
+      // The new user turn renders…
+      await screen.findByText("a brand new question")
+      // …and the thread followed it to the bottom (scrollTo called again).
+      await waitFor(() => {
+        expect(scrollSpy.mock.calls.length).toBeGreaterThan(before)
+      })
+    } finally {
+      ;(HTMLElement.prototype as unknown as { scrollTo?: unknown }).scrollTo = orig
+    }
+  })
+
   // A3: the thread composer renders a hidden file input + a wired Attach button.
   it("renders a hidden file input and an Attach button on the thread composer", () => {
     seedThreadTab()
@@ -302,6 +335,36 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     })
   })
 
+  // Regression: after sending, the composer must snap back to its CSS resting
+  // height — NOT a hardcoded inline height shorter than the textarea's own
+  // vertical padding, which clipped the placeholder ("Ask Sprntly anything…"
+  // showing only halfway). The fix clears the inline height so CSS governs.
+  it("clears the composer's inline height on send (no clipped resting box)", async () => {
+    seedThreadTab()
+    renderScreen()
+    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+
+    // Simulate a grown composer: the input handler measures scrollHeight (0 in
+    // jsdom), so stamp a non-empty inline height to stand in for a multi-line
+    // draft that had expanded the box.
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "a long draft that grew the composer" } })
+    })
+    textarea.style.height = "96px"
+    expect(textarea.style.height).toBe("96px")
+
+    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => {
+      fireEvent.click(sendBtn)
+    })
+
+    // Inline height is cleared (falls back to CSS min-height + padding), never
+    // left at the old too-short "24px" that crushed the box below one line.
+    expect(textarea.style.height).toBe("")
+    expect(textarea.style.height).not.toBe("24px")
+  })
+
   // A4: an attached file's content is appended to the outgoing query on send.
   it("appends the attached file content to the outgoing query on send", async () => {
     seedThreadTab()
@@ -338,5 +401,115 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     expect(sent).toContain("[Attached files]")
     expect(sent).toContain("data.csv")
     expect(sent).toContain("a,b,c")
+  })
+
+  // The thread renders the ASK + a file chip (like Claude's chat) — NOT the raw
+  // document dump. The full content still rides the outgoing query to the
+  // backend (asserted above / here), so this is purely a display change.
+  it("shows the ask + a file chip in the thread, never the raw document content", async () => {
+    seedThreadTab()
+    renderScreen()
+    const input = fileInput()
+    expect(input).toBeTruthy()
+
+    // A file whose content is a distinctive marker we can assert never renders.
+    const MARKER = "TOP_SECRET_DOC_BODY_9137"
+    await act(async () => {
+      fireEvent.change(input!, { target: { files: [fakeFile("report.txt", `intro\n${MARKER}\noutro`)] } })
+    })
+    await waitFor(() => {
+      const dock = document.querySelector(".bc-dock") as HTMLElement
+      expect(within(dock).getByText("report.txt")).toBeTruthy()
+    })
+
+    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "summarize the attached report" } })
+    })
+    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => {
+      fireEvent.click(sendBtn)
+    })
+
+    // The newest user turn shows the ask text (the seeded thread already has a
+    // "first question" bubble, so assert on the LAST bubble)…
+    const bubble = await waitFor(() => {
+      const els = document.querySelectorAll(".bc-user-bubble")
+      const last = els[els.length - 1] as HTMLElement | undefined
+      expect(last?.textContent).toBe("summarize the attached report")
+      return last as HTMLElement
+    })
+    expect(bubble.textContent).toBe("summarize the attached report")
+
+    // …and a read-only attachment chip naming the file (in the turn, not the
+    // composer dock — the dock's chip clears on send).
+    const turnChip = document.querySelector('[data-testid="turn-attachment-chip"]')
+    expect(turnChip).toBeTruthy()
+    expect(turnChip!.textContent).toContain("report.txt")
+
+    // The raw document body and the "[Attached files]" scaffolding are NOT
+    // rendered anywhere in the thread — only the backend query carries them.
+    expect(document.body.textContent).not.toContain(MARKER)
+    expect(document.body.textContent).not.toContain("[Attached files]")
+
+    // Backend still received the full content (display change only).
+    await waitFor(() => expect(askedQueries.length).toBeGreaterThan(0))
+    const sent = askedQueries[askedQueries.length - 1]
+    expect(sent).toContain("summarize the attached report")
+    expect(sent).toContain(MARKER)
+    expect(sent).toContain("[Attached files]")
+  })
+
+  // Clicking a file card opens a viewer that renders the document content; the
+  // content is NOT in the thread until then (proving the card, not a dump).
+  it("opens a content viewer when the file card is clicked, and closes it", async () => {
+    seedThreadTab()
+    renderScreen()
+    const input = fileInput()
+
+    const MARKER = "VIEWER_CONTENT_MARKER_5521"
+    await act(async () => {
+      fireEvent.change(input!, { target: { files: [fakeFile("brief.txt", `line one\n${MARKER}\nline three`)] } })
+    })
+    await waitFor(() => {
+      const dock = document.querySelector(".bc-dock") as HTMLElement
+      expect(within(dock).getByText("brief.txt")).toBeTruthy()
+    })
+
+    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "read this please" } })
+    })
+    await act(async () => {
+      fireEvent.click(within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send"))
+    })
+
+    // The card is present; the content is hidden until clicked.
+    const card = await waitFor(() => {
+      const c = document.querySelector('[data-testid="turn-attachment-chip"]') as HTMLButtonElement
+      expect(c).toBeTruthy()
+      return c
+    })
+    expect(document.body.textContent).not.toContain(MARKER)
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+
+    // Click → the viewer dialog opens and renders the content.
+    await act(async () => {
+      fireEvent.click(card)
+    })
+    const dialog = await waitFor(() => {
+      const d = document.querySelector('[role="dialog"]') as HTMLElement
+      expect(d).toBeTruthy()
+      return d
+    })
+    expect(dialog.textContent).toContain(MARKER)
+    expect(dialog.textContent).toContain("brief.txt")
+
+    // Close via the close button → dialog gone, content hidden again.
+    await act(async () => {
+      fireEvent.click(within(dialog).getByLabelText("Close"))
+    })
+    await waitFor(() => expect(document.querySelector('[role="dialog"]')).toBeNull())
+    expect(document.body.textContent).not.toContain(MARKER)
   })
 })

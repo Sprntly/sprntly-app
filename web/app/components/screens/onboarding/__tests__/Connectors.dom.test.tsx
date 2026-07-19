@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Container-level mount test for onboarding step 04 — "Connect your tools."
+// Container-level mount test for onboarding step 05 — "Connect your tools."
 // (v6 screenshot spec 2026-07-17). Mounts the real container under jsdom with
 // mocked auth/onboarding/router/api/modal and asserts:
 //   - categories render from wizardCategories() — only the v6 wizard
@@ -73,11 +73,11 @@ function mountLoaded(connections: unknown[] = []) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   onboardingMock.mockReturnValue(
     makeOnboardingCtx({
-      workspace: makeWorkspace({ onboarding_step: 4 }),
+      workspace: makeWorkspace({ onboarding_step: 5 }),
     }),
   )
   listMock.mockResolvedValue({ connections })
-  advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 5 }))
+  advanceStepMock.mockResolvedValue(makeWorkspace({ onboarding_step: 6 }))
   markSkippedMock.mockResolvedValue(undefined)
   return render(React.createElement(Connectors))
 }
@@ -96,7 +96,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("Connectors (container) — v6 step 04 accordion", () => {
+describe("Connectors (container) — v6 step 05 accordion", () => {
   it("renders every SUPPORTED wizard category as an accordion step, first one open", () => {
     const { container } = mountLoaded()
     expect(screen.getByText(/Connect your/)).not.toBeNull()
@@ -113,7 +113,7 @@ describe("Connectors (container) — v6 step 04 accordion", () => {
     }
   })
 
-  it("renders the header + sub copy verbatim, on step 4 of the dots", () => {
+  it("renders the header + sub copy verbatim, on step 5 of the dots", () => {
     const { container } = mountLoaded()
     // Header: "Connect your tools." with the period inside the italic <em>.
     const h = container.querySelector(".onb-card .onb-h") as HTMLElement
@@ -123,10 +123,10 @@ describe("Connectors (container) — v6 step 04 accordion", () => {
     expect(sub.textContent).toBe(
       "The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later.",
     )
-    // The chrome marks step 4 of the 9 numbered steps.
+    // The chrome marks step 5 of the 10 numbered steps.
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("4")
+    ).toBe("5")
     // Design accordion shell: onb-card → conn-steps → conn-step rows.
     expect(container.querySelector(".onb-card .conn-steps")).not.toBeNull()
     expect(container.querySelectorAll(".conn-steps .conn-step").length).toBeGreaterThan(0)
@@ -283,12 +283,12 @@ describe("Connectors (container) — v6 step 04 accordion", () => {
     expect(screen.queryByText("Heap")).toBeNull()
   })
 
-  it("Continue advances to step 5 and routes to team once a connection is live (no skip marking)", async () => {
+  it("Continue advances to step 6 and routes to team once a connection is live (no skip marking)", async () => {
     mountLoaded([{ provider: "mixpanel", status: "active" }])
     await screen.findByText("Live")
     fireEvent.click(screen.getByText("Continue").closest("button") as HTMLElement)
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/team")
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
@@ -306,10 +306,10 @@ describe("Connectors (container) — v6 step 04 accordion", () => {
     ).not.toBeNull()
   })
 
-  it("Back routes to the metrics step", () => {
+  it("Back routes to the api-key step", () => {
     mountLoaded()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

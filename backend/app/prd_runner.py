@@ -597,10 +597,30 @@ async def extract_input_questions_task(prd_id: int, *, reserved: bool = False) -
         clear_extracting(prd_id)
 
 
+async def _notify_prd_ready_slack(
+    company_id: str, user_id: str, prd_id: int, prd_title: str | None,
+) -> None:
+    """Best-effort: ping the PRD's requester on their configured Slack target
+    once the human PRD is ready. Error-isolated + off the app loop (the delivery
+    is sync + network) — a Slack hiccup never turns a finished PRD into a failed
+    task."""
+    try:
+        from app.synthesis.delivery import deliver_prd_ready_to_slack
+
+        res = await asyncio.to_thread(
+            deliver_prd_ready_to_slack, company_id, user_id, prd_id, prd_title
+        )
+        logger.info("prd-ready slack notify prd_id=%s result=%s", prd_id, res)
+    except Exception:  # noqa: BLE001 — notification is best-effort
+        logger.exception("prd-ready slack notify failed prd_id=%s", prd_id)
+
+
 async def generate_prd_and_warm(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
     insight_override: dict | None = None, author: str | None = None,
     import_source_md: str | None = None,
+    company_id: str | None = None, user_id: str | None = None,
+    prd_title: str | None = None,
 ) -> None:
     """Generate the human PRD, extract its input questions, THEN pre-warm the
     Implementation Spec (Part B).
@@ -645,6 +665,12 @@ async def generate_prd_and_warm(
         extract_input_questions_task(prd_id),
         warm_impl_spec(prd_id, ctx=ctx),
     )
+    # The human PRD is ready → ping the requester on their configured Slack
+    # target with a "View PRD here" button. Only on a successful generation
+    # (ctx is not None) and only when we know who to notify. Best-effort — the
+    # helper swallows its own errors so a Slack hiccup never fails the task.
+    if ctx is not None and company_id and user_id:
+        await _notify_prd_ready_slack(company_id, user_id, prd_id, prd_title)
 
 
 def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
