@@ -56,7 +56,12 @@ from app.db.prds import (
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
-from app.graph.retrieval import insight_evidence_trail, render_evidence_trail_section
+from app.graph.retrieval import (
+    insight_evidence_trail,
+    render_context_section,
+    render_evidence_trail_section,
+    retrieve_context,
+)
 from app.html_style import inject_canonical_css
 from app.llm import strip_code_fence
 from app.prompts import PRD_VARIANT, VOICE_GUARD
@@ -249,20 +254,65 @@ def _kg_trail(
     return trail
 
 
+def _kg_topic_bundle(dataset: str, insight: dict | None) -> dict | None:
+    """Topic-relevance KG retrieval — the middle grounding tier for PRDs whose
+    insight has no evidence trail (chat-task PRDs carry a synthetic insight
+    with no theme; a brief insight's trail read can also fail). Ranks the
+    tenant's themes/signals against the insight text with the SAME retrieval
+    the Ask path uses, so a "generate a PRD for bulk onboarding" chat request
+    grounds on the company's live signals instead of whatever markdown happens
+    to sit in the corpus. Best-effort: no tenant / no text / empty bundle /
+    any read error → None (the caller then takes the corpus fallback)."""
+    company_id = company_id_for_slug(dataset)
+    if not company_id or not insight:
+        return None
+    query = " ".join(
+        str(insight.get(k) or "") for k in ("title", "summary", "body")
+    ).strip()
+    if not query:
+        return None
+    try:
+        facade = GraphFacade()
+        bundle = retrieve_context(facade, company_id, query)
+    except Exception:  # noqa: BLE001 — KG read must never break PRD generation
+        logger.exception(
+            "PRD topic-KG grounding failed for slug=%s — corpus fallback", dataset
+        )
+        return None
+    if not bundle or bundle.get("empty"):
+        return None
+    # Distinguish topic retrieval from the trail in the decision log: same
+    # "the KG grounded this" family, different resolution path.
+    bundle["grounding"] = "kg_topic"
+    return bundle
+
+
 def _resolve_grounding(
     dataset: str, brief: dict, insight_index: int, insight: dict | None = None
 ) -> tuple[str, dict | None]:
-    """Resolve the evidence block + (the KG trail it came from, or None).
+    """Resolve the evidence block + (the KG grounding it came from, or None).
 
-    KG-first, consistent with brief/evidence/ask: the insight's evidence trail
-    when it has backing, else corpus fallback (an empty KG, a legacy corpus
-    dataset, or any KG read error). The returned trail (None on the corpus
-    fallback) drives kg_refs in the decision log. `insight` overrides
-    brief.insights[insight_index] (ideation PRD path).
+    KG-first, consistent with brief/evidence/ask, in three tiers:
+      1. the insight's evidence trail (theme/hypothesis-anchored) when it has
+         backing;
+      2. topic-relevance retrieval over the tenant's KG keyed on the insight
+         text (chat-task PRDs have no theme; a trail read can also fail);
+      3. corpus fallback (empty KG, legacy corpus dataset, or any read error).
+    The returned dict (None on the corpus fallback) drives kg_refs and the
+    grounding label in the decision log. `insight` overrides
+    brief.insights[insight_index] (ideation/chat PRD paths).
     """
     trail = _kg_trail(dataset, brief, insight_index, insight)
     if trail is not None:
         return render_evidence_trail_section(trail), trail
+    ins = insight
+    if ins is None:
+        insights = brief.get("insights") or []
+        if 0 <= insight_index < len(insights):
+            ins = insights[insight_index]
+    bundle = _kg_topic_bundle(dataset, ins)
+    if bundle is not None:
+        return render_context_section(bundle), bundle
     return _corpus_grounding(dataset), None
 
 
@@ -500,7 +550,11 @@ def _finalize_part_a(
             "brief_id": brief_id,
             "insight_index": insight_index,
             "skill": _SKILL,
-            "grounding": "kg" if trail is not None else "corpus",
+            # 'kg' = insight evidence trail; 'kg_topic' = topic retrieval over
+            # the tenant KG (chat-task PRDs / trail miss); 'corpus' = fallback.
+            "grounding": (
+                (trail.get("grounding") or "kg") if trail is not None else "corpus"
+            ),
             "kg_signals": len((trail or {}).get("signals") or []),
         }
         log_agent_decision(
@@ -673,12 +727,13 @@ async def generate_prd_and_warm(
         await _notify_prd_ready_slack(company_id, user_id, prd_id, prd_title)
 
 
-def _run_sync(prd_id: int, brief_id: int, insight_index: int) -> None:
+def _run_sync(prd_id: int, brief_id: int, insight_index: int, **kwargs) -> None:
     """Synchronous entry point (used by tests and any sync caller).
 
     Drives the human-PRD generation to completion on a fresh event loop.
+    Extra kwargs (e.g. insight_override) forward to _generate_human_prd.
     """
-    asyncio.run(_generate_human_prd(prd_id, brief_id, insight_index))
+    asyncio.run(_generate_human_prd(prd_id, brief_id, insight_index, **kwargs))
 
 
 async def generate_prd(

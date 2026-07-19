@@ -297,9 +297,10 @@ async def generate_from_task(
 
     The task text becomes the synthetic insight (title + summary) fed to the
     prd-author pipeline — the same insight_override shape the ideation and
-    import paths use. Grounding is KG-first with corpus fallback; with no theme
-    backing it grounds on the company corpus, and the user's words steer the
-    document. Anchors to the company's current brief when one exists (dataset
+    import paths use. Grounding is KG-first: with no theme backing, the task
+    text drives topic retrieval over the tenant's KG (the same retrieval the
+    Ask path uses), and only an empty/unreachable KG falls back to the company
+    corpus. The user's words steer the document either way. Anchors to the company's current brief when one exists (dataset
     grounding), else to the per-company uploads brief so new accounts can still
     use the command. Fire-and-forget like /generate: returns the prd_id
     immediately; poll GET /v1/prd/{prd_id} until status == 'ready'.
@@ -328,7 +329,8 @@ async def generate_from_task(
 
     # Synthetic insight — mirrors a brief insight so the PRD prompt resolves
     # identically to the brief/ideation paths. No theme_id inside the insight:
-    # the synthetic id has no KG backing, so grounding takes its corpus fallback.
+    # the synthetic id has no KG backing, so grounding resolves via topic
+    # retrieval over the tenant KG (corpus only as last resort).
     insight = {
         "title": title,
         "summary": f"Requested by the user in chat: {task_text}",
