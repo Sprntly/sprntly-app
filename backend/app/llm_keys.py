@@ -1,14 +1,12 @@
 """Per-company Claude API key — resolution, enforcement, and ambient binding.
 
 Policy (product):
-  * A company MUST use its own Anthropic (Claude) API key. The key is collected
-    during onboarding (before the connectors step).
-  * If a company has no key configured, Claude calls FAIL — UNLESS platform
-    fallback is allowed for that company, which happens in exactly two cases:
-      1. `companies.use_platform_key` is true (a DB-only flag Sprntly sets for
-         specific contracted customers — there is no UI toggle), or
-      2. the company has not finished onboarding yet (pre-key onboarding LLM
-         work runs on the platform key).
+  * A company SHOULD use its own Anthropic (Claude) API key. The key is
+    collected during onboarding (before the connectors step).
+  * If a company has no key configured, Claude calls fall back to the PLATFORM
+    key rather than failing. `companies.use_platform_key` and onboarding state
+    no longer gate this — they remain as billing/reporting signals only (the
+    staff admin UI still shows the key mode).
   * OpenAI embeddings (`app/graph/embeddings.py`) are unaffected: they read
     `settings.openai_api_key` directly and never touch this module.
 
@@ -28,9 +26,9 @@ binders populate it:
     request).
 
 The three Anthropic client factories (app.llm, app.design_agent.client,
-app.routes.agent_chat) call `resolve_llm_api_key(platform_key)` to pick the key
-or raise. Truly-unbound calls (CLI, system startup, anything with no company in
-scope) get the platform key unchanged.
+app.routes.agent_chat) call `resolve_llm_api_key(platform_key)` to pick the key.
+Truly-unbound calls (CLI, system startup, anything with no company in scope) get
+the platform key unchanged.
 """
 from __future__ import annotations
 
@@ -57,30 +55,13 @@ class _Resolution:
     """A company's resolved LLM-key posture."""
 
     company_key: str | None
-    allow_platform: bool
-
-
-class CompanyKeyRequiredError(HTTPException):
-    """Raised when a bound company has no Claude key and platform fallback is not
-    allowed (no `use_platform_key` flag, onboarding complete). Surfaces as a 400
-    with an actionable message; not retried by the LLM retry layer."""
-
-    def __init__(self) -> None:
-        super().__init__(
-            status_code=400,
-            detail=(
-                "This workspace has no Claude API key configured. Add your "
-                "Anthropic API key in Settings → Admin to use Sprntly."
-            ),
-        )
 
 
 class KeyResolutionUnavailableError(HTTPException):
     """Raised when the company's key posture could not be READ (DB error, decrypt
-    error) — distinct from a resolved "no key" (CompanyKeyRequiredError). The
-    caller's request failed on our side, not on their configuration, so the
-    message says "try again" rather than "add your key". Never cached: the next
-    call re-reads the DB."""
+    error) — distinct from a resolved "no key", which now falls back to the
+    platform key. The caller's request failed on our side, so the message says
+    "try again". Never cached: the next call re-reads the DB."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -114,21 +95,18 @@ def _resolve(company_id: str) -> _Resolution:
     try:
         from app.db.companies import get_company_llm_config
 
-        cipher, use_platform_key, onboarding_complete = get_company_llm_config(company_id)
+        cipher, _use_platform_key, _onboarding_complete = get_company_llm_config(company_id)
         if cipher:
             company_key = decrypt_token_json(cipher).strip() or None
-        # Platform fallback is allowed for contracted customers (the DB flag), or
-        # while the company is still onboarding (pre-key setup work).
-        allow_platform = bool(use_platform_key) or not bool(onboarding_complete)
     except Exception as exc:  # noqa: BLE001 — a read failure is not a key posture
         logger.exception("Failed to resolve company LLM config for %s", company_id)
-        # Still fail safe toward NOT leaking the platform key — but as an
-        # explicit "couldn't read your config, try again" (503), never the
-        # misleading "add your API key" (400), and never cached: a transient
-        # DB blip must not poison this company's calls for a TTL window.
+        # A read failure is NOT "no key": we cannot tell whether this company has
+        # its own key, and silently billing the platform for a company that has
+        # one would be wrong. Surface a retryable 503 instead, and never cache it
+        # — a transient DB blip must not poison this company for a TTL window.
         raise KeyResolutionUnavailableError() from exc
 
-    res = _Resolution(company_key=company_key, allow_platform=allow_platform)
+    res = _Resolution(company_key=company_key)
     _cache[company_id] = (now, res)
     return res
 
@@ -138,10 +116,11 @@ def resolve_llm_api_key(platform_key: str | None) -> str | None:
 
     * No company bound (CLI / system / unauthenticated) → the platform key.
     * Company has its own key → that key (never the platform key).
-    * Company has no key but platform fallback is allowed (DB flag or still
-      onboarding) → the platform key.
-    * Company has no key and fallback is not allowed → raise
-      CompanyKeyRequiredError.
+    * Company has no key → the platform key, whatever the `use_platform_key`
+      flag or onboarding state says. A missing key is a billing question, not a
+      reason to fail the user's request: keyless workspaces used to hit a hard
+      400 (CompanyKeyRequiredError) that surfaced in the product as "failed to
+      generate answer".
     * Key posture could not be read (DB/decrypt failure) → raise
       KeyResolutionUnavailableError (503, retryable, never cached).
     """
@@ -151,9 +130,7 @@ def resolve_llm_api_key(platform_key: str | None) -> str | None:
     res = _resolve(company_id)
     if res.company_key:
         return res.company_key
-    if res.allow_platform:
-        return platform_key
-    raise CompanyKeyRequiredError()
+    return platform_key
 
 
 @contextlib.contextmanager
