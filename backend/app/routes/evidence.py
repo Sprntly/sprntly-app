@@ -157,13 +157,15 @@ async def stream_evidence_generation(
     GET /v1/prd/{prd_id}/stream).
 
     EventSource can't send headers, so the bearer rides as `?token=`
-    (require_workspace_from_query). Frames: `{"kind":"delta","text":…}` as the
-    HTML streams, then a terminal `{"kind":"done"|"error"}`. PROGRESSIVE DISPLAY
-    ONLY — the client keeps polling GET /{evidence_id}, which stays the
-    authoritative source for the finished, persisted brief. Single-worker
-    transport (see app.graph.token_stream); on multi-worker this yields nothing
-    and the poll still carries the result. Opening late (generation already
-    finished) simply receives no frames — the poll shows the completed brief.
+    (require_workspace_from_query). Frames: an optional `{"kind":"replay",…}`
+    catch-up (everything a warm-started generation emitted before this client
+    connected), `{"kind":"delta","text":…}` as the HTML streams, then a terminal
+    `{"kind":"done"|"error"}`. PROGRESSIVE DISPLAY ONLY — the client keeps
+    polling GET /{evidence_id}, which stays the authoritative source for the
+    finished, persisted brief. Single-worker transport (see
+    app.graph.token_stream); on multi-worker this yields nothing and the poll
+    still carries the result. Opening after the generation finished receives no
+    frames — the poll shows the completed brief.
     """
     # 404 on cross-tenant/missing (evidence → brief → dataset → company).
     require_owned_evidence(evidence_id, company.company_id, company.workspace_id)

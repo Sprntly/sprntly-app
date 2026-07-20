@@ -537,12 +537,14 @@ async def stream_prd_generation(
 
     EventSource can't send headers, so the bearer rides as `?token=`
     (require_workspace_from_query). Frames: `{"kind":"delta","text":…}` as the HTML
-    streams, then a terminal `{"kind":"done"|"error"}`. PROGRESSIVE DISPLAY ONLY
-    — the client keeps polling GET /{prd_id}, which stays the authoritative
-    source for the finished, persisted PRD. Single-worker transport (see
-    app.graph.token_stream); on multi-worker this yields nothing and the poll
-    still carries the result. Opening late (generation already finished) simply
-    receives no frames — the poll shows the completed PRD.
+    streams, then a terminal `{"kind":"done"|"error"}`. A client joining
+    mid-generation (the warm-started brief-insight PRDs) first gets one
+    `{"kind":"replay","text":…}` catch-up frame with everything emitted so far.
+    PROGRESSIVE DISPLAY ONLY — the client keeps polling GET /{prd_id}, which
+    stays the authoritative source for the finished, persisted PRD.
+    Single-worker transport (see app.graph.token_stream); on multi-worker this
+    yields nothing and the poll still carries the result. Opening after the
+    generation finished receives no frames — the poll shows the completed PRD.
     """
     require_owned_prd(prd_id, company.company_id, company.workspace_id)  # 404 on cross-tenant/missing
     channel = f"prd:{prd_id}"

@@ -144,6 +144,7 @@ def score_candidates(
     goal_weight: float,
     agent: str = "synthesis",
     classifier=None,
+    background: bool = False,
 ) -> dict[str, dict]:
     """Price KPI-tree fit into each candidate's score — the shared §4c scoring
     pass used by BOTH the brief ranker and the ideation sequencer.
@@ -156,12 +157,21 @@ def score_candidates(
 
     `classifier` injects the fit-classification function (defaults to
     `classify_theme_fit`); callers pass their own module-level reference so a
-    monkeypatch of THAT reference is honored."""
+    monkeypatch of THAT reference is honored.
+
+    `background=True` runs the classification calls in the LLM gate's
+    background lane (they queue behind, and always yield to, interactive
+    callers). The ideation sequencer MUST pass it: a first-run company can have
+    hundreds of uncached themes, and this loop is serial — on the interactive
+    lane it holds one of the few process-wide LLM slots for many minutes,
+    starving the user-facing PRD/evidence/ticket generations (seen 2026-07-20:
+    154 serial classify calls alongside a first brief's drill-downs)."""
     classify = classifier or classify_theme_fit
     out: dict[str, dict] = {}
     for c in candidates:
         if goal_enabled:
-            fit = classify(facade, enterprise_id, c, kpi_tree, agent=agent)
+            fit = classify(facade, enterprise_id, c, kpi_tree, agent=agent,
+                           background=background)
             factor = goal_factor(fit, goal_weight=goal_weight)
         else:
             fit, factor = "off", 1.0
@@ -194,6 +204,7 @@ def classify_theme_fit(
     kpi_tree: Optional["KpiTree"],
     *,
     agent: str = "synthesis",
+    background: bool = False,
 ) -> str:
     """Classify a theme's strategic fit ("high"|"med"|"low") against the KPI tree.
 
@@ -218,6 +229,7 @@ def classify_theme_fit(
         input=_fit_payload(theme.theme_label, theme.evidence,
                            kpi_tree.render_for_prompt()),
         json_schema=_FIT_SCHEMA,
+        background=background,
     )
     fit = (result.output or {}).get("fit", "med")
     if fit not in GOAL_FIT:
