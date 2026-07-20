@@ -476,15 +476,23 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
-  it("a generic 'generate a PRD' in a PRD tab still runs the brief-insight command", async () => {
+  it("a generic 'generate a PRD' with no real conversation does NOT open the brief's top insight", async () => {
     renderChat()
     await openPrdTabViaImport()
 
+    // The import-PRD tab's only turn is the import command itself — not a real
+    // conversation — so a bare "generate a PRD" has nothing to seed from. It must
+    // NOT fall back to the brief's top insight (the bug); it asks for a topic.
+    const resumeCallsBefore = resumePrdGeneration.mock.calls.length
     await typeAndSendInTab("generate a PRD")
+    // prdCommandFlow reaches its "ask for a topic" branch synchronously (no async
+    // work before the toast), so a microtask flush settles it.
+    await act(async () => { await Promise.resolve() })
 
-    await waitFor(() => expect(briefCurrent).toHaveBeenCalled())
-    expect(runAskGeneration).not.toHaveBeenCalled()
-    expect(generateFromTask).not.toHaveBeenCalled()
+    expect(briefCurrent).not.toHaveBeenCalled()        // no brief-insight fallback
+    expect(generateFromTask).not.toHaveBeenCalled()    // no PRD generated
+    expect(resumePrdGeneration.mock.calls.length).toBe(resumeCallsBefore) // no new PRD opened
+    expect(runAskGeneration).not.toHaveBeenCalled()    // not the ask agent either
   })
 
   it("'make this ticket shorter' beside an open PRD tab goes to ask, not the Tickets panel", async () => {
