@@ -500,6 +500,20 @@ async def _run_ticket_sync_cycle() -> None:
             logger.warning("ticket sync failed for prd %s: %s", prd_id, exc)
 
 
+def _run_orphan_ask_job_sweep() -> None:
+    """Fail `ask_jobs` rows abandoned in `generating` by a dead worker, so the
+    chat UI stops polling a job nothing will ever finish. Fully isolated — a
+    failure here never affects other jobs."""
+    try:
+        from app.db.asks import fail_orphan_generating_ask_jobs
+
+        n = fail_orphan_generating_ask_jobs()
+        if n:
+            logger.info("Failed %d abandoned Ask job(s) stuck in generating", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan Ask job sweep failed")
+
+
 def _run_jira_personal_data_report() -> None:
     """GDPR obligation for the distributed Jira app: report the Atlassian
     accountIds we store to Atlassian and erase any it flags as closed. Fully
@@ -642,6 +656,18 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(hours=24),
         id="jira_personal_data_report",
         name="Jira personal-data reporting (GDPR, every 24h)",
+        replace_existing=True,
+    )
+
+    # Orphaned Ask jobs: a process that dies mid-answer strands its `ask_jobs`
+    # row in `generating`, and the chat UI polls that row forever. Startup
+    # reaping alone only heals on the next restart, which in steady state can be
+    # days — so sweep on an interval too. Cheap: one indexed status query.
+    _scheduler.add_job(
+        _run_orphan_ask_job_sweep,
+        trigger=IntervalTrigger(minutes=5),
+        id="orphan_ask_job_sweep",
+        name="Fail abandoned Ask jobs (every 5m)",
         replace_existing=True,
     )
 
