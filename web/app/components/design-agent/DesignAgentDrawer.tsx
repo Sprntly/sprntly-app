@@ -39,12 +39,16 @@ import {
   type DesignAgentGenResult,
 } from "../../lib/runDesignAgentGeneration"
 import {
+  acknowledge,
   markCompleted,
   markPending,
+  markResolvingPending,
   markSeenThisLoad,
   pendingCompleted,
+  pendingPendingIds,
   recordReplayShow,
   wasCancelled,
+  wasResolvingPending,
   wasSeenThisLoad,
 } from "./notificationStore"
 import { IconClose, IconSparkle } from "../shared/app-icons"
@@ -384,6 +388,49 @@ export function replayCompletedNotifications(
     }
     markSeenThisLoad(n.prototypeId)
     recordReplayShow(n.prototypeId, READY_TOAST_TITLE, n.sub)
+  }
+}
+
+/**
+ * Part C — closes the reload gap: a page reload mid-generation kills
+ * `runGenerateFlow`'s own in-memory `.then()` chain, so a `pending` entry
+ * (kickoff already recorded, never flipped to `completed`) is otherwise
+ * orphaned forever — the shell replay only ever reads `pendingCompleted()`.
+ * Reuses `runDesignAgentGeneration` (already does exactly "poll a prototype
+ * whose generation was already kicked off elsewhere") to resume each still-
+ * pending id. `wasResolvingPending`/`markResolvingPending` ensure each id is
+ * polled AT MOST ONCE per page-load even though `AppShell` remounts the
+ * replay component across every authed-route navigation.
+ *
+ * No title is available at resume time without a new fetch, so the resumed
+ * toast uses the generic fallback copy (`buildReadySub(undefined)`) —
+ * documented, not silently dropped (a deliberate gap; naming the PRD here
+ * would need a new fetch this ticket avoids).
+ *
+ * On failure/timeout: silently `acknowledge` the entry (no toast) — matches
+ * the existing posture that a genuine failure is surfaced live-only in the
+ * originating tab, never persisted/replayed.
+ */
+export async function resumePendingNotifications(
+  showToast: (
+    title: string,
+    sub: string,
+    link?: string,
+    opts?: { onAction?: () => void; persist?: boolean },
+  ) => void,
+  poll: (args: { prototypeId: number }) => Promise<DesignAgentGenResult> = runDesignAgentGeneration,
+): Promise<void> {
+  for (const id of pendingPendingIds()) {
+    if (wasResolvingPending(id)) continue
+    markResolvingPending(id)
+    const result = await poll({ prototypeId: id })
+    if (result.ok) {
+      const prdId: number | null = result.prototype.prd_id ?? null
+      markCompleted(id, buildReadySub(undefined), prdId)
+      replayCompletedNotifications(showToast)
+    } else {
+      acknowledge(id) // drop the dead/failed pending entry — no stale sessionStorage leak
+    }
   }
 }
 

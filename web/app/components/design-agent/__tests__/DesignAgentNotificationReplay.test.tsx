@@ -4,6 +4,9 @@
 // null assertion and exercise the pure exported units the component composes
 // (`replayCompletedNotifications` show/no-ack + `shouldAckOnClear` ack precision)
 // directly. The component itself is a thin effect wrapper over those units.
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -30,6 +33,12 @@ import {
 } from "../notificationStore"
 
 const READY = "Prototype ready"
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const COMPONENT_SRC = readFileSync(
+  join(HERE, "..", "DesignAgentNotificationReplay.tsx"),
+  "utf8",
+)
 
 function makeSessionStorage(): Storage {
   let store: Record<string, string> = {}
@@ -73,6 +82,13 @@ describe("DesignAgentNotificationReplay — renders null (AC7)", () => {
       React.createElement(DesignAgentNotificationReplay),
     )
     expect(html).toBe("")
+  })
+})
+
+describe("mount effect calls both replay and resume (Part C, AC14)", () => {
+  it("test_replay_component_effect_calls_both_replay_and_resume — source-level pin (effects don't fire under SSR render)", () => {
+    expect(COMPONENT_SRC).toContain("replayCompletedNotifications(showToast)")
+    expect(COMPONENT_SRC).toContain("resumePendingNotifications(showToast)")
   })
 })
 

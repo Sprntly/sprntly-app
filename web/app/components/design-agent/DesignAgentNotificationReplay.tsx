@@ -33,7 +33,10 @@
 
 import { useEffect, useRef } from "react"
 import { useNavigation } from "../../context/NavigationContext"
-import { replayCompletedNotifications } from "./DesignAgentDrawer"
+import {
+  replayCompletedNotifications,
+  resumePendingNotifications,
+} from "./DesignAgentDrawer"
 import {
   acknowledge,
   getLastReplayShow,
@@ -46,9 +49,12 @@ export function DesignAgentNotificationReplay() {
   // Replay on mount. The per-page-load guard inside `replayCompletedNotifications`
   // dedupes within the same load, so AppShell re-mounting the replay across
   // authed-route navigations does not re-fire the toast. `showToast` is a stable
-  // useCallback, so this runs once per page-load.
+  // useCallback, so this runs once per page-load. Part C: also resume any
+  // `pending` entry a reload orphaned mid-generation (resumePendingNotifications
+  // has its own per-page-load resolving-guard, same dedupe shape).
   useEffect(() => {
     replayCompletedNotifications(showToast)
+    void resumePendingNotifications(showToast)
   }, [showToast])
 
   // Decision-D(b): ack the replay's OWN last-shown id when its toast clears.

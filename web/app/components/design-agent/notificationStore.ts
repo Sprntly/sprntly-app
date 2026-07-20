@@ -117,6 +117,16 @@ export function pendingCompleted(): CompletedNotification[] {
     }))
 }
 
+/** The still-`pending` prototype ids — a reload mid-generation orphans these
+ *  (no in-memory `.then()` chain survives the reload to ever flip them to
+ *  `completed`). `resumePendingNotifications` (DesignAgentDrawer.tsx) polls
+ *  each of these at most once per page-load. */
+export function pendingPendingIds(): number[] {
+  return readAll()
+    .filter((e) => e.status === "pending")
+    .map((e) => e.prototypeId)
+}
+
 // ─── P6-05 (Decision-D(b)): per-page-load guards + last-replay-show record ───
 //
 // The shell replay (`DesignAgentNotificationReplay`) shows a completed-but-
@@ -203,6 +213,25 @@ export function shouldAckOnClear(
   return null
 }
 
+// Part C — reload gap: ids currently being resolved by
+// `resumePendingNotifications` THIS page-load. `AppShell` remounts
+// `DesignAgentNotificationReplay` across every authed-route navigation, so
+// without this guard the same orphaned pending id would be polled again on
+// every navigation. In-memory (per page-load, like `seenThisLoad`) — a real
+// browser reload re-evaluates the module and the guard clears, so a still-
+// pending id is correctly retried after a reload.
+const resolvingPending = new Set<number>()
+
+/** Mark an id as currently being resolved this page-load. */
+export function markResolvingPending(prototypeId: number): void {
+  resolvingPending.add(prototypeId)
+}
+
+/** Was this id already claimed for resolving this page-load? */
+export function wasResolvingPending(prototypeId: number): boolean {
+  return resolvingPending.has(prototypeId)
+}
+
 /** Test seam: reset the in-memory per-page-load guards. A browser reload
  *  re-evaluates the module; tests call this to simulate a fresh page-load (the
  *  guards are NOT sessionStorage-backed by design). */
@@ -210,4 +239,5 @@ export function __resetPageLoadGuards(): void {
   seenThisLoad.clear()
   lastReplayShow = null
   cancelledIds.clear()
+  resolvingPending.clear()
 }
