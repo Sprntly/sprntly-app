@@ -273,6 +273,9 @@ async def test_on_demand_prd_generate_runs_immediately_with_no_existing(
         # Routes read ctx.workspace_id since the multi-workspace slice; None
         # keeps require_owned_brief on the company-wide (legacy) check.
         workspace_id = None
+        # The generate route forwards ctx.user_id into generate_prd_and_warm
+        # (llm-key binding) since the latency round; mirror WorkspaceContext.
+        user_id = "user-1"
 
     body = prd_routes.GenerateIn(brief_id=brief_id, insight_index=0)
     resp = await prd_routes.generate(body, company=_Ctx())
