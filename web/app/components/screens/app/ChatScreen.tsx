@@ -2532,10 +2532,15 @@ export function ChatScreen() {
                               />
                             ) : null}
                           </div>
-                          {/* Skip the row when the insight/PRD card is shown at the
-                              top of the thread — it already hosts these actions, and
-                              rendering both reads as duplicate button noise. */}
-                          {isLast && turn.reply && !showInsightMsg ? (
+                          {/* Artifact-action row (Generate/View PRD + prototype)
+                              — ONLY on a PRD-bound tab whose insight card isn't
+                              showing yet (a restored PRD tab: prdId kept, prd not
+                              yet rehydrated, so showInsightMsg is transiently
+                              false). A GENERIC chat answer never shows it: a plain
+                              Q&A reply is not a PRD springboard — to make a PRD
+                              from a chat the user types the request (the "generate
+                              a PRD for …" command), which opens its own PRD tab. */}
+                          {isLast && turn.reply && !showInsightMsg && activeTab?.prdId != null ? (
                             <ChatArtifactActions
                               evidenceExists={chatEvidenceExists}
                               prdExists={chatPrdExists}
