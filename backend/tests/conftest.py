@@ -184,7 +184,10 @@ CREATE TABLE evidences (
     status           TEXT NOT NULL DEFAULT 'generating',
     error            TEXT,
     template_version INTEGER,
-    variant          TEXT NOT NULL DEFAULT 'v1'
+    variant          TEXT NOT NULL DEFAULT 'v1',
+    -- 20260719120000: chat-task evidence keys by (brief_id, theme_id)
+    -- ('chat:<hash>'); brief-insight docs keep NULL.
+    theme_id         TEXT
 );
 
 -- Test-harness only (NOT a migration): the real prd_patches migration ships

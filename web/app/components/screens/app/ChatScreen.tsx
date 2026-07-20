@@ -1111,6 +1111,52 @@ export function ChatScreen() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, setContent])
 
+  // Chat-task PRDs generate an Evidence artifact server-side (semantic KG
+  // retrieval over the task — skipped when the KG has no backing). Once a tab
+  // carries a chat-sourced PRD, probe for that doc and land it on the tab: a
+  // found row (ready OR still generating) surfaces the Evidence tab (the
+  // hidden-gate in ContentPanel clears when evidence/evidenceGenerating is
+  // set); a 404 (no backing → skipped) leaves the tab hidden. One probe per
+  // (tab, prd) — the ref set is keyed accordingly so a regenerated PRD probes
+  // again but re-renders don't.
+  const evidenceProbedRef = useRef<Set<string>>(new Set())
+  const activePrdId = (() => {
+    const tab = tabs.find((t) => t.id === activeTabId)
+    return tab?.prd?.source === "chat" ? tab.prd.prd_id : null
+  })()
+  useEffect(() => {
+    if (!activeTabId || activePrdId == null) return
+    const tabId = activeTabId
+    const probeKey = `${tabId}:${activePrdId}`
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    if (!tab || tab.evidence || tab.evidenceGenerating) return
+    if (evidenceProbedRef.current.has(probeKey)) return
+    evidenceProbedRef.current.add(probeKey)
+    void (async () => {
+      try {
+        const { prdApi } = await import("../../../lib/api")
+        const rec = await prdApi.evidenceForPrd(activePrdId)
+        if (!rec || rec.status === "failed") return
+        // A doc exists (ready or in-flight): show the Evidence tab's spinner
+        // while resumeEvidenceGeneration polls it to terminal (a ready row
+        // resolves on the first poll).
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: true } : t))
+        if (activeTabIdRef.current === tabId) setContent({ evidenceGenerating: true })
+        const result = await resumeEvidenceGeneration(rec.id, undefined)
+        setTabs((prev) => prev.map((t) => t.id === tabId
+          ? { ...t, evidenceGenerating: false, evidence: result.ok ? result.evidence : null }
+          : t))
+        if (activeTabIdRef.current === tabId) {
+          setContent({ evidenceGenerating: false, ...(result.ok ? { evidence: result.evidence } : {}) })
+        }
+      } catch {
+        // Probe is best-effort — a failed lookup just leaves the tab hidden.
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false } : t))
+        if (activeTabIdRef.current === tabId) setContent({ evidenceGenerating: false })
+      }
+    })()
+  }, [activeTabId, activePrdId, setContent])
+
   useEffect(() => {
     if (!pendingSearchHandoff) return
     const { query, reply, convId } = pendingSearchHandoff
