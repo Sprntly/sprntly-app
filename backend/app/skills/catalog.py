@@ -114,9 +114,6 @@ NON_ROUTABLE: frozenset[str] = frozenset(
     {"business-context", "fact-check", "weekly-brief", "evidence-brief"}
 )
 
-# Expensive skills that trip the confirm gate on large scope (see qa_agent).
-COST_GATED: frozenset[str] = frozenset({"competitive-intelligence-review"})
-
 # Acronyms to upper-case when humanising an id into a display label.
 _ACRONYMS = {
     "prd", "okr", "nct", "gtm", "rice", "saas", "cir", "jtbd", "ice",

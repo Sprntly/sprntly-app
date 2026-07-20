@@ -42,7 +42,7 @@ from app.skill_router import (
     is_data_analysis_request,
     is_voc_report_request,
 )
-from app.skills.catalog import COST_GATED, NON_ROUTABLE, routable_manifest
+from app.skills.catalog import NON_ROUTABLE, routable_manifest
 from app.skills.loader import get_skill, list_skills
 from app.skills.scripts import SCRIPT_TOOLS
 
@@ -219,30 +219,6 @@ def route(
         logger.exception("LLM router failed; answering directly")
 
     return RouteDecision(None, 0.0, "none")
-
-
-# Confirm gate (decision 2026-06-13): cost-gated skills return this instead of
-# running, so the UI can ask the PM how deep to go. v1 trips on every fresh
-# route of a cost-gated skill (not when pinned via the follow-up); scope-aware
-# auto-run of a tiny one-competitor teardown is a documented follow-up.
-def _confirm_payload(skill_id: str, question: str) -> dict:
-    return {
-        "type": "needs_confirmation",
-        "skill": skill_id,
-        "scope": {"depth": "full"},
-        "estimate": {"tier": "deep", "duration_s": 210},
-        "options": [
-            {"id": "quick", "label": "Quick teardown", "scope": {"depth": "quick"}},
-            {"id": "full", "label": "Full review", "scope": {"depth": "full"}},
-        ],
-        # Keep the standard Ask shape so the route's _strip_citations + UI don't break.
-        "answer": "",
-        "key_points": [],
-        "citations": [],
-        "confidence": 0.0,
-        "unanswered": "",
-        "_skill": skill_id,
-    }
 
 
 # Ground truth over imagination: a question outside product/PM/engineering/
@@ -548,11 +524,6 @@ def answer(
         return compose_ask_answer(
             dataset, q, enterprise_id=enterprise_id, prd_context=prd_context
         )
-
-    # Cost-gated skill freshly routed → ask before spending (CIR). A pinned
-    # follow-up has already confirmed, so it runs.
-    if decision.skill_id in COST_GATED and decision.source != "pinned":
-        return _confirm_payload(decision.skill_id, question)
 
     # VoC routed with no live call source (call_digest is handled upstream): render
     # the pinned HTML report from KG signal when there is any; else fall through to
