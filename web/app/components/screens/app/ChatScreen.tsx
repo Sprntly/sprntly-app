@@ -1384,12 +1384,23 @@ export function ChatScreen() {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toISOString()
+      // The DB conversation this tab is bound to, if any. A tab resumed from
+      // Chat history already carries a `dbConvId` but has NO in-memory rail
+      // entry (its conversation lives only in ChatsScreen's DB list). Without
+      // this, a follow-up in a resumed room fell through to the `else` branch
+      // and prepended a phantom new rail row (titled with the follow-up text)
+      // that vanished on reload — the reported bug.
+      const dbConvId = tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ?? null
       // ONE rail entry per chat tab (mirrors the one-conversation-per-tab DB
       // invariant in chatPersistence.ts). A follow-up message in the same room
       // UPDATES that room's entry (latest turn, bumped time, moved to top)
       // instead of prepending a new row — otherwise every message showed up as
-      // its own item in the History list until the next page reload.
-      const existing = prev.find((c) => (c as any)._tabId === targetTabId)
+      // its own item in the History list until the next page reload. Match by
+      // the tab id OR the bound DB conversation id (covers resumed tabs).
+      const existing = prev.find((c) =>
+        (c as any)._tabId === targetTabId ||
+        (dbConvId != null && (c as any)._dbId === dbConvId),
+      )
       if (existing) {
         setContent({
           conversations: [
@@ -1406,6 +1417,10 @@ export function ChatScreen() {
               time: timeStr,
               savedTurn: { id: turnId, query },
               _tabId: targetTabId,
+              // Tag with the bound DB conversation id (when resuming an existing
+              // thread) so ChatsScreen's `_dbId` dedup folds this into the real
+              // DB row instead of rendering it as a separate phantom entry.
+              ...(dbConvId != null ? { _dbId: dbConvId } : {}),
             } as ConversationRow,
             ...prev,
           ],
@@ -2533,6 +2548,14 @@ export function ChatScreen() {
                     ) : null}
                     {thread.map((turn, idx) => {
                       const isLast = idx === thread.length - 1
+                      // A turn shows the "thinking" skeleton ONLY while its ask is
+                      // genuinely in flight — the active tab is busy AND this is the
+                      // last (in-flight) turn. Any other reply-less turn is terminal:
+                      // an ask that never got a response (failed / stopped / abandoned,
+                      // or a restored orphan turn from history). Basing this on live
+                      // busy state — not merely `reply === undefined` — means a
+                      // sessionStorage-cached thread renders correctly on reload too.
+                      const isGenerating = busy && isLast
                       const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
                       if (hasFreshReply) animatedTurnIds.current.add(turn.id)
                       return (
@@ -2571,7 +2594,13 @@ export function ChatScreen() {
                             {turn.stopped && !turn.reply ? (
                               <div className="bc-stopped">You stopped this response.</div>
                             ) : null}
-                            {!turn.reply && !turn.error && !turn.stopped ? <AssistantThinkingSkeleton compact /> : null}
+                            {!turn.reply && !turn.error && !turn.stopped ? (
+                              isGenerating ? (
+                                <AssistantThinkingSkeleton compact />
+                              ) : (
+                                <div className="bc-stopped">No response was generated for this message.</div>
+                              )
+                            ) : null}
                             {turn.reply ? (
                               <AskReplyBody
                                 reply={turn.reply}
