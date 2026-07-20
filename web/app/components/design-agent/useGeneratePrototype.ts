@@ -453,6 +453,19 @@ export function useGeneratePrototype(
                 onSuccess ? onSuccess(protoForToast) : router.push(prototypePath(prdId)),
             },
           )
+        } else if (result && !result.ok && result.timedOut) {
+          // Client-side give-up only, NOT a genuine failure (same rationale as
+          // DesignAgentDrawer's runGenerateFlow/resumePendingNotifications
+          // sites). Suppress the false "Generation failed" toast AND do NOT
+          // dispatch da:generating-done — that is the exact signal the
+          // non-notify-mode duplicate-spend closure (below) relies on;
+          // falsely dispatching it here would reopen that same hole for the
+          // notify-mode path. Leave the `pending` sessionStorage entry
+          // (written by markPending at kickoff) untouched so
+          // resumePendingNotifications notifies honestly once the run truly
+          // resolves.
+          clearOverlayTimers()
+          return
         } else if (result && !result.ok) {
           showToast(
             "Generation failed",
@@ -465,6 +478,20 @@ export function useGeneratePrototype(
         clearOverlayTimers()
         return
       }
+      if (result && !result.ok && result.timedOut) {
+        showToast(
+          "Still generating",
+          "This is taking longer than expected — we'll notify you when it's ready.",
+        )
+        if (genProtoId != null) {
+          window.dispatchEvent(
+            new CustomEvent("da:generating", { detail: { prototypeId: genProtoId } }),
+          )
+        }
+        clearOverlayTimers()
+        setGenLoading(false)
+        return
+      }
       pendingResultRef.current = result?.ok && result.prototype ? result.prototype : null
       const remaining = MIN_VISIBLE_MS - (Date.now() - shownAtRef.current)
       if (remaining <= 0) {
@@ -474,7 +501,7 @@ export function useGeneratePrototype(
         minTimerRef.current = setTimeout(hideLoading, remaining)
       }
     },
-    [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId, skipExistenceCheck, onGenerationSettled],
+    [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId, skipExistenceCheck, onGenerationSettled, genProtoId],
   )
 
   // Default "Notify me when ready" side effects — reproduces

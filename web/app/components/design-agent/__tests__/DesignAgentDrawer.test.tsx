@@ -189,6 +189,66 @@ describe("runGenerateFlow (AC1, AC5)", () => {
     expect(showToast).toHaveBeenCalledWith("Generation failed", "timed out")
   })
 
+  it("test_run_generate_flow_timed_out_does_not_toast_generation_failed — AC3: a client-side give-up must not fabricate a failure toast", async () => {
+    const generate = vi
+      .fn()
+      .mockResolvedValue({ prototype_id: 71, status: "generating" })
+    const genResult = Promise.resolve({
+      ok: false as const,
+      timedOut: true as const,
+      message: "Generation timed out (6 minutes)",
+    })
+    const runGeneration = vi.fn().mockReturnValue(genResult)
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params,
+      generate,
+      runGeneration,
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+    })
+    await genResult
+    await Promise.resolve()
+
+    expect(showToast).not.toHaveBeenCalledWith(
+      "Generation failed",
+      expect.anything(),
+    )
+  })
+
+  it("test_run_generate_flow_timed_out_still_calls_on_generated — AC4: onGenerated fires exactly once with the full timedOut result", async () => {
+    const generate = vi
+      .fn()
+      .mockResolvedValue({ prototype_id: 72, status: "generating" })
+    const timedOutResult = {
+      ok: false as const,
+      timedOut: true as const,
+      message: "Generation timed out (6 minutes)",
+    }
+    const genResult = Promise.resolve(timedOutResult)
+    const runGeneration = vi.fn().mockReturnValue(genResult)
+    const onGenerated = vi.fn()
+
+    await runGenerateFlow({
+      params,
+      generate,
+      runGeneration,
+      onOpenChange: vi.fn(),
+      showToast: vi.fn(),
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+      onGenerated,
+    })
+    await genResult
+    await Promise.resolve()
+
+    expect(onGenerated).toHaveBeenCalledTimes(1)
+    expect(onGenerated).toHaveBeenCalledWith(timedOutResult)
+  })
+
   it("on kickoff error: toasts 'Generate failed', keeps the drawer open, no poll (AC5)", async () => {
     const generate = vi.fn().mockRejectedValue(new Error("server 500"))
     const runGeneration = vi.fn()
