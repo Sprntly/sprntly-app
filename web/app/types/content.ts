@@ -634,6 +634,19 @@ export interface AppContentState {
    *  so ContentPanel's EvidenceTab can show a loading state even when
    *  content.detail is null. */
   evidenceGenerating: boolean
+  /** Live streaming preview: the accumulating evidence HTML forwarded from the
+   *  in-flight generation's SSE stream (already throttled inside
+   *  runEvidenceGeneration). Rendered by the Evidence tab while loading and no
+   *  `evidence` has landed yet; every generation start resets it to null so a
+   *  previous run's preview can never bleed into a new one. Mirrors
+   *  `prdPartialHtml`. */
+  evidencePartialHtml: string | null
+  /** A self-contained HTML report answer (e.g. the voice-of-customer-report
+   *  skill's fixed-template document) currently open in the right panel's
+   *  Report tab. Chat surfaces set this instead of rendering the document
+   *  inline, so the user keeps chatting on the left while reading it on the
+   *  right. `null` = no Report tab shown. */
+  report: { html: string; title: string } | null
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]

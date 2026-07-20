@@ -387,8 +387,10 @@ def test_cost_gated_skill_runs_when_pinned(monkeypatch):
 # ── PRD-tab grounding (prd_id) ───────────────────────────────────────────────
 
 def test_answer_prd_id_grounds_skill_answer(monkeypatch):
-    """A PRD-tab ask routed to a skill carries the CURRENT PRD CONTEXT block in
-    the gateway input and the PRD addendum in the system prompt."""
+    """A PRD-tab ask routed to a skill carries the CURRENT PRD CONTEXT block on
+    the gateway's CACHEABLE user prefix (byte-stable across turns → prompt-cache
+    reads) — NOT in the uncached input — and the PRD addendum in the system
+    prompt."""
     calls = []
     monkeypatch.setattr(
         qa, "llm_call", lambda **k: calls.append(k) or _answer_out()
@@ -406,9 +408,54 @@ def test_answer_prd_id_grounds_skill_answer(monkeypatch):
     )
     assert out["answer"] == "ok"
     answer_call = calls[-1]
-    assert "CURRENT PRD CONTEXT" in answer_call["input"]
-    assert "prd 7 for ent" in answer_call["input"]
+    assert "CURRENT PRD CONTEXT" in answer_call["user_cacheable_prefix"]
+    assert "prd 7 for ent" in answer_call["user_cacheable_prefix"]
+    assert "CURRENT PRD CONTEXT" not in answer_call["input"]
+    assert answer_call["input"] == "Question: anything"
     assert "CURRENT PRD CONTEXT" in answer_call["system"]
+
+
+def test_answer_prd_id_skips_kg_retrieval_on_skill_path(monkeypatch):
+    """A PRD-grounded skill ask must NOT run KG retrieval (embeddings HTTP call
+    + pgvector) — the PRD block is the grounding. A plain skill ask still does."""
+    retrievals = []
+    monkeypatch.setattr(
+        qa, "_retrieve_kg_bundle",
+        lambda eid, q: retrievals.append(q) or None,
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context", lambda ent, prd_id: "THE PRD BLOCK"
+    )
+    qa.answer(enterprise_id="ent", question="anything", dataset="acme",
+              pinned_skill="roadmap", prd_id=7)
+    assert retrievals == []  # PRD-grounded → no KG retrieval
+
+    qa.answer(enterprise_id="ent", question="anything", dataset="acme",
+              pinned_skill="roadmap")
+    assert len(retrievals) == 1  # non-PRD skill ask unchanged
+
+
+def test_answer_prd_prefix_stable_across_turns(monkeypatch):
+    """Turns 2+ of the same PRD conversation must send a byte-identical
+    cacheable prefix (same PRD content → cache read), with only the question
+    varying in the uncached input."""
+    calls = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: calls.append(k) or _answer_out())
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context",
+        lambda ent, prd_id: f"=== CURRENT PRD CONTEXT ===\nprd {prd_id}",
+    )
+    qa.answer(enterprise_id="ent", question="first question", dataset="acme",
+              pinned_skill="roadmap", prd_id=7)
+    qa.answer(enterprise_id="ent", question="second question", dataset="acme",
+              pinned_skill="roadmap", prd_id=7)
+    assert calls[0]["user_cacheable_prefix"] == calls[1]["user_cacheable_prefix"]
+    assert calls[0]["input"] != calls[1]["input"]
 
 
 def test_answer_prd_id_grounds_direct_answer(monkeypatch):

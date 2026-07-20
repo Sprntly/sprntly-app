@@ -53,6 +53,8 @@ const EMPTY: AppContentState = {
   prdPartialHtml: null,
   evidence: null,
   evidenceGenerating: false,
+  evidencePartialHtml: null,
+  report: null,
   teamMembers: [],
   teamPending: [],
   connectorCategories: [],

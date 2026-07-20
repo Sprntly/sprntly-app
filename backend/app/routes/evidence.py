@@ -16,11 +16,14 @@ GET is permissive — it returns any row by id regardless of variant so
 old bookmarks keep resolving.
 """
 import asyncio
+import json
 
 from fastapi import Depends, APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
+from app.auth import WorkspaceContext, require_company, require_workspace, require_workspace_from_query  # noqa: F401 — re-exported for tests' dependency_overrides
+from app.graph import token_stream
 from app.db import (
     find_existing_evidence,
     find_latest_failed_evidence,
@@ -142,6 +145,39 @@ def get_by_insight(
     if not row:
         raise HTTPException(status_code=404, detail="No evidence for this insight")
     return row
+
+
+@router.get("/{evidence_id}/stream")
+async def stream_evidence_generation(
+    evidence_id: int,
+    company: WorkspaceContext = Depends(require_workspace_from_query),
+) -> StreamingResponse:
+    """SSE token stream of an evidence brief's generation, so the client renders
+    the doc as it's written instead of waiting for the whole document (mirrors
+    GET /v1/prd/{prd_id}/stream).
+
+    EventSource can't send headers, so the bearer rides as `?token=`
+    (require_workspace_from_query). Frames: `{"kind":"delta","text":…}` as the
+    HTML streams, then a terminal `{"kind":"done"|"error"}`. PROGRESSIVE DISPLAY
+    ONLY — the client keeps polling GET /{evidence_id}, which stays the
+    authoritative source for the finished, persisted brief. Single-worker
+    transport (see app.graph.token_stream); on multi-worker this yields nothing
+    and the poll still carries the result. Opening late (generation already
+    finished) simply receives no frames — the poll shows the completed brief.
+    """
+    # 404 on cross-tenant/missing (evidence → brief → dataset → company).
+    require_owned_evidence(evidence_id, company.company_id, company.workspace_id)
+    channel = f"evidence:{evidence_id}"
+
+    async def _gen():
+        async for event in token_stream.subscribe(channel):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/{evidence_id}")

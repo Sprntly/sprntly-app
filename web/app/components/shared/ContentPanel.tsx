@@ -5,6 +5,9 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { EvidenceSections } from "./EvidenceSections"
 import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
+import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
+import { stripHtmlCodeFence } from "../../lib/htmlBrief"
+import { HtmlReportView } from "./HtmlReportView"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
@@ -403,16 +406,20 @@ function EvidenceTab() {
     if (evidenceLoadedKey !== key) setContent({ evidence: null })
     let cancelled = false
     setLocalState({ kind: "loading" })
+    setContent({ evidencePartialHtml: null })
     evidenceLoadedKey = key
-    runEvidenceGeneration(detail.meta)
+    runEvidenceGeneration(detail.meta, undefined, (html) => {
+      if (!cancelled) setContent({ evidencePartialHtml: html })
+    })
       .then((result) => {
         if (cancelled) return
-        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); return }
-        setContent({ evidence: result.evidence })
+        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); setContent({ evidencePartialHtml: null }); return }
+        setContent({ evidence: result.evidence, evidencePartialHtml: null })
         setLocalState({ kind: "idle" })
       })
       .catch((e: unknown) => {
         if (cancelled) return
+        setContent({ evidencePartialHtml: null })
         setLocalState({ kind: "error", message: e instanceof Error ? e.message : String(e) })
       })
     return () => { cancelled = true }
@@ -457,13 +464,15 @@ function EvidenceTab() {
     const meta = detail?.meta
     if (!meta) return
     setLocalState({ kind: "loading" })
-    runEvidenceGeneration(meta, { force: true })
+    setContent({ evidencePartialHtml: null })
+    runEvidenceGeneration(meta, { force: true }, (html) => setContent({ evidencePartialHtml: html }))
       .then((result) => {
-        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); return }
-        setContent({ evidence: result.evidence })
+        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); setContent({ evidencePartialHtml: null }); return }
+        setContent({ evidence: result.evidence, evidencePartialHtml: null })
         setLocalState({ kind: "idle" })
       })
       .catch((e: unknown) => {
+        setContent({ evidencePartialHtml: null })
         setLocalState({ kind: "error", message: e instanceof Error ? e.message : String(e) })
       })
   }, [detail?.meta, setContent])
@@ -525,6 +534,20 @@ function EvidenceTab() {
               </div>
             </>
           )
+        ) : isLoading && content.evidencePartialHtml ? (
+          // Live streaming preview: partial evidence HTML is already arriving —
+          // render it as it grows, with a slim pulsing indicator instead of the
+          // full-pane skeleton. The finished doc (poll result) replaces this.
+          <div style={{ minHeight: 280 }}>
+            <div data-testid="evidence-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
+              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
+            </div>
+            <StreamingHtmlPreview
+              html={stripLeadingFence(stripHtmlCodeFence(content.evidencePartialHtml))}
+              title="Evidence brief (generating)"
+              testId="evidence-streaming-preview"
+            />
+          </div>
         ) : isLoading ? (
           <EmptyPane
             title="Generating evidence…"

@@ -480,6 +480,153 @@ def test_run_sync_kg_falls_back_to_legacy_when_no_backing(
     assert legacy_calls[0]["skill"] == "evidence-brief"  # same skill binding
 
 
+def test_generate_evidence_kg_streams_over_channel(isolated_settings, monkeypatch):
+    """The brief's HTML deltas are published to the evidence:<id> channel as
+    they stream, then a terminal 'done' — the SSE route relays these to the
+    client (mirrors the prd:<id> stream)."""
+    from app import evidence_kg
+    from app.graph import token_stream
+
+    _seed_template(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    _seed_company(isolated_settings["supabase"], slug="acme",
+                  company_id="ent-A")
+    facade = __import__("app.graph", fromlist=["GraphFacade"]).GraphFacade()
+    theme, _hyp, _sigs = _seed_theme_hypothesis(facade)
+    brief_id = _seed_brief(db_mod, dataset="acme", insights=[
+        {"title": "SSO gap blocks $1.4M in deals", "theme_id": theme.id}])
+    evidence_id = db_mod.start_evidence(brief_id=brief_id, insight_index=0,
+                                        title="t", template_version=2,
+                                        variant="v2")
+
+    async def _flow():
+        chan = f"evidence:{evidence_id}"
+        collected: list[dict] = []
+
+        async def _sub():
+            async for f in token_stream.subscribe(chan):
+                collected.append(f)
+
+        sub_task = asyncio.ensure_future(_sub())
+        await asyncio.sleep(0)  # let the subscriber register its queue
+
+        def _call(**kwargs):
+            od = kwargs.get("on_delta")
+            if od:
+                od("<h1>Streaming")
+                od(" evidence</h1>")
+            return _llm_result("<h1>Streaming evidence</h1>")
+
+        monkeypatch.setattr(evidence_kg, "llm_call", _call)
+        await evidence_kg.generate_evidence_kg(evidence_id, brief_id, 0)
+        await asyncio.sleep(0)  # flush the scheduled publishes + terminal close
+        await sub_task
+        return collected
+
+    frames = asyncio.run(_flow())
+    deltas = [f["text"] for f in frames if f["kind"] == "delta"]
+    assert "".join(deltas) == "<h1>Streaming evidence</h1>"
+    assert frames[-1]["kind"] == "done", "terminal frame closes the stream"
+    row = db_mod.get_evidence(evidence_id)
+    assert row["status"] == "ready"  # poll fallback still authoritative
+
+
+def test_generate_evidence_kg_streams_corpus_fallback_over_channel(
+    isolated_settings, monkeypatch
+):
+    """No KG backing → the legacy corpus path runs, and IT streams over the
+    same evidence:<id> channel (the sink is threaded through the fallback)."""
+    from app import evidence_kg, evidence_runner
+    from app.graph import token_stream
+
+    _seed_template(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    _seed_company(isolated_settings["supabase"], slug="acme",
+                  company_id="ent-A")
+    ds = isolated_settings["data_dir"] / "acme"
+    ds.mkdir(exist_ok=True)
+    (ds / "a.md").write_text("legacy corpus body")
+    brief_id = _seed_brief(db_mod, dataset="acme", insights=[
+        {"title": "no KG backing", "theme_id": "missing"}])
+    evidence_id = db_mod.start_evidence(brief_id=brief_id, insight_index=0,
+                                        title="t", template_version=4,
+                                        variant="v3")
+
+    async def _flow():
+        chan = f"evidence:{evidence_id}"
+        collected: list[dict] = []
+
+        async def _sub():
+            async for f in token_stream.subscribe(chan):
+                collected.append(f)
+
+        sub_task = asyncio.ensure_future(_sub())
+        await asyncio.sleep(0)
+
+        def _legacy_call(**kwargs):
+            od = kwargs.get("on_delta")
+            if od:
+                od("<h1>Corpus brief</h1>")
+            return _llm_result("<h1>Corpus brief</h1>")
+
+        monkeypatch.setattr(evidence_runner, "llm_call", _legacy_call)
+        await evidence_kg.generate_evidence_kg(evidence_id, brief_id, 0)
+        await asyncio.sleep(0)
+        await sub_task
+        return collected
+
+    frames = asyncio.run(_flow())
+    deltas = [f["text"] for f in frames if f["kind"] == "delta"]
+    assert "".join(deltas) == "<h1>Corpus brief</h1>"
+    assert frames[-1]["kind"] == "done"
+    assert db_mod.get_evidence(evidence_id)["status"] == "ready"
+
+
+def test_generate_evidence_kg_streams_error_frame_on_failure(
+    isolated_settings, monkeypatch
+):
+    """A failed generation closes the channel with a terminal 'error' frame so
+    a connected client stops waiting (the poll shows the failed row)."""
+    from app import evidence_kg
+    from app.graph import token_stream
+
+    _seed_template(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    _seed_company(isolated_settings["supabase"], slug="acme",
+                  company_id="ent-A")
+    facade = __import__("app.graph", fromlist=["GraphFacade"]).GraphFacade()
+    theme, _hyp, _sigs = _seed_theme_hypothesis(facade)
+    brief_id = _seed_brief(db_mod, dataset="acme", insights=[
+        {"title": "SSO gap blocks $1.4M in deals", "theme_id": theme.id}])
+    evidence_id = db_mod.start_evidence(brief_id=brief_id, insight_index=0,
+                                        title="t", template_version=2,
+                                        variant="v2")
+
+    async def _flow():
+        chan = f"evidence:{evidence_id}"
+        collected: list[dict] = []
+
+        async def _sub():
+            async for f in token_stream.subscribe(chan):
+                collected.append(f)
+
+        sub_task = asyncio.ensure_future(_sub())
+        await asyncio.sleep(0)
+
+        def _boom(**_kw):
+            raise ValueError("gateway exploded")
+
+        monkeypatch.setattr(evidence_kg, "llm_call", _boom)
+        await evidence_kg.generate_evidence_kg(evidence_id, brief_id, 0)
+        await asyncio.sleep(0)
+        await sub_task
+        return collected
+
+    frames = asyncio.run(_flow())
+    assert frames[-1]["kind"] == "error"
+    assert db_mod.get_evidence(evidence_id)["status"] == "failed"
+
+
 def test_generate_evidence_kg_records_failure(isolated_settings, monkeypatch):
     from app import evidence_kg
     _seed_template(isolated_settings["data_dir"])

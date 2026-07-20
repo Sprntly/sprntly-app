@@ -986,22 +986,25 @@ export function ChatScreen() {
       openContentPanel("evidence")
       return
     }
-    setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: true } : t))
-    setContent({ evidence: null, evidenceGenerating: true, prdMeta: meta })
+    const tabId = activeTabId
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: true } : t))
+    setContent({ evidence: null, evidenceGenerating: true, evidencePartialHtml: null, prdMeta: meta })
     openContentPanel("evidence")
     try {
-      const result = await runEvidenceGeneration(meta)
+      const result = await runEvidenceGeneration(meta, undefined, (html) => {
+        if (activeTabIdRef.current === tabId) setContent({ evidencePartialHtml: html })
+      })
       if (result.ok) {
-        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
-        setContent({ evidence: result.evidence, evidenceGenerating: false, prdMeta: meta })
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+        setContent({ evidence: result.evidence, evidenceGenerating: false, evidencePartialHtml: null, prdMeta: meta })
       } else {
-        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
-        setContent({ evidenceGenerating: false })
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false } : t))
+        setContent({ evidenceGenerating: false, evidencePartialHtml: null })
         showToast("Evidence generation failed", result.message)
       }
     } catch (e) {
-      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
-      setContent({ evidenceGenerating: false })
+      setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false } : t))
+      setContent({ evidenceGenerating: false, evidencePartialHtml: null })
       showToast("Evidence generation failed", e instanceof Error ? e.message : "Unknown error")
     }
   }, [activeTabId, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
@@ -1053,16 +1056,22 @@ export function ChatScreen() {
       const evId = Number(pendingEvidence.id)
       if (Number.isFinite(evId)) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: true } : t))
+        setContent({ evidencePartialHtml: null })
         void (async () => {
           try {
-            const result = await resumeEvidenceGeneration(evId, meta)
+            const result = await resumeEvidenceGeneration(evId, meta, (html) => {
+              if (activeTabIdRef.current === activeTabId) setContent({ evidencePartialHtml: html })
+            })
             if (result.ok) {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+              setContent({ evidencePartialHtml: null })
             } else {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
+              setContent({ evidencePartialHtml: null })
             }
           } catch {
             setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
+            setContent({ evidencePartialHtml: null })
           }
         })()
       }
@@ -1418,7 +1427,18 @@ export function ChatScreen() {
       // tickets. With a document attached, either phrasing imports the doc as a
       // PRD; "…tickets" additionally lands on the Tickets tab when it's ready.
       const docFile = attachments.find((a) => a.file)?.file ?? null
-      if (isTicketsCommand(trimmed)) {
+      // Deictic-edit guard: with NO attached document, an edit-phrased message
+      // that points at the OPEN artifact ("make this PRD shorter", "shorten
+      // that ticket") beside a PRD tab is a QUESTION about that artifact, not a
+      // command to spawn a new one — let it fall through to the ask agent,
+      // which is grounded on the tab's PRD (+ evidence/tickets) since #786.
+      // With an attachment, "this PRD"/"this document" names the FILE, so the
+      // import flows below still run unchanged.
+      const activeTab = activeTabId ? tabsRef.current.find((t) => t.id === activeTabId) : undefined
+      const isPrdTab = !!(activeTab && (activeTab.prd || activeTab.prdId != null || activeTab.prdGenerating))
+      const deicticPrd = /\b(this|that|the current|my)\s+prd\b/i.test(trimmed)
+      const deicticTicket = /\b(this|that|the current|my)\s+tickets?\b/i.test(trimmed)
+      if (isTicketsCommand(trimmed) && !(!docFile && deicticTicket && isPrdTab)) {
         if (docFile) {
           setAttachments([])
           void importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
@@ -1427,13 +1447,12 @@ export function ChatScreen() {
         // No document: mirror the reply-footer "Create tickets" action when this
         // tab already carries a PRD. Otherwise fall through to the ask agent
         // (the user-stories skill answers in markdown, as before).
-        const tab = activeTabId ? tabsRef.current.find((t) => t.id === activeTabId) : undefined
-        if (tab?.prd) {
-          setContent({ prd: tab.prd, prdMeta: tab.briefMeta })
+        if (activeTab?.prd) {
+          setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
           openContentPanel("tickets")
           return
         }
-      } else if (isPrdCommand(trimmed)) {
+      } else if (isPrdCommand(trimmed) && !(!docFile && deicticPrd && isPrdTab)) {
         if (docFile) {
           setAttachments([])
           void importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })

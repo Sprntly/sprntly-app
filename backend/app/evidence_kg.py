@@ -170,9 +170,13 @@ def build_evidence_kg(
     facade: GraphFacade,
     enterprise_id: str,
     insight: dict,
+    on_delta=None,
 ) -> tuple[str, dict]:
     """Build the KG-grounded evidence brief (self-contained HTML) for one
     brief insight.
+
+    `on_delta(text)` — optional; forwards each HTML text delta as it streams so
+    the client can render the brief progressively (see app.graph.token_stream).
 
     Returns (html, meta) where meta carries the kg_refs + the trail used.
     Raises NoKGBackingError when the KG has no signals for this insight so the
@@ -211,6 +215,7 @@ def build_evidence_kg(
         # honesty pass → value-driven hypothesis), grounded in the trail. The
         # `evidence-brief` skill is a long-output skill (large HTML payload).
         skill="evidence-brief",
+        on_delta=on_delta,
     )
     raw = result.output if isinstance(result.output, str) else str(result.output)
     # The model occasionally wraps the document in a ```html code fence despite
@@ -262,7 +267,7 @@ def build_evidence_kg(
 
 
 def _run_sync_kg(
-    evidence_id: int, brief_id: int, insight_index: int
+    evidence_id: int, brief_id: int, insight_index: int, on_delta=None
 ) -> None:
     """Inner worker (mirrors evidence_runner._run_sync). KG-grounded.
 
@@ -283,7 +288,9 @@ def _run_sync_kg(
     enterprise_id, _slug = resolve_company(brief.get("dataset", "asurion"))
     facade = GraphFacade()
     try:
-        html, _meta = build_evidence_kg(facade, enterprise_id, insight)
+        html, _meta = build_evidence_kg(
+            facade, enterprise_id, insight, on_delta=on_delta
+        )
     except NoKGBackingError as exc:
         logger.info(
             "evidence_kg: %s — falling back to legacy corpus path "
@@ -291,7 +298,7 @@ def _run_sync_kg(
         )
         from app.evidence_runner import _run_sync as _legacy_run_sync
 
-        _legacy_run_sync(evidence_id, brief_id, insight_index)
+        _legacy_run_sync(evidence_id, brief_id, insight_index, on_delta=on_delta)
         return
 
     title = insight.get("title") or f"Insight #{insight_index + 1}"
@@ -302,15 +309,33 @@ async def generate_evidence_kg(
     evidence_id: int, brief_id: int, insight_index: int
 ) -> None:
     """KG-grounded evidence generation in a worker thread; update DB with the
-    result. Drop-in replacement for evidence_runner.generate_evidence."""
+    result. Drop-in replacement for evidence_runner.generate_evidence.
+
+    Token-streams the brief's HTML to any connected client over
+    `evidence:<evidence_id>` (mirrors prd_runner.generate_prd_and_warm): the
+    sink publishes each delta from the LLM worker thread onto this loop, and a
+    terminal frame closes the channel on success (done) or failure (error).
+    PROGRESSIVE DISPLAY ONLY — the poll on GET /v1/evidence/{id} stays the
+    authoritative source; publishing with no subscribers (warm/background
+    callers) is a no-op. The corpus fallback streams over the same channel."""
     logger.info(
         "KG evidence generation starting evidence_id=%s brief_id=%s "
         "insight_index=%s", evidence_id, brief_id, insight_index,
     )
+    from app.graph import token_stream
+
+    channel = f"evidence:{evidence_id}"
+    sink = token_stream.delta_sink(asyncio.get_running_loop(), channel)
+    ok = False
     try:
-        await asyncio.to_thread(_run_sync_kg, evidence_id, brief_id, insight_index)
+        await asyncio.to_thread(
+            _run_sync_kg, evidence_id, brief_id, insight_index, on_delta=sink
+        )
+        ok = True
         logger.info("KG evidence generation succeeded evidence_id=%s", evidence_id)
     except Exception as exc:  # noqa: BLE001
         msg = f"{type(exc).__name__}: {exc}"
         logger.exception("KG evidence generation failed evidence_id=%s", evidence_id)
         fail_evidence(evidence_id, msg)
+    finally:
+        token_stream.close(channel, kind="done" if ok else "error")

@@ -23,11 +23,12 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { briefCurrent, importDoc, extractFile, storiesGenerate } = vi.hoisted(() => ({
+const { briefCurrent, importDoc, extractFile, storiesGenerate, generateFromTask } = vi.hoisted(() => ({
   briefCurrent: vi.fn(),
   importDoc: vi.fn(),
   extractFile: vi.fn(),
   storiesGenerate: vi.fn(),
+  generateFromTask: vi.fn(),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -44,6 +45,7 @@ vi.mock("../../../../lib/api", () => {
     briefApi: { current: briefCurrent },
     prdApi: {
       importDoc: (...a: unknown[]) => importDoc(...a),
+      generateFromTask: (...a: unknown[]) => generateFromTask(...a),
       listInputQuestions: vi.fn().mockResolvedValue([]),
       answerInputQuestion: vi.fn(),
     },
@@ -177,6 +179,8 @@ beforeEach(() => {
   extractFile.mockResolvedValue({ name: "Fraznet Enhancements.pptx", markdown: "## Slide 1\n\nFraznet MRT workflow" })
   briefCurrent.mockReset()
   briefCurrent.mockResolvedValue({ id: 7, insights: [{ title: "Enterprise expansion is stalled" }] })
+  generateFromTask.mockReset()
+  generateFromTask.mockResolvedValue({ prd_id: 55, status: "generating", title: "Dark mode" })
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
@@ -389,5 +393,119 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     expect(runAskGeneration).not.toHaveBeenCalled()
     // …and the attachment chip is still there for a retry (not silently lost).
     await waitFor(() => expect(document.body.textContent).toContain("Fraznet Enhancements.pptx"))
+  })
+})
+
+// ── Deictic edit phrasings beside an OPEN PRD tab ────────────────────────────
+// "make this PRD shorter" typed next to an open PRD, with NO attachment, is a
+// QUESTION about that PRD (the ask is PRD-grounded since #786) — it must NOT
+// spawn a brand-new PRD via the command flow. With an attachment, "this PRD"
+// names the file and the import flow still runs; non-deictic command phrasings
+// ("generate a PRD for dark mode") stay commands everywhere.
+
+// Open a PRD tab via the doc-import command, then clear the setup calls so each
+// test asserts only its own dispatch. Leaves the active tab carrying prd_id 42.
+async function openPrdTabViaImport() {
+  await attachDoc("setup.pptx")
+  await typeAndSend("generate a PRD from this")
+  await waitFor(() => expect(importDoc).toHaveBeenCalledTimes(1))
+  await waitFor(() => expect(panelTab()).toBe("prd"))
+  // The tab's PRD has landed (resume poll resolved) before the test proceeds.
+  await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalled())
+  runAskGeneration.mockClear()
+  briefCurrent.mockClear()
+}
+
+// The PRD tab renders the in-tab composer (.bc-composer), not the landing one.
+async function typeAndSendInTab(text: string) {
+  const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+  expect(textarea).toBeTruthy()
+  await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
+  const sendBtn = document.querySelector(".bc-send") as HTMLButtonElement
+  expect(sendBtn).toBeTruthy()
+  await act(async () => { fireEvent.click(sendBtn) })
+}
+
+describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
+  it.each([
+    "make this PRD shorter",
+    "make that PRD more concise",
+    "make the current PRD two pages",
+  ])("'%s' with no attachment goes to the ask agent, not a new PRD", async (phrase) => {
+    renderChat()
+    await openPrdTabViaImport()
+
+    await typeAndSendInTab(phrase)
+
+    // Answered by the (PRD-grounded) ask agent…
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    expect(runAskGeneration.mock.calls[0][0]).toContain(phrase)
+    // …never a brand-new PRD via either command flow.
+    expect(generateFromTask).not.toHaveBeenCalled()
+    expect(briefCurrent).not.toHaveBeenCalled()
+    expect(importDoc).toHaveBeenCalledTimes(1) // only the setup import
+  })
+
+  it("attachment + deictic phrasing in a PRD tab STILL imports (the file is 'this PRD')", async () => {
+    renderChat()
+    await openPrdTabViaImport()
+
+    // A distinct title so the second import opens its own tab (same-title
+    // imports reuse the existing tab and skip the openTickets hop).
+    importDoc.mockResolvedValueOnce({ prd_id: 43, status: "generating", title: "Updated spec" })
+    resumePrdGeneration.mockResolvedValueOnce({
+      ok: true, prd: { prd_id: 43, title: "Updated spec", metaLine: "", sections: [] },
+    })
+    const file = await attachDoc("updated-spec.pptx")
+    await typeAndSendInTab("convert this PRD into tickets")
+
+    // Second import: the attached document is what "this PRD" names.
+    await waitFor(() => expect(importDoc).toHaveBeenCalledTimes(2))
+    expect(importDoc).toHaveBeenLastCalledWith(file, "acme")
+    await waitFor(() => expect(panelTab()).toBe("tickets"))
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("a NON-deictic task command in a PRD tab still generates a new PRD", async () => {
+    renderChat()
+    await openPrdTabViaImport()
+
+    await typeAndSendInTab("generate a PRD for dark mode on mobile")
+
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile"))
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("a generic 'generate a PRD' in a PRD tab still runs the brief-insight command", async () => {
+    renderChat()
+    await openPrdTabViaImport()
+
+    await typeAndSendInTab("generate a PRD")
+
+    await waitFor(() => expect(briefCurrent).toHaveBeenCalled())
+    expect(runAskGeneration).not.toHaveBeenCalled()
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("'make this ticket shorter' beside an open PRD tab goes to ask, not the Tickets panel", async () => {
+    renderChat()
+    await openPrdTabViaImport()
+
+    await typeAndSendInTab("make this ticket shorter")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    // The panel is NOT hijacked to Tickets and no ticket generation starts.
+    expect(panelTab()).toBe("prd")
+    expect(storiesGenerate).not.toHaveBeenCalled()
+  })
+
+  it("'create tickets from this PRD' (no attachment) in a PRD tab still opens the Tickets panel", async () => {
+    renderChat()
+    await openPrdTabViaImport()
+
+    await typeAndSendInTab("create tickets from this PRD")
+
+    await waitFor(() => expect(panelTab()).toBe("tickets"))
+    expect(runAskGeneration).not.toHaveBeenCalled()
   })
 })
