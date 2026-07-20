@@ -216,6 +216,34 @@ def _invite_result(row: dict, send_status: str) -> dict:
     )
 
 
+def _send_invite_for_row(row: dict, *, company: CompanyContext) -> str:
+    """Send the Day-0 invite email for a workspace_invites row, personalised
+    with the inviter's first name, the workspace (company) name, and the
+    invitee's first name (when they already have a profile). Best-effort name
+    resolution — a failed lookup just falls back to a friendly default."""
+    from app.db.companies import display_name_for_company_id
+    from app.db.profiles import first_name_for_email, first_name_for_user
+
+    try:
+        inviter_first = first_name_for_user(company.user_id)
+    except Exception:  # noqa: BLE001 — personalisation is best-effort
+        inviter_first = ""
+    try:
+        workspace_name = display_name_for_company_id(company.company_id) or ""
+    except Exception:  # noqa: BLE001
+        workspace_name = ""
+    try:
+        invitee_first = first_name_for_email(row.get("email") or "")
+    except Exception:  # noqa: BLE001
+        invitee_first = ""
+    return send_invite_email(
+        row.get("email"),
+        inviter_first_name=inviter_first,
+        workspace_name=workspace_name,
+        first_name=invitee_first,
+    )
+
+
 @router.post("/invites", status_code=status.HTTP_201_CREATED)
 def post_team_invite(
     body: InviteIn,
@@ -275,7 +303,7 @@ def post_team_invite(
     # false` lets the frontend nudge the inviter to resend or share the link
     # manually. Already-registered invitees get a magic-link sign-in instead
     # (email_sent stays true; `existing_user` flags the different path).
-    return _invite_result(row, send_invite_email(body.email))
+    return _invite_result(row, _send_invite_for_row(row, company=company))
 
 
 @router.delete(
@@ -306,7 +334,9 @@ def resend_team_invite(
     updated = touch_invite(invite_id)
     # Resend = bump created_at + actually fire a new email (invite for new
     # users, magic-link sign-in for already-registered ones).
-    return _invite_result(updated or invite, send_invite_email(invite["email"]))
+    return _invite_result(
+        updated or invite, _send_invite_for_row(invite, company=company)
+    )
 
 
 # ─────────────────────── Member edit / remove ───────────────────────

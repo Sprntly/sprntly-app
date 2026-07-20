@@ -592,6 +592,18 @@ export async function completeOnboarding(companyId: string, userId: string) {
   } catch {
     /* no Intl / transient write error — leave timezone null → backend UTC */
   }
+
+  // Fire the one-time "welcome to Sprntly, your workspace is ready" email.
+  // Fire-and-forget: NOT awaited, so entering the app is never blocked on the
+  // send (which can take a Resend round-trip). The backend de-duplicates per
+  // (company, user), so a resumed/re-run completion won't send twice. Errors
+  // are swallowed — a missing/slow email must never trap the user.
+  try {
+    const { onboardingApi } = await import("../api")
+    void onboardingApi.complete().catch(() => {})
+  } catch {
+    /* dynamic import failed — skip; the email is best-effort */
+  }
 }
 
 /**

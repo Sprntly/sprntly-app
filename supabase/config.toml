@@ -249,7 +249,7 @@ sender_name = "Sprntly"
 
 # Branded email templates (Supabase substitutes {{ .ConfirmationURL }} etc.).
 [auth.email.template.invite]
-subject = "You've been invited to Sprntly"
+subject = "{{ .Data.inviter_first_name }} has invited you to Sprntly to collaborate"
 content_path = "./supabase/templates/invite.html"
 
 [auth.email.template.confirmation]

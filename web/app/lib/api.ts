@@ -674,6 +674,18 @@ export const onboardingApi = {
         baseline: string | null
       }[]
     }>("/v1/onboarding/metric-definitions", { metrics }),
+  /**
+   * Signal that onboarding is complete so the backend fires the one-time
+   * "welcome to Sprntly, your workspace is ready" email. Company/user are
+   * taken from the JWT (Depends(require_company)); de-duplicated server-side,
+   * so a double call never double-sends. Best-effort — callers fire-and-forget
+   * and must never block entering the app on it.
+   */
+  complete: () =>
+    api.post<{ ok: true; sent: boolean; reason?: string }>(
+      "/v1/onboarding/complete",
+      {},
+    ),
 }
 
 // ── Workspaces (multi-workspace 2026-07) ────────────────────────────────────
