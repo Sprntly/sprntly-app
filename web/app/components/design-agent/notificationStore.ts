@@ -27,10 +27,19 @@ type Entry = {
   prototypeId: number
   status: NotificationStatus
   sub: string
+  /** The owning PRD, when known at write time. A LEGACY entry (written before
+   *  this field existed) parses via JSON.parse with the key simply absent —
+   *  every reader defensively does `entry.prdId ?? null`, never assumes the
+   *  key exists. */
+  prdId: number | null
 }
 
 /** Public completed-entry shape (the subset the drawer needs to re-show). */
-export type CompletedNotification = { prototypeId: number; sub: string }
+export type CompletedNotification = {
+  prototypeId: number
+  sub: string
+  prdId: number | null
+}
 
 /** Read the full entry array. Returns [] on any failure (SSR, bad JSON, quota). */
 function readAll(): Entry[] {
@@ -55,11 +64,17 @@ function writeAll(entries: Entry[]): void {
   }
 }
 
-/** Insert or replace the single entry for a prototype id. */
-function upsert(prototypeId: number, status: NotificationStatus, sub: string): void {
+/** Insert or replace the single entry for a prototype id. Always writes
+ *  `prdId ?? null` (never `undefined`) so a fresh write is always well-shaped. */
+function upsert(
+  prototypeId: number,
+  status: NotificationStatus,
+  sub: string,
+  prdId?: number | null,
+): void {
   const entries = readAll()
   const idx = entries.findIndex((e) => e.prototypeId === prototypeId)
-  const next: Entry = { prototypeId, status, sub }
+  const next: Entry = { prototypeId, status, sub, prdId: prdId ?? null }
   if (idx >= 0) {
     entries[idx] = next
   } else {
@@ -69,13 +84,17 @@ function upsert(prototypeId: number, status: NotificationStatus, sub: string): v
 }
 
 /** Record a kickoff — a `pending` entry (NOT re-shown on mount). */
-export function markPending(prototypeId: number): void {
-  upsert(prototypeId, "pending", "")
+export function markPending(prototypeId: number, prdId?: number | null): void {
+  upsert(prototypeId, "pending", "", prdId)
 }
 
 /** Flip the entry to `completed` (or insert) so a reload can re-show it. */
-export function markCompleted(prototypeId: number, sub: string): void {
-  upsert(prototypeId, "completed", sub)
+export function markCompleted(
+  prototypeId: number,
+  sub: string,
+  prdId?: number | null,
+): void {
+  upsert(prototypeId, "completed", sub, prdId)
 }
 
 /** Remove the entry for a prototype id (clear-on-show / explicit acknowledge). */
@@ -89,7 +108,13 @@ export function acknowledge(prototypeId: number): void {
 export function pendingCompleted(): CompletedNotification[] {
   return readAll()
     .filter((e) => e.status === "completed")
-    .map((e) => ({ prototypeId: e.prototypeId, sub: e.sub }))
+    .map((e) => ({
+      prototypeId: e.prototypeId,
+      sub: e.sub,
+      // Defensive: a LEGACY entry (written before `prdId` existed) parses via
+      // JSON.parse with the key simply absent.
+      prdId: e.prdId ?? null,
+    }))
 }
 
 // ─── P6-05 (Decision-D(b)): per-page-load guards + last-replay-show record ───

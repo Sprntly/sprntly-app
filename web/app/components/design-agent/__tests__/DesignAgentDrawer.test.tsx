@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import {
   buildGenerateParams,
+  buildReadySub,
   DEFAULT_PLATFORM,
   DesignAgentDrawerView,
   DrawerFooter,
@@ -514,7 +515,7 @@ describe("notification persistence (P5-09)", () => {
     // P6-05: the entry is NOT acknowledged on show — it survives in sessionStorage
     // so a subsequent hard reload re-shows it (acked-until-user-acks).
     expect(pendingCompleted()).toEqual([
-      { prototypeId: 7, sub: "Your prototype finished generating." },
+      { prototypeId: 7, sub: "Your prototype finished generating.", prdId: null },
     ])
 
     // A second replay within the SAME page-load does NOT re-show (per-load guard).
@@ -562,9 +563,14 @@ describe("notification persistence (P5-09)", () => {
 
     // Live toast unchanged (still fires this page life)…
     expect(showToast).toHaveBeenCalledWith("Prototype ready", expect.any(String))
-    // …AND the completion is persisted so a reload can re-show it.
+    // …AND the completion is persisted so a reload can re-show it. This entry
+    // flows through runGenerateFlow's new prdId threading with the seeded
+    // params.prd_id (9) — NOT null (see ticket drift note: the closed-world
+    // table classified this site as a "legacy 2-arg markCompleted" seed, but
+    // it is actually seeded via a full runGenerateFlow call carrying a real
+    // prd_id, same as the explicitly-flagged :654 case below).
     expect(pendingCompleted()).toEqual([
-      { prototypeId: 7, sub: "Your prototype finished generating." },
+      { prototypeId: 7, sub: "Your prototype finished generating.", prdId: 9 },
     ])
   })
 
@@ -650,12 +656,245 @@ describe("notification persistence (P5-09)", () => {
     await Promise.resolve()
 
     const liveSub = liveToast.mock.calls.find((c) => c[0] === "Prototype ready")![1]
-    // The live toast's sub is what gets persisted…
-    expect(pendingCompleted()).toEqual([{ prototypeId: 12, sub: liveSub }])
-    // …and the post-reload replay re-shows that exact persisted sub.
+    // The live toast's sub is what gets persisted, along with the seeded
+    // params.prd_id (12) — NOT null; this entry flows through the new
+    // prdId threading.
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 12, sub: liveSub, prdId: 12 },
+    ])
+    // …and the post-reload replay re-shows that exact persisted sub, now with
+    // the "Open" link action (prdId is non-null — the replay-arity widening).
     const replayToast = vi.fn()
     replayCompletedNotifications(replayToast)
-    expect(replayToast).toHaveBeenCalledWith("Prototype ready", liveSub)
+    expect(replayToast).toHaveBeenCalledWith(
+      "Prototype ready",
+      liveSub,
+      "Open",
+      expect.objectContaining({ onAction: expect.any(Function) }),
+    )
+  })
+})
+
+// ─── Part B: named-PRD ready toast + link ────────────────────────────────
+
+describe("buildReadySub (Part B, AC5/AC6)", () => {
+  it("test_build_ready_sub_with_title — names the PRD when a title is given", () => {
+    expect(buildReadySub("Onboarding flow")).toBe(
+      'Your prototype for "Onboarding flow" is ready.',
+    )
+  })
+
+  it("test_build_ready_sub_without_title — falls back to the generic copy when omitted/null/blank", () => {
+    expect(buildReadySub()).toBe("Your prototype finished generating.")
+    expect(buildReadySub(null)).toBe("Your prototype finished generating.")
+    expect(buildReadySub("   ")).toBe("Your prototype finished generating.")
+  })
+})
+
+describe("runGenerateFlow — prdTitle threading (Part B)", () => {
+  function makeSessionStorage(): Storage {
+    let store: Record<string, string> = {}
+    return {
+      get length(): number {
+        return Object.keys(store).length
+      },
+      getItem: (k: string): string | null => (k in store ? store[k] : null),
+      setItem: (k: string, v: string): void => {
+        store[k] = String(v)
+      },
+      removeItem: (k: string): void => {
+        delete store[k]
+      },
+      clear: (): void => {
+        store = {}
+      },
+      key: (i: number): string | null => Object.keys(store)[i] ?? null,
+    }
+  }
+  const testGlobal = globalThis as unknown as {
+    window?: { sessionStorage: Storage }
+  }
+  function installStorage() {
+    testGlobal.window = { sessionStorage: makeSessionStorage() }
+  }
+  afterEach(() => {
+    testGlobal.window = undefined
+    __resetPageLoadGuards()
+  })
+
+  it("test_run_generate_flow_marks_pending_with_prd_id — markPending is threaded params.prd_id at kickoff (AC5)", async () => {
+    installStorage()
+    // Never-resolving poll: isolates markPending's own write from
+    // markCompleted's (the entry stays "pending" for the assertion).
+    const neverResolves = new Promise<never>(() => {})
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 42,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 100, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(neverResolves),
+      onOpenChange: vi.fn(),
+      showToast: vi.fn(),
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+    })
+
+    const raw = JSON.parse(
+      testGlobal.window!.sessionStorage.getItem("design-agent:notifications")!,
+    )
+    expect(raw).toEqual([
+      { prototypeId: 100, status: "pending", sub: "", prdId: 42 },
+    ])
+  })
+
+  it("test_run_generate_flow_marks_completed_with_title_sub_and_prd_id — named-PRD sub + prdId persisted on completion (AC5)", async () => {
+    installStorage()
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 55,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 200, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast: vi.fn(),
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+      prdTitle: "Checkout redesign",
+    })
+    await genResult
+    await Promise.resolve()
+
+    expect(pendingCompleted()).toEqual([
+      {
+        prototypeId: 200,
+        sub: 'Your prototype for "Checkout redesign" is ready.',
+        prdId: 55,
+      },
+    ])
+  })
+
+  it("test_every_caller_omitting_prd_title_keeps_generic_copy — no prdTitle -> byte-identical fallback sub (AC10)", async () => {
+    installStorage()
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 61,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 300, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast: vi.fn(),
+      setSubmitting: vi.fn(),
+      notifyOnReady: false,
+      // prdTitle omitted — mirrors ApproveModal/BriefChat's unmodified call shape.
+    })
+    await genResult
+    await Promise.resolve()
+
+    const entry = pendingCompleted().find((e) => e.prototypeId === 300)
+    expect(entry?.sub).toBe("Your prototype finished generating.")
+  })
+
+  it("test_live_ready_toast_called_with_exactly_two_args — the live toast never widens (AC10d)", async () => {
+    installStorage()
+    const genResult = Promise.resolve({ ok: true as const, prototype: {} as never })
+    const showToast = vi.fn()
+
+    await runGenerateFlow({
+      params: {
+        prd_id: 70,
+        target_platform: "desktop" as const,
+        instructions: "",
+        figma_file_key: null,
+      },
+      generate: vi.fn().mockResolvedValue({ prototype_id: 400, status: "generating" }),
+      runGeneration: vi.fn().mockReturnValue(genResult),
+      onOpenChange: vi.fn(),
+      showToast,
+      setSubmitting: vi.fn(),
+      notifyOnReady: true,
+    })
+    await genResult
+    await Promise.resolve()
+
+    const readyCall = showToast.mock.calls.find((c) => c[0] === "Prototype ready")
+    expect(readyCall).toBeTruthy()
+    expect(readyCall!.length).toBe(2)
+  })
+})
+
+describe("replayCompletedNotifications — Open-link action (Part B, AC7/AC8)", () => {
+  function makeSessionStorage(): Storage {
+    let store: Record<string, string> = {}
+    return {
+      get length(): number {
+        return Object.keys(store).length
+      },
+      getItem: (k: string): string | null => (k in store ? store[k] : null),
+      setItem: (k: string, v: string): void => {
+        store[k] = String(v)
+      },
+      removeItem: (k: string): void => {
+        delete store[k]
+      },
+      clear: (): void => {
+        store = {}
+      },
+      key: (i: number): string | null => Object.keys(store)[i] ?? null,
+    }
+  }
+  const testGlobal = globalThis as unknown as {
+    window?: { sessionStorage: Storage; location: { href: string } }
+  }
+  function installStorage() {
+    testGlobal.window = {
+      sessionStorage: makeSessionStorage(),
+      location: { href: "" },
+    }
+  }
+  afterEach(() => {
+    testGlobal.window = undefined
+    __resetPageLoadGuards()
+  })
+
+  it("test_replay_shows_open_action_when_prd_id_present — 4-arg call; invoking onAction sets window.location.href (AC7)", () => {
+    installStorage()
+    markCompleted(9001, "Your prototype for \"Thing\" is ready.", 77)
+    const showToast = vi.fn()
+    replayCompletedNotifications(showToast)
+
+    expect(showToast).toHaveBeenCalledWith(
+      "Prototype ready",
+      'Your prototype for "Thing" is ready.',
+      "Open",
+      { onAction: expect.any(Function) },
+    )
+    const opts = showToast.mock.calls[0][3] as { onAction: () => void }
+    opts.onAction()
+    expect(testGlobal.window!.location.href).toBe("/prototype?prd=77")
+  })
+
+  it("test_replay_omits_action_when_prd_id_null — legacy-shape entry stays 2-arg (AC8)", () => {
+    installStorage()
+    markCompleted(9002, "legacy sub") // no prdId -> null
+    const showToast = vi.fn()
+    replayCompletedNotifications(showToast)
+
+    expect(showToast).toHaveBeenCalledWith("Prototype ready", "legacy sub")
+    expect(showToast.mock.calls[0].length).toBe(2)
   })
 })
 

@@ -100,7 +100,9 @@ describe("acked-until-user-acks (AC3) — no auto-ack on first show", () => {
     replayCompletedNotifications(showToast)
     // Shown — but NOT acknowledged: the sessionStorage entry survives.
     expect(showToast).toHaveBeenCalledTimes(1)
-    expect(pendingCompleted()).toEqual([{ prototypeId: 3, sub: "sub3" }])
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 3, sub: "sub3", prdId: null },
+    ])
     // Same page-load: a second replay does NOT re-show (per-page-load guard).
     const showToast2 = vi.fn()
     replayCompletedNotifications(showToast2)
@@ -142,7 +144,9 @@ describe("ack-on-toast-clear precision (AC3 / AC11)", () => {
     )
     expect(ackId).toBeNull()
     // The replay's entry is untouched — it waits for a clear of its OWN toast.
-    expect(pendingCompleted()).toEqual([{ prototypeId: 9, sub: "sub9" }])
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 9, sub: "sub9", prdId: null },
+    ])
   })
 
   it("does NOT ack on a non-clear transition (prev null, or current still set)", () => {
