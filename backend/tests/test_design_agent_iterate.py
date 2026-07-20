@@ -24,6 +24,7 @@ read_source_files_for_checkpoint; mode threaded as 'execute', not 'iterate').
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import importlib
 import logging
@@ -66,9 +67,9 @@ def test_iterate_system_renders_shadcn_inventory():
     assert "ITERATING" in DESIGN_AGENT_ITERATE_SYSTEM
 
 
-def test_template_version_is_5():
-    # Bumped to 5 by the recreate-discipline append (codebase-context wave).
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 7
+def test_template_version_is_current():
+    # Now 9 — the mobile-capability platform directives (template-invalidating).
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 9
 
 
 def test_render_iterate_user_cache_on_last_stable_block():
@@ -143,6 +144,42 @@ def test_apply_pinned_still_element_targeted():
     assert 'data-anchor-id="fb3007b5"' in volatile["text"]
     assert "PINNED_FEEDBACK_789" in volatile["text"]
     assert "entire prototype" not in volatile["text"]
+
+
+def test_iterate_prefix_includes_screenshot_block_cache_stable():
+    # The reference-screenshot image block joins the CACHEABLE prefix as the
+    # LAST stable block, and the cache breakpoint MOVES onto it (a breakpoint
+    # left mid-prefix would silently re-bill the image every turn).
+    shot = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/png", "data": "QUJDRA=="},
+    }
+    kwargs = dict(
+        current_source={"src/App.tsx": "export default function App(){}"},
+        open_comments=[],
+        iterate_prompt="change the title",
+        applied_comment=None,
+    )
+    c1, v1 = render_iterate_user(**kwargs, screenshot_block=shot)
+    c2, v2 = render_iterate_user(**kwargs, screenshot_block=shot)
+
+    assert c1[-1]["type"] == "image"
+    assert c1[-1]["source"]["media_type"] == "image/png"
+    assert c1[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    # The breakpoint moved OFF the text block — exactly one breakpoint, at the
+    # END of the stable prefix; none on the volatile suffix.
+    assert all("cache_control" not in b for b in c1[:-1])
+    assert "cache_control" not in v1
+    # Prefix-stable: two renders are byte-identical (the cache hit across turns).
+    assert c1 == c2 and v1 == v2
+    # The caller's block is never mutated.
+    assert "cache_control" not in shot
+
+    # No screenshot → the single text block keeps the breakpoint, byte-identical
+    # to the pre-screenshot shape.
+    c3, _v3 = render_iterate_user(**kwargs)
+    assert [b["type"] for b in c3] == ["text"]
+    assert c3[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -372,6 +409,7 @@ CREATE TABLE prototypes (
     figma_file_key         TEXT,
     website_url            TEXT,
     github_installation_id INTEGER,
+    screenshot_key         TEXT,
     bundle_url             TEXT,
     current_checkpoint_id  INTEGER,
     error                  TEXT,
@@ -647,6 +685,137 @@ async def test_run_iterate_bg_open_comments_in_cacheable_prefix(env, monkeypatch
     assert "RESOLVED_COMMENT_BODY" not in cache_blob
 
 
+# ─── Screenshot design-reference re-entry ──────────────────────────────────
+
+
+def _seed_ready_with_screenshot(env, key: str) -> int:
+    """A ready prototype whose row carries a stored reference-screenshot key."""
+    pid = env.proto.start_prototype(
+        prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1,
+        screenshot_key=key,
+    )
+    env.proto.complete_prototype(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        bundle_url="https://bundle/original", current_checkpoint_id=None,
+    )
+    return pid
+
+
+@pytest.mark.asyncio
+async def test_iterate_reentry_attaches_screenshot_in_cacheable_prefix(env, monkeypatch):
+    # Re-entry: an execute iterate on a screenshot-carrying prototype re-attaches
+    # the SAME stored image inside the cacheable prefix; the breakpoint rides the
+    # image block (the last stable block), never the volatile prompt.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    key = f"uploads/{_TEST_COMPANY_ID}/cafebabe.png"
+    pid = _seed_ready_with_screenshot(env, key)
+    captured = _stub_iterate_capture(monkeypatch, env.routes)
+    reads: list[tuple] = []
+
+    # Stub read_screenshot SEPARATELY from the seed-source read (convention:
+    # never overload the seed stub with the screenshot read).
+    async def _fake_shot_read(*, key, workspace_id):
+        reads.append((key, workspace_id))
+        return b"\x89PNG-fake-bytes", "image/png"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _fake_shot_read)
+
+    await env.routes._run_iterate_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        body=env.routes.IterateRequest(prompt="tweak the header"),
+    )
+    assert reads == [(key, _TEST_COMPANY_ID)]
+    blocks = captured["user_message"]["content"]
+    # Volatile prompt block last + uncached; the image is the LAST STABLE block.
+    assert blocks[-1]["type"] == "text" and "cache_control" not in blocks[-1]
+    image = blocks[-2]
+    assert image["type"] == "image"
+    assert image["source"]["media_type"] == "image/png"
+    assert image["source"]["data"] == base64.b64encode(b"\x89PNG-fake-bytes").decode("ascii")
+    assert image["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    # Exactly one breakpoint in the user content — on the image.
+    assert sum(1 for b in blocks if "cache_control" in b) == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_run_attaches_screenshot_too(env, monkeypatch):
+    # Plan runs get the same design reference (the plan should be grounded in
+    # what the prototype is supposed to look like).
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    key = f"uploads/{_TEST_COMPANY_ID}/0badf00d.png"
+    pid = _seed_ready_with_screenshot(env, key)
+    captured = _stub_iterate_capture(monkeypatch, env.routes)
+
+    async def _fake_shot_read(*, key, workspace_id):
+        return b"plan-shot", "image/jpeg"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _fake_shot_read)
+
+    await env.routes._run_iterate_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        body=env.routes.IterateRequest(prompt="how would you restructure this?", mode="plan"),
+    )
+    assert captured["mode"] == "plan"
+    images = [b for b in captured["user_message"]["content"] if b.get("type") == "image"]
+    assert len(images) == 1
+    assert images[0]["source"]["media_type"] == "image/jpeg"
+
+
+@pytest.mark.asyncio
+async def test_iterate_proceeds_without_missing_screenshot(env, monkeypatch, caplog):
+    # FAIL-OPEN reference: a lost/unreadable stored screenshot logs ONE WARNING
+    # (identifiers only) and the run proceeds image-less — the prototype is
+    # never failed by a missing reference image.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    key = f"uploads/{_TEST_COMPANY_ID}/deadbeef.png"
+    pid = _seed_ready_with_screenshot(env, key)
+
+    captured: dict = {}
+
+    async def _fake_iterate(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            status="complete", iters=1, error_message=None, error_class=None, usage=None,
+        ), {"src/App.tsx": "export default function App(){ return null }"}
+
+    monkeypatch.setattr(env.routes, "iterate_prototype", _fake_iterate)
+
+    staged: list[dict] = []
+
+    async def _fake_stage(**kwargs):
+        staged.append(kwargs)
+        return True
+
+    monkeypatch.setattr(env.routes, "_stage_iterate_run", _fake_stage)
+
+    async def _raising_read(*, key, workspace_id):
+        raise FileNotFoundError(key)
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _raising_read)
+
+    with caplog.at_level(logging.WARNING):
+        await env.routes._run_iterate_bg(
+            prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+            body=env.routes.IterateRequest(prompt="tweak"),
+        )
+
+    # The run proceeded WITHOUT the image (no image block anywhere).
+    assert all(b.get("type") != "image" for b in captured["user_message"]["content"])
+    warnings = [
+        r for r in caplog.records
+        if "screenshot_context_unavailable" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    msg = warnings[0].getMessage()
+    assert "deadbeef.png" in msg                # key suffix — enough to triage
+    assert _TEST_COMPANY_ID not in msg          # never the workspace prefix
+    # Prototype NOT failed by the missing reference; the run staged normally.
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "ready"
+    assert row["error"] is None
+    assert staged
+
+
 # ─── Iterate staging path (B2 / AC6a) ──────────────────────────────────────
 
 
@@ -749,3 +918,122 @@ async def test_run_iterate_bg_failure_marks_prototype_failed(env, monkeypatch):
     assert "error_class=BadRequestError" in row["error"]
     # The original bundle is preserved (iterate failure does not erase it).
     assert row["bundle_url"] == "https://bundle/original"
+
+
+# ─── Empty-seed fail-closed guard ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_iterate_empty_seed_with_checkpoint_fails_closed(env, monkeypatch):
+    # A checkpointed prototype whose staged source reads back EMPTY must fail
+    # loudly BEFORE any agent call: an empty seed renders as a fresh build, and
+    # the execute run would then replace the whole prototype with only the
+    # requested change.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    agent_calls: list = []
+
+    async def fake_agent(**kwargs):
+        agent_calls.append(kwargs)
+        return SimpleNamespace(
+            status="complete", iters=1, error_message=None, error_class=None,
+        ), {"src/App.tsx": "only the change"}
+
+    async def fake_read(prototype_id, checkpoint_id):
+        return {}
+
+    monkeypatch.setattr(env.routes, "iterate_prototype", fake_agent)
+    monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", fake_read)
+    pid = _seed_ready(env, current_checkpoint_id=42)
+
+    await env.routes._run_iterate_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        body=env.routes.IterateRequest(prompt="make the button blue"),
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "failed"
+    assert row["error"].startswith("source_read_empty:")
+    assert agent_calls == []                                # agent never invoked
+    assert row["bundle_url"] == "https://bundle/original"   # prior bundle preserved
+    assert row["current_checkpoint_id"] == 42               # no checkpoint change
+
+
+@pytest.mark.asyncio
+async def test_iterate_without_checkpoint_skips_guard(env, monkeypatch):
+    # current_checkpoint_id IS NULL → nothing staged to wipe; the guard stays
+    # silent and the run reaches the agent with the fresh-build (empty) seed.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+    captured = _stub_iterate_capture(monkeypatch, env.routes)
+
+    async def fake_read(prototype_id, checkpoint_id):
+        return {}
+
+    monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", fake_read)
+    pid = _seed_ready(env)  # no current checkpoint
+
+    await env.routes._run_iterate_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        body=env.routes.IterateRequest(prompt="build it"),
+    )
+    assert captured["current_source"] == {}   # agent WAS invoked with the fresh seed
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert not (row["error"] or "").startswith("source_read_empty:")
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_empty_seed_does_not_fail_prototype(env, monkeypatch):
+    # Plan mode is exempt from the guard: a plan run stages nothing and advances
+    # no checkpoint, so an empty seed cannot wipe anything; the destructive
+    # execute run re-reads the source and hits the guard itself.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+
+    async def fake_agent(**kwargs):
+        return SimpleNamespace(
+            status="complete", iters=1, error_message=None, error_class=None,
+            final_content=[{"type": "text", "text": "- shrink the logo"}],
+        ), {}
+
+    async def fake_read(prototype_id, checkpoint_id):
+        return {}
+
+    monkeypatch.setattr(env.routes, "iterate_prototype", fake_agent)
+    monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", fake_read)
+    monkeypatch.setattr(env.routes, "set_iteration_plan", lambda **k: None)
+    pid = _seed_ready(env, current_checkpoint_id=42)
+
+    await env.routes._run_iterate_bg(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        body=env.routes.IterateRequest(prompt="rethink the header", mode="plan"),
+        iteration_id=1,
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "ready"           # NOT failed
+    assert row["error"] is None
+    assert row["bundle_url"] == "https://bundle/original"
+
+
+@pytest.mark.asyncio
+async def test_empty_seed_guard_logs_identifiers_only(env, monkeypatch, caplog):
+    # The guard emits exactly one WARNING carrying prototype_id + checkpoint_id
+    # and no prompt / staged-source content.
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "1")
+
+    async def fake_read(prototype_id, checkpoint_id):
+        return {}
+
+    monkeypatch.setattr(env.routes, "read_source_files_for_checkpoint", fake_read)
+    pid = _seed_ready(env, current_checkpoint_id=42)
+
+    with caplog.at_level(logging.WARNING):
+        await env.routes._run_iterate_bg(
+            prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+            body=env.routes.IterateRequest(prompt="SECRET_PROMPT_BODY"),
+        )
+    warns = [
+        r.getMessage() for r in caplog.records
+        if r.getMessage().startswith("prototype_iterate_source_read_empty")
+    ]
+    assert warns == [
+        f"prototype_iterate_source_read_empty prototype_id={pid} checkpoint_id=42"
+    ]
+    blob = "\n".join(r.getMessage() for r in caplog.records)
+    assert "SECRET_PROMPT_BODY" not in blob   # never the prompt / content

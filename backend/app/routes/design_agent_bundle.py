@@ -334,6 +334,94 @@ async def serve_public_bundle(
     )
 
 
+# ─── PUBLIC per-prototype PWA manifest ───────────────────────────────────────
+
+
+@router.get("/by-token/{token}/manifest.webmanifest")
+def serve_public_manifest(token: str) -> Response:
+    """Per-prototype PWA manifest for the public `/p` viewer (installability).
+
+    The web app is a static export (`next.config.ts` `output: "export"`), so a
+    per-prototype manifest (name/start_url/scope distinct per share link) cannot
+    come from Next — it is served here and linked client-side after token
+    resolution. Deny logic mirrors get_by_token: missing / private / not-ready →
+    404, indistinguishable from the sibling by-token 404s. A passcode-mode READY
+    row IS served: the resolver already discloses the cosmetic slugs pre-verify,
+    the name is the same title the public page renders, and the installed app
+    must be able to re-fetch its manifest. `scope` is the token path, so two
+    installed prototypes never capture each other's navigations. Deliberately NO
+    service worker anywhere — installability only (offline caching of the
+    signed-URL-proxied bundle is a security question, not a checkbox)."""
+    _require_feature()
+    row = find_prototype_by_share_token(token)
+    if not row or row.get("share_mode") == "private" or row.get("status") != "ready":
+        if not row:
+            sub_reason = "missing"
+        elif row.get("share_mode") == "private":
+            sub_reason = "private"
+        else:
+            sub_reason = "not_ready"
+        logger.info(
+            "da_manifest_deny gate=%s token_hash=%s",
+            sub_reason,
+            hashlib.sha256(token.encode()).hexdigest()[:8],
+        )
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Reuse the resolver's cosmetic-slug derivation so start_url/scope are
+    # byte-identical to the canonical /p/ URL the viewer canonicalizes to.
+    # Lazy imports: design_agent.py lazily imports THIS module
+    # (set_share_grant_cookie), so a module-level import back would be a cycle
+    # hazard; db.prds follows the same lazy-import discipline.
+    from app.db.prds import get_prd_rendered
+    from app.routes.design_agent import _public_cosmetic_slugs
+
+    company_display_slug, feature_slug = _public_cosmetic_slugs(row)
+    title = ""
+    try:
+        prd = get_prd_rendered(row["prd_id"]) if row.get("prd_id") else None
+        title = ((prd or {}).get("title") or "").strip()
+    except Exception:
+        # Fail-soft like _public_cosmetic_slugs: a cosmetic lookup must never 500
+        # a public surface. Identifiers only in the log — never title content.
+        logger.warning(
+            "da_manifest_title_lookup_failed prd_id=%s", row.get("prd_id"), exc_info=True
+        )
+    name = title or "Sprntly Prototype"
+    short_name = title[:12].strip() or "Prototype"
+    # brief_deep_link pattern: config-derived frontend origin, never the Host header.
+    frontend_origin = (settings.frontend_url or "https://app.sprntly.ai").rstrip("/")
+    start_url = f"{frontend_origin}/p/{company_display_slug}/{feature_slug}/{token}"
+    manifest = {
+        "name": name,
+        "short_name": short_name,
+        "start_url": start_url,
+        "scope": start_url,
+        "display": "standalone",
+        "background_color": "#f6f7f6",
+        "theme_color": "#f6f7f6",
+        "icons": [
+            {
+                "src": f"{frontend_origin}/pwa/prototype-icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+            },
+            {
+                "src": f"{frontend_origin}/pwa/prototype-icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+        ],
+    }
+    logger.info(
+        "da_manifest_served token_hash=%s share_mode=%s",
+        hashlib.sha256(token.encode()).hexdigest()[:8],
+        row["share_mode"],
+    )
+    return Response(content=json.dumps(manifest), media_type="application/manifest+json")
+
+
 def set_share_grant_cookie(response: Response, *, token: str, checkpoint_id: int) -> None:
     """Set the scoped da_share_grant cookie on a passcode-verify success.
 

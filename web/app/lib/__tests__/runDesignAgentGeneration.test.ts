@@ -80,7 +80,66 @@ describe("runDesignAgentGeneration", () => {
     // Past the 6-minute cap (with a tick of slack).
     await vi.advanceTimersByTimeAsync(6 * 60 * 1000 + 4000)
     const r = await p
-    expect(r).toEqual({ ok: false, message: "Generation timed out (6 minutes)" })
+    // Closed-world repair (AC12): the MAX_MS fallback now also sets the
+    // `timedOut` discriminant so downstream callers can tell a client-side
+    // give-up apart from a genuine backend failure.
+    expect(r).toEqual({
+      ok: false,
+      timedOut: true,
+      message: "Generation timed out (6 minutes)",
+    })
+  })
+
+  it("test_run_design_agent_generation_marks_timeout_result — AC1: MAX_MS fallback sets timedOut:true", async () => {
+    vi.useFakeTimers()
+    vi.spyOn(designAgentApi, "get").mockResolvedValue(
+      proto({ status: "generating" }),
+    )
+    const p = runDesignAgentGeneration({ prototypeId: 1 })
+    await vi.advanceTimersByTimeAsync(6 * 60 * 1000 + 4000)
+    const r = await p
+    expect(r.ok).toBe(false)
+    expect((r as { timedOut?: true }).timedOut).toBe(true)
+  })
+
+  it("test_run_design_agent_generation_timeout_message_byte_identical — AC1 edge: message text is exactly unchanged (other consumers already render it)", async () => {
+    vi.useFakeTimers()
+    vi.spyOn(designAgentApi, "get").mockResolvedValue(
+      proto({ status: "generating" }),
+    )
+    const p = runDesignAgentGeneration({ prototypeId: 1 })
+    await vi.advanceTimersByTimeAsync(6 * 60 * 1000 + 4000)
+    const r = await p
+    expect((r as { message: string }).message).toBe(
+      "Generation timed out (6 minutes)",
+    )
+  })
+
+  it("test_run_design_agent_generation_other_branches_omit_timed_out — AC2: every non-timeout branch leaves timedOut undefined", async () => {
+    const cases: { status: string; error?: string | null }[] = [
+      { status: "failed", error: "oops" },
+      { status: "failed", error: null },
+      { status: "invalidated" },
+    ]
+    for (const c of cases) {
+      vi.spyOn(designAgentApi, "get").mockResolvedValueOnce(
+        proto({ status: c.status as never, error: c.error ?? null }),
+      )
+      const r = await runDesignAgentGeneration({ prototypeId: 1 })
+      expect((r as { timedOut?: true }).timedOut).toBeUndefined()
+    }
+
+    // ready branch
+    vi.spyOn(designAgentApi, "get").mockResolvedValueOnce(
+      proto({ status: "ready", bundle_url: "b" }),
+    )
+    const readyResult = await runDesignAgentGeneration({ prototypeId: 1 })
+    expect((readyResult as { timedOut?: true }).timedOut).toBeUndefined()
+
+    // rejected GET
+    vi.spyOn(designAgentApi, "get").mockRejectedValueOnce(new Error("network"))
+    const rejectedResult = await runDesignAgentGeneration({ prototypeId: 1 })
+    expect((rejectedResult as { timedOut?: true }).timedOut).toBeUndefined()
   })
 
   it("never throws — a rejecting GET is surfaced as ok:false", async () => {

@@ -35,6 +35,7 @@ SCOPE (what this initial slice does NOT do):
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -44,7 +45,7 @@ import uuid
 from typing import Any, Literal
 from urllib.parse import urlsplit
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -99,6 +100,7 @@ from app.design_agent.prompts import (
     render_scaffold_user,
 )
 from app.design_agent.event_stream import publish_step, subscribe as _sse_subscribe
+from app.design_agent.notify import notify_prototype_ready  # prototype-ready ping (best-effort)
 from app.design_agent.progress import FINISHING_STEP, VITE_PHASE_STEP
 from app.design_agent.runner import MODEL, generate_prototype, reconcile_comments_on_checkpoint, repair_build_run
 from app.design_agent.screenshot import capture_bundle_screenshot  # best-effort preview capture
@@ -120,9 +122,11 @@ from app.design_agent.storage import (
     authed_bundle_url,
     fresh_bundle_url,
     public_bundle_proxy_url,
+    read_screenshot,
     repair_unresolved_relative_imports,
     stage_bundle,
     stage_preview_image,
+    stage_screenshot,
     vite_build,
     vite_build_with_repair,
 )
@@ -393,11 +397,19 @@ class GenerateRequest(BaseModel):
     #                                       and, when a matching GitHub App installation
     #                                       is known, into the design-system source
     #                                       resolver for future codebase extraction.
-    design_source: Literal["figma", "github", "website"] | None = None
+    screenshot_key: str | None = None
+    #   Staged upload key returned by POST /uploads/screenshot — a generate-time
+    #   input snapshot mirroring figma_file_key (persisted on the row; iterate
+    #   re-reads it from there, never from a fresh upload). This release only
+    #   accepts + persists the key; engine selection semantics land separately.
+    design_source: Literal["figma", "github", "website", "screenshot"] | None = None
     #   Explicit single-source selector. figma → use figma_file_key; github →
     #   use github_repo; website → use the onboarding website (or a typed
     #   website_url). None = old client / no explicit choice → preserve the
     #   prior implicit precedence + always-on onboarding fallback unchanged.
+    #   "screenshot" is ACCEPTED but not yet consumed by the runner's source
+    #   arms — it falls through to the implicit precedence (safe by design)
+    #   until the engine wiring lands.
     chosen_screen_route: str | None = None
     #   The route the PM confirmed in the locate UX (codebase generation only).
     #   When present alongside a resolved installation, the background task
@@ -432,6 +444,66 @@ class GenerateResponse(BaseModel):
 # ─── Routes ───────────────────────────────────────────────────────────────
 
 
+# ── Screenshot upload intake ─────────────────────────────────────────────────
+#
+# Stages a user-uploaded screenshot as generate-time design context (the key is
+# threaded into a later POST /generate). Unrelated to design_agent/screenshot.py,
+# which is the server-side preview CAPTURE of staged bundles.
+#
+# Declared ABOVE the single-segment GET /{prototype_id} catch-all per the house
+# route-ordering convention (see design_agent_comments.py) — a 2-segment POST is
+# unshadowable by a GET catch-all, but the ordering rule stays uniform.
+
+_MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024  # 8 MB — generous for a UI screenshot.
+
+# Magic-byte signatures. The DECLARED content-type is never trusted: the sniffed
+# type decides (a prefix check meets the threat model — the bytes are stored,
+# never decoded server-side, so no image dependency is warranted).
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_JPEG_MAGIC = b"\xff\xd8\xff"
+
+
+def _sniff_image_media_type(data: bytes) -> str | None:
+    """Return the media type for a PNG/JPEG/WebP byte signature, else None."""
+    if data.startswith(_PNG_MAGIC):
+        return "image/png"
+    if data.startswith(_JPEG_MAGIC):
+        return "image/jpeg"
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+@router.post(
+    "/uploads/screenshot",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+async def upload_screenshot(
+    file: UploadFile = File(...),
+    company: CompanyContext = Depends(require_company),
+) -> dict[str, str]:
+    """Validate + stage an uploaded screenshot; return its storage key.
+
+    Guards mirror routes/prd.py's import guard: empty → 400, oversize → 413,
+    plus a magic-byte sniff → 422 when the bytes match no allowed image
+    signature. The response media_type is the SNIFFED type (e.g. JPEG bytes
+    uploaded under a .png name come back "image/jpeg").
+    """
+    _require_feature_enabled()
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Uploaded file is empty.")
+    if len(data) > _MAX_SCREENSHOT_BYTES:
+        raise HTTPException(413, "File too large (max 8 MB).")
+    media_type = _sniff_image_media_type(data)
+    if media_type is None:
+        raise HTTPException(422, "Unsupported file type (PNG, JPEG, or WebP required).")
+    key = await stage_screenshot(
+        workspace_id=company.company_id, data=data, media_type=media_type
+    )
+    return {"screenshot_key": key, "media_type": media_type}
+
+
 @router.post(
     "/generate",
     response_model=GenerateResponse,
@@ -460,6 +532,20 @@ async def generate(
             detail="service is draining, retry shortly",
         )
     workspace_id = company.company_id
+
+    # Route-layer mirror of read_screenshot's workspace-prefix check: a key from
+    # another tenant's upload space (or any non-upload key) is refused outright.
+    # 403 — the caller referenced an object it does not own; not invisibility
+    # (the route itself already resolved past the feature gate).
+    # A `..` segment is refused too: it can satisfy the literal prefix yet
+    # resolve into another workspace's directory on the filesystem backend. The
+    # write side never produces one, so it is always hostile — reject it at the
+    # source rather than letting the key persist and fail only at read time.
+    if body.screenshot_key is not None and (
+        not body.screenshot_key.startswith(f"uploads/{workspace_id}/")
+        or ".." in body.screenshot_key.split("/")
+    ):
+        raise HTTPException(status_code=403, detail={"error": "screenshot_key_forbidden"})
 
     # Sync DB helpers, called directly (no await) — see CALL-STYLE NOTE.
     existing = find_existing_prototype(
@@ -523,6 +609,10 @@ async def generate(
         figma_file_key=body.figma_file_key,
         website_url=effective_website_url,  # snapshot; resolved value incl. onboarding fallback
         github_installation_id=github_installation_id,
+        screenshot_key=body.screenshot_key,  # snapshot; ownership-checked above
+        # The generating user's identity (require_company), snapshotted so the
+        # prototype-ready notification (design_agent/notify.py) can DM them.
+        created_by_user_id=company.user_id,
     )
 
     # Open a usage-ledger row for this generation (billing/observability). The id
@@ -565,6 +655,9 @@ async def generate(
         github_repo=repo,  # normalised connected-repo full_name; prompt context only
         github_installation_id=github_installation_id,
         design_source=body.design_source,
+        # Same ownership-checked snapshot start_prototype persisted; a plain
+        # str/None → round-trips losslessly through the Tier-2 job payload.
+        screenshot_key=body.screenshot_key,
         chosen_screen_route=body.chosen_screen_route,
         chosen_screen_id=body.chosen_screen_id,
         map_commit_sha=body.map_commit_sha,
@@ -1540,6 +1633,44 @@ def _finalize_usage_event_failed(
         )
 
 
+async def _screenshot_reference_block(
+    screenshot_key: str | None, *, prototype_id: int, workspace_id: str
+) -> dict | None:
+    """Load the uploaded reference screenshot into an Anthropic base64 image
+    content block; None when there is no key.
+
+    FAIL-OPEN by decision: a missing/unreadable screenshot logs ONE WARNING
+    (identifiers only — never the key's workspace prefix or the bytes) and the
+    run proceeds WITHOUT the image. This is deliberately the OPPOSITE policy
+    from the empty-seed guard in `_run_iterate_bg`, which is fail-closed: a
+    blank seed would let an execute run REPLACE the whole prototype, while a
+    lost reference image only loses styling context and must never brick
+    generation or iteration. Different assets, different blast radii — do not
+    "harmonise" the two policies.
+    """
+    if not screenshot_key:
+        return None
+    try:
+        data, media_type = await read_screenshot(
+            key=screenshot_key, workspace_id=workspace_id
+        )
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": base64.b64encode(data).decode("ascii"),
+            },
+        }
+    except Exception:  # noqa: BLE001 — fail-open reference; identifiers only.
+        logger.warning(
+            "screenshot_context_unavailable prototype_id=%s key_suffix=%s",
+            prototype_id,
+            screenshot_key.rsplit("/", 1)[-1],
+        )
+        return None
+
+
 async def _run_generation_bg(
     *,
     prototype_id: int,
@@ -1554,6 +1685,7 @@ async def _run_generation_bg(
     github_repo: str | None = None,
     github_installation_id: int | None = None,
     design_source: str | None = None,
+    screenshot_key: str | None = None,
     chosen_screen_route: str | None = None,
     chosen_screen_id: str | None = None,
     map_commit_sha: str | None = None,
@@ -1582,11 +1714,18 @@ async def _run_generation_bg(
         # reach the prototype the same way Scenario A's do — via a pre-seeded
         # `src/index.css` — without a second browser run. Skipped entirely when a
         # Figma file is present (Figma wins the single design-source slot).
+        # design_source == "screenshot" is its own arm: NO website extraction
+        # and NO design-system resolution — the attached image IS the design
+        # context (see _design_source_for_generation's screenshot arm, which
+        # returns the un-seeded tuple for the same reason). Scenario inference
+        # below is unchanged: a screenshot alone is Scenario 0-with-context,
+        # never a new label.
+        screenshot_selected = design_source == "screenshot"
         website_sample: dict | None = None
-        if not figma_file_key:
+        if not figma_file_key and not screenshot_selected:
             website_sample = await _extract_website_sample(website_url)
         website_block = (
-            None if figma_file_key
+            None if (figma_file_key or screenshot_selected)
             else await _website_context_block(
                 website_url,
                 manual_design,
@@ -1604,16 +1743,31 @@ async def _run_generation_bg(
             "text": DESIGN_AGENT_SCAFFOLD_SYSTEM,
             "cache_control": {"type": "ephemeral", "ttl": "1h"},
         }]
+        # Uploaded screenshot as the DESIGN REFERENCE (vision context). Keyed on
+        # the ownership-checked screenshot_key snapshot, whatever the selected
+        # design_source. Fail-open: a lost/unreadable object logs one WARNING
+        # and the run proceeds image-less (see _screenshot_reference_block) —
+        # the directive is only appended when the image really attached.
+        screenshot_block = await _screenshot_reference_block(
+            screenshot_key, prototype_id=prototype_id, workspace_id=workspace_id
+        )
         user_text = render_scaffold_user(
             prd_md=prd_md,
             target_platform=target_platform,
             instructions=instructions,
             figma_frames=source_block,
             codebase_repo=github_repo,  # one-line "match this codebase" context; None -> "(no codebase source)"
+            has_screenshot=screenshot_block is not None,
         )
+        user_content: list[dict] = [{"type": "text", "text": user_text}]
+        if screenshot_block is not None:
+            # Vision-first ordering: the image block PRECEDES the text block so
+            # the directive's "the attached screenshot" reads against an image
+            # the model has already seen.
+            user_content.insert(0, screenshot_block)
         user_message = {
             "role": "user",
-            "content": [{"type": "text", "text": user_text}],
+            "content": user_content,
         }
 
         # Derive the scenario label once at the call boundary so the runner can
@@ -1806,6 +1960,26 @@ async def _run_generation_bg(
                     # pass's usage into this so the ledger captures primary + repair.
                     repair_usage=repair_usage,
                 )
+                # Prototype-ready notification (best-effort side effect): fires
+                # ONLY on a successful FIRST-completion stage — iterate/manual
+                # edits advance checkpoints elsewhere and deliberately do not
+                # notify. The notifier's reads + post_to_target are synchronous
+                # → to_thread (CALL-STYLE NOTE). notify_prototype_ready itself
+                # never raises; this guard also catches anything above it (e.g.
+                # a to_thread scheduling error) so a notify failure can NEVER
+                # fail the prototype.
+                if staged_ok:
+                    try:
+                        await asyncio.to_thread(
+                            notify_prototype_ready,
+                            prototype_id=prototype_id,
+                            workspace_id=workspace_id,
+                        )
+                    except Exception:  # noqa: BLE001 — side effect, never fatal.
+                        logger.warning(
+                            "prototype_ready_notify_hook_failed prototype_id=%s",
+                            prototype_id,
+                        )
                 # Finalize the usage ledger. _stage_complete_run owns the prototype
                 # status write (ready on success, failed on build-exhaustion), so we
                 # mirror it: succeeded only when it staged. Tokens = primary run +
@@ -3516,6 +3690,27 @@ async def _run_iterate_bg(
             if checkpoint_id else {}
         )
 
+        # Fail closed on an empty seed: an existing checkpoint whose staged source
+        # reads back empty would be rendered as a fresh build, and the execute run
+        # would then REPLACE the whole prototype with only the requested change.
+        # Plan mode is exempt: a plan run stages nothing and advances no
+        # checkpoint, and the destructive execute run re-reads the source and hits
+        # this guard itself.
+        if checkpoint_id and not current_source and body.mode != "plan":
+            logger.warning(
+                "prototype_iterate_source_read_empty prototype_id=%s checkpoint_id=%s",
+                prototype_id, checkpoint_id,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=(
+                    f"source_read_empty: checkpoint {checkpoint_id} has no readable "
+                    "staged source; refusing to iterate from a blank seed"
+                ),
+            )
+            return
+
         # Open comment threads — the stable cacheable signal (list_comments,
         # filtered to open, anchored-only). See _project_open_comments_for_grounding.
         all_comments = list_comments(prototype_id=prototype_id, workspace_id=workspace_id)
@@ -3535,11 +3730,24 @@ async def _run_iterate_bg(
                 None,
             )
 
+        # Screenshot design-reference RE-ENTRY: the stored image re-enters every
+        # iterate AND plan turn inside the cacheable prefix (immutable per
+        # prototype → prefix-stable; render_iterate_user moves the cache
+        # breakpoint onto it). The manual-edit path deliberately does NOT
+        # attach it — mechanical commit-backs need no design reference.
+        # Fail-open on a lost object (see _screenshot_reference_block).
+        screenshot_block = await _screenshot_reference_block(
+            proto.get("screenshot_key"),
+            prototype_id=prototype_id,
+            workspace_id=workspace_id,
+        )
+
         cacheable_blocks, volatile_block = render_iterate_user(
             current_source=current_source,
             open_comments=open_comments,
             iterate_prompt=body.prompt,
             applied_comment=applied_comment,
+            screenshot_block=screenshot_block,
         )
         # System block(s) cached at the END of the stable prefix, mirroring
         # _run_generation_bg. The bundle+comments user prefix is cached too (its
@@ -4109,6 +4317,24 @@ async def _run_manual_edit_bg(
             await read_source_files_for_checkpoint(prototype_id, checkpoint_id)
             if checkpoint_id else {}
         )
+
+        # Fail closed on an empty seed (mirrors _run_iterate_bg): a manual edit
+        # over an existing checkpoint whose staged source reads back empty would
+        # rebuild from scratch and replace the prototype wholesale.
+        if checkpoint_id and not current_source:
+            logger.warning(
+                "prototype_manual_edit_source_read_empty prototype_id=%s checkpoint_id=%s",
+                prototype_id, checkpoint_id,
+            )
+            fail_prototype(
+                prototype_id=prototype_id,
+                workspace_id=workspace_id,
+                error=(
+                    f"source_read_empty: checkpoint {checkpoint_id} has no readable "
+                    "staged source; refusing to manual-edit from a blank seed"
+                ),
+            )
+            return
 
         cacheable_blocks, volatile_block = render_manual_edit_user(
             current_source=current_source,

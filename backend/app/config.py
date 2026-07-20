@@ -432,6 +432,13 @@ class Settings(BaseSettings):
     # Routes return 404 when false so the feature is invisible when off.
     design_agent_enabled: bool = False
 
+    # Prototype-ready notification kill switch (design_agent/notify.py): the
+    # best-effort ping sent to the generating user when their prototype first
+    # reaches 'ready'. Default ON because design_agent_enabled above is the
+    # outer gate — no generations means no notifications; this switch exists to
+    # silence the ping alone without touching generation.
+    prototype_ready_notify_enabled: bool = True
+
     # Multi-Agent mode: run PRD + Evidence + Technical Design + QA Test Cases +
     # Risk Analysis + Traceability Matrix concurrently from a single trigger.
     # "aggressive" mode pulls ClickUp task context (comments, attachments,

@@ -525,6 +525,136 @@ def test_fresh_bundle_url_signs_from_object_path_with_bucket(monkeypatch):
     assert "STALE" not in out
 
 
+# ─── GET /by-token/{token}/manifest.webmanifest (PWA installability) ──────────
+#
+# Per-prototype PWA manifest served from the API side: the web app is a static
+# export (`output: "export"`), so Next cannot render a per-share manifest. The
+# route lives on the bundle router (registered before design_agent.router) and
+# carries the SAME deny posture as every other by-token route.
+
+
+def _manifest_frontend_origin() -> str:
+    # Mirror the handler's brief_deep_link-style origin derivation so the test
+    # tracks FRONTEND_URL (isolated_settings pins http://localhost:3000).
+    from app.config import settings
+
+    return (settings.frontend_url or "https://app.sprntly.ai").rstrip("/")
+
+
+def test_manifest_shape_and_content_type(unauth):
+    # AC1 — 200 + application/manifest+json with the full field set; start_url and
+    # scope are the canonical 3-segment /p/ URL built from the SAME cosmetic slugs
+    # get_by_token returns, and nothing internal (ids, workspace) is disclosed.
+    token = _seed(
+        share_mode="public",
+        workspace_id="acme",
+        display_name="Lab X",
+        prd_title="Customer Onboarding Revamp",
+    )
+    resp = unauth.get(f"/v1/design-agent/by-token/{token}/manifest.webmanifest")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-type"].startswith("application/manifest+json")
+    body = resp.json()
+    origin = _manifest_frontend_origin()
+    canonical = f"{origin}/p/lab-x/customer-onboarding-revamp/{token}"
+    assert body["name"] == "Customer Onboarding Revamp"
+    assert body["short_name"] == "Customer Onb"  # title truncated, ≤ 12 chars
+    assert len(body["short_name"]) <= 12
+    assert body["start_url"] == canonical
+    assert body["scope"] == canonical
+    assert body["display"] == "standalone"
+    assert body["background_color"] == "#f6f7f6"
+    assert body["theme_color"] == "#f6f7f6"
+    assert body["icons"] == [
+        {
+            "src": f"{origin}/pwa/prototype-icon-192.png",
+            "sizes": "192x192",
+            "type": "image/png",
+        },
+        {
+            "src": f"{origin}/pwa/prototype-icon-512.png",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any maskable",
+        },
+    ]
+    # Minimum disclosure: EXACTLY the manifest fields — no prototype_id / prd_id /
+    # workspace_id leak onto the public surface.
+    assert set(body.keys()) == {
+        "name", "short_name", "start_url", "scope", "display",
+        "background_color", "theme_color", "icons",
+    }
+
+
+def test_manifest_name_falls_back_when_prd_title_missing(unauth):
+    # Fallbacks — the prototype's prd_id points at no PRD row: name/short_name
+    # degrade to the fixed strings, the feature segment degrades to "prototype",
+    # and the response is still 200 (a cosmetic lookup must never 500).
+    token = _seed(
+        share_mode="public",
+        workspace_id="acme",
+        display_name="Lab X",
+        prd_id=999,  # no prds row seeded for this id
+    )
+    resp = unauth.get(f"/v1/design-agent/by-token/{token}/manifest.webmanifest")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "Sprntly Prototype"
+    assert body["short_name"] == "Prototype"
+    assert body["start_url"].endswith(f"/p/lab-x/prototype/{token}")
+    assert body["scope"] == body["start_url"]
+
+
+def test_manifest_reachable_alongside_catchall(unauth, env):
+    # Route-ordering pin (house pattern): the 3-segment manifest path resolves on
+    # the bundle router (registered BEFORE design_agent.router) and is never
+    # swallowed by the single-segment GET /{prototype_id} catch-all.
+    paths = {r.path for r in env.main.app.router.routes}
+    assert "/v1/design-agent/by-token/{token}/manifest.webmanifest" in paths
+    assert "/v1/design-agent/{prototype_id}" in paths  # the catch-all still exists
+    token = _seed(share_mode="public")
+    resp = unauth.get(f"/v1/design-agent/by-token/{token}/manifest.webmanifest")
+    assert resp.status_code == 200, resp.text
+    assert "start_url" in resp.json()
+
+
+def test_manifest_served_for_passcode_mode_row(unauth):
+    # A passcode-mode READY row serves its manifest: the resolver already
+    # discloses the cosmetic slugs pre-verify, and the viewer only injects the
+    # manifest link after the passcode unlocks to the ready state — the endpoint
+    # must not 404 the installed app's manifest re-fetch.
+    token = _seed(share_mode="passcode", passcode_hash="$argon2id$irrelevant")
+    resp = unauth.get(f"/v1/design-agent/by-token/{token}/manifest.webmanifest")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["display"] == "standalone"
+
+
+@pytest.mark.parametrize("case", ["missing", "private", "not_ready"])
+def test_manifest_404_posture(unauth, case):
+    # AC2 — missing / private / not-ready are indistinguishable: same 404 status
+    # AND same body as the sibling by-token 404s.
+    if case == "missing":
+        token = str(uuid.uuid4())
+    elif case == "private":
+        token = _seed(share_mode="private", bundle_url=None)
+    else:
+        token = _seed(share_mode="public", status="generating")
+    resp = unauth.get(f"/v1/design-agent/by-token/{token}/manifest.webmanifest")
+    assert resp.status_code == 404
+    sibling = unauth.get(f"/v1/design-agent/by-token/{uuid.uuid4()}")
+    assert sibling.status_code == 404
+    assert resp.json() == sibling.json()
+
+
+def test_manifest_404_when_feature_disabled(unauth, monkeypatch):
+    # AC7 — feature flag off → the manifest 404s like every other DA route
+    # (request-time read, matching the by-token siblings).
+    token = _seed(share_mode="public")
+    monkeypatch.setenv("DESIGN_AGENT_ENABLED", "0")
+    resp = unauth.get(f"/v1/design-agent/by-token/{token}/manifest.webmanifest")
+    assert resp.status_code == 404
+
+
 # ─── cosmetic slug helpers (SHARE URL company + feature segments) ─────────────
 
 

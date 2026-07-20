@@ -24,6 +24,8 @@ import type { PrototypeRecord } from "../../lib/api"
 export function GeneratePrototypeCTA({
   prdId,
   figmaFileKey,
+  platformHint,
+  prdTitle,
   skipExistenceCheck,
   listenForCrossSurfaceGenerating,
   onSuccess,
@@ -32,6 +34,12 @@ export function GeneratePrototypeCTA({
 }: {
   prdId: number | null
   figmaFileKey?: string | null
+  /** PRD-declared surface hint (the parsed :::design block's platform_hint),
+   *  threaded to the GenerateModal as its platform DEFAULT. */
+  platformHint?: "desktop" | "mobile" | "both" | null
+  /** The PRD's title, when known. Threaded to the GenerateModal so the
+   *  persisted ready-completion toast can name the PRD. */
+  prdTitle?: string | null
   skipExistenceCheck?: boolean
   listenForCrossSurfaceGenerating?: boolean
   onSuccess?: (prototype: PrototypeRecord) => void
@@ -50,6 +58,8 @@ export function GeneratePrototypeCTA({
 }): ReactElement {
   const gen = useGeneratePrototype(prdId, {
     figmaFileKey,
+    platformHint,
+    prdTitle,
     skipExistenceCheck,
     listenForCrossSurfaceGenerating,
     onSuccess,

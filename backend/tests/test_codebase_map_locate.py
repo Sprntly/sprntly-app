@@ -1287,5 +1287,5 @@ def test_no_prohibited_tokens_in_source():
 
 
 def test_template_version_at_current():
-    """DESIGN_AGENT_TEMPLATE_VERSION is 5 after the recreate-discipline bump."""
-    assert DESIGN_AGENT_TEMPLATE_VERSION == 7
+    """DESIGN_AGENT_TEMPLATE_VERSION is 9 after the mobile-capability directive bump."""
+    assert DESIGN_AGENT_TEMPLATE_VERSION == 9

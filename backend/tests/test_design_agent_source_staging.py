@@ -137,13 +137,26 @@ async def test_round_trip_preserves_unicode(monkeypatch, tmp_path):
     assert out == virtual_fs
 
 
-async def test_round_trip_supabase_flat_files(monkeypatch):
-    """AC #2 (Supabase backend): flat-file round-trip through the mocked storage client.
+def _one_level_list(uploaded: dict[str, bytes]):
+    """Mimic real Supabase Storage `list(prefix)` semantics: one level deep,
+    folder entries WITHOUT an object `id`, file entries WITH one."""
+    def _list(prefix):
+        entries: dict[str, dict] = {}
+        for path in uploaded:
+            if not path.startswith(prefix + "/"):
+                continue
+            rest = path[len(prefix) + 1:]
+            if "/" in rest:
+                name = rest.split("/", 1)[0]
+                entries.setdefault(name, {"name": name, "id": None})
+            else:
+                entries[rest] = {"name": rest, "id": f"obj-{rest}"}
+        return list(entries.values())
+    return _list
 
-    Supabase Storage `list(prefix)` is non-recursive, so the readback covers the
-    flat (top-level) case here; nested-path recursion is exercised on the
-    filesystem path above (the round-trip AC's tested backend per the ticket).
-    """
+
+def _mock_supabase_object_store(monkeypatch) -> dict[str, bytes]:
+    """Mocked storage client backed by a dict, with real list() semantics."""
     uploaded: dict[str, bytes] = {}
     sb = _mock_supabase(monkeypatch)
 
@@ -151,10 +164,15 @@ async def test_round_trip_supabase_flat_files(monkeypatch):
         uploaded[path] = file
 
     sb.upload.side_effect = _upload
-    sb.list.side_effect = lambda prefix: [
-        {"name": p.rsplit("/", 1)[-1]} for p in uploaded if p.startswith(prefix)
-    ]
+    sb.list.side_effect = _one_level_list(uploaded)
     sb.download.side_effect = lambda path: uploaded[path]
+    return uploaded
+
+
+async def test_round_trip_supabase_flat_files(monkeypatch):
+    """AC #2 (Supabase backend): flat-file round-trip through the mocked storage
+    client, whose list() mirrors real semantics (file entries carry an `id`)."""
+    _mock_supabase_object_store(monkeypatch)
 
     virtual_fs = {"App.tsx": "export default () => null;", "index.css": "body{}"}
     await storage.stage_bundle(
@@ -162,6 +180,82 @@ async def test_round_trip_supabase_flat_files(monkeypatch):
     )
     out = await storage.read_source_files_for_checkpoint(2, 5)
     assert out == virtual_fs
+
+
+async def test_round_trip_supabase_nested_paths(monkeypatch):
+    """Nested paths survive the Supabase round-trip: list() is one level deep
+    (folder entries without `id`, file entries with `id` — real semantics), so
+    the readback must recurse into folders or every nested src/** file is
+    silently dropped from the returned dict."""
+    _mock_supabase_object_store(monkeypatch)
+
+    virtual_fs = {
+        "src/App.tsx": "export default () => null;",
+        "src/components/Nav.tsx": "export const Nav = () => null;",
+        "index.css": "body { margin: 0; }",
+    }
+    await storage.stage_bundle(
+        prototype_id=3, checkpoint_id=7, files=virtual_fs, sub_prefix="_source",
+    )
+    out = await storage.read_source_files_for_checkpoint(3, 7)
+    assert out == virtual_fs
+
+
+def test_walk_supabase_prefix_recurses_folder_entries():
+    """Pure helper: folder entries (no `id`) are recursed into, files come back
+    as full prefix-included paths, and a list() error mid-tree degrades to []
+    for that level only (siblings survive)."""
+    tree = {
+        "prototypes/1/2/_source": [
+            {"name": "index.css", "id": "f1"},
+            {"name": "src", "id": None},
+            {"name": "broken", "id": None},
+        ],
+        "prototypes/1/2/_source/src": [
+            {"name": "App.tsx", "id": "f2"},
+            {"name": "components", "id": None},
+        ],
+        "prototypes/1/2/_source/src/components": [
+            {"name": "Nav.tsx", "id": "f3"},
+        ],
+    }
+    storage_obj = MagicMock()
+
+    def _list(prefix):
+        if prefix == "prototypes/1/2/_source/broken":
+            raise RuntimeError("mid-tree list failure")
+        return tree.get(prefix, [])
+
+    storage_obj.list.side_effect = _list
+    out = storage._walk_supabase_prefix(storage_obj, "prototypes/1/2/_source")
+    assert sorted(out) == [
+        "prototypes/1/2/_source/index.css",
+        "prototypes/1/2/_source/src/App.tsx",
+        "prototypes/1/2/_source/src/components/Nav.tsx",
+    ]
+
+
+async def test_read_bundle_supabase_output_unchanged_via_shared_walk(monkeypatch):
+    """Bundle readback through the shared recursive walker is unchanged:
+    nested assets read back, binary assets under a `.b64` sentinel, and the
+    `_source/` / `_preview/` sibling sub-prefixes stay excluded."""
+    import base64
+
+    uploaded = _mock_supabase_object_store(monkeypatch)
+    png = b"\x89PNG\r\n\x1a\n\x00binary"
+    uploaded.update({
+        "prototypes/4/6/index.html": b"<html></html>",
+        "prototypes/4/6/assets/main.js": b"console.log(1)",
+        "prototypes/4/6/assets/logo.png": png,
+        "prototypes/4/6/_source/src/App.tsx": b"raw source",
+        "prototypes/4/6/_preview/preview.png": png,
+    })
+    out = await storage.read_bundle_files_for_checkpoint(4, 6)
+    assert out == {
+        "index.html": "<html></html>",
+        "assets/main.js": "console.log(1)",
+        "assets/logo.png.b64": base64.b64encode(png).decode("ascii"),
+    }
 
 
 # ─── Empty / missing (AC #3) ─────────────────────────────────────────────────

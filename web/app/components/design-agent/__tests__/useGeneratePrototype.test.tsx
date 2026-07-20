@@ -258,6 +258,187 @@ describe("useGeneratePrototype — onGenDone terminal outcomes", () => {
     expect(onSuccess).not.toHaveBeenCalled()
     expect(push).not.toHaveBeenCalled()
   })
+
+  it("test_handle_gen_done_genuine_failure_unchanged — AC11 regression pin: a genuine (timedOut absent) failure calls neither showToast, onSuccess, nor push from within the hook", async () => {
+    const onSuccess = vi.fn()
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={26}
+        options={{ skipExistenceCheck: true, onSuccess }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: false, message: "boom" })
+    })
+    expect(showToast).not.toHaveBeenCalled()
+    expect(onSuccess).not.toHaveBeenCalled()
+    expect(push).not.toHaveBeenCalled()
+  })
+})
+
+describe("useGeneratePrototype — handleGenDone timedOut branch (non-notify-mode)", () => {
+  it("test_handle_gen_done_timed_out_shows_still_generating_toast_not_failure — AC7 regression: today falls through to a silent hideLoading() with no toast", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={27}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(500)
+    })
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({
+        ok: false,
+        timedOut: true,
+        message: "Generation timed out (6 minutes)",
+      })
+    })
+
+    expect(showToast).toHaveBeenCalledTimes(1)
+    expect(showToast).toHaveBeenCalledWith(
+      "Still generating",
+      "This is taking longer than expected — we'll notify you when it's ready.",
+    )
+  })
+
+  it("test_handle_gen_done_timed_out_dispatches_da_generating_with_proto_id — AC8: exactly one da:generating event with the known prototypeId", async () => {
+    const generatingEvents: CustomEvent[] = []
+    const onGenerating = (e: Event) => generatingEvents.push(e as CustomEvent)
+    window.addEventListener("da:generating", onGenerating)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={28}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(501)
+    })
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({
+        ok: false,
+        timedOut: true,
+        message: "Generation timed out (6 minutes)",
+      })
+    })
+
+    expect(generatingEvents.length).toBe(1)
+    expect(generatingEvents[0].detail).toEqual({ prototypeId: 501 })
+    window.removeEventListener("da:generating", onGenerating)
+  })
+
+  it("test_handle_gen_done_timed_out_without_proto_id_dispatches_no_event — AC8 edge: no known prototypeId (timeout before kickoff resolved) dispatches nothing and does not throw", async () => {
+    const generatingEvents: CustomEvent[] = []
+    const onGenerating = (e: Event) => generatingEvents.push(e as CustomEvent)
+    window.addEventListener("da:generating", onGenerating)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={29}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      // Deliberately no onKickoff call — genProtoId stays null.
+    })
+
+    await expect(
+      act(async () => {
+        latest.generateModalProps.onGenDone({
+          ok: false,
+          timedOut: true,
+          message: "Generation timed out (6 minutes)",
+        })
+      }),
+    ).resolves.not.toThrow()
+
+    expect(generatingEvents.length).toBe(0)
+    window.removeEventListener("da:generating", onGenerating)
+  })
+
+  it("test_handle_gen_done_timed_out_no_success_or_navigation — AC9: onSuccess is not called and router.push is not called", async () => {
+    const onSuccess = vi.fn()
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={30}
+        options={{ skipExistenceCheck: true, onSuccess }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(502)
+    })
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({
+        ok: false,
+        timedOut: true,
+        message: "Generation timed out (6 minutes)",
+      })
+    })
+
+    expect(onSuccess).not.toHaveBeenCalled()
+    expect(push).not.toHaveBeenCalled()
+  })
+
+  it("test_handle_gen_done_timed_out_dismisses_overlay_with_toast — AC10: genLoading becomes false in the same act as the toast, never a silent dismiss", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={33}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(503)
+    })
+    expect(latest.loadingScreenProps.open).toBe(true)
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({
+        ok: false,
+        timedOut: true,
+        message: "Generation timed out (6 minutes)",
+      })
+    })
+
+    expect(latest.loadingScreenProps.open).toBe(false)
+    expect(showToast).toHaveBeenCalledWith(
+      "Still generating",
+      "This is taking longer than expected — we'll notify you when it's ready.",
+    )
+  })
 })
 
 describe("useGeneratePrototype — notify-when-ready", () => {
@@ -443,6 +624,58 @@ describe("useGeneratePrototype — notify-mode completion (handleGenDone)", () =
     expect(doneEvents.length).toBe(1)
     window.removeEventListener("da:generating-done", onDone)
   })
+
+  // Gate-1 Note 1 (mandatory addition, not in the original ticket): a timed-out
+  // result reaching handleGenDone in NOTIFY mode must NOT show the false
+  // "Generation failed" toast, and must NOT dispatch da:generating-done — that
+  // event is the exact signal the duplicate-spend closure (non-notify branch)
+  // relies on, so falsely dispatching it here in notify-mode reopens the
+  // duplicate-spend hole this ticket exists to close. The `pending`
+  // sessionStorage entry (written by markPending at kickoff, in
+  // DesignAgentDrawer's runGenerateFlow) is left untouched so
+  // resumePendingNotifications notifies honestly once the run truly resolves.
+  it("test_handle_gen_done_notify_mode_timed_out_suppresses_failure_toast_and_done_event — Gate-1 mandatory addition", async () => {
+    const doneEvents: Event[] = []
+    const onDone = (e: Event) => doneEvents.push(e)
+    window.addEventListener("da:generating-done", onDone)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={24 + 100}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    // Arm notify mode via the real onNotifyWhenReady wiring (default path).
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(999)
+    })
+    await act(async () => {
+      latest.loadingScreenProps.onNotifyWhenReady()
+    })
+    showToast.mockClear()
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({
+        ok: false,
+        timedOut: true,
+        message: "Generation timed out (6 minutes)",
+      })
+    })
+
+    expect(showToast).not.toHaveBeenCalledWith(
+      "Generation failed",
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+    )
+    expect(doneEvents.length).toBe(0)
+    window.removeEventListener("da:generating-done", onDone)
+  })
 })
 
 describe("useGeneratePrototype — cross-surface generating signal", () => {
@@ -601,5 +834,33 @@ describe("useGeneratePrototype — onCancel wiring (locating-phase Cancel contro
       latest.generateModalProps.onCancel()
     })
     expect(latest.loadingScreenProps.open).toBe(false)
+  })
+})
+
+describe("useGeneratePrototype — platform hint threading", () => {
+  it("threads options.platformHint into generateModalProps verbatim", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={31}
+        options={{ skipExistenceCheck: true, platformHint: "mobile" }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+    expect(latest.generateModalProps.platformHint).toBe("mobile")
+  })
+
+  it("defaults generateModalProps.platformHint to null when the option is absent", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={32}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+    expect(latest.generateModalProps.platformHint).toBeNull()
   })
 })

@@ -45,7 +45,19 @@ from __future__ import annotations
 #       prompt + injected reference files for that class of run.
 #   Either change alone invalidates cached prototypes; both ship under v7, so the
 #   version bumps once (6 -> 7), not twice.
-DESIGN_AGENT_TEMPLATE_VERSION = 7
+# v8 (screenshot design reference): user-uploaded screenshots become vision
+# context — screenshot-sourced runs append DESIGN_AGENT_SCREENSHOT_DIRECTIVE to
+# the scaffold user turn (the image block itself is attached by the route) and
+# the iterate cacheable prefix can carry the same stored image. The directive
+# changes the assembled prompt text for that class of run, so it is
+# template-invalidating.
+# v9 (mobile capability directives): the mobile and responsive ("both")
+# platform directives gain concrete mobile-capability requirements (44px touch
+# targets, no hover-only affordances, thumb-reach placement, mobile navigation
+# patterns, safe-area insets, keyboard-aware inputs, scroll-based content) so
+# mobile-flagged runs stop producing desktop-shaped layouts. Changes the
+# scaffold user prompt for mobile/both runs → template-invalidating.
+DESIGN_AGENT_TEMPLATE_VERSION = 9
 
 # ─── shadcn/ui component inventory (per agent-build-research.md §5.2) ─────
 # Enumerating the available components in the cached system prompt is the
@@ -276,6 +288,32 @@ End your turn with a 1-2 sentence summary when the prototype is complete.
 """
 
 
+# ─── Screenshot design-reference directive ────────────────────────────────
+# Appended to the scaffold user turn when the prototype carries an uploaded
+# reference screenshot (the image content block itself is attached by the
+# route — this module stays pure-text, mirroring how the Figma context block
+# works). LLM-facing: property-tested for length, required content, and the
+# negative-space ("when NOT to follow it") clause.
+DESIGN_AGENT_SCREENSHOT_DIRECTIVE = """\
+SCREENSHOT DESIGN REFERENCE:
+The user attached a screenshot of an existing interface as the DESIGN REFERENCE
+for this prototype. Study the attached image and match its visual direction:
+- Layout: mirror its layout structure — grid, navigation placement, content
+  hierarchy, and overall density.
+- Palette: reuse its color palette — background tones, surface colors, and its
+  accent color(s), including its light/dark character.
+- Typography: follow its typography — relative sizes, weights, and casing.
+- Components: echo its component shapes — corner radius, borders, shadows, and
+  spacing rhythm.
+
+Treat the screenshot as reference, not spec: the PRD's requirements win on any
+conflict — build the screens and features the PRD asks for, styled the way the
+screenshot looks. Do NOT reproduce the screenshot's literal copy, data values,
+or placeholder content, and do NOT add screens, features, or widgets that appear
+in the screenshot but are not in the PRD.
+"""
+
+
 # ─── Target-platform directive ────────────────────────────────────────────
 # The actionable form-factor instruction injected into the scaffold user turn.
 # Keyed on the normalised (lowercased) target platform; anything unrecognised
@@ -292,13 +330,32 @@ _PLATFORM_DIRECTIVE: dict[str, str] = {
         "Target platform: MOBILE ONLY. Build a single mobile layout designed for "
         "a ~390px-wide viewport. Do NOT include a desktop or tablet layout, and "
         "do NOT add responsive breakpoints that expand or widen the design for "
-        "large screens. This prototype is mobile-only."
+        "large screens. This prototype is mobile-only. Build it with real mobile "
+        "capabilities, not a narrowed desktop page: touch targets at least 44px "
+        "tall; no hover-only affordances (every hover interaction must have a tap "
+        "equivalent — do NOT gate any content or action on hover alone); primary "
+        "actions placed within thumb reach (bottom-anchored CTAs or a bottom tab "
+        "bar); mobile navigation patterns (a bottom tab bar or a "
+        "hamburger-triggered sheet, never a desktop-style top navigation bar); "
+        "safe-area/notch insets respected on fixed top and bottom bars; form "
+        "inputs sized for the on-screen keyboard (full-width fields, no tiny "
+        "inline inputs); and content revealed by scrolling, never by "
+        "hover-revealed or cursor-dependent interactions."
     ),
     "both": (
         "Target platform: RESPONSIVE (desktop + mobile). Build one fully "
         "responsive, mobile-first design that adapts gracefully from a ~390px "
         "mobile viewport up to a ~1440px desktop viewport. Include the responsive "
-        "breakpoints needed for both form factors."
+        "breakpoints needed for both form factors. On mobile widths, apply real "
+        "mobile capabilities rather than a compressed desktop layout: touch "
+        "targets at least 44px tall; no hover-only affordances (every hover "
+        "interaction must have a tap equivalent on touch screens); primary "
+        "actions within thumb reach (bottom-anchored CTAs or a bottom tab bar); "
+        "mobile navigation patterns (a bottom tab bar or a hamburger-triggered "
+        "sheet replacing the desktop top navigation); safe-area/notch insets "
+        "respected on fixed bars; form inputs sized for the on-screen keyboard; "
+        "and content revealed by scrolling on touch, never by hover-revealed or "
+        "cursor-dependent interactions."
     ),
 }
 
@@ -319,6 +376,7 @@ def render_scaffold_user(
     instructions: str,
     figma_frames: str,
     codebase_repo: str | None = None,
+    has_screenshot: bool = False,
 ) -> str:
     """Render the scaffold user template with the supplied context.
 
@@ -332,18 +390,27 @@ def render_scaffold_user(
     a non-empty repo is supplied it renders a one-line "Existing codebase to
     match: {repo}" block; when absent or blank/whitespace it renders
     "(no codebase source)" with no repo name.
+
+    `has_screenshot` appends DESIGN_AGENT_SCREENSHOT_DIRECTIVE to the assembled
+    text — set it ONLY when the route actually attached the image content block
+    to the user message (this function stays pure-text; a directive that talks
+    about an image that is not attached would mislead the agent). When False
+    (the default) the output is byte-identical to the pre-screenshot render.
     """
     repo = (codebase_repo or "").strip()
     codebase_block = (
         f"Existing codebase to match: {repo}" if repo else "(no codebase source)"
     )
-    return DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE.format(
+    rendered = DESIGN_AGENT_SCAFFOLD_USER_TEMPLATE.format(
         prd_md=prd_md.strip() or "(PRD is empty)",
         platform_directive=_platform_directive(target_platform),
         instructions=(instructions.strip() or "(none)"),
         figma_frames=figma_frames.strip() or "(no Figma source detected)",
         codebase_repo=codebase_block,
     )
+    if has_screenshot:
+        rendered = f"{rendered}\n{DESIGN_AGENT_SCREENSHOT_DIRECTIVE}"
+    return rendered
 
 
 # ─── Iterate-system prompt (P3-05; AD8 — DISTINCT sibling of scaffold) ────────
@@ -551,6 +618,7 @@ def render_iterate_user(
     open_comments: list[dict],
     iterate_prompt: str,
     applied_comment: dict | None,
+    screenshot_block: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """Assemble the iterate user-turn content with the AD2 cache breakpoint.
 
@@ -558,12 +626,22 @@ def render_iterate_user(
 
     - ``cacheable_prefix_blocks`` — the STABLE prefix that changes only when the
       bundle or the open comments change: the current source files + the open
-      comment threads. The LAST block carries
+      comment threads (+ the reference-screenshot image block when the prototype
+      carries one — the image is immutable per prototype, so it is
+      prefix-stable). The LAST block carries
       ``cache_control: {type: "ephemeral", ttl: "1h"}`` so this whole prefix
       (and the system blocks above it) is cached across the run's iterations.
     - ``volatile_user_block`` — the per-call suffix: the user's iterate prompt
       (plus the applied-comment anchor/body when F10 pre-filled it). It carries
       NO ``cache_control`` because it changes every call.
+
+    ``screenshot_block`` is a ready-made Anthropic image content block (built by
+    the route from the stored upload) or None. When present it is appended as
+    the LAST stable block and the cache breakpoint MOVES onto it — the
+    breakpoint marks the END of the stable prefix, so leaving it on the text
+    block would strand the image below the breakpoint and silently re-bill it
+    on every turn. The caller's dict is not mutated. When None, the single text
+    block keeps the breakpoint, byte-identical to the pre-screenshot shape.
 
     The CALLER assembles the user message as
     ``{"role": "user", "content": [*cacheable_prefix_blocks, volatile_user_block]}``
@@ -578,12 +656,23 @@ def render_iterate_user(
         "of truth — `view` files before editing.\n\n"
         f"{source_text}\n\n{comments_text}"
     )
-    cacheable_prefix_blocks = [{
-        "type": "text",
-        "text": cacheable_text,
-        # Breakpoint at the END of the stable prefix (bundle + open comments).
-        "cache_control": {"type": "ephemeral", "ttl": "1h"},
-    }]
+    if screenshot_block is not None:
+        cacheable_prefix_blocks = [
+            {"type": "text", "text": cacheable_text},
+            {
+                # Shallow copy: never mutate the caller's block.
+                **screenshot_block,
+                # Breakpoint at the END of the stable prefix — now the image.
+                "cache_control": {"type": "ephemeral", "ttl": "1h"},
+            },
+        ]
+    else:
+        cacheable_prefix_blocks = [{
+            "type": "text",
+            "text": cacheable_text,
+            # Breakpoint at the END of the stable prefix (bundle + open comments).
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        }]
 
     volatile_parts: list[str] = []
     if applied_comment:

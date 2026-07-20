@@ -41,6 +41,7 @@
 // straight from their source module (CommentsPanel) — PostGenerationResult only
 // re-exports them — so this view does not depend on PostGenerationResult at runtime.
 import type { PinComment } from "./PostGenerationResult"
+import type { PinCluster } from "./pinClustering"
 import { CommentAvatar, shortRelativeTime } from "./CommentsPanel"
 import {
   getElementAtIframePoint,
@@ -110,6 +111,9 @@ export function PinLayer({
   pins,
   computedPinPositions = {},
   occludedPins,
+  pinOrigins,
+  clusters,
+  onClusterClick,
 }: {
   pins: PinComment[]
   computedPinPositions?: Record<number, { xPct: number; yPct: number }>
@@ -118,12 +122,30 @@ export function PinLayer({
    *  (z-index above the iframe) never floats a pin on top of the modal that
    *  visually covers its element. Empty / undefined → nothing is hidden. */
   occludedPins?: Set<number>
+  /** Per-pin provenance keyed by `pin.n` — "public" adds the blue
+   *  `pc-pin--public` variant. A PARALLEL map rather than a `PinComment`
+   *  field, so the shared type (and the signed-in surface that passes no map
+   *  and renders byte-identically) stays untouched. */
+  pinOrigins?: Record<number, "internal" | "public">
+  /** Spatial cluster groups (see pinClustering.ts — the strategy lives with
+   *  the caller). Members of a collapsed cluster are suppressed here and the
+   *  cluster renders one aggregate count-badge marker at its centroid; an
+   *  `expanded` cluster shows its members individually while its marker stays
+   *  mounted (de-emphasised) as the collapse affordance. Undefined/empty →
+   *  every pin renders individually, exactly as before. */
+  clusters?: Array<PinCluster & { expanded?: boolean }>
+  onClusterClick?: (cluster: PinCluster) => void
 }) {
-  if (pins.length === 0) return null
-  const visiblePins = occludedPins
-    ? pins.filter((pin) => !occludedPins.has(pin.n))
-    : pins
-  if (visiblePins.length === 0) return null
+  const clusterList = clusters ?? []
+  const clusteredNs = new Set<number>()
+  for (const c of clusterList) {
+    if (!c.expanded) for (const n of c.members) clusteredNs.add(n)
+  }
+  if (pins.length === 0 && clusterList.length === 0) return null
+  const visiblePins = pins.filter(
+    (pin) => !occludedPins?.has(pin.n) && !clusteredNs.has(pin.n),
+  )
+  if (visiblePins.length === 0 && clusterList.length === 0) return null
   return (
     <div className="da-pin-layer" data-testid="da-pin-layer" aria-hidden="true">
       {visiblePins.map((pin) => {
@@ -131,12 +153,33 @@ export function PinLayer({
         return (
           <span
             key={pin.n}
-            className="pc-pin placed"
+            className={`pc-pin placed${pinOrigins?.[pin.n] === "public" ? " pc-pin--public" : ""}`}
             data-testid={`da-pin-${pin.n}`}
             style={{ left: `${pos.xPct}%`, top: `${pos.yPct}%` }}
           >
             <span className="pc-pin-num">{pin.n}</span>
           </span>
+        )
+      })}
+      {clusterList.map((c) => {
+        const isPublic =
+          c.members.length > 0 && c.members.every((n) => pinOrigins?.[n] === "public")
+        return (
+          // The layer is aria-hidden + pointer-events:none (pins are inert
+          // markers); the cluster marker alone re-enables pointer events in
+          // CSS and stays out of the tab order (tabIndex -1) to match the
+          // layer's hidden-from-AT contract.
+          <button
+            key={`cluster-${c.members.join("-")}`}
+            type="button"
+            tabIndex={-1}
+            className={`pc-pin-cluster placed${isPublic ? " pc-pin--public" : ""}${c.expanded ? " expanded" : ""}`}
+            data-testid={`da-pin-cluster-${c.members[0] ?? 0}`}
+            style={{ left: `${c.xPct}%`, top: `${c.yPct}%` }}
+            onClick={() => onClusterClick?.(c)}
+          >
+            <span className="pc-pin-num">{c.members.length}</span>
+          </button>
         )
       })}
     </div>

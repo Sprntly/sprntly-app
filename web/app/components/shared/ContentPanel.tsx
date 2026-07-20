@@ -31,7 +31,7 @@ import {
 } from "@tabler/icons-react"
 import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
 import { printCombined } from "../../lib/combinedExport"
-import type { PrdState, PrdContent, AppContentState } from "../../types/content"
+import type { PrdState, PrdContent, PrdDesignBlock, AppContentState } from "../../types/content"
 
 // Tab order mirrors the pipeline: Evidence → PRD → Tickets (each tab's bottom
 // bar launches the NEXT artifact). Evidence is hidden for non-brief PRDs (see
@@ -355,6 +355,17 @@ function TicketsBottomBar() {
       <GeneratePrototypeCTA
         prdId={prdId}
         figmaFileKey={content.prd?.figma_file_key ?? null}
+        prdTitle={content.prd?.title}
+        // The PRD's own :::design platform_hint (already parsed into the
+        // sections in scope here) seeds the generate panel's platform
+        // default; the toggle still overrides. Optional-chained: a PRD
+        // hydrated without parsed sections (e.g. a bare record) simply
+        // yields no hint.
+        platformHint={
+          content.prd?.sections?.find(
+            (s): s is PrdDesignBlock => s.type === "prd-design",
+          )?.platformHint ?? null
+        }
         // Safe: the panel shows ONE current PRD at a time, so the unscoped
         // da:generating signal can't mislabel a different PRD's run.
         listenForCrossSurfaceGenerating

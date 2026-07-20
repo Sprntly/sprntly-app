@@ -19,6 +19,14 @@ import { CommentsPanel, CommentAvatar, shortRelativeTime } from "../components/d
 // the public viewer routes via createCommentByToken (no prototypeId / auth).
 import { usePinMarking } from "../components/design-agent/usePinMarking"
 import { MarkOverlay, PinLayer, PrototypeMarkLayer } from "../components/design-agent/PrototypeMarkLayer"
+// Server-pin hydration renders saved rows through the same PinLayer shape the
+// hook produces, so the hydrated entries borrow the shared PinComment type
+// (type-only import — PostGenerationResult itself is not mounted here).
+import type { PinComment } from "../components/design-agent/PostGenerationResult"
+// Spatial cluster grouping — `clusterPins` is bound as a ClusterStrategy, the
+// swappable pure default (see pinClustering.ts): refining the grouping is a
+// strategy/opts swap at this call-site, not a rework of the pin layer.
+import { clusterPins, type PinCluster } from "../components/design-agent/pinClustering"
 import { designAgentApi, type CommentRecord } from "../lib/api"
 import { IconClose, IconMessage, IconPin, IconCheck } from "../components/shared/app-icons"
 
@@ -79,6 +87,13 @@ function persistViewerName(name: string): void {
 function viewerInitials(name: string): string {
   const words = name.trim().split(/\s+/).filter(Boolean)
   return words.slice(0, 2).map((w) => w[0]!.toUpperCase()).join("")
+}
+
+// Identity of a cluster across recomputes: its member pin numbers. Used to
+// carry the "expanded" selection through re-renders — if the membership
+// changes, the key changes and the expansion drops (by design).
+function clusterKeyOf(c: PinCluster): string {
+  return c.members.join("-")
 }
 
 export type PublicPrototypeChromeProps = {
@@ -241,6 +256,123 @@ export function PublicPrototypeChrome({
     stayInMarkMode: true,
   })
 
+  // ── Server-pin hydration ──────────────────────────────────────────────────
+  // Saved pin comments used to render NO marker on reload: usePinMarking's
+  // `pins` is session-local state seeded to [], and nothing projected the
+  // persisted rows (which carry pin_x_pct/pin_y_pct) back onto the canvas.
+  // Hydration lives HERE in the chrome — not inside the shared hook — so the
+  // signed-in surface's pin engine is untouched: hydrated pins render at
+  // their STORED static percentages (the persisted truth); the hook's
+  // anchor-tracking/occlusion chain is progressive enhancement built for
+  // interactively-dropped pins with live anchor handles, and its own
+  // fallbacks already treat static-% rendering as the sound base case.
+  //
+  // AD4: N elements can share one anchor-id; `findByAnchor`
+  // (`pinAnchorBridge.ts:44`, `querySelector` → `Element | null`) takes the
+  // FIRST match — any future re-resolution for hydrated pins must query ALL
+  // matches (`querySelectorAll`) and pick nearest to the stored x/y%, never
+  // the first match.
+  const localCommentIds = useMemo(
+    () =>
+      new Set(
+        pin.pins.map((p) => p.commentId).filter((id): id is number => id != null),
+      ),
+    [pin.pins],
+  )
+  const hydrated = useMemo(() => {
+    const rows = allComments
+      // Markers hydrate only for OPEN rows with real stored coordinates —
+      // general comments (null coords), older right-click-anchored comments
+      // (anchor, no coords), resolved and orphaned rows all render no pin.
+      .filter((c) => c.pin_x_pct != null && c.pin_y_pct != null && c.status === "open")
+      // A just-created local pin also arrives on the next refetch — the LOCAL
+      // entry wins (dedup by commentId) so one comment never shows two markers.
+      .filter((c) => !localCommentIds.has(c.id))
+      .sort(
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+      )
+    // n = 1..H by created_at ascending: stable across refetches (new rows
+    // append, they never renumber older ones).
+    const pins: PinComment[] = rows.map((c, i) => ({
+      n: i + 1,
+      xPct: c.pin_x_pct!,
+      yPct: c.pin_y_pct!,
+      draft: "",
+      body: c.body,
+      saved: true,
+      busy: false,
+      error: null,
+      author: c.author,
+      createdAt: c.created_at,
+      commentId: c.id,
+      resolved: false,
+      anchor: null,
+      xPctInEl: null,
+      yPctInEl: null,
+      elementFriendly: null,
+      elementTechnical: null,
+    }))
+    const origins: Record<number, "internal" | "public"> = {}
+    rows.forEach((c, i) => {
+      // The by-token list returns public-origin rows only; an absent `origin`
+      // (older rows) is treated as public on this public surface.
+      origins[i + 1] = c.origin ?? "public"
+    })
+    return { pins, origins }
+  }, [allComments, localCommentIds])
+
+  // ── Keyspace merge (hydrated ∪ local) ─────────────────────────────────────
+  // Hydrated pins own n = 1..H; the untouched hook numbers ITS pins from 1 —
+  // so every local entry is remapped by a consistent +H offset. `n` is the
+  // join key across ALL THREE PinLayer inputs (pins / computedPinPositions /
+  // occludedPins) AND the React key AND the visible badge number, so the
+  // remap is applied to all three structures inside this single memo — a
+  // partial remap would silently mis-join position/occlusion data or
+  // duplicate React keys. Accepted consequence: H can grow mid-session on a
+  // refetch (another visitor's pins arrive), shifting local ns/keys — a
+  // remount flash of the local pins in that moment is accepted.
+  const mergedPinState = useMemo(() => {
+    const H = hydrated.pins.length
+    const localPins = pin.pins.map((p) => ({ ...p, n: p.n + H }))
+    const positions: Record<number, { xPct: number; yPct: number }> = {}
+    for (const [n, pos] of Object.entries(pin.computedPinPositions)) {
+      positions[Number(n) + H] = pos
+    }
+    const occluded = new Set<number>()
+    for (const n of pin.occludedPins) occluded.add(n + H)
+    const origins: Record<number, "internal" | "public"> = { ...hydrated.origins }
+    // Local just-dropped pins are the anon viewer's own → public (blue) too.
+    for (const p of localPins) origins[p.n] = "public"
+    return { pins: [...hydrated.pins, ...localPins], positions, occluded, origins }
+  }, [hydrated, pin.pins, pin.computedPinPositions, pin.occludedPins])
+
+  // ── Spatial cluster grouping ──────────────────────────────────────────────
+  // Re-clustered on every merged-set change (the strategy is pure and cheap).
+  // A pin-set change regenerates cluster keys, so a stale expanded key simply
+  // matches nothing → the expansion collapses (cheap + predictable).
+  const [expandedClusterKey, setExpandedClusterKey] = useState<string | null>(null)
+  const pinClusters = useMemo(() => {
+    const points = mergedPinState.pins.map((p) => {
+      const pos = mergedPinState.positions[p.n] ?? { xPct: p.xPct, yPct: p.yPct }
+      return { n: p.n, xPct: pos.xPct, yPct: pos.yPct }
+    })
+    return clusterPins(points).clusters.map((c) => ({
+      ...c,
+      expanded: clusterKeyOf(c) === expandedClusterKey,
+    }))
+  }, [mergedPinState, expandedClusterKey])
+  function handleClusterClick(c: PinCluster) {
+    const key = clusterKeyOf(c)
+    if (expandedClusterKey === key) {
+      setExpandedClusterKey(null)
+    } else {
+      // Expanding surfaces the members' comments alongside their markers;
+      // collapsing leaves the panel as the viewer had it.
+      setExpandedClusterKey(key)
+      setCommentsOpen(true)
+    }
+  }
+
   // Single-device gate — mirrors the signed-in single-device viewer's toggle gate.
   // A prototype targeting one device has nothing to toggle to, so we suppress the
   // Desktop/Mobile toggle (via showDesktop/showMobile → PrototypeViewer's showToggle)
@@ -257,6 +389,17 @@ export function PublicPrototypeChrome({
           data-testid="da-canvas-center"
         >
           <PrototypeViewer
+            // Load mask: cover the iframe with the neutral surface until the
+            // bundle's first paint (with the viewer's own timeout fallback), so
+            // anon share/passcode recipients never see the white/black pre-paint
+            // flash. The key mirrors the signed-in mount's remount-key intent:
+            // `loaded` is per-mount state, so a bundleUrl change (token
+            // re-resolution / signed-URL rotation) remounts the viewer and
+            // re-masks until the fresh bundle paints. Accepted trade-off: a
+            // remount resets the viewer's local platform-toggle state —
+            // bundleUrl only changes on re-resolution, never on user interaction.
+            key={bundleUrl}
+            maskUntilLoaded
             bundleUrl={bundleUrl}
             isComplete={isComplete}
             // Single-device gate: suppress the in-frame Desktop/Mobile toggle when
@@ -317,7 +460,14 @@ export function PublicPrototypeChrome({
             stageOverlay={
               <>
                 <MarkOverlay markMode={pin.markMode} onStageClick={pin.handleStageClick} />
-                <PinLayer pins={pin.pins} computedPinPositions={pin.computedPinPositions} occludedPins={pin.occludedPins} />
+                <PinLayer
+                  pins={mergedPinState.pins}
+                  computedPinPositions={mergedPinState.positions}
+                  occludedPins={mergedPinState.occluded}
+                  pinOrigins={mergedPinState.origins}
+                  clusters={pinClusters}
+                  onClusterClick={handleClusterClick}
+                />
               </>
             }
             // The manual-edit overlay's trigger never rendered here (it requires a

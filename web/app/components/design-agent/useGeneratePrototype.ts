@@ -38,6 +38,7 @@ import { useWorkspace } from "../../context/WorkspaceContext"
 import { updateWorkspace } from "../../lib/onboarding/store"
 import type { DesignSourcePreference } from "../../lib/onboarding/types"
 import { designAgentApi, type PrototypeRecord } from "../../lib/api"
+import type { TargetPlatform } from "./DesignAgentDrawer"
 import { prototypePath } from "../../lib/routes"
 import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 import { reasonCopy } from "./GenerationErrorBanner"
@@ -82,6 +83,14 @@ export function generatePrototypeCtaLabel(cta: GeneratePrototypeCtaState): strin
 
 export type UseGeneratePrototypeOptions = {
   figmaFileKey?: string | null
+  /** PRD-declared surface hint (the parsed :::design block's platform_hint),
+   *  threaded through to the GenerateModal, where it seeds the platform
+   *  selector's DEFAULT only — the user's explicit toggle always wins. */
+  platformHint?: TargetPlatform | null
+  /** The PRD's title, when known. Threaded to the GenerateModal as `prdTitle`
+   *  so the persisted ready-completion toast can name the PRD. Omitted/null
+   *  keeps today's generic fallback copy. */
+  prdTitle?: string | null
   /** Default false. When true, the hook performs NO getByPrd existence check —
    *  `existing` stays permanently null, `cta` is permanently "generate", and
    *  handleCtaClick always opens the GenerateModal (never navigates). Set this
@@ -155,6 +164,8 @@ export type GenerateModalWiredProps = {
   onCancel: () => void
   savedPreference: DesignSourcePreference | null
   onSavePreference: (pref: DesignSourcePreference) => Promise<void>
+  platformHint: TargetPlatform | null
+  prdTitle?: string | null
 }
 
 /** Spread onto <GenerationLoadingScreen>. */
@@ -442,6 +453,19 @@ export function useGeneratePrototype(
                 onSuccess ? onSuccess(protoForToast) : router.push(prototypePath(prdId)),
             },
           )
+        } else if (result && !result.ok && result.timedOut) {
+          // Client-side give-up only, NOT a genuine failure (same rationale as
+          // DesignAgentDrawer's runGenerateFlow/resumePendingNotifications
+          // sites). Suppress the false "Generation failed" toast AND do NOT
+          // dispatch da:generating-done — that is the exact signal the
+          // non-notify-mode duplicate-spend closure (below) relies on;
+          // falsely dispatching it here would reopen that same hole for the
+          // notify-mode path. Leave the `pending` sessionStorage entry
+          // (written by markPending at kickoff) untouched so
+          // resumePendingNotifications notifies honestly once the run truly
+          // resolves.
+          clearOverlayTimers()
+          return
         } else if (result && !result.ok) {
           showToast(
             "Generation failed",
@@ -454,6 +478,20 @@ export function useGeneratePrototype(
         clearOverlayTimers()
         return
       }
+      if (result && !result.ok && result.timedOut) {
+        showToast(
+          "Still generating",
+          "This is taking longer than expected — we'll notify you when it's ready.",
+        )
+        if (genProtoId != null) {
+          window.dispatchEvent(
+            new CustomEvent("da:generating", { detail: { prototypeId: genProtoId } }),
+          )
+        }
+        clearOverlayTimers()
+        setGenLoading(false)
+        return
+      }
       pendingResultRef.current = result?.ok && result.prototype ? result.prototype : null
       const remaining = MIN_VISIBLE_MS - (Date.now() - shownAtRef.current)
       if (remaining <= 0) {
@@ -463,7 +501,7 @@ export function useGeneratePrototype(
         minTimerRef.current = setTimeout(hideLoading, remaining)
       }
     },
-    [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId, skipExistenceCheck, onGenerationSettled],
+    [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId, skipExistenceCheck, onGenerationSettled, genProtoId],
   )
 
   // Default "Notify me when ready" side effects — reproduces
@@ -549,6 +587,8 @@ export function useGeneratePrototype(
     onCancel: handleCancel,
     savedPreference,
     onSavePreference: handleSavePreference,
+    platformHint: options?.platformHint ?? null,
+    prdTitle: options?.prdTitle ?? null,
   }
 
   const loadingScreenProps: GenerationLoadingScreenWiredProps = {
