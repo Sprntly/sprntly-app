@@ -44,7 +44,7 @@ describe("GenerationLoadingScreen — notify-when-ready armed confirmation", () 
 
     fireEvent.click(screen.getByText("Notify me when ready"))
 
-    const link = screen.getByText("Back to Briefs").closest("a")
+    const link = screen.getByText("Back to Ideation").closest("a")
     expect(link).toBeTruthy()
     expect(document.activeElement).toBe(link)
   })
@@ -59,7 +59,7 @@ describe("GenerationLoadingScreen — notify-when-ready armed confirmation", () 
     )
 
     fireEvent.click(screen.getByText("Notify me when ready"))
-    const link = screen.getByText("Back to Briefs").closest("a")!
+    const link = screen.getByText("Back to Ideation").closest("a")!
     fireEvent.click(link)
 
     expect(onNotifyWhenReady).toHaveBeenCalledTimes(1)

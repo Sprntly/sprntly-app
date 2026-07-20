@@ -416,7 +416,7 @@ export function GenerationLoadingScreen({
                     className="btn proto-gen-notify-back-link"
                     onClick={() => onNotifyWhenReady?.()}
                   >
-                    Back to Briefs
+                    Back to Ideation
                     <IconArrowRight size={14} />
                   </a>
                 </div>
