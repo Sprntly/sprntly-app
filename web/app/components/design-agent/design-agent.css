@@ -2270,17 +2270,12 @@
   background: transparent;
   border-color: transparent;
 }
-.design-agent-surface.proto-gen-overlay .proto-gen-notify-btn {
-  /* Part D (Treatment B): the JSX no longer applies btn-ghost btn-sm to this
-     element in generate mode — it's now btn-primary, full width; see the
-     notify-when-ready promotion block appended below. */
-}
-/* Hover: plain underlined text — no background/border box. */
-.design-agent-surface.proto-gen-overlay .proto-gen-notify-btn:hover {
-  text-decoration: underline;
-  background: transparent;
-  border-color: transparent;
-}
+/* The notify control is now `btn btn-primary` in every mode, so the shared
+   .btn-primary hover (accent-hover fill) owns its hover state. The former
+   ghost-era override lived here and forced `background: transparent` on hover;
+   at 4-class specificity it outranked `.btn-primary:hover:not(:disabled)` and
+   flashed the panel white. Removed — do not reintroduce a hover override here
+   without also matching the shared button hover. */
 /* === generation loading overlay (end) ===================================== */
 
 /* === notify-when-ready promotion (start) =====================================
