@@ -988,6 +988,24 @@ CREATE TABLE drip_email_sends (
 CREATE INDEX drip_email_sends_company_user_idx
     ON drip_email_sends (company_id, user_id);
 
+-- Invite reminder drip tracking (mirrors
+-- 20260720120000_invite_reminder_sends.sql). One row per delivered
+-- (invite × step); UNIQUE is the de-dup guard. FK cascade from
+-- workspace_invites so accept/revoke (which delete the invite) auto-clear it.
+CREATE TABLE invite_reminder_sends (
+    id          TEXT PRIMARY KEY,
+    invite_id   TEXT NOT NULL REFERENCES workspace_invites (id) ON DELETE CASCADE,
+    company_id  TEXT NOT NULL,
+    email       TEXT NOT NULL,
+    step_key    TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'sent'
+                  CHECK (status IN ('sent', 'skipped')),
+    sent_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (invite_id, step_key)
+);
+CREATE INDEX invite_reminder_sends_invite_idx
+    ON invite_reminder_sends (invite_id);
+
 -- NOTE: the `prototypes` table is intentionally NOT in this shared base schema.
 -- The ~40 Design Agent tests each create their own (richer) `prototypes` on the
 -- singleton in-memory DB in their fixtures; a base-schema copy collides with

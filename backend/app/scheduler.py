@@ -458,6 +458,21 @@ async def _run_brief_nudge_cycle() -> None:
         logger.error("Scheduler: brief nudge cycle failed: %s", exc)
 
 
+async def _run_invite_reminder_cycle() -> None:
+    """Invite reminder drip: send the due Day-1 / Day-3 follow-up for each
+    pending workspace invite that still hasn't been accepted (Day 0 fires
+    inline at invite time). Mirrors the drip job — error-isolated inside
+    run_invite_reminder_cycle, blocking Supabase + Resend HTTP pushed off the
+    event loop. Opt-in via INVITE_REMINDERS_ENABLED."""
+    from app.invite_reminders import run_invite_reminder_cycle
+
+    try:
+        summary = await asyncio.to_thread(run_invite_reminder_cycle)
+        logger.info("Scheduler: invite reminder cycle → %s", summary)
+    except Exception as exc:  # noqa: BLE001 — never let one cycle kill the job
+        logger.error("Scheduler: invite reminder cycle failed: %s", exc)
+
+
 async def _run_scheduled_cycle() -> None:
     """Run the scheduled KG-synthesis cycle: seed + run_synthesis per company."""
     await _run_synthesis_for_all_companies()
@@ -591,6 +606,20 @@ def start_scheduler() -> None:
             trigger=IntervalTrigger(hours=nudge_hours),
             id="brief_nudges",
             name=f"Brief nudge reminders (every {nudge_hours}h)",
+            replace_existing=True,
+        )
+
+    # Invite reminders: Day-1 / Day-3 follow-ups to invitees who haven't
+    # accepted yet (Day 0 fires inline at invite time). Opt-in via
+    # INVITE_REMINDERS_ENABLED; idempotent + stop-condition-gated so extra
+    # ticks are cheap no-ops.
+    if getattr(settings, "invite_reminders_enabled", False):
+        invite_hours = getattr(settings, "invite_reminder_interval_hours", 6) or 6
+        _scheduler.add_job(
+            _run_invite_reminder_cycle,
+            trigger=IntervalTrigger(hours=invite_hours),
+            id="invite_reminders",
+            name=f"Invite reminders (every {invite_hours}h)",
             replace_existing=True,
         )
 

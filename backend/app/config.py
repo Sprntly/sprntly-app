@@ -357,12 +357,41 @@ class Settings(BaseSettings):
     # cycle after a member crosses its day_offset, and de-dup makes extra
     # cycles cheap no-ops.
     drip_interval_hours: int = 6
+    # Onboarding welcome email — the instant "your workspace is ready" send,
+    # fired once when a user completes onboarding (app/welcome_email.py, via
+    # POST /v1/onboarding/complete). Distinct from the drip cadence above.
+    # ON by default (it's a core onboarding touch), but RESEND_API_KEY still
+    # gates the transport: with no key the send is a no-op recorded as
+    # "skipped". De-dup via drip_email_sends (step_key="welcome").
+    welcome_email_enabled: bool = True
+    # From: header for the welcome email. Empty → "Sprntly
+    # <onboarding@mail.sprntly.ai>" (verified sending domain).
+    welcome_email_from: str = ""
+    # The "one-page guide" link in the welcome email. Empty → "<frontend_url>/
+    # guide". Swap for a hosted guide/doc URL when one exists.
+    welcome_guide_url: str = ""
     # Brief nudges: the Slack/email reminder sequence that drives users to open
     # their weekly brief (app/brief_nudge.py). OFF by default — no real user is
     # messaged until this is explicitly enabled. Day 0 sends inline at brief
     # generation; the cycle sweeps Day 1/2/3 reminders while a brief is unopened.
     brief_nudge_enabled: bool = False
     brief_nudge_interval_hours: int = 6
+    # Invite reminder drip: the Day-1 / Day-3 follow-up emails nudging an
+    # invitee who hasn't accepted yet (app/invite_reminders.py). Day 0 fires
+    # inline at invite time (routes/team.py). ON by default — but RESEND_API_KEY
+    # still gates transport, and the scheduler job only registers when
+    # SCHEDULER_ENABLED is also on. Recorded per (invite, step) in
+    # invite_reminder_sends so a step never double-sends.
+    invite_reminders_enabled: bool = True
+    invite_reminder_interval_hours: int = 6
+    # An invite is considered expired this many days after created_at: past
+    # that, no further reminders go out. Must sit comfortably AFTER the last
+    # reminder — with the chained cadence (Day 1 → Day-1+3 → Day-3+7) plus
+    # weekend shifts, Day 7 can land ~17 days out, so the default leaves margin.
+    invite_expiry_days: int = 30
+    # From: header for invite reminder emails. Empty → brief_email_from (the
+    # same verified sender the Day-0 existing-user notification uses).
+    invite_from_email: str = ""
     ds_agent_url: str = ""  # e.g. http://localhost:8001
 
     # GitHub connector (GitHub App with user-to-server OAuth)

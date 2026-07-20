@@ -27,6 +27,7 @@ import sys
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app import config
 from app.auth import CompanyContext, require_company
 from app.db import (
     get_analysis_job,
@@ -163,6 +164,87 @@ def post_metric_definitions(
             "metric-definition draft failed for %s: %s", company.company_id, exc
         )
         raise HTTPException(503, "Couldn't draft metric definitions right now")
+
+
+@router.post("/complete")
+def post_onboarding_complete(
+    company: CompanyContext = Depends(require_company),
+):
+    """Fired ONCE when a user finishes onboarding and their first workspace is
+    ready — sends the founder "welcome to Sprntly" email.
+
+    The frontend calls this fire-and-forget from completeOnboarding() (right
+    after it stamps onboarding_completed_at); it must never block entry into
+    the app, so this is best-effort and always 200. De-duplicated per
+    (company, user) via the drip_email_sends table (step_key="welcome"), so a
+    resumed / double-fired completion never sends twice. Recipient name +
+    workspace name come from the caller's profile + company.
+
+    Returns {ok, sent, reason} — `sent` is False when it was a no-op
+    (already sent, welcome email disabled, or no email on file).
+    """
+    from app.db import drip as drip_db
+    from app.db.companies import display_name_for_company_id
+    from app.db.profiles import emails_for_user_ids, first_name_for_user
+    from app.welcome_email import send_welcome_email
+
+    company_id = company.company_id
+    user_id = company.user_id
+    # Prefer the JWT email; fall back to the profile row (Supabase user-context
+    # tokens sometimes omit the email claim — mirrors auth.session_email).
+    email = (company.user_email or "").strip()
+    if not email:
+        email = (emails_for_user_ids([user_id]).get(user_id) or "").strip()
+
+    if not getattr(config.settings, "welcome_email_enabled", True):
+        return {"ok": True, "sent": False, "reason": "disabled"}
+
+    # Idempotency: a prior 'welcome' row (sent OR skipped) means we're done.
+    try:
+        already = drip_db.sent_steps_for_company(company_id)
+    except Exception:  # noqa: BLE001 — never fail onboarding on a lookup error
+        logger.exception("welcome-email: sent-steps lookup failed for %s", company_id)
+        already = set()
+    if (user_id, "welcome") in already:
+        return {"ok": True, "sent": False, "reason": "already_sent"}
+
+    if not email:
+        # Nothing to send to; record a skip so we don't retry every completion.
+        _record_welcome(drip_db, company_id, user_id, email, status="skipped")
+        return {"ok": True, "sent": False, "reason": "no_email"}
+
+    workspace_name = display_name_for_company_id(company_id) or ""
+    first_name = first_name_for_user(user_id) or (
+        (company.user_name or "").split()[0] if company.user_name else ""
+    )
+
+    ok = send_welcome_email(
+        to_email=email, first_name=first_name, workspace_name=workspace_name
+    )
+    _record_welcome(
+        drip_db, company_id, user_id, email, status="sent" if ok else "skipped"
+    )
+    return {"ok": True, "sent": ok}
+
+
+def _record_welcome(drip_db, company_id, user_id, email, *, status):
+    """Record the welcome send in drip_email_sends (step_key='welcome'). The
+    UNIQUE (company_id, user_id, step_key) constraint is the idempotency guard;
+    a duplicate insert (a racing completion) raises and is swallowed here — the
+    other caller already recorded it."""
+    try:
+        drip_db.record_drip_sent(
+            company_id=company_id,
+            user_id=user_id,
+            step_key="welcome",
+            email=email,
+            status=status,
+        )
+    except Exception:  # noqa: BLE001 — best-effort; UNIQUE clash = already done
+        logger.info(
+            "welcome-email: record skipped for %s/%s (likely already recorded)",
+            company_id, user_id,
+        )
 
 
 class WorkspaceNameIn(BaseModel):
