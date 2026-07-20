@@ -31,6 +31,11 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const APP_DIR = join(HERE, "..", "..", "..")
 const CSS_PATH = join(HERE, "..", "design-agent.css")
 const LAYOUT_PATH = join(APP_DIR, "layout.tsx")
+const GENERATION_LOADING_SCREEN_PATH = join(
+  HERE,
+  "..",
+  "GenerationLoadingScreen.tsx",
+)
 const PUBLIC_VIEWER_PATH = join(APP_DIR, "p", "PublicTokenViewer.tsx")
 // The anon-viewer chrome (mark tool, comments, name capture, single-device
 // gate) was extracted out of PublicTokenViewer.tsx into this sibling file; the
@@ -42,6 +47,10 @@ const GLOBALS_PATH = join(APP_DIR, "globals.css")
 
 const CSS = readFileSync(CSS_PATH, "utf8")
 const LAYOUT = readFileSync(LAYOUT_PATH, "utf8")
+const GENERATION_LOADING_SCREEN = readFileSync(
+  GENERATION_LOADING_SCREEN_PATH,
+  "utf8",
+)
 const PUBLIC_VIEWER = readFileSync(PUBLIC_VIEWER_PATH, "utf8")
 const PUBLIC_CHROME = readFileSync(PUBLIC_CHROME_PATH, "utf8")
 const GLOBALS = readFileSync(GLOBALS_PATH, "utf8")
@@ -292,6 +301,46 @@ describe("layout non-breakage (AC8)", () => {
   it("test_layout_default_export_unchanged — RootLayout default export + globals import intact", () => {
     expect(LAYOUT).toMatch(/export default function RootLayout\(/)
     expect(LAYOUT).toContain('import "./globals.css"')
+  })
+})
+
+// ── Notify-button hover flash regression ───────────────────────────────────
+describe("notify-button hover flash regression", () => {
+  it("test_notify_btn_hover_rule_absent — no dedicated :hover override remains for .proto-gen-notify-btn", () => {
+    // Regression: the stale ghost-era override forced `background: transparent`
+    // on hover at 4-class specificity, outranking the shared
+    // `.btn-primary:hover:not(:disabled)` accent fill and flashing the panel
+    // white. The control is now `btn btn-primary` in every mode, so the shared
+    // hover rule (globals.css) owns its hover state — no dedicated override
+    // for this selector should exist at all.
+    expect(CSS).not.toContain(".proto-gen-notify-btn:hover")
+  })
+
+  it("test_notify_btn_empty_rule_body_absent — no empty/comment-only rule remains for the bare .proto-gen-notify-btn selector", () => {
+    const block = CSS.match(
+      /\.design-agent-surface\.proto-gen-overlay\s+\.proto-gen-notify-btn\s*\{([^}]*)\}/,
+    )
+    if (block) {
+      // If the bare (non-.btn-primary-qualified) selector still exists at
+      // all, its body must not be empty/comment-only — that was exactly the
+      // dead rule this ticket removes.
+      const body = stripCssComments(block[1]).trim()
+      expect(body.length).toBeGreaterThan(0)
+    } else {
+      expect(block).toBeNull()
+    }
+  })
+})
+
+// ── GenerationLoadingScreen notify-button class regression pin (AC5) ──────
+describe("notify-button JSX class unchanged (AC5)", () => {
+  it("test_generation_loading_screen_notify_btn_class_unchanged — class attribute stays exactly 'btn btn-primary proto-gen-notify-btn'", () => {
+    // Regression pin: this ticket only touches design-agent.css, never the
+    // JSX. The notify control must remain btn-primary (no btn-ghost
+    // reintroduced) and no other class added or removed.
+    expect(GENERATION_LOADING_SCREEN).toContain(
+      'className="btn btn-primary proto-gen-notify-btn"',
+    )
   })
 })
 
