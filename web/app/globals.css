@@ -8571,23 +8571,6 @@
     }
   }
 
-  .ai-bar-reply-kp--stream-reveal>li {
-    opacity: 0;
-    animation: ask-reply-kp-enter 0.38s ease forwards;
-  }
-
-  @keyframes ask-reply-kp-enter {
-    from {
-      opacity: 0;
-      transform: translateY(3px);
-    }
-
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
   .ai-bar-reply-cites--stream-reveal {
     opacity: 0;
     animation: ask-reply-cites-enter 0.42s ease 0.08s forwards;
@@ -8603,14 +8586,6 @@
       opacity: 1;
       transform: translateY(0);
     }
-  }
-
-  .ai-bar-reply-kp {
-    margin: 10px 0 0;
-    padding-left: 18px;
-    color: var(--ink-3);
-    font-size: 12px;
-    line-height: 1.45;
   }
 
   .ai-bar-reply-cites {
@@ -8637,13 +8612,6 @@
 
   .ai-bar-reply-cite-ev {
     color: var(--ink-3);
-  }
-
-  .ai-bar-reply-gap {
-    margin-top: 10px;
-    font-size: 11px;
-    color: var(--muted);
-    font-style: italic;
   }
 
   .selection-ask {
@@ -9048,7 +9016,6 @@
       box-shadow: none;
     }
 
-    .ai-bar-reply-kp--stream-reveal>li,
     .ai-bar-reply-cites--stream-reveal {
       animation: none;
       opacity: 1;
