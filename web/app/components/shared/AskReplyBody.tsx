@@ -67,7 +67,7 @@ export function AskReplyBody({
   // A skill answer that IS a self-contained HTML document (e.g. the
   // voice-of-customer-report) renders in a sandboxed iframe — ReactMarkdown would
   // escape the tags. The report is self-contained, so we skip the simulated-typing
-  // stream and the key_points/citations chrome below it.
+  // stream and the citations chrome below it.
   if (looksLikeHtmlBrief(reply.answer)) {
     const report = <HtmlReportView html={reply.answer} title="Voice of Customer report" />
     return animateIn ? (
@@ -86,15 +86,6 @@ export function AskReplyBody({
           {visible}
         </ReactMarkdown>
       </div>
-      {done && reply.key_points?.length ? (
-        <ul className="ai-bar-reply-kp ai-bar-reply-kp--stream-reveal">
-          {reply.key_points.map((kp, i) => (
-            <li key={i} style={{ animationDelay: `${0.05 * i}s` }}>
-              {kp}
-            </li>
-          ))}
-        </ul>
-      ) : null}
       {done && !omitCitations && reply.citations?.length ? (
         <div className="ai-bar-reply-cites ai-bar-reply-cites--stream-reveal">
           {reply.citations.map((c, i) => (
@@ -105,7 +96,6 @@ export function AskReplyBody({
           ))}
         </div>
       ) : null}
-      {done && reply.unanswered ? <div className="ai-bar-reply-gap">Gap: {reply.unanswered}</div> : null}
     </>
   )
   if (animateIn) {
