@@ -54,6 +54,17 @@ function overlayBlock(css: string): string {
   return css.slice(start, end)
 }
 
+/** Part D — the notify-when-ready promotion delimited block, appended AFTER
+ *  the generation-loading-overlay block's own end delimiter (its own
+ *  start/end pair), sliced the same way. */
+function notifyPromotionBlock(css: string): string {
+  const start = css.indexOf("/* === notify-when-ready promotion (start)")
+  const end = css.indexOf("/* === notify-when-ready promotion (end)")
+  expect(start).toBeGreaterThanOrEqual(0)
+  expect(end).toBeGreaterThan(start)
+  return css.slice(start, end)
+}
+
 describe("GenerationLoadingScreen render", () => {
   it("test_loading_screen_closed_renders_null — open=false renders nothing", () => {
     const html = renderToStaticMarkup(
@@ -136,5 +147,99 @@ describe("no throwaway markers (regression)", () => {
 
   it("the overlay CSS block carries no throwaway marker (test_overlay_css_block_durable)", () => {
     expect(overlayBlock(CSS)).not.toContain("UX-EXPLORE")
+  })
+})
+
+// ─── Part D: "Notify me when ready" promotion (Treatment B) ──────────────
+
+describe("notify-when-ready promotion footer (Part D, AC15)", () => {
+  it("test_generation_loading_screen_default_footer_structure — default (non-armed) state shows the microcopy + full-width primary button", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(GenerationLoadingScreen, {
+        open: true,
+        onNotifyWhenReady: () => {},
+      }),
+    )
+    expect(html).toContain("This takes a few minutes")
+    expect(html).toContain("Notify me when ready")
+    // proto-gen-notify-btn present WITHOUT btn-ghost in the same class attr.
+    const btnMatch = html.match(/class="([^"]*proto-gen-notify-btn[^"]*)"/)
+    expect(btnMatch).not.toBeNull()
+    expect(btnMatch![1]).not.toContain("btn-ghost")
+    expect(btnMatch![1]).toContain("btn-primary")
+    // Not yet armed — no confirmation block.
+    expect(html).not.toContain("proto-gen-notify-armed")
+  })
+})
+
+describe("cancel-only footer unchanged (Part D, AC16)", () => {
+  it("test_generation_loading_screen_cancel_only_footer_unchanged — onCancel-only (no onNotifyWhenReady) footer is byte-identical to today", () => {
+    const withOnlyCancel = renderToStaticMarkup(
+      React.createElement(GenerationLoadingScreen, {
+        open: true,
+        onCancel: () => {},
+      }),
+    )
+    // The plain (unmodified) .proto-gen-footer row — no --stacked modifier,
+    // no notify markup at all.
+    expect(withOnlyCancel).toMatch(/class="proto-gen-footer"/)
+    expect(withOnlyCancel).not.toContain("proto-gen-footer--stacked")
+    expect(withOnlyCancel).not.toContain("proto-gen-notify-block")
+    expect(withOnlyCancel).not.toContain("proto-gen-notify-armed")
+    expect(withOnlyCancel).not.toContain("Notify me when ready")
+    expect(withOnlyCancel).toContain("proto-gen-cancel-btn")
+  })
+})
+
+describe("Back to Briefs link uses the routes constant (Part D, AC17)", () => {
+  it("test_generation_loading_screen_back_to_briefs_uses_screen_path_constant — imports SCREEN_PATH, href equals SCREEN_PATH.backlog, no hardcoded literal", () => {
+    expect(COMPONENT_SRC).toContain('import { SCREEN_PATH } from "../../lib/routes"')
+    expect(COMPONENT_SRC).toContain("href={SCREEN_PATH.backlog}")
+    // The literal "/backlog" string does not appear hardcoded outside the
+    // routes.ts import chain (this file never spells it out itself).
+    expect(COMPONENT_SRC).not.toContain('"/backlog"')
+  })
+})
+
+describe("no new icon import (Part D, AC18)", () => {
+  it("test_generation_loading_screen_no_new_icon_import — imports IconArrowRight from app-icons, no IconBell", () => {
+    expect(COMPONENT_SRC).toContain(
+      'import { IconArrowRight } from "../shared/app-icons"',
+    )
+    expect(COMPONENT_SRC).not.toContain("IconBell")
+  })
+})
+
+describe("no timer scheduled by handleNotifyClick (Part D, AC22)", () => {
+  it("test_handle_notify_click_schedules_no_timer — source-scan: no setTimeout inside handleNotifyClick's body", () => {
+    const start = COMPONENT_SRC.indexOf("const handleNotifyClick = ()")
+    expect(start).toBeGreaterThan(0)
+    // handleNotifyClick is a short arrow function; its body ends at the next
+    // top-level `}` on its own line before the next const/function decl.
+    const end = COMPONENT_SRC.indexOf("\n  }", start)
+    const body = COMPONENT_SRC.slice(start, end)
+    expect(body).not.toContain("setTimeout")
+  })
+})
+
+describe("notify-when-ready promotion CSS (Part D, AC23/AC24)", () => {
+  it("test_notify_promotion_css_palette_clean — only var(--…)/keywords, no rgb()/hsl()/hex literal", () => {
+    const stripped = stripCssComments(notifyPromotionBlock(CSS))
+    expect(stripped).not.toMatch(/rgba?\(/)
+    expect(stripped).not.toMatch(/hsla?\(/)
+    expect(stripped).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
+  })
+
+  it("test_notify_promotion_css_selectors_scoped — every new selector line begins with .design-agent-surface", () => {
+    const selectorLines = stripCssComments(notifyPromotionBlock(CSS))
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.startsWith("@"))
+      .filter((l) => l.endsWith("{") || l.endsWith(","))
+    expect(selectorLines.length).toBeGreaterThan(0)
+    const offenders = selectorLines.filter(
+      (l) => !l.startsWith(".design-agent-surface"),
+    )
+    expect(offenders).toEqual([])
   })
 })
