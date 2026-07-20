@@ -27,10 +27,19 @@ type Entry = {
   prototypeId: number
   status: NotificationStatus
   sub: string
+  /** The owning PRD, when known at write time. A LEGACY entry (written before
+   *  this field existed) parses via JSON.parse with the key simply absent —
+   *  every reader defensively does `entry.prdId ?? null`, never assumes the
+   *  key exists. */
+  prdId: number | null
 }
 
 /** Public completed-entry shape (the subset the drawer needs to re-show). */
-export type CompletedNotification = { prototypeId: number; sub: string }
+export type CompletedNotification = {
+  prototypeId: number
+  sub: string
+  prdId: number | null
+}
 
 /** Read the full entry array. Returns [] on any failure (SSR, bad JSON, quota). */
 function readAll(): Entry[] {
@@ -55,11 +64,17 @@ function writeAll(entries: Entry[]): void {
   }
 }
 
-/** Insert or replace the single entry for a prototype id. */
-function upsert(prototypeId: number, status: NotificationStatus, sub: string): void {
+/** Insert or replace the single entry for a prototype id. Always writes
+ *  `prdId ?? null` (never `undefined`) so a fresh write is always well-shaped. */
+function upsert(
+  prototypeId: number,
+  status: NotificationStatus,
+  sub: string,
+  prdId?: number | null,
+): void {
   const entries = readAll()
   const idx = entries.findIndex((e) => e.prototypeId === prototypeId)
-  const next: Entry = { prototypeId, status, sub }
+  const next: Entry = { prototypeId, status, sub, prdId: prdId ?? null }
   if (idx >= 0) {
     entries[idx] = next
   } else {
@@ -69,13 +84,17 @@ function upsert(prototypeId: number, status: NotificationStatus, sub: string): v
 }
 
 /** Record a kickoff — a `pending` entry (NOT re-shown on mount). */
-export function markPending(prototypeId: number): void {
-  upsert(prototypeId, "pending", "")
+export function markPending(prototypeId: number, prdId?: number | null): void {
+  upsert(prototypeId, "pending", "", prdId)
 }
 
 /** Flip the entry to `completed` (or insert) so a reload can re-show it. */
-export function markCompleted(prototypeId: number, sub: string): void {
-  upsert(prototypeId, "completed", sub)
+export function markCompleted(
+  prototypeId: number,
+  sub: string,
+  prdId?: number | null,
+): void {
+  upsert(prototypeId, "completed", sub, prdId)
 }
 
 /** Remove the entry for a prototype id (clear-on-show / explicit acknowledge). */
@@ -89,7 +108,23 @@ export function acknowledge(prototypeId: number): void {
 export function pendingCompleted(): CompletedNotification[] {
   return readAll()
     .filter((e) => e.status === "completed")
-    .map((e) => ({ prototypeId: e.prototypeId, sub: e.sub }))
+    .map((e) => ({
+      prototypeId: e.prototypeId,
+      sub: e.sub,
+      // Defensive: a LEGACY entry (written before `prdId` existed) parses via
+      // JSON.parse with the key simply absent.
+      prdId: e.prdId ?? null,
+    }))
+}
+
+/** The still-`pending` prototype ids — a reload mid-generation orphans these
+ *  (no in-memory `.then()` chain survives the reload to ever flip them to
+ *  `completed`). `resumePendingNotifications` (DesignAgentDrawer.tsx) polls
+ *  each of these at most once per page-load. */
+export function pendingPendingIds(): number[] {
+  return readAll()
+    .filter((e) => e.status === "pending")
+    .map((e) => e.prototypeId)
 }
 
 // ─── P6-05 (Decision-D(b)): per-page-load guards + last-replay-show record ───
@@ -178,6 +213,25 @@ export function shouldAckOnClear(
   return null
 }
 
+// Part C — reload gap: ids currently being resolved by
+// `resumePendingNotifications` THIS page-load. `AppShell` remounts
+// `DesignAgentNotificationReplay` across every authed-route navigation, so
+// without this guard the same orphaned pending id would be polled again on
+// every navigation. In-memory (per page-load, like `seenThisLoad`) — a real
+// browser reload re-evaluates the module and the guard clears, so a still-
+// pending id is correctly retried after a reload.
+const resolvingPending = new Set<number>()
+
+/** Mark an id as currently being resolved this page-load. */
+export function markResolvingPending(prototypeId: number): void {
+  resolvingPending.add(prototypeId)
+}
+
+/** Was this id already claimed for resolving this page-load? */
+export function wasResolvingPending(prototypeId: number): boolean {
+  return resolvingPending.has(prototypeId)
+}
+
 /** Test seam: reset the in-memory per-page-load guards. A browser reload
  *  re-evaluates the module; tests call this to simulate a fresh page-load (the
  *  guards are NOT sessionStorage-backed by design). */
@@ -185,4 +239,5 @@ export function __resetPageLoadGuards(): void {
   seenThisLoad.clear()
   lastReplayShow = null
   cancelledIds.clear()
+  resolvingPending.clear()
 }

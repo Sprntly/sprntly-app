@@ -87,6 +87,10 @@ export type UseGeneratePrototypeOptions = {
    *  threaded through to the GenerateModal, where it seeds the platform
    *  selector's DEFAULT only — the user's explicit toggle always wins. */
   platformHint?: TargetPlatform | null
+  /** The PRD's title, when known. Threaded to the GenerateModal as `prdTitle`
+   *  so the persisted ready-completion toast can name the PRD. Omitted/null
+   *  keeps today's generic fallback copy. */
+  prdTitle?: string | null
   /** Default false. When true, the hook performs NO getByPrd existence check —
    *  `existing` stays permanently null, `cta` is permanently "generate", and
    *  handleCtaClick always opens the GenerateModal (never navigates). Set this
@@ -161,6 +165,7 @@ export type GenerateModalWiredProps = {
   savedPreference: DesignSourcePreference | null
   onSavePreference: (pref: DesignSourcePreference) => Promise<void>
   platformHint: TargetPlatform | null
+  prdTitle?: string | null
 }
 
 /** Spread onto <GenerationLoadingScreen>. */
@@ -556,6 +561,7 @@ export function useGeneratePrototype(
     savedPreference,
     onSavePreference: handleSavePreference,
     platformHint: options?.platformHint ?? null,
+    prdTitle: options?.prdTitle ?? null,
   }
 
   const loadingScreenProps: GenerationLoadingScreenWiredProps = {

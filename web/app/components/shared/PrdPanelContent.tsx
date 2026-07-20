@@ -395,6 +395,7 @@ export function PrdPanelContent() {
             <GeneratePrototypeCTA
               prdId={prd.prd_id}
               figmaFileKey={prd.figma_file_key ?? null}
+              prdTitle={prd.title}
               // The PRD's own :::design platform_hint (already parsed into the
               // sections in scope here) seeds the generate panel's platform
               // default; the toggle still overrides.

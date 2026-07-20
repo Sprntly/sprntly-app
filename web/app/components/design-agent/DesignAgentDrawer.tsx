@@ -33,26 +33,40 @@
 import { useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { designAgentApi } from "../../lib/api"
+import { prototypePath } from "../../lib/routes"
 import {
   runDesignAgentGeneration,
   type DesignAgentGenResult,
 } from "../../lib/runDesignAgentGeneration"
 import {
+  acknowledge,
   markCompleted,
   markPending,
+  markResolvingPending,
   markSeenThisLoad,
   pendingCompleted,
+  pendingPendingIds,
   recordReplayShow,
   wasCancelled,
+  wasResolvingPending,
   wasSeenThisLoad,
 } from "./notificationStore"
-import { ensureNotifyPermission, fireReadyNotification } from "./browserNotify"
 import { IconClose, IconSparkle } from "../shared/app-icons"
 
 /** P1-12 ready-completion toast copy. Reused for the live toast, the persisted
  *  entry's sub, and the post-reload re-show so all three are byte-identical. */
 const READY_TOAST_TITLE = "Prototype ready"
 const READY_TOAST_SUB = "Your prototype finished generating."
+
+/** Named-PRD ready-toast sub, mirroring the backend Slack notifier's copy
+ *  shape (minus the inline link — the link is a separate toast affordance
+ *  here, not baked into the sub string). Falls back to the existing generic
+ *  `READY_TOAST_SUB` when no title is known (byte-identical to today for
+ *  every caller that omits it). */
+export function buildReadySub(prdTitle?: string | null): string {
+  const t = prdTitle?.trim()
+  return t ? `Your prototype for "${t}" is ready.` : READY_TOAST_SUB
+}
 
 export type TargetPlatform = "desktop" | "mobile" | "both"
 
@@ -140,6 +154,10 @@ type GenerateFlowDeps = {
   /** Fires immediately after the generate POST returns with the new prototype_id.
    *  Lets the loading screen subscribe to the SSE stream as soon as the agent starts. */
   onKickoff?: (prototypeId: number) => void
+  /** The PRD's title, when known at call time. Threaded into the persisted
+   *  ready-completion sub via `buildReadySub`. Optional — every existing
+   *  caller that omits it keeps today's generic fallback copy. */
+  prdTitle?: string | null
 }
 
 /**
@@ -235,18 +253,14 @@ export async function runGenerateFlow({
   notifyOnKickoff = true,
   onGenerated,
   onKickoff,
+  prdTitle,
 }: GenerateFlowDeps): Promise<void> {
   setSubmitting(true)
-  // Ask for OS-notification permission inside the Generate user-gesture (where
-  // browsers allow the prompt) so a ready notification can reach the user if
-  // they navigate away / background the tab during the minutes-long build.
-  // Unawaited + best-effort: never blocks or fails the kickoff.
-  void ensureNotifyPermission()
   try {
     const kickoff = await generate(params)
     // P5-09: persist a `pending` entry so a reload mid-generation that then
     // completes still captures the ready notification.
-    markPending(kickoff.prototype_id)
+    markPending(kickoff.prototype_id, params.prd_id)
     onKickoff?.(kickoff.prototype_id)
     onOpenChange(false)
     // UX-EXPLORE (throwaway — REVERT): the kickoff "Design Agent generating"
@@ -265,18 +279,15 @@ export async function runGenerateFlow({
         // same-session reload can re-show it. The persistence delta is
         // independent of the F3 opt-in — the entry is always recorded; only the
         // *live* toast stays gated on `notifyOnReady` (unchanged from P1-12).
-        markCompleted(kickoff.prototype_id, READY_TOAST_SUB)
+        const sub = buildReadySub(prdTitle)
+        markCompleted(kickoff.prototype_id, sub, params.prd_id)
+        // LOCKED (AC10d): the live toast stays exactly 2-arg — no link, no
+        // opts. This branch is dead in production (both real GenerateModal
+        // call sites pass notifyOnReady: false); the production-visible ready
+        // notification is the replay path below, which does link.
         if (notifyOnReady) {
-          showToast(READY_TOAST_TITLE, READY_TOAST_SUB)
+          showToast(READY_TOAST_TITLE, sub)
         }
-        // OS-level notification (no-op unless permission was granted) so the
-        // user is reached even when the tab is backgrounded / they navigated
-        // away. Clicking it routes to this PRD's prototype.
-        fireReadyNotification({
-          title: READY_TOAST_TITLE,
-          body: READY_TOAST_SUB,
-          prdId: params.prd_id,
-        })
       } else if (!wasCancelled(kickoff.prototype_id)) {
         // Suppress the false failure toast for a user-cancelled run (the cancel
         // path deletes the row; the still-running task's terminal write 404s).
@@ -355,13 +366,71 @@ export function DrawerFooter({
  * is `node`, where effects do not fire under SSR render).
  */
 export function replayCompletedNotifications(
-  showToast: (title: string, sub: string) => void,
+  showToast: (
+    title: string,
+    sub: string,
+    link?: string,
+    opts?: { onAction?: () => void; persist?: boolean },
+  ) => void,
 ): void {
   for (const n of pendingCompleted()) {
     if (wasSeenThisLoad(n.prototypeId)) continue
-    showToast(READY_TOAST_TITLE, n.sub)
+    if (n.prdId != null) {
+      showToast(READY_TOAST_TITLE, n.sub, "Open", {
+        onAction: () => {
+          if (typeof window !== "undefined") {
+            window.location.href = prototypePath(n.prdId)
+          }
+        },
+      })
+    } else {
+      showToast(READY_TOAST_TITLE, n.sub) // legacy/no-prdId entry — unchanged 2-arg shape
+    }
     markSeenThisLoad(n.prototypeId)
     recordReplayShow(n.prototypeId, READY_TOAST_TITLE, n.sub)
+  }
+}
+
+/**
+ * Part C — closes the reload gap: a page reload mid-generation kills
+ * `runGenerateFlow`'s own in-memory `.then()` chain, so a `pending` entry
+ * (kickoff already recorded, never flipped to `completed`) is otherwise
+ * orphaned forever — the shell replay only ever reads `pendingCompleted()`.
+ * Reuses `runDesignAgentGeneration` (already does exactly "poll a prototype
+ * whose generation was already kicked off elsewhere") to resume each still-
+ * pending id. `wasResolvingPending`/`markResolvingPending` ensure each id is
+ * polled AT MOST ONCE per page-load even though `AppShell` remounts the
+ * replay component across every authed-route navigation.
+ *
+ * No title is available at resume time without a new fetch, so the resumed
+ * toast uses the generic fallback copy (`buildReadySub(undefined)`) —
+ * documented, not silently dropped (a deliberate gap; naming the PRD here
+ * would need a new fetch this ticket avoids).
+ *
+ * On failure/timeout: silently `acknowledge` the entry (no toast) — matches
+ * the existing posture that a genuine failure is surfaced live-only in the
+ * originating tab, never persisted/replayed.
+ */
+export async function resumePendingNotifications(
+  showToast: (
+    title: string,
+    sub: string,
+    link?: string,
+    opts?: { onAction?: () => void; persist?: boolean },
+  ) => void,
+  poll: (args: { prototypeId: number }) => Promise<DesignAgentGenResult> = runDesignAgentGeneration,
+): Promise<void> {
+  for (const id of pendingPendingIds()) {
+    if (wasResolvingPending(id)) continue
+    markResolvingPending(id)
+    const result = await poll({ prototypeId: id })
+    if (result.ok) {
+      const prdId: number | null = result.prototype.prd_id ?? null
+      markCompleted(id, buildReadySub(undefined), prdId)
+      replayCompletedNotifications(showToast)
+    } else {
+      acknowledge(id) // drop the dead/failed pending entry — no stale sessionStorage leak
+    }
   }
 }
 

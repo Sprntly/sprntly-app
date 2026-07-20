@@ -304,6 +304,10 @@ export function GenerateModal({
   // Seeds the platform selector's INITIAL value only — the user's explicit
   // toggle always wins, and absent/undefined keeps today's DEFAULT_PLATFORM.
   platformHint,
+  // The PRD's title, when known. Threaded into the persisted ready-completion
+  // toast's sub via buildReadySub — omitted/undefined keeps today's generic
+  // fallback copy (byte-identical, no behaviour change for callers that omit it).
+  prdTitle,
   // Pre-build locate phase bridge. Emits the current locate phase so the parent
   // can thread it into the full-screen GenerationLoadingScreen. Accepted here
   // for forward-compat with the locate-in-loading-screen rollout; this version
@@ -360,6 +364,10 @@ export function GenerateModal({
    *  auto-skip path INTENTIONALLY inherits it — the PRD knows its surface, so
    *  a zero-interaction auto-skipped generation carries the hinted platform. */
   platformHint?: TargetPlatform | null
+  /** Optional PRD title. Threaded into the persisted ready-completion toast's
+   *  sub (`buildReadySub`) so it names the PRD instead of the generic fallback.
+   *  Omitted/null callers keep byte-identical today's-fallback copy. */
+  prdTitle?: string | null
   /** Emits the current pre-build locate phase so the parent can thread it into
    *  the full-screen GenerationLoadingScreen. This version drives locate in-modal;
    *  the callback is accepted for forward-compat and is a no-op here. */
@@ -799,6 +807,7 @@ export function GenerateModal({
         notifyOnKickoff: false,
         onKickoff,
         onGenerated: (result) => onGenDone?.(result),
+        prdTitle,
       }).catch(() => { onGenDone?.() })
     }, 0)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1017,6 +1026,7 @@ export function GenerateModal({
       // threaded through to onGenDone so ApproveModal can reveal the full-screen
       // canvas on success and skip it on failure.
       onGenerated: (result) => onGenDone?.(result),
+      prdTitle,
     }).catch(() => {
       // Defensive — if the whole flow rejects (shouldn't, runGenerateFlow
       // swallows kickoff errors), still dismiss the overlay.
