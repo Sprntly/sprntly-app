@@ -56,13 +56,12 @@ vi.mock("../../../../lib/api", () => {
 })
 
 const resumePrdGeneration = vi.fn()
+const loadPrdById = vi.fn()
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: vi.fn(),
   resumePrdGeneration: (...args: unknown[]) => resumePrdGeneration(...args),
   runPrdGenerationFromIdeation: vi.fn(),
-  loadPrdById: vi.fn().mockResolvedValue({
-    ok: true, prd: { prd_id: 99, title: "Loaded PRD", metaLine: "", sections: [] },
-  }),
+  loadPrdById: (...args: unknown[]) => loadPrdById(...args),
 }))
 
 vi.mock("../../../../lib/runAskGeneration", () => ({
@@ -150,6 +149,9 @@ beforeEach(() => {
   sessionStorage.clear()
   pathname = "/"
   resumePrdGeneration.mockReset()
+  loadPrdById.mockReset().mockResolvedValue({
+    ok: true, prd: { prd_id: 944, title: "CSV export", metaLine: "", sections: [] },
+  })
   vi.mocked(prdApi.get).mockReset().mockResolvedValue({ id: 944, status: "ready" } as never)
 })
 afterEach(() => {
@@ -159,24 +161,28 @@ afterEach(() => {
 })
 
 describe("ChatScreen — chat-task PRD reload resume", () => {
-  it("resumes a restored task tab whose PRD is still generating (probe → poll+stream + panel)", async () => {
+  it("resumes a restored task tab whose PRD is still generating — no error toast", async () => {
     seedRestoredTaskTab(944)
-    vi.mocked(prdApi.get).mockResolvedValue({ id: 944, status: "generating" } as never)
+    // The reload-restore effect auto-opens the tab's PRD; the DB load reports a
+    // healthy in-flight generation rather than a ready doc.
+    loadPrdById.mockResolvedValue({ ok: false, message: "PRD isn't ready yet", generating: true })
     let finish: (v: unknown) => void = () => {}
     resumePrdGeneration.mockReturnValue(new Promise((res) => { finish = res }))
 
     renderWith()
 
-    // The restored tab probes its PRD's status, finds it in flight, and
-    // re-enters the resume poll with a live-preview callback.
-    await waitFor(() => expect(prdApi.get).toHaveBeenCalledWith(944))
+    // The restored tab loads its PRD, finds it in flight, and re-enters the
+    // resume poll with a live-preview callback (the stream replays the backlog).
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(944))
     await waitFor(() =>
       expect(resumePrdGeneration).toHaveBeenCalledWith(944, undefined, expect.any(Function)))
     // The panel slides open on the PRD (the user was watching it pre-reload) …
     await waitFor(() => expect(panelProbe()).toBe("prd"))
-    // … and the insight card shows the run as in-flight.
+    // … the insight card shows the run as in-flight …
     const card = await screen.findByTestId("chat-insight-msg")
     expect(within(card).getByText("Generating PRD…")).toBeTruthy()
+    // … and an in-flight PRD is NOT surfaced as a load error (the toast bug).
+    expect(screen.queryByText("Couldn't load PRD")).toBeNull()
 
     // Completion lands the PRD on the tab: the CTA flips to View PRD.
     await act(async () => {
@@ -185,28 +191,27 @@ describe("ChatScreen — chat-task PRD reload resume", () => {
     await waitFor(() => expect(within(card).getByText("View PRD")).toBeTruthy())
   })
 
-  it("keeps the PRD card (View PRD) on a restored task tab whose PRD already finished — and does NOT regenerate", async () => {
+  it("restores a finished PRD (card + DB load) without resuming or regenerating", async () => {
     seedRestoredTaskTab(944)
-    vi.mocked(prdApi.get).mockResolvedValue({ id: 944, status: "ready" } as never)
 
     renderWith()
 
     // Pre-fix the card vanished entirely after reload (prd stripped, no
-    // briefMeta, no in-flight flag). The persisted prdId now keeps it.
+    // briefMeta, no in-flight flag). The persisted prdId now keeps it, and the
+    // existing restore path DB-loads the doc — never a resume, never a regen.
     const card = await screen.findByTestId("chat-insight-msg")
     await waitFor(() => expect(within(card).getByText("View PRD")).toBeTruthy())
-    // A finished PRD is left to the lazy click path — no auto poll, no regen.
-    await waitFor(() => expect(prdApi.get).toHaveBeenCalledWith(944))
+    await waitFor(() => expect(loadPrdById).toHaveBeenCalledWith(944))
     expect(resumePrdGeneration).not.toHaveBeenCalled()
   })
 
-  it("a restored plain chat tab (no prdId) neither probes nor renders a PRD card", async () => {
+  it("a restored plain chat tab (no prdId) neither loads nor renders a PRD card", async () => {
     seedRestoredTaskTab(null)
 
     renderWith()
 
     await screen.findByText(/Ask Sprntly anything|New chat/i).catch(() => {})
-    expect(prdApi.get).not.toHaveBeenCalled()
+    expect(loadPrdById).not.toHaveBeenCalled()
     expect(resumePrdGeneration).not.toHaveBeenCalled()
     expect(screen.queryByTestId("chat-insight-msg")).toBeNull()
   })

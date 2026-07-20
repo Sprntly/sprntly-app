@@ -107,3 +107,20 @@ describe("throttlePartial", () => {
     }
   })
 })
+
+describe("loadPrdById status mapping", () => {
+  it("flags a still-generating PRD as `generating` so callers resume instead of erroring", async () => {
+    const { loadPrdById } = await import("../runPrdGeneration")
+    vi.spyOn(prdApi, "get").mockResolvedValue({ id: 21, status: "generating" } as never)
+    const res = await loadPrdById(21)
+    expect(res).toMatchObject({ ok: false, generating: true })
+  })
+
+  it("a failed PRD is NOT flagged generating (real error path unchanged)", async () => {
+    const { loadPrdById } = await import("../runPrdGeneration")
+    vi.spyOn(prdApi, "get").mockResolvedValue({ id: 22, status: "failed", error: "boom" } as never)
+    const res = await loadPrdById(22)
+    expect(res).toMatchObject({ ok: false, message: "boom" })
+    expect((res as { generating?: boolean }).generating).toBeUndefined()
+  })
+})
