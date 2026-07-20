@@ -500,7 +500,10 @@ export function TicketDetail({ story, index, prdId, onBack, onOpenLinked, tracke
     })
     saveFields({ custom_fields: { [fieldId]: v } })
   }
-  const providerLabel = tracker?.provider === "jira" ? "Jira" : "ClickUp"
+  const providerLabel =
+    tracker?.provider === "jira" ? "Jira"
+    : tracker?.provider === "asana" ? "Asana"
+    : "ClickUp"
 
   // Issue type (Jira-bound tickets): the destination's real non-subtask
   // types. Displayed value = local edit ?? pulled tracker type ?? "Task".

@@ -37,6 +37,12 @@ BRIEF_WEEKDAY = 0  # Monday
 BRIEF_HOUR = 6
 BRIEF_MINUTE = 0
 
+# How long BEFORE the delivery time generation kicks off. Generation (KG seed +
+# synthesis LLM calls) takes minutes and can queue behind other companies, so it
+# starts with a head start; delivery then happens exactly at the configured
+# time, never before (see app.scheduler's generate-then-deliver split).
+GENERATION_LEAD = timedelta(hours=3)
+
 # How wide a window after the nominal fire time still counts as "due". The
 # scheduler ticks on an interval (not exactly at :00), and a tick can be a little
 # late under load, so a company is "due" if local now is within this window after
@@ -230,6 +236,67 @@ def should_run_weekly_brief(
 
     # Already ran for (or after) this week's fire → not due again.
     if last_run is not None and _as_utc(last_run) >= fire:
+        return False
+
+    return True
+
+
+def generation_start_time(
+    now: datetime,
+    tz: ZoneInfo,
+    *,
+    weekday: int = BRIEF_WEEKDAY,
+    hour: int = BRIEF_HOUR,
+    minute: int = BRIEF_MINUTE,
+    lead: timedelta = GENERATION_LEAD,
+) -> datetime:
+    """The most recent generation-start instant (delivery fire time minus
+    ``lead``) at or before ``now``, as an aware UTC datetime.
+
+    The delivery fire time is resolved DST-correctly in ``tz`` (like
+    :func:`previous_fire_time`); the lead is then a plain UTC offset — "start 3
+    hours before delivery" means 3 real hours, whatever the local clock does.
+    Shifting ``now`` forward by ``lead`` before asking for the previous fire
+    makes the returned instant the generation start whose window ``now`` can be
+    inside, even though its delivery fire is still in the future.
+    """
+    fire = previous_fire_time(
+        _as_utc(now) + lead, tz, weekday=weekday, hour=hour, minute=minute
+    )
+    return fire - lead
+
+
+def should_generate_weekly_brief(
+    now: datetime,
+    tz: ZoneInfo,
+    last_generation: datetime | None,
+    *,
+    weekday: int = BRIEF_WEEKDAY,
+    hour: int = BRIEF_HOUR,
+    minute: int = BRIEF_MINUTE,
+    lead: timedelta = GENERATION_LEAD,
+    window: timedelta = DUE_WINDOW,
+) -> bool:
+    """Pure decision: should this company's weekly brief START GENERATING now?
+
+    The mirror of :func:`should_run_weekly_brief`, shifted ``lead`` earlier:
+    generation is due when ``now`` is within ``window`` after (fire − ``lead``)
+    and generation hasn't already run for this cycle. Generating early gives the
+    brief time to synthesize so delivery can happen exactly at the configured
+    fire time (delivery itself is decided separately, never before the fire).
+
+    ``last_generation`` is the instant generation last started for this company
+    (aware or naive-UTC), the once-per-cycle guard.
+    """
+    now_utc = _as_utc(now)
+    gen_start = generation_start_time(
+        now_utc, tz, weekday=weekday, hour=hour, minute=minute, lead=lead
+    )
+
+    if not (gen_start <= now_utc <= gen_start + window):
+        return False
+
+    if last_generation is not None and _as_utc(last_generation) >= gen_start:
         return False
 
     return True

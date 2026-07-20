@@ -22,10 +22,23 @@ import logging
 
 from app import db
 from app.brief_nudge import brief_deep_link, generate_nudge, nudge_slack_blocks
+from app.config import settings
 from app.connectors import slack_oauth
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 
 logger = logging.getLogger(__name__)
+
+# The short notification for a USER-TRIGGERED (unscheduled) regenerate. The
+# user just asked for the brief, so they don't need the full weekly message —
+# just a heads-up that it's ready, with the same deep-link button the weekly
+# message carries.
+READY_PING_TEXT = "Hey, your brief is generated."
+READY_PING_CTA_LABEL = "Open your brief"
+
+# The "your PRD is ready" ping, sent to the requester once a PRD finishes
+# generating (see app.prd_runner.generate_prd_and_warm). Static copy — a
+# notification, not the PRD itself.
+PRD_READY_CTA_LABEL = "View PRD here"
 
 
 def _deliver_to_one(row: dict, text: str, blocks: list[dict]) -> dict:
@@ -70,13 +83,16 @@ def deliver_brief(enterprise_id: str, brief: dict) -> dict:
     """Push a brief to ALL of a company's configured destinations — per-user
     Slack + email — logging any real failure. Best-effort; never raises.
 
-    Invoked by the WEEKLY SCHEDULER TICK (app.scheduler), not by synthesis.
-    Delivery is a scheduled action, not a side effect of generating a brief:
-    the tick delivers whatever brief is current at the configured day/time —
-    whether it was freshly synthesized this run or returned from cache because
-    the KG hadn't changed. (Delivery used to live inside run_synthesis, so an
-    unchanged-KG week skipped synthesis AND silently skipped delivery — the
-    "my scheduled brief never arrived" bug.)"""
+    This is the FULL weekly brief message. Two callers:
+      - the weekly scheduler (app.scheduler): exactly AT the company's
+        configured day/time — the brief was already generated GENERATION_LEAD
+        earlier with delivery suppressed, so the push lands on time, never
+        early;
+      - run_synthesis with deliver=True: autonomous fresh briefs outside the
+        schedule (startup pass, new-dataset seed) announce themselves on
+        generation.
+    User-triggered regenerates never send this — they send the short
+    deliver_brief_ready_ping instead."""
     from app.synthesis.email_delivery import deliver_brief_to_email
 
     slack = deliver_brief_to_slack(enterprise_id, brief)
@@ -126,4 +142,129 @@ def deliver_brief_to_slack(enterprise_id: str, brief: dict) -> dict:
         return out
     except Exception as e:  # noqa: BLE001 — delivery never breaks generation
         logger.exception("brief slack delivery failed for %s", enterprise_id)
+        return {"delivered": False, "reason": f"error: {e}", "recipients": []}
+
+
+def ready_ping_slack_blocks() -> tuple[str, list[dict]]:
+    """(plain-text fallback, Block Kit blocks) for the short regenerate ping:
+    one line of copy + the same deep-link CTA button the weekly message uses.
+    Static copy — no LLM draft, this is a notification, not the brief itself."""
+    deep_link = brief_deep_link()
+    blocks: list[dict] = [
+        {"type": "section",
+         "text": {"type": "mrkdwn", "text": READY_PING_TEXT}},
+        {"type": "actions",
+         "elements": [
+             {"type": "button",
+              "text": {"type": "plain_text", "text": READY_PING_CTA_LABEL},
+              "url": deep_link,
+              "style": "primary"},
+         ]},
+    ]
+    return READY_PING_TEXT, blocks
+
+
+def deliver_brief_ready_ping(enterprise_id: str) -> dict:
+    """Push the short "Hey, your brief is generated." ping (Slack + email) after
+    a USER-TRIGGERED regenerate — NOT the full weekly brief message, which stays
+    reserved for the scheduled delivery. Same recipients/config gates as
+    deliver_brief; best-effort, never raises."""
+    from app.synthesis.email_delivery import deliver_brief_ping_to_email
+
+    slack = deliver_ready_ping_to_slack(enterprise_id)
+    if not slack.get("delivered") and slack.get("reason") not in (
+        "slack_not_connected", "no_channel_configured"
+    ):
+        logger.warning("brief ready-ping slack delivery: %s", slack)
+
+    email = deliver_brief_ping_to_email(enterprise_id)
+    if not email.get("delivered") and email.get("reason") not in (
+        "email_disabled", "no_recipients", "resend_not_configured"
+    ):
+        logger.warning("brief ready-ping email delivery: %s", email)
+
+    return {"slack": slack, "email": email}
+
+
+def deliver_ready_ping_to_slack(enterprise_id: str) -> dict:
+    """Fan the static ready-ping out to every member who connected their own
+    Slack and picked a target — same routing as deliver_brief_to_slack, minus
+    the LLM-drafted announcement. Never raises."""
+    try:
+        rows = db.list_slack_connections(enterprise_id)
+        if not rows:
+            return {"delivered": False, "reason": "slack_not_connected",
+                    "recipients": []}
+        text, blocks = ready_ping_slack_blocks()
+        recipients = [_deliver_to_one(row, text, blocks) for row in rows]
+        any_delivered = any(r.get("delivered") for r in recipients)
+        out: dict = {"delivered": any_delivered, "recipients": recipients}
+        if not any_delivered:
+            out["reason"] = recipients[0].get("reason", "not_delivered")
+        return out
+    except Exception as e:  # noqa: BLE001 — delivery never breaks generation
+        logger.exception("brief ready-ping slack delivery failed for %s",
+                         enterprise_id)
+        return {"delivered": False, "reason": f"error: {e}", "recipients": []}
+
+
+# ── PRD-ready ping ────────────────────────────────────────────────────────────
+
+
+def prd_deep_link(prd_id: int) -> str:
+    """The CTA target for a generated PRD. Carries the prd id on the app's brief
+    surface so the button lands the user in the app (mirrors brief_deep_link's
+    frontend_url handling)."""
+    base = (settings.frontend_url or "https://app.sprntly.ai").rstrip("/")
+    return f"{base}/brief?prd={prd_id}"
+
+
+def prd_ready_slack_blocks(prd_title: str | None, prd_id: int) -> tuple[str, list[dict]]:
+    """(plain-text fallback, Slack Block Kit blocks) for the "your PRD is ready"
+    ping: one line naming the PRD + a "View PRD here" CTA button. Static copy —
+    no LLM draft, this is a notification, not the PRD itself."""
+    name = (prd_title or "").strip() or "your latest insight"
+    text = (
+        f"Hey, your PRD for {name} has been generated successfully, "
+        "view it by clicking the button below."
+    )
+    blocks: list[dict] = [
+        {"type": "section",
+         "text": {"type": "mrkdwn", "text": text}},
+        {"type": "actions",
+         "elements": [
+             {"type": "button",
+              "text": {"type": "plain_text", "text": PRD_READY_CTA_LABEL},
+              "url": prd_deep_link(prd_id),
+              "style": "primary"},
+         ]},
+    ]
+    return text, blocks
+
+
+def deliver_prd_ready_to_slack(
+    company_id: str, user_id: str, prd_id: int, prd_title: str | None,
+) -> dict:
+    """Ping the PRD's requester on THEIR configured Slack target (DM or channel)
+    that the PRD is ready, with a "View PRD here" button.
+
+    Unlike the brief delivery (which fans out to every connected member), a PRD
+    belongs to the one user who generated it — the copy is "your PRD" — so this
+    delivers to that user's own connection only. Best-effort, never raises: a
+    Slack hiccup must never affect the finished PRD."""
+    try:
+        row = db.get_slack_connection(company_id, user_id)
+        if not row:
+            return {"delivered": False, "reason": "slack_not_connected",
+                    "recipients": []}
+        text, blocks = prd_ready_slack_blocks(prd_title, prd_id)
+        result = _deliver_to_one(row, text, blocks)
+        out: dict = {"delivered": bool(result.get("delivered")),
+                     "recipients": [result]}
+        if not out["delivered"]:
+            out["reason"] = result.get("reason", "not_delivered")
+        return out
+    except Exception as e:  # noqa: BLE001 — delivery never breaks generation
+        logger.exception("prd-ready slack delivery failed for %s/%s",
+                         company_id, user_id)
         return {"delivered": False, "reason": f"error: {e}", "recipients": []}

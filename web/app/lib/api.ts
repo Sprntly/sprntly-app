@@ -51,6 +51,20 @@ export function setAccessTokenProvider(fn: () => Promise<string | null>) {
   accessTokenProvider = fn
 }
 
+// The ACTIVE workspace, set by WorkspaceContext when the user picks one from
+// the switcher (mirrors the accessTokenProvider pattern). Injected as the
+// X-Workspace-Id header on every backend request in ONE place; the backend
+// falls back to the company's default workspace when absent.
+let activeWorkspaceId: string | null = null
+
+export function setActiveWorkspaceId(id: string | null) {
+  activeWorkspaceId = id
+}
+
+export function getActiveWorkspaceId(): string | null {
+  return activeWorkspaceId
+}
+
 async function request<T>(
   method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH",
   path: string,
@@ -67,6 +81,7 @@ async function request<T>(
     const token = await accessTokenProvider()
     if (token) headers.Authorization = `Bearer ${token}`
   }
+  if (activeWorkspaceId) headers["X-Workspace-Id"] = activeWorkspaceId
 
   const res = await fetch(`${API_URL}${path}`, {
     method,
@@ -280,31 +295,38 @@ export const briefApi = {
       .then((b) => ({ ...briefFromWire(b), brief_id: b.brief_id })),
 }
 
-// ---- backlog ----------------------------------------------------------------
+// ---- ideation ---------------------------------------------------------------
 //
-// The backlog is the REMAINDER of the same weekly-analysis ranking that feeds
-// the brief: the top 3 ranked insights go into the brief, ranks 4..N are
-// sequenced into the backlog. The backend gates the list on a brief existing,
-// so a company that has never had a brief returns an empty backlog.
+// The ideation pool is the REMAINDER of the same weekly-analysis ranking that
+// feeds the brief: the top 3 ranked insights go into the brief, ranks 4..N are
+// sequenced into the pool, and a weekly prioritization pass shortlists the
+// 25-30 ideas worth showing — the list route returns ONLY that visible set.
+// The backend gates the list on a brief existing, so a company that has never
+// had a brief returns an empty list.
 //
 // The route is tenant-scoped via the session (no company param) — the backend
 // resolves the company from the authenticated user.
 
-export type BacklogTag = "something_new" | "something_better" | "something_broken"
-export type BacklogStatus = "backlog" | "in_progress" | "done" | "dismissed"
+export type IdeationTag = "something_new" | "something_better" | "something_broken"
+// 'backlog' is the legacy spelling of 'proposed' (rows written by pre-rename
+// prod until cutover) — treat the two as the same landing state.
+export type IdeationStatus = "proposed" | "backlog" | "in_progress" | "done" | "dismissed"
 
-export type BacklogItem = {
+export type IdeationItem = {
   id: string
   theme_id: string
   title: string
-  tag: BacklogTag | null
+  tag: IdeationTag | null
   rank: number
   score: number
-  status: BacklogStatus
+  status: IdeationStatus
+  /** Picked by the weekly prioritization pass (manual ideas are born true). */
+  shortlisted?: boolean
   reasoning: string | null
+  updated_at?: string
 }
 
-export type BacklogList = { items: BacklogItem[]; count: number }
+export type IdeationList = { items: IdeationItem[]; count: number }
 
 /** A completed brief finding — a theme whose action is prd_created or done. */
 export type CompletedItem = {
@@ -316,22 +338,23 @@ export type CompletedItem = {
 
 export type CompletedList = { items: CompletedItem[]; count: number }
 
-export const backlogApi = {
-  /** Ranked backlog items (rank-ascending). Empty when no brief exists. */
-  list: () => api.get<BacklogList>("/v1/backlog"),
+export const ideationApi = {
+  /** The visible ideas (rank-ascending): the weekly shortlist + user-pinned
+   *  rows. Empty when no brief exists. */
+  list: () => api.get<IdeationList>("/v1/ideation"),
   /** Completed findings (prd_created | done) for the Completed tab. */
-  completed: () => api.get<CompletedList>("/v1/backlog/completed"),
+  completed: () => api.get<CompletedList>("/v1/ideation/completed"),
   /** Move one item to a new status (in_progress | done | dismissed). */
-  setStatus: (itemId: string, status: Exclude<BacklogStatus, "backlog">) =>
-    api.patch<BacklogItem>(`/v1/backlog/${encodeURIComponent(itemId)}`, { status }),
-  /** Create a user-added backlog item ("+ Add idea"). `tag` is an optional
-   *  BacklogTag when the idea-type maps cleanly, else null. Returns the row. */
-  create: (title: string, tag: BacklogTag | null = null) =>
-    api.post<BacklogItem>("/v1/backlog", { title, tag }),
+  setStatus: (itemId: string, status: "in_progress" | "done" | "dismissed") =>
+    api.patch<IdeationItem>(`/v1/ideation/${encodeURIComponent(itemId)}`, { status }),
+  /** Create a user-added idea ("+ Add idea"). `tag` is an optional
+   *  IdeationTag when the idea-type maps cleanly, else null. Returns the row. */
+  create: (title: string, tag: IdeationTag | null = null) =>
+    api.post<IdeationItem>("/v1/ideation", { title, tag }),
   /** Persist a new rank order (drag-to-rerank / Re-sequence). `orderedIds` is
    *  the full visible order; each item's rank becomes its position. */
   reorder: (orderedIds: string[]) =>
-    api.post<BacklogList>("/v1/backlog/reorder", { ordered_ids: orderedIds }),
+    api.post<IdeationList>("/v1/ideation/reorder", { ordered_ids: orderedIds }),
 }
 
 export type AskCitation = { source: string; evidence: string }
@@ -348,6 +371,8 @@ export type SkillInfo = {
   label: string
   trigger: string
   description: string
+  /** Display category from the backend catalog (e.g. "Discovery & Research"). */
+  category: string
 }
 
 /** POST /v1/ask is fire-and-forget: it returns an ask_id immediately and the
@@ -355,7 +380,7 @@ export type SkillInfo = {
  *  askApi.get(id) until status leaves 'generating'. */
 export type AskStartResponse = {
   ask_id: number
-  status: "generating" | "ready" | "error"
+  status: "generating" | "ready" | "error" | "cancelled"
 }
 
 /** GET /v1/ask/{id} status + result. Once status === 'ready' the answer /
@@ -363,7 +388,7 @@ export type AskStartResponse = {
  *  citation-stripped shape the old synchronous POST returned, so downstream
  *  rendering is unchanged. `error` is set when status === 'error'. */
 export type AskStatusResponse = AskResponse & {
-  status: "generating" | "ready" | "error"
+  status: "generating" | "ready" | "error" | "cancelled"
   error?: string | null
   /** Extra qa_agent metadata (e.g. routed skill) passed through verbatim. */
   [extra: string]: unknown
@@ -375,16 +400,26 @@ export const askApi = {
   start: (
     question: string,
     company: string = "asurion",
-    opts?: { conversation_id?: number; pinned_skill?: string },
+    opts?: { conversation_id?: number; pinned_skill?: string; prd_id?: number },
   ) =>
     api.post<AskStartResponse>("/v1/ask", {
       question,
       dataset: company,
       ...(opts?.conversation_id != null ? { conversation_id: opts.conversation_id } : {}),
       ...(opts?.pinned_skill != null ? { pinned_skill: opts.pinned_skill } : {}),
+      // PRD-tab chat: ground the answer on the PRD open beside this chat
+      // (+ its insight, evidence, tickets, prototype).
+      ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
+  /** Stop an in-flight Ask (the user hit Stop). Flips the job to `cancelled`
+   *  so the worker aborts before the next LLM step and a late answer is
+   *  discarded. Idempotent — returns the job's resulting status. */
+  cancel: (askId: number) =>
+    api.post<{ ask_id: number; status: "generating" | "ready" | "error" | "cancelled" }>(
+      `/v1/ask/${askId}/cancel`,
+    ),
   /** List available skills the chat can route to. */
   skills: () =>
     api.get<{ skills: SkillInfo[] }>("/v1/ask/skills"),
@@ -424,9 +459,9 @@ export type PrdRecord = {
   variant?: string
   /** How this PRD was created — returned by the GET routes' `select("*")`.
    *  Only `'brief'` PRDs carry their own research Evidence (keyed at
-   *  `(brief_id, insight_index)`); `'backlog'` and `'upload'` PRDs have none.
+   *  `(brief_id, insight_index)`); `'ideation'` and `'upload'` PRDs have none.
    *  Absent on legacy rows — treat missing as `'brief'` (the DB default). */
-  source?: "brief" | "backlog" | "upload"
+  source?: "brief" | "ideation" | "backlog" | "upload" | "chat"
 }
 
 /** Response from POST /v1/prd/{id}/impl-spec — the on-demand machine-readable
@@ -473,6 +508,16 @@ export const evidenceApi = {
       force,
     }),
   get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
+  /** SSE URL to token-stream an evidence doc's generation as it's written.
+   *  Mirrors prdApi.streamUrl: the bearer rides as ?token= (EventSource can't
+   *  set headers). Frames: {kind:'delta',text} then a terminal
+   *  {kind:'done'|'error'}. Progressive display only — evidenceApi.get(id)
+   *  stays the authoritative finished doc. */
+  streamUrl: (evidenceId: number, token: string): string =>
+    `${API_URL}/v1/evidence/${evidenceId}/stream?token=${encodeURIComponent(token)}` +
+    (activeWorkspaceId
+      ? `&workspace_id=${encodeURIComponent(activeWorkspaceId)}`
+      : ""),
   /** Read the latest evidence for a brief insight (ready or in-flight), or null.
    *  Lets the Evidence tab populate for the insight whose PRD is being viewed /
    *  generated — a pure read, never kicks off generation. Swallows 404→null. */
@@ -567,6 +612,18 @@ export type AnalyzeWebsiteStatusResponse = {
   error: string | null
 }
 
+export const signupApi = {
+  /**
+   * PUBLIC (pre-auth): does an account already exist for this email? Called
+   * from sign-up step 1 so returning users are stopped with "already
+   * registered — sign in" before filling the about-you step. The backend
+   * fails open (exists: false) — the end-of-signup already_registered check
+   * remains the backstop.
+   */
+  emailExists: (email: string) =>
+    api.post<{ exists: boolean }>("/v1/auth/email-exists", { email }),
+}
+
 export const onboardingApi = {
   /**
    * Kick off a website analysis to infer industry / business type / stage and
@@ -584,6 +641,94 @@ export const onboardingApi = {
   analyzeWebsiteStatus: (jobId: number) =>
     api.get<AnalyzeWebsiteStatusResponse>(
       `/v1/onboarding/analyze-website/${jobId}`,
+    ),
+  /**
+   * Names the default workspace (renames the company's default `workspaces`
+   * row — never creates a second — grants the caller workspace-admin, and
+   * binds the company dataset). No longer an onboarding step since v6; kept
+   * for Settings-side callers.
+   */
+  createWorkspace: (name: string) =>
+    api.post<{ id: string; name: string; slug: string; is_default: boolean }>(
+      "/v1/onboarding/workspace",
+      { name },
+    ),
+  /**
+   * Step 9 "Here's what we learned": draft the business-context prose from
+   * everything collected (company/product/metrics rows + website analysis +
+   * connected sources). Synchronous — a spinner-length call; re-request on
+   * remount if lost. Fully editable client-side before accept.
+   */
+  draftBusinessContext: () =>
+    api.post<{ draft: string }>("/v1/onboarding/business-context-draft", {}),
+  /**
+   * Define-metrics sub-flow: AI-draft a plain-English definition + analytics
+   * event mapping (+ best-effort current value) for each picked metric.
+   */
+  draftMetricDefinitions: (metrics: string[]) =>
+    api.post<{
+      definitions: {
+        metric: string
+        definition: string
+        mapping: string
+        baseline: string | null
+      }[]
+    }>("/v1/onboarding/metric-definitions", { metrics }),
+}
+
+// ── Workspaces (multi-workspace 2026-07) ────────────────────────────────────
+
+/** One workspace as the switcher sees it: the caller's effective role plus
+ *  the dataset slug every dataset-keyed call feeds on. */
+export type WorkspaceSummary = {
+  id: string
+  name: string
+  slug: string
+  is_default: boolean
+  product_id: string | null
+  dataset: string | null
+  role: "admin" | "member" | "viewer"
+}
+
+export type WorkspaceMemberRecord = {
+  id: string | null
+  user_id: string
+  role: "admin" | "member" | "viewer"
+  created_at: string | null
+  display_name: string | null
+  email: string | null
+  avatar_url: string | null
+}
+
+export const workspacesApi = {
+  // org_role: the caller's COMPANY-level role (owner/admin/member/viewer) —
+  // workspace creation is org-admin gated, unlike the per-workspace `role`
+  // each summary row carries.
+  list: () =>
+    api.get<{ workspaces: WorkspaceSummary[]; org_role?: string | null }>(
+      "/v1/workspaces",
+    ),
+  create: (name: string) =>
+    api.post<WorkspaceSummary>("/v1/workspaces", { name }),
+  rename: (id: string, name: string) =>
+    api.patch<WorkspaceSummary>(
+      `/v1/workspaces/${encodeURIComponent(id)}`,
+      { name },
+    ),
+  remove: (id: string) =>
+    api.delete<void>(`/v1/workspaces/${encodeURIComponent(id)}`),
+  members: (id: string) =>
+    api.get<{ members: WorkspaceMemberRecord[] }>(
+      `/v1/team/workspaces/${encodeURIComponent(id)}/members`,
+    ),
+  setMemberRole: (id: string, userId: string, role: "admin" | "member" | "viewer") =>
+    api.put<{ user_id: string; role: string }>(
+      `/v1/team/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
+      { role },
+    ),
+  removeMember: (id: string, userId: string) =>
+    api.delete<void>(
+      `/v1/team/workspaces/${encodeURIComponent(id)}/members/${encodeURIComponent(userId)}`,
     ),
 }
 
@@ -869,6 +1014,11 @@ export type CompanyDocType =
   | "team_priorities"
   | "research"
   | "company_strategy"
+  // v6 onboarding steps 6-7 upload-or-type blocks.
+  | "team_strategy"
+  | "team_roadmap"
+  | "decision_process"
+  | "additional_context"
 
 /** One stored company document, as the list view reads it. Never carries the
  *  raw file bytes — only metadata + the extracted-char count. */
@@ -1157,6 +1307,14 @@ export const connectorsApi = {
       history_days: historyDays,
     }),
 
+  // ---- Sprinklr ------------------------------------------------------------
+  disconnectSprinklr: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/sprinklr`),
+
+  // ---- Asana ---------------------------------------------------------------
+  disconnectAsana: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/asana`),
+
   // ---- Fireflies (API key, not OAuth) --------------------------------------
   connectFirefliesWithApiKey: (apiKey: string) =>
     api.post<{ ok: true; provider: string; account_label: string }>(
@@ -1165,6 +1323,17 @@ export const connectorsApi = {
     ),
   disconnectFireflies: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
+
+  // ---- Superset (self-hosted; instance URL + service-account login) --------
+  connectSupersetWithCredentials: (
+    baseUrl: string, username: string, password: string,
+  ) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      `/v1/connectors/superset/connect`,
+      { base_url: baseUrl, username, password },
+    ),
+  disconnectSuperset: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/superset`),
 
   // ---- Generic test-connection --------------------------------------------
   /**
@@ -1290,16 +1459,39 @@ export const prdApi = {
    *  {kind:'delta',text} then a terminal {kind:'done'|'error'}. Progressive
    *  display only — prdApi.get(id) stays the authoritative finished PRD. */
   streamUrl: (prdId: number, token: string): string =>
-    `${API_URL}/v1/prd/${prdId}/stream?token=${encodeURIComponent(token)}`,
-  /** Kick off PRD generation for a BACKLOG item (a theme ranked ≥ 4, not in the
-   *  brief's top-3). Same fire-and-forget contract as `generate`: returns a
+    `${API_URL}/v1/prd/${prdId}/stream?token=${encodeURIComponent(token)}` +
+    (activeWorkspaceId
+      ? `&workspace_id=${encodeURIComponent(activeWorkspaceId)}`
+      : ""),
+  /** Kick off PRD generation for an IDEATION item (a theme ranked ≥ 4, not in
+   *  the brief's top-3). Same fire-and-forget contract as `generate`: returns a
    *  prd_id to poll via prdApi.get(id). The backend synthesizes the insight from
-   *  the backlog row and grounds it on the company's current brief. */
-  generateFromBacklog: (backlogItemId: string, force = false) =>
-    api.post<PrdStartResponse>("/v1/prd/generate-from-backlog", {
-      backlog_item_id: backlogItemId,
+   *  the ideation row and grounds it on the company's current brief. */
+  generateFromIdeation: (ideationItemId: string, force = false) =>
+    api.post<PrdStartResponse>("/v1/prd/generate-from-ideation", {
+      ideation_item_id: ideationItemId,
       force,
     }),
+  /** Kick off PRD generation for a SPECIFIC TASK the user described in chat
+   *  ("generate a PRD for dark mode"). The backend synthesizes the insight from
+   *  the task text (find-or-create keyed on it) and grounds on the company's
+   *  data. Same fire-and-forget contract as `generate`: returns a prd_id to
+   *  poll via prdApi.get(id) until status === 'ready'. */
+  generateFromTask: (task: string, force = false) =>
+    api.post<PrdStartResponse>("/v1/prd/generate-from-task", { task, force }),
+  /** The Evidence artifact behind a chat-task PRD (generated in parallel with
+   *  the PRD from semantic KG retrieval over the task). Resolves null when the
+   *  PRD isn't chat-sourced OR retrieval found no backing signals and the doc
+   *  was skipped — the Evidence tab stays hidden in either case. May return a
+   *  `generating` row; poll evidenceApi.get(id) until terminal. */
+  evidenceForPrd: async (prdId: number): Promise<EvidenceRecord | null> => {
+    try {
+      return await api.get<EvidenceRecord>(`/v1/prd/${prdId}/evidence`)
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null
+      throw e
+    }
+  },
   /** Import an existing PRD from an uploaded file (PDF/PPT/DOCX/…). The backend
    *  parses it to text and re-lays-it-out into our format via the prd-author
    *  skill. Same fire-and-forget contract as `generate`: returns a prd_id to
@@ -2292,6 +2484,11 @@ export const storiesApi = {
    *  isn't connected. */
   listClickUpLists: () =>
     api.post<{ lists: ClickUpList[] }>("/v1/stories/lists", {}),
+  /** Asana projects the company can push into (target picker). Shaped like the
+   *  ClickUp list picker (project gid as `id`) so the same picker is reused.
+   *  404 if Asana isn't connected. */
+  listAsanaProjects: () =>
+    api.post<{ lists: ClickUpList[] }>("/v1/stories/asana/projects", {}),
   /** Create the reviewed stories as tasks in a ClickUp list (explicit write). */
   pushToClickUp: (listId: string, stories: GeneratedStory[]) =>
     api.post<StoryPushResult>("/v1/stories/push", { list_id: listId, stories }),
@@ -2413,7 +2610,7 @@ export type TrackerTransition = {
 
 // ── Ticket tracker sync (per-PRD) ────────────────────────────────────────────
 
-export type TrackerProvider = "clickup" | "jira"
+export type TrackerProvider = "clickup" | "jira" | "asana"
 
 /** Per-PRD tracker-sync state (GET /v1/stories/sync/{prd_id}). After the first
  *  push registers a destination, the backend auto-syncs on an interval; the

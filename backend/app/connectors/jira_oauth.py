@@ -698,6 +698,12 @@ def get_issue(
             },
             timeout=_TIMEOUT,
         )
+        # A definite deletion (404/410) is reported distinctly from a transient
+        # failure so the sync can RE-PUSH a tracker-side-deleted issue instead
+        # of silently skipping it (see app.stories.sync). A transient error
+        # (5xx/timeout/auth) stays {} → the pass keeps the prior state.
+        if resp.status_code in (404, 410):
+            return {"__gone__": True}
         if not resp.ok:
             logger.warning(
                 "Jira get_issue failed for %s: %s", issue_key, resp.status_code

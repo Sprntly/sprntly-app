@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react"
 import { adminApi, ApiError, apiErrorMessage, type LlmKeyStatus } from "../../../../lib/api"
 import { SettingsSection, SettingsMessage } from "./SettingsLayout"
+import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 
 /**
  * Admin pane — the company's own Claude (Anthropic) API key.
@@ -123,10 +124,25 @@ export function AdminSettingsView({
   )
 }
 
+// Module-scoped cache of the last-loaded admin key status. Survives the pane
+// remounting on a settings tab-switch, so a revisit renders the key state
+// INSTANTLY and revalidates in the background — no "Loading settings…" spinner
+// every time. `null` = never loaded (the only cold case that spins). Cleared
+// on sign-out via resetAdminSettingsCache.
+let _adminCache: { status: LlmKeyStatus | null; restricted: boolean } | null = null
+
+// Clear on sign-out so a different user never sees the previous account's key
+// status (see lib/settingsCache).
+registerSettingsCacheReset(() => {
+  _adminCache = null
+})
+
 export function AdminSettings() {
-  const [status, setStatus] = useState<LlmKeyStatus | null>(null)
-  const [restricted, setRestricted] = useState(false)
-  const [loading, setLoading] = useState(true)
+  // Seed from cache so a tab-switch return renders instantly; the effect below
+  // still revalidates in the background.
+  const [status, setStatus] = useState<LlmKeyStatus | null>(() => _adminCache?.status ?? null)
+  const [restricted, setRestricted] = useState(() => _adminCache?.restricted ?? false)
+  const [loading, setLoading] = useState(() => _adminCache === null)
   const [keyInput, setKeyInput] = useState("")
   const [saving, setSaving] = useState(false)
   const [removing, setRemoving] = useState(false)
@@ -139,11 +155,15 @@ export function AdminSettings() {
     ;(async () => {
       try {
         const s = await adminApi.getLlmKey()
-        if (!cancelled) setStatus(s)
+        if (!cancelled) {
+          setStatus(s)
+          _adminCache = { status: s, restricted: false }
+        }
       } catch (e) {
         if (cancelled) return
         if (e instanceof ApiError && e.status === 403) {
           setRestricted(true)
+          _adminCache = { status: null, restricted: true }
         } else {
           setError(e instanceof ApiError ? apiErrorMessage(e.status, e.body) : "Could not load settings.")
         }
@@ -167,6 +187,7 @@ export function AdminSettings() {
       try {
         const s = await adminApi.setLlmKey(key)
         setStatus(s)
+        _adminCache = { status: s, restricted: false }
         setKeyInput("")
         setMessage("Claude API key saved. Sprntly will now use it for this workspace.")
       } catch (e) {
@@ -185,6 +206,7 @@ export function AdminSettings() {
     try {
       const s = await adminApi.deleteLlmKey()
       setStatus(s)
+      _adminCache = { status: s, restricted: false }
       setMessage("Key removed. Sprntly will use the platform key again.")
     } catch (e) {
       setError(e instanceof ApiError ? apiErrorMessage(e.status, e.body) : "Could not remove the key.")

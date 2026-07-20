@@ -380,8 +380,12 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectSlack()
   } else if (providerId === "fireflies") {
     await connectorsApi.disconnectFireflies()
-  } else if (providerId === "slack") {
-    await connectorsApi.disconnectSlack()
+  } else if (providerId === "sprinklr") {
+    await connectorsApi.disconnectSprinklr()
+  } else if (providerId === "asana") {
+    await connectorsApi.disconnectAsana()
+  } else if (providerId === "superset") {
+    await connectorsApi.disconnectSuperset()
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }

@@ -6,7 +6,7 @@
 
 Generation and push are kept SEPARATE on purpose: generation never touches the
 user's tracker, so the user reviews the stories before any are written. Push is
-the explicit, outward-facing write. All routes require_company (tenant scoped).
+the explicit, outward-facing write. All routes require_workspace (tenant scoped).
 """
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company
-from app.connectors import clickup_oauth, jira_oauth
+from app.auth import WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
+from app.connectors import asana_oauth, clickup_oauth, jira_oauth
 from app.stories.generate import (
     PRDNotFoundError,
     Story,
@@ -26,8 +26,10 @@ from app.stories.generate import (
 )
 from app.prd_runner import warm_impl_spec
 from app.stories.push import (
+    AsanaNotConnectedError,
     ClickUpNotConnectedError,
     JiraNotConnectedError,
+    push_stories_to_asana,
     push_stories_to_clickup,
     push_stories_to_jira,
 )
@@ -120,7 +122,7 @@ class PushJiraIn(BaseModel):
 @router.post("/generate")
 async def generate(
     body: GenerateIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Kick off user-story generation from a PRD (or a free-form insight).
 
@@ -235,7 +237,7 @@ async def generate(
 @router.get("/jobs/{job_id}")
 def get_job(
     job_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Poll a story-generation job. 404 for an unknown job or a foreign tenant
     (job ids are sequential integers, so bind to the caller's company)."""
@@ -260,7 +262,7 @@ def get_job(
 @router.get("/for-prd/{prd_id}")
 def tickets_for_prd(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Return the persisted tickets for a PRD and whether they're still fresh.
 
@@ -290,7 +292,7 @@ def tickets_for_prd(
 
 
 @router.post("/lists")
-def clickup_lists(company: CompanyContext = Depends(require_company)):
+def clickup_lists(company: WorkspaceContext = Depends(require_workspace)):
     """List the ClickUp lists this company can push into (target picker).
 
     404 if ClickUp isn't connected.
@@ -307,7 +309,7 @@ def clickup_lists(company: CompanyContext = Depends(require_company)):
 @router.post("/push")
 def push(
     body: PushIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Create the given stories as tasks in a ClickUp list (explicit write).
 
@@ -323,7 +325,7 @@ def push(
 
 
 @router.post("/jira/projects")
-def jira_projects(company: CompanyContext = Depends(require_company)):
+def jira_projects(company: WorkspaceContext = Depends(require_workspace)):
     """List the Jira projects this company can push stories into (target picker).
 
     404 if Jira isn't connected.
@@ -337,6 +339,27 @@ def jira_projects(company: CompanyContext = Depends(require_company)):
     return {"projects": jira_oauth.list_projects(access_token, cloud_id)}
 
 
+@router.post("/asana/projects")
+def asana_projects(company: WorkspaceContext = Depends(require_workspace)):
+    """List the Asana projects this company can push stories into (target
+    picker). Returns `{lists: [{id, name}]}` — shaped like the ClickUp list
+    picker (project gid as `id`) so the web's compact destination picker is
+    reused unchanged. 404 if Asana isn't connected.
+    """
+    from app.stories.push import _asana_creds
+
+    try:
+        token = _asana_creds(company.company_id)
+    except AsanaNotConnectedError as e:
+        raise HTTPException(404, str(e)) from e
+    return {
+        "lists": [
+            {"id": p["gid"], "name": p.get("name") or p["gid"]}
+            for p in asana_oauth.list_projects(token) if p.get("gid")
+        ]
+    }
+
+
 class JiraMembersIn(BaseModel):
     project_key: str = Field(..., min_length=1)
     query: str | None = None
@@ -345,7 +368,7 @@ class JiraMembersIn(BaseModel):
 @router.post("/jira/members")
 def jira_members(
     body: JiraMembersIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """List users assignable to issues in a Jira project (assignee picker).
 
@@ -367,7 +390,7 @@ def jira_members(
 @router.post("/jira/push")
 def push_jira(
     body: PushJiraIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Create the given stories as issues in a Jira project (explicit write).
 
@@ -428,7 +451,7 @@ def _public_sync_state(cfg: dict | None) -> dict:
 @router.get("/sync/{prd_id}")
 def sync_state(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """This PRD's tracker-sync state: destination, whether a sync is running,
     when it last completed, and the pulled per-ticket tracker statuses.
@@ -442,7 +465,7 @@ def sync_state(
 def tracker_meta(
     prd_id: int,
     refresh: bool = False,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """The tracker vocabulary (statuses / priorities / issue types / custom
     fields) the ticket detail renders instead of Sprntly's canned lists.
@@ -498,7 +521,7 @@ def tracker_meta(
 async def trigger_sync(
     prd_id: int,
     body: SyncTriggerIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Run a two-way sync pass for this PRD's tickets, in the background.
 
@@ -583,7 +606,7 @@ class PullStatusIn(BaseModel):
 @router.post("/pull-status")
 def pull_status(
     body: PullStatusIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Bidirectional read: return the current ClickUp state (status, assignee,
     url) for the given tickets already synced to `list_id`, keyed by ticket id.

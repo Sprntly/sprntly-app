@@ -22,6 +22,7 @@ Key behaviours covered:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -218,6 +219,104 @@ def test_ask_worker_failure_marks_error_and_does_not_crash(
     assert "kaboom" in (body["error"] or "")
 
 
+# ---- POST /v1/ask/{id}/cancel (stop an in-flight ask) -----------------------
+# The composer's Stop button POSTs here. It flips a `generating` job to
+# `cancelled`; the worker polls that status between LLM steps and aborts before
+# the (expensive) answer call, and a late answer is discarded (complete/fail are
+# guarded on status == 'generating'). Idempotent + race-safe + tenant-scoped.
+
+
+def test_cancel_generating_job_flips_to_cancelled(tenant_client, isolated_settings):
+    """A generating job → cancelled; GET reflects it."""
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    resp = t.client.post(f"/v1/ask/{ask_id}/cancel")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "cancelled"
+    assert db.get_ask_job(ask_id)["status"] == "cancelled"
+    assert t.client.get(f"/v1/ask/{ask_id}").json()["status"] == "cancelled"
+
+
+def test_cancel_already_finished_job_is_noop_returns_terminal(
+    tenant_client, isolated_settings
+):
+    """If the worker already finished (ready), cancel is a race-safe no-op and
+    reports the real terminal status instead of clobbering it to cancelled."""
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    db.complete_ask_job(ask_id, {
+        "answer": "done", "key_points": [], "citations": [],
+        "confidence": 1.0, "unanswered": "",
+    })
+    resp = t.client.post(f"/v1/ask/{ask_id}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ready"
+    assert db.get_ask_job(ask_id)["status"] == "ready"
+
+
+def test_cancel_foreign_job_returns_404_and_leaves_it_running(
+    tenant_client, isolated_settings
+):
+    """A job belonging to another company is not cancellable (404, no
+    disclosure) and stays generating."""
+    a = tenant_client.make(slug="company-a")
+    ask_id = db.start_ask_job(company_id=a.company_id, dataset="company-a", question="q?")
+    b = tenant_client.make(slug="company-b")
+    resp = b.client.post(f"/v1/ask/{ask_id}/cancel")
+    assert resp.status_code == 404
+    assert db.get_ask_job(ask_id)["status"] == "generating"
+
+
+def test_cancel_nonexistent_returns_404(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post("/v1/ask/999999/cancel")
+    assert resp.status_code == 404
+
+
+def test_late_answer_does_not_resurrect_a_cancelled_job(
+    tenant_client, isolated_settings
+):
+    """The un-interruptible final LLM call can finish AFTER a cancel lands. The
+    guarded complete_ask_job must NOT overwrite the cancel and resurface the
+    unwanted answer."""
+    t = tenant_client.make(slug="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    assert db.cancel_ask_job(ask_id) == "cancelled"
+    db.complete_ask_job(ask_id, {
+        "answer": "late unwanted answer", "key_points": [], "citations": [],
+        "confidence": 1.0, "unanswered": "",
+    })
+    row = db.get_ask_job(ask_id)
+    assert row["status"] == "cancelled"
+    assert (row.get("response") or {}).get("answer", "") != "late unwanted answer"
+
+
+def test_worker_aborts_before_llm_when_cancelled(
+    tenant_client, isolated_settings, fake_llm
+):
+    """A pre-cancelled job short-circuits at qa_agent's first checkpoint: the
+    worker leaves the row `cancelled` (NOT error) and never calls the answer
+    LLM, so the Stop actually saves the generation cost."""
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    ask_id = db.start_ask_job(company_id=t.company_id, dataset="acme", question="q?")
+    db.cancel_ask_job(ask_id)
+    fake_llm["calls"].clear()
+
+    from app.ask_job_runner import run_ask_job
+
+    asyncio.run(run_ask_job(
+        ask_id=ask_id,
+        enterprise_id=t.company_id,
+        question="q?",
+        dataset="acme",
+    ))
+
+    row = db.get_ask_job(ask_id)
+    assert row["status"] == "cancelled"  # not 'error', not 'ready'
+    assert fake_llm["calls"] == []       # the expensive answer LLM was skipped
+
+
 # ---- GET status auth/ownership ----------------------------------------------
 
 def test_get_ask_nonexistent_returns_404(tenant_client, isolated_settings):
@@ -354,3 +453,135 @@ def test_ask_accepts_question_with_inlined_attachment_block(tenant_client, isola
     assert resp.status_code == 200, resp.text
     body = _poll_ask(t.client, resp.json()["ask_id"])
     assert body["status"] == "ready"
+
+
+def test_find_cached_ask_skips_oversized_question_without_hitting_the_client():
+    """An oversized question (a chat ask carrying an inlined [Attached files]
+    block — tens of KB) can never match a pre-warmed prompt, and sending it as a
+    PostgREST `?question=eq.<value>` URL filter overflows the request limit → a
+    400 that surfaced as a 500 on the whole ask (the multi-file 'Failed to fetch'
+    bug). find_cached_ask must short-circuit to a miss BEFORE touching the DB.
+
+    The route-level tests can't reproduce this — the test DB enforces no URL
+    limit — so we assert the guard directly: require_client must never be called.
+    """
+    from app.db import asks as asks_mod
+
+    called = False
+
+    def _boom():
+        nonlocal called
+        called = True
+        raise AssertionError("require_client must not be called for an oversized question")
+
+    original = asks_mod.require_client
+    asks_mod.require_client = _boom
+    try:
+        huge = "q " * asks_mod._MAX_CACHE_QUESTION_CHARS  # well over the ceiling
+        assert asks_mod.find_cached_ask("acme", huge) is None
+        assert called is False
+    finally:
+        asks_mod.require_client = original
+
+
+# ---- PRD-tab grounding (prd_id) ---------------------------------------------
+# A chat running beside an open PRD sends prd_id; the answer must be grounded
+# on that PRD (+ insight/evidence/tickets), the prd must be ownership-gated,
+# and the (dataset, question)-keyed prewarm cache must be bypassed — it would
+# serve a context-free answer for a question about the open PRD.
+
+def _seed_prd(db, *, slug: str, prd_id: int, payload_md: str = "# PRD body"):
+    brief = db.table("briefs").insert(
+        {"dataset": slug, "week_label": "W",
+         "payload": {"insights": [{"title": "Top insight", "body": "Insight body."}]},
+         "is_current": True}
+    ).execute().data[0]
+    db.table("prds").insert(
+        {"id": prd_id, "brief_id": brief["id"], "insight_index": 0,
+         "title": "The open PRD", "status": "ready", "payload_md": payload_md}
+    ).execute()
+
+
+def test_ask_foreign_prd_id_returns_404(tenant_client, isolated_settings):
+    """prd_id must belong to the caller — otherwise a crafted id would seed a
+    foreign tenant's PRD into the answer context."""
+    tenant_client.make(slug="company-a")
+    _seed_prd(isolated_settings["supabase"], slug="company-a", prd_id=401)
+    b = tenant_client.make(slug="company-b")
+    _seed_corpus(isolated_settings["data_dir"], dataset="company-b")
+    resp = b.client.post(
+        "/v1/ask",
+        json={"question": "What does this PRD say?", "dataset": "company-b",
+              "prd_id": 401},
+    )
+    assert resp.status_code == 404
+
+
+def test_ask_with_prd_id_grounds_answer_on_prd(
+    tenant_client, isolated_settings, fake_llm
+):
+    """The LLM prompt for a PRD-tab ask carries the CURRENT PRD CONTEXT block
+    with the PRD body and its source insight — riding the CACHEABLE user
+    prefix (byte-stable across turns → prompt-cache reads), with the question
+    kept in the uncached user suffix."""
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    _seed_prd(
+        isolated_settings["supabase"], slug="acme", prd_id=402,
+        payload_md="# Export revamp\nUsers need CSV export.",
+    )
+    fake_llm["payload"] = {
+        "answer": "grounded", "key_points": [], "citations": [],
+        "confidence": 0.9, "unanswered": "",
+    }
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": "What is the biggest churn driver?",
+              "dataset": "acme", "prd_id": 402},
+    ).json()
+    body = _poll_ask(t.client, start["ask_id"])
+    assert body["status"] == "ready"
+    assert len(fake_llm["calls"]) == 1
+    prefix = fake_llm["calls"][0]["kwargs"]["user_cacheable_prefix"]
+    assert "CURRENT PRD CONTEXT" in prefix
+    assert "Users need CSV export." in prefix
+    assert "Top insight" in prefix
+    # The question stays in the uncached suffix; the PRD block does NOT.
+    prompt = fake_llm["calls"][0]["user"]
+    assert "What is the biggest churn driver?" in prompt
+    assert "CURRENT PRD CONTEXT" not in prompt
+    # The job row records the grounding PRD (mirrors conversation_id).
+    row = db.get_ask_job(start["ask_id"])
+    assert row["prd_id"] == 402
+
+
+def test_ask_with_prd_id_skips_prewarm_cache(
+    tenant_client, isolated_settings, fake_llm, monkeypatch
+):
+    """A cached (dataset, question) answer is context-free — a PRD-tab ask must
+    generate fresh instead of serving it."""
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MIN_SECONDS", 0.0)
+    monkeypatch.setattr(ask_route, "CACHE_HIT_DELAY_MAX_SECONDS", 0.0)
+    t = tenant_client.make(slug="acme")
+    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
+    _seed_prd(isolated_settings["supabase"], slug="acme", prd_id=403)
+    question = "What are the biggest revenue drivers"
+    cache_id = db.start_cached_ask(dataset="acme", question=question)
+    db.complete_cached_ask(
+        cache_id,
+        json.dumps({"answer": "**Cached answer**", "key_points": [],
+                    "citations": [], "confidence": 1.0, "unanswered": ""}),
+    )
+    fake_llm["payload"] = {
+        "answer": "fresh grounded answer", "key_points": [], "citations": [],
+        "confidence": 0.9, "unanswered": "",
+    }
+    fake_llm["calls"].clear()
+    start = t.client.post(
+        "/v1/ask",
+        json={"question": question, "dataset": "acme", "prd_id": 403},
+    ).json()
+    body = _poll_ask(t.client, start["ask_id"])
+    assert body["status"] == "ready"
+    assert body["answer"] == "fresh grounded answer"
+    assert len(fake_llm["calls"]) == 1

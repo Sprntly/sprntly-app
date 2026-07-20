@@ -85,7 +85,9 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "cached_asks":          {"response"},
     "ask_jobs":             {"response"},
     "website_analysis_jobs": {"result"},
-    "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings", "feature_flags"},
+    "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings", "feature_flags", "icp", "tone_voice"},
+    "products":             {"surfaces", "personas", "monetization"},
+    "workspace_invites":    {"workspace_ids"},
     "connections":          {"config"},
     "org_invites":          {"feature_flags"},
     "github_installations": {"permissions", "events"},
@@ -112,6 +114,9 @@ _BOOL_COLUMNS: dict[str, set[str]] = {
     "briefs":               {"is_current"},
     "github_installations": {"suspended"},
     "github_pull_requests": {"is_draft"},
+    "workspaces":           {"is_default"},
+    "products":             {"is_primary"},
+    "ideation_items":       {"shortlisted"},
 }
 
 
@@ -193,15 +198,24 @@ class _Query:
         self._eqs.append((col, val))
         return self
 
+    def neq(self, col: str, val: Any) -> "_Query":
+        """`col != ?` (PostgREST `.neq`). NULL columns are excluded in both
+        engines (NULL != x is NULL → false), matching Postgres."""
+        self._raw_where.append(f"{col} != ?")
+        self._raw_args.append(val)
+        return self
+
     def in_(self, col: str, vals: Iterable) -> "_Query":
         self._ins.append((col, list(vals)))
         return self
 
     def ilike(self, col: str, val: Any) -> "_Query":
         """Case-insensitive match. SQLite's LIKE is ASCII case-insensitive,
-        which mirrors PostgREST `.ilike` for the GitHub-login lookup that uses
-        it (logins carry no %/_ wildcards)."""
-        self._raw_where.append(f"{col} LIKE ?")
+        which mirrors PostgREST `.ilike`. ESCAPE '\\' matches Postgres' default
+        escape character so backslash-escaped patterns (the team email lookup
+        escapes %/_ in emails) behave identically; patterns without
+        backslashes (the GitHub-login lookup) are unaffected."""
+        self._raw_where.append(f"{col} LIKE ? ESCAPE '\\'")
         self._raw_args.append(val)
         return self
 

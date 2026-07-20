@@ -43,15 +43,16 @@ class Settings(BaseSettings):
     # behind warming. Default 1 (warm serialized); raise via LLM_BG_CAP to
     # parallelize the per-insight PRD/evidence warm (clamped to capacity-1).
     llm_bg_cap: int = 1
-    # Ticket generation strategy. "single" (default) is one big streamed call
-    # for the whole set; when ticket_gen_fanout is true the route uses the
-    # fan-out path (plan → parallel enrich) which shards the big generation into
-    # concurrent shorter streams. Fan-out shards contend for the SAME
-    # llm_max_concurrency slots, so raising ticket_gen_max_parallel without also
-    # raising llm_max_concurrency just makes shards queue on the gate. Kept off
-    # by default until the benchmark confirms the win on the target box.
+    # Ticket generation strategy. When ticket_gen_fanout is true (default) the
+    # route uses the fan-out path (plan → parallel enrich) which shards the big
+    # generation into concurrent shorter streams — benchmarked ~35% faster than
+    # the "single" one-big-call path and verified live on staging (PR #737/#745).
+    # Fan-out shards contend for the SAME llm_max_concurrency slots, so raising
+    # ticket_gen_max_parallel without also raising llm_max_concurrency just
+    # makes shards queue on the gate. Set TICKET_GEN_FANOUT=false to fall back
+    # to the single-call path.
     # Env: TICKET_GEN_FANOUT / TICKET_GEN_BATCH_SIZE / TICKET_GEN_MAX_PARALLEL.
-    ticket_gen_fanout: bool = False
+    ticket_gen_fanout: bool = True
     ticket_gen_batch_size: int = 4
     ticket_gen_max_parallel: int = 4
     # Tier 1 — process-wide cap on how many Design Agent generations may run
@@ -195,6 +196,29 @@ class Settings(BaseSettings):
     # HubSpot accounts can't create legacy public apps. Set to "v1" for
     # backward-compat with older legacy apps still active in production.
     hubspot_oauth_version: str = "v3"
+
+    # Asana connector (OAuth 2.0; ~1h access tokens with long-lived refresh).
+    # App registered in the Asana developer console. Scope depends on the
+    # app's permission MODE there: full-permissions apps accept only the
+    # special "default" scope (granular scopes get `forbidden_scopes`),
+    # while scoped-permissions apps take space-separated
+    # "<resource>:<action>" scopes that were pre-selected on the app —
+    # for those, set ASANA_SCOPES="users:read workspaces:read".
+    asana_client_id: str = ""
+    asana_client_secret: str = ""
+    asana_oauth_redirect_uri: str = ""
+    asana_scopes: str = "default"
+
+    # Sprinklr connector (OAuth 2.0; ~30-day access tokens with refresh).
+    # Key + secret come from an app registered on dev.sprinklr.com; they are
+    # ENVIRONMENT-SPECIFIC — a key minted for one Sprinklr environment is
+    # invalid in another, so sprinklr_environment must match the env the app
+    # was registered for ("" = production app.sprinklr.com; "prod0"/"prod2"/
+    # "sandbox" for the others).
+    sprinklr_api_key: str = ""
+    sprinklr_api_secret: str = ""
+    sprinklr_oauth_redirect_url: str = ""
+    sprinklr_environment: str = ""
 
     # Slack connector (OAuth 2.0 — bot token for message delivery + sync)
     slack_client_id: str = ""
@@ -397,6 +421,19 @@ class Settings(BaseSettings):
     analysis_mode: str = "aggressive"
     # Max concurrent agent calls during multi-agent orchestration.
     multi_agent_concurrency: int = 6
+
+    # ── Sentry (error tracking) ──
+    # DSN for this backend's Sentry project. EMPTY = Sentry fully disabled
+    # (local dev, CI, tests never send anything). Set per-environment via the
+    # systemd EnvironmentFile / .env. See app/sentry.py.
+    sentry_dsn: str = ""
+    # Logical environment tag shown in Sentry ("production", "staging", …).
+    sentry_environment: str = "development"
+    # Tracing sample rate. Default 0.0 = errors only (no perf overhead / cost).
+    # Raise (e.g. 0.1) to sample transactions for performance monitoring.
+    sentry_traces_sample_rate: float = 0.0
+    # Optional release identifier (git sha / version) for grouping regressions.
+    sentry_release: str = ""
 
     @property
     def github_app_private_key_pem(self) -> str:

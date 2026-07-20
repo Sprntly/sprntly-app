@@ -37,7 +37,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PROVIDERS = ("clickup", "jira")
+PROVIDERS = ("clickup", "jira", "asana")
 
 # Canonical status projection values.
 CATEGORY_OPEN = "open"
@@ -129,6 +129,27 @@ JIRA_BUILTIN_FIELDS = [
     {"id": "builtin:labels", "name": "Labels", "type": "labels",
      "raw_type": "builtin", "required": False, "editable": True, "options": None},
 ]
+# Asana built-ins. Only the due date is EDITABLE: Asana rejects a task write
+# that sets `start_on` without a `due_on` in the SAME request (the API mirrors
+# the web app's "start must have an end" rule), so a start-date-only push 400s
+# and would collaterally block other custom-field writes batched into the same
+# PUT. Due date has no such coupling. Assignee is absent too — like ClickUp/
+# Jira, cross-system identity isn't editable from Sprntly.
+ASANA_BUILTIN_FIELDS = [
+    {"id": "builtin:due_date", "name": "Due date", "type": "date",
+     "raw_type": "builtin", "required": False, "editable": True, "options": None},
+]
+
+# Asana custom-field resource_subtype → our editor type. Absent = unsupported
+# (shown read-only). People maps to `users` for parity with Jira/ClickUp.
+_ASANA_TYPE_MAP = {
+    "text": "text",
+    "number": "number",
+    "enum": "select",
+    "multi_enum": "multiselect",
+    "date": "date",
+    "people": "users",
+}
 
 
 def jira_category_key_to_canonical(key: str | None) -> str:
@@ -147,6 +168,21 @@ def _clickup_category(status_type: str | None) -> str:
     if t in ("closed", "done"):
         return CATEGORY_DONE
     return CATEGORY_IN_PROGRESS
+
+
+def _asana_section_category(name: str | None) -> str:
+    """Asana has no status field — a task's status is which SECTION it's in,
+    and sections carry no category, so we infer one from the section NAME
+    (heuristic, mirror of stories.sync.tracker_status_to_sprntly). Unknown
+    names default to open — a section is a place work sits, so "not clearly
+    done/in-progress" reads as open/todo."""
+    v = (name or "").strip().lower()
+    if "done" in v or "complet" in v or "closed" in v or "resolved" in v or "ship" in v:
+        return CATEGORY_DONE
+    if ("progress" in v or "doing" in v or "review" in v or v == "qa"
+            or "testing" in v or "dev" in v or "build" in v):
+        return CATEGORY_IN_PROGRESS
+    return CATEGORY_OPEN
 
 
 # ── Normalizers ──────────────────────────────────────────────────────────────
@@ -271,6 +307,59 @@ def normalize_clickup_meta(
     }
 
 
+def normalize_asana_meta(
+    destination_id: str,
+    *,
+    sections: list[dict[str, Any]],
+    custom_fields: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the normalized TrackerMeta from an Asana project's sections +
+    custom-field definitions (asana_oauth.list_project_sections /
+    get_project_custom_fields). Sections ARE the status columns (status id =
+    SECTION GID; stories.sync moves a task by that gid). Custom fields
+    (enum/multi_enum/text/number/date/people) become the editable field
+    vocabulary the ticket detail + MCP render and two-way sync. Asana has no
+    native priority / issue type, so those stay empty."""
+    out_fields: list[dict[str, Any]] = [dict(f) for f in ASANA_BUILTIN_FIELDS]
+    for cf in custom_fields or []:
+        fid = cf.get("gid")
+        if not fid:
+            continue
+        raw_type = (cf.get("resource_subtype") or cf.get("type") or "")
+        our_type = _ASANA_TYPE_MAP.get(raw_type)
+        options = [
+            {"id": o.get("gid"), "name": o.get("name"), "color": o.get("color")}
+            for o in cf.get("enum_options") or []
+            if o.get("gid") and o.get("name")
+        ] or None
+        out_fields.append({
+            "id": fid,
+            "name": cf.get("name") or fid,
+            "type": our_type or "unsupported",
+            "raw_type": raw_type,
+            "required": False,
+            "editable": our_type in SUPPORTED_FIELD_TYPES,
+            "options": options,
+        })
+    return {
+        "provider": "asana",
+        "destination_id": destination_id,
+        "statuses": [
+            {
+                "id": s.get("gid"),
+                "name": s.get("name"),
+                "color": None,
+                "category": _asana_section_category(s.get("name")),
+            }
+            for s in sections
+            if s.get("gid") and s.get("name")
+        ],
+        "priorities": [],
+        "issue_types": None,
+        "fields": out_fields,
+    }
+
+
 # ── Fetch (live read → normalized shape) ─────────────────────────────────────
 
 
@@ -308,6 +397,18 @@ def fetch_tracker_meta(
                 access_token, destination_id
             ),
         )
+    elif provider == "asana":
+        from app.connectors import asana_oauth
+        from app.stories.push import _asana_creds
+
+        access_token = _asana_creds(company_id)
+        meta = normalize_asana_meta(
+            destination_id,
+            sections=asana_oauth.list_project_sections(access_token, destination_id),
+            custom_fields=asana_oauth.get_project_custom_fields(
+                access_token, destination_id
+            ),
+        )
     else:
         raise ValueError(f"unknown tracker provider {provider!r}")
     meta["fetched_at"] = datetime.now(timezone.utc).isoformat()
@@ -342,6 +443,14 @@ def warm_company_tracker_meta(
         token = _clickup_access_token(company_id)
         destinations = [
             l["id"] for l in clickup_oauth.list_lists(token) if l.get("id")
+        ]
+    elif provider == "asana":
+        from app.connectors import asana_oauth
+        from app.stories.push import _asana_creds
+
+        token = _asana_creds(company_id)
+        destinations = [
+            p["gid"] for p in asana_oauth.list_projects(token) if p.get("gid")
         ]
     else:
         return 0
@@ -648,8 +757,10 @@ def decode_field_value(
             if isinstance(raw, dict):
                 return {
                     "id": str(raw.get("accountId") or raw.get("id") or ""),
+                    # `name` covers Asana's compact user shape ({gid, name});
+                    # displayName/username/email cover Jira/ClickUp.
                     "name": raw.get("displayName") or raw.get("username")
-                            or raw.get("email"),
+                            or raw.get("email") or raw.get("name"),
                 }
             return None
         if ftype == "users":
@@ -658,7 +769,7 @@ def decode_field_value(
                 {
                     "id": str(u.get("accountId") or u.get("id") or ""),
                     "name": u.get("displayName") or u.get("username")
-                            or u.get("email"),
+                            or u.get("email") or u.get("name"),
                 }
                 for u in items if isinstance(u, dict)
             ]
@@ -702,6 +813,12 @@ def encode_field_value(
             if dt.tzinfo is None:
                 dt = dt.replace(tzinfo=timezone.utc)
             return int(dt.timestamp() * 1000)
+        if provider == "asana":
+            # Validate the date up front (parity with ClickUp) so a bad value
+            # 422s at save time instead of failing later at push. Asana date
+            # writes take {"date": "YYYY-MM-DD"} (day granularity).
+            datetime.fromisoformat(str(value))  # raises ValueError on garbage
+            return {"date": str(value)[:10]}
         return str(value)
     if ftype == "select":
         oid = (value or {}).get("id") if isinstance(value, dict) else None
@@ -710,12 +827,17 @@ def encode_field_value(
                 return {"id": str(oid)}
             name = value.get("name") if isinstance(value, dict) else value
             return {"value": str(name)}
+        # ClickUp drop_down + Asana enum both write the chosen OPTION id.
         if not oid:
-            raise ValueError("ClickUp drop_down values need an option id")
+            raise ValueError(f"{provider} select values need an option id")
         return str(oid)
     if ftype == "multiselect":
         items = value if isinstance(value, list) else [value]
         ids = [str(i["id"]) for i in items if isinstance(i, dict) and i.get("id")]
+        # Entries with no option ids can't encode — fail loudly instead of
+        # silently clearing the field. An empty list ([]) IS a valid clear.
+        if items and not ids:
+            raise ValueError("multiselect values need option ids")
         if provider == "jira":
             return [{"id": i} for i in ids]
         return ids
@@ -727,8 +849,12 @@ def encode_field_value(
     if ftype == "users":
         items = value if isinstance(value, list) else [value]
         ids = [i["id"] for i in items if isinstance(i, dict) and i.get("id")]
+        if items and not ids:
+            raise ValueError("user values need ids")
         if provider == "jira":
             return [{"accountId": str(i)} for i in ids]
+        if provider == "asana":  # people fields take a list of user gids
+            return [str(i) for i in ids]
         return {"add": ids}
     if ftype == "labels":
         return [str(x) for x in (value if isinstance(value, list) else [value])]

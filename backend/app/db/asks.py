@@ -8,8 +8,23 @@ ask_jobs:   per-request, per-tenant status row for the blur-safe chat Ask
              background task; the client polls GET /v1/ask/{id}.
 """
 import json
+import logging
+
+from postgrest.exceptions import APIError
 
 from app.db.client import require_client, retry_on_disconnect
+
+logger = logging.getLogger(__name__)
+
+# The cache is keyed on the EXACT question text, which PostgREST sends as an
+# `?question=eq.<value>` URL filter. The pre-warmed set is a handful of short
+# starter prompts (see PREDEFINED_ASK_PROMPTS — the longest is ~130 chars), so a
+# question longer than this ceiling can never be a cache hit. Looking it up
+# anyway builds a URL that overflows PostgREST's request limit and 400s ("JSON
+# could not be generated" / "Bad Request") — which is exactly what a chat ask
+# carrying an inlined `[Attached files]` block (tens of KB) does. Skip the lookup
+# for oversized questions so a multi-file ask is a clean cache miss, not a 500.
+_MAX_CACHE_QUESTION_CHARS = 1000
 
 
 # ─────────────────────── ask_log (append-only) ───────────────────────
@@ -81,17 +96,30 @@ def find_cached_ask(dataset: str, question: str) -> dict | None:
     Returns the SQLite-shaped dict — `response_json` (string), not
     `response` (jsonb) — so callers don't change.
     """
+    normalized = _normalize_q(question)
+    # An oversized question (e.g. a chat ask with an inlined [Attached files]
+    # block) can never match a pre-warmed prompt, and sending it as a URL filter
+    # overflows PostgREST's request limit → a 400 that bubbles up as a 500 on the
+    # whole ask. Treat it as an immediate cache miss.
+    if len(normalized) > _MAX_CACHE_QUESTION_CHARS:
+        return None
     c = require_client()
-    resp = (
-        c.table("cached_asks")
-        .select("*")
-        .eq("dataset", dataset)
-        .eq("question", _normalize_q(question))
-        .in_("status", ["ready", "generating"])
-        .order("id", desc=True)
-        .limit(1)
-        .execute()
-    )
+    try:
+        resp = (
+            c.table("cached_asks")
+            .select("*")
+            .eq("dataset", dataset)
+            .eq("question", normalized)
+            .in_("status", ["ready", "generating"])
+            .order("id", desc=True)
+            .limit(1)
+            .execute()
+        )
+    except APIError:
+        # Defence in depth: any malformed-query failure degrades to a cache miss
+        # so the ask falls through to real generation instead of erroring out.
+        logger.warning("cached_asks lookup failed; treating as miss", exc_info=True)
+        return None
     if not resp.data:
         return None
     row = resp.data[0]
@@ -127,6 +155,60 @@ def invalidate_orphan_generating_cached_asks() -> int:
     return len(ids)
 
 
+ORPHAN_ASK_JOB_ERROR = (
+    "Generation was interrupted by a server restart. Please ask again."
+)
+
+# How long an `ask_jobs` row may sit in `generating` before we treat it as
+# abandoned. Deliberately well above the slowest real answer (multi-step asks
+# run a couple of minutes) — see fail_orphan_generating_ask_jobs for why this
+# must not be tightened to "anything generating at startup".
+ORPHAN_ASK_JOB_AFTER_MINUTES = 15
+
+
+def fail_orphan_generating_ask_jobs(
+    older_than_minutes: int = ORPHAN_ASK_JOB_AFTER_MINUTES,
+) -> int:
+    """Fail `ask_jobs` rows abandoned in `generating` by a dead worker.
+
+    When the process dies mid-answer the owning worker goes with it, so nothing
+    will ever move the row to a terminal state. The Ask UI polls
+    `GET /v1/ask/{id}` until the status leaves `generating`, so an interrupted
+    job spins forever and reads to the user as "failed to generate answer" with
+    no error to explain it. Observed on staging when a deploy restart landed 34s
+    into job 189. `cached_asks` already had this treatment
+    (invalidate_orphan_generating_cached_asks); `ask_jobs` did not.
+
+    IMPORTANT — why the age cutoff rather than "fail everything generating":
+    staging and prod share one Supabase project, so both environments' rows live
+    in this table. A blanket sweep at staging startup would kill answers being
+    generated right then by the prod process (and vice versa). Age is the only
+    signal here that separates "owner is dead" from "owner is another live
+    process", since rows carry no owner/heartbeat column."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+    ).isoformat()
+    c = require_client()
+    rows = (
+        c.table("ask_jobs")
+        .select("id")
+        .eq("status", "generating")
+        .lt("updated_at", cutoff)
+        .execute()
+        .data
+    )
+    ids = [r["id"] for r in rows]
+    if ids:
+        c.table("ask_jobs").update({
+            "status": "error",
+            "error": ORPHAN_ASK_JOB_ERROR,
+            "updated_at": _now(),
+        }).in_("id", ids).eq("status", "generating").execute()
+    return len(ids)
+
+
 # ─────────────────────── ask_jobs (fire-and-forget) ───────────────────────
 
 
@@ -137,6 +219,7 @@ def start_ask_job(
     question: str,
     conversation_id: int | None = None,
     pinned_skill: str | None = None,
+    prd_id: int | None = None,
 ) -> int:
     """Persist a `generating` Ask job row and return its id. The POST returns
     this id immediately; the background worker fills `response` and flips the
@@ -148,6 +231,7 @@ def start_ask_job(
         "question": question,
         "conversation_id": conversation_id,
         "pinned_skill": pinned_skill,
+        "prd_id": prd_id,
         "status": "generating",
         "response": {},
     }).execute()
@@ -155,24 +239,63 @@ def start_ask_job(
 
 
 def complete_ask_job(ask_id: int, payload: dict) -> None:
-    """Store the citation-stripped answer payload and mark the job `ready`."""
+    """Store the citation-stripped answer payload and mark the job `ready`.
+
+    Guarded on `status == 'generating'`: if the user stopped the ask
+    (status → `cancelled`) while the answer was in its final, un-interruptible
+    LLM call, the finished-but-unwanted answer must NOT overwrite the cancel and
+    resurface. The conditional update no-ops in that race, so a cancelled job
+    stays cancelled."""
     c = require_client()
     c.table("ask_jobs").update({
         "response": payload or {},
         "status": "ready",
         "error": None,
         "updated_at": _now(),
-    }).eq("id", ask_id).execute()
+    }).eq("id", ask_id).eq("status", "generating").execute()
 
 
 def fail_ask_job(ask_id: int, error: str) -> None:
-    """Mark the job `error` (best-effort — the worker never crashes on this)."""
+    """Mark the job `error` (best-effort — the worker never crashes on this).
+
+    Guarded on `status == 'generating'` for the same reason as
+    complete_ask_job: a cancel that landed first must not be clobbered by a
+    trailing failure from the (now-abandoned) worker."""
     c = require_client()
     c.table("ask_jobs").update({
         "status": "error",
         "error": (error or "")[:500],
         "updated_at": _now(),
-    }).eq("id", ask_id).execute()
+    }).eq("id", ask_id).eq("status", "generating").execute()
+
+
+def cancel_ask_job(ask_id: int) -> str | None:
+    """Stop an in-flight Ask: flip `generating` → `cancelled`, then return the
+    job's ACTUAL resulting status (or None if the row is gone).
+
+    The update is conditional on `status == 'generating'` so it's a race-safe
+    no-op when the worker already finished (the row is `ready`/`error`) — the
+    subsequent read then reports that real terminal state, letting the caller be
+    idempotent. Returns 'cancelled' when this call won the race."""
+    c = require_client()
+    c.table("ask_jobs").update({
+        "status": "cancelled",
+        "updated_at": _now(),
+    }).eq("id", ask_id).eq("status", "generating").execute()
+    row = get_ask_job(ask_id)
+    return row.get("status") if row else None
+
+
+def is_ask_cancelled(ask_id: int) -> bool:
+    """True if the Ask job has been cancelled — the worker's cooperative
+    cancellation checkpoint reads this between LLM steps to abort before the
+    next (expensive) call. Any read error degrades to False so a transient DB
+    blip never spuriously aborts a healthy answer."""
+    try:
+        row = get_ask_job(ask_id)
+    except Exception:  # noqa: BLE001 — cancellation is best-effort; never abort on a read blip
+        return False
+    return bool(row) and row.get("status") == "cancelled"
 
 
 @retry_on_disconnect

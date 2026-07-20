@@ -33,7 +33,7 @@ from app.synthesis.convergence import (
     compute_convergence,
     has_sufficient_evidence,
 )
-from app.synthesis.backlog import sequence_backlog
+from app.synthesis.ideation import sequence_ideation
 from app.synthesis.delivery import deliver_brief
 from app.synthesis.dedup import suppress_unchanged
 from app.synthesis.scoring import classify_theme_fit, score_candidates
@@ -48,8 +48,8 @@ logger = logging.getLogger(__name__)
 PROMPT_VERSION = "synthesis-brief-v4"
 MAX_CANDIDATES = 8   # themes sent to the LLM judge
 MAX_INSIGHTS = 3     # the weekly brief surfaces the TOP 3 ranked insights;
-                     # ranks 4..N are sequenced into the backlog (a single
-                     # analysis run → top 3 = brief, the rest = backlog).
+                     # ranks 4..N are sequenced into the ideation pool (a single
+                     # analysis run → top 3 = brief, the rest = ideation).
 
 
 class EmptyKnowledgeGraphError(ValueError):
@@ -203,7 +203,7 @@ computed convergence evidence: multi-source weights, revenue at stake, \
 competitive pressure) plus context (recipient, company scale). The numbers are \
 INPUTS the analysis already produced; PHRASE them per the METHOD, never recompute \
 or invent one. Select and rank the TOP 3 findings a product manager should act on \
-this week. (Lower-priority candidates are sequenced into the backlog separately, \
+this week. (Lower-priority candidates are sequenced into the ideation pool separately, \
 so focus the brief on the three that matter most.)
 
 Emit BOTH:
@@ -311,7 +311,7 @@ def _save_empty_brief(enterprise_id: str, dataset_slug: str, *, reason: str) -> 
     unchanged) but with insights=[] and a minimal summary, plus the
     ``_insufficient_evidence`` flag + ``_empty_reason`` so callers/telemetry can
     tell this apart from a content-rich brief. Slack/email delivery is SKIPPED
-    (nothing to deliver), and the backlog/judge are not run. Distinct from
+    (nothing to deliver), and the ideation pool/judge are not run. Distinct from
     EmptyKnowledgeGraphError, which still signals a totally empty KG.
     """
     now = datetime.now(timezone.utc)
@@ -384,8 +384,16 @@ def run_synthesis(
     *,
     dataset_slug: str,
     agent: str = "synthesis",
+    deliver: bool = True,
 ) -> dict:
-    """Generate + persist a KG-driven brief. Returns the brief payload."""
+    """Generate + persist a KG-driven brief. Returns the brief payload.
+
+    ``deliver=False`` suppresses the on-generation Slack/email push — used by
+    callers that own delivery themselves: the weekly scheduler (which generates
+    ahead of the configured send time and must not deliver early) and the
+    user-triggered regenerate paths (which send a short "brief is ready" ping
+    instead of the full brief message).
+    """
     convergence = compute_convergence(facade, enterprise_id)
     if not convergence:
         raise EmptyKnowledgeGraphError(
@@ -434,7 +442,7 @@ def run_synthesis(
     # Brief de-dup: a theme already surfaced in a prior brief is dropped from
     # brief candidacy unless its issue materially changed since (new evidence /
     # ≥20% metric move — see synthesis/dedup.py). Suppressed themes are not lost:
-    # they still flow to the backlog via sequence_backlog (which excludes only
+    # they still flow to the ideation pool via sequence_ideation (which excludes only
     # the brief top-N, not these). If nothing previously-surfaced changed and no
     # new themes exist, brief_pool may be smaller than convergence — that's the
     # intended "nothing new to report" outcome.
@@ -679,27 +687,32 @@ def run_synthesis(
                 "finding-state upsert failed for theme %s", tc.theme_id, exc_info=True
             )
 
-    # SEQUENCE the rest — one synthesis run yields BOTH the brief AND the
-    # ranked backlog behind it. Additive + resilient: a backlog failure must
-    # never break brief generation (the brief is already saved above), so it is
-    # isolated in try/except and only logged.
+    # SEQUENCE + PRIORITIZE the rest — one synthesis run yields BOTH the brief
+    # AND the prioritized ideation pool behind it (the weekly shortlist
+    # repopulates exactly when new ideas are generated). Additive + resilient:
+    # an ideation failure must never break brief generation (the brief is
+    # already saved above), so it is isolated in try/except and only logged.
     brief_theme_ids = [ins.get("theme_id") for ins in insights if ins.get("theme_id")]
     try:
-        backlog = sequence_backlog(
+        ideation = sequence_ideation(
             facade, enterprise_id, exclude_theme_ids=brief_theme_ids)
-        brief["_backlog_count"] = len(backlog)
-    except Exception:  # noqa: BLE001 — backlog is best-effort; brief must survive
-        logger.exception("backlog sequencing failed (brief unaffected)")
-        brief["_backlog_count"] = None
+        brief["_ideation_count"] = len(ideation)
+    except Exception:  # noqa: BLE001 — ideation is best-effort; brief must survive
+        logger.exception("ideation sequencing failed (brief unaffected)")
+        brief["_ideation_count"] = None
 
-    # Deliver on generation — this is the mid-week "a new brief was produced"
-    # push (Slack + email). The weekly scheduler tick ALSO delivers the current
-    # brief at the user's configured day/time so a quiet, unchanged-KG week
-    # still gets its scheduled push; to avoid a double send when the tick itself
-    # regenerated, the tick only delivers a brief it got from CACHE (see
-    # app.scheduler + synthesis_brief.generate_brief_for's `_from_cache`).
-    _delivery = deliver_brief(enterprise_id, brief)
-    brief["_slack_delivery"] = _delivery["slack"]
-    brief["_email_delivery"] = _delivery["email"]
+    # Deliver on generation — the "a new brief was produced" push (Slack +
+    # email) for autonomous fresh briefs (startup pass, new-dataset seed).
+    # Suppressed (deliver=False) when the caller owns delivery: the weekly
+    # scheduler generates GENERATION_LEAD early and delivers exactly at the
+    # configured fire time, and the user-triggered regenerate paths send a
+    # short "brief is ready" ping instead of this full brief message.
+    if deliver:
+        _delivery = deliver_brief(enterprise_id, brief)
+        brief["_slack_delivery"] = _delivery["slack"]
+        brief["_email_delivery"] = _delivery["email"]
+    else:
+        brief["_slack_delivery"] = {"delivered": False, "reason": "deferred"}
+        brief["_email_delivery"] = {"delivered": False, "reason": "deferred"}
 
     return brief

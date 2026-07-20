@@ -1,13 +1,19 @@
 export type ScreenId =
-  // Numbered onboarding steps, keyed by their semantic slug (6-step redesign),
-  // in flow order: business-info → workspace → api-key → connectors →
-  // business-context → strategy (strategy is the closing step).
-  | "ob-business-info"
-  | "ob-workspace"
+  // Numbered onboarding steps, keyed by their semantic slug (v6 screenshot
+  // spec 2026-07-17 + restored optional api-key step 2026-07-19, 10 steps), in
+  // flow order: company → product → metrics → api-key → connectors → team →
+  // strategy → decisions → invite → review (review closes via the unnumbered
+  // define-metrics sub-flow).
+  | "ob-company"
+  | "ob-product"
+  | "ob-metrics"
   | "ob-api-key"
   | "ob-connectors"
-  | "ob-business-context"
+  | "ob-team"
   | "ob-strategy"
+  | "ob-decisions"
+  | "ob-invite"
+  | "ob-review"
   | "chat"
   | "chats"
   // The Artifacts library — a dedicated left-nav surface listing durable outputs
@@ -27,19 +33,26 @@ export type ScreenId =
   // The dedicated full-page prototype surface. The prototype canvas renders
   // in-tab here at `/prototype?prd=<id>`; the PRD context rides as a query param.
   | "prototype"
-  | "backlog"
+  | "ideation"
   // Top-level "what good looks like" surface: the company's gold-standard PRD
   // examples. Design data-view="templates", bookmark icon.
   | "templates"
+  // The Skills gallery — every routable PM skill as a card; clicking one opens
+  // a chat thread with the skill's /trigger pre-filled in the composer.
+  | "skills"
 
 // The NUMBERED onboarding screens, in flow order.
 export const ONBOARDING_SCREENS: ScreenId[] = [
-  "ob-business-info",
-  "ob-workspace",
+  "ob-company",
+  "ob-product",
+  "ob-metrics",
   "ob-api-key",
   "ob-connectors",
-  "ob-business-context",
+  "ob-team",
   "ob-strategy",
+  "ob-decisions",
+  "ob-invite",
+  "ob-review",
 ]
 
 export const APP_SCREENS: ScreenId[] = [
@@ -59,18 +72,23 @@ export const APP_SCREENS: ScreenId[] = [
   "sources",
   "tickets",
   "prototype",
-  "backlog",
+  "ideation",
   "templates",
+  "skills",
 ]
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-business-info": "Setup · Step 1 of 6",
-  "ob-workspace": "Setup · Step 2 of 6",
-  "ob-api-key": "Setup · Step 3 of 6",
-  "ob-connectors": "Setup · Step 4 of 6",
-  "ob-business-context": "Setup · Step 5 of 6",
-  "ob-strategy": "Setup · Step 6 of 6",
+  "ob-company": "Setup · Step 1 of 10",
+  "ob-product": "Setup · Step 2 of 10",
+  "ob-metrics": "Setup · Step 3 of 10",
+  "ob-api-key": "Setup · Step 4 of 10",
+  "ob-connectors": "Setup · Step 5 of 10",
+  "ob-team": "Setup · Step 6 of 10",
+  "ob-strategy": "Setup · Step 7 of 10",
+  "ob-decisions": "Setup · Step 8 of 10",
+  "ob-invite": "Setup · Step 9 of 10",
+  "ob-review": "Setup · Step 10 of 10",
   chat: "Home",
   chats: "History",
   artifacts: "Artifacts",
@@ -85,8 +103,9 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   sources: "Sources",
   tickets: "Project Management",
   prototype: "Prototype",
-  backlog: "Backlog Projects",
+  ideation: "Ideation",
   templates: "Templates",
+  skills: "Skills",
 }
 
 export function getMainChromeTitle(screen: ScreenId): string {

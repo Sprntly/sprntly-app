@@ -43,6 +43,7 @@ type ProfileFields = {
   lastName: string
   role: string
   roleOther: string
+  priorities: string
   timezone: string
 }
 
@@ -52,11 +53,13 @@ function fieldsFromProfile(p: {
   first_name: string | null
   last_name: string | null
   role: string | null
+  priorities?: string | null
   timezone: string | null
 }): ProfileFields {
   const fields: ProfileFields = {
     firstName: p.first_name ?? "",
     lastName: p.last_name ?? "",
+    priorities: p.priorities ?? "",
     // Seed from the saved zone; if none stored yet, prefill the browser's so
     // the field is never blank and a Save persists a sensible default.
     timezone: p.timezone ?? detectBrowserTimezone() ?? "",
@@ -102,6 +105,7 @@ export function ProfileSettings() {
   const [lastName, setLastName] = useState(seeded?.lastName ?? "")
   const [role, setRole] = useState(seeded?.role ?? "")
   const [roleOther, setRoleOther] = useState(seeded?.roleOther ?? "")
+  const [priorities, setPriorities] = useState(seeded?.priorities ?? "")
   const [timezone, setTimezone] = useState(seeded?.timezone ?? "")
 
   const applyFields = useCallback((loaded: ProfileFields) => {
@@ -109,6 +113,7 @@ export function ProfileSettings() {
     setLastName(loaded.lastName)
     setRole(loaded.role)
     setRoleOther(loaded.roleOther)
+    setPriorities(loaded.priorities)
     setTimezone(loaded.timezone)
     setSnapshot(loaded)
   }, [])
@@ -122,6 +127,7 @@ export function ProfileSettings() {
       lastName !== snapshot.lastName ||
       role !== snapshot.role ||
       roleOther !== snapshot.roleOther ||
+      priorities !== snapshot.priorities ||
       timezone !== snapshot.timezone)
 
   // Full IANA zone list from the browser (modern engines). The current saved
@@ -164,7 +170,7 @@ export function ProfileSettings() {
             timezone: metaTz,
           })
           .select(
-            "id, email, first_name, last_name, role, timezone, onboarding_step, onboarding_completed_at, skipped_fields",
+            "id, email, first_name, last_name, role, priorities, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields",
           )
           .single()
         if (!error && data) {
@@ -174,7 +180,12 @@ export function ProfileSettings() {
             first_name: data.first_name,
             last_name: data.last_name,
             role: data.role,
+            priorities: data.priorities ?? null,
             timezone: data.timezone ?? null,
+            account_type:
+              data.account_type === "company" || data.account_type === "personal"
+                ? data.account_type
+                : null,
             onboarding_step: data.onboarding_step ?? 0,
             onboarding_completed_at: data.onboarding_completed_at,
             skipped_fields: Array.isArray(data.skipped_fields) ? data.skipped_fields : [],
@@ -215,6 +226,7 @@ export function ProfileSettings() {
     setLastName(snapshot.lastName)
     setRole(snapshot.role)
     setRoleOther(snapshot.roleOther)
+    setPriorities(snapshot.priorities)
     setTimezone(snapshot.timezone)
     setProfileError(null)
   }
@@ -236,9 +248,10 @@ export function ProfileSettings() {
         first_name: firstName,
         last_name: lastName,
         role: resolvedRole,
+        priorities: priorities.trim() || null,
         timezone: timezone.trim() || null,
       })
-      setSnapshot({ firstName, lastName, role, roleOther, timezone })
+      setSnapshot({ firstName, lastName, role, roleOther, priorities, timezone })
       setProfileSaved(true)
       await refreshWorkspace()
     } catch (e) {
@@ -402,6 +415,20 @@ export function ProfileSettings() {
                 maxLength={50}
               />
             )}
+          </div>
+          <div className="pset-field pset-field--full">
+            <label className="pset-label" htmlFor="pset-priorities">
+              Your priorities
+            </label>
+            <textarea
+              id="pset-priorities"
+              className="input"
+              rows={3}
+              value={priorities}
+              onChange={(e) => setPriorities(e.target.value)}
+              maxLength={500}
+              placeholder="What you're focused on right now — briefs are tuned to this"
+            />
           </div>
         </div>
 

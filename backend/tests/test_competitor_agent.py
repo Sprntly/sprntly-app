@@ -352,7 +352,7 @@ def _override_company(monkeypatch, cid="co-X"):
     import app.routes.research as research_route
     require_company = research_route.require_company
     main_mod.app.dependency_overrides[require_company] = lambda: CompanyContext(
-        company_id=cid, role="member", user_id="u1")
+        company_id=cid, role="admin", user_id="u1")
     return main_mod, require_company
 
 

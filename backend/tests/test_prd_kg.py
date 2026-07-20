@@ -441,8 +441,10 @@ def test_prd_human_storage_unchanged_on_kg(isolated_settings, facade, monkeypatc
     assert (row["llm_part"] or "") == ""
 
 
-def test_prd_kg_read_failure_falls_back_to_corpus(isolated_settings, facade, monkeypatch):
-    """A KG read that explodes must not break the PRD — it degrades to corpus."""
+def test_prd_trail_failure_degrades_to_topic_retrieval(isolated_settings, facade, monkeypatch):
+    """A trail read that explodes must not break the PRD — with a reachable KG
+    it degrades to TOPIC retrieval (tier 2), not straight to the corpus, so the
+    prompt still carries the tenant's live signals."""
     db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
 
     def _boom(*a, **k):
@@ -454,5 +456,65 @@ def test_prd_kg_read_failure_falls_back_to_corpus(isolated_settings, facade, mon
                         lambda **kw: (captured.update(kw), _llm_result(_TWO_PART))[1])
     prd_runner._run_sync(prd_id, brief_id, 0)
 
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in captured["input"]
+    assert "KG_SIGNAL_MARK abandon at pay" in captured["input"]
+    assert "CORPUS_FALLBACK_MARK" not in captured["input"]
+    assert db_mod.get_prd(prd_id)["status"] == "ready"
+    sup = isolated_settings["supabase"]
+    gen = [r for r in sup.table("agent_decision_log").select("*").execute().data
+           if r["decision_type"] == "generate_prd"]
+    assert gen[0]["factors"]["grounding"] == "kg_topic"
+    assert any(s.id in gen[0]["kg_refs"] for s in sigs)
+
+
+def test_prd_kg_fully_down_falls_back_to_corpus(isolated_settings, facade, monkeypatch):
+    """Both KG tiers exploding must not break the PRD — it degrades to corpus."""
+    db_mod, brief_id, prd_id, theme, hyp, sigs = _setup_kg_prd(isolated_settings, facade)
+
+    def _boom(*a, **k):
+        raise RuntimeError("KG down")
+
+    monkeypatch.setattr(prd_runner, "insight_evidence_trail", _boom)
+    monkeypatch.setattr(prd_runner, "retrieve_context", _boom)
+    captured: dict = {}
+    monkeypatch.setattr(prd_runner, "llm_call",
+                        lambda **kw: (captured.update(kw), _llm_result(_TWO_PART))[1])
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
     assert "CORPUS_FALLBACK_MARK" in captured["input"]
     assert db_mod.get_prd(prd_id)["status"] == "ready"
+
+
+def test_chat_task_prd_grounds_on_topic_retrieval(isolated_settings, facade, monkeypatch):
+    """The chat-task path (synthetic insight, no theme_id) grounds on topic
+    retrieval over the tenant KG — the original bug was a silent corpus
+    fallback that produced PRDs telling a different story than the KG."""
+    db_mod = isolated_settings["db"]
+    _seed_company(isolated_settings["supabase"], company_id=COMPANY_ID, slug=SLUG)
+    _seed_corpus(isolated_settings["data_dir"], SLUG)
+    _seed_trail(
+        facade, COMPANY_ID, theme_label="Bulk onboarding", insight_title="unrelated",
+        signal_specs=[
+            ("customer_voice", "complaint", "KG_SIGNAL_MARK CSV import demand", {}),
+        ])
+    brief_id = _seed_brief(db_mod, SLUG, insights=[])
+    prd_id = _start_prd(db_mod, brief_id)
+
+    captured: dict = {}
+    monkeypatch.setattr(prd_runner, "llm_call",
+                        lambda **kw: (captured.update(kw), _llm_result(_TWO_PART))[1])
+    # Mirrors routes/prd.py generate-from-task: insight_override with no theme_id.
+    prd_runner._run_sync(
+        prd_id, brief_id, 0,
+        insight_override={"title": "Bulk team onboarding feature",
+                          "summary": "Requested by the user in chat: bulk onboarding"},
+    )
+
+    assert "LIVE CONTEXT FROM CONNECTED SOURCES" in captured["input"]
+    assert "KG_SIGNAL_MARK CSV import demand" in captured["input"]
+    assert "CORPUS_FALLBACK_MARK" not in captured["input"]
+    sup = isolated_settings["supabase"]
+    gen = [r for r in sup.table("agent_decision_log").select("*").execute().data
+           if r["decision_type"] == "generate_prd"]
+    assert gen[0]["factors"]["grounding"] == "kg_topic"
+    assert gen[0]["kg_refs"] != []

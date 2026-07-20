@@ -43,13 +43,20 @@ from app.ingest import convert
 
 logger = logging.getLogger(__name__)
 
-# The typed upload cards the onboarding strategy step offers. Each card uploads
-# under one of these doc_types; the migration's CHECK constraint mirrors this set.
+# The typed upload cards the onboarding wizard offers. Each card uploads
+# under one of these doc_types; the migration's CHECK constraint mirrors this
+# set (base four from v5; the last four are the v6 steps-6/7 upload-or-type
+# blocks — team strategy/roadmap, decision process, additional context — plus
+# step 1's strategy upload reusing company_strategy).
 DOC_TYPES: tuple[str, ...] = (
     "ceo_memo",
     "team_priorities",
     "research",
     "company_strategy",
+    "team_strategy",
+    "team_roadmap",
+    "decision_process",
+    "additional_context",
 )
 
 
@@ -92,12 +99,13 @@ def save_company_document(
     filename: str,
     data: bytes,
     content_type: Optional[str] = None,
+    workspace_id: Optional[str] = None,
 ) -> CompanyDocument:
-    """Store a new strategy/context document for the company (many allowed).
+    """Store a new strategy/context document (many allowed).
 
     Each call inserts a new row — like company_template, unlike roadmap_doc's
-    one-per-company upsert — so a company can accumulate several documents per
-    doc_type."""
+    one-per-workspace upsert — so several documents can accumulate per
+    doc_type. `workspace_id` scopes the document to the active workspace."""
     extracted = _extract_text(filename, data)
     doc_id = str(uuid.uuid4())
     uploaded_at = datetime.now(timezone.utc).isoformat()
@@ -111,6 +119,8 @@ def save_company_document(
         "raw_b64": base64.b64encode(data).decode("ascii"),
         "uploaded_at": uploaded_at,
     }
+    if workspace_id:
+        row["workspace_id"] = workspace_id
     require_client().table("company_document").insert(row).execute()
     return CompanyDocument(
         id=doc_id,
@@ -124,10 +134,14 @@ def save_company_document(
 
 
 def list_company_documents(
-    company_id: str, *, doc_type: Optional[str] = None
+    company_id: str,
+    *,
+    doc_type: Optional[str] = None,
+    workspace_id: Optional[str] = None,
 ) -> list[CompanyDocument]:
     """All strategy/context documents for the company, newest first. Optionally
-    filtered by `doc_type`. Empty list when none / on read error."""
+    filtered by `doc_type` and/or the active `workspace_id`. Empty list when
+    none / on read error."""
     q = (
         require_client().table("company_document")
         .select("id,doc_type,filename,content_type,extracted_text,uploaded_at")
@@ -135,6 +149,8 @@ def list_company_documents(
     )
     if doc_type is not None:
         q = q.eq("doc_type", doc_type)
+    if workspace_id is not None:
+        q = q.eq("workspace_id", workspace_id)
     try:
         r = q.execute()
     except Exception:  # noqa: BLE001 — fail open

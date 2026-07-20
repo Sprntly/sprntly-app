@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation"
 import { AuthApiError } from "@supabase/supabase-js"
 import { useAuth } from "../lib/auth"
 import { validatePassword, validateWorkEmail } from "../lib/auth-validation"
+import { signupApi } from "../lib/api"
 import { publicPath } from "../lib/public-path"
 import { AuthShell } from "../components/auth/AuthShell"
 import { SignUpStep1View, SignUpStep2View } from "../components/auth/SignUpView"
@@ -40,6 +41,7 @@ function SignUpForm() {
   const [firstName, setFirstName] = useState("")
   const [lastName, setLastName] = useState("")
   const [role, setRole] = useState("Product Manager")
+  const [priorities, setPriorities] = useState("")
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -50,8 +52,9 @@ function SignUpForm() {
     }
   }, [auth, router])
 
-  function onStep1(e: React.FormEvent) {
+  async function onStep1(e: React.FormEvent) {
     e.preventDefault()
+    if (submitting) return
     setError(null)
     const emailErr = validateWorkEmail(email)
     if (emailErr) {
@@ -62,6 +65,21 @@ function SignUpForm() {
     if (pwErr) {
       setError(pwErr)
       return
+    }
+    // Early duplicate check so a returning user is stopped HERE, not after
+    // filling the about-you step. Fail-open on network/API errors — the
+    // signUpWithPassword "already_registered" handling remains the backstop.
+    setSubmitting(true)
+    try {
+      const { exists } = await signupApi.emailExists(email)
+      if (exists) {
+        setError("An account with this email already exists. Try signing in.")
+        return
+      }
+    } catch {
+      /* availability check only — proceed; the final signup call re-checks */
+    } finally {
+      setSubmitting(false)
     }
     setStep(2)
   }
@@ -94,6 +112,9 @@ function SignUpForm() {
         firstName,
         lastName,
         role,
+        priorities,
+        // The company/personal split is retired (v6) — every signup is company.
+        accountType: "company",
       })
       if (result === "already_registered") {
         setError("An account with this email already exists. Try signing in.")
@@ -132,11 +153,13 @@ function SignUpForm() {
         firstName={firstName}
         lastName={lastName}
         role={role}
+        priorities={priorities}
         submitting={submitting}
         error={error}
         onFirstNameChange={setFirstName}
         onLastNameChange={setLastName}
         onRoleChange={setRole}
+        onPrioritiesChange={setPriorities}
         onSubmit={onCreate}
         onBack={() => {
           setError(null)
@@ -157,7 +180,7 @@ function SignUpForm() {
       onEmailChange={setEmail}
       onPasswordChange={setPassword}
       onToggleShowPassword={() => setShowPassword((v) => !v)}
-      onSubmit={onStep1}
+      onSubmit={(e) => void onStep1(e)}
       onGoogle={onGoogle}
     />
   )

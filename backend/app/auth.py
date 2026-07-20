@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import jwt
-from fastapi import APIRouter, Cookie, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Cookie, Depends, Header, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from app.config import settings
@@ -364,6 +364,46 @@ def login(body: LoginIn, response: Response):
     return {"ok": True, "audience": body.audience}
 
 
+class EmailExistsIn(BaseModel):
+    email: str
+
+
+@router.post("/email-exists")
+def email_exists(body: EmailExistsIn):
+    """PUBLIC (pre-auth) — true iff an account already exists for this email.
+
+    The v6 sign-up step 1 calls this on "Create account" so a returning user is
+    told "already registered — sign in" IMMEDIATELY instead of after filling the
+    about-you step (supabase.auth.signUp only reveals it at the very end).
+
+    Checks `profiles` (a row exists for every auth user, confirmed or not, via
+    the handle_new_user trigger) with the service-role client. GoTrue stores
+    emails lowercased, so an eq on the normalized needle suffices. Existence
+    disclosure is acceptable: the signup flow's final response already reveals
+    the same fact. Fail-open on any error — the end-of-flow check remains the
+    backstop.
+    """
+    needle = body.email.strip().lower()
+    if not needle or "@" not in needle:
+        return {"exists": False}
+    try:
+        from app.db.client import require_client
+
+        rows = (
+            require_client()
+            .table("profiles")
+            .select("id")
+            .eq("email", needle)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+        return {"exists": bool(rows)}
+    except Exception:  # noqa: BLE001 — availability check only, never blocks signup
+        return {"exists": False}
+
+
 @router.post("/logout")
 def logout(
     response: Response,
@@ -464,7 +504,7 @@ def require_company(
         # resolved to a company membership.
         raise HTTPException(403, "Company context requires a signed-in user")
 
-    from app.db.companies import memberships_for_user
+    from app.db.companies import memberships_for_user, profile_name_for_user
 
     memberships = memberships_for_user(user_id)
     if not memberships:
@@ -480,20 +520,9 @@ def require_company(
         raise HTTPException(500, "Membership data integrity error — contact support")
 
     only = memberships[0]
-    try:
-        from app.db.client import require_client
-        c = require_client()
-        profile_resp = c.table("profiles").select("full_name, first_name, last_name").eq("id", user_id).limit(1).execute()
-        profile = profile_resp.data[0] if profile_resp.data else {}
-        _first = profile.get("first_name") or ""
-        _last = profile.get("last_name") or ""
-        user_name = (
-            profile.get("full_name")
-            or f"{_first} {_last}".strip()
-            or None
-        )
-    except Exception:
-        user_name = None
+    # Cached (profile_name_cache) + best-effort: returns None on any lookup
+    # failure — name resolution must never fail the request.
+    user_name = profile_name_for_user(user_id)
     return CompanyContext(
         company_id=only["company_id"], role=only["role"], user_id=user_id,
         user_email=session.get("email"),
@@ -565,3 +594,92 @@ def resolve_company_optional(
         )
     except HTTPException:
         return None
+
+
+# ─────────────────── Active-workspace resolution (require_workspace) ───────────────────
+#
+# Multi-workspace (2026-07): a company has N workspaces; workspace-scoped
+# surfaces (briefs/PRDs/tickets/chat) additionally resolve WHICH workspace the
+# request acts in. The client sends the active workspace as the
+# `X-Workspace-Id` header (SSE: `?workspace_id=`); a missing header falls back
+# to the company's default workspace so old clients keep working.
+#
+# Two-level roles: org owner/admin implicitly administer every workspace
+# (workspace_role='admin', no workspace_members row needed); plain org
+# members/viewers need a workspace_members row or the request 403s. A
+# workspace id from another company 404s (existence non-disclosure).
+
+
+class WorkspaceContext(CompanyContext):
+    """CompanyContext + the resolved active workspace."""
+
+    workspace_id: str
+    workspace_role: str  # 'admin' | 'member' | 'viewer'
+    workspace_is_default: bool = False
+
+
+def _resolve_workspace(
+    company: CompanyContext, workspace_id: str | None
+) -> WorkspaceContext:
+    from app.db.workspaces import (
+        ensure_default_workspace,
+        get_workspace,
+        get_workspace_member,
+    )
+
+    if workspace_id:
+        ws = get_workspace(workspace_id)
+        if not ws or ws.get("company_id") != company.company_id:
+            raise HTTPException(404, "Workspace not found")
+    else:
+        # Backward compat: no header → the default workspace (self-healing
+        # for companies whose default row was never created).
+        ws = ensure_default_workspace(company.company_id)
+
+    if company.role in ("owner", "admin"):
+        workspace_role = "admin"
+    else:
+        member = get_workspace_member(ws["id"], company.user_id)
+        if not member:
+            raise HTTPException(403, "Not a member of this workspace")
+        workspace_role = member.get("role") or "member"
+
+    return WorkspaceContext(
+        **company.model_dump(),
+        workspace_id=ws["id"],
+        workspace_role=workspace_role,
+        workspace_is_default=bool(ws.get("is_default")),
+    )
+
+
+def require_workspace(
+    company: CompanyContext = Depends(require_company),
+    x_workspace_id: str | None = Header(default=None, alias="X-Workspace-Id"),
+) -> WorkspaceContext:
+    """FastAPI dependency — resolve company AND active workspace.
+
+    Use on workspace-scoped routes:
+      ctx: WorkspaceContext = Depends(require_workspace)
+    then filter by ctx.workspace_id (and keep writing ctx.company_id).
+
+    Chains require_company as a REAL sub-dependency (not a direct call) so
+    dependency_overrides on require_company keep working — the test suites
+    override the company gate and expect every downstream gate to honor it.
+    """
+    return _resolve_workspace(company, x_workspace_id)
+
+
+def require_workspace_from_query(
+    company: CompanyContext = Depends(require_company_from_query),
+    workspace_id: str | None = Query(default=None),
+) -> WorkspaceContext:
+    """SSE-only workspace gate (EventSource can't send headers, so the bearer
+    rides as ?token= and the active workspace as ?workspace_id= — optional,
+    with the same default-workspace fallback)."""
+    return _resolve_workspace(company, workspace_id)
+
+
+def require_workspace_admin(ctx: WorkspaceContext) -> None:
+    """Guard for workspace-mutating handlers (rename/member management)."""
+    if ctx.workspace_role != "admin":
+        raise HTTPException(403, "Workspace management is restricted to admins")

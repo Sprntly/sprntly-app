@@ -13,6 +13,48 @@ export type OnPrdPartial = (html: string) => void
 const MAX_MS = 6 * 60 * 1000
 
 /**
+ * Leading+trailing throttle for the live-preview callback: the first delta
+ * renders immediately, then at most one update per `intervalMs`, always
+ * ending on the latest html (trailing edge). Deltas arrive far faster than an
+ * iframe should re-render, so this is what keeps the preview from thrashing.
+ * `cancel()` drops any pending trailing update — called on stream teardown so
+ * a late timer can't resurrect a stale preview after the real PRD landed.
+ * Exported for tests.
+ */
+export function throttlePartial(
+  fn: OnPrdPartial,
+  intervalMs = 400,
+): { push: OnPrdPartial; cancel: () => void } {
+  let last = 0
+  let timer: ReturnType<typeof setTimeout> | null = null
+  let latest = ""
+  const fire = () => {
+    last = Date.now()
+    timer = null
+    fn(latest)
+  }
+  return {
+    push: (html) => {
+      latest = html
+      if (timer) return
+      const wait = intervalMs - (Date.now() - last)
+      if (wait <= 0) fire()
+      else timer = setTimeout(fire, wait)
+    },
+    cancel: () => {
+      if (timer) {
+        clearTimeout(timer)
+        timer = null
+      }
+    },
+  }
+}
+
+/** Signals the poll loop that the stream saw its terminal `done` frame, so the
+ *  next status read happens immediately instead of waiting out the 4s tick. */
+type DoneSignal = { fired: boolean; promise: Promise<void> }
+
+/**
  * Poll an already-kicked-off PRD by id until terminal, then map to the result
  * shape. Shared by `runPrdGeneration` (which calls generate first) and
  * `resumePrdGeneration` (which re-enters against a persisted id on remount).
@@ -20,23 +62,37 @@ const MAX_MS = 6 * 60 * 1000
  * failed / timeout) so the resume only fires while a job is genuinely running.
  *
  * `onPartial`, when given, opens an SSE token stream alongside the poll and
- * forwards the accumulating Part A HTML for a live preview. The poll stays the
- * authoritative source of the finished PRD; the stream only feeds the preview
- * and is always torn down before returning.
+ * forwards the accumulating Part A HTML (throttled) for a live preview. The
+ * poll stays the authoritative source of the finished PRD; the stream only
+ * feeds the preview and is always torn down before returning. The stream's
+ * `done` frame also wakes the poll so `ready` is picked up right away.
  */
 async function pollPrdToResult(
   prdId: number,
   scope: string | null,
   onPartial?: OnPrdPartial,
 ): Promise<PrdGenResult> {
-  const stopStream = onPartial
+  let wakeDone: (() => void) | null = null
+  const done: DoneSignal = {
+    fired: false,
+    promise: new Promise<void>((resolve) => {
+      wakeDone = () => {
+        done.fired = true
+        resolve()
+      }
+    }),
+  }
+  const throttled = onPartial ? throttlePartial(onPartial) : null
+  const stopStream = throttled
     ? subscribeToGenerationStream((t) => prdApi.streamUrl(prdId, t), {
-        onDelta: (full) => onPartial(full),
+        onDelta: (full) => throttled.push(full),
+        onDone: () => wakeDone?.(),
       })
     : () => {}
   try {
-    return await _pollPrdLoop(prdId, scope)
+    return await _pollPrdLoop(prdId, scope, done)
   } finally {
+    throttled?.cancel()
     stopStream()
   }
 }
@@ -44,14 +100,23 @@ async function pollPrdToResult(
 async function _pollPrdLoop(
   prdId: number,
   scope: string | null,
+  done?: DoneSignal,
 ): Promise<PrdGenResult> {
   let prd = await prdApi.get(prdId)
   const startedAt = Date.now()
+  let doneConsumed = false
   while (prd.status === "generating" && Date.now() - startedAt < MAX_MS) {
     // Visibility-aware sleep: a backgrounded tab throttles setTimeout to ~1/min,
     // which stalls polling though the server-side PRD job finishes. Refocusing
-    // wakes immediately and re-reads the real status.
-    await sleepUntilNextPoll(4000)
+    // wakes immediately and re-reads the real status. The stream's `done` frame
+    // also wakes the sleep (consumed after one use — a status read lagging the
+    // frame falls back to plain ticks instead of a hot loop).
+    if (done && !doneConsumed) {
+      await Promise.race([sleepUntilNextPoll(4000), done.promise])
+      if (done.fired) doneConsumed = true
+    } else {
+      await sleepUntilNextPoll(4000)
+    }
     prd = await prdApi.get(prdId)
   }
   if (scope) clearPendingJob("prd", "_", scope)
@@ -100,22 +165,23 @@ export async function runPrdGeneration(
 }
 
 /**
- * Kick off + poll PRD generation for a BACKLOG item (a theme ranked ≥ 4 that
+ * Kick off + poll PRD generation for an IDEATION item (a theme ranked ≥ 4 that
  * isn't in the brief's top-3, so it has no insight_index). Mirrors
- * `runPrdGeneration` but starts from a backlog_item_id — the backend synthesizes
- * the insight and anchors the PRD to the company's current brief. Polling,
- * pending-job persistence, and the result shape are identical, so the content
- * panel renders a backlog PRD exactly like a brief PRD.
+ * `runPrdGeneration` but starts from an ideation_item_id — the backend
+ * synthesizes the insight and anchors the PRD to the company's current brief.
+ * Polling, pending-job persistence, and the result shape are identical, so the
+ * content panel renders an ideation PRD exactly like a brief PRD.
  */
-export async function runPrdGenerationFromBacklog(
-  backlogItemId: string,
+export async function runPrdGenerationFromIdeation(
+  ideationItemId: string,
+  onPartial?: OnPrdPartial,
 ): Promise<PrdGenResult> {
-  const start = await prdApi.generateFromBacklog(backlogItemId)
-  // Scope the pending-job marker by the backlog item — backlog PRDs share a
+  const start = await prdApi.generateFromIdeation(ideationItemId)
+  // Scope the pending-job marker by the ideation item — ideation PRDs share a
   // sentinel insight_index, so the item id is the unambiguous resume key.
-  const scope = `backlog:${backlogItemId}`
+  const scope = `ideation:${ideationItemId}`
   setPendingJob("prd", "_", scope, start.prd_id)
-  return pollPrdToResult(start.prd_id, scope)
+  return pollPrdToResult(start.prd_id, scope, onPartial)
 }
 
 /**
@@ -127,9 +193,10 @@ export async function runPrdGenerationFromBacklog(
 export async function resumePrdGeneration(
   prdId: number,
   meta: DetailState["meta"],
+  onPartial?: OnPrdPartial,
 ): Promise<PrdGenResult> {
   const scope = meta ? insightScope(meta.briefId, meta.insightIndex) : null
-  return pollPrdToResult(prdId, scope)
+  return pollPrdToResult(prdId, scope, onPartial)
 }
 
 export type PrdLoadResult = { ok: true; prd: PrdState } | { ok: false; message: string }

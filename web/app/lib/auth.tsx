@@ -13,6 +13,7 @@ import type { Session, User } from "@supabase/supabase-js"
 import { authCallbackUrl } from "./supabase/client"
 import { normalizeEmail } from "./auth-validation"
 import { setAccessTokenProvider } from "./api"
+import { resetSettingsCaches } from "./settingsCache"
 import {
   getSupabase,
   isSupabaseConfigured,
@@ -48,6 +49,12 @@ export type SignUpInput = {
   lastName: string
   /** v4 page 03 "about you" — optional self-reported role. */
   role?: string
+  /** "Your priorities — what you're focused on right now" (v6 about-you).
+   *  Persisted to profiles.priorities by the handle_new_user trigger. */
+  priorities?: string
+  /** Legacy signup choice — the v6 flow always sends "company" (the
+   *  company/personal split is retired from the UI). */
+  accountType?: "company" | "personal"
   /** IANA timezone (e.g. "America/New_York"). Optional override; when absent we
    *  auto-detect from the browser so the weekly brief fires Monday 06:00 local. */
   timezone?: string
@@ -79,6 +86,15 @@ type AuthCtx = AuthState & {
 
 const Ctx = createContext<AuthCtx | null>(null)
 
+// The last session observed from Supabase, kept current by refresh() and the
+// onAuthStateChange subscription (and cleared on sign-out). Lets the
+// accessTokenProvider hand out the current token WITHOUT calling
+// supabase.auth.getSession() — which acquires a navigator.locks mutex on every
+// call and serialized all concurrent API requests behind one LockManager
+// queue. Module-level (not state) so the provider closure always reads the
+// freshest value.
+let cachedSession: Session | null = null
+
 function sessionToState(session: Session | null): AuthState {
   if (!session?.user) return { kind: "anonymous" }
   return { kind: "authed", user: session.user, session }
@@ -100,6 +116,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const {
       data: { session },
     } = await supabase.auth.getSession()
+    cachedSession = session
     setState(sessionToState(session))
   }, [])
 
@@ -112,9 +129,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const supabase = getSupabase()
 
     setAccessTokenProvider(async () => {
+      // Fast path: serve the cached token while it has >30s of life left, so
+      // parallel API calls don't serialize behind getSession()'s LockManager
+      // lock. Near/past expiry, fall through to getSession(), which refreshes
+      // the token if needed.
+      if (
+        cachedSession?.access_token &&
+        (cachedSession.expires_at ?? 0) * 1000 - Date.now() > 30_000
+      ) {
+        return cachedSession.access_token
+      }
       const {
         data: { session },
       } = await supabase.auth.getSession()
+      cachedSession = session
       return session?.access_token ?? null
     })
 
@@ -123,6 +151,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
+      cachedSession = session
       setState(sessionToState(session))
     })
 
@@ -160,6 +189,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
             first_name: input.firstName.trim(),
             last_name: input.lastName.trim(),
             ...(input.role?.trim() ? { role: input.role.trim() } : {}),
+            ...(input.priorities?.trim() ? { priorities: input.priorities.trim() } : {}),
+            ...(input.accountType ? { account_type: input.accountType } : {}),
             ...(timezone ? { timezone } : {}),
           },
         },
@@ -197,9 +228,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await supabase.auth.signOut()
     } finally {
-      // Wipe all session-scoped localStorage so a different user logging in
-      // on the same browser never sees the previous user's data (chat tabs,
-      // active company, conversation resume, etc.).
+      // Drop the token cache immediately — the next user must never inherit a
+      // still-valid bearer from the previous session.
+      cachedSession = null
+      // Wipe all session-scoped storage so a different user logging in on the
+      // same browser never sees the previous user's data (chat tabs, active
+      // company, conversation resume, etc.). Chat tabs now live in
+      // sessionStorage (session-scoped by design — see ChatScreen); we clear
+      // BOTH storages: sessionStorage so a same-tab re-login starts fresh, and
+      // localStorage to sweep any stale tab entries written before that move.
       try {
         // Fixed keys
         const SESSION_KEYS = [
@@ -210,20 +247,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         ]
         for (const key of SESSION_KEYS) {
           localStorage.removeItem(key)
+          sessionStorage.removeItem(key)
         }
-        // Company-scoped keys (sprntly_chat_tabs_<slug>, etc.)
-        const toRemove: string[] = []
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i)
-          if (key && (key.startsWith("sprntly_chat_tabs_") || key.startsWith("sprntly_chat_active_tab_"))) {
-            toRemove.push(key)
+        // Company-scoped keys (sprntly_chat_tabs_<slug>, etc.) across both stores.
+        const isTabKey = (key: string | null): key is string =>
+          !!key && (key.startsWith("sprntly_chat_tabs_") || key.startsWith("sprntly_chat_active_tab_"))
+        for (const store of [localStorage, sessionStorage]) {
+          const toRemove: string[] = []
+          for (let i = 0; i < store.length; i++) {
+            const key = store.key(i)
+            if (isTabKey(key)) toRemove.push(key)
           }
-        }
-        for (const key of toRemove) {
-          localStorage.removeItem(key)
+          for (const key of toRemove) store.removeItem(key)
         }
       } catch {
-        // localStorage may be disabled; not fatal.
+        // storage may be disabled; not fatal.
+      }
+      // In-memory settings-pane caches (Connectors/MCP/Team/Admin) survive
+      // localStorage wipes — clear them too so the next user never flashes the
+      // previous account's connectors/tokens/team before revalidation.
+      try {
+        resetSettingsCaches()
+      } catch {
+        // Never let cache cleanup block sign-out.
       }
       setState({ kind: "anonymous" })
     }

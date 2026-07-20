@@ -17,6 +17,7 @@ import {
   type BcSrc,
 } from "../../../../lib/api"
 import { profileDisplayName } from "../../../../context/WorkspaceContext"
+import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
 /** The doc form's id — the pane bar's Save submits it from outside the form. */
@@ -579,16 +580,35 @@ function valuesFromDoc(doc: BusinessContextDoc): Record<string, string> {
   return out
 }
 
+// Module-scoped cache of the last-loaded business-context doc. Survives the
+// pane remounting on a settings tab-switch, so a revisit renders the doc
+// INSTANTLY and revalidates in the background — no "Loading business context…"
+// spinner every time. The wrapper distinguishes "never loaded" (null → cold
+// spinner) from "loaded, no doc yet" ({doc: null}). Cleared on sign-out.
+let _bizCtxCache: { doc: BusinessContextDoc | null } | null = null
+
+registerSettingsCacheReset(() => {
+  _bizCtxCache = null
+})
+
 export function BusinessContextSettings() {
   const auth = useAuth()
   const { profile } = useWorkspace()
-  const [doc, setDoc] = useState<BusinessContextDoc | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Seed from cache so a tab-switch return renders instantly; load() below
+  // still revalidates in the background.
+  const [doc, setDoc] = useState<BusinessContextDoc | null>(
+    () => _bizCtxCache?.doc ?? null,
+  )
+  const [loading, setLoading] = useState(() => _bizCtxCache === null)
   const [loadError, setLoadError] = useState<string | null>(null)
-  const [values, setValues] = useState<Record<string, string>>({})
+  const [values, setValues] = useState<Record<string, string>>(
+    () => (_bizCtxCache?.doc ? valuesFromDoc(_bizCtxCache.doc) : {}),
+  )
   // The last loaded/saved doc values — "Discard" restores these; deviation
   // from them arms the pane bar's Save/Discard.
-  const [snapshot, setSnapshot] = useState<Record<string, string>>({})
+  const [snapshot, setSnapshot] = useState<Record<string, string>>(
+    () => (_bizCtxCache?.doc ? valuesFromDoc(_bizCtxCache.doc) : {}),
+  )
 
   const [canEdit, setCanEdit] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -618,10 +638,13 @@ export function BusinessContextSettings() {
   }, [currentUserId])
 
   const load = useCallback(async () => {
-    setLoading(true)
+    // No setLoading(true): a warm revisit keeps the doc on screen while this
+    // revalidates, and a save/refresh (which routes through load) no longer
+    // flashes the whole pane to "Loading…". Cold load spins via initial state.
     setLoadError(null)
     try {
       const d = await businessContextApi.get()
+      _bizCtxCache = { doc: d }
       setDoc(d)
       const seeded = d ? valuesFromDoc(d) : {}
       setValues(seeded)
@@ -721,6 +744,11 @@ export function BusinessContextSettings() {
           The structured lens every Sprntly agent reads your company through.
         </p>
 
+        {/* The prose summary accepted at the end of onboarding (v6 step 9,
+            "Here's what we learned") — companies.business_context_summary.
+            Distinct from the structured doc below; own inline save. */}
+        <BusinessContextSummarySettings />
+
         <BusinessContextSettingsView
           loading={loading}
           loadError={loadError}
@@ -742,5 +770,77 @@ export function BusinessContextSettings() {
         <CompanyShapeSettings canEdit={view.canEdit} />
       </div>
     </div>
+  )
+}
+
+/**
+ * The prose business-context summary accepted at the end of onboarding
+ * (v6 step 9 — companies.business_context_summary). Editable by anyone who
+ * can save the workspace row; own inline save, independent of the doc.
+ */
+function BusinessContextSummarySettings() {
+  const { workspace, refresh } = useWorkspace()
+  const [summary, setSummary] = useState("")
+  const [snapshot, setSnapshot] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!workspace) return
+    const s = workspace.business_context_summary ?? ""
+    setSummary(s)
+    setSnapshot(s)
+  }, [workspace])
+
+  if (!workspace) return null
+
+  async function onSave(e: React.FormEvent) {
+    e.preventDefault()
+    if (!workspace) return
+    setSaving(true)
+    setError(null)
+    setSaved(false)
+    try {
+      await updateWorkspace(workspace.id, {
+        business_context_summary: summary.trim() || null,
+      })
+      setSnapshot(summary)
+      setSaved(true)
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not save the summary")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <SettingsSection
+      title="Business context summary"
+      sub="The prose you accepted at the end of onboarding — every agent reasons through it."
+    >
+      <form onSubmit={onSave}>
+        <textarea
+          className="input"
+          rows={10}
+          value={summary}
+          onChange={(e) => setSummary(e.target.value)}
+          maxLength={8000}
+          placeholder="What the business is, how it earns, who it serves, and what the team is focused on right now"
+          aria-label="Business context summary"
+        />
+        {error && <SettingsMessage kind="error">{error}</SettingsMessage>}
+        {saved && <SettingsMessage kind="success">Summary saved.</SettingsMessage>}
+        <button
+          type="submit"
+          className="btn btn-primary"
+          disabled={saving || summary === snapshot}
+          style={{ marginTop: 10 }}
+        >
+          {saving ? "Saving…" : "Save summary"}
+        </button>
+      </form>
+    </SettingsSection>
   )
 }

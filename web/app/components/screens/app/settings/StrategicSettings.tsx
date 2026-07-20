@@ -63,7 +63,7 @@ export function StrategicSettings() {
             semantic-routes refactor. There's no longer a step to deep-link to,
             so the no-workspace CTA points at the start of onboarding. */}
         <p className="settings-placeholder">
-          <a href="/onboarding/business-info">Start onboarding →</a>
+          <a href="/onboarding/company">Start onboarding →</a>
         </p>
       </SettingsSection>
     )

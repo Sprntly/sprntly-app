@@ -7,6 +7,10 @@ import { useAuth } from "../../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { ProfileSettings } from "./settings/ProfileSettings"
 import { WorkspaceSettings } from "./settings/WorkspaceSettings"
+import { CompanyProfileSettings } from "./settings/CompanyProfileSettings"
+import { ProcessSettings } from "./settings/ProcessSettings"
+import { KpiSettings } from "./settings/KpiSettings"
+import { WorkspacesSettings } from "./settings/WorkspacesSettings"
 import { BusinessContextSettings } from "./settings/BusinessContextSettings"
 import { StrategicSettings } from "./settings/StrategicSettings"
 import { FeatureFlagsSettings } from "./settings/FeatureFlagsSettings"
@@ -34,6 +38,16 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
     // tweaks (matching the design's layouts) are separate slices.
     case "product-category":
       return <WorkspaceSettings />
+    // Registration-spec (2026-07) panes.
+    case "company-profile":
+      return <CompanyProfileSettings />
+    case "process":
+      return <ProcessSettings />
+    // Onboarding v6: metrics + definitions picked in the wizard, editable here.
+    case "metrics":
+      return <KpiSettings />
+    case "workspaces":
+      return <WorkspacesSettings />
     case "business-context":
       return <BusinessContextSettings />
     case "comms-brief":
@@ -83,7 +97,12 @@ const FULL_BLEED_SECTIONS: ReadonlySet<SettingsSectionId> = new Set([
   "profile",
   "comms-brief",
   "product-category",
+  "company-profile",
+  "process",
   "business-context",
+  // Owns its own pset bar so the "New workspace" action can live in the
+  // sticky header (Profile-pane pattern).
+  "workspaces",
 ])
 
 /** Panes that carry their own padded shell (`.set-pane`) — the screen adds
@@ -133,6 +152,21 @@ function NavIcon({ id }: { id: SettingsSectionId }) {
         <svg {...p}>
           <rect x="3" y="3" width="18" height="18" rx="2" />
           <path d="M3 9h18M9 21V9" />
+        </svg>
+      )
+    case "company-profile":
+      return (
+        <svg {...p}>
+          <path d="M3 21h18" />
+          <path d="M5 21V7l7-4 7 4v14" />
+          <path d="M9 9h.01M9 12h.01M9 15h.01M15 9h.01M15 12h.01M15 15h.01" />
+        </svg>
+      )
+    case "process":
+      return (
+        <svg {...p}>
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
         </svg>
       )
     case "business-context":

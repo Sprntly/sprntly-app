@@ -32,10 +32,9 @@ describe("clampStep — out-of-range persisted indices", () => {
   })
 
   it("clamps stale longer-flow steps down to the last valid step", () => {
-    // Existing users mid an older, longer flow (e.g. the old 7-step order) must
-    // NOT crash — they land on the last valid new step (now 5).
-    expect(clampStep(6)).toBe(ONBOARDING_STEP_COUNT)
-    expect(clampStep(7)).toBe(ONBOARDING_STEP_COUNT)
+    // Existing users mid an older, longer flow must NOT crash — they land on
+    // the last valid step of the current 8-step flow.
+    expect(clampStep(ONBOARDING_STEP_COUNT + 1)).toBe(ONBOARDING_STEP_COUNT)
     expect(clampStep(99)).toBe(ONBOARDING_STEP_COUNT)
   })
 
@@ -54,20 +53,24 @@ describe("clampStep — out-of-range persisted indices", () => {
 
 describe("slugForStep — resume index → slug (clamped)", () => {
   it("maps each in-range index to its ordered slug", () => {
-    expect(slugForStep(1)).toBe("business-info")
-    expect(slugForStep(2)).toBe("workspace")
-    expect(slugForStep(3)).toBe("api-key")
-    expect(slugForStep(4)).toBe("connectors")
-    expect(slugForStep(5)).toBe("business-context")
-    expect(slugForStep(6)).toBe("strategy")
+    expect(slugForStep(1)).toBe("company")
+    expect(slugForStep(2)).toBe("product")
+    expect(slugForStep(3)).toBe("metrics")
+    expect(slugForStep(4)).toBe("api-key")
+    expect(slugForStep(5)).toBe("connectors")
+    expect(slugForStep(6)).toBe("team")
+    expect(slugForStep(7)).toBe("strategy")
+    expect(slugForStep(8)).toBe("decisions")
+    expect(slugForStep(9)).toBe("invite")
+    expect(slugForStep(10)).toBe("review")
   })
 
   it("maps a stale out-of-range index to the LAST step (no crash)", () => {
     // Indices past the end (older/longer flows) clamp to the last step
-    // (strategy is now the closing step).
-    expect(slugForStep(7)).toBe("strategy")
-    expect(slugForStep(8)).toBe("strategy")
-    expect(slugForStep(0)).toBe("business-info")
+    // (review is now the closing numbered step).
+    expect(slugForStep(11)).toBe("review")
+    expect(slugForStep(20)).toBe("review")
+    expect(slugForStep(0)).toBe("company")
   })
 })
 
@@ -86,16 +89,20 @@ describe("stepForSlug — slug → 1-based index", () => {
 })
 
 describe("isOnboardingStepSlug", () => {
-  it("accepts the 5 numbered slugs and rejects analyzing / removed / unknown", () => {
+  it("accepts the 10 numbered slugs (incl. the restored api-key) and rejects analyzing / removed / unknown", () => {
     for (const slug of ONBOARDING_STEP_SLUGS) {
       expect(isOnboardingStepSlug(slug)).toBe(true)
     }
+    // api-key is a numbered step again (restored 2026-07-19 as an optional step).
+    expect(isOnboardingStepSlug("api-key")).toBe(true)
     expect(isOnboardingStepSlug(ANALYZING_SLUG)).toBe(false)
-    // The removed agent-naming step + folded-in standalone routes are no longer
-    // numbered slugs.
+    // The removed agent-naming step + retired routes are no longer numbered.
     expect(isOnboardingStepSlug("coworkers")).toBe(false)
-    expect(isOnboardingStepSlug("metrics")).toBe(false)
+    expect(isOnboardingStepSlug("business-info")).toBe(false)
+    expect(isOnboardingStepSlug("business-context")).toBe(false)
     expect(isOnboardingStepSlug("first-brief")).toBe(false)
+    // Still retired: workspace naming lives in Settings → Workspaces.
+    expect(isOnboardingStepSlug("workspace")).toBe(false)
     expect(isOnboardingStepSlug("does-not-exist")).toBe(false)
   })
 })

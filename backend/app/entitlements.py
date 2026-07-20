@@ -39,7 +39,7 @@ import logging
 
 from fastapi import Depends, HTTPException
 
-from app.auth import CompanyContext, require_company
+from app.auth import WorkspaceContext, require_workspace
 
 logger = logging.getLogger(__name__)
 
@@ -122,13 +122,16 @@ def feature_flags_for_company(company_id: str) -> dict:
 
 
 def require_agents_module(
-    company: CompanyContext = Depends(require_company),
-) -> CompanyContext:
-    """FastAPI dependency: require_company + the `agents` module gate.
+    company: WorkspaceContext = Depends(require_workspace),
+) -> WorkspaceContext:
+    """FastAPI dependency: require_workspace + the `agents` module gate.
 
-    Drop-in replacement for `Depends(require_company)` on chat-surface
-    routes — returns the same CompanyContext, or 403s when the caller's
-    company has the Agents module explicitly disabled.
+    Drop-in replacement for `Depends(require_workspace)` on chat-surface
+    routes — returns the same WorkspaceContext (a CompanyContext subclass,
+    so company-scoped callers keep working), or 403s when the caller's
+    company has the Agents module explicitly disabled. The module flag
+    itself stays COMPANY-level; only the returned context carries the
+    active workspace.
     """
     if not agents_enabled(feature_flags_for_company(company.company_id)):
         logger.info(
@@ -139,9 +142,9 @@ def require_agents_module(
 
 
 def require_weekly_brief_module(
-    company: CompanyContext = Depends(require_company),
-) -> CompanyContext:
-    """FastAPI dependency: require_company + the `weekly_brief` module gate.
+    company: WorkspaceContext = Depends(require_workspace),
+) -> WorkspaceContext:
+    """FastAPI dependency: require_workspace + the `weekly_brief` module gate.
 
     For the on-demand brief generation/regeneration endpoints. Read-only
     brief endpoints (current/status/by-id/…) stay ungated — existing briefs

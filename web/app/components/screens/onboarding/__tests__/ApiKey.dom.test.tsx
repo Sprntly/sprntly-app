@@ -1,12 +1,12 @@
 // @vitest-environment jsdom
 //
-// Container mount test for the onboarding "api-key" step — collect the
-// company's own Claude key BEFORE connectors.
+// Container mount test for the onboarding "api-key" step (step 04) — collect
+// the company's own Claude key BEFORE connectors.
 //
 // Covers: a valid key saves via the backend then advances to connectors; a
-// non-anthropic key is rejected inline (no save); the step is REQUIRED by
-// default (no skip link, Continue disabled with an empty field) but SKIPPABLE
-// when the workspace is flagged use_platform_key.
+// non-anthropic key is rejected inline (no save); the step is OPTIONAL for
+// EVERYONE (restored 2026-07-19) — a skip link is always shown, Continue is
+// enabled with an empty field, and an empty Continue skips without saving.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -59,7 +59,7 @@ function keyInput() {
   return document.querySelector('input[type="password"]') as HTMLInputElement
 }
 
-describe("ApiKey (onboarding step 03 — Claude key)", () => {
+describe("ApiKey (onboarding step 04 — optional Claude key)", () => {
   it("saves a valid key via the backend, then advances to connectors", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: makeWorkspace() }))
     mount()
@@ -70,7 +70,7 @@ describe("ApiKey (onboarding step 03 — Claude key)", () => {
       fireEvent.click(screen.getByRole("button", { name: /continue/i }))
     })
     await waitFor(() => expect(setLlmKeyMock).toHaveBeenCalledWith("sk-ant-abcdef123456"))
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
@@ -88,28 +88,45 @@ describe("ApiKey (onboarding step 03 — Claude key)", () => {
     expect(advanceStepMock).not.toHaveBeenCalled()
   })
 
-  it("is required by default — no skip link, and Continue is disabled while empty", () => {
+  it("is OPTIONAL for everyone — shows a skip link and Continue is enabled while empty", () => {
     onboardingMock.mockReturnValue(
       makeOnboardingCtx({ workspace: makeWorkspace({ use_platform_key: false }) }),
     )
     mount()
-    expect(screen.queryByText(/skip for now/i)).toBeNull()
+    expect(screen.getByText(/skip for now/i)).not.toBeNull()
     const cont = screen.getByRole("button", { name: /continue/i }) as HTMLButtonElement
-    expect(cont.disabled).toBe(true)
+    expect(cont.disabled).toBe(false)
   })
 
-  it("is skippable for a use_platform_key workspace", async () => {
-    onboardingMock.mockReturnValue(
-      makeOnboardingCtx({ workspace: makeWorkspace({ use_platform_key: true }) }),
-    )
+  it("an empty Continue skips (marks api_key skipped, no save) and advances to connectors", async () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: makeWorkspace() }))
+    mount()
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /continue/i }))
+    })
+    await waitFor(() => expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["api_key"]))
+    expect(setLlmKeyMock).not.toHaveBeenCalled()
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+  })
+
+  it("the footer skip link advances without saving", async () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: makeWorkspace() }))
     mount()
     const skip = screen.getByText(/skip for now/i)
     await act(async () => {
       fireEvent.click(skip)
     })
     await waitFor(() => expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["api_key"]))
-    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     expect(setLlmKeyMock).not.toHaveBeenCalled()
+  })
+
+  it("Back returns to the metrics step", () => {
+    onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: makeWorkspace() }))
+    mount()
+    fireEvent.click(screen.getByRole("button", { name: /back/i }))
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
   })
 })

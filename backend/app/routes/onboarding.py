@@ -105,3 +105,115 @@ def get_analyze_website(
         "result": row.get("result"),
         "error": row.get("error"),
     }
+
+
+class MetricDefinitionsIn(BaseModel):
+    metrics: list[str]
+
+
+@router.post("/business-context-draft")
+def post_business_context_draft(
+    company: CompanyContext = Depends(require_company),
+):
+    """Step 9 "Here's what we learned" — draft the business-context prose from
+    everything the wizard collected (company/product rows, KPI tree, connected
+    providers, and the website-analysis lens).
+
+    Synchronous (spinner-length); the client shows a manual-entry fallback on
+    failure, so an LLM/infra error is a plain 503 rather than a job to poll.
+    The ACCEPTED (possibly edited) text is written by the frontend to
+    companies.business_context_summary — this endpoint only drafts.
+    """
+    from app.onboarding.wizard_drafts import draft_business_context
+
+    try:
+        return {"draft": draft_business_context(company.company_id)}
+    except Exception as exc:  # noqa: BLE001 — degrade to manual entry
+        logger.warning(
+            "business-context draft failed for %s: %s", company.company_id, exc
+        )
+        raise HTTPException(503, "Couldn't draft the business context right now")
+
+
+@router.post("/metric-definitions")
+def post_metric_definitions(
+    body: MetricDefinitionsIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Define-metrics sub-flow — AI-draft a plain-English definition + analytics
+    event mapping per picked metric (phrased against the company's connected
+    analytics providers where possible). `baseline` is best-effort and never
+    fabricated — null today, "—" in the review UI. 503 on LLM/infra failure;
+    the client falls back to hand-written definitions.
+    """
+    metrics = [m.strip() for m in body.metrics if m and m.strip()]
+    if not metrics:
+        return {"definitions": []}
+    if len(metrics) > 10:
+        raise HTTPException(422, "Too many metrics — define at most 10")
+
+    from app.onboarding.wizard_drafts import draft_metric_definitions
+
+    try:
+        return {
+            "definitions": draft_metric_definitions(company.company_id, metrics)
+        }
+    except Exception as exc:  # noqa: BLE001 — degrade to manual entry
+        logger.warning(
+            "metric-definition draft failed for %s: %s", company.company_id, exc
+        )
+        raise HTTPException(503, "Couldn't draft metric definitions right now")
+
+
+class WorkspaceNameIn(BaseModel):
+    name: str
+
+    @property
+    def clean_name(self) -> str:
+        return self.name.strip()
+
+
+@router.post("/workspace")
+def post_onboarding_workspace(
+    body: WorkspaceNameIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Name the default workspace. No longer an onboarding step since v6 (the
+    workspace stays "Default" until renamed in Settings → Workspaces); kept for
+    Settings-side callers.
+
+    RENAMES the company's default workspace (never creates a second one: the
+    default was created at company creation / by backfill, and
+    ensure_default_workspace self-heals the gap for companies that predate
+    workspace rows). Also grants the caller a workspace-admin membership and
+    binds the company dataset (bare company slug) to the workspace, making it
+    the workspace's corpus. Idempotent — safe to re-run on a resumed step.
+    """
+    name = body.clean_name
+    if not name:
+        raise HTTPException(422, "Workspace name cannot be empty")
+    if len(name) > 100:
+        raise HTTPException(422, "Workspace name is too long")
+
+    from app.db.authcache import invalidate_workspace_caches
+    from app.db.companies import slug_for_company_id
+    from app.db.workspaces import (
+        ensure_default_workspace,
+        register_workspace_dataset,
+        update_workspace,
+        upsert_workspace_member,
+    )
+
+    ws = ensure_default_workspace(company.company_id)
+    updated = update_workspace(ws["id"], name=name) or {**ws, "name": name}
+    upsert_workspace_member(ws["id"], company.user_id, "admin")
+    company_slug = slug_for_company_id(company.company_id)
+    if company_slug:
+        register_workspace_dataset(updated, company_slug=company_slug)
+    invalidate_workspace_caches()
+    return {
+        "id": updated["id"],
+        "name": updated["name"],
+        "slug": updated["slug"],
+        "is_default": bool(updated.get("is_default")),
+    }

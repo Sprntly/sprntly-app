@@ -192,12 +192,12 @@ describe("cancel-only footer unchanged (Part D, AC16)", () => {
 })
 
 describe("Back to Briefs link uses the routes constant (Part D, AC17)", () => {
-  it("test_generation_loading_screen_back_to_briefs_uses_screen_path_constant — imports SCREEN_PATH, href equals SCREEN_PATH.backlog, no hardcoded literal", () => {
+  it("test_generation_loading_screen_back_to_briefs_uses_screen_path_constant — imports SCREEN_PATH, href equals SCREEN_PATH.ideation, no hardcoded literal", () => {
     expect(COMPONENT_SRC).toContain('import { SCREEN_PATH } from "../../lib/routes"')
-    expect(COMPONENT_SRC).toContain("href={SCREEN_PATH.backlog}")
-    // The literal "/backlog" string does not appear hardcoded outside the
+    expect(COMPONENT_SRC).toContain("href={SCREEN_PATH.ideation}")
+    // The literal "/ideation" string does not appear hardcoded outside the
     // routes.ts import chain (this file never spells it out itself).
-    expect(COMPONENT_SRC).not.toContain('"/backlog"')
+    expect(COMPONENT_SRC).not.toContain('"/ideation"')
   })
 })
 

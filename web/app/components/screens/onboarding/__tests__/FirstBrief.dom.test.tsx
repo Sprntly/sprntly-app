@@ -301,7 +301,7 @@ describe("FirstBrief (container) — first brief", () => {
     render(React.createElement(FirstBrief))
     spy.mockRestore()
 
-    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/business-info")
+    expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/company")
     expect(screen.getByText("Loading…")).not.toBeNull()
     const sideEffectInRender = errors
       .map(String)

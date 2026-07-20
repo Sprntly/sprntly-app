@@ -33,6 +33,10 @@ COPY prototype-runtime /prototype-runtime
 RUN cd /prototype-runtime && npm ci --no-audit --no-fund
 
 COPY backend/app ./app
+# Vendored PM skills (app/skills/loader.py resolves them at REPO_ROOT/skills =
+# /app/skills). Without them /v1/ask/skills is empty and every skill-bound
+# agent call (prd-author, weekly-brief, …) raises UnknownSkillError.
+COPY backend/skills ./skills
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

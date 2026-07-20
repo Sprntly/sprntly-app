@@ -16,6 +16,7 @@ it returns any row by id regardless of variant so old bookmarks keep
 resolving.
 """
 import asyncio
+import hashlib
 import json
 import logging
 
@@ -25,15 +26,17 @@ from fastapi import Depends, APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company, require_company_from_query
+from app.auth import WorkspaceContext, require_company, require_workspace, require_workspace_from_query  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.graph import token_stream
 from app.db import (
     find_existing_prd,
     get_prd_rendered,
     start_prd,
 )
-from app.db.backlog import get_backlog_item
+from app.db.ideation import get_ideation_item
 from app.db.briefs import ensure_uploads_brief, get_current_brief
+from app.db.evidences import find_existing_evidence_for_theme
+from app.evidence_kg import generate_task_evidence
 from app.ingest import convert
 from app.db.companies import slug_for_company_id
 from app.db.prd_input_questions import (
@@ -56,7 +59,11 @@ from app.prd_runner import (
     PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
     generate_prd_and_warm,
 )
-from app.prompts import PRD_TEMPLATE_VERSION
+from app.prompts import (
+    EVIDENCE_TEMPLATE_VERSION,
+    EVIDENCE_VARIANT,
+    PRD_TEMPLATE_VERSION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +82,7 @@ def _record_prd_action(company_id: str, insight: dict) -> None:
 
     Resolves the insight → theme_id from the brief payload (insights carry
     `theme_id`, set by the synthesis ranker) and records the action so the theme
-    surfaces in the Backlog screen's Completed tab on the next brief. Swallows
+    surfaces in the Ideation screen's Completed tab on the next brief. Swallows
     everything: a finding-state hiccup must never fail PRD generation."""
     try:
         theme_id = insight.get("theme_id")
@@ -97,7 +104,7 @@ class GenerateIn(BaseModel):
 @router.post("/generate")
 async def generate(
     body: GenerateIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Kick off PRD generation in the background.
 
@@ -107,7 +114,7 @@ async def generate(
     """
     # Tenant gate: the body's brief_id must belong to the caller's company
     # (404 on mismatch — no cross-tenant existence disclosure).
-    brief = require_owned_brief(body.brief_id, company.company_id)
+    brief = require_owned_brief(body.brief_id, company.company_id, company.workspace_id)
     insights = brief.get("insights") or []
     if not (0 <= body.insight_index < len(insights)):
         raise HTTPException(
@@ -148,6 +155,8 @@ async def generate(
         generate_prd_and_warm(
             prd_id, body.brief_id, body.insight_index,
             author=company.user_name,
+            company_id=company.company_id, user_id=company.user_id,
+            prd_title=title,
         )
     )
     _inflight_tasks.add(task)
@@ -160,38 +169,38 @@ async def generate(
     }
 
 
-# Sentinel insight_index for backlog PRDs. The theme isn't in brief.insights, so
-# there is no real index; backlog PRDs dedupe + group by (brief_id, theme_id)
+# Sentinel insight_index for ideation PRDs. The theme isn't in brief.insights,
+# so there is no real index; ideation PRDs dedupe + group by (brief_id, theme_id)
 # instead (see db.prds.find_existing_prd_for_theme / list_prd_generations).
-_BACKLOG_INSIGHT_INDEX = 0
+_IDEATION_INSIGHT_INDEX = 0
 
 
-class BacklogGenerateIn(BaseModel):
-    backlog_item_id: str = Field(..., min_length=1)
+class IdeationGenerateIn(BaseModel):
+    ideation_item_id: str = Field(..., min_length=1)
     force: bool = False
 
 
-@router.post("/generate-from-backlog")
-async def generate_from_backlog(
-    body: BacklogGenerateIn,
-    company: CompanyContext = Depends(require_company),
+@router.post("/generate-from-ideation")
+async def generate_from_ideation(
+    body: IdeationGenerateIn,
+    company: WorkspaceContext = Depends(require_workspace),
 ):
-    """Kick off PRD generation for a BACKLOG item (a theme ranked ≥ 4 that never
-    made the weekly brief's top-3).
+    """Kick off PRD generation for an IDEATION item (a theme ranked ≥ 4 that
+    never made the weekly brief's top-3).
 
-    Backlog themes aren't in brief.insights, so we synthesize an insight from the
-    backlog row ({theme_id, title, summary}) — the same shape the KG evidence
-    trail and PRD prompt consume — and attach the PRD to the company's CURRENT
-    brief for tenant/dataset grounding. Dedup + version history key on
+    Ideation themes aren't in brief.insights, so we synthesize an insight from
+    the ideation row ({theme_id, title, summary}) — the same shape the KG
+    evidence trail and PRD prompt consume — and attach the PRD to the company's
+    CURRENT brief for tenant/dataset grounding. Dedup + version history key on
     (brief_id, theme_id). Fire-and-forget like /generate: returns the prd_id
     immediately; poll GET /v1/prd/{prd_id} until status == 'ready'.
     """
     # Tenant gate: the item must belong to the caller's company (404 otherwise).
-    item = get_backlog_item(company.company_id, body.backlog_item_id)
+    item = get_ideation_item(company.company_id, body.ideation_item_id)
     if item is None:
-        raise HTTPException(404, "Backlog item not found")
+        raise HTTPException(404, "Ideation item not found")
 
-    # Backlog PRDs anchor to the company's current brief (dataset grounding).
+    # Ideation PRDs anchor to the company's current brief (dataset grounding).
     # No brief ⇒ no analysis ⇒ nothing to ground a PRD on.
     slug = slug_for_company_id(company.company_id)
     brief = get_current_brief(slug) if slug else None
@@ -202,7 +211,7 @@ async def generate_from_backlog(
     brief_id = brief["id"]
 
     theme_id = item.get("theme_id")
-    title = item.get("title") or "Backlog item"
+    title = item.get("title") or "Ideation item"
     # Synthetic insight — mirrors a brief insight so the KG trail (theme_id) and
     # the PRD prompt (title/summary) resolve identically to the brief path.
     insight = {
@@ -226,20 +235,20 @@ async def generate_from_backlog(
 
     prd_id = start_prd(
         brief_id=brief_id,
-        insight_index=_BACKLOG_INSIGHT_INDEX,
+        insight_index=_IDEATION_INSIGHT_INDEX,
         title=title,
         template_version=PRD_TEMPLATE_VERSION,
         variant=PRD_VARIANT,
-        source="backlog",
+        source="ideation",
         theme_id=theme_id,
     )
     # Lifecycle: mark the theme prd_created so it lands in the Completed tab
-    # (keyed by theme_id — works identically for backlog and brief themes).
+    # (keyed by theme_id — works identically for ideation and brief themes).
     _record_prd_action(company.company_id, insight)
 
     task = asyncio.create_task(
         generate_prd_and_warm(
-            prd_id, brief_id, _BACKLOG_INSIGHT_INDEX, insight_override=insight,
+            prd_id, brief_id, _IDEATION_INSIGHT_INDEX, insight_override=insight,
             author=company.user_name,
         )
     )
@@ -251,6 +260,155 @@ async def generate_from_backlog(
         "title": title,
         "variant": PRD_VARIANT,
     }
+
+
+# Chat-task PRDs: "generate a PRD for <specific need>" typed in chat. The user's
+# own words are the source — there is no brief insight and no KG theme, so
+# insight_index is a storage sentinel and dedup keys on a synthetic theme_id
+# derived from the normalized task text: re-issuing the same ask returns the
+# same PRD (find-or-create, like the brief/ideation paths).
+_CHAT_TASK_INSIGHT_INDEX = 0
+_CHAT_TASK_TITLE_MAX = 90
+
+
+def _chat_task_theme_id(task: str) -> str:
+    """Deterministic dedup key for a chat task ('chat:<sha1[:16]>' of the
+    whitespace-collapsed, lowercased text). Same precedent as ideation's
+    'manual:%' synthetic theme ids — never resolves in the KG."""
+    norm = " ".join(task.lower().split())
+    return "chat:" + hashlib.sha1(norm.encode("utf-8")).hexdigest()[:16]
+
+
+def _chat_task_title(task: str) -> str:
+    """A row/tab title derived from the task text: collapsed whitespace,
+    trailing punctuation stripped, first letter capitalized, word-truncated."""
+    title = " ".join(task.split()).strip().rstrip(".!?,;: ")
+    if len(title) > _CHAT_TASK_TITLE_MAX:
+        title = title[:_CHAT_TASK_TITLE_MAX].rsplit(" ", 1)[0].rstrip(".!?,;: ") + "…"
+    return (title[:1].upper() + title[1:]) if title else "Chat PRD"
+
+
+class TaskGenerateIn(BaseModel):
+    task: str = Field(..., min_length=3, max_length=4000)
+    force: bool = False
+
+
+@router.post("/generate-from-task")
+async def generate_from_task(
+    body: TaskGenerateIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Kick off PRD generation for a SPECIFIC TASK the user described in chat
+    ("generate a PRD for dark mode on mobile").
+
+    The task text becomes the synthetic insight (title + summary) fed to the
+    prd-author pipeline — the same insight_override shape the ideation and
+    import paths use. Grounding is KG-first: with no theme backing, the task
+    text drives topic retrieval over the tenant's KG (the same retrieval the
+    Ask path uses), and only an empty/unreachable KG falls back to the company
+    corpus. The user's words steer the document either way. In parallel, an
+    Evidence artifact is generated from the same semantic retrieval IF it finds
+    backing signals — with no backing the evidence doc is skipped entirely (no
+    row → the Evidence tab stays hidden). Anchors to the company's current
+    brief when one exists (dataset grounding), else to the per-company uploads
+    brief so new accounts can still use the command. Fire-and-forget like
+    /generate: returns the prd_id immediately; poll GET /v1/prd/{prd_id} until
+    status == 'ready'.
+    """
+    slug = slug_for_company_id(company.company_id)
+    if not slug:
+        raise HTTPException(
+            409, "No dataset for this company yet — connect a source first."
+        )
+    brief = get_current_brief(slug)
+    brief_id = brief["id"] if brief else ensure_uploads_brief(slug)
+
+    task_text = body.task.strip()
+    theme_id = _chat_task_theme_id(task_text)
+    title = _chat_task_title(task_text)
+
+    if not body.force:
+        existing = find_existing_prd_for_theme(brief_id, theme_id, variant=PRD_VARIANT)
+        if existing:
+            return {
+                "prd_id": existing["id"],
+                "status": existing["status"],
+                "title": existing["title"],
+                "variant": PRD_VARIANT,
+            }
+
+    # Synthetic insight — mirrors a brief insight so the PRD prompt resolves
+    # identically to the brief/ideation paths. No theme_id inside the insight:
+    # the synthetic id has no KG backing, so grounding resolves via topic
+    # retrieval over the tenant KG (corpus only as last resort). `query`
+    # carries the user's raw ask for the parallel Evidence-artifact retrieval.
+    insight = {
+        "title": title,
+        "summary": f"Requested by the user in chat: {task_text}",
+        "query": task_text,
+    }
+
+    prd_id = start_prd(
+        brief_id=brief_id,
+        insight_index=_CHAT_TASK_INSIGHT_INDEX,
+        title=title,
+        template_version=PRD_TEMPLATE_VERSION,
+        variant=PRD_VARIANT,
+        source="chat",
+        theme_id=theme_id,
+    )
+    # No _record_prd_action: there is no real theme to advance in the lifecycle.
+
+    task = asyncio.create_task(
+        generate_prd_and_warm(
+            prd_id, brief_id, _CHAT_TASK_INSIGHT_INDEX, insight_override=insight,
+            author=company.user_name,
+            company_id=company.company_id, user_id=company.user_id,
+            prd_title=title,
+        )
+    )
+    _inflight_tasks.add(task)
+    task.add_done_callback(_inflight_tasks.discard)
+
+    # In parallel: the Evidence artifact, generated from semantic KG retrieval
+    # over the task — skipped inside (no row) when the KG has no backing signals.
+    ev_task = asyncio.create_task(
+        generate_task_evidence(
+            brief_id, insight, theme_id,
+            template_version=EVIDENCE_TEMPLATE_VERSION, variant=EVIDENCE_VARIANT,
+        )
+    )
+    _inflight_tasks.add(ev_task)
+    ev_task.add_done_callback(_inflight_tasks.discard)
+
+    return {
+        "prd_id": prd_id,
+        "status": "generating",
+        "title": title,
+        "variant": PRD_VARIANT,
+    }
+
+
+@router.get("/{prd_id}/evidence")
+def get_prd_evidence(
+    prd_id: int,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """The Evidence artifact behind a chat-task PRD, or 404.
+
+    Chat-task evidence is keyed (brief_id, theme_id) — not insight_index, which
+    is only a storage sentinel for these rows. 404 covers both "not a chat PRD"
+    and "retrieval found no backing → doc was skipped"; the client hides the
+    Evidence tab in either case. May answer a `generating` row — the client
+    polls GET /v1/evidence/{id} until terminal."""
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
+    theme_id = row.get("theme_id") or ""
+    if row.get("source") != "chat" or not theme_id.startswith("chat:"):
+        raise HTTPException(404, "No evidence for this PRD")
+    doc = find_existing_evidence_for_theme(row["brief_id"], theme_id)
+    if not doc:
+        raise HTTPException(404, "No evidence for this PRD")
+    return doc
 
 
 # Uploaded PRDs don't index a brief (they have no KG lineage). insight_index is a
@@ -266,7 +424,7 @@ _MAX_IMPORT_BYTES = 25 * 1024 * 1024  # 25 MB
 async def import_prd(
     file: UploadFile = File(...),
     dataset: str = Form(...),
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Import an existing PRD the customer uploaded (PDF/PPT/DOCX/…).
 
@@ -281,7 +439,7 @@ async def import_prd(
     GET /v1/prd/{prd_id} until status == 'ready'.
     """
     # Tenant gate: the dataset (company slug) must belong to the caller (404).
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
 
     data = await file.read()
     if not data:
@@ -304,7 +462,7 @@ async def import_prd(
     brief_id = ensure_uploads_brief(dataset)
 
     # Synthetic insight — carries the title so the PRD prompt + decision log
-    # resolve identically to the brief/backlog paths (no theme_id: no KG trail).
+    # resolve identically to the brief/ideation paths (no theme_id: no KG trail).
     insight = {"title": title, "summary": "Imported from an uploaded document."}
 
     prd_id = start_prd(
@@ -324,6 +482,8 @@ async def import_prd(
             insight_override=insight,
             author=company.user_name,
             import_source_md=extracted,
+            company_id=company.company_id, user_id=company.user_id,
+            prd_title=title,
         )
     )
     _inflight_tasks.add(task)
@@ -339,14 +499,14 @@ async def import_prd(
 @router.get("/latest")
 def latest(
     dataset: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Return the most recent ready PRD for a dataset (company slug).
 
     Used by the PRD screen to auto-load the last generated PRD on refresh
     instead of showing an empty pane.
     """
-    require_owned_dataset(dataset, company.company_id)
+    require_owned_dataset(dataset, company.company_id, company.workspace_id)
     row = latest_prd_for_dataset(dataset)
     if not row:
         raise HTTPException(404, "No PRD found for this workspace")
@@ -357,10 +517,10 @@ def latest(
 @router.get("/{prd_id}")
 def get(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Fetch a PRD row by id (only if it belongs to the caller's company)."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     row = get_prd_rendered(prd_id)
     if not row:
         raise HTTPException(404, "PRD not found")
@@ -370,13 +530,13 @@ def get(
 @router.get("/{prd_id}/stream")
 async def stream_prd_generation(
     prd_id: int,
-    company: CompanyContext = Depends(require_company_from_query),
+    company: WorkspaceContext = Depends(require_workspace_from_query),
 ) -> StreamingResponse:
     """SSE token stream of a PRD's Part A generation, so the client renders the
     PRD as it's written instead of waiting for the whole document.
 
     EventSource can't send headers, so the bearer rides as `?token=`
-    (require_company_from_query). Frames: `{"kind":"delta","text":…}` as the HTML
+    (require_workspace_from_query). Frames: `{"kind":"delta","text":…}` as the HTML
     streams, then a terminal `{"kind":"done"|"error"}`. PROGRESSIVE DISPLAY ONLY
     — the client keeps polling GET /{prd_id}, which stays the authoritative
     source for the finished, persisted PRD. Single-worker transport (see
@@ -384,7 +544,7 @@ async def stream_prd_generation(
     still carries the result. Opening late (generation already finished) simply
     receives no frames — the poll shows the completed PRD.
     """
-    require_owned_prd(prd_id, company.company_id)  # 404 on cross-tenant/missing
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)  # 404 on cross-tenant/missing
     channel = f"prd:{prd_id}"
 
     async def _gen():
@@ -404,7 +564,7 @@ async def stream_prd_generation(
 @router.post("/{prd_id}/impl-spec")
 def generate_impl_spec(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Produce the machine-readable Implementation Spec for a PRD on demand.
 
@@ -414,7 +574,7 @@ def generate_impl_spec(
     Synchronous: the caller shows a loading state and pastes the returned
     `llm_part` into Claude Code. Returns {"llm_part": ..., "cached": ...}.
     """
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     try:
         return ensure_impl_spec(prd_id)
     except RuntimeError as exc:
@@ -434,10 +594,10 @@ class PrdUpdateIn(BaseModel):
 def update(
     prd_id: int,
     body: PrdUpdateIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Save PRD edits to Supabase. Auto-creates a version snapshot."""
-    row = require_owned_prd(prd_id, company.company_id)
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
     # Save current content as a version before overwriting
     try:
         save_prd_version(prd_id, row.get("title", ""), row.get("payload_md", ""), saved_by="auto")
@@ -463,10 +623,10 @@ class PrdVersionSaveIn(BaseModel):
 def create_version(
     prd_id: int,
     body: PrdVersionSaveIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Explicitly save a named version of the PRD."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     version = save_prd_version(prd_id, body.title, body.payload_md, saved_by=body.label)
     return version
 
@@ -474,22 +634,22 @@ def create_version(
 @router.get("/{prd_id}/versions")
 def get_versions(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """List all versions of a PRD, newest first."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     return list_prd_versions(prd_id)
 
 
 @router.get("/{prd_id}/generations")
 def get_generations(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Prior generations of this PRD (other prds rows sharing the same
     brief+insight), newest first — the regeneration history surfaced in the
     PRD's Version History dropdown."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     return {"generations": list_prd_generations(prd_id)}
 
 
@@ -497,10 +657,10 @@ def get_generations(
 def restore_version(
     prd_id: int,
     version_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Restore a PRD to a specific version."""
-    require_owned_prd(prd_id, company.company_id)
+    require_owned_prd(prd_id, company.company_id, company.workspace_id)
     result = restore_prd_version(prd_id, version_id)
     if not result:
         raise HTTPException(404, "Version not found")
@@ -521,7 +681,7 @@ _INPUT_SECTION_MARKER = "User input needed"
 @router.get("/{prd_id}/input-questions")
 async def get_input_questions(
     prd_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """List the PRD's structured "User input needed" questions.
 
@@ -539,7 +699,7 @@ async def get_input_questions(
     just-finished PRD, whose first fetch can race the pipeline's extraction)
     schedule exactly one run.
     """
-    row = require_owned_prd(prd_id, company.company_id)
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
     questions = list_questions(prd_id)
     if questions:
         return {"questions": questions, "extracting": False}
@@ -569,7 +729,7 @@ def answer_input_question(
     prd_id: int,
     question_id: int,
     body: InputAnswerIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Answer one "User input needed" question and fold the answer into the PRD.
 
@@ -585,7 +745,7 @@ def answer_input_question(
     # gateway) and mirror the lazy-import discipline used elsewhere in this file.
     from app.prd_questions import apply_answer
 
-    row = require_owned_prd(prd_id, company.company_id)
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
     question = get_question(question_id)
     if not question or question.get("prd_id") != prd_id:
         raise HTTPException(404, "Question not found")

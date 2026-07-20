@@ -9,4 +9,4 @@
  *  badges (the agent's function), not its name — they are intentionally
  *  unaffected by this constant.
  */
-export const AGENT_NAME = "Spiky"
+export const AGENT_NAME = "Sprntly"

@@ -22,7 +22,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company
+from app.auth import (
+    CompanyContext,
+    WorkspaceContext,
+    require_company,
+    require_workspace,
+)
 from app.db.client import require_client, utc_now
 
 logger = logging.getLogger(__name__)
@@ -69,14 +74,15 @@ def _get_owned_conversation(
 
 @router.get("")
 def list_conversations(
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
-    """List the CALLER'S conversations, newest first."""
+    """List the CALLER'S conversations in the ACTIVE WORKSPACE, newest first."""
     c = require_client()
     resp = (
         c.table("conversations")
         .select("*")
         .eq("company_id", company.company_id)
+        .eq("workspace_id", company.workspace_id)
         .eq("user_id", company.user_id)
         .order("created_at", desc=True)
         .limit(100)
@@ -88,12 +94,14 @@ def list_conversations(
 @router.post("")
 def create_conversation(
     body: ConversationIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
-    """Create a new conversation, owned by the calling user."""
+    """Create a new conversation, owned by the calling user, in the active
+    workspace."""
     c = require_client()
     row: dict[str, Any] = {
         "company_id": company.company_id,
+        "workspace_id": company.workspace_id,
         # Chats are per-user: stamp the creator so list/read stay private.
         "user_id": company.user_id,
         "title": body.title,
@@ -118,7 +126,8 @@ def get_conversation_by_prd(
     so a reopened PRD tab can rehydrate their prior chat. PRD chats are
     per-user — a teammate reopening the same PRD gets their own (or no)
     conversation, never someone else's. Empty (not 404) when the caller has no
-    saved conversation for the PRD yet."""
+    saved conversation for the PRD yet. (Company-scoped: the PRD id itself is
+    already workspace-gated where it's read, and chats stay per-user.)"""
     c = require_client()
     conv = (
         c.table("conversations")

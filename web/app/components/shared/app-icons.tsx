@@ -56,6 +56,17 @@ export function IconSendUp({ size = 18 }: { size?: number }) {
   )
 }
 
+export function IconStop({ size = 18 }: { size?: number }) {
+  // Filled circle — a white "round" on the dark Stop button. Radius 9 of the 24
+  // viewBox (~0.3 of the icon box) so it reads as covering roughly a third of
+  // the button, the "stop generating" affordance.
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+      <circle cx="12" cy="12" r="9" />
+    </svg>
+  )
+}
+
 export function IconMessage({ size = 18 }: { size?: number }) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden>

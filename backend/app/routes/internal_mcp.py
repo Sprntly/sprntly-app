@@ -132,17 +132,19 @@ def brief_current(company_id: str) -> dict[str, Any]:
     return brief
 
 
-@data_router.get("/backlog", dependencies=[Depends(_require_internal_key)])
-def backlog(company_id: str) -> dict[str, Any]:
-    from app.db.backlog import list_backlog_items
+@data_router.get("/ideation", dependencies=[Depends(_require_internal_key)])
+def ideation(company_id: str) -> dict[str, Any]:
+    from app.db.ideation import list_visible_ideation_items
     from app.db.briefs import get_current_brief
 
-    # Empty-when-no-brief invariant, mirrored from routes/backlog.py: the
-    # backlog is the by-product of a weekly brief, so no brief -> no backlog.
+    # Empty-when-no-brief invariant, mirrored from routes/ideation.py: the
+    # ideation pool is the by-product of a weekly brief, so no brief -> no
+    # ideas. Returns the same visible set the page shows (the weekly shortlist
+    # + user-pinned rows), not the hidden tail.
     slug = slug_for_company_id(company_id)
     if not slug or not get_current_brief(slug):
         return {"items": [], "count": 0}
-    items = list_backlog_items(company_id)
+    items = list_visible_ideation_items(company_id)
     return {"items": items, "count": len(items)}
 
 

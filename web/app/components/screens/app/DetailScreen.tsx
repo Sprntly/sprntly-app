@@ -10,6 +10,8 @@ import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { EvidenceSections } from "../../shared/EvidenceSections"
 import { EvidenceHtmlBrief } from "../../shared/EvidenceHtmlBrief"
+import { StreamingHtmlPreview, stripLeadingFence } from "../../shared/StreamingHtmlPreview"
+import { stripHtmlCodeFence } from "../../../lib/htmlBrief"
 
 export function DetailScreen() {
   const { goTo, setAIBarValue, expandAiPanel, showToast, openContentPanel } = useNavigation()
@@ -45,21 +47,25 @@ export function DetailScreen() {
     if (loadedKeyRef.current === key && evidence) return
     let cancelled = false
     setEvidenceState({ kind: "loading" })
-    setContent({ evidence: null })
+    setContent({ evidence: null, evidencePartialHtml: null })
     loadedKeyRef.current = key
-    runEvidenceGeneration(d.meta)
+    runEvidenceGeneration(d.meta, undefined, (html) => {
+      if (!cancelled) setContent({ evidencePartialHtml: html })
+    })
       .then((result) => {
         if (cancelled) return
         if (!result.ok) {
+          setContent({ evidencePartialHtml: null })
           setEvidenceState({ kind: "error", message: result.message })
           return
         }
-        setContent({ evidence: result.evidence })
+        setContent({ evidence: result.evidence, evidencePartialHtml: null })
         setEvidenceState({ kind: "idle" })
       })
       .catch((e: unknown) => {
         if (cancelled) return
         const msg = e instanceof Error ? e.message : String(e)
+        setContent({ evidencePartialHtml: null })
         setEvidenceState({ kind: "error", message: msg })
       })
     return () => {
@@ -73,18 +79,24 @@ export function DetailScreen() {
       return
     }
     setGeneratingPrd(true)
+    // Open the rail immediately with the live streaming preview — the PRD
+    // renders as its Part A HTML arrives instead of hiding behind the button
+    // spinner for the whole generation.
+    setContent({ prd: null, prdMeta: d.meta, prdGenerating: true, prdPartialHtml: null })
+    openContentPanel("prd")
     try {
-      const result = await runPrdGeneration(d.meta)
+      const result = await runPrdGeneration(d.meta, (html) => setContent({ prdPartialHtml: html }))
       if (!result.ok) {
+        setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", result.message.slice(0, 200))
         return
       }
       // Persist the source pointer so the PRD rail can refetch / regenerate
-      // against the same brief insight, then open it in the content panel
-      // (same rail card as Evidence — no separate PRD page).
-      setContent({ prd: result.prd, prdMeta: d.meta })
-      openContentPanel("prd")
+      // against the same brief insight (same rail card as Evidence — no
+      // separate PRD page).
+      setContent({ prd: result.prd, prdMeta: d.meta, prdGenerating: false, prdPartialHtml: null })
     } catch (e) {
+      setContent({ prdGenerating: false, prdPartialHtml: null })
       const msg = e instanceof Error ? e.message : String(e)
       showToast("PRD generation failed", msg.slice(0, 200))
     } finally {
@@ -156,6 +168,21 @@ export function DetailScreen() {
             </div>
           </div>
         )
+      ) : evidenceState.kind === "loading" && content.evidencePartialHtml ? (
+        // Live streaming preview: partial evidence HTML is already arriving —
+        // render it as it grows with a slim indicator instead of the skeleton.
+        <div className="prd-frame">
+          <div className="prd-body">
+            <div data-testid="evidence-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
+              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
+            </div>
+            <StreamingHtmlPreview
+              html={stripLeadingFence(stripHtmlCodeFence(content.evidencePartialHtml))}
+              title="Evidence brief (generating)"
+              testId="evidence-streaming-preview"
+            />
+          </div>
+        </div>
       ) : evidenceState.kind === "loading" ? (
         <EmptyPane
           title="Generating evidence…"

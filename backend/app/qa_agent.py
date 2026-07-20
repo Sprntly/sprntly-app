@@ -6,6 +6,9 @@ Pipeline (deterministic control flow; model only where judgement is needed):
        slash fast-path  (`/prioritize …`)            → that skill, conf 1.0
        regex fast-path  (skill_router.detect_intent) → that skill, if routable
        else LLM router  (haiku over the routable manifest) → {skill_id|none}
+       The LLM router also classifies scope: a question clearly outside
+       product / PM / engineering / design short-circuits to the canned
+       OUT_OF_SCOPE_MESSAGE — no answer model runs, so nothing is imagined.
   2. ANSWER  — skill → gateway.llm_call(skill=…) on sonnet, escalating heavy
                skills to opus; direct → compose_ask_answer (corpus + KG).
   3. (history) prior conversation turns are folded in for both the router and
@@ -22,18 +25,45 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
+from typing import Callable, Optional
 
 from app.ask_runner import _ASK_RESPONSE_SCHEMA, _retrieve_kg_bundle, compose_ask_answer
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
-from app.prompts import ASK_SYSTEM, ASK_SYSTEM_KG_ADDENDUM
-from app.skill_router import detect_intent, is_call_digest, is_voc_report_request
-from app.skills.catalog import COST_GATED, NON_ROUTABLE, routable_manifest
+from app.prompts import (
+    ASK_SYSTEM,
+    ASK_SYSTEM_KG_ADDENDUM,
+    ASK_SYSTEM_PRD_ADDENDUM,
+    OUT_OF_SCOPE_MESSAGE,
+)
+from app.skill_router import (
+    detect_intent,
+    is_call_digest,
+    is_data_analysis_request,
+    is_voc_report_request,
+)
+from app.skills.catalog import NON_ROUTABLE, routable_manifest
 from app.skills.loader import get_skill, list_skills
 from app.skills.scripts import SCRIPT_TOOLS
 
 logger = logging.getLogger(__name__)
+
+
+class AskCancelled(Exception):
+    """Raised at a cooperative cancellation checkpoint when the caller's
+    `is_cancelled()` reports the Ask has been stopped by the user. The worker
+    (ask_job_runner) catches it and leaves the job row in its `cancelled` state
+    WITHOUT marking it `error` — the answer is simply abandoned. Raising it
+    between LLM steps is what lets a Stop that lands before the expensive answer
+    call actually save that call, rather than only discarding the result."""
+
+
+def _check_cancelled(is_cancelled: Optional[Callable[[], bool]]) -> None:
+    """Abort the answer pipeline if the Ask was stopped. A no-op when no
+    canceller is wired (e.g. direct/test callers) or it returns False."""
+    if is_cancelled is not None and is_cancelled():
+        raise AskCancelled()
+
 
 ROUTER_MODEL = "claude-haiku-4-5"
 ANSWER_MODEL = "claude-sonnet-4-6"
@@ -80,8 +110,16 @@ _ROUTE_SCHEMA: dict = {
         },
         "confidence": {"type": "number", "description": "0..1"},
         "reason": {"type": "string", "description": "One short clause."},
+        "in_scope": {
+            "type": "boolean",
+            "description": (
+                "false ONLY when the question is clearly outside product / PM / "
+                "engineering / design work (see system prompt); when false, "
+                "skill_id must be 'none'."
+            ),
+        },
     },
-    "required": ["skill_id", "confidence", "reason"],
+    "required": ["skill_id", "confidence", "reason", "in_scope"],
 }
 
 _ROUTER_SYSTEM = (
@@ -89,7 +127,15 @@ _ROUTER_SYSTEM = (
     "question (and recent conversation), pick the SINGLE best-fit PM skill from "
     "the menu, or 'none' if the question is general/conversational and no skill "
     "clearly applies. Prefer 'none' over a weak match. Return the skill's exact "
-    "id."
+    "id.\n\n"
+    "Also classify scope. in_scope=true when the question concerns the user's "
+    "product or product work in any way: the product itself, problems, "
+    "evidence, prioritization, tickets, PRDs, user feedback, prototypes, "
+    "design, engineering, data about the business, or project management — or "
+    "is a greeting / a question about this assistant. in_scope=false ONLY when "
+    "the question is clearly outside those domains (general trivia, news, "
+    "weather, sports, entertainment, personal advice, unrelated general "
+    "knowledge). When in doubt, prefer in_scope=true."
 )
 
 
@@ -152,7 +198,7 @@ def route(
             model=ROUTER_MODEL,
             system=_ROUTER_SYSTEM,
             input=_render_history(history) + f"Question: {question}",
-            prompt_version="qa-router-v1",
+            prompt_version="qa-router-v2",
             json_schema=_ROUTE_SCHEMA,
             user_cacheable_prefix=_router_menu(),
             max_tokens=300,
@@ -162,33 +208,33 @@ def route(
         conf = float(out.get("confidence") or 0.0)
         if sid != "none" and _routable(sid) and conf >= _LLM_ROUTE_THRESHOLD:
             return RouteDecision(sid, conf, "llm", sid)
+        # Scope gate: no skill matched AND the router says the question is
+        # outside product/PM/engineering/design → canned refusal instead of a
+        # direct answer the model would have to imagine. Strict `is False` so a
+        # missing/odd field (old cached router rows, partial output) fails open
+        # to the direct path, whose grounding rules still apply.
+        if out.get("in_scope") is False:
+            return RouteDecision(None, conf, "out_of_scope")
     except Exception:  # noqa: BLE001 — routing must never break the answer
         logger.exception("LLM router failed; answering directly")
 
     return RouteDecision(None, 0.0, "none")
 
 
-# Confirm gate (decision 2026-06-13): cost-gated skills return this instead of
-# running, so the UI can ask the PM how deep to go. v1 trips on every fresh
-# route of a cost-gated skill (not when pinned via the follow-up); scope-aware
-# auto-run of a tiny one-competitor teardown is a documented follow-up.
-def _confirm_payload(skill_id: str, question: str) -> dict:
+# Ground truth over imagination: a question outside product/PM/engineering/
+# design gets this fixed payload — no answer-model call, so there is nothing to
+# hallucinate. Standard Ask shape (answer/key_points/citations/confidence/
+# unanswered) so _strip_citations and the UI render it as a normal turn.
+def _out_of_scope_payload() -> dict:
     return {
-        "type": "needs_confirmation",
-        "skill": skill_id,
-        "scope": {"depth": "full"},
-        "estimate": {"tier": "deep", "duration_s": 210},
-        "options": [
-            {"id": "quick", "label": "Quick teardown", "scope": {"depth": "quick"}},
-            {"id": "full", "label": "Full review", "scope": {"depth": "full"}},
-        ],
-        # Keep the standard Ask shape so the route's _strip_citations + UI don't break.
-        "answer": "",
+        "type": "out_of_scope",
+        "answer": OUT_OF_SCOPE_MESSAGE,
         "key_points": [],
         "citations": [],
-        "confidence": 0.0,
+        "confidence": 1.0,
         "unanswered": "",
-        "_skill": skill_id,
+        "_skill": None,
+        "_skill_source": "scope_gate",
     }
 
 
@@ -221,13 +267,29 @@ def _kg_grounding(enterprise_id, question) -> tuple[str, bool]:
     return f"{render_context_section(bundle)}\n\n---\n\n", True
 
 
-def _answer_single_shot(decision: RouteDecision, enterprise_id, question, history) -> dict:
+def _answer_single_shot(
+    decision: RouteDecision, enterprise_id, question, history, prd_context: str = ""
+) -> dict:
     """Skill answer via one gateway call (SKILL.md injected by the gateway),
-    grounded on the KG when the tenant's graph has relevant signal."""
+    grounded on the KG when the tenant's graph has relevant signal — or, for a
+    PRD-tab chat, on the open PRD alone (`prd_context` rides the cacheable
+    prefix and the KG retrieval is skipped)."""
     model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
-    kg_block, kg_used = _kg_grounding(enterprise_id, question)
+    if prd_context:
+        # PRD-grounded ask: the PRD context block (~26K tokens) IS the
+        # grounding — skip the KG retrieval (embeddings HTTP call + pgvector
+        # queries, ~0.5-1s serial) entirely. The block rides the CACHEABLE
+        # user prefix instead of plain input: it is byte-stable across turns
+        # of the same PRD conversation, so turns 2+ cache-read it instead of
+        # re-prefilling. The gateway PREPENDS the skill's METHOD block to this
+        # prefix — also byte-stable per (skill, PRD content) — so the whole
+        # prefix stays cache-friendly; history + the question stay uncached.
+        kg_block, kg_used = "", False
+    else:
+        kg_block, kg_used = _kg_grounding(enterprise_id, question)
     system = (
         ASK_SYSTEM
+        + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + (ASK_SYSTEM_KG_ADDENDUM if kg_used else "")
         + f"\n\nThe user's question maps to the '{decision.skill_id}' skill. "
         "Follow that skill's method to produce a structured, actionable answer."
@@ -239,6 +301,7 @@ def _answer_single_shot(decision: RouteDecision, enterprise_id, question, histor
         model=model,
         system=system,
         input=_render_history(history) + kg_block + f"Question: {question}",
+        user_cacheable_prefix=prd_context or None,
         prompt_version="qa-skill-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=decision.skill_id,
@@ -284,14 +347,18 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
     return _tag(payload, decision)
 
 
-def _answer_with_script(decision: RouteDecision, enterprise_id, question, history) -> dict:
+def _answer_with_script(
+    decision: RouteDecision, enterprise_id, question, history, prd_context: str = ""
+) -> dict:
     """Skill answer via a tool-use loop so the skill's deterministic script runs
     ON OUR INFRA (app.skills.scripts) instead of the model estimating the math."""
     skill_id = decision.skill_id
     tool = SCRIPT_TOOLS[skill_id]
     spec = get_skill(skill_id)
+    prd_block = f"{prd_context}\n\n---\n\n" if prd_context else ""
     system = (
         ASK_SYSTEM
+        + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + f"\n\n## METHOD (skill: {skill_id})\n{spec.method}\n\n"
         f"You have a tool, `{tool.name}`, that runs the skill's deterministic "
         "script. Call it for the math instead of computing it yourself, then "
@@ -304,7 +371,7 @@ def _answer_with_script(decision: RouteDecision, enterprise_id, question, histor
     meta: dict = {}
     text = run_tool_loop(
         system=system,
-        user=_render_history(history) + f"Question: {question}",
+        user=_render_history(history) + prd_block + f"Question: {question}",
         tools=[tool.as_tool()],
         dispatch=dispatch,
         model=HEAVY_MODEL if skill_id in HEAVY_SKILLS else ANSWER_MODEL,
@@ -373,9 +440,22 @@ def answer(
     dataset: str,
     history: Optional[list[dict]] = None,
     pinned_skill: Optional[str] = None,
+    is_cancelled: Optional[Callable[[], bool]] = None,
+    prd_id: Optional[int] = None,
 ) -> dict:
     """Answer a question via the best skill, or directly. `pinned_skill` skips
-    routing (used when a confirm-gate follow-up has already chosen the skill)."""
+    routing (used when a confirm-gate follow-up has already chosen the skill).
+    `prd_id` marks a PRD-tab ask: the open PRD (+ its insight/evidence/tickets/
+    prototype) is assembled into a grounding block so "this PRD" questions
+    actually see the document.
+
+    `is_cancelled`, when supplied, is polled at cheap checkpoints between the
+    routing and answer steps; if it returns True the pipeline raises
+    `AskCancelled` and stops BEFORE the expensive answer LLM call, so a user
+    Stop that lands early actually saves that cost. Callers that don't support
+    cancellation (tests, the direct path) omit it and behave as before."""
+    # Cancelled before we've spent anything → bail immediately.
+    _check_cancelled(is_cancelled)
     # On-demand call digest: "summarize the customer calls from last week" needs a
     # LIVE fetch of every call in a window + a VoC pass over the complete corpus.
     # The generic router would misroute it (e.g. → interview-synthesis) and answer
@@ -402,20 +482,48 @@ def answer(
                 enterprise_id=enterprise_id, question=question, history=history
             )
 
+    # "Analyze my data" is a COMMAND to run the deterministic DS engine over the
+    # company's uploaded CSV/Excel exports — not a question for the corpus/KG.
+    # Intercept before generic routing for the same reason as the call digest:
+    # the keyword rules would send it to a synthesis skill, which answers from
+    # the KG instead of computing over the actual data.
+    if not pinned_skill and is_data_analysis_request(question):
+        from app.ds import chat_analysis
+
+        return chat_analysis.answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
+
     if pinned_skill and _routable(pinned_skill):
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)
     else:
         decision = route(question, enterprise_id=enterprise_id, history=history)
 
+    # Routing (a cheap haiku call) is done; the answer/script call below is the
+    # expensive one. This is the highest-value checkpoint: a Stop within the
+    # first second or two lands here and skips the sonnet/opus generation.
+    _check_cancelled(is_cancelled)
+
+    # Out-of-domain question (router classified it, no skill matched) → the
+    # canned refusal, deterministically. Never let the answer model improvise
+    # on a topic we hold no ground truth for.
+    if decision.source == "out_of_scope":
+        return _out_of_scope_payload()
+
+    # PRD-tab grounding, shared by the direct and skill paths. Best-effort:
+    # build_prd_context returns '' on any failure, degrading to a plain ask.
+    prd_context = ""
+    if prd_id:
+        from app.prd_context import build_prd_context
+
+        prd_context = build_prd_context(enterprise_id, prd_id)
+
     if not decision.skill_id:
         # Direct path — corpus + KG, unchanged. Fold history into the question.
         q = _render_history(history) + question if history else question
-        return compose_ask_answer(dataset, q, enterprise_id=enterprise_id)
-
-    # Cost-gated skill freshly routed → ask before spending (CIR). A pinned
-    # follow-up has already confirmed, so it runs.
-    if decision.skill_id in COST_GATED and decision.source != "pinned":
-        return _confirm_payload(decision.skill_id, question)
+        return compose_ask_answer(
+            dataset, q, enterprise_id=enterprise_id, prd_context=prd_context
+        )
 
     # VoC routed with no live call source (call_digest is handled upstream): render
     # the pinned HTML report from KG signal when there is any; else fall through to
@@ -426,7 +534,11 @@ def answer(
             return _maybe_verify(voc, enterprise_id)
 
     if decision.skill_id in SCRIPT_TOOLS:
-        payload = _answer_with_script(decision, enterprise_id, question, history)
+        payload = _answer_with_script(
+            decision, enterprise_id, question, history, prd_context=prd_context
+        )
     else:
-        payload = _answer_single_shot(decision, enterprise_id, question, history)
+        payload = _answer_single_shot(
+            decision, enterprise_id, question, history, prd_context=prd_context
+        )
     return _maybe_verify(payload, enterprise_id)

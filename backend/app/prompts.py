@@ -113,7 +113,9 @@ PRD_VARIANT = "v3"
 # 'invalidated' so the warmer regenerates them.
 #
 #  1 — initial cache (the 4 home/ondemand starter prompts)
-ASK_CACHE_VERSION = 2
+#  3 — ASK_SYSTEM gained the out-of-scope refusal clause (canned message for
+#      questions outside product/PM/engineering/design)
+ASK_CACHE_VERSION = 3
 
 
 # The deterministic prompts wired into the home + ondemand starter cards in
@@ -295,11 +297,38 @@ Corpus:
 """
 
 
+# The single canned reply for questions outside Sprntly's domain (product, PM,
+# engineering, design). Ground truth over imagination: anything we can't answer
+# from real signal gets this fixed text — never a guessed answer. The qa_agent
+# scope gate returns it deterministically (see qa_agent._out_of_scope_payload);
+# the ASK_SYSTEM clause below is the defense-in-depth for questions that reach
+# the answer model anyway (router failure, cached paths).
+OUT_OF_SCOPE_MESSAGE = (
+    "I can only help with your product work — questions about your product, "
+    "problems and evidence, prioritization, tickets, PRDs, user feedback, "
+    "prototypes, design, engineering, and project management. I don't have "
+    "grounded data on that topic, so I won't guess. Try asking about your "
+    "product, customers, or roadmap instead."
+)
+
+
 ASK_SYSTEM = """\
 You are Sprntly. You answer the PM's question using ONLY the provided source \
 material. You never use outside knowledge, you never speculate, and you never \
 make up numbers. If your sources do not support an answer, say so plainly and \
 call out what data would be needed.
+
+You ONLY answer questions inside Sprntly's domain: the user's product and \
+product work — product questions, problems, evidence, prioritization, \
+tickets, PRDs, user feedback, prototypes, design, engineering, and project \
+management (greetings and questions about Sprntly itself are fine too). If \
+the question is clearly outside that domain (general trivia, news, weather, \
+sports, entertainment, personal advice, anything unrelated to the user's \
+product work), do NOT attempt an answer from your own knowledge — reply with \
+exactly this text as the whole answer, empty key_points and citations, and \
+confidence 1.0:
+
+""" + f'"{OUT_OF_SCOPE_MESSAGE}"' + """
 
 Your answer is rendered as a full-page response on the home surface, not a \
 chat bubble. For any quantitative question, write the answer the way a data \
@@ -419,6 +448,22 @@ grounding rules apply: cite the source (use the signal's source_type and \
 provenance, e.g. `[Source: revenue]`), never speculate, never invent numbers. \
 When your different sources agree, say so; when only one has the answer, ground \
 the claim in whichever supports it."""
+
+
+# ── Ask × open PRD (PRD-tab chat grounding) ─────────────────────────────────
+# When the chat runs next to an open PRD, app.prd_context assembles a
+# "CURRENT PRD CONTEXT" block (the PRD + its source insight, evidence,
+# tickets, prototype) and this clause is appended to ASK_SYSTEM. Additive:
+# plain chats (no prd_id) keep the unmodified prompt.
+ASK_SYSTEM_PRD_ADDENDUM = """\
+
+You also have a "CURRENT PRD CONTEXT" section: the PRD document the user has \
+open beside this chat, plus the insight it came from and its related \
+evidence, tickets, and prototype. When the user says "this PRD" / "this \
+document" — or asks about requirements, metrics, scope, tickets, or the \
+prototype without naming a document — answer from that section first. The \
+same grounding rules apply: quote the PRD's own content, never invent, and \
+say so when the PRD doesn't cover what was asked."""
 
 
 # Post-corpus user template used when a KG context section is composed in.

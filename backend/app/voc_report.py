@@ -25,18 +25,20 @@ logger = logging.getLogger(__name__)
 
 _VOC_SKILL = "voice-of-customer-report"
 
-# The verbatim <style> block from example-output.html — the pinned design. Kept
-# byte-for-byte so the rendered report matches the reference exactly (minus the
+# The <style> block from example-output.html — the pinned design (minus the
 # sample banner and brand chrome, which are demo-only and never emitted here).
+# Deliberate divergence from the reference: .tfind's side column is auto-sized
+# (was a fixed 172px) so wide VOL/SEV pills can never overflow left over the
+# finding title in narrow panels.
 _STYLE = """
   :root{
-    --desk:#E9E7E2; --page:#FFFFFF; --ink:#1F241F; --sec:#5B615B; --accent:#1A6B47;
+    --page:#FFFFFF; --ink:#1F241F; --sec:#5B615B; --accent:#1A6B47;
     --happy-bg:#E7F1EA; --happy-fg:#1A6B47; --edge-bg:#FBF0DC; --edge-fg:#8A5A12;
     --fail-bg:#F9E7E4; --fail-fg:#9C3223; --hair:#E3E1DC; --quiet:#F6F5F2;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--desk);font-family:'Inter',sans-serif;font-size:15px;line-height:1.6;color:var(--ink);padding:40px 16px}
-  .page{max-width:900px;margin:0 auto;background:var(--page);border-radius:2px;box-shadow:0 2px 14px rgba(31,36,31,.10);padding:72px;position:relative}
+  body{background:var(--page);font-family:'Inter',sans-serif;font-size:15px;line-height:1.6;color:var(--ink);padding:0}
+  .page{max-width:900px;margin:0 auto;background:var(--page);padding:56px 64px;position:relative}
   .chips{max-width:900px;margin:0 auto 12px;display:flex;gap:8px;flex-wrap:wrap;font-family:'IBM Plex Mono',monospace;font-size:11.5px}
   .chip{padding:4px 10px;border-radius:2px;background:#fff;color:var(--sec);box-shadow:0 1px 3px rgba(31,36,31,.08)}
   .chip.green{background:var(--happy-bg);color:var(--happy-fg)}
@@ -52,13 +54,13 @@ _STYLE = """
   .srcchip{font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--accent);background:#fff;border:1px solid #C7DCCE;border-radius:2px;padding:2px 8px}
   .tldr-lede{font-family:'Spectral',serif;font-size:19px;line-height:1.5;padding:22px 26px 6px}
   .tldr-lede b{font-weight:600}
-  .tfind{display:grid;grid-template-columns:44px 1fr 172px;gap:14px;align-items:start;padding:16px 26px;border-top:1px solid var(--hair)}
+  .tfind{display:grid;grid-template-columns:44px minmax(0,1fr) auto;gap:14px;align-items:start;padding:16px 26px;border-top:1px solid var(--hair)}
   .tfind .disc{width:30px;height:30px;border-radius:50%;background:var(--accent);color:#fff;font-family:'IBM Plex Mono',monospace;font-size:12px;display:flex;align-items:center;justify-content:center;margin-top:2px}
   .tfind h4{font-size:15px;font-weight:600;margin-bottom:2px}
   .tfind .d{font-size:13.5px;color:var(--sec)}
   .tfind .metric{font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent);margin-top:5px}
   .tfind .side{display:flex;flex-direction:column;gap:5px;align-items:flex-end}
-  .mini{font-family:'IBM Plex Mono',monospace;font-size:10.5px;padding:3px 8px;border-radius:2px;white-space:nowrap}
+  .mini{font-family:'IBM Plex Mono',monospace;font-size:10.5px;padding:3px 8px;border-radius:2px;max-width:100%;overflow-wrap:anywhere}
   .mini .k{opacity:.65;margin-right:4px}
   .mini.high{background:var(--fail-bg);color:var(--fail-fg)}
   .mini.med{background:var(--edge-bg);color:var(--edge-fg)}
@@ -105,7 +107,7 @@ _STYLE = """
   .cta.ghost{border:1px solid var(--accent);color:var(--accent)}
   .gate{font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--sec);margin:-4px 0 14px}
   @media(max-width:760px){.page{padding:32px 20px}.themes{grid-template-columns:1fr}.tfind{grid-template-columns:38px 1fr}.tfind .side{flex-direction:row;justify-content:flex-start;grid-column:2}}
-  @media print{body{background:#fff;padding:0}.chips{display:none}.page{box-shadow:none;padding:40px}}
+  @media print{.chips{display:none}.page{padding:40px}}
 """
 
 # ── JSON schema for the report DATA (the model returns this, never HTML) ──────
@@ -275,11 +277,9 @@ def _theme(t: dict) -> str:
 
 
 def _rec(i: int, r: dict) -> str:
-    if r.get("investigation_only"):
-        ctas = '<span class="cta ghost">Move to backlog</span>'
-    else:
-        ctas = ('<span class="cta primary">Generate PRD</span>'
-                '<span class="cta ghost">Move to backlog</span>')
+    # No CTAs inside the report: the document renders in a script-less sandboxed
+    # iframe where nothing is clickable — the REAL "Generate PRD" action lives in
+    # the content panel's bottom bar, outside the iframe.
     return (
         '<div class="rec">'
         f'<div class="rank">R{i}</div>'
@@ -287,7 +287,6 @@ def _rec(i: int, r: dict) -> str:
         f'<h4>{_e(r.get("title"))}</h4>'
         f'<div class="why">{_e(r.get("description"))}</div>'
         f'<div class="metric">{_e(r.get("impact_line"))}</div>'
-        f"{ctas}"
         '</div></div>'
     )
 
@@ -310,17 +309,15 @@ def render_html(data: dict) -> str:
     gate_line = (
         f"PRIORITIZATION GATE PASSED ✓ — {_e(cand)} candidate actions identified · "
         f"{_e(sel)} selected · cap 5–7 unless impacts tie at the cut · "
-        f"{_e(routed)} routed to monitor/backlog, not listed here"
+        f"{_e(routed)} routed to monitor/ideation, not listed here"
     )
     goals = data.get("goals_note")
     rec_eyebrow = "Recommendations"
     if goals:
         rec_eyebrow += f" — selected by fit to this quarter's goals ({_e(goals)})"
 
-    coverage_chip = (
-        f'<span class="chip">{_e(data["coverage"])}</span>' if data.get("coverage") else ""
-    )
-
+    # The reference design's meta chips row (skill name / source-curation /
+    # basis) is internal chrome, not customer signal — deliberately NOT rendered.
     return (
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
         '<meta charset="UTF-8">\n'
@@ -329,11 +326,6 @@ def render_html(data: dict) -> str:
         '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
         '<link href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400;1,500&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">\n'
         f"<style>{_STYLE}</style>\n</head>\n<body>\n"
-        '<div class="chips">'
-        '<span class="chip green">voice-of-customer-report</span>'
-        '<span class="chip">curated, direct-access sources only</span>'
-        '<span class="chip">basis: volume + impact + commercial</span>'
-        f"{coverage_chip}</div>\n"
         '<div class="page">\n'
         f"<h1>{_e(data.get('title') or 'Voice of Customer')}</h1>\n"
         '<div class="tldr">'
@@ -365,10 +357,19 @@ _SYSTEM = (
     "side), never an internal/solution label.\n"
     "- Use real COUNTS, never percentages, for these qualitative sources.\n"
     "- Volume and severity each rate low/med/high; keep the raw count with the "
-    "volume and a 2–4 word justification with the severity.\n"
-    "- Every problem names ONE metric it impacts and quantifies by how much, and "
-    "ALWAYS carries a revenue line: a sourced figure, or set revenue_unknown=true "
-    "with revenue_line='revenue: 🅘 unknown'. Never estimate revenue.\n"
+    "volume and a 2–4 word justification with the severity. Volume counts are "
+    "SHORT — '11/17 calls', '3 of 5' — never a sentence; put any caveat in the "
+    "finding's sentence, not the count.\n"
+    "- Every problem names ONE metric it impacts and ALWAYS carries a revenue "
+    "line: a sourced figure, or set revenue_unknown=true with "
+    "revenue_line='revenue: 🅘 unknown'. Never estimate revenue — if the CRM/"
+    "commercial data provides no spend or deal figures, every revenue line is "
+    "'revenue: 🅘 unknown'.\n"
+    "- `by_how_much` is a quantified delta ONLY when the source material states "
+    "one. When no analytics/metric data is present, describe the impact "
+    "qualitatively or write '🅘 unknown — no metric data connected'. NEVER "
+    "compute, extrapolate, or invent percentages, deltas, dollar amounts, or "
+    "any other number that does not appear verbatim in the material below.\n"
     "- Set silent_killer=true when volume is low but severity or dollars are high.\n"
     "- Confidence tiers 🅗 hard / 🅢 soft / 🅘 unknown belong inline on the counts "
     "and impact lines.\n"

@@ -166,9 +166,10 @@ CREATE TABLE prds (
     template_version INTEGER,
     variant          TEXT NOT NULL DEFAULT 'v1',
     run_id           TEXT,
-    -- Backlog-sourced PRDs (mirrors 20260702000000_prds_backlog_source.sql):
-    -- source='backlog' + theme_id set for a PRD generated from a backlog item;
-    -- source='brief' + theme_id NULL for a brief-insight PRD.
+    -- Ideation-sourced PRDs (mirrors 20260702000000_prds_backlog_source.sql,
+    -- values renamed by 20260715000000): source='ideation' + theme_id set for a
+    -- PRD generated from an ideation item; source='brief' + theme_id NULL for a
+    -- brief-insight PRD.
     source           TEXT NOT NULL DEFAULT 'brief',
     theme_id         TEXT
 );
@@ -183,7 +184,10 @@ CREATE TABLE evidences (
     status           TEXT NOT NULL DEFAULT 'generating',
     error            TEXT,
     template_version INTEGER,
-    variant          TEXT NOT NULL DEFAULT 'v1'
+    variant          TEXT NOT NULL DEFAULT 'v1',
+    -- 20260719120000: chat-task evidence keys by (brief_id, theme_id)
+    -- ('chat:<hash>'); brief-insight docs keep NULL.
+    theme_id         TEXT
 );
 
 -- Test-harness only (NOT a migration): the real prd_patches migration ships
@@ -266,6 +270,8 @@ CREATE TABLE ask_jobs (
     question        TEXT NOT NULL,
     conversation_id INTEGER,
     pinned_skill    TEXT,
+    -- PRD-tab grounding (mirrors 20260718120000_ask_jobs_prd_id.sql).
+    prd_id          INTEGER,
     status          TEXT NOT NULL DEFAULT 'generating',
     response        TEXT NOT NULL DEFAULT '{}',
     error           TEXT,
@@ -320,6 +326,9 @@ CREATE INDEX idx_multi_agent_docs_run_id ON multi_agent_docs (run_id);
 CREATE TABLE datasets (
     slug         TEXT PRIMARY KEY,
     display_name TEXT NOT NULL,
+    -- Workspace binding (mirrors 20260716123000_datasets_workspace_id.sql):
+    -- the dataset is the workspace's corpus key. NULL = legacy demo dataset.
+    workspace_id TEXT,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -361,6 +370,29 @@ CREATE TABLE companies (
     feature_flags       TEXT NOT NULL DEFAULT '{}',
     seat_limit          INTEGER,
     prototype_enabled   INTEGER NOT NULL DEFAULT 1,
+    -- Registration-spec v5 columns (mirrors
+    -- 20260716120000_account_type_onboarding_v5.sql).
+    account_type        TEXT,
+    mission             TEXT,
+    strategy            TEXT,
+    portfolio           TEXT,
+    icp                 TEXT NOT NULL DEFAULT '{}',
+    tone_voice          TEXT NOT NULL DEFAULT '{}',
+    planning_cycle      TEXT,
+    team_scope          TEXT,
+    prioritization_framework TEXT,
+    sizing_methodology  TEXT,
+    -- Onboarding v6 columns (mirrors 20260717120000_onboarding_v6.sql):
+    -- team name + the steps-6/7 typed blocks + the accepted business-context
+    -- prose + the define-metrics sub-flow definitions.
+    team_name           TEXT,
+    team_strategy       TEXT,
+    team_roadmap        TEXT,
+    decision_process    TEXT,
+    additional_context  TEXT,
+    business_context_summary TEXT,
+    business_context_accepted_at TEXT,
+    metric_definitions  TEXT NOT NULL DEFAULT '[]',
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -447,6 +479,15 @@ CREATE TABLE products (
     website     TEXT,
     description TEXT,
     is_primary  INTEGER NOT NULL DEFAULT 0,
+    -- Registration-spec v5 product fields (mirrors
+    -- 20260716120000_account_type_onboarding_v5.sql; text[] → JSON TEXT).
+    surfaces     TEXT NOT NULL DEFAULT '[]',
+    personas     TEXT NOT NULL DEFAULT '[]',
+    positioning  TEXT,
+    monetization TEXT NOT NULL DEFAULT '[]',
+    -- v6 "tell us about your users" prose (mirrors 20260717120000_onboarding_v6.sql).
+    users_description TEXT,
+    maturity     TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -456,7 +497,12 @@ CREATE INDEX products_company_id_idx ON products (company_id);
 -- Mirrors supabase/migrations/20260606120000_workspaces_and_connection_scope.sql.
 CREATE TABLE workspaces (
     id          TEXT PRIMARY KEY,
-    company_id  TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    -- No REFERENCES companies(id) here, unlike prod: route tests override
+    -- require_company with fabricated company ids (co-X, acme, …) that have no
+    -- companies row, and require_workspace's ensure_default_workspace self-heal
+    -- must be able to insert for them. In prod require_company resolves the
+    -- company FROM the DB, so the row always exists and the FK never bites.
+    company_id  TEXT NOT NULL,
     product_id  TEXT REFERENCES products (id) ON DELETE SET NULL,
     name        TEXT NOT NULL,
     slug        TEXT NOT NULL,
@@ -468,15 +514,35 @@ CREATE TABLE workspaces (
 CREATE INDEX workspaces_company_id_idx ON workspaces (company_id);
 CREATE INDEX workspaces_product_id_idx ON workspaces (product_id);
 
--- Mirrors supabase/migrations/20260525150000_onboarding_workspace.sql.
+-- Workspace membership (mirrors 20260716121000_workspace_members.sql).
+-- Two-level roles: org owner/admin implicitly access all workspaces;
+-- plain members need a row here per workspace.
+CREATE TABLE workspace_members (
+    id           TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces (id) ON DELETE CASCADE,
+    user_id      TEXT NOT NULL,
+    role         TEXT NOT NULL DEFAULT 'member'
+                  CHECK (role IN ('admin', 'member', 'viewer')),
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (workspace_id, user_id)
+);
+CREATE INDEX workspace_members_user_id_idx      ON workspace_members (user_id);
+CREATE INDEX workspace_members_workspace_id_idx ON workspace_members (workspace_id);
+
+-- Mirrors supabase/migrations/20260525150000_onboarding_workspace.sql
+-- (+ 20260716122000_invites_multi_workspace.sql: viewer role + the
+-- workspace_ids uuid[] → JSON-encoded TEXT here).
 -- Used by the Settings → Team route suite (test_team_*.py).
 CREATE TABLE workspace_invites (
-    id         TEXT PRIMARY KEY,
-    company_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
-    email      TEXT NOT NULL,
-    role       TEXT NOT NULL DEFAULT 'member',
-    invited_by TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    id            TEXT PRIMARY KEY,
+    company_id    TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    email         TEXT NOT NULL,
+    role          TEXT NOT NULL DEFAULT 'member',
+    -- v6 invite step's JOB role (mirrors 20260717120000_onboarding_v6.sql).
+    job_role      TEXT,
+    invited_by    TEXT,
+    workspace_ids TEXT NOT NULL DEFAULT '[]',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, email)
 );
 CREATE INDEX workspace_invites_company_id_idx ON workspace_invites (company_id);
@@ -554,13 +620,15 @@ CREATE TABLE IF NOT EXISTS company_members (
 -- User profiles (mirrors auth.users FK in prod; require_company reads this
 -- to resolve user_name instead of stale JWT user_metadata).
 CREATE TABLE IF NOT EXISTS profiles (
-    id         TEXT PRIMARY KEY,
-    email      TEXT,
-    full_name  TEXT,
-    first_name TEXT,
-    last_name  TEXT,
-    avatar_url TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    id           TEXT PRIMARY KEY,
+    email        TEXT,
+    full_name    TEXT,
+    first_name   TEXT,
+    last_name    TEXT,
+    avatar_url   TEXT,
+    -- Registration-spec v5 (mirrors 20260716120000_account_type_onboarding_v5.sql).
+    account_type TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- ---- KG foundation (Phase 0) ----
@@ -661,10 +729,13 @@ CREATE TABLE agent_decision_log (
     timestamp      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Sequenced product backlog (mirrors 20260608120000_backlog_items.sql).
--- One row per non-brief theme, carrying its rank/score + triage rationale.
+-- Prioritized ideation pool (mirrors 20260608120000_backlog_items.sql as
+-- renamed + extended by 20260715000000_ideation_rename_shortlist.sql).
+-- One row per non-brief theme, carrying its rank/score + rationale and the
+-- weekly-prioritization `shortlisted` flag. 'backlog' stays an allowed legacy
+-- status (pre-rename prod writes it through the compat view until cutover).
 -- uuid PK / timestamptz are TEXT under SQLite, matching the other seeded tables.
-CREATE TABLE backlog_items (
+CREATE TABLE ideation_items (
     id            TEXT PRIMARY KEY,
     enterprise_id TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
     theme_id      TEXT NOT NULL,
@@ -673,14 +744,15 @@ CREATE TABLE backlog_items (
     tag           TEXT,
     rank          INTEGER NOT NULL,
     score         REAL NOT NULL,
-    status        TEXT NOT NULL DEFAULT 'backlog'
-                  CHECK (status IN ('backlog', 'in_progress', 'done', 'dismissed')),
+    status        TEXT NOT NULL DEFAULT 'proposed'
+                  CHECK (status IN ('proposed', 'backlog', 'in_progress', 'done', 'dismissed')),
+    shortlisted   INTEGER NOT NULL DEFAULT 0,
     reasoning     TEXT,
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (enterprise_id, theme_id)
 );
-CREATE INDEX backlog_items_rank_idx ON backlog_items (enterprise_id, rank);
+CREATE INDEX ideation_items_rank_idx ON ideation_items (enterprise_id, rank);
 
 -- Per-theme brief de-dup fingerprint (mirrors 20260616130000_brief_finding_state.sql).
 -- One row per theme ever surfaced in a brief; carries the convergence state at
@@ -708,6 +780,8 @@ CREATE INDEX brief_finding_state_enterprise_idx ON brief_finding_state (enterpri
 -- Mirrors supabase/migrations/20260611100000_ticket_data.sql (SQLite-ized).
 -- Ticket overrides keyed by a stable ticket_key + company_id.
 CREATE TABLE ticket_edits (
+    -- Workspace scope (20260716124000_workspace_scope_columns.sql).
+    workspace_id TEXT,
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id          TEXT NOT NULL,
     ticket_key          TEXT NOT NULL,
@@ -732,6 +806,7 @@ CREATE TABLE ticket_edits (
     UNIQUE (company_id, ticket_key)
 );
 CREATE TABLE ticket_attachments (
+    workspace_id TEXT,
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id  TEXT NOT NULL,
     ticket_key  TEXT NOT NULL,
@@ -741,6 +816,7 @@ CREATE TABLE ticket_attachments (
 );
 CREATE INDEX idx_ticket_attachments_key ON ticket_attachments (company_id, ticket_key);
 CREATE TABLE ticket_comments (
+    workspace_id TEXT,
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id  TEXT NOT NULL,
     ticket_key  TEXT NOT NULL,
@@ -759,6 +835,8 @@ CREATE INDEX idx_ticket_comments_key ON ticket_comments (company_id, ticket_key)
 -- (the ticket_edits/comments/attachments tables above only layer overrides on
 -- top). bigint identity / jsonb / timestamptz are INTEGER / TEXT here.
 CREATE TABLE prd_tickets (
+    -- Workspace scope (20260716124000_workspace_scope_columns.sql).
+    workspace_id TEXT,
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id    TEXT NOT NULL,
     prd_id        INTEGER NOT NULL UNIQUE,
@@ -777,6 +855,7 @@ CREATE INDEX idx_prd_tickets_company ON prd_tickets (company_id);
 CREATE TABLE prd_ticket_sync (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id       TEXT NOT NULL,
+    workspace_id     TEXT,
     prd_id           INTEGER NOT NULL,
     provider         TEXT NOT NULL,
     destination_id   TEXT NOT NULL,
@@ -798,6 +877,7 @@ CREATE TABLE prd_ticket_sync (
 CREATE TABLE jira_issue_map (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id     TEXT NOT NULL,
+    workspace_id     TEXT,
     project_key    TEXT NOT NULL,
     ticket_id      TEXT NOT NULL,
     jira_issue_key TEXT NOT NULL,
@@ -813,6 +893,7 @@ CREATE TABLE jira_issue_map (
 CREATE TABLE tracker_meta (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id     TEXT NOT NULL,
+    workspace_id     TEXT,
     provider       TEXT NOT NULL,
     destination_id TEXT NOT NULL,
     meta           TEXT NOT NULL DEFAULT '{}',
@@ -829,14 +910,21 @@ CREATE TABLE tracker_meta (
 CREATE TABLE roadmap_doc (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id     TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    -- Workspace scope (mirrors 20260716124000_workspace_scope_columns.sql):
+    -- one roadmap per WORKSPACE now; the old unique(company_id) is gone.
+    workspace_id   TEXT,
     filename       TEXT NOT NULL,
     content_type   TEXT,
     extracted_text TEXT NOT NULL DEFAULT '',
     raw_b64        TEXT,
     version        INTEGER NOT NULL DEFAULT 1,
-    uploaded_at    TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (company_id)
+    uploaded_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
+-- Non-partial (unlike Postgres) so the fake's ON CONFLICT(workspace_id)
+-- upsert matches; SQLite treats NULLs as distinct, so legacy no-workspace
+-- rows still coexist.
+CREATE UNIQUE INDEX roadmap_doc_workspace_id_key
+    ON roadmap_doc (workspace_id);
 
 -- Company templates storage (mirrors 20260623140000_company_template.sql,
 -- SQLite-ized). MANY rows per company (unlike roadmap_doc's one-per-company):
@@ -866,9 +954,12 @@ CREATE INDEX company_template_company_idx ON company_template (company_id);
 CREATE TABLE company_document (
     id             TEXT PRIMARY KEY,
     company_id     TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    workspace_id   TEXT,
     doc_type       TEXT NOT NULL
                      CHECK (doc_type IN (
-                       'ceo_memo', 'team_priorities', 'research', 'company_strategy'
+                       'ceo_memo', 'team_priorities', 'research', 'company_strategy',
+                       'team_strategy', 'team_roadmap', 'decision_process',
+                       'additional_context'
                      )),
     filename       TEXT NOT NULL,
     content_type   TEXT,
@@ -928,6 +1019,8 @@ CREATE INDEX mcp_tokens_company_idx ON mcp_tokens (company_id);
 -- PRD it's about (20260709130000_conversations_prd_id.sql) so a reopened PRD
 -- tab can rehydrate its earlier turns via GET /v1/conversations/by-prd/{prd_id}.
 CREATE TABLE conversations (
+    -- Workspace scope (20260716124000_workspace_scope_columns.sql).
+    workspace_id TEXT,
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     company_id  TEXT NOT NULL,
     user_id     TEXT,
@@ -1102,6 +1195,32 @@ def _reset_iterate_limiter():
     except Exception:
         pass
     yield
+
+
+@pytest.fixture(autouse=True)
+def _clear_auth_caches():
+    """Per-test isolation for the in-process auth/tenancy TTL caches.
+
+    `app.db.authcache` holds module-level TTLMap singletons (memberships,
+    profile names, workspace rows) that survive the per-test module reloads
+    (authcache is not in _RELOAD_ORDER, and nothing resets it). Tests reuse
+    the same user/company/workspace ids against a FRESH fake DB each test,
+    so an entry cached in one test would leak stale rows — or worse, rows
+    that no longer exist — into the next. Clear on both sides of each test
+    so a test's own cache writes can't outlive it either."""
+    try:
+        from app.db import authcache
+
+        authcache.clear_all()
+    except Exception:
+        pass
+    yield
+    try:
+        from app.db import authcache
+
+        authcache.clear_all()
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)

@@ -100,6 +100,37 @@ describe("subscribeToGenerationStream", () => {
     expect(seen).toEqual(["ok"])
   })
 
+  it("resets the accumulator when a backend retry re-emits the document from zero", async () => {
+    const seen: string[] = []
+    subscribeToGenerationStream(() => "http://api.test/s", { onDelta: (f) => seen.push(f) })
+    await flush()
+
+    const es = MockEventSource.latest()
+    es.emit({ kind: "delta", text: "<!doctype html><body>first attempt" })
+    // A mid-generation backend retry restarts the stream from zero on the same
+    // channel — the preview must show ONLY the fresh document, not both glued.
+    es.emit({ kind: "delta", text: "<!doctype html><body>second" })
+    es.emit({ kind: "delta", text: " attempt" })
+    expect(seen).toEqual([
+      "<!doctype html><body>first attempt",
+      "<!doctype html><body>second",
+      "<!doctype html><body>second attempt",
+    ])
+  })
+
+  it("handles a restart whose doctype is split across two delta frames", async () => {
+    const seen: string[] = []
+    subscribeToGenerationStream(() => "http://api.test/s", { onDelta: (f) => seen.push(f) })
+    await flush()
+
+    const es = MockEventSource.latest()
+    es.emit({ kind: "delta", text: "<!DOCTYPE html><p>one</p><!doc" })
+    es.emit({ kind: "delta", text: "type html><p>two</p>" })
+    // The first frame's dangling "<!doc" is not yet a restart; once the second
+    // frame completes the doctype, the accumulator resets to the new document.
+    expect(seen[seen.length - 1]).toBe("<!doctype html><p>two</p>")
+  })
+
   it("cleanup before the token resolves never opens a stream", async () => {
     const stop = subscribeToGenerationStream(() => "http://api.test/s", { onDelta: () => {} })
     stop() // closed while getAccessToken() is still pending

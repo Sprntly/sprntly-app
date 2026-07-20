@@ -9,15 +9,16 @@ from fastapi import Depends, APIRouter, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app.ask_job_runner import run_ask_job
-from app.auth import CompanyContext, require_company
+from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.ingest import convert
 from app.db import (
+    cancel_ask_job,
     complete_ask_job,
     find_cached_ask,
     get_ask_job,
     start_ask_job,
 )
-from app.deps.ownership import require_owned_dataset
+from app.deps.ownership import require_owned_dataset, require_owned_prd
 from app.entitlements import require_agents_module
 from app.skill_router import list_available_skills
 
@@ -99,6 +100,10 @@ class AskIn(BaseModel):
     # Optional: skip routing and force this skill — used when a confirm-gate
     # follow-up has already chosen the skill.
     pinned_skill: str | None = None
+    # Optional PRD-tab grounding: when the chat runs beside an open PRD, the
+    # tab sends its prd_id so the answer sees the PRD (+ its insight, evidence,
+    # tickets, prototype). Ownership-gated in the route.
+    prd_id: int | None = Field(default=None, ge=1)
 
 
 def _strip_citations(payload: dict) -> dict:
@@ -199,10 +204,16 @@ async def ask(
     """
     # 0) Tenant gate: the dataset slug must resolve to the caller's company.
     # Without this, an arbitrary client slug would seed a FOREIGN company's
-    # corpus into the LLM answer (cross-tenant corpus leak). require_company
-    # scopes the KG half; this scopes the corpus/dataset half. 404 on mismatch.
-    require_owned_dataset(body.dataset, company.company_id)
+    # corpus into the LLM answer (cross-tenant corpus leak). The company gate
+    # (via require_agents_module) scopes the KG half; this scopes the
+    # corpus/dataset half. 404 on mismatch.
+    require_owned_dataset(body.dataset, company.company_id, company.workspace_id)
     enterprise_id = company.company_id
+    # PRD-tab ask: the prd must belong to the caller's company/workspace, or a
+    # crafted prd_id would seed a FOREIGN tenant's PRD (+ evidence/tickets)
+    # into the answer context. 404 on mismatch, same as the dataset gate.
+    if body.prd_id is not None:
+        require_owned_prd(body.prd_id, company.company_id, company.workspace_id)
 
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
@@ -210,8 +221,12 @@ async def ask(
     # inline) so the POST contract is uniform — the client always gets an ask_id
     # and reads the body from the status endpoint, cached or generated. The
     # user-visible result is identical (same payload, same synthetic delay).
-    cached_payload = await asyncio.to_thread(
-        _resolve_cache_hit, body.dataset, body.question
+    # SKIPPED for PRD-tab asks: the cache is keyed on (dataset, question) only,
+    # so it would serve a context-free answer for a question about the open PRD.
+    cached_payload = (
+        await asyncio.to_thread(_resolve_cache_hit, body.dataset, body.question)
+        if body.prd_id is None
+        else None
     )
     if cached_payload is not None:
         ask_id = start_ask_job(
@@ -234,6 +249,7 @@ async def ask(
         question=body.question,
         conversation_id=body.conversation_id,
         pinned_skill=body.pinned_skill,
+        prd_id=body.prd_id,
     )
     if "pytest" in sys.modules:
         # The TestClient does not keep the app's event loop alive between
@@ -248,6 +264,7 @@ async def ask(
             dataset=body.dataset,
             history=history,
             pinned_skill=body.pinned_skill,
+            prd_id=body.prd_id,
         )
         row = get_ask_job(ask_id)
         return {"ask_id": ask_id, "status": (row or {}).get("status", "ready")}
@@ -260,6 +277,7 @@ async def ask(
             dataset=body.dataset,
             history=history,
             pinned_skill=body.pinned_skill,
+            prd_id=body.prd_id,
         )
     )
     _inflight_tasks.add(task)
@@ -306,8 +324,29 @@ async def extract_file(
     return {"name": file.filename or "upload", "markdown": markdown}
 
 
+@router.post("/{ask_id}/cancel")
+def cancel_ask(
+    ask_id: int,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Stop an in-flight Ask (the user realized it was the wrong question).
+
+    Flips the job `generating` → `cancelled`; the background worker polls that
+    status between LLM steps and aborts before the next (expensive) call, and a
+    late-finishing answer is discarded rather than shown. Idempotent and
+    race-safe: if the worker already finished, the update no-ops and this
+    returns the real terminal status (`ready`/`error`) instead. 404 if the job
+    doesn't belong to the caller's company (no cross-tenant existence
+    disclosure — mirrors GET /v1/ask/{id})."""
+    row = get_ask_job(ask_id)
+    if not row or row.get("company_id") != company.company_id:
+        raise HTTPException(404, "Ask not found")
+    status = cancel_ask_job(ask_id)
+    return {"ask_id": ask_id, "status": status or "cancelled"}
+
+
 @router.get("/usage")
-def get_usage(company: CompanyContext = Depends(require_company)):
+def get_usage(company: WorkspaceContext = Depends(require_workspace)):
     """Per-enterprise Q&A usage: calls, cost, tokens (total + by agent)."""
     from app.qa_usage import fetch_qa_usage
 
@@ -319,7 +358,7 @@ def get_usage(company: CompanyContext = Depends(require_company)):
 @router.get("/{ask_id}")
 def get_ask(
     ask_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Status + result for an Ask job.
 

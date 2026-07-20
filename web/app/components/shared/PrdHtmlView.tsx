@@ -10,6 +10,7 @@ import {
 } from "react"
 import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { prdApi } from "../../lib/api"
+import { applyEvidenceTruncation, stripEvidenceTruncation } from "../../lib/prdEvidenceTruncate"
 
 export type PrdSaveStatus = "saved" | "saving" | "unsaved"
 
@@ -60,7 +61,12 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
   prdId: number
   title: string
   onStatus?: (s: PrdSaveStatus) => void
-}>(function PrdHtmlView({ html, prdId, title, onStatus }, ref) {
+  /** When provided AND the PRD's Evidence list has >3 items, the panel shows
+   *  only the top few and injects a "View more evidence" link that calls this
+   *  (the panel switches to its Evidence tab). Omitted → no truncation, so the
+   *  full list renders (e.g. when the Evidence tab is unavailable). */
+  onViewMoreEvidence?: () => void
+}>(function PrdHtmlView({ html, prdId, title, onStatus, onViewMoreEvidence }, ref) {
   const frameRef = useRef<HTMLIFrameElement>(null)
   const [height, setHeight] = useState(720)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -87,6 +93,9 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
     // removed — viewer styling must never leak into the persisted document.
     const root = cdoc.documentElement.cloneNode(true) as HTMLElement
     root.querySelector(`#${PANEL_STYLE_ID}`)?.remove()
+    // Strip the viewer-only Evidence-truncation artifacts too, so the stored PRD
+    // keeps ALL of its evidence (the top-3 fold is a panel view, never an edit).
+    stripEvidenceTruncation(root)
     // Preserve the doctype the srcDoc rendered from — outerHTML drops it.
     return `<!DOCTYPE html>\n${root.outerHTML}`
   }, [])
@@ -127,6 +136,16 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       style.textContent = PANEL_OVERRIDE_CSS
       ;(cdoc.head ?? cdoc.documentElement).appendChild(style)
     }
+    // Fold a long Evidence list to its top 3 with a "View more evidence" link
+    // (viewer-only — stripped in readDoc). Guarded so a malformed doc can't break
+    // the resize/autosave wiring below.
+    if (onViewMoreEvidence) {
+      try {
+        applyEvidenceTruncation(cdoc, onViewMoreEvidence)
+      } catch {
+        /* non-fatal: fall back to rendering the full evidence list */
+      }
+    }
     resize()
     const onInput = () => {
       onStatus?.("unsaved")
@@ -135,7 +154,7 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
       saveTimer.current = setTimeout(persist, 2000)
     }
     cdoc.addEventListener("input", onInput)
-  }, [resize, persist, onStatus])
+  }, [resize, persist, onStatus, onViewMoreEvidence])
 
   useEffect(() => () => { if (saveTimer.current) clearTimeout(saveTimer.current) }, [])
 

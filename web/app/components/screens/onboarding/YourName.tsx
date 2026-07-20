@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { useWorkspace } from "../../../context/WorkspaceContext"
 import { updateUserProfile } from "../../../lib/onboarding/store"
-import { ROLE_OPTIONS } from "../../../lib/onboarding/types"
+import { ONBOARDING_STEP_SLUGS, ROLE_OPTIONS } from "../../../lib/onboarding/types"
 
 /**
  * Pre-onboarding PROFILE GATE — "What should we call you?".
@@ -15,14 +15,16 @@ import { ROLE_OPTIONS } from "../../../lib/onboarding/types"
  * is not a back-navigable numbered step, and it renders no progress dots. It
  * therefore touches none of the 1-based `onboarding_step` index math.
  *
- * It exists so users who sign up via Google (whose Supabase profile lands with
- * empty first/last name) can set their name before the numbered flow begins.
- * `postLoginPath` routes a NEW user (no workspace) here only when their profile
- * `first_name` is empty — email/password users (who type their name at sign-up)
- * skip straight to `/onboarding/business-info`.
+ * It exists so users who sign up via Google can complete their profile before
+ * the numbered flow begins: their Supabase profile may land with an empty
+ * first/last name (email/password users provide the full about-you at
+ * sign-up and skip straight to the first numbered step). Mirrors the email
+ * flow's about-you fields: name, role, and priorities. Every account is a
+ * company account since v6 — account_type is always written as "company".
  *
- * On submit it persists the name via updateUserProfile (which derives full_name),
- * refreshes the workspace context, then forwards to the first numbered step.
+ * On submit it persists the profile via updateUserProfile (which derives
+ * full_name), refreshes the workspace context, then forwards to the first
+ * numbered step.
  */
 
 function deriveInitialNames(
@@ -59,6 +61,7 @@ export function YourName() {
   const [lastName, setLastName] = useState(initial.last)
   const [role, setRole] = useState("")
   const [roleOther, setRoleOther] = useState("")
+  const [priorities, setPriorities] = useState("")
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -78,9 +81,11 @@ export function YourName() {
         first_name: firstName,
         last_name: lastName,
         role: resolvedRole,
+        priorities: priorities.trim() || null,
+        account_type: "company",
       })
       await refresh()
-      router.push("/onboarding/business-info")
+      router.push(`/onboarding/${ONBOARDING_STEP_SLUGS[0]}`)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Couldn't save your name.")
     } finally {
@@ -171,6 +176,22 @@ export function YourName() {
                   maxLength={50}
                 />
               )}
+            </div>
+
+            <div className="field full" data-field="priorities">
+              <div className="field-l">
+                Your priorities{" "}
+                <span className="opt">— what you&apos;re focused on right now</span>
+              </div>
+              <textarea
+                className="inp"
+                rows={3}
+                value={priorities}
+                onChange={(e) => setPriorities(e.target.value)}
+                maxLength={500}
+                placeholder="e.g. grow MAU, recover the redesign dip, ship the calorie deficit before Watch 9…"
+                aria-label="Your priorities"
+              />
             </div>
           </div>
 

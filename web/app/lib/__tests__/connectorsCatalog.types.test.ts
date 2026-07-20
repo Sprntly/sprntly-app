@@ -46,6 +46,7 @@ describe("connector types", () => {
     expect(trackers).toEqual([
       { id: "jira", label: "Jira" },
       { id: "clickup", label: "ClickUp" },
+      { id: "asana", label: "Asana" },
     ])
     // Linear is a task-management tool by TYPE but not sync-implemented yet —
     // it must not reach the sync button until the backend engine supports it.
