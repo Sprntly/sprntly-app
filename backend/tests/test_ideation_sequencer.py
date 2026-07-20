@@ -98,6 +98,41 @@ def test_sequence_excludes_brief_top_themes(facade, isolated_settings):
     assert theme_ids == {rest_a.id, rest_b.id}
 
 
+def test_sequence_classifies_goal_fit_on_background_lane(
+        facade, isolated_settings, monkeypatch):
+    """The sequencer's goal-fit sweep classifies EVERY non-brief theme — on a
+    first-run company that is hundreds of serial LLM calls, so they must ride
+    the gate's background lane (never starving the interactive PRD/evidence/
+    ticket generations a user is waiting on right after their brief)."""
+    from app.synthesis import ideation as bl
+    from app.synthesis import scoring
+    from app.kpi_tree import KpiTree, NorthStar
+
+    _seed_company(isolated_settings["supabase"], "ent-A")
+    t = _seed_theme_with_signals(facade, "ent-A", "rest-a", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 400000}, 0),
+    ])
+    tree = KpiTree(north_star=NorthStar(metric="Weekly Active Technicians",
+                                        description="7-day active techs."),
+                   version=1)
+    monkeypatch.setattr(bl, "load_kpi_tree", lambda eid: tree)
+
+    classify_calls = []
+
+    def fake_scoring_llm(**kw):
+        classify_calls.append(kw)
+        return _llm_result({"fit": "high", "reasoning": "moves the north star"})
+
+    with patch.object(scoring, "llm_call", fake_scoring_llm), \
+            patch.object(bl, "llm_call",
+                         return_value=_llm_result(_triage_for(t.id))):
+        bl.sequence_ideation(facade, "ent-A", exclude_theme_ids=[])
+
+    assert classify_calls, "expected the sequencer to classify goal fit"
+    assert all(kw["purpose"] == "classify_goal_fit" for kw in classify_calls)
+    assert all(kw["background"] is True for kw in classify_calls)
+
+
 def test_sequence_ranks_remaining_by_score(facade, isolated_settings):
     from app.synthesis import ideation as bl
 

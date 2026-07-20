@@ -19,6 +19,16 @@ Two transport realities shape this module:
 Frames are advisory display only: the authoritative result is always the
 persisted doc the client already polls for. So a full queue drops its OLDEST
 frame rather than blocking, and a closed loop drops the publish.
+
+LATE JOINERS: brief-insight PRDs and evidence are warm-started server-side
+(warm_prds_for_brief / warm_synthesis_drilldowns), so the client typically
+opens the panel MID-generation. Deltas emitted before that had no subscriber
+and were dropped, which used to leave the panel previewing nothing. The module
+therefore also accumulates each channel's delta text while the generation is
+live; `subscribe()` hands a joiner one `{"kind":"replay","text":…}` catch-up
+frame (everything so far) before the live deltas. The buffer exists only
+between the first delta and `close()` — a finished generation replays nothing,
+and the poll carries the persisted result as before.
 """
 from __future__ import annotations
 
@@ -30,17 +40,40 @@ from typing import Any, AsyncIterator, Callable
 # oldest frames (its text jumps) but the final poll still shows the whole doc.
 _QUEUE_MAX = 512
 
+# Cap on a channel's accumulated replay text. Generated docs are ~100 KB of
+# HTML, so 4 MB means "a runaway generation, not a real doc" — past it the
+# buffer is dropped for the rest of the run (late joiners degrade to live-only,
+# never to a truncated head that the next delta would glue wrongly onto).
+_ACCUM_MAX = 4_000_000
+
 _subscribers: dict[str, set[asyncio.Queue]] = {}
+# channel -> delta text accumulated since the generation started (loop thread
+# only, like _subscribers). Entries live from first delta to close().
+_accum: dict[str, str] = {}
+# Channels whose accumulation overran _ACCUM_MAX this run: stop buffering (a
+# partial buffer must never be replayed) but keep relaying live deltas.
+_accum_overflowed: set[str] = set()
 
 
 def publish(channel: str, event: dict[str, Any]) -> None:
     """Non-blocking fan-out to all live subscribers of `channel` (loop thread).
 
     Drops the oldest frame from a full queue so a slow subscriber never blocks
-    the generation. A publish to a channel with no subscribers is a no-op.
-    Never raises. Call this only from the event loop; from a worker thread use
-    `publish_threadsafe`.
+    the generation. Never raises. Call this only from the event loop; from a
+    worker thread use `publish_threadsafe`.
+
+    Delta text is also accumulated into the channel's replay buffer — even with
+    no subscribers connected — so a client that opens the panel mid-generation
+    can be caught up by `subscribe()`.
     """
+    if event.get("kind") == "delta" and event.get("text"):
+        if channel not in _accum_overflowed:
+            grown = _accum.get(channel, "") + event["text"]
+            if len(grown) > _ACCUM_MAX:
+                _accum.pop(channel, None)
+                _accum_overflowed.add(channel)
+            else:
+                _accum[channel] = grown
     queues = _subscribers.get(channel)
     if not queues:
         return
@@ -86,12 +119,21 @@ def delta_sink(
 async def subscribe(channel: str) -> AsyncIterator[dict[str, Any]]:
     """Yield frames for `channel` until a terminal (kind=done/error) frame.
 
+    A subscriber joining mid-generation first receives one
+    `{"kind":"replay","text":…}` frame carrying every delta published before it
+    connected, then the live frames. The buffer snapshot and the queue
+    registration happen in the same loop tick, so a delta lands in exactly one
+    of the two — the joiner never sees text duplicated or skipped.
+
     Registers a fresh bounded queue on entry, deregisters in `finally` — a
     disconnected client (CancelledError) never leaks a queue.
     """
     q: asyncio.Queue = asyncio.Queue(maxsize=_QUEUE_MAX)
+    backlog = _accum.get(channel, "")
     _subscribers.setdefault(channel, set()).add(q)
     try:
+        if backlog:
+            yield {"kind": "replay", "text": backlog}
         while True:
             item = await q.get()
             yield item
@@ -109,9 +151,14 @@ def close(channel: str, *, kind: str = "done") -> None:
     """Push a terminal sentinel to all subscribers of `channel` and clear it.
 
     Every active subscribe() generator yields the sentinel then completes. Safe
-    when no subscribers exist (no-op). Call on the loop thread; from a worker
-    thread use `close_threadsafe`.
+    when no subscribers exist (no-op). Also drops the channel's replay buffer:
+    a subscriber arriving after the terminal frame replays nothing (the poll
+    serves the persisted doc), and the next generation on this channel starts
+    accumulating from empty. Call on the loop thread; from a worker thread use
+    `close_threadsafe`.
     """
+    _accum.pop(channel, None)
+    _accum_overflowed.discard(channel)
     queues = _subscribers.pop(channel, set())
     sentinel: dict[str, Any] = {"kind": kind}
     for q in queues:

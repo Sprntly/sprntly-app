@@ -290,10 +290,14 @@ def sequence_ideation(
     goal_enabled = bool(config_get("scoring.goal_factor_enabled", enterprise_id,
                                    default=True))
     goal_weight = float(config_get("scoring.goal_weight", enterprise_id, default=1.0))
+    # background=True: this sweep classifies EVERY non-brief converged theme —
+    # on a first-run company that's hundreds of serial LLM calls. The bg lane
+    # yields to interactive callers, so it can't starve the PRD/evidence/ticket
+    # generations the user is actively waiting on right after their brief lands.
     score_factors = score_candidates(
         facade, enterprise_id, cands, tree,
         goal_enabled=goal_enabled, goal_weight=goal_weight, agent=agent,
-        classifier=classify_theme_fit)
+        classifier=classify_theme_fit, background=True)
     cands.sort(key=lambda c: -score_factors[c.theme_id]["goal_adjusted_score"])
 
     # PRIORITIZE — one batched call (skill-bound): tag + rationale + dedup per
