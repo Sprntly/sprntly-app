@@ -155,6 +155,60 @@ def invalidate_orphan_generating_cached_asks() -> int:
     return len(ids)
 
 
+ORPHAN_ASK_JOB_ERROR = (
+    "Generation was interrupted by a server restart. Please ask again."
+)
+
+# How long an `ask_jobs` row may sit in `generating` before we treat it as
+# abandoned. Deliberately well above the slowest real answer (multi-step asks
+# run a couple of minutes) — see fail_orphan_generating_ask_jobs for why this
+# must not be tightened to "anything generating at startup".
+ORPHAN_ASK_JOB_AFTER_MINUTES = 15
+
+
+def fail_orphan_generating_ask_jobs(
+    older_than_minutes: int = ORPHAN_ASK_JOB_AFTER_MINUTES,
+) -> int:
+    """Fail `ask_jobs` rows abandoned in `generating` by a dead worker.
+
+    When the process dies mid-answer the owning worker goes with it, so nothing
+    will ever move the row to a terminal state. The Ask UI polls
+    `GET /v1/ask/{id}` until the status leaves `generating`, so an interrupted
+    job spins forever and reads to the user as "failed to generate answer" with
+    no error to explain it. Observed on staging when a deploy restart landed 34s
+    into job 189. `cached_asks` already had this treatment
+    (invalidate_orphan_generating_cached_asks); `ask_jobs` did not.
+
+    IMPORTANT — why the age cutoff rather than "fail everything generating":
+    staging and prod share one Supabase project, so both environments' rows live
+    in this table. A blanket sweep at staging startup would kill answers being
+    generated right then by the prod process (and vice versa). Age is the only
+    signal here that separates "owner is dead" from "owner is another live
+    process", since rows carry no owner/heartbeat column."""
+    from datetime import datetime, timedelta, timezone
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(minutes=older_than_minutes)
+    ).isoformat()
+    c = require_client()
+    rows = (
+        c.table("ask_jobs")
+        .select("id")
+        .eq("status", "generating")
+        .lt("updated_at", cutoff)
+        .execute()
+        .data
+    )
+    ids = [r["id"] for r in rows]
+    if ids:
+        c.table("ask_jobs").update({
+            "status": "error",
+            "error": ORPHAN_ASK_JOB_ERROR,
+            "updated_at": _now(),
+        }).in_("id", ids).eq("status", "generating").execute()
+    return len(ids)
+
+
 # ─────────────────────── ask_jobs (fire-and-forget) ───────────────────────
 
 

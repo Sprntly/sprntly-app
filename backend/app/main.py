@@ -158,6 +158,16 @@ async def lifespan(app: FastAPI):
             prd_orphans,
             ask_orphans,
         )
+    # Same for `ask_jobs` (the chat Ask flow the client polls). Age-gated rather
+    # than "everything generating", because staging and prod share one Supabase
+    # project — see fail_orphan_generating_ask_jobs. The scheduler repeats this
+    # every 5m so an interrupted ask heals without waiting for a restart.
+    job_ask_orphans = db.fail_orphan_generating_ask_jobs()
+    if job_ask_orphans:
+        logger.info(
+            "Failed %d orphan generating Ask job(s)",
+            job_ask_orphans,
+        )
     # Design Agent startup invalidation (prototypes + iterations).
     #
     # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
