@@ -948,6 +948,22 @@ export function ChatScreen() {
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
           setContent({ prd: result.prd, prdMeta: tab.briefMeta, prdGenerating: false })
+        } else if (result.generating) {
+          // A healthy IN-FLIGHT PRD, not a failure — e.g. a reload restored this
+          // tab mid-generation (the stamped-at-kickoff prdId is how we know it).
+          // Re-enter poll+stream instead of toasting: the SSE replay frame
+          // repaints everything generated so far, then live deltas continue.
+          const resumed = await resumePrdGeneration(prdId, undefined, (html) => {
+            if (activeTabIdRef.current === activeTabId) setContent({ prdPartialHtml: html })
+          })
+          if (resumed.ok) {
+            setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: resumed.prd, prdId: resumed.prd.prd_id } : t))
+            if (activeTabIdRef.current === activeTabId) setContent({ prd: resumed.prd, prdMeta: tab.briefMeta, prdGenerating: false, prdPartialHtml: null })
+          } else {
+            setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+            if (activeTabIdRef.current === activeTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+            showToast("PRD generation failed", resumed.message)
+          }
         } else {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
           setContent({ prdGenerating: false })
@@ -1076,45 +1092,13 @@ export function ChatScreen() {
   useEffect(() => {
     if (!activeTabId) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    const meta = tab?.briefMeta
+    // Chat-task tabs (no briefMeta) resume through the reload-restore effect →
+    // handleOpenPrd, whose DB-load branch re-enters poll+stream when the tab's
+    // persisted prdId points at a still-generating PRD.
+    if (!meta) return
     if (resumedTabsRef.current.has(activeTabId)) return
     resumedTabsRef.current.add(activeTabId)
-    const meta = tab?.briefMeta
-    if (!meta) {
-      // Chat-task tab (no briefMeta): the tab's persisted prdId is the only
-      // trace of its PRD. If that PRD is still generating server-side (a reload
-      // mid-generation dropped the await closure), re-enter the poll+stream —
-      // the SSE replay frame repaints everything generated so far instantly.
-      // A ready/failed PRD is left to the existing lazy View-PRD click path.
-      const prdId = tab?.prdId
-      if (prdId != null && !tab?.prd && !tab?.prdGenerating) {
-        void (async () => {
-          try {
-            const { prdApi } = await import("../../../lib/api")
-            const row = await prdApi.get(prdId)
-            if (row.status !== "generating") return
-            setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
-            if (activeTabIdRef.current === activeTabId) {
-              setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
-              openContentPanel("prd")
-            }
-            const result = await resumePrdGeneration(prdId, undefined, (html) => {
-              if (activeTabIdRef.current === activeTabId) setContent({ prdPartialHtml: html })
-            })
-            if (result.ok) {
-              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
-              if (activeTabIdRef.current === activeTabId) setContent({ prd: result.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
-            } else {
-              setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-              if (activeTabIdRef.current === activeTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
-            }
-          } catch {
-            setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-            if (activeTabIdRef.current === activeTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
-          }
-        })()
-      }
-      return
-    }
     const scope = insightScope(meta.briefId, meta.insightIndex)
 
     const pendingPrd = getPendingJob("prd", "_", scope)
@@ -1166,7 +1150,7 @@ export function ChatScreen() {
         })()
       }
     }
-  }, [activeTabId, setContent, openContentPanel])
+  }, [activeTabId, setContent])
 
   const conversations = content.conversations
   const starters = content.ondemandStarters

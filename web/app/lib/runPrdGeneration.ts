@@ -199,7 +199,12 @@ export async function resumePrdGeneration(
   return pollPrdToResult(prdId, scope, onPartial)
 }
 
-export type PrdLoadResult = { ok: true; prd: PrdState } | { ok: false; message: string }
+// `generating` distinguishes a healthy in-flight PRD from a real load failure,
+// so a caller that lands on one (e.g. a reload restoring a task tab
+// mid-generation) can resume the poll instead of surfacing an error.
+export type PrdLoadResult =
+  | { ok: true; prd: PrdState }
+  | { ok: false; message: string; generating?: boolean }
 
 /**
  * Fetch an already-generated PRD by id and map it to PrdState — no generation.
@@ -212,7 +217,7 @@ export async function loadPrdById(prdId: number): Promise<PrdLoadResult> {
     return { ok: false, message: prd.error || "PRD failed on the backend" }
   }
   if (prd.status !== "ready") {
-    return { ok: false, message: "PRD isn't ready yet" }
+    return { ok: false, message: "PRD isn't ready yet", generating: prd.status === "generating" }
   }
   return {
     ok: true,
