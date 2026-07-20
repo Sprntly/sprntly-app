@@ -206,6 +206,59 @@ def test_answer_ok_renders_html_report_over_corpus(monkeypatch):
     assert "Call 1" in captured["corpus_text"] and 'Cust: "quote 1"' in captured["corpus_text"]
 
 
+def test_answer_autowidens_default_window_until_calls_found(monkeypatch):
+    # Generic ask (no window named): the 7-day default is empty, 30 days has
+    # calls → the digest widens instead of dead-ending, and the report runs
+    # over the widened window.
+    import app.voc_report as vr
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    windows = []
+    def fetch(key, *, since, until):
+        windows.append((until - since).days)
+        return [_call(1)] if (until - since).days >= 29 else []
+    monkeypatch.setattr(cd, "fetch_calls", fetch)
+    captured = {}
+    monkeypatch.setattr(
+        vr, "build",
+        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>r</body></html>",
+    )
+    p = cd.answer(enterprise_id="co", question="give me a summary of feedback of recent customer conversations")
+    assert p["answer"].startswith("<!DOCTYPE html>")
+    # Fetched 7d (empty) then 30d (found) — never needed 90d.
+    assert len(windows) == 2 and windows[0] <= 7 and 29 <= windows[1] <= 30
+    assert "the last 30 days" in p["_skill_action"]
+    assert "the last 30 days" in captured["source_line"]
+
+
+def test_answer_explicit_window_is_never_widened(monkeypatch):
+    # The user NAMED a window — an empty result is the honest answer, and only
+    # one fetch happens.
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    calls = []
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: calls.append(1) or [])
+    p = cd.answer(enterprise_id="co", question="summarize customer calls from last week")
+    assert len(calls) == 1
+    assert "No customer calls found" in p["answer"] and "wider window" in p["answer"]
+
+
+def test_answer_autowiden_exhausted_says_90_days(monkeypatch):
+    # Nothing in 7/30/90 days → the message reports the widest window searched
+    # and doesn't suggest widening further.
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    fetches = []
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: fetches.append(1) or [])
+    p = cd.answer(enterprise_id="co", question="summary of feedback from recent customer conversations")
+    assert len(fetches) == 3  # 7 → 30 → 90
+    assert "the last 90 days" in p["answer"]
+    assert "wider window" not in p["answer"]
+
+
+def test_parse_window_explicit_flag():
+    assert cd.parse_window("calls from the last 30 days", now=NOW).explicit is True
+    assert cd.parse_window("calls from last week", now=NOW).explicit is True
+    assert cd.parse_window("summary of recent feedback", now=NOW).explicit is False
+
+
 def test_answer_report_failure_degrades_gracefully(monkeypatch):
     import app.voc_report as vr
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
