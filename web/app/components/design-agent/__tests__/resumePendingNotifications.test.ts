@@ -14,6 +14,7 @@ import {
   __resetPageLoadGuards,
   markPending,
   pendingCompleted,
+  pendingPendingIds,
 } from "../notificationStore"
 
 function makeSessionStorage(): Storage {
@@ -105,6 +106,48 @@ describe("resumePendingNotifications (Part C)", () => {
 
     expect(pendingCompleted()).toEqual([])
     expect(showToast).not.toHaveBeenCalled()
+  })
+
+  it("test_resume_pending_notifications_retries_a_timed_out_entry — AC5: a timedOut poll result does NOT acknowledge/drop the entry, and does NOT toast", async () => {
+    installStorage()
+    markPending(559)
+    const poll = vi.fn().mockResolvedValue({
+      ok: false,
+      timedOut: true,
+      message: "Generation timed out (6 minutes)",
+    })
+    const showToast = vi.fn()
+
+    // Fails on unfixed code: today ANY !result.ok calls acknowledge(id),
+    // dropping a still-running entry forever.
+    await resumePendingNotifications(showToast, poll)
+
+    expect(showToast).not.toHaveBeenCalled()
+    expect(pendingPendingIds()).toContain(559)
+  })
+
+  it("test_resume_pending_notifications_timed_out_leaves_pending_pending_ids — AC5 edge: explicit pendingPendingIds() check", async () => {
+    installStorage()
+    markPending(560)
+    const poll = vi.fn().mockResolvedValue({
+      ok: false,
+      timedOut: true,
+      message: "Generation timed out (6 minutes)",
+    })
+
+    await resumePendingNotifications(vi.fn(), poll)
+
+    expect(pendingPendingIds()).toEqual([560])
+  })
+
+  it("test_resume_pending_notifications_drops_genuine_failure_unchanged — AC6: a genuine (timedOut absent) failure still acknowledges", async () => {
+    installStorage()
+    markPending(561)
+    const poll = vi.fn().mockResolvedValue({ ok: false, message: "boom" })
+
+    await resumePendingNotifications(vi.fn(), poll)
+
+    expect(pendingPendingIds()).not.toContain(561)
   })
 
   it("test_resume_pending_notifications_dedupes_within_page_load — a second call in the same page-load is a no-op for already-resolving/resolved ids (AC13)", async () => {

@@ -288,6 +288,13 @@ export async function runGenerateFlow({
         if (notifyOnReady) {
           showToast(READY_TOAST_TITLE, sub)
         }
+      } else if (result.timedOut) {
+        // Client-side give-up only, NOT a genuine failure (proven live: a run
+        // completed 3m40s after this local wait expired). Do not fabricate a
+        // "Generation failed" toast. The `pending` sessionStorage entry markPending
+        // wrote at kickoff is left untouched, so resumePendingNotifications (on any
+        // later nav/reload, via DesignAgentNotificationReplay's mount effect)
+        // notifies honestly once the run truly resolves.
       } else if (!wasCancelled(kickoff.prototype_id)) {
         // Suppress the false failure toast for a user-cancelled run (the cancel
         // path deletes the row; the still-running task's terminal write 404s).
@@ -407,9 +414,13 @@ export function replayCompletedNotifications(
  * documented, not silently dropped (a deliberate gap; naming the PRD here
  * would need a new fetch this ticket avoids).
  *
- * On failure/timeout: silently `acknowledge` the entry (no toast) — matches
- * the existing posture that a genuine failure is surfaced live-only in the
- * originating tab, never persisted/replayed.
+ * On a genuine failure (`timedOut` absent): silently `acknowledge` the entry
+ * (no toast) — matches the existing posture that a genuine failure is
+ * surfaced live-only in the originating tab, never persisted/replayed. On a
+ * client-side give-up on THIS resume attempt too (`timedOut: true`): leave
+ * the entry pending so a LATER resume retries — without this, a run
+ * outliving even a resume attempt's own window would be silently dropped
+ * forever.
  */
 export async function resumePendingNotifications(
   showToast: (
@@ -428,9 +439,11 @@ export async function resumePendingNotifications(
       const prdId: number | null = result.prototype.prd_id ?? null
       markCompleted(id, buildReadySub(undefined), prdId)
       replayCompletedNotifications(showToast)
-    } else {
+    } else if (!result.timedOut) {
       acknowledge(id) // drop the dead/failed pending entry — no stale sessionStorage leak
     }
+    // else: a client-side give-up on THIS resume attempt too — leave the
+    // entry pending so a LATER resume retries.
   }
 }
 

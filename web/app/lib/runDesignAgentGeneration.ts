@@ -4,7 +4,7 @@ import type { PrototypeRecord } from "./api"
 
 export type DesignAgentGenResult =
   | { ok: true; prototype: PrototypeRecord }
-  | { ok: false; message: string }
+  | { ok: false; message: string; timedOut?: true }
 
 // Structural copy of runPrdGeneration.ts — the 4s tick + 6min cap are
 // deliberately duplicated here (and in runEvidenceGeneration.ts) rather than
@@ -49,5 +49,13 @@ export async function runDesignAgentGeneration({
   if (proto.status === "invalidated") {
     return { ok: false, message: "Template invalidated; retry" }
   }
-  return { ok: false, message: "Generation timed out (6 minutes)" }
+  // Client-side give-up only, not a genuine backend failure: the poll loop
+  // exits on local elapsed time without knowing whether the backend job is
+  // still running (and it routinely still is — see the Site 1/2/3 callers of
+  // this discriminant). Message text stays byte-identical to before.
+  return {
+    ok: false,
+    timedOut: true,
+    message: "Generation timed out (6 minutes)",
+  }
 }
