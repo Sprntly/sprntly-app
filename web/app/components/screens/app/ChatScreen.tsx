@@ -17,7 +17,7 @@ import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleto
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { PrdInputQuestions } from "../../shared/PrdInputQuestions"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
-import { ApiError, askApi, briefApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -95,6 +95,24 @@ const BRIEF_TAB_ID = "brief"
 // can see they're on a new tab and switch back), and gets its real title from the
 // first message on send (see submitAsk's first-send rename).
 export const NEW_CHAT_TITLE = "New chat"
+
+// Build a compact task string from a tab's conversation to seed a chat PRD when
+// a "generate a PRD" command (or the Generate PRD button) carries no explicit
+// topic. Uses the user's own turns — the problem/intent they described — joined
+// and capped to the backend's 4000-char task limit. Returns "" when the tab has
+// no conversation to seed from (the caller then asks for a topic instead of
+// opening an unrelated brief PRD).
+const CHAT_PRD_TASK_MAX = 3500
+function conversationToPrdTask(thread: ThreadTurn[]): string {
+  const joined = thread
+    .map((t) => t.query?.trim())
+    // Skip the PRD/import commands that merely opened artifacts — they're not the
+    // problem the user is discussing, so they'd make a nonsensical PRD seed.
+    .filter((q): q is string => !!q && !isPrdCommand(q))
+    .join("\n\n")
+    .trim()
+  return joined.length > CHAT_PRD_TASK_MAX ? `${joined.slice(0, CHAT_PRD_TASK_MAX)}…` : joined
+}
 
 // The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
 // request). Shown as the reply to the user's seeded command turn, so the chat
@@ -937,14 +955,43 @@ export function ChatScreen() {
       }
       return
     }
-    const defaultKey = pickDefaultDetailKey(content.briefDetails)
-    const meta = tab.briefMeta
-      ?? content.detail?.meta
-      ?? (defaultKey ? content.briefDetails[defaultKey]?.meta ?? null : null)
-    if (!meta) {
-      openContentPanel("prd") // panel will show empty state / prompt
+    // No cached PRD and none saved on this tab yet. An insight-anchored tab
+    // (briefMeta) generates that insight's PRD. A PLAIN chat tab (no briefMeta) is
+    // seeded from its CONVERSATION — not the brief's default insight, which served
+    // an unrelated PRD (the bug). With no conversation to seed from, show the empty
+    // prompt instead of an irrelevant document.
+    if (!tab.briefMeta) {
+      const convTask = conversationToPrdTask(tab.thread)
+      if (!convTask) {
+        openContentPanel("prd") // nothing to seed from yet — empty state / prompt
+        return
+      }
+      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
+      setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
+      openContentPanel("prd")
+      try {
+        const { prdApi } = await import("../../../lib/api")
+        const start = await prdApi.generateFromTask(convTask)
+        // Poll the just-kicked-off task PRD onto THIS tab (keeps the chat + PRD
+        // panel together) rather than spawning a separate tab.
+        const result = await resumePrdGeneration(start.prd_id, undefined, (html) => setContent({ prdPartialHtml: html }))
+        if (result.ok) {
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
+          setContent({ prd: result.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
+        } else {
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+          setContent({ prdGenerating: false, prdPartialHtml: null })
+          showToast("PRD generation failed", result.message)
+        }
+      } catch (e) {
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+        setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
+      }
       return
     }
+    // Insight-anchored tab → generate that brief insight's PRD.
+    const meta = tab.briefMeta
     setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
     // Drive the panel's generating spinner via content too (not just per-tab),
     // so the right rail shows in-progress PRD state immediately on open.
@@ -965,7 +1012,7 @@ export function ChatScreen() {
       setContent({ prdGenerating: false, prdPartialHtml: null })
       showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
     }
-  }, [activeTabId, chatInsightState, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
+  }, [activeTabId, chatInsightState, openContentPanel, setContent, showToast])
 
   const handleOpenEvidence = useCallback(async () => {
     if (!activeTabId) return
@@ -1415,12 +1462,19 @@ export function ChatScreen() {
       // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
       // the PRD from the user's own words: the backend synthesizes the insight
       // (find-or-create keyed on the task text) and returns a generating prd_id
-      // that opens in the standard PRD tab via the resume path. A generic
-      // "generate a PRD" keeps the top-insight behavior below.
+      // that opens in the standard PRD tab via the resume path.
+      //
+      // A GENERIC "generate a PRD" (no topic) is seeded from THIS conversation —
+      // the user's turns in the active tab — so the PRD is about what was actually
+      // discussed. (Previously a bare command defaulted to the brief's top insight,
+      // which served an unrelated PRD.) With no conversation to seed from, we ask
+      // for a topic rather than opening something irrelevant.
       const task = seedQuery ? prdCommandTask(seedQuery) : null
-      if (task) {
+      const activeTabNow = tabsRef.current.find((t) => t.id === activeTabIdRef.current)
+      const effectiveTask = task || conversationToPrdTask(activeTabNow?.thread ?? [])
+      if (effectiveTask) {
         const { prdApi } = await import("../../../lib/api")
-        const start = await prdApi.generateFromTask(task)
+        const start = await prdApi.generateFromTask(effectiveTask)
         openPrdTab({
           title: `PRD · ${start.title}`,
           seedQuery,
@@ -1428,21 +1482,15 @@ export function ChatScreen() {
         })
         return
       }
-      const brief = await briefApi.current(activeCompany)
-      const insights = brief.insights || []
-      if (!insights.length) {
-        showToast("No brief yet", "Run the pipeline to refresh this week's brief first.")
-        return
-      }
-      openPrdTab({
-        title: "PRD · Weekly brief",
-        seedQuery,
-        source: { kind: "generate", meta: { briefId: brief.id, insightIndex: 0 } },
-      })
+      // No explicit topic and no conversation to ground it — ask for a topic.
+      showToast(
+        "What should the PRD cover?",
+        "Tell me the topic — e.g. \"generate a PRD for magic-link sign-in\" — or describe the problem first and I'll build one from our chat.",
+      )
     } catch (e) {
       showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     }
-  }, [activeCompany, openPrdTab, showToast])
+  }, [openPrdTab, showToast])
 
   // A command phrasing over an ATTACHED DOCUMENT is the chat entry to the
   // PRD-import flow: upload the doc to POST /v1/prd/import — the same conversion
