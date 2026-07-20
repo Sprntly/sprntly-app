@@ -25,7 +25,7 @@ EVALS: list[tuple[str, str]] = [
     ("Generate user stories for the checkout flow", "user-stories"),
     ("Prioritize these features with RICE: SSO, export, dark mode", "prioritize"),
     ("Re-rank our backlog by WSJF", "prioritize"),
-    ("Triage this messy backlog and dedupe it", "backlog-triage"),
+    ("Triage this messy backlog and dedupe it", "ideation-prioritize"),
     ("Draft a decision memo: build vs buy for billing", "decision-memo"),
     ("Synthesize this pile of customer feedback into themes", "feedback-synthesis"),
     ("Synthesize these user interviews into themes", "interview-synthesis"),

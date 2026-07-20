@@ -50,8 +50,11 @@ const EMPTY: AppContentState = {
   prd: null,
   prdMeta: null,
   prdGenerating: false,
+  prdPartialHtml: null,
   evidence: null,
   evidenceGenerating: false,
+  evidencePartialHtml: null,
+  report: null,
   teamMembers: [],
   teamPending: [],
   connectorCategories: [],
@@ -66,6 +69,14 @@ type ContentContextValue = {
   setContent: (patch: Partial<AppContentState>) => void
   replaceContent: (next: AppContentState) => void
   resetContent: () => void
+  /**
+   * Clear the workspace-scoped brief slices back to their empty values. Called
+   * when the active workspace changes so the weekly brief screen doesn't keep
+   * rendering the previous workspace's brief while the new one loads — and never
+   * leaks it at all when the new workspace has no brief yet. Unlike `setContent`
+   * (which MERGES the nested `brief` object), this replaces the slices outright.
+   */
+  resetBrief: () => void
 }
 
 const ContentContext = createContext<ContentContextValue | null>(null)
@@ -104,9 +115,20 @@ export function ContentProvider({ children }: { children: ReactNode }) {
     setContentState(EMPTY)
   }, [])
 
+  const resetBrief = useCallback(() => {
+    setContentState((prev) => ({
+      ...prev,
+      brief: EMPTY.brief,
+      briefV2: EMPTY.briefV2,
+      briefDetails: EMPTY.briefDetails,
+      pastWeeks: EMPTY.pastWeeks,
+      detail: EMPTY.detail,
+    }))
+  }, [])
+
   const value = useMemo(
-    () => ({ content, setContent, replaceContent, resetContent }),
-    [content, setContent, replaceContent, resetContent],
+    () => ({ content, setContent, replaceContent, resetContent, resetBrief }),
+    [content, setContent, replaceContent, resetContent, resetBrief],
   )
 
   return (

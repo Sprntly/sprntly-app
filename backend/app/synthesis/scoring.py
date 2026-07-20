@@ -146,12 +146,12 @@ def score_candidates(
     classifier=None,
 ) -> dict[str, dict]:
     """Price KPI-tree fit into each candidate's score — the shared §4c scoring
-    pass used by BOTH the brief ranker and the backlog sequencer.
+    pass used by BOTH the brief ranker and the ideation sequencer.
 
     For each ThemeConvergence, returns {theme_id: {base_score, fit, goal_factor,
     goal_adjusted_score}}. Deterministic: goal_adjusted_score = base_score ×
     goal_factor(fit). When goal scoring is disabled, fit is "off" and the factor
-    is 1.0 (no classification call). Factoring this out keeps the backlog and the
+    is 1.0 (no classification call). Factoring this out keeps the ideation pool and the
     brief on one identical scoring path (no second formula to drift).
 
     `classifier` injects the fit-classification function (defaults to

@@ -1187,6 +1187,13 @@
     display: flex;
     flex-direction: column;
     min-height: 0;
+    /* Containment boundary (parity with .main--brief-chat). The chat thread's
+       inner scroll region (.od-center-scroll / .bc-scroll) is bounded by flex,
+       but WITHOUT this its overflow leaked up to .main-column (overflow-y:auto),
+       so the whole page scrolled — dragging the pinned composer up with it once
+       a thread grew past the viewport. Clipping here keeps the scroll INSIDE the
+       thread and pins the composer, exactly as the Weekly-brief tab already does. */
+    overflow: hidden;
   }
 
   .home-chat-root {
@@ -1389,6 +1396,108 @@
     display: none;
   }
 
+  /* Workspace switcher (multi-workspace 2026-07): the brand name is the
+   trigger; the menu drops below the sidebar header. */
+  .sb-ws-wrap {
+    position: relative;
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+  }
+
+  .sidebar--collapsed .sb-ws-wrap {
+    display: none;
+  }
+
+  .sb-ws-trigger {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: transparent;
+    border: none;
+    padding: 2px 4px;
+    cursor: pointer;
+    border-radius: 6px;
+    width: 100%;
+    text-align: left;
+  }
+
+  .sb-ws-trigger:hover {
+    background: var(--nav-2);
+  }
+
+  .sb-ws-trigger--static {
+    cursor: default;
+  }
+
+  .sb-ws-trigger--static:hover {
+    background: transparent;
+  }
+
+  .sb-ws-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+
+  .sb-ws-menu {
+    position: absolute;
+    left: 0;
+    top: calc(100% + 6px);
+    min-width: 200px;
+    max-width: 260px;
+    background: var(--nav);
+    border: 1px solid var(--nav-2);
+    border-radius: 10px;
+    box-shadow: var(--shadow-lg);
+    padding: 4px;
+    z-index: 80;
+  }
+
+  .sb-ws-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 8px 10px;
+    background: transparent;
+    border: none;
+    color: var(--nav-text-hover);
+    text-align: left;
+    cursor: pointer;
+    font-size: 13px;
+    border-radius: 6px;
+  }
+
+  .sb-ws-row:hover,
+  .sb-ws-row.active {
+    background: var(--nav-2);
+  }
+
+  .sb-ws-row-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .sb-ws-row-meta {
+    font-size: 11px;
+    color: var(--nav-text);
+  }
+
+  .sb-ws-row--create {
+    color: var(--nav-text);
+  }
+
+  .sb-ws-sep {
+    height: 1px;
+    background: var(--nav-2);
+    margin: 4px 0;
+  }
+
   /* Inline label shown beside each icon only when expanded. */
   .sb-rail-label {
     font-size: 13px;
@@ -1552,6 +1661,61 @@
   .sb-rail-new svg {
     width: 18px;
     height: 18px;
+  }
+
+  /* Global search trigger (⌘K) — sits under the workspace switcher, above
+     New chat. Collapsed: a 38px icon square like .sb-rail-new; expanded: a
+     faux search input with the label + kbd hint. */
+  .sb-rail-search {
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
+    background: var(--nav-2);
+    border: 1px solid transparent;
+    color: var(--nav-text);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    margin-bottom: 10px;
+    flex-shrink: 0;
+    position: relative;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .sb-rail-search:hover {
+    background: var(--nav-2);
+    color: var(--nav-text-hover);
+  }
+
+  .sb-rail-search:hover .nav-tooltip {
+    opacity: 1;
+    transform: translate(4px, -50%);
+  }
+
+  .sb-rail-search-kbd {
+    display: none;
+    margin-left: auto;
+    font-size: 10px;
+    font-family: var(--font-mono);
+    color: var(--nav-text);
+    border: 1px solid var(--on-dark-alpha-14);
+    border-radius: 4px;
+    padding: 1px 5px;
+    line-height: 1.4;
+  }
+
+  .sidebar--expanded .sb-rail-search {
+    width: 100%;
+    justify-content: flex-start;
+    gap: 10px;
+    padding: 0 12px;
+    height: 40px;
+    border-color: var(--on-dark-alpha-14);
+  }
+
+  .sidebar--expanded .sb-rail-search-kbd {
+    display: inline-block;
   }
 
   .sb-rail-nav {
@@ -2258,15 +2422,40 @@
     box-shadow: var(--shadow-sm);
   }
 
+  /* Once there's a sendable message (the button is enabled), the send turns
+     green — an at-a-glance "ready to send" affordance in a new chat. An empty or
+     too-short draft keeps it neutral (and faded via :disabled below). */
+  .chat-home-composer-send:not(:disabled) {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+
   .chat-home-composer-send:hover:not(:disabled) {
-    background: var(--accent-muted);
-    border-color: var(--accent-alpha-40);
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
     box-shadow: var(--shadow-md);
   }
 
   .chat-home-composer-send:disabled {
     opacity: 0.35;
     cursor: not-allowed;
+  }
+
+  /* Stop variant — replaces Send while an ask is generating. Dark button with a
+     white glyph so it reads as "halt", distinct from the green send affordance. */
+  .chat-home-composer-send--stop,
+  .chat-home-composer-send--stop:not(:disabled) {
+    background: var(--ink);
+    border-color: var(--ink);
+    color: #fff;
+  }
+
+  .chat-home-composer-send--stop:hover:not(:disabled) {
+    background: var(--ink);
+    border-color: var(--ink);
+    opacity: 0.85;
+    box-shadow: var(--shadow-md);
   }
 
   .chat-landing-cards {
@@ -3911,6 +4100,208 @@
     transform: scale(1);
   }
 
+  /* ---------- Command palette (global search, ⌘K) ---------- */
+  /* Rides on .modal-overlay for backdrop/z-index; top-aligned like DocSearch. */
+  .cmdp-overlay {
+    align-items: flex-start;
+    padding-top: 12vh;
+  }
+
+  .cmdp {
+    width: 100%;
+    max-width: 640px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-xl);
+    display: flex;
+    flex-direction: column;
+    max-height: min(60vh, 520px);
+    overflow: hidden;
+  }
+
+  .cmdp-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+    flex-shrink: 0;
+  }
+
+  .cmdp-head-icon {
+    color: var(--muted);
+    flex-shrink: 0;
+  }
+
+  .cmdp-input {
+    flex: 1;
+    border: none;
+    background: transparent;
+    font-family: var(--font-body);
+    font-size: 15px;
+    color: var(--ink);
+    outline: none;
+    min-width: 0;
+  }
+
+  .cmdp-input::placeholder {
+    color: var(--ink-4);
+  }
+
+  .cmdp-kbd {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--ink-3);
+    background: var(--surface-3);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 2px 5px;
+    line-height: 1.3;
+    white-space: nowrap;
+  }
+
+  .cmdp-list {
+    overflow-y: auto;
+    padding: 8px;
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .cmdp-group + .cmdp-group {
+    margin-top: 4px;
+  }
+
+  .cmdp-group-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--ink-3);
+    padding: 10px 10px 4px;
+  }
+
+  .cmdp-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 8px 10px;
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .cmdp-item.active {
+    background: var(--accent-muted);
+  }
+
+  .cmdp-item-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 7px;
+    background: var(--surface-3);
+    color: var(--ink-2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .cmdp-item.active .cmdp-item-icon {
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+  }
+
+  .cmdp-item-main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .cmdp-item-title {
+    font-size: 14px;
+    color: var(--ink);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .cmdp-item-sub {
+    font-size: 12px;
+    color: var(--ink-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .cmdp-hl {
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    border-radius: 3px;
+    padding: 0 1px;
+  }
+
+  .cmdp-crumb {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 1px;
+    flex-shrink: 0;
+    max-width: 40%;
+  }
+
+  .cmdp-crumb-trail {
+    font-size: 11px;
+    color: var(--ink-3);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+
+  .cmdp-crumb-url {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    color: var(--ink-4);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+  }
+
+  .cmdp-empty {
+    text-align: center;
+    color: var(--ink-3);
+    font-size: 13px;
+    padding: 28px 16px;
+  }
+
+  .cmdp-foot {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 16px;
+    border-top: 1px solid var(--line);
+    font-size: 11px;
+    color: var(--ink-3);
+    flex-shrink: 0;
+  }
+
+  .cmdp-foot-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .cmdp-loading {
+    margin-left: auto;
+    color: var(--ink-4);
+  }
+
   .modal-head {
     padding: 24px 28px 4px;
     display: flex;
@@ -4461,6 +4852,27 @@
     padding: 12px 24px;
     border-top: 1px solid var(--line);
     background: var(--surface-2, #fff);
+  }
+
+  /* Shared pipeline bar for the Evidence + Tickets tabs (the PRD tab keeps its
+     own .prd-footer-bar). Pinned to the panel's bottom edge; the single
+     next-step button sits on the right, matching the PRD footer's CTA. */
+  .cpanel-bottom-bar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    flex-shrink: 0;
+    padding: 12px 24px;
+    border-top: 1px solid var(--line);
+    background: var(--surface-2, #fff);
+  }
+
+  .cpanel-next-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
   }
 
   /* Inside the content panel the PRD fills the (now wide) panel instead of
@@ -5609,9 +6021,12 @@
     min-width: 0;
   }
 
-  /* User turn */
+  /* User turn — right-aligned (the user's message sits on the RIGHT, the agent
+     reply on the left). row-reverse packs the head to the right edge with the
+     avatar outermost, mirroring the agent head on the left. */
   .bc-user-head {
     display: flex;
+    flex-direction: row-reverse;
     align-items: center;
     gap: 8px;
   }
@@ -5643,17 +6058,180 @@
   }
 
   .bc-user-bubble {
-    align-self: flex-start;
+    align-self: flex-end;
     max-width: 100%;
-    margin-left: 34px;
+    margin-right: 34px;
     padding: 10px 14px;
-    border-radius: 4px 14px 14px 14px;
+    border-radius: 14px 4px 14px 14px;
     background: var(--surface-3);
     color: var(--ink);
     font-size: 14px;
     line-height: 1.5;
     overflow-wrap: anywhere;
     word-break: break-word;
+  }
+
+  /* Attached-file cards on a user turn — shown INSTEAD of dumping the document
+     content into the bubble (the content still rides the ask to the backend).
+     Claude-style: an icon tile + file name + a type/size sub-line, clickable to
+     open the content viewer. */
+  .bc-user-attachments {
+    align-self: flex-end;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+    max-width: 100%;
+    margin-right: 34px;
+    margin-bottom: 6px;
+  }
+
+  .bc-file-card {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px 8px 8px;
+    border-radius: 12px;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+    max-width: 280px;
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  }
+
+  .bc-file-card:hover:not(:disabled) {
+    border-color: var(--line-strong);
+    background: var(--surface-3);
+    box-shadow: var(--shadow-sm);
+  }
+
+  .bc-file-card:disabled {
+    cursor: default;
+  }
+
+  .bc-file-card-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    flex-shrink: 0;
+    border-radius: 8px;
+    background: var(--accent-alpha-08, rgba(23, 148, 99, 0.08));
+    color: var(--accent, #179463);
+  }
+
+  .bc-file-card-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    gap: 1px;
+  }
+
+  .bc-file-card-name {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .bc-file-card-meta {
+    font-size: 11px;
+    color: var(--ink-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Attachment content viewer — full-screen overlay opened from a file card. */
+  .bc-file-viewer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    background: rgba(20, 20, 22, 0.45);
+    backdrop-filter: blur(2px);
+  }
+
+  .bc-file-viewer {
+    display: flex;
+    flex-direction: column;
+    width: min(760px, 100%);
+    max-height: 100%;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+  }
+
+  .bc-file-viewer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .bc-file-viewer-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .bc-file-viewer-title svg {
+    flex-shrink: 0;
+    color: var(--ink-3);
+  }
+
+  .bc-file-viewer-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+  }
+
+  .bc-file-viewer-close:hover {
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+
+  .bc-file-viewer-body {
+    padding: 18px 22px;
+    overflow-y: auto;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--ink);
+  }
+
+  .bc-file-viewer-body pre {
+    overflow-x: auto;
+  }
+
+  .bc-file-viewer-empty {
+    color: var(--ink-3);
+    font-style: italic;
   }
 
   /* Agent turn */
@@ -5704,7 +6282,9 @@
     font-size: 9.5px;
     font-weight: 700;
     letter-spacing: 0.06em;
-    text-transform: uppercase;
+    /* No text-transform: badge text renders as authored, so "Product Coworker"
+       shows in title case. Role badges whose source is already caps
+       (DS COWORKER, DECISION, INPUT) are unaffected. */
     background: var(--accent-soft);
     color: var(--accent-ink);
     padding: 2px 9px;
@@ -6573,6 +7153,14 @@
     line-height: 1.5;
   }
 
+  /* The user stopped this ask — muted, non-alarming (NOT the red error style). */
+  .bc-stopped {
+    color: var(--ink-4);
+    font-size: 13px;
+    line-height: 1.5;
+    font-style: italic;
+  }
+
   .bc-actions {
     display: flex;
     flex-wrap: wrap;
@@ -6814,6 +7402,140 @@
     border-color: var(--accent-hover);
   }
 
+  /* ── Slash-command palette ("/" skills picker above the composer) ──────────
+     Shared by the landing and thread composers. Claude-style: a floating card
+     with a small section header, mono trigger pills and a keyboard-driven
+     highlight (↑/↓ move, Enter selects). */
+  .chat-slash-menu {
+    position: absolute;
+    bottom: calc(100% + 8px);
+    left: 0;
+    right: 0;
+    z-index: 20;
+    max-height: 340px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 6px;
+    background: var(--surface-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-lg);
+    transform-origin: bottom center;
+    animation: chat-slash-in 0.14s var(--ease) both;
+  }
+
+  /* Dock composer is inset 8px from the rail; match its edges. */
+  .chat-slash-menu--inset {
+    left: 8px;
+    right: 8px;
+  }
+
+  @keyframes chat-slash-in {
+    from { opacity: 0; transform: translateY(6px) scale(0.985); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  .chat-slash-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 5px 10px 7px;
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--ink-4);
+  }
+
+  .chat-slash-count {
+    font-family: var(--font-mono);
+    font-weight: 500;
+    letter-spacing: 0;
+    color: var(--ink-4);
+  }
+
+  .chat-slash-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    padding: 8px 10px;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    text-align: left;
+    color: var(--ink);
+    transition: background 0.1s var(--ease);
+  }
+
+  .chat-slash-item.is-active {
+    background: var(--accent-alpha-08);
+  }
+
+  .chat-slash-trigger {
+    flex-shrink: 0;
+    min-width: 116px;
+    align-self: flex-start;
+    margin-top: 1px;
+    padding: 2px 8px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--accent-ink);
+    background: var(--accent-muted);
+    border-radius: 6px;
+  }
+
+  .chat-slash-item.is-active .chat-slash-trigger {
+    background: var(--accent-soft);
+  }
+
+  .chat-slash-text {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+  }
+
+  .chat-slash-label {
+    font-size: 13px;
+    font-weight: 550;
+    color: var(--ink);
+  }
+
+  .chat-slash-desc {
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--ink-3);
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .chat-slash-enter {
+    flex-shrink: 0;
+    margin-left: auto;
+    align-self: center;
+    font-size: 12px;
+    color: var(--accent);
+    opacity: 0;
+    transform: translateX(-2px);
+    transition: opacity 0.1s var(--ease), transform 0.1s var(--ease);
+  }
+
+  .chat-slash-item.is-active .chat-slash-enter {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .chat-slash-menu { animation: none; }
+    .chat-slash-enter { transition: none; }
+  }
+
   .bc-composer {
     background: transparent;
     border: 1px solid var(--line-strong);
@@ -6929,6 +7651,18 @@
   .bc-send:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  /* Stop variant — replaces Send while an ask is generating. Dark button with a
+     white glyph so it reads as "halt", distinct from the accent send button. */
+  .bc-send--stop {
+    background: var(--ink);
+    color: #fff;
+  }
+
+  .bc-send--stop:hover:not(:disabled) {
+    background: var(--ink);
+    opacity: 0.85;
   }
 
   .bc-hints {
@@ -7837,23 +8571,6 @@
     }
   }
 
-  .ai-bar-reply-kp--stream-reveal>li {
-    opacity: 0;
-    animation: ask-reply-kp-enter 0.38s ease forwards;
-  }
-
-  @keyframes ask-reply-kp-enter {
-    from {
-      opacity: 0;
-      transform: translateY(3px);
-    }
-
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
-  }
-
   .ai-bar-reply-cites--stream-reveal {
     opacity: 0;
     animation: ask-reply-cites-enter 0.42s ease 0.08s forwards;
@@ -7869,14 +8586,6 @@
       opacity: 1;
       transform: translateY(0);
     }
-  }
-
-  .ai-bar-reply-kp {
-    margin: 10px 0 0;
-    padding-left: 18px;
-    color: var(--ink-3);
-    font-size: 12px;
-    line-height: 1.45;
   }
 
   .ai-bar-reply-cites {
@@ -7903,13 +8612,6 @@
 
   .ai-bar-reply-cite-ev {
     color: var(--ink-3);
-  }
-
-  .ai-bar-reply-gap {
-    margin-top: 10px;
-    font-size: 11px;
-    color: var(--muted);
-    font-style: italic;
   }
 
   .selection-ask {
@@ -8314,7 +9016,6 @@
       box-shadow: none;
     }
 
-    .ai-bar-reply-kp--stream-reveal>li,
     .ai-bar-reply-cites--stream-reveal {
       animation: none;
       opacity: 1;
@@ -10113,8 +10814,10 @@
   }
 
   .set-team-invite-form {
-    display: grid;
-    grid-template-columns: 1fr 130px auto;
+    /* Flex (not the old 3-col grid) so the optional workspaces multi-select
+       slots in and narrow panes wrap gracefully. */
+    display: flex;
+    flex-wrap: wrap;
     gap: 10px;
     align-items: center;
     padding: 12px 0 14px;
@@ -10123,6 +10826,8 @@
   }
 
   .set-team-invite-input {
+    flex: 1 1 200px;
+    min-width: 0;
     font-size: 13px;
     padding: 9px 11px;
     border: 1px solid var(--line);
@@ -10297,6 +11002,83 @@
   .themed-select-option.active {
     color: var(--accent);
     font-weight: 600;
+  }
+
+  /* Rich options: role name + definition (the old "Roles" reference card
+     lives inside the dropdown now). Wide menus right-anchor so they never
+     overflow the card on the row's right edge. */
+  .themed-select-menu.wide {
+    width: 300px;
+    left: auto;
+    right: 0;
+  }
+
+  .themed-select-option-label {
+    display: block;
+  }
+
+  .themed-select-option-desc {
+    display: block;
+    font-size: 11px;
+    line-height: 1.4;
+    color: var(--ink-3);
+    font-weight: 400;
+    margin-top: 1px;
+  }
+
+  /* Multi-select (workspaces): checkbox-style options, menu stays open. */
+  .themed-select-option.check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .themed-select-trigger .placeholder {
+    color: var(--ink-3);
+  }
+
+  .themed-select-check {
+    width: 14px;
+    height: 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: 4px;
+    background: var(--surface);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: #fff;
+  }
+
+  .themed-select-check.on {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .themed-select.set-team-invite-ws {
+    width: 170px;
+  }
+
+  .themed-select.set-team-row-ws {
+    width: 150px;
+    flex-shrink: 0;
+  }
+
+  .set-team-row-ws .themed-select-menu,
+  .set-team-row-select .themed-select-menu {
+    left: auto;
+    right: 0;
+    min-width: 100%;
+  }
+
+  /* Org owners/admins: implicit access everywhere — shown as a muted label
+     where plain members get the workspaces multi-select. */
+  .set-team-row-ws-all {
+    width: 150px;
+    flex-shrink: 0;
+    font-size: 12px;
+    color: var(--ink-3);
+    padding: 7px 10px;
   }
 
   /* Status chips — design-kit semantic pair pattern (-l bg, -d text, -b border). */
@@ -14434,6 +15216,88 @@
     background: var(--line);
   }
 
+  /* Optional-field disclosure (registration spec 2026-07): collapsed
+   "+ Add …" row that expands optional inputs inline on onboarding steps. */
+  .onb-disclosure {
+    margin-top: 16px;
+  }
+
+  .onb-disclosure-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 9px 12px;
+    border: 1px dashed var(--line-strong);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--ink-2);
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .onb-disclosure-toggle:hover {
+    background: var(--surface-3);
+  }
+
+  .onb-disclosure-toggle .t {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .onb-disclosure-toggle .s {
+    font-size: 11px;
+    color: var(--ink-3);
+  }
+
+  .onb-disclosure-body {
+    margin-top: 12px;
+  }
+
+  /* Account-type choice (registration spec 2026-07): two-card segmented
+   control on sign-up step 1 and the your-name gate. */
+  .auth-acct-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .auth-acct-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    padding: 10px 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    background: var(--surface-2);
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+
+  .auth-acct-card:hover {
+    background: var(--surface-3);
+  }
+
+  .auth-acct-card .t {
+    font-size: 12.5px;
+    font-weight: 600;
+  }
+
+  .auth-acct-card .s {
+    font-size: 11px;
+    color: var(--ink-3);
+  }
+
+  .auth-acct-card-active {
+    border-color: var(--accent);
+    background: var(--surface-3);
+  }
+
   .sso-row {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -14817,6 +15681,35 @@
     display: flex;
     flex-direction: column;
     min-width: 0;
+  }
+
+  /* "Type instead" / "Upload instead" toggle under an upload-or-type block —
+     a small icon+text link hugging the card's bottom-left, highlighting green
+     on hover (screenshot spec 2026-07-17). */
+  .onb-card .onb-toggle-link {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-top: 8px;
+    padding: 2px 0;
+    background: none;
+    border: 0;
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--ink-3);
+    cursor: pointer;
+    transition: color 0.12s;
+  }
+
+  .onb-card .onb-toggle-link:hover {
+    color: var(--accent-ink);
+  }
+
+  .onb-card .onb-toggle-link svg {
+    width: 13px;
+    height: 13px;
   }
 
   .onb-card .onb-up {
@@ -16328,7 +17221,7 @@
      Backlog Projects screen  (BacklogScreen.tsx)
   ═══════════════════════════════════════════════════════════════════════════ */
 
-  .main--backlog {
+  .main--ideation {
     padding: 0;
     display: flex;
     flex-direction: column;
@@ -17123,7 +18016,7 @@
   }
 
   /* ── Task 4: Hide main chrome strip on Backlog page ── */
-  .main-column:has(.main--backlog) .app-main-chrome {
+  .main-column:has(.main--ideation) .app-main-chrome {
     display: none;
   }
 
@@ -17797,6 +18690,210 @@
 
 .tpl-add-t { font-size: 13.5px; font-weight: 600; }
 .tpl-add-s { font-size: 12px; color: var(--ink-3); max-width: 220px; }
+
+/* ── Skills gallery (data-view="skills") ─────────────────────────────────────
+   Mirrors the Templates surface chrome (.tpl-*): sticky header row, intro
+   banner, then one section per catalog category — serif numbered heading with
+   a tagline — over a card grid. Cards are BUTTONS (the whole card invokes the
+   skill into a new chat thread), so they carry hover/focus affordances. */
+
+.main--skills {
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.skl-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.skl-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.skl-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.skl-title-icon { color: var(--accent); flex-shrink: 0; }
+
+.skl-sub {
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--ink-3);
+  margin-left: 4px;
+}
+
+.skl-create { display: inline-flex; align-items: center; gap: 6px; }
+
+.skl-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 20px 24px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.skl-intro {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: var(--radius);
+  background: var(--accent-muted);
+  border: 1px solid var(--accent-2);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.skl-intro-icon { color: var(--accent); flex-shrink: 0; margin-top: 1px; }
+
+.skl-search {
+  position: relative;
+  max-width: 460px;
+}
+
+.skl-search svg {
+  position: absolute;
+  left: 13px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--ink-3);
+  pointer-events: none;
+}
+
+.skl-search input {
+  width: 100%;
+  font-size: 13px;
+  padding: 8px 14px 8px 35px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface-3, #EEF0EE);
+  color: var(--ink);
+  outline: none;
+}
+
+.skl-search input:focus {
+  border-color: var(--accent-alpha-40);
+  background: var(--surface-2, #fff);
+}
+
+.skl-msg {
+  font-size: 13px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+}
+.skl-msg-error { background: #fdeaea; color: #c13838; border: 1px solid #f5b3b3; }
+
+.skl-placeholder { font-size: 13px; color: var(--ink-3); padding: 8px 0; }
+
+.skl-group { display: flex; flex-direction: column; gap: 12px; }
+
+.skl-group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.skl-group-title {
+  font-family: var(--font-serif);
+  font-size: 19px;
+  font-weight: 500;
+  color: var(--ink);
+  margin: 0;
+}
+
+.skl-group-tag { font-size: 12.5px; color: var(--ink-3); }
+
+.skl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.skl-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  text-align: left;
+  gap: 8px;
+  padding: 16px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: border-color 0.12s, box-shadow 0.12s, transform 0.12s;
+}
+.skl-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 2px 10px rgba(23, 148, 99, 0.08);
+  transform: translateY(-1px);
+}
+.skl-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.skl-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--accent-muted);
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.skl-card-t { font-size: 14px; font-weight: 600; color: var(--ink); }
+
+.skl-card-d {
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--ink-3);
+  flex: 1;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.skl-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.skl-by {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+.skl-by svg { color: var(--accent); }
 /* ── Weekly-brief skill design — 7-type taxonomy accents ──────────────────────
    Each finding card sets `--card-accent` inline (lib/brief-skill-taxonomy,
    derived from the finding type, NOT the model's mismatchable accent). The left
@@ -18201,4 +19298,3 @@
 .tkv2-cfcheck { width: 15px; height: 15px; accent-color: var(--green); cursor: pointer; display: block; margin-top: 3px; }
 /* Option dot inside pickers + values (status/priority colors reuse this). */
 .tkv2-cfdot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
-

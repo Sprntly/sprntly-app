@@ -71,7 +71,7 @@ def test_full_pipeline_bg_ingests_then_briefs_then_downstream(monkeypatch):
     )
     monkeypatch.setattr(
         brief_routes, "generate_brief_for",
-        lambda d: order.append(("brief", d)),
+        lambda d, **k: order.append(("brief", d)),
     )
 
     async def _fake_downstream(dataset):
@@ -110,7 +110,7 @@ def test_full_pipeline_bg_stops_after_empty_kg(monkeypatch):
     monkeypatch.setattr(brief_routes, "resolve_company", lambda d: ("co-1", d))
     monkeypatch.setattr(brief_routes, "kickoff_corpus_seed", lambda cid, slug: True)
 
-    def _raise(_d):
+    def _raise(_d, **_k):
         raise EmptyKnowledgeGraphError("no themes")
 
     monkeypatch.setattr(brief_routes, "generate_brief_for", _raise)

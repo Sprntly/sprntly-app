@@ -6,17 +6,28 @@ import {
   DEFAULT_FEATURE_FLAGS,
   emptyKpiTree,
   ONBOARDING_STEP_COUNT,
+  parseAccountType,
+  parseCompanyIcp,
+  parseCompanyToneVoice,
   parseDesignSourcePreference,
   parseFeatureFlags,
   parseKpiTree,
+  parseMetricDefinitions,
+  type AccountType,
   type FeatureFlags,
   type KpiTree,
+  type MetricDefinition,
   type UserProfile,
   type WorkspaceCompany,
   type WorkspaceProduct,
 } from "./types"
 
+const PRODUCT_COLUMNS =
+  "id, company_id, name, website, description, is_primary, surfaces, personas, positioning, monetization, users_description, maturity"
+
 function rowToProduct(row: Record<string, unknown>): WorkspaceProduct {
+  const strArr = (v: unknown) =>
+    Array.isArray(v) ? v.map(String).filter(Boolean) : []
   return {
     id: String(row.id),
     company_id: String(row.company_id),
@@ -24,6 +35,12 @@ function rowToProduct(row: Record<string, unknown>): WorkspaceProduct {
     website: (row.website as string | null) ?? null,
     description: (row.description as string | null) ?? null,
     is_primary: Boolean(row.is_primary),
+    surfaces: strArr(row.surfaces),
+    personas: strArr(row.personas),
+    positioning: (row.positioning as string | null) ?? null,
+    monetization: strArr(row.monetization),
+    users_description: (row.users_description as string | null) ?? null,
+    maturity: (row.maturity as string | null) ?? null,
   }
 }
 
@@ -37,6 +54,7 @@ function rowToCompany(
     display_name: String(row.display_name),
     product_description: (row.product_description as string | null) ?? null,
     product,
+    account_type: parseAccountType(row.account_type),
     industry: (row.industry as string | null) ?? null,
     stage: (row.stage as string | null) ?? null,
     business_type: (row.business_type as string | null) ?? null,
@@ -47,6 +65,25 @@ function rowToCompany(
     competitors: Array.isArray(row.competitors) ? (row.competitors as string[]) : [],
     tech_stack: Array.isArray(row.tech_stack) ? (row.tech_stack as string[]) : [],
     okrs: (row.okrs as string | null) ?? null,
+    mission: (row.mission as string | null) ?? null,
+    strategy: (row.strategy as string | null) ?? null,
+    portfolio: (row.portfolio as string | null) ?? null,
+    icp: parseCompanyIcp(row.icp),
+    tone_voice: parseCompanyToneVoice(row.tone_voice),
+    planning_cycle: (row.planning_cycle as string | null) ?? null,
+    team_name: (row.team_name as string | null) ?? null,
+    team_scope: (row.team_scope as string | null) ?? null,
+    prioritization_framework: (row.prioritization_framework as string | null) ?? null,
+    sizing_methodology: (row.sizing_methodology as string | null) ?? null,
+    team_strategy: (row.team_strategy as string | null) ?? null,
+    team_roadmap: (row.team_roadmap as string | null) ?? null,
+    decision_process: (row.decision_process as string | null) ?? null,
+    additional_context: (row.additional_context as string | null) ?? null,
+    business_context_summary:
+      (row.business_context_summary as string | null) ?? null,
+    business_context_accepted_at:
+      (row.business_context_accepted_at as string | null) ?? null,
+    metric_definitions: parseMetricDefinitions(row.metric_definitions),
     recent_decisions: (row.recent_decisions as string | null) ?? null,
     dead_ends: Array.isArray(row.dead_ends) ? (row.dead_ends as string[]) : [],
     biggest_risk: (row.biggest_risk as string | null) ?? null,
@@ -66,6 +103,9 @@ function rowToCompany(
   }
 }
 
+const PROFILE_COLUMNS =
+  "id, email, first_name, last_name, role, priorities, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields"
+
 function rowToProfile(row: Record<string, unknown>): UserProfile {
   return {
     id: String(row.id),
@@ -73,7 +113,9 @@ function rowToProfile(row: Record<string, unknown>): UserProfile {
     first_name: (row.first_name as string | null) ?? null,
     last_name: (row.last_name as string | null) ?? null,
     role: (row.role as string | null) ?? null,
+    priorities: (row.priorities as string | null) ?? null,
     timezone: (row.timezone as string | null) ?? null,
+    account_type: parseAccountType(row.account_type),
     onboarding_step: Number(row.onboarding_step) || 0,
     onboarding_completed_at: (row.onboarding_completed_at as string | null) ?? null,
     skipped_fields: Array.isArray(row.skipped_fields) ? (row.skipped_fields as string[]) : [],
@@ -84,9 +126,7 @@ export async function fetchUserProfile(userId: string): Promise<UserProfile | nu
   const supabase = getSupabase()
   const { data, error } = await supabase
     .from("profiles")
-    .select(
-      "id, email, first_name, last_name, role, timezone, onboarding_step, onboarding_completed_at, skipped_fields",
-    )
+    .select(PROFILE_COLUMNS)
     .eq("id", userId)
     .maybeSingle()
   if (error || !data) return null
@@ -99,8 +139,13 @@ export async function updateUserProfile(
     first_name: string
     last_name: string
     role: string | null
+    /** "Your priorities" free text; omit to leave unchanged, pass null to clear. */
+    priorities?: string | null
     /** IANA timezone; omit to leave unchanged, pass null to clear. */
     timezone?: string | null
+    /** Legacy signup choice; omit to leave unchanged. The v6 flow always
+     *  writes "company". */
+    account_type?: AccountType
   },
 ): Promise<UserProfile> {
   const supabase = getSupabase()
@@ -115,15 +160,17 @@ export async function updateUserProfile(
       last_name: last,
       full_name: full_name || null,
       role: patch.role?.trim() || null,
+      ...(patch.priorities !== undefined
+        ? { priorities: patch.priorities?.trim() || null }
+        : {}),
       ...(patch.timezone !== undefined
         ? { timezone: patch.timezone?.trim() || null }
         : {}),
+      ...(patch.account_type !== undefined ? { account_type: patch.account_type } : {}),
       updated_at: new Date().toISOString(),
     })
     .eq("id", userId)
-    .select(
-      "id, email, first_name, last_name, role, timezone, onboarding_step, onboarding_completed_at, skipped_fields",
-    )
+    .select(PROFILE_COLUMNS)
     .single()
 
   if (error || !data) {
@@ -138,7 +185,7 @@ export async function fetchPrimaryProduct(
   const supabase = getSupabase()
   const { data, error } = await supabase
     .from("products")
-    .select("id, company_id, name, website, description, is_primary")
+    .select(PRODUCT_COLUMNS)
     .eq("company_id", companyId)
     .eq("is_primary", true)
     .maybeSingle()
@@ -148,11 +195,35 @@ export async function fetchPrimaryProduct(
 
 export async function upsertPrimaryProduct(
   companyId: string,
-  input: { name: string; website: string | null; description?: string | null },
+  input: {
+    name: string
+    website: string | null
+    description?: string | null
+    /** Registration-spec product fields; omit any to leave it unchanged. */
+    surfaces?: string[]
+    personas?: string[]
+    positioning?: string | null
+    monetization?: string[]
+    usersDescription?: string | null
+    maturity?: string | null
+  },
 ): Promise<WorkspaceProduct> {
   const supabase = getSupabase()
   const name = input.name.trim()
   const existing = await fetchPrimaryProduct(companyId)
+
+  const specFields = {
+    ...(input.surfaces !== undefined ? { surfaces: input.surfaces } : {}),
+    ...(input.personas !== undefined ? { personas: input.personas } : {}),
+    ...(input.positioning !== undefined
+      ? { positioning: input.positioning?.trim() || null }
+      : {}),
+    ...(input.monetization !== undefined ? { monetization: input.monetization } : {}),
+    ...(input.usersDescription !== undefined
+      ? { users_description: input.usersDescription?.trim() || null }
+      : {}),
+    ...(input.maturity !== undefined ? { maturity: input.maturity || null } : {}),
+  }
 
   if (existing) {
     const { data, error } = await supabase
@@ -161,10 +232,11 @@ export async function upsertPrimaryProduct(
         name,
         website: input.website,
         description: input.description?.trim() || null,
+        ...specFields,
         updated_at: new Date().toISOString(),
       })
       .eq("id", existing.id)
-      .select("id, company_id, name, website, description, is_primary")
+      .select(PRODUCT_COLUMNS)
       .single()
     if (error || !data) throw error ?? new Error("Could not update product")
     return rowToProduct(data as Record<string, unknown>)
@@ -177,15 +249,21 @@ export async function upsertPrimaryProduct(
       name,
       website: input.website,
       description: input.description?.trim() || null,
+      ...specFields,
       is_primary: true,
     })
-    .select("id, company_id, name, website, description, is_primary")
+    .select(PRODUCT_COLUMNS)
     .single()
   if (error || !data) throw error ?? new Error("Could not create product")
   return rowToProduct(data as Record<string, unknown>)
 }
 
-export async function fetchWorkspaceForUser(
+/**
+ * The pre-embed workspace resolution: membership → company → primary product,
+ * three sequential round-trips. Kept as the fallback for fetchWorkspaceForUser
+ * when the single embedded select errors or returns an unexpected shape.
+ */
+async function fetchWorkspaceForUserSequential(
   userId: string,
 ): Promise<WorkspaceCompany | null> {
   const supabase = getSupabase()
@@ -208,10 +286,57 @@ export async function fetchWorkspaceForUser(
   return rowToCompany(data as Record<string, unknown>, product)
 }
 
+export async function fetchWorkspaceForUser(
+  userId: string,
+): Promise<WorkspaceCompany | null> {
+  const supabase = getSupabase()
+  // Single round-trip: membership + company + products via one PostgREST
+  // embedded select, replacing the three sequential queries that sat on the
+  // authed-refresh critical path. Any error or unexpected embed shape falls
+  // back to the sequential implementation, so a relationship quirk (e.g. an
+  // ambiguous FK needing a `companies!<fk>` hint) can never break workspace
+  // resolution — it just costs the old round-trips.
+  try {
+    const { data, error } = await supabase
+      .from("company_members")
+      .select("company_id, companies(*, products(*))")
+      .eq("user_id", userId)
+      .limit(1)
+      .maybeSingle()
+    if (error) return fetchWorkspaceForUserSequential(userId)
+    // No membership row at all — genuinely workspace-less (matches the
+    // sequential path's null).
+    if (!data) return null
+    const embedded = (data as Record<string, unknown>).companies
+    // A to-one embed arrives as an object; tolerate an array shape too.
+    const companyRow = Array.isArray(embedded) ? embedded[0] : embedded
+    if (!companyRow || typeof companyRow !== "object") {
+      return fetchWorkspaceForUserSequential(userId)
+    }
+    const products = (companyRow as Record<string, unknown>).products
+    const productRows = Array.isArray(products)
+      ? (products as Record<string, unknown>[])
+      : []
+    // Same semantics as fetchPrimaryProduct (eq is_primary=true + maybeSingle):
+    // exactly one primary row → that product; zero OR multiple → null.
+    const primaries = productRows.filter((p) => p.is_primary === true)
+    const product = primaries.length === 1 ? rowToProduct(primaries[0]) : null
+    return rowToCompany(companyRow as Record<string, unknown>, product)
+  } catch {
+    return fetchWorkspaceForUserSequential(userId)
+  }
+}
+
 export async function createWorkspace(input: {
   companyName: string
   productName: string
   productWebsite?: string | null
+  /** The signup choice, denormalized from profiles.account_type so
+   *  company-scoped reads never need a join. */
+  accountType?: AccountType | null
+  /** Company mission / strategy (optional onboarding fields). */
+  mission?: string | null
+  strategy?: string | null
   /** Optional on create — Claude infers it from the website; confirmed later. */
   industry?: string | null
   /** No longer collected in onboarding — captured later via business context. */
@@ -238,6 +363,9 @@ export async function createWorkspace(input: {
         created_by: input.userId,
         slug: trySlug,
         display_name: input.companyName.trim(),
+        account_type: input.accountType ?? "company",
+        mission: input.mission?.trim() || null,
+        strategy: input.strategy?.trim() || null,
         industry: input.industry ?? null,
         stage: input.stage ?? null,
         business_type: input.businessType ?? null,
@@ -361,6 +489,61 @@ export async function saveFeatureFlags(
   return updateWorkspace(companyId, {
     feature_flags: flags,
     onboarding_step: clampStep(nextStep),
+  })
+}
+
+/**
+ * Set only the weekly-brief weekday inside companies.notification_settings,
+ * merge-writing over the CURRENT stored object so the other keys (brief_hour,
+ * email_enabled, timezone, Slack config…) are never clobbered. Used by the
+ * onboarding team step; the full schedule editor lives in Settings → Comms.
+ */
+export async function saveNotificationBriefDay(
+  companyId: string,
+  weekday: number,
+): Promise<WorkspaceCompany> {
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from("companies")
+    .select("notification_settings")
+    .eq("id", companyId)
+    .single()
+  if (error || !data) throw error ?? new Error("Could not load notification settings")
+  const current =
+    data.notification_settings && typeof data.notification_settings === "object"
+      ? (data.notification_settings as Record<string, unknown>)
+      : {}
+  return updateWorkspace(companyId, {
+    notification_settings: { ...current, brief_weekday: weekday },
+  })
+}
+
+/**
+ * Persist the confirmed metric definitions (define-metrics sub-flow / the
+ * Settings KPI pane). Normalized through parseMetricDefinitions so only
+ * well-formed `{metric, definition, mapping, baseline}` entries are stored.
+ */
+export async function saveMetricDefinitions(
+  companyId: string,
+  definitions: MetricDefinition[],
+) {
+  return updateWorkspace(companyId, {
+    metric_definitions: parseMetricDefinitions(definitions),
+  })
+}
+
+/**
+ * Persist the accepted business-context prose (step 9 "Here's what we
+ * learned"). Stamps business_context_accepted_at when `accepted`.
+ */
+export async function saveBusinessContextSummary(
+  companyId: string,
+  summary: string,
+  accepted: boolean,
+) {
+  return updateWorkspace(companyId, {
+    business_context_summary: summary.trim() || null,
+    ...(accepted ? { business_context_accepted_at: new Date().toISOString() } : {}),
   })
 }
 

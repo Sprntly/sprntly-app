@@ -43,8 +43,8 @@ SKILL_CATEGORY: dict[str, str] = {
     "public-feedback-report": "Discovery & Research",
     "survey-design": "Discovery & Research",
     "voice-of-customer-report": "Discovery & Research",
-    "backlog-triage": "Prioritization & Decision",
     "decision-by-traffic-lights": "Prioritization & Decision",
+    "ideation-prioritize": "Prioritization & Decision",
     "decision-memo": "Prioritization & Decision",
     "pre-mortem": "Prioritization & Decision",
     "prioritize": "Prioritization & Decision",
@@ -113,9 +113,6 @@ SKILL_CATEGORY: dict[str, str] = {
 NON_ROUTABLE: frozenset[str] = frozenset(
     {"business-context", "fact-check", "weekly-brief", "evidence-brief"}
 )
-
-# Expensive skills that trip the confirm gate on large scope (see qa_agent).
-COST_GATED: frozenset[str] = frozenset({"competitive-intelligence-review"})
 
 # Acronyms to upper-case when humanising an id into a display label.
 _ACRONYMS = {

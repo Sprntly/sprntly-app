@@ -2,7 +2,7 @@
 //
 // The right-panel Evidence tab must only appear for PRDs that actually have
 // research Evidence. Brief-insight PRDs (`source: 'brief'`, or legacy rows with
-// no source) do; backlog and uploaded PRDs do not — an uploaded PRD may have no
+// no source) do; ideation and uploaded PRDs do not — an uploaded PRD may have no
 // evidence at all — so the tab is hidden for them. These tests lock both the
 // pure predicate and the rendered tab bar (plus the redirect off a now-hidden
 // Evidence tab).
@@ -95,7 +95,8 @@ describe("isEvidenceTabHidden — pure predicate", () => {
     expect(isEvidenceTabHidden({ ...base, prd: prd(undefined) })).toBe(false)
   })
 
-  it("hides the tab for a backlog PRD", () => {
+  it("hides the tab for an ideation PRD (and legacy 'backlog' rows)", () => {
+    expect(isEvidenceTabHidden({ ...base, prd: prd("ideation") })).toBe(true)
     expect(isEvidenceTabHidden({ ...base, prd: prd("backlog") })).toBe(true)
   })
 
@@ -128,9 +129,21 @@ describe("ContentPanel — Evidence tab visibility", () => {
     expect(evidenceTab()).toBeNull()
   })
 
-  it("hides the Evidence tab for a backlog PRD", () => {
-    renderPanel({ tab: "prd", prd: prd("backlog") })
+  it("hides the Evidence tab for an ideation PRD", () => {
+    renderPanel({ tab: "prd", prd: prd("ideation") })
     expect(evidenceTab()).toBeNull()
+  })
+
+  it("orders the tabs Evidence → PRD → Tickets (the pipeline order) for a brief PRD", () => {
+    renderPanel({ tab: "prd", prd: prd("brief") })
+    const labels = Array.from(document.querySelectorAll(".cpanel-tab")).map((b) => b.textContent?.trim())
+    expect(labels).toEqual(["Evidence", "PRD", "Tickets"])
+  })
+
+  it("shows PRD → Tickets only for an uploaded PRD (Evidence tab absent)", () => {
+    renderPanel({ tab: "prd", prd: prd("upload") })
+    const labels = Array.from(document.querySelectorAll(".cpanel-tab")).map((b) => b.textContent?.trim())
+    expect(labels).toEqual(["PRD", "Tickets"])
   })
 
   it("redirects to the PRD tab when parked on Evidence for an uploaded PRD", () => {

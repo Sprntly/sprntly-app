@@ -17,12 +17,13 @@ import logging
 from typing import Any, Iterable
 
 from app import db
-from app.connectors import clickup_oauth, jira_oauth
+from app.connectors import asana_oauth, clickup_oauth, jira_oauth
 from app.connectors.tokens import (
     TokenEncryptionError,
     decrypt_token_json,
     encrypt_token_json,
 )
+from app.db.asana_sync import get_asana_task_gid, save_asana_task_gid
 from app.db.clickup_sync import get_clickup_task_id, save_clickup_task_id
 from app.db.jira_sync import get_jira_issue_key, save_jira_issue_key
 from app.stories.generate import Story
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 CLICKUP_PROVIDER = "clickup"
 JIRA_PROVIDER = "jira"
+ASANA_PROVIDER = "asana"
 
 
 class ClickUpNotConnectedError(LookupError):
@@ -39,6 +41,10 @@ class ClickUpNotConnectedError(LookupError):
 
 class JiraNotConnectedError(LookupError):
     """Raised when the company has no active Jira connection."""
+
+
+class AsanaNotConnectedError(LookupError):
+    """Raised when the company has no active Asana connection."""
 
 
 def _clickup_fields(story: Story) -> dict[str, Any]:
@@ -409,3 +415,152 @@ def pull_jira_status(
         if state.get("status") or state.get("assignee"):
             out[ticket_id] = state
     return out
+
+
+# ── Asana push ─────────────────────────────────────────────────────────────
+#
+# Mirrors the ClickUp/Jira push but targets an Asana PROJECT (gid) and creates
+# tasks. Asana access tokens expire ~1h (refresh + persist like Jira). Asana
+# has no native priority / issue type, and a task's "status" is the SECTION it
+# sits in — so status sync happens in the two-way pass (app/stories/sync.py),
+# not on first create; a freshly-created task lands in the project's default
+# (first) section.
+
+
+def _asana_creds(company_id: str) -> str:
+    """Return the company's Asana access token, refreshing + persisting an
+    expired one first (Asana access tokens expire ~1h; refresh tokens are
+    long-lived but a refresh response may omit the refresh token — carry the
+    stored one forward). Raises AsanaNotConnectedError when unusable."""
+    import time
+
+    row = db.get_connection(company_id, ASANA_PROVIDER)
+    if not row or not row.get("token_json_encrypted"):
+        raise AsanaNotConnectedError("Asana is not connected for this company")
+    try:
+        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
+    except (TokenEncryptionError, ValueError) as e:
+        raise AsanaNotConnectedError("Asana token is unreadable") from e
+
+    obtained_at = token_json.get("obtained_at", 0)
+    expires_in = token_json.get("expires_in", 3600)
+    refresh_token = token_json.get("refresh_token")
+    if refresh_token and time.time() > obtained_at + expires_in - 120:
+        try:
+            token_json = json.loads(
+                asana_oauth.token_payload_to_store(
+                    asana_oauth.refresh_access_token(refresh_token),
+                    keep_refresh_token=refresh_token,
+                )
+            )
+            db.update_connection_tokens(
+                company_id, ASANA_PROVIDER, encrypt_token_json(json.dumps(token_json))
+            )
+        except Exception as e:  # noqa: BLE001 — refresh failed → surface reconnect
+            raise AsanaNotConnectedError(
+                "Asana authorization expired — reconnect Asana to continue"
+            ) from e
+
+    access_token = token_json.get("access_token") or ""
+    if not access_token:
+        raise AsanaNotConnectedError("Asana connection has no access_token")
+    return access_token
+
+
+def push_asana_subtasks(
+    company_id: str,
+    project_gid: str,
+    parent_gid: str,
+    ticket_id: str,
+    subtasks: Iterable[str],
+    *,
+    access_token: str,
+) -> None:
+    """Create the MISSING child issues as real NATIVE Asana subtasks under
+    `parent_gid`. Idempotent by content: each subtask maps to a
+    `{ticket_id}#sub#{hash}` row in asana_task_map (reusing the same table as
+    the parent), so a re-push/sync skips ones that exist; a renamed item
+    creates a new subtask (the old one stays — add-only, mirroring the Jira
+    sub-task push). Per-item failures are isolated + logged.
+
+    Asana subtasks need no special type (unlike Jira), so this always runs when
+    a story has child issues — they never live only as description text."""
+    import hashlib
+    import re as _re
+
+    for raw in subtasks or []:
+        label = _re.sub(r"^\s*\[P\]\s*", "", str(raw)).strip()
+        if not label:
+            continue
+        sub_id = (
+            f"{ticket_id}#sub#"
+            f"{hashlib.sha256(label.encode('utf-8')).hexdigest()[:12]}"
+        )
+        try:
+            if get_asana_task_gid(company_id, project_gid, sub_id):
+                continue
+            sub = asana_oauth.create_subtask(access_token, parent_gid, name=label[:255])
+            if sub.get("gid"):
+                save_asana_task_gid(company_id, project_gid, sub_id, sub["gid"])
+        except Exception as e:  # noqa: BLE001 — one child failing is isolated
+            logger.warning(
+                "Asana sub-task push failed under %s (%r): %s", parent_gid, label, e
+            )
+
+
+def push_stories_to_asana(
+    company_id: str,
+    project_gid: str,
+    stories: Iterable[Story],
+) -> dict[str, Any]:
+    """Create (or idempotently update) one Asana task per story in `project_gid`.
+
+    Returns `{"created": [{story, task_id, url, updated}], "errors": [...]}`.
+    Error-isolated per story. Raises AsanaNotConnectedError up-front if Asana
+    isn't connected. Mirrors the ClickUp/Jira push's create-or-update-by-map
+    behavior so a re-push doesn't duplicate tasks. Status (section) and
+    comments are reconciled by the two-way sync pass, not here.
+
+    Child issues become REAL native Asana subtasks under the task (add-only,
+    idempotent by content) — so the description drops its Child issues text
+    section, exactly like the Jira push does when a project has a sub-task
+    type."""
+    access_token = _asana_creds(company_id)
+
+    created: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for story in stories:
+        try:
+            ticket_id = story.stable_id()
+            existing = get_asana_task_gid(company_id, project_gid, ticket_id)
+            # Subtasks become real Asana subtasks below, so keep them OUT of the
+            # notes body (no duplication between the subtask list and the text).
+            notes = story.to_description(include_subtasks=False)
+            if existing:
+                task = asana_oauth.update_task(
+                    access_token, existing, name=story.title, notes=notes,
+                )
+                task_gid = task.get("gid") or existing
+            else:
+                task = asana_oauth.create_task(
+                    access_token, project_gid, name=story.title, notes=notes,
+                )
+                task_gid = task.get("gid")
+                if task_gid:
+                    save_asana_task_gid(company_id, project_gid, ticket_id, task_gid)
+            if task_gid and story.subtasks:
+                push_asana_subtasks(
+                    company_id, project_gid, task_gid, ticket_id, story.subtasks,
+                    access_token=access_token,
+                )
+            created.append({
+                "story": story.title,
+                "task_id": task_gid,
+                "url": task.get("url"),
+                "updated": bool(existing),
+            })
+        except Exception as e:  # noqa: BLE001 — isolate per-story failures
+            logger.warning("Asana push failed for story %r: %s", story.title, e)
+            errors.append({"story": story.title, "error": str(e)})
+
+    return {"created": created, "errors": errors}

@@ -51,7 +51,7 @@ const loadPrdById = vi.fn((id: number) =>
 vi.mock("../../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: (...a: unknown[]) => runPrdGeneration(...a),
   resumePrdGeneration: vi.fn(),
-  runPrdGenerationFromBacklog: vi.fn(),
+  runPrdGenerationFromIdeation: vi.fn(),
   loadPrdById: (...a: unknown[]) => loadPrdById(...a),
 }))
 
@@ -125,11 +125,11 @@ function mountApp() {
 const panelProbe = () => screen.getByTestId("panel-probe").textContent
 const prdProbe = () => screen.getByTestId("prd-probe").textContent
 
-// Seed localStorage exactly as a reload would leave it: the tab persists (with its
-// briefMeta) but `prd` is stripped, and the active tab points at it.
+// Seed sessionStorage exactly as an in-session reload would leave it: the tab
+// persists (with its briefMeta) but `prd` is stripped, and the active tab points at it.
 function seedPersistedTab(tab: Record<string, unknown>, activeId: string) {
-  localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([tab]))
-  localStorage.setItem("sprntly_chat_active_tab_anon_acme", activeId)
+  sessionStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([tab]))
+  sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", activeId)
 }
 
 const tabBar = () => within(screen.getByTestId("chat-tab-bar"))
@@ -175,11 +175,11 @@ describe("ChatScreen — PRD panel restore after reload", () => {
       entriesByInsight: new Map([[0, { prd_id: 55, prd_title: "Later PRD", prototype: null }]]),
       loading: false,
     }
-    localStorage.setItem(
+    sessionStorage.setItem(
       "sprntly_chat_tabs_anon_acme",
       JSON.stringify([{ id: "tab-late", title: "PRD · Later PRD", thread: [], dbConvId: null, briefMeta: { briefId: 3, insightIndex: 0 }, insightBody: null }]),
     )
-    localStorage.setItem("sprntly_chat_active_tab_anon_acme", "brief") // land on brief first
+    sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "brief") // land on brief first
 
     await act(async () => { mountApp() })
     // On the brief tab, no restore.
@@ -255,12 +255,12 @@ describe("ChatScreen — PRD panel restore after reload", () => {
   })
 
   it("restores a BACKLOG PRD (no briefMeta) via the tab's own saved prdId", async () => {
-    // Backlog PRD tabs carry no briefMeta, so the brief-map path can't recover
+    // Ideation PRD tabs carry no briefMeta, so the brief-map path can't recover
     // them. The tab's persisted `prdId` is the only recovery path — it must DB-load
     // that exact PRD, never regenerate a duplicate.
     mapState = { entriesByInsight: new Map(), loading: false } // no map help at all
     seedPersistedTab(
-      { id: "tab-bk", title: "PRD · Backlog thing", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 88 },
+      { id: "tab-bk", title: "PRD · Ideation thing", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 88 },
       "tab-bk",
     )
 
@@ -276,11 +276,11 @@ describe("ChatScreen — PRD panel restore after reload", () => {
     // The panel is a single global overlay; switching between PRD tabs must re-sync
     // it to the ACTIVE tab's PRD (the "wrong PRD on refocus" bug left a prior tab's
     // doc showing). Two tabs with distinct saved ids; the panel must track them.
-    localStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
+    sessionStorage.setItem("sprntly_chat_tabs_anon_acme", JSON.stringify([
       { id: "tab-a", title: "PRD · Alpha", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 10 },
       { id: "tab-b", title: "PRD · Beta", thread: [], dbConvId: null, briefMeta: null, insightBody: null, prdId: 20 },
     ]))
-    localStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-a")
+    sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-a")
 
     await act(async () => { mountApp() })
     // Landed on tab-a → its PRD (10).

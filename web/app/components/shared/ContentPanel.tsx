@@ -5,9 +5,13 @@ import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { EvidenceSections } from "./EvidenceSections"
 import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
+import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
+import { stripHtmlCodeFence } from "../../lib/htmlBrief"
+import { HtmlReportView } from "./HtmlReportView"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
+import { runPrdGeneration } from "../../lib/runPrdGeneration"
 import { useRouter } from "next/navigation"
 import {
   ApiError, storiesApi,
@@ -16,6 +20,7 @@ import {
   type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { TicketDetail } from "./TicketDetail"
 import { DestinationPicker } from "./DestinationPicker"
 import { JiraPushModal, type JiraPushChoice } from "./JiraPushModal"
@@ -26,11 +31,14 @@ import {
 } from "@tabler/icons-react"
 import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
 import { printCombined } from "../../lib/combinedExport"
-import type { PrdState, PrdContent, AppContentState } from "../../types/content"
+import type { PrdState, PrdContent, PrdDesignBlock, AppContentState } from "../../types/content"
 
+// Tab order mirrors the pipeline: Evidence → PRD → Tickets (each tab's bottom
+// bar launches the NEXT artifact). Evidence is hidden for non-brief PRDs (see
+// isEvidenceTabHidden), so uploads show PRD → Tickets.
 const TABS = [
-  { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
+  { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
 ] as const
 
@@ -134,7 +142,7 @@ function ShareMenu({
  * Whether to hide the right-panel Evidence tab for the current content.
  *
  * Only brief-insight PRDs carry their own research Evidence (keyed at
- * `(brief_id, insight_index)`). Backlog and uploaded PRDs have none — an
+ * `(brief_id, insight_index)`). Ideation and uploaded PRDs have none — an
  * uploaded PRD may genuinely have no evidence at all — so the Evidence tab is
  * hidden for them. We still show it while evidence is loaded/generating into
  * context (e.g. a brief-finding flow), and a missing `source` (legacy rows) is
@@ -266,11 +274,114 @@ export function ContentPanel() {
 
         <div className="cpanel-body">
           {activeTab === "evidence" && <EvidenceTab />}
-          {activeTab === "prd" && <PrdPanelContent />}
+          {activeTab === "prd" && <PrdPanelContent evidenceTabAvailable={!evidenceHidden} />}
           {activeTab === "tickets" && <TicketsTab />}
         </div>
+
+        {/* Fixed pipeline bar — each tab's bottom launches the NEXT artifact.
+            The PRD tab keeps its OWN footer (autosave + version history + the
+            tickets button), so the shared bar is only for Evidence and Tickets. */}
+        {activeTab === "evidence" && <EvidenceBottomBar />}
+        {activeTab === "tickets" && <TicketsBottomBar />}
       </aside>
     </>
+  )
+}
+
+// ── Fixed bottom bar: Evidence tab → Generate / View PRD ──────────────────────
+// The Evidence tab's next pipeline step is the PRD. "View PRD" (one is already
+// loaded for this context) just switches tabs; otherwise "Generate PRD" runs the
+// generation for the current insight, flips to the PRD tab, and lands the doc
+// there. Disabled when there's no insight meta to generate from.
+function EvidenceBottomBar() {
+  const { openContentPanel, showToast } = useNavigation()
+  const { content, setContent } = useContent()
+  const prd = content.prd
+  const meta = content.detail?.meta ?? content.prdMeta ?? null
+  const [generating, setGenerating] = useState(false)
+
+  const generate = useCallback(async () => {
+    if (!meta || generating) return
+    setGenerating(true)
+    // Reveal the PRD tab right away — it live-renders the draft as it streams.
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
+    openContentPanel("prd")
+    try {
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
+      if (result.ok) {
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+      } else {
+        setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD generation failed", result.message)
+      }
+    } catch (e) {
+      setContent({ prdGenerating: false, prdPartialHtml: null })
+      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+    } finally {
+      setGenerating(false)
+    }
+  }, [meta, generating, setContent, openContentPanel, showToast])
+
+  return (
+    <div className="cpanel-bottom-bar">
+      {prd ? (
+        <button type="button" className="btn btn-primary btn-sm cpanel-next-btn" onClick={() => openContentPanel("prd")}>
+          View PRD
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="btn btn-primary btn-sm cpanel-next-btn"
+          data-testid="evidence-footer-prd-cta"
+          disabled={generating || !meta}
+          onClick={generate}
+        >
+          {generating ? "Generating PRD…" : "Generate PRD"}
+        </button>
+      )}
+    </div>
+  )
+}
+
+// ── Fixed bottom bar: Tickets tab → Generate / View Prototype ─────────────────
+// The Tickets tab's next pipeline step is the prototype, driven by the canonical
+// GeneratePrototypeCTA (the only sanctioned generate/view-prototype trigger). A
+// Tickets tab always has a PRD in scope, so the button is never disabled here.
+function TicketsBottomBar() {
+  const { content } = useContent()
+  const prdId = content.prd?.prd_id ?? null
+  return (
+    <div className="cpanel-bottom-bar">
+      <GeneratePrototypeCTA
+        prdId={prdId}
+        figmaFileKey={content.prd?.figma_file_key ?? null}
+        prdTitle={content.prd?.title}
+        // The PRD's own :::design platform_hint (already parsed into the
+        // sections in scope here) seeds the generate panel's platform
+        // default; the toggle still overrides. Optional-chained: a PRD
+        // hydrated without parsed sections (e.g. a bare record) simply
+        // yields no hint.
+        platformHint={
+          content.prd?.sections?.find(
+            (s): s is PrdDesignBlock => s.type === "prd-design",
+          )?.platformHint ?? null
+        }
+        // Safe: the panel shows ONE current PRD at a time, so the unscoped
+        // da:generating signal can't mislabel a different PRD's run.
+        listenForCrossSurfaceGenerating
+        render={({ label, onClick, disabled }) => (
+          <button
+            type="button"
+            className="btn btn-primary btn-sm cpanel-next-btn"
+            data-testid="tickets-footer-prototype-cta"
+            disabled={disabled || prdId == null}
+            onClick={onClick}
+          >
+            {label}
+          </button>
+        )}
+      />
+    </div>
   )
 }
 
@@ -306,16 +417,20 @@ function EvidenceTab() {
     if (evidenceLoadedKey !== key) setContent({ evidence: null })
     let cancelled = false
     setLocalState({ kind: "loading" })
+    setContent({ evidencePartialHtml: null })
     evidenceLoadedKey = key
-    runEvidenceGeneration(detail.meta)
+    runEvidenceGeneration(detail.meta, undefined, (html) => {
+      if (!cancelled) setContent({ evidencePartialHtml: html })
+    })
       .then((result) => {
         if (cancelled) return
-        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); return }
-        setContent({ evidence: result.evidence })
+        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); setContent({ evidencePartialHtml: null }); return }
+        setContent({ evidence: result.evidence, evidencePartialHtml: null })
         setLocalState({ kind: "idle" })
       })
       .catch((e: unknown) => {
         if (cancelled) return
+        setContent({ evidencePartialHtml: null })
         setLocalState({ kind: "error", message: e instanceof Error ? e.message : String(e) })
       })
     return () => { cancelled = true }
@@ -360,13 +475,15 @@ function EvidenceTab() {
     const meta = detail?.meta
     if (!meta) return
     setLocalState({ kind: "loading" })
-    runEvidenceGeneration(meta, { force: true })
+    setContent({ evidencePartialHtml: null })
+    runEvidenceGeneration(meta, { force: true }, (html) => setContent({ evidencePartialHtml: html }))
       .then((result) => {
-        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); return }
-        setContent({ evidence: result.evidence })
+        if (!result.ok) { setLocalState({ kind: "error", message: result.message }); setContent({ evidencePartialHtml: null }); return }
+        setContent({ evidence: result.evidence, evidencePartialHtml: null })
         setLocalState({ kind: "idle" })
       })
       .catch((e: unknown) => {
+        setContent({ evidencePartialHtml: null })
         setLocalState({ kind: "error", message: e instanceof Error ? e.message : String(e) })
       })
   }, [detail?.meta, setContent])
@@ -428,6 +545,20 @@ function EvidenceTab() {
               </div>
             </>
           )
+        ) : isLoading && content.evidencePartialHtml ? (
+          // Live streaming preview: partial evidence HTML is already arriving —
+          // render it as it grows, with a slim pulsing indicator instead of the
+          // full-pane skeleton. The finished doc (poll result) replaces this.
+          <div style={{ minHeight: 280 }}>
+            <div data-testid="evidence-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
+              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
+            </div>
+            <StreamingHtmlPreview
+              html={stripLeadingFence(stripHtmlCodeFence(content.evidencePartialHtml))}
+              title="Evidence brief (generating)"
+              testId="evidence-streaming-preview"
+            />
+          </div>
         ) : isLoading ? (
           <EmptyPane
             title="Generating evidence…"
@@ -850,10 +981,19 @@ export function TicketsTab() {
         setPickState({ kind: "picking-jira", provider: "jira", projects: r.projects })
         return
       }
-      const r = await storiesApi.listClickUpLists()
+      // ClickUp lists and Asana projects share the compact list picker (both
+      // return {lists:[{id,name}]}); only the destination-fetch call differs.
+      const r = provider === "asana"
+        ? await storiesApi.listAsanaProjects()
+        : await storiesApi.listClickUpLists()
       if (r.lists.length === 0) {
         setPickState({ kind: "idle" })
-        showToast("No ClickUp lists found", "Create a list in ClickUp first.")
+        showToast(
+          provider === "asana" ? "No Asana projects found" : "No ClickUp lists found",
+          provider === "asana"
+            ? "Create a project in Asana first."
+            : "Create a list in ClickUp first.",
+        )
         return
       }
       setSelectedListId(r.lists[0].id)

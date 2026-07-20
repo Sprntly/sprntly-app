@@ -25,7 +25,9 @@ def _is_unique_violation(exc: Exception) -> bool:
     return "unique" in text or _UNIQUE_VIOLATION in text
 
 
-def insert_dataset(slug: str, display_name: str) -> None:
+def insert_dataset(
+    slug: str, display_name: str, *, workspace_id: str | None = None
+) -> None:
     """Register a new dataset. Idempotent — a duplicate slug is a no-op
     (preserves the existing row's display_name). The route handler surfaces a
     409 before reaching this; the no-op here keeps seed-on-startup safe for
@@ -33,12 +35,18 @@ def insert_dataset(slug: str, display_name: str) -> None:
     both pass the SELECT, so we also catch the unique-constraint violation from
     the INSERT (the `datasets.slug` unique index, migration
     2026*_datasets_slug_unique.sql) and treat it as "already exists".
+
+    `workspace_id` binds the dataset to a workspace (the multi-workspace
+    corpus key — see db/workspaces.register_workspace_dataset).
     """
     c = require_client()
     if c.table("datasets").select("slug").eq("slug", slug).limit(1).execute().data:
         return
+    payload: dict = {"slug": slug, "display_name": display_name}
+    if workspace_id:
+        payload["workspace_id"] = workspace_id
     try:
-        c.table("datasets").insert({"slug": slug, "display_name": display_name}).execute()
+        c.table("datasets").insert(payload).execute()
     except Exception as exc:  # noqa: BLE001 — narrow to unique-violation below
         if _is_unique_violation(exc):
             # Lost the race to a concurrent create of the same slug — the row
@@ -47,6 +55,14 @@ def insert_dataset(slug: str, display_name: str) -> None:
                         "treating as exists", slug)
             return
         raise
+
+
+def bind_dataset_workspace(slug: str, workspace_id: str) -> None:
+    """Point an existing dataset row at a workspace (backfill/self-heal path
+    for datasets that predate the workspace binding)."""
+    require_client().table("datasets").update({"workspace_id": workspace_id}).eq(
+        "slug", slug
+    ).execute()
 
 
 def dataset_exists(slug: str) -> bool:

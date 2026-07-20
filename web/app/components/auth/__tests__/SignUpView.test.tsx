@@ -39,11 +39,13 @@ function renderStep2(override: Partial<SignUpStep2ViewProps> = {}): string {
     firstName: "",
     lastName: "",
     role: "Product Manager",
+    priorities: "",
     submitting: false,
     error: null,
     onFirstNameChange: noop,
     onLastNameChange: noop,
     onRoleChange: noop,
+    onPrioritiesChange: noop,
     onSubmit: noop,
     onBack: noop,
   }
@@ -77,6 +79,19 @@ describe("SignUpStep1View (v4 page 02)", () => {
     expect(html).toContain("Privacy Policy")
     expect(html).toContain("Sign up with Google")
   })
+
+  it("has no account-type cards (the company/personal split is retired in v6)", () => {
+    const html = renderStep1()
+    expect(html).not.toContain("For a company")
+    expect(html).not.toContain("For personal use")
+    expect(html).not.toContain("auth-acct-card")
+  })
+
+  it("labels the email field plainly", () => {
+    const html = renderStep1()
+    expect(html).toContain("Email")
+    expect(html).not.toContain("Work email")
+  })
 })
 
 describe("SignUpStep2View (v4 page 03 — about you)", () => {
@@ -107,5 +122,12 @@ describe("SignUpStep2View (v4 page 03 — about you)", () => {
 
   it("renders the 'Who are you?' serif heading", () => {
     expect(renderStep2()).toContain("<em>you?</em>")
+  })
+
+  it("renders the optional priorities textarea (v6)", () => {
+    const html = renderStep2({ priorities: "grow MAU" })
+    expect(html).toContain('id="priorities"')
+    expect(html).toContain("Your priorities")
+    expect(html).toContain("grow MAU")
   })
 })

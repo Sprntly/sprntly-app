@@ -16,11 +16,14 @@ GET is permissive — it returns any row by id regardless of variant so
 old bookmarks keep resolving.
 """
 import asyncio
+import json
 
 from fastapi import Depends, APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.auth import CompanyContext, require_company
+from app.auth import WorkspaceContext, require_company, require_workspace, require_workspace_from_query  # noqa: F401 — re-exported for tests' dependency_overrides
+from app.graph import token_stream
 from app.db import (
     find_existing_evidence,
     find_latest_failed_evidence,
@@ -51,7 +54,7 @@ class GenerateIn(BaseModel):
 @router.post("/generate")
 async def generate(
     body: GenerateIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Kick off evidence generation in the background.
 
@@ -60,7 +63,7 @@ async def generate(
     the existing row.
     """
     # Tenant gate: the body's brief_id must belong to the caller's company.
-    brief = require_owned_brief(body.brief_id, company.company_id)
+    brief = require_owned_brief(body.brief_id, company.company_id, company.workspace_id)
     insights = brief.get("insights") or []
     if not (0 <= body.insight_index < len(insights)):
         raise HTTPException(
@@ -126,7 +129,7 @@ async def generate(
 def get_by_insight(
     brief_id: int,
     insight_index: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Return the latest evidence for a brief insight (ready or in-flight), or 404.
 
@@ -137,17 +140,50 @@ def get_by_insight(
     (404 on a foreign/missing brief). Two-segment-deeper path, so it can never be
     shadowed by the single-segment `GET /{evidence_id}` below.
     """
-    require_owned_brief(brief_id, company.company_id)
+    require_owned_brief(brief_id, company.company_id, company.workspace_id)
     row = find_existing_evidence(brief_id, insight_index, variant=_VARIANT)
     if not row:
         raise HTTPException(status_code=404, detail="No evidence for this insight")
     return row
 
 
+@router.get("/{evidence_id}/stream")
+async def stream_evidence_generation(
+    evidence_id: int,
+    company: WorkspaceContext = Depends(require_workspace_from_query),
+) -> StreamingResponse:
+    """SSE token stream of an evidence brief's generation, so the client renders
+    the doc as it's written instead of waiting for the whole document (mirrors
+    GET /v1/prd/{prd_id}/stream).
+
+    EventSource can't send headers, so the bearer rides as `?token=`
+    (require_workspace_from_query). Frames: `{"kind":"delta","text":…}` as the
+    HTML streams, then a terminal `{"kind":"done"|"error"}`. PROGRESSIVE DISPLAY
+    ONLY — the client keeps polling GET /{evidence_id}, which stays the
+    authoritative source for the finished, persisted brief. Single-worker
+    transport (see app.graph.token_stream); on multi-worker this yields nothing
+    and the poll still carries the result. Opening late (generation already
+    finished) simply receives no frames — the poll shows the completed brief.
+    """
+    # 404 on cross-tenant/missing (evidence → brief → dataset → company).
+    require_owned_evidence(evidence_id, company.company_id, company.workspace_id)
+    channel = f"evidence:{evidence_id}"
+
+    async def _gen():
+        async for event in token_stream.subscribe(channel):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.get("/{evidence_id}")
 def get(
     evidence_id: int,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Fetch an evidence row by id (only if it belongs to the caller's company).
 
@@ -157,4 +193,4 @@ def get(
     """
     # require_owned_evidence resolves evidence → brief → dataset → company and
     # 404s on mismatch (or a missing row), returning the evidence row.
-    return require_owned_evidence(evidence_id, company.company_id)
+    return require_owned_evidence(evidence_id, company.company_id, company.workspace_id)

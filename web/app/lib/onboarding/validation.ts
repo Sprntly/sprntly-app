@@ -45,3 +45,12 @@ export function requireText(
 ): FieldCheck {
   return { key, valid: value.trim().length > 0, message }
 }
+
+/**
+ * @deprecated Onboarding v6 (2026-07-17) retired the company/personal split —
+ * starred fields are mandatory for everyone, so steps use plain checks now.
+ * Kept only so stale imports fail loudly at review rather than at runtime.
+ */
+export function requiredFor(isCompany: boolean, check: FieldCheck): FieldCheck {
+  return isCompany ? check : { ...check, valid: true }
+}

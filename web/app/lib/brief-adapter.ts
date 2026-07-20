@@ -273,7 +273,7 @@ function buildDocFooter(insights: Insight[]): BriefDocFooter {
     values.length > 0 ? values.map((m) => `${m.value}`.trim()).join(" · ") : "—"
   const recover =
     insights.length > 1
-      ? `${insights.length} ranked findings · triage near-term vs. backlog`
+      ? `${insights.length} ranked findings · triage near-term vs. ideation`
       : "Single ranked focus this week"
   const src = [
     ...new Set(insights.flatMap((i) => (i.convergence || []).map((c) => c.source))),

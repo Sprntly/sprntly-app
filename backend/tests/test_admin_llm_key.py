@@ -75,13 +75,14 @@ def test_no_key_while_onboarding_allows_platform(isolated_settings, monkeypatch)
         assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
 
 
-def test_no_key_after_onboarding_fails(isolated_settings, monkeypatch):
-    from app.llm_keys import CompanyKeyRequiredError, resolve_llm_api_key
+def test_no_key_after_onboarding_falls_back_to_platform(isolated_settings, monkeypatch):
+    # A keyless workspace must NOT fail. This used to raise a 400 that surfaced
+    # in the product as "failed to generate answer"; the platform key covers it.
+    from app.llm_keys import resolve_llm_api_key
 
     _stub_config(monkeypatch, cipher=None, use_platform=False, onboarded=True)
     with _bind("co-1"):
-        with pytest.raises(CompanyKeyRequiredError):
-            resolve_llm_api_key("sk-ant-platform")
+        assert resolve_llm_api_key("sk-ant-platform") == "sk-ant-platform"
 
 
 def test_use_platform_flag_allows_platform_after_onboarding(isolated_settings, monkeypatch):
@@ -169,15 +170,13 @@ def test_factory_uses_platform_when_unbound(isolated_settings, monkeypatch):
     assert llm.get_client().api_key == "sk-ant-platform"
 
 
-def test_factory_raises_after_onboarding_without_key(isolated_settings, monkeypatch):
+def test_factory_uses_platform_after_onboarding_without_key(isolated_settings, monkeypatch):
     import app.llm as llm
-    from app.llm_keys import CompanyKeyRequiredError
 
     monkeypatch.setattr(llm.settings, "anthropic_api_key", "sk-ant-platform")
     _stub_config(monkeypatch, cipher=None, use_platform=False, onboarded=True)
     with _bind("co-1"):
-        with pytest.raises(CompanyKeyRequiredError):
-            llm.get_client()
+        assert llm.get_client().api_key == "sk-ant-platform"
 
 
 def test_embeddings_ignore_company_binding(isolated_settings, monkeypatch, fernet_key):

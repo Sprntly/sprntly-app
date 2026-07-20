@@ -44,12 +44,16 @@ export function prdIdFromPrototypeSearch(raw: string | null): number | null {
 
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
-  "ob-business-info": "/onboarding/business-info",
-  "ob-workspace": "/onboarding/workspace",
+  "ob-company": "/onboarding/company",
+  "ob-product": "/onboarding/product",
+  "ob-metrics": "/onboarding/metrics",
   "ob-api-key": "/onboarding/api-key",
   "ob-connectors": "/onboarding/connectors",
-  "ob-business-context": "/onboarding/business-context",
+  "ob-team": "/onboarding/team",
   "ob-strategy": "/onboarding/strategy",
+  "ob-decisions": "/onboarding/decisions",
+  "ob-invite": "/onboarding/invite",
+  "ob-review": "/onboarding/review",
   chat: "/",
   chats: "/history",
   artifacts: "/artifacts",
@@ -70,8 +74,9 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // `/prototype?prd=<id>`; bare `/prototype` with no `?prd=` shows an empty state
   // prompting the user to choose a PRD first.
   prototype: PROTOTYPE_PATH,
-  backlog: "/backlog",
+  ideation: "/ideation",
   templates: "/templates",
+  skills: "/skills",
 }
 
 const PATH_TO_SCREEN: Record<string, ScreenId> = {
@@ -90,8 +95,9 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   // stays highlighted. The PRD context rides as a `?prd=` query param, which
   // pathname-based screen derivation ignores — the path is always `/prototype`.
   [PROTOTYPE_PATH]: "prototype",
-  "/backlog": "backlog",
+  "/ideation": "ideation",
   "/templates": "templates",
+  "/skills": "skills",
 }
 
 // Inverse map for the numbered onboarding routes (slug → "ob-<slug>" ScreenId).

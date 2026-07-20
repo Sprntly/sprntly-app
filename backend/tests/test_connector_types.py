@@ -65,7 +65,7 @@ def test_ticket_sync_providers_is_typed_and_implemented():
     from app.stories.sync import SYNC_PROVIDERS, ticket_sync_providers
 
     eligible = ticket_sync_providers()
-    assert set(eligible) == {"clickup", "jira"}
+    assert set(eligible) == {"clickup", "jira", "asana"}
     assert set(eligible) <= set(SYNC_PROVIDERS)
     assert "linear" not in eligible and "slack" not in eligible
 

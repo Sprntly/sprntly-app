@@ -2,8 +2,10 @@
 the onboarding strategy step (design scene onbstrat): storage (save/list, per
 doc_type) + the POST/GET /v1/company/documents routes.
 
-Sibling of test_company_template.py. The 4 doc_types are the onbstrat upload
-cards: ceo_memo | team_priorities | research | company_strategy. These docs are
+Sibling of test_company_template.py. The doc_types are the onbstrat upload
+cards (ceo_memo | team_priorities | research | company_strategy) plus the v6
+steps-6/7 upload-or-type blocks (team_strategy | team_roadmap |
+decision_process | additional_context). These docs are
 STORED only for now (feeding them into agent context is a follow-up), so there is
 no render_for_prompt / synthesis coverage here."""
 from __future__ import annotations
@@ -33,10 +35,16 @@ def _seed_company(db, company_id="co-1"):
 
 def test_doc_types_are_the_onbstrat_cards():
     assert set(DOC_TYPES) == {
+        # base four (v5 onbstrat cards)
         "ceo_memo",
         "team_priorities",
         "research",
         "company_strategy",
+        # v6 steps-6/7 upload-or-type blocks
+        "team_strategy",
+        "team_roadmap",
+        "decision_process",
+        "additional_context",
     }
     assert is_valid_doc_type("ceo_memo")
     assert not is_valid_doc_type("not_a_type")
@@ -179,6 +187,28 @@ def test_post_list_roundtrip_per_doc_type(isolated_settings):
     assert only_memos.status_code == 200
     memos = only_memos.json()["documents"]
     assert [m["filename"] for m in memos] == ["memo.md"]
+
+
+def test_post_accepts_v6_upload_or_type_doc_types(isolated_settings):
+    """The v6 steps-6/7 upload-or-type blocks (+ step 1's strategy upload)
+    upload under the four NEW doc_types — the route + storage constraint must
+    accept every one of them end-to-end."""
+    client, route = _route_client(isolated_settings, "co-v6")
+    try:
+        for doc_type in (
+            "team_strategy", "team_roadmap", "decision_process", "additional_context",
+        ):
+            r = client.post(
+                "/v1/company/documents",
+                files={"file": (f"{doc_type}.md", io.BytesIO(b"content"), "text/markdown")},
+                data={"doc_type": doc_type},
+            )
+            assert r.status_code == 200, f"{doc_type}: {r.text}"
+            assert r.json()["doc_type"] == doc_type
+        listed = client.get("/v1/company/documents")
+    finally:
+        _clear(route)
+    assert len(listed.json()["documents"]) == 4
 
 
 def test_post_rejects_invalid_doc_type(isolated_settings):

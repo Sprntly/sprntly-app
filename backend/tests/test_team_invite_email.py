@@ -185,16 +185,37 @@ def test_resend_email_sent_false_when_admin_fails(isolated_settings, monkeypatch
 
 
 # ──────────────── existing-user invitee (already registered) ────────────────
+# 2026-07-17 invite rules: an existing account must NEVER be logged in by an
+# email click. Instead of the old magic-link fallback, we send a plain
+# notification (Resend) linking to /sign-in — with a live session the sign-in
+# page forwards them straight in; otherwise they enter their password.
 
 
-def test_invite_existing_user_sends_magic_link(isolated_settings, monkeypatch):
+def _install_fake_resend(monkeypatch, *, api_key="rk-test"):
+    """Patch team_email's Resend POST + configure an API key. Returns the
+    httpx.post mock for payload assertions."""
+    import app.config as config_mod
+    from app import team_email
+
+    monkeypatch.setattr(
+        config_mod.settings, "resend_api_key", api_key, raising=False
+    )
+    post_mock = MagicMock(return_value=SimpleNamespace(raise_for_status=lambda: None))
+    monkeypatch.setattr(team_email.httpx, "post", post_mock)
+    return post_mock
+
+
+def test_invite_existing_user_sends_signin_notification(
+    isolated_settings, monkeypatch
+):
     """If the invitee already has a Supabase account, invite_user_by_email
-    422s ("already registered"). We must fall back to a magic-link sign-in
-    email — NOT report a send failure. Response: email_sent=true (an email
-    DID go out) + existing_user=true."""
+    422s ("already registered"). We must send a plain sign-in notification —
+    NOT a magic link, and NOT report a send failure. Response:
+    email_sent=true (an email DID go out) + existing_user=true."""
     ctx = company_client(monkeypatch)
     admin_mock = _install_fake_admin(monkeypatch)
     admin_mock.invite_user_by_email.side_effect = Exception(_ALREADY_REGISTERED)
+    post_mock = _install_fake_resend(monkeypatch)
 
     r = ctx.client.post(
         "/v1/team/invites", json={"email": "existing@co.com", "role": "member"}
@@ -204,26 +225,29 @@ def test_invite_existing_user_sends_magic_link(isolated_settings, monkeypatch):
     assert body.get("email_sent") is True
     assert body.get("existing_user") is True
 
-    # The magic-link sign-in email was sent to the right address, redirecting
-    # back to our auth callback so the post-login auto-accept hook can run.
-    otp = _otp_mock()
-    otp.assert_called_once()
-    (payload,), _ = otp.call_args
-    assert payload["email"] == "existing@co.com"
-    opts = payload["options"]
-    assert opts["email_redirect_to"].startswith("http")
-    assert opts["should_create_user"] is False
+    # No magic-link/OTP email — an email click must not log an existing
+    # account in.
+    _otp_mock().assert_not_called()
+
+    # The notification went to the right address and links to /sign-in.
+    post_mock.assert_called_once()
+    _, kwargs = post_mock.call_args
+    payload = kwargs["json"]
+    assert payload["to"] == ["existing@co.com"]
+    assert "/sign-in" in payload["text"]
+    assert "/sign-in" in payload["html"]
 
 
-def test_existing_user_magic_link_failure_is_email_sent_false(
+def test_existing_user_notification_failure_is_email_sent_false(
     isolated_settings, monkeypatch
 ):
-    """If BOTH the invite and the magic-link fallback fail, the invite row
+    """If BOTH the invite and the notification fallback fail, the invite row
     still persists and email_sent=false (genuine delivery failure)."""
     ctx = company_client(monkeypatch)
     admin_mock = _install_fake_admin(monkeypatch)
     admin_mock.invite_user_by_email.side_effect = Exception(_ALREADY_REGISTERED)
-    _otp_mock().side_effect = Exception("supabase email rate limit")
+    post_mock = _install_fake_resend(monkeypatch)
+    post_mock.side_effect = Exception("resend rate limit")
 
     r = ctx.client.post(
         "/v1/team/invites", json={"email": "existing2@co.com", "role": "member"}
@@ -234,12 +258,34 @@ def test_existing_user_magic_link_failure_is_email_sent_false(
     assert body.get("existing_user") is not True
 
 
+def test_existing_user_no_resend_key_is_email_sent_false(
+    isolated_settings, monkeypatch
+):
+    """Without RESEND_API_KEY nothing can be sent to an existing user —
+    email_sent=false so the inviter shares the link manually. (Never fall
+    back to a magic link.)"""
+    ctx = company_client(monkeypatch)
+    admin_mock = _install_fake_admin(monkeypatch)
+    admin_mock.invite_user_by_email.side_effect = Exception(_ALREADY_REGISTERED)
+    import app.config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "", raising=False)
+
+    r = ctx.client.post(
+        "/v1/team/invites", json={"email": "existing3@co.com", "role": "member"}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json().get("email_sent") is False
+    _otp_mock().assert_not_called()
+
+
 def test_existing_user_unit_returns_sent_existing(isolated_settings, monkeypatch):
     """Unit-level: send_invite_email returns SENT_EXISTING for an already-
-    registered email when the magic-link send succeeds."""
+    registered email when the notification send succeeds."""
     company_client(monkeypatch)  # wires the fake supabase client
     admin_mock = _install_fake_admin(monkeypatch)
     admin_mock.invite_user_by_email.side_effect = Exception(_ALREADY_REGISTERED)
+    _install_fake_resend(monkeypatch)
 
     from app import team_email
 

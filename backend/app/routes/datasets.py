@@ -22,7 +22,7 @@ from fastapi import Depends, APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app import datasets
-from app.auth import CompanyContext, require_company
+from app.auth import WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.db.companies import slug_for_company_id
 from app.deps.ownership import require_owned_dataset
 from app.ingest import UnsupportedFileType, md_filename
@@ -40,7 +40,7 @@ _inflight_tasks: set[asyncio.Task] = set()
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024
 
 
-def _ensure_owned_dataset(slug: str, company_id: str) -> None:
+def _ensure_owned_dataset(slug: str, company_id: str, workspace_id: str) -> None:
     """Tenant gate + lazy registration. `require_owned_dataset` first proves the
     slug maps to the CALLER'S OWN company (404 otherwise — no cross-tenant
     disclosure). Onboarding creates the company but not always its `datasets`
@@ -48,7 +48,7 @@ def _ensure_owned_dataset(slug: str, company_id: str) -> None:
     (idempotent insert). This never creates a dataset for a slug the caller
     doesn't own — the ownership check runs first and 404s on any mismatch.
     """
-    require_owned_dataset(slug, company_id)
+    require_owned_dataset(slug, company_id, workspace_id)
     from app import db
     if not db.dataset_exists(slug):
         db.insert_dataset(slug, slug)
@@ -60,7 +60,7 @@ class CreateDatasetIn(BaseModel):
 
 
 @router.get("")
-def list_all(company: CompanyContext = Depends(require_company)):
+def list_all(company: WorkspaceContext = Depends(require_workspace)):
     """List ONLY the caller's company's dataset(s).
 
     A dataset slug IS a company slug, so the caller's company maps to exactly
@@ -77,7 +77,7 @@ def list_all(company: CompanyContext = Depends(require_company)):
 @router.post("")
 def create(
     body: CreateDatasetIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     # Format first (422), then the tenant gate: a dataset slug IS a company
     # slug, and onboarding (not this route) is what creates companies. Only
@@ -107,7 +107,7 @@ def create(
 async def upload_files(
     slug: str,
     files: Annotated[list[UploadFile], File(description="Source files to ingest")],
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Accept one or more files; convert each to markdown; persist both.
 
@@ -116,7 +116,7 @@ async def upload_files(
     """
     # Tenant gate (404 if not the caller's company) + lazily register the
     # caller's own dataset row if onboarding hasn't created it yet.
-    _ensure_owned_dataset(slug, company.company_id)
+    _ensure_owned_dataset(slug, company.company_id, company.workspace_id)
     if not datasets.dataset_path(slug).exists():
         # Hit the DB too — folder might exist from a stale dir without a row.
         try:
@@ -193,13 +193,13 @@ async def upload_files(
 @router.get("/{slug}/files")
 def list_files(
     slug: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """List source files (raw originals) for a dataset, newest first."""
     # Tenant gate (404 if not the caller's company) + lazily register the
     # caller's own dataset row if onboarding hasn't created it yet, so the
     # Sources page shows an empty list rather than "dataset does not exist".
-    _ensure_owned_dataset(slug, company.company_id)
+    _ensure_owned_dataset(slug, company.company_id, company.workspace_id)
 
     raw_dir = datasets.raw_path(slug)
     base_dir = datasets.dataset_path(slug)
@@ -245,10 +245,10 @@ def list_files(
 def delete_file(
     slug: str,
     filename: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Remove one source file: the raw original plus any matching .md siblings."""
-    require_owned_dataset(slug, company.company_id)
+    require_owned_dataset(slug, company.company_id, company.workspace_id)
     # Defense in depth — reject anything that isn't a plain basename. FastAPI
     # already prevents path segments in {filename}, but a bare ".." or a
     # dotfile would slip through path validation.
@@ -288,7 +288,7 @@ def delete_file(
 @router.post("/{slug}/generate")
 async def generate(
     slug: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Fire-and-forget brief generation. Frontend polls /v1/brief/status?dataset=slug.
 
@@ -296,7 +296,7 @@ async def generate(
     SAME path as /regenerate + the scheduler, so a newly-created dataset
     produces an identical brief.
     """
-    require_owned_dataset(slug, company.company_id)
+    require_owned_dataset(slug, company.company_id, company.workspace_id)
     from app import db
     if not db.dataset_exists(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")
@@ -312,9 +312,9 @@ async def generate(
 @router.delete("/{slug}")
 def delete(
     slug: str,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
-    require_owned_dataset(slug, company.company_id)
+    require_owned_dataset(slug, company.company_id, company.workspace_id)
     from app import db
     if not db.delete_dataset(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")

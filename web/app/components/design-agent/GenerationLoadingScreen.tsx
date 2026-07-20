@@ -411,12 +411,12 @@ export function GenerationLoadingScreen({
                     this tab or carry on elsewhere.
                   </div>
                   <a
-                    href={SCREEN_PATH.backlog}
+                    href={SCREEN_PATH.ideation}
                     ref={backToBriefsRef}
                     className="btn proto-gen-notify-back-link"
                     onClick={() => onNotifyWhenReady?.()}
                   >
-                    Back to Briefs
+                    Back to Ideation
                     <IconArrowRight size={14} />
                   </a>
                 </div>

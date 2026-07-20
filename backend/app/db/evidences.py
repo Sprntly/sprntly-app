@@ -13,7 +13,12 @@ def start_evidence(
     title: str,
     template_version: int | None = None,
     variant: str = "v1",
+    theme_id: str | None = None,
 ) -> int:
+    """`theme_id` marks a non-insight evidence doc (the chat-task PRD path:
+    'chat:<hash>' — mirrors prds.theme_id) so it dedupes/loads by
+    (brief_id, theme_id) instead of colliding with the insight-indexed docs.
+    Brief-insight docs keep theme_id NULL."""
     c = require_client()
     resp = c.table("evidences").insert({
         "brief_id": brief_id,
@@ -23,8 +28,28 @@ def start_evidence(
         "status": "generating",
         "template_version": template_version,
         "variant": variant,
+        "theme_id": theme_id,
     }).execute()
     return resp.data[0]["id"]
+
+
+@retry_on_disconnect
+def find_existing_evidence_for_theme(brief_id: int, theme_id: str) -> dict | None:
+    """Newest ready/generating evidence keyed by (brief_id, theme_id) — the
+    chat-task path's find-or-create/dedup lookup (any variant: the reader
+    surfaces the best available doc, mirroring find_latest_evidence)."""
+    c = require_client()
+    resp = (
+        c.table("evidences")
+        .select("*")
+        .eq("brief_id", brief_id)
+        .eq("theme_id", theme_id)
+        .in_("status", ["ready", "generating"])
+        .order("id", desc=True)
+        .limit(1)
+        .execute()
+    )
+    return resp.data[0] if resp.data else None
 
 
 def invalidate_stale_evidences(current_version: int, variant: str = "v1") -> int:

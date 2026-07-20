@@ -17,7 +17,11 @@ export type SettingsSectionId =
   | "profile"
   | "comms-brief"
   | "product-category"
+  | "company-profile"
+  | "process"
+  | "metrics"
   | "business-context"
+  | "workspaces"
   | "team"
   | "connectors"
   | "mcp"
@@ -50,12 +54,21 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     items: [
       { id: "profile", label: "Profile", available: true },
       { id: "comms-brief", label: "Comms & Brief", available: true },
+      // Multi-workspace (2026-07): manage the real workspaces rows.
+      { id: "workspaces", label: "Workspaces", available: true },
     ],
   },
   {
     groupLabel: "Workspace",
     items: [
       { id: "product-category", label: "Product & Category", available: true },
+      // Registration-spec (2026-07) panes: the blue/settings-only company
+      // fields (mission, ICP, tone & voice…) and process choices.
+      { id: "company-profile", label: "Company Profile", available: true },
+      { id: "process", label: "Process & Planning", available: true },
+      // Onboarding v6: the metrics + definitions picked in the wizard's
+      // metrics step / define-metrics sub-flow, editable post-onboarding.
+      { id: "metrics", label: "Metrics", available: true },
       { id: "business-context", label: "Business Context", available: true },
       { id: "team", label: "Team & roles", available: true },
     ],

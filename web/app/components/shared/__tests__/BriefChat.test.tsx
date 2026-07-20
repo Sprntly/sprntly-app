@@ -560,60 +560,10 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
   })
 })
 
-// ── Composer "generate a prototype" → carries the open PRD's id in the URL ─────
-// Regression for the gap where the composer prototype command (and the post-build
-// reveal) navigated to a BARE /prototype, dropping the ?prd= context, so the route
-// landed on its "No PRD selected" empty state and the prototype looked lost. With
-// an open PRD in ContentContext, the command must push /prototype?prd=<id>.
-describe("BriefChat composer — 'generate a prototype' navigation", () => {
-  // Seeds a brief AND an open PRD (prd_id) into ContentContext so prototypeFlow
-  // takes its `content.prd` branch (the composer path under test).
-  function InjectBriefWithPrd({ prdId }: { prdId: number }) {
-    const { setContent } = useContent()
-    React.useEffect(() => {
-      setContent({
-        briefV2: BRIEF,
-        userName: "Apurva Jain",
-        // Minimal open-PRD state — prototypeFlow only reads content.prd.prd_id.
-        prd: { prd_id: prdId } as never,
-        prdMeta: { briefId: 1, insightIndex: 0 },
-        briefDetails: {
-          "something_wrong-0": { meta: { briefId: 1, insightIndex: 0 } },
-          "something_wrong-1": { meta: { briefId: 1, insightIndex: 1 } },
-        } as never,
-      })
-    }, [setContent, prdId])
-    return null
-  }
-
-  it("pushes /prototype?prd=<id> (NOT a bare /prototype) when a PRD is open", async () => {
-    await act(async () => {
-      render(
-        React.createElement(
-          NavigationProvider,
-          null,
-          React.createElement(
-            ContentProvider,
-            null,
-            React.createElement(InjectBriefWithPrd, { prdId: 515 }),
-            React.createElement(BriefChat),
-          ),
-        ),
-      )
-    })
-
-    const composer = screen.getByPlaceholderText(/Ask anything/i)
-    await act(async () => {
-      fireEvent.change(composer, { target: { value: "generate a prototype" } })
-      fireEvent.keyDown(composer, { key: "Enter" })
-    })
-
-    // The navigation carries the PRD context — and is NOT the bare path.
-    expect(pushSpy).toHaveBeenCalledWith(prototypePath(515))
-    expect(pushSpy).toHaveBeenCalledWith("/prototype?prd=515")
-    expect(pushSpy).not.toHaveBeenCalledWith("/prototype")
-  })
-})
+// The brief's own composer was removed (chatting now happens in each PRD's own
+// chat tab), so the former "BriefChat composer — 'generate a prototype'
+// navigation" test was dropped — that entry point no longer exists on the brief.
+// prototypeFlow's ?prd= URL-carrying behavior is still covered from the PRD flow.
 
 // ── Brief top bar removed ─────────────────────────────────────────────────────
 // The brief top bar (the .bh <header> with the "Week of … · <Company>" label and
@@ -637,31 +587,31 @@ describe("BriefChat header — top bar removed", () => {
   })
 })
 
-// ── Fixed agent name "Spiky" ──────────────────────────────────────────────────
-// The PM agent is no longer user-named: there is ONE fixed display name, "Spiky",
-// sourced from the AGENT_NAME constant. The brief/chat header must render that
-// name (next to the sparkle mark) — never the old hardcoded "PM Agent". The
-// "PM COWORKER" pill is a *role* badge and is intentionally unaffected.
-describe("BriefChat header — fixed agent name 'Spiky'", () => {
-  it("renders the agent display name as 'Spiky' (not 'PM Agent')", async () => {
+// ── Fixed agent name "Sprntly" ────────────────────────────────────────────────
+// The PM agent is no longer user-named: there is ONE fixed display name,
+// "Sprntly", sourced from the AGENT_NAME constant. The brief/chat header must
+// render that name (next to the sparkle mark) — never the old hardcoded
+// "PM Agent". The "Product Coworker" pill is a *role* badge.
+describe("BriefChat header — fixed agent name 'Sprntly'", () => {
+  it("renders the agent display name as 'Sprntly' (not 'PM Agent')", async () => {
     await act(async () => {
       renderBrief()
     })
     // The brief's agent head carries the agent's NAME + role badge.
     const head = document.querySelector(".bc-agent-head") as HTMLElement | null
     expect(head).not.toBeNull()
-    // The agent's NAME (the .bc-agent-name span) reads "Spiky".
+    // The agent's NAME (the .bc-agent-name span) reads "Sprntly".
     const name = head!.querySelector(".bc-agent-name") as HTMLElement | null
     expect(name).not.toBeNull()
     expect(name!.textContent).toBe(AGENT_NAME)
-    expect(name!.textContent).toBe("Spiky")
+    expect(name!.textContent).toBe("Sprntly")
     // The old hardcoded name is gone everywhere.
     expect(screen.queryByText("PM Agent")).toBeNull()
-    // The role pill ("PM COWORKER") is unaffected.
-    expect(within(head!).getByText("PM COWORKER")).not.toBeNull()
+    // The role pill ("Product Coworker") is present.
+    expect(within(head!).getByText("Product Coworker")).not.toBeNull()
   })
 
-  it("greeting still renders below the Spiky header", async () => {
+  it("greeting still renders below the Sprntly header", async () => {
     await act(async () => {
       renderBrief()
     })

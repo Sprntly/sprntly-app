@@ -3,13 +3,13 @@
  *
  * Spec: Sprntly_Onboarding_Flow_Spec_v1 § Settings → Team [Only for Admins].
  * Visual: sprntly-pages/15-settings.html § Team & roles (lines 2245-2262)
- *   - Two `set-block` cards:
- *       (1) combined Members + pending invites list with header
- *           "N members · M pending invites" + inline "+ Invite teammate"
- *           trigger.
- *       (2) "Roles" reference card explaining what each role can do.
- *   - Per-row layout: avatar + name/email + role select + status chip
- *     + 3-dot actions menu (replaces the old inline Remove button).
+ *   - One `set-block` card: combined Members + pending invites list with
+ *     header "N members · M pending invites" + inline "+ Invite teammate"
+ *     trigger. (The old standalone "Roles" reference card was folded into
+ *     the role dropdowns — each option shows its definition.)
+ *   - Per-row layout: avatar + name/email + role select + workspaces
+ *     multi-select (multi-workspace companies) + status chip + 3-dot
+ *     actions menu (replaces the old inline Remove button).
  *
  * Pattern unchanged: pure View component (no hooks, no IO,
  * renderToStaticMarkup-testable) + a default-exported hooks wrapper
@@ -22,35 +22,52 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useAuth } from "../../../../lib/auth"
-import { api } from "../../../../lib/api"
+import { useWorkspace as useWorkspaceCtx } from "../../../../context/WorkspaceContext"
+import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
+import {
+  teamApi,
+  type InviteRole,
+  type TeamInvite,
+  type TeamMember,
+  type TeamRole,
+} from "../../../../lib/teamApi"
 
 // ─────────────────────────── Types ───────────────────────────
+// The team API surface + row types moved to web/app/lib/teamApi.ts so
+// onboarding and postLoginPath don't import a settings component; re-exported
+// here for existing callers.
 
-export type TeamRole = "owner" | "admin" | "member" | "viewer"
-/** Roles a non-owner invite/edit can target. `owner` is reserved. */
-export type InviteRole = "admin" | "member" | "viewer"
-
-export type TeamMember = {
-  user_id: string
-  role: TeamRole
-  display_name: string | null
-  email: string | null
-  avatar_url: string | null
-}
-
-export type TeamInvite = {
-  id: string
-  email: string
-  role: InviteRole
-  created_at: string | null
-  /** Returned on POST /invites and POST /invites/{id}/resend. */
-  email_sent?: boolean
-}
+export { teamApi }
+export type { InviteRole, TeamInvite, TeamMember, TeamRole }
 
 /** Unified row type so members + pending invites render in one list. */
 type RosterRow =
   | { kind: "member"; member: TeamMember }
   | { kind: "invite"; invite: TeamInvite }
+
+/** Role definitions shown inside the role dropdowns (replaces the old
+ *  standalone "Roles" reference card). */
+const ROLE_DESCRIPTIONS: Record<TeamRole, string> = {
+  owner: "Full access · billing · delete workspace · transfer ownership",
+  admin: "Manage team, connectors, settings · cannot delete workspace",
+  member:
+    "Edit Briefs, PRDs, tickets, prototypes · cannot manage team or billing",
+  viewer: "Read-only access · can comment but not edit",
+}
+
+const MEMBER_ROLE_OPTIONS: { value: TeamRole; label: string; description: string }[] = [
+  { value: "owner", label: "Owner", description: ROLE_DESCRIPTIONS.owner },
+  { value: "admin", label: "Admin", description: ROLE_DESCRIPTIONS.admin },
+  { value: "member", label: "Member", description: ROLE_DESCRIPTIONS.member },
+  { value: "viewer", label: "Viewer", description: ROLE_DESCRIPTIONS.viewer },
+]
+
+/** `owner` is reserved — invites can only target admin/member/viewer. */
+const INVITE_ROLE_OPTIONS: { value: InviteRole; label: string; description: string }[] = [
+  { value: "admin", label: "Admin", description: ROLE_DESCRIPTIONS.admin },
+  { value: "member", label: "Member", description: ROLE_DESCRIPTIONS.member },
+  { value: "viewer", label: "Viewer", description: ROLE_DESCRIPTIONS.viewer },
+]
 
 // ─────────────────────────── Pure View ───────────────────────────
 
@@ -73,6 +90,11 @@ export type TeamSettingsViewProps = {
   onChangeInviteEmail: (value: string) => void
   onChangeInviteRole: (value: InviteRole) => void
   onSubmitInvite: () => Promise<void>
+  // Multi-workspace (2026-07): which workspaces the invitee joins on accept.
+  // Empty availableWorkspaces (single-workspace company) hides the picker.
+  availableWorkspaces?: { id: string; name: string }[]
+  inviteWorkspaceIds?: string[]
+  onToggleInviteWorkspace?: (id: string) => void
 
   // Pending invite actions.
   onRevokeInvite: (inviteId: string) => void
@@ -81,6 +103,8 @@ export type TeamSettingsViewProps = {
   // Member-row actions.
   onChangeMemberRole: (userId: string, role: TeamRole) => void
   onRemoveMember: (userId: string) => void
+  /** Toggle one workspace grant on an existing member (multi-select row). */
+  onToggleMemberWorkspace?: (userId: string, workspaceId: string) => void
 }
 
 export function TeamSettingsView(props: TeamSettingsViewProps) {
@@ -101,10 +125,14 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
     onChangeInviteEmail,
     onChangeInviteRole,
     onSubmitInvite,
+    availableWorkspaces = [],
+    inviteWorkspaceIds = [],
+    onToggleInviteWorkspace,
     onRevokeInvite,
     onResendInvite,
     onChangeMemberRole,
     onRemoveMember,
+    onToggleMemberWorkspace,
   } = props
 
   const canManage = currentUserRole === "owner" || currentUserRole === "admin"
@@ -164,14 +192,25 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
             <ThemedSelect<InviteRole>
               className="set-team-invite-select"
               value={inviteRole}
-              options={[
-                { value: "member", label: "Member" },
-                { value: "admin", label: "Admin" },
-                { value: "viewer", label: "Viewer" },
-              ]}
+              options={INVITE_ROLE_OPTIONS}
               disabled={inviteSubmitting}
               onChange={onChangeInviteRole}
             />
+            {availableWorkspaces.length > 1 && onToggleInviteWorkspace && (
+              <ThemedMultiSelect
+                className="set-team-invite-ws"
+                values={inviteWorkspaceIds}
+                options={availableWorkspaces.map((w) => ({
+                  value: w.id,
+                  label: w.name,
+                }))}
+                placeholder="Select workspaces"
+                allLabel="All workspaces"
+                disabled={inviteSubmitting}
+                ariaLabel="Workspaces for this invite"
+                onToggle={onToggleInviteWorkspace}
+              />
+            )}
             <button
               type="submit"
               className="set-team-invite-submit"
@@ -224,18 +263,36 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
                     className="set-team-row-select"
                     value={m.role}
                     disabled={isSoleOwner}
-                    options={[
-                      { value: "owner", label: "Owner" },
-                      { value: "admin", label: "Admin" },
-                      { value: "member", label: "Member" },
-                      { value: "viewer", label: "Viewer" },
-                    ]}
+                    options={MEMBER_ROLE_OPTIONS}
                     ariaLabel={`Role for ${display}`}
                     onChange={(role) => onChangeMemberRole(m.user_id, role)}
                   />
                 ) : (
                   <span className="st neutral">{m.role}</span>
                 )}
+                {canManage &&
+                  availableWorkspaces.length > 1 &&
+                  onToggleMemberWorkspace &&
+                  (m.role === "owner" || m.role === "admin" ? (
+                    // Org owners/admins access every workspace implicitly —
+                    // a picker here would lie.
+                    <span className="set-team-row-ws-all">All workspaces</span>
+                  ) : (
+                    <ThemedMultiSelect
+                      className="set-team-row-ws"
+                      values={m.workspace_ids ?? []}
+                      options={availableWorkspaces.map((w) => ({
+                        value: w.id,
+                        label: w.name,
+                      }))}
+                      placeholder="No workspaces"
+                      allLabel="All workspaces"
+                      ariaLabel={`Workspaces for ${display}`}
+                      onToggle={(wid) =>
+                        onToggleMemberWorkspace(m.user_id, wid)
+                      }
+                    />
+                  ))}
                 <span className="st active">
                   <span className="st-dot" /> Active
                 </span>
@@ -309,45 +366,8 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
         )}
       </div>
 
-      {/* ── Block 2: Roles reference ───────────────────────────────── */}
-      <div className="set-block">
-        <div className="set-block-h">
-          <div className="set-block-t">Roles</div>
-        </div>
-        <div className="set-row">
-          <span className="k">
-            <strong>Owner</strong>
-          </span>
-          <span className="v">
-            Full access · billing · delete workspace · transfer ownership
-          </span>
-        </div>
-        <div className="set-row">
-          <span className="k">
-            <strong>Admin</strong>
-          </span>
-          <span className="v">
-            Manage team, connectors, settings · cannot delete workspace
-          </span>
-        </div>
-        <div className="set-row">
-          <span className="k">
-            <strong>Member</strong>
-          </span>
-          <span className="v">
-            Edit Briefs, PRDs, tickets, prototypes · cannot manage team or
-            billing
-          </span>
-        </div>
-        <div className="set-row">
-          <span className="k">
-            <strong>Viewer</strong>
-          </span>
-          <span className="v">
-            Read-only access · can comment but not edit
-          </span>
-        </div>
-      </div>
+      {/* The old "Roles" reference card was folded into the role dropdowns
+          (each option now carries its definition). */}
     </div>
   )
 }
@@ -382,8 +402,35 @@ function Avatar({
   )
 }
 
+/** Close-on-outside-click shared by both themed dropdowns. */
+function useCloseOnOutsideClick(
+  open: boolean,
+  ref: React.RefObject<HTMLDivElement | null>,
+  close: () => void,
+) {
+  useEffect(() => {
+    if (!open) return
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) close()
+    }
+    document.addEventListener("mousedown", handler)
+    return () => document.removeEventListener("mousedown", handler)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+}
+
+function Chevron() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  )
+}
+
 /** Custom themed dropdown — replaces native <select> so the open list
- *  picks up the app theme instead of the OS-native cyan highlight. */
+ *  picks up the app theme instead of the OS-native cyan highlight.
+ *  Options may carry a `description` rendered under the label (used for
+ *  role definitions — the old "Roles" reference card lives here now). */
 function ThemedSelect<T extends string>({
   value,
   options,
@@ -393,7 +440,7 @@ function ThemedSelect<T extends string>({
   onChange,
 }: {
   value: T
-  options: { value: T; label: string }[]
+  options: { value: T; label: string; description?: string }[]
   disabled?: boolean
   className?: string
   ariaLabel?: string
@@ -401,18 +448,10 @@ function ThemedSelect<T extends string>({
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
-
-  // Close on outside click
-  useEffect(() => {
-    if (!open) return
-    function handler(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener("mousedown", handler)
-    return () => document.removeEventListener("mousedown", handler)
-  }, [open])
+  useCloseOnOutsideClick(open, ref, () => setOpen(false))
 
   const selected = options.find((o) => o.value === value)
+  const hasDescriptions = options.some((o) => o.description)
 
   return (
     <div
@@ -427,12 +466,10 @@ function ThemedSelect<T extends string>({
         disabled={disabled}
       >
         <span>{selected?.label ?? value}</span>
-        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
-          <polyline points="6 9 12 15 18 9" />
-        </svg>
+        <Chevron />
       </button>
       {open && (
-        <div className="themed-select-menu">
+        <div className={`themed-select-menu${hasDescriptions ? " wide" : ""}`}>
           {options.map((opt) => (
             <button
               key={opt.value}
@@ -440,9 +477,97 @@ function ThemedSelect<T extends string>({
               className={`themed-select-option${opt.value === value ? " active" : ""}`}
               onClick={() => { onChange(opt.value); setOpen(false) }}
             >
-              {opt.label}
+              <span className="themed-select-option-label">{opt.label}</span>
+              {opt.description && (
+                <span className="themed-select-option-desc">
+                  {opt.description}
+                </span>
+              )}
             </button>
           ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Multi-select variant — checkbox-style options that keep the menu open on
+ *  toggle. Trigger summarises the selection ("Design", "2 workspaces",
+ *  "All workspaces"). Used for the invite + member-row workspace pickers. */
+function ThemedMultiSelect({
+  values,
+  options,
+  disabled,
+  className,
+  ariaLabel,
+  placeholder,
+  allLabel,
+  onToggle,
+}: {
+  values: string[]
+  options: { value: string; label: string }[]
+  disabled?: boolean
+  className?: string
+  ariaLabel?: string
+  placeholder: string
+  allLabel: string
+  onToggle: (value: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useCloseOnOutsideClick(open, ref, () => setOpen(false))
+
+  const picked = options.filter((o) => values.includes(o.value))
+  const summary =
+    picked.length === 0
+      ? placeholder
+      : picked.length === options.length && options.length > 1
+        ? allLabel
+        : picked.length === 1
+          ? picked[0].label
+          : `${picked.length} workspaces`
+
+  return (
+    <div
+      ref={ref}
+      className={`themed-select themed-multi-select${disabled ? " disabled" : ""}${className ? ` ${className}` : ""}`}
+      aria-label={ariaLabel}
+    >
+      <button
+        type="button"
+        className="themed-select-trigger"
+        onClick={() => !disabled && setOpen((o) => !o)}
+        disabled={disabled}
+      >
+        <span className={picked.length === 0 ? "placeholder" : undefined}>
+          {summary}
+        </span>
+        <Chevron />
+      </button>
+      {open && (
+        <div className="themed-select-menu">
+          {options.map((opt) => {
+            const checked = values.includes(opt.value)
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                role="menuitemcheckbox"
+                aria-checked={checked}
+                className={`themed-select-option check${checked ? " active" : ""}`}
+                onClick={() => onToggle(opt.value)}
+              >
+                <span className={`themed-select-check${checked ? " on" : ""}`} aria-hidden>
+                  {checked && (
+                    <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5">
+                      <polyline points="20 6 9 17 4 12" />
+                    </svg>
+                  )}
+                </span>
+                <span className="themed-select-option-label">{opt.label}</span>
+              </button>
+            )
+          })}
         </div>
       )}
     </div>
@@ -553,22 +678,27 @@ function formatSent(iso: string | null): string {
 
 // ─────────────────────────── Hooks wrapper ───────────────────────────
 
-type TeamMembersResp = {
-  members: {
-    user_id: string
-    role: TeamRole
-    display_name: string | null
-    email: string | null
-    avatar_url: string | null
-  }[]
-}
-type TeamInvitesResp = { invites: TeamInvite[] }
+// (TeamMembersResp / TeamInvitesResp live in lib/teamApi.ts with the api calls.)
+
+// Module-scoped cache of the last-loaded team (members + invites). Survives the
+// pane remounting on a settings tab-switch, so a revisit shows the team
+// INSTANTLY and revalidates in the background — no spinner every time. `null` =
+// never loaded (the only cold case that shows the spinner). Cleared on sign-out.
+let _teamCache: { members: TeamMember[]; invites: TeamInvite[] } | null = null
+
+// Clear on sign-out so a different user never sees the previous account's
+// members/invites (see lib/settingsCache).
+registerSettingsCacheReset(() => {
+  _teamCache = null
+})
 
 export function TeamSettings() {
   const auth = useAuth()
-  const [members, setMembers] = useState<TeamMember[]>([])
-  const [invites, setInvites] = useState<TeamInvite[]>([])
-  const [loading, setLoading] = useState(true)
+  // Seed from cache so a tab-switch return renders instantly; reload() below
+  // still revalidates in the background.
+  const [members, setMembers] = useState<TeamMember[]>(() => _teamCache?.members ?? [])
+  const [invites, setInvites] = useState<TeamInvite[]>(() => _teamCache?.invites ?? [])
+  const [loading, setLoading] = useState(() => _teamCache === null)
   const [loadError, setLoadError] = useState<string | null>(null)
 
   const [showInviteForm, setShowInviteForm] = useState(false)
@@ -579,28 +709,43 @@ export function TeamSettings() {
   const [inviteNotice, setInviteNotice] = useState<
     { kind: "sent" | "saved"; email: string } | null
   >(null)
+  // Multi-workspace: which workspaces the invite targets. Defaults to the
+  // ACTIVE workspace once the list loads; [] = default workspace at accept.
+  const { workspaces, activeWorkspace } = useWorkspaceCtx()
+  const [inviteWorkspaceIds, setInviteWorkspaceIds] = useState<string[]>([])
+  useEffect(() => {
+    if (activeWorkspace) setInviteWorkspaceIds([activeWorkspace.id])
+  }, [activeWorkspace])
+
+  function toggleInviteWorkspace(id: string) {
+    setInviteWorkspaceIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    )
+  }
 
   const currentUserId = auth.kind === "authed" ? auth.user.id : ""
   const currentRow = members.find((m) => m.user_id === currentUserId)
   const currentUserRole: TeamRole = (currentRow?.role as TeamRole) || "member"
 
   const reload = useCallback(async () => {
-    setLoading(true)
+    // No setLoading(true): a warm revisit keeps the current team on screen
+    // while this revalidates. The cold-load spinner is the initial state above.
     setLoadError(null)
     try {
       const [m, inv] = await Promise.all([
         teamApi.listMembers(),
         teamApi.listInvites(),
       ])
-      setMembers(
-        m.members.map((row) => ({
-          user_id: row.user_id,
-          role: row.role,
-          display_name: row.display_name,
-          email: row.email,
-          avatar_url: row.avatar_url,
-        })),
-      )
+      const nextMembers = m.members.map((row) => ({
+        user_id: row.user_id,
+        role: row.role,
+        display_name: row.display_name,
+        email: row.email,
+        avatar_url: row.avatar_url,
+        workspace_ids: row.workspace_ids ?? [],
+      }))
+      _teamCache = { members: nextMembers, invites: inv.invites }
+      setMembers(nextMembers)
       setInvites(inv.invites)
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e))
@@ -620,7 +765,7 @@ export function TeamSettings() {
     setInviteError(null)
     setInviteNotice(null)
     try {
-      const created = await teamApi.invite(email, inviteRole)
+      const created = await teamApi.invite(email, inviteRole, inviteWorkspaceIds)
       setInviteEmail("")
       setInviteRole("member")
       setShowInviteForm(false)
@@ -675,6 +820,29 @@ export function TeamSettings() {
     })()
   }
 
+  function toggleMemberWorkspace(userId: string, workspaceId: string) {
+    const current =
+      members.find((m) => m.user_id === userId)?.workspace_ids ?? []
+    const next = current.includes(workspaceId)
+      ? current.filter((id) => id !== workspaceId)
+      : [...current, workspaceId]
+    // Optimistic: the menu stays open across toggles, so reflect the new
+    // check state immediately; reload() reconciles with the server after.
+    setMembers((prev) =>
+      prev.map((m) =>
+        m.user_id === userId ? { ...m, workspace_ids: next } : m,
+      ),
+    )
+    void (async () => {
+      try {
+        await teamApi.setMemberWorkspaces(userId, next)
+      } catch (e) {
+        setLoadError(e instanceof Error ? e.message : String(e))
+      }
+      await reload()
+    })()
+  }
+
   function removeMember(userId: string) {
     if (!confirm("Remove this member from the team?")) return
     void (async () => {
@@ -705,34 +873,17 @@ export function TeamSettings() {
       onChangeInviteEmail={setInviteEmail}
       onChangeInviteRole={setInviteRole}
       onSubmitInvite={submitInvite}
+      availableWorkspaces={workspaces.map((w) => ({ id: w.id, name: w.name }))}
+      inviteWorkspaceIds={inviteWorkspaceIds}
+      onToggleInviteWorkspace={toggleInviteWorkspace}
       onRevokeInvite={revoke}
       onResendInvite={resend}
       onChangeMemberRole={changeRole}
       onRemoveMember={removeMember}
+      onToggleMemberWorkspace={toggleMemberWorkspace}
     />
   )
 }
 
 // ─────────────────────────── API surface ───────────────────────────
-
-export const teamApi = {
-  listMembers: () => api.get<TeamMembersResp>("/v1/team/members"),
-  listInvites: () => api.get<TeamInvitesResp>("/v1/team/invites"),
-  invite: (email: string, role: InviteRole) =>
-    api.post<TeamInvite>("/v1/team/invites", { email, role }),
-  revokeInvite: (id: string) =>
-    api.delete<void>(`/v1/team/invites/${encodeURIComponent(id)}`),
-  resendInvite: (id: string) =>
-    api.post<TeamInvite>(
-      `/v1/team/invites/${encodeURIComponent(id)}/resend`,
-    ),
-  patchMemberRole: (userId: string, role: TeamRole) =>
-    api.patch<{ user_id: string; role: TeamRole }>(
-      `/v1/team/members/${encodeURIComponent(userId)}`,
-      { role },
-    ),
-  removeMember: (userId: string) =>
-    api.delete<void>(`/v1/team/members/${encodeURIComponent(userId)}`),
-  acceptInvite: () =>
-    api.post<{ company_id: string; role: TeamRole }>("/v1/invites/accept"),
-}
+// teamApi moved to web/app/lib/teamApi.ts (re-exported at the top of this file).

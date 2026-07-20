@@ -14,8 +14,11 @@ class _Result:
         self.output = output
 
 
-def _route_out(skill_id="none", confidence=0.0, reason="x"):
-    return _Result({"skill_id": skill_id, "confidence": confidence, "reason": reason})
+def _route_out(skill_id="none", confidence=0.0, reason="x", in_scope=None):
+    out = {"skill_id": skill_id, "confidence": confidence, "reason": reason}
+    if in_scope is not None:
+        out["in_scope"] = in_scope
+    return _Result(out)
 
 
 def _answer_out():
@@ -77,6 +80,64 @@ def test_llm_router_failure_is_direct(monkeypatch):
     monkeypatch.setattr(qa, "llm_call", boom)
     d = qa.route("some ambiguous question about strategy", enterprise_id="ent")
     assert d.skill_id is None and d.source == "none"
+
+
+# ── out-of-scope gate ────────────────────────────────────────────────────────
+
+def test_route_out_of_scope_flag(monkeypatch):
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _route_out("none", 0.9, "trivia", in_scope=False)
+    )
+    d = qa.route("who won the champions league final?", enterprise_id="ent")
+    assert d.skill_id is None and d.source == "out_of_scope"
+
+
+def test_route_missing_in_scope_fails_open(monkeypatch):
+    # Old-shape router output (no in_scope field) must fall through to the
+    # direct path, not the refusal — the gate only fires on an explicit False.
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out("none", 0.0))
+    d = qa.route("what happened last week", enterprise_id="ent")
+    assert d.source == "none"
+
+
+def test_route_skill_match_wins_over_scope_flag(monkeypatch):
+    # A confident routable-skill match is in-scope by construction, even if the
+    # router contradicts itself on the flag.
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: _route_out("retention-churn", 0.85, "churn", in_scope=False),
+    )
+    d = qa.route("why do users churn?", enterprise_id="ent")
+    assert d.skill_id == "retention-churn" and d.source == "llm"
+
+
+def test_answer_out_of_scope_returns_canned(monkeypatch):
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _route_out("none", 0.9, "weather", in_scope=False)
+    )
+    def _no_direct(*a, **k):
+        raise AssertionError("compose_ask_answer must not run for out-of-scope")
+    monkeypatch.setattr(qa, "compose_ask_answer", _no_direct)
+    out = qa.answer(
+        enterprise_id="ent", question="what's the weather in tokyo?", dataset="acme"
+    )
+    assert out["answer"] == qa.OUT_OF_SCOPE_MESSAGE
+    assert out["type"] == "out_of_scope"
+    assert out["key_points"] == [] and out["citations"] == []
+    assert out["_skill_source"] == "scope_gate"
+
+
+def test_answer_pinned_skill_bypasses_scope_gate(monkeypatch):
+    # A pinned follow-up has already chosen a PM skill — the router (and its
+    # scope flag) is never consulted.
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _answer_out()
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="anything", dataset="acme",
+        pinned_skill="user-stories",
+    )
+    assert out["_skill"] == "user-stories"
 
 
 # ── answer dispatch ────────────────────────────────────────────────────────────
@@ -173,7 +234,7 @@ def test_answer_direct_path(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id: {
+        lambda dataset, q, *, enterprise_id, prd_context="": {
             "answer": "generic", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -274,17 +335,39 @@ def test_script_skill_uses_tool_loop_not_single_shot(monkeypatch):
     assert loop_calls["tools"][0]["name"] == "prioritize_score"
 
 
-# ── CIR confirm gate ──────────────────────────────────────────────────────────
+# ── CIR runs on a fresh route (no confirm gate) ───────────────────────────────
 
-def test_cost_gated_skill_returns_confirmation(monkeypatch):
+def test_cir_slash_generates_report(monkeypatch):
+    """A fresh /competitive-intelligence-review ask runs the skill and returns a
+    real answer — no needs_confirmation interstitial (the old confirm gate was
+    never consumed by any UI, so it rendered as an empty message)."""
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     out = qa.answer(
         enterprise_id="ent",
         question="/competitive-intelligence-review Linear, Jira, Asana",
         dataset="acme",
     )
-    assert out["type"] == "needs_confirmation"
-    assert out["skill"] == "competitive-intelligence-review"
-    assert {o["id"] for o in out["options"]} == {"quick", "full"}
+    assert out.get("type") != "needs_confirmation"
+    assert out["_skill"] == "competitive-intelligence-review"
+    assert out["answer"] == "ok"
+    assert captured["model"] == qa.HEAVY_MODEL  # CIR is heavy → opus
+
+
+def test_cir_regex_route_generates_report(monkeypatch):
+    """The natural phrasing ('competitor analysis…') regex-routes to CIR and
+    also runs it directly."""
+    captured = {}
+    monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
+    out = qa.answer(
+        enterprise_id="ent",
+        question="run a competitor analysis for my product",
+        dataset="acme",
+    )
+    assert out["_skill"] == "competitive-intelligence-review"
+    assert out["_skill_source"] == "regex"
+    assert out["answer"] == "ok"
+    assert captured["skill"] == "competitive-intelligence-review"
 
 
 def test_verify_pass_off_by_default(monkeypatch):
@@ -309,7 +392,7 @@ def test_verify_pass_when_enabled_annotates(monkeypatch):
     assert "fact_check" in calls
 
 
-def test_cost_gated_skill_runs_when_pinned(monkeypatch):
+def test_cir_runs_when_pinned(monkeypatch):
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     out = qa.answer(
@@ -321,3 +404,125 @@ def test_cost_gated_skill_runs_when_pinned(monkeypatch):
     assert out.get("type") != "needs_confirmation"
     assert out["_skill"] == "competitive-intelligence-review"
     assert captured["model"] == qa.HEAVY_MODEL  # CIR is heavy → opus
+
+
+# ── PRD-tab grounding (prd_id) ───────────────────────────────────────────────
+
+def test_answer_prd_id_grounds_skill_answer(monkeypatch):
+    """A PRD-tab ask routed to a skill carries the CURRENT PRD CONTEXT block on
+    the gateway's CACHEABLE user prefix (byte-stable across turns → prompt-cache
+    reads) — NOT in the uncached input — and the PRD addendum in the system
+    prompt."""
+    calls = []
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: calls.append(k) or _answer_out()
+    )
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod,
+        "build_prd_context",
+        lambda ent, prd_id: f"=== CURRENT PRD CONTEXT ===\nprd {prd_id} for {ent}",
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="anything", dataset="acme",
+        pinned_skill="roadmap", prd_id=7,
+    )
+    assert out["answer"] == "ok"
+    answer_call = calls[-1]
+    assert "CURRENT PRD CONTEXT" in answer_call["user_cacheable_prefix"]
+    assert "prd 7 for ent" in answer_call["user_cacheable_prefix"]
+    assert "CURRENT PRD CONTEXT" not in answer_call["input"]
+    assert answer_call["input"] == "Question: anything"
+    assert "CURRENT PRD CONTEXT" in answer_call["system"]
+
+
+def test_answer_prd_id_skips_kg_retrieval_on_skill_path(monkeypatch):
+    """A PRD-grounded skill ask must NOT run KG retrieval (embeddings HTTP call
+    + pgvector) — the PRD block is the grounding. A plain skill ask still does."""
+    retrievals = []
+    monkeypatch.setattr(
+        qa, "_retrieve_kg_bundle",
+        lambda eid, q: retrievals.append(q) or None,
+    )
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _answer_out())
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context", lambda ent, prd_id: "THE PRD BLOCK"
+    )
+    qa.answer(enterprise_id="ent", question="anything", dataset="acme",
+              pinned_skill="roadmap", prd_id=7)
+    assert retrievals == []  # PRD-grounded → no KG retrieval
+
+    qa.answer(enterprise_id="ent", question="anything", dataset="acme",
+              pinned_skill="roadmap")
+    assert len(retrievals) == 1  # non-PRD skill ask unchanged
+
+
+def test_answer_prd_prefix_stable_across_turns(monkeypatch):
+    """Turns 2+ of the same PRD conversation must send a byte-identical
+    cacheable prefix (same PRD content → cache read), with only the question
+    varying in the uncached input."""
+    calls = []
+    monkeypatch.setattr(qa, "llm_call", lambda **k: calls.append(k) or _answer_out())
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context",
+        lambda ent, prd_id: f"=== CURRENT PRD CONTEXT ===\nprd {prd_id}",
+    )
+    qa.answer(enterprise_id="ent", question="first question", dataset="acme",
+              pinned_skill="roadmap", prd_id=7)
+    qa.answer(enterprise_id="ent", question="second question", dataset="acme",
+              pinned_skill="roadmap", prd_id=7)
+    assert calls[0]["user_cacheable_prefix"] == calls[1]["user_cacheable_prefix"]
+    assert calls[0]["input"] != calls[1]["input"]
+
+
+def test_answer_prd_id_grounds_direct_answer(monkeypatch):
+    """Router → none: the direct compose_ask_answer path receives the block via
+    prd_context (kept out of the question so decision-log text stays small)."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())  # router → none
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context", lambda ent, prd_id: "THE PRD BLOCK"
+    )
+    seen = {}
+
+    def _compose(dataset, q, *, enterprise_id, prd_context=""):
+        seen.update(question=q, prd_context=prd_context)
+        return {"answer": "generic", "key_points": [], "citations": [],
+                "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _compose)
+    out = qa.answer(
+        enterprise_id="ent", question="what changed", dataset="acme", prd_id=7
+    )
+    assert out["answer"] == "generic"
+    assert seen["prd_context"] == "THE PRD BLOCK"
+    assert "THE PRD BLOCK" not in seen["question"]
+
+
+def test_answer_prd_context_failure_degrades_to_plain_ask(monkeypatch):
+    """build_prd_context returning '' (missing prd, foreign tenant, read error)
+    must not break the answer — the ask runs exactly as a plain chat."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    import app.prd_context as prd_context_mod
+
+    monkeypatch.setattr(
+        prd_context_mod, "build_prd_context", lambda ent, prd_id: ""
+    )
+    monkeypatch.setattr(
+        qa,
+        "compose_ask_answer",
+        lambda dataset, q, *, enterprise_id, prd_context="": {
+            "answer": "plain", "key_points": [], "citations": [],
+            "confidence": 0.5, "unanswered": "",
+        },
+    )
+    out = qa.answer(
+        enterprise_id="ent", question="what changed", dataset="acme", prd_id=404
+    )
+    assert out["answer"] == "plain"

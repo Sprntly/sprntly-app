@@ -286,6 +286,41 @@ class GraphFacade:
             q = q.eq("type", type)
         return [self._row_to_relationship(r) for r in (q.execute().data or [])]
 
+    def all_signals(self, enterprise_id: str) -> list[Signal]:
+        """Every signal for the enterprise in ONE query (no stale/superseded
+        filter — callers filter as needed). Lets convergence build its whole
+        signal lookup once instead of a per-theme `get_signals` fetch. Per-
+        enterprise volumes are bounded (§20 NFR), same assumption as
+        `active_signals`."""
+        rows = (
+            self._tbl("kg_signal").select("*")
+            .eq("enterprise_id", enterprise_id)
+            .execute().data or []
+        )
+        return [self._row_to_signal(r) for r in rows]
+
+    def edges_from_many(
+        self, enterprise_id: str, source_ids: list[str]
+    ) -> list[Relationship]:
+        """Every relationship whose `source_id` is in `source_ids`, over a few
+        chunked `.in_()` queries instead of one-per-source. This is what lets
+        convergence fetch all signal→theme edges in a handful of round-trips
+        rather than a query per theme (the old N+1 that made a first-time brief
+        over a large theme set take minutes). De-dups ids; empty → []."""
+        unique = list(dict.fromkeys(source_ids))
+        out: list[Relationship] = []
+        chunk = 150  # keep the `.in_()` URL well under server limits
+        for i in range(0, len(unique), chunk):
+            batch = unique[i:i + chunk]
+            rows = (
+                self._tbl("kg_relationship").select("*")
+                .eq("enterprise_id", enterprise_id)
+                .in_("source_id", batch)
+                .execute().data or []
+            )
+            out.extend(self._row_to_relationship(r) for r in rows)
+        return out
+
     def active_signals(
         self,
         enterprise_id: str,
@@ -323,9 +358,13 @@ class GraphFacade:
         can be skipped. Tenant-scoped — only this enterprise's signals are
         considered, never another tenant's.
 
-        Filtered in Python (mirrors `active_signals`) so it works against both
+        Only the newest few signals are fetched (order created_at desc,
+        small limit) and compared in Python — `order`/`limit` work against both
         real Supabase and the in-memory test fake (which has no `gt`/`OR`).
-        Per-enterprise volumes are bounded (§20 NFR), so the scan is fine.
+        The old unordered full-select scan silently broke past Supabase's
+        1000-row page: a tenant with >1000 signals could get a page containing
+        none of its recent rows, so the gate reported "unchanged" forever and
+        regeneration never ran again.
         """
         cutoff = _parse_iso(iso_ts)
         if cutoff is None:
@@ -334,6 +373,8 @@ class GraphFacade:
         rows = (
             self._tbl("kg_signal").select("created_at")
             .eq("enterprise_id", enterprise_id)
+            .order("created_at", desc=True)
+            .limit(5)
             .execute().data or []
         )
         for r in rows:

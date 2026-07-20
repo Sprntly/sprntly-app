@@ -33,9 +33,32 @@ vi.mock("../../../lib/auth", () => ({
   useAuth: () => ({ kind: "anonymous", signOut: vi.fn() }),
 }))
 
+const setActiveWorkspace = vi.fn()
+let workspacesState: Array<{
+  id: string
+  name: string
+  slug: string
+  is_default: boolean
+  product_id: string | null
+  dataset: string | null
+  role: string
+}> = []
+let activeWorkspaceState: (typeof workspacesState)[number] | null = null
+// Company-level role — workspace creation gates on THIS, not the
+// per-workspace effective role each summary row carries.
+let orgRoleState: string | null = null
+
 vi.mock("../../../context/WorkspaceContext", () => ({
   profileDisplayName: () => "Ada Lovelace",
-  useWorkspace: () => ({ profile: null, workspace: null }),
+  useWorkspace: () => ({
+    profile: null,
+    workspace: null,
+    workspaces: workspacesState,
+    activeWorkspace: activeWorkspaceState,
+    orgRole: orgRoleState,
+    setActiveWorkspace,
+    refresh: vi.fn(),
+  }),
 }))
 
 import { Sidebar } from "../Sidebar"
@@ -44,7 +67,11 @@ beforeEach(() => {
   goTo.mockClear()
   goToNewChat.mockClear()
   toggleSidebar.mockClear()
+  setActiveWorkspace.mockClear()
   sidebarCollapsed = true
+  workspacesState = []
+  activeWorkspaceState = null
+  orgRoleState = null
 })
 afterEach(() => cleanup())
 
@@ -60,7 +87,7 @@ describe("Sidebar — New chat wiring", () => {
     render(React.createElement(Sidebar))
     fireEvent.click(screen.getByLabelText("Weekly brief"))
     expect(goTo).toHaveBeenCalledWith("brief")
-    fireEvent.click(screen.getByLabelText("History"))
+    fireEvent.click(screen.getByLabelText("Chat history"))
     expect(goTo).toHaveBeenCalledWith("chats")
     // The new-chat helper was not triggered by either.
     expect(goToNewChat).not.toHaveBeenCalled()
@@ -78,7 +105,7 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     for (const label of [
       "New chat",
       "Weekly brief",
-      "History",
+      "Chat history",
       "Sources",
       "Settings",
       "Feedback",
@@ -92,9 +119,9 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     expect(screen.queryByLabelText("Sign out")).toBeNull()
   })
 
-  it("no longer renders the Backlog rail icon (functionality kept, icon removed)", () => {
+  it("no longer renders the Ideation rail icon (functionality kept, icon removed)", () => {
     render(React.createElement(Sidebar))
-    expect(screen.queryByLabelText("Backlog Projects")).toBeNull()
+    expect(screen.queryByLabelText("Ideation")).toBeNull()
   })
 
   it("Feedback opens the feedback modal (not a nav)", () => {
@@ -108,6 +135,72 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
   it("renders the brand mark with its accent dot", () => {
     const { container } = render(React.createElement(Sidebar))
     expect(container.querySelector(".sb-rail-logo-dot")).toBeTruthy()
+  })
+})
+
+// ── Workspace switcher (multi-workspace 2026-07) ─────────────────────────────
+describe("Sidebar — workspace switcher", () => {
+  const twoWorkspaces = () => {
+    workspacesState = [
+      { id: "ws-a", name: "Acme App", slug: "default", is_default: true, product_id: null, dataset: "acme", role: "admin" },
+      { id: "ws-b", name: "Notifications", slug: "notifications", is_default: false, product_id: null, dataset: "acme--notifications", role: "admin" },
+    ]
+    activeWorkspaceState = workspacesState[0]
+    orgRoleState = "admin"
+    sidebarCollapsed = false
+  }
+
+  it("shows the active workspace name as the brand and opens the menu", () => {
+    twoWorkspaces()
+    render(React.createElement(Sidebar))
+    const trigger = screen.getByTestId("workspace-switcher")
+    expect(trigger.textContent).toContain("Acme App")
+    fireEvent.click(trigger)
+    expect(screen.getByText("Notifications")).toBeTruthy()
+  })
+
+  it("selecting a workspace calls setActiveWorkspace and closes the menu", () => {
+    twoWorkspaces()
+    const { container } = render(React.createElement(Sidebar))
+    fireEvent.click(screen.getByTestId("workspace-switcher"))
+    fireEvent.click(screen.getByText("Notifications"))
+    expect(setActiveWorkspace).toHaveBeenCalledWith("ws-b")
+    expect(container.querySelector(".sb-ws-menu")).toBeNull()
+  })
+
+  it("org admins see '+ New workspace'; the trigger is static for a lone non-admin workspace", () => {
+    twoWorkspaces()
+    render(React.createElement(Sidebar))
+    fireEvent.click(screen.getByTestId("workspace-switcher"))
+    expect(screen.getByText("+ New workspace")).toBeTruthy()
+    cleanup()
+
+    workspacesState = [
+      { id: "ws-a", name: "Acme App", slug: "default", is_default: true, product_id: null, dataset: "acme", role: "member" },
+    ]
+    activeWorkspaceState = workspacesState[0]
+    orgRoleState = "member"
+    const { container } = render(React.createElement(Sidebar))
+    expect(
+      container.querySelector(".sb-ws-trigger--static"),
+    ).toBeTruthy()
+  })
+
+  it("a WORKSPACE-level admin who is a plain org member gets no create button (org-admin gated)", () => {
+    twoWorkspaces()
+    // Effective role on the rows is admin, but the company-level role is not.
+    orgRoleState = "member"
+    render(React.createElement(Sidebar))
+    fireEvent.click(screen.getByTestId("workspace-switcher"))
+    expect(screen.queryByText("+ New workspace")).toBeNull()
+  })
+
+  it("an org OWNER sees the create button (owner ⊇ admin)", () => {
+    twoWorkspaces()
+    orgRoleState = "owner"
+    render(React.createElement(Sidebar))
+    fireEvent.click(screen.getByTestId("workspace-switcher"))
+    expect(screen.getByText("+ New workspace")).toBeTruthy()
   })
 })
 

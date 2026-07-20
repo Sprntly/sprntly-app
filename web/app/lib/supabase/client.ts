@@ -81,11 +81,10 @@ export async function postLoginPath(): Promise<string> {
   // check the backend for a pending invite that matches their verified
   // email. On success the backend creates their company_members row, so
   // the next workspace fetch resolves to a real company. Best-effort —
-  // any failure (404 = no invite, 409 = already in another company,
-  // network glitch) falls through to onboarding without surfacing an
-  // error here.
+  // any failure (404 = no invite, network glitch) falls through to
+  // onboarding without surfacing an error here.
   if (!workspace) {
-    const accepted = await tryAutoAcceptInvite()
+    const accepted = (await tryAcceptInvite()) === "accepted"
     if (accepted) {
       const fresh = await fetchWorkspaceForUser(user.id)
       if (fresh) {
@@ -95,51 +94,78 @@ export async function postLoginPath(): Promise<string> {
         return `/onboarding/${slugForStep(fresh.onboarding_step)}`
       }
     }
-    // Pre-onboarding profile gate: a brand-new user whose profile has no first
-    // name (primarily Google sign-ups — Supabase lands them with empty
-    // first/last) goes to the unnumbered `your-name` gate to set it before the
-    // numbered flow. Email/password users (who type their name at sign-up) and
-    // anyone who already has a name skip straight to the first numbered step.
-    // A missing profile row is treated as an empty name → show the gate.
-    if (!(await hasFirstName(user.id))) {
+    // Pre-onboarding profile gate: a brand-new user whose profile is missing
+    // a first name OR the company-vs-personal account type goes to the
+    // unnumbered `your-name` gate first. Google sign-ups always miss the
+    // account type (the choice only exists on the email sign-up form) and may
+    // miss the name; email/password users provide both at sign-up and skip
+    // straight to the first numbered step. A missing profile row is treated
+    // as missing both → show the gate.
+    if (!(await hasCompleteSignupProfile(user.id))) {
       return "/onboarding/your-name"
     }
     return `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
   }
+  // The user already belongs to a company. A pending invite for their email
+  // still needs resolving at sign-in:
+  //  - same company, more workspaces → the backend accept grants them
+  //    (idempotent "second invite" semantics), then continue in normally;
+  //  - a DIFFERENT company → the one-user-one-company invariant means they
+  //    can never accept it, and silently ignoring the invite leaves both
+  //    sides confused — route to the explanatory blocked-invite page instead.
+  //  - no invite (404) / transient error → normal flow.
+  if ((await tryAcceptInvite()) === "conflict") return "/invite-conflict"
+
   if (workspace.onboarding_completed_at) return "/"
   return `/onboarding/${slugForStep(workspace.onboarding_step)}`
 }
 
 /**
- * True when the user's profile already has a non-empty first name. Minimal
- * query (`select first_name`); a missing row or any error is treated as "no
- * name" so the gate shows rather than silently skipping it.
+ * True when the user's profile already has BOTH a non-empty first name and an
+ * account type (the company-vs-personal signup choice). Minimal query; a
+ * missing row or any error is treated as incomplete so the gate shows rather
+ * than silently skipping it.
  */
-async function hasFirstName(userId: string): Promise<boolean> {
+async function hasCompleteSignupProfile(userId: string): Promise<boolean> {
   try {
     const supabase = getSupabase()
     const { data, error } = await supabase
       .from("profiles")
-      .select("first_name")
+      .select("first_name, account_type")
       .eq("id", userId)
       .maybeSingle()
     if (error || !data) return false
-    return String((data as { first_name?: unknown }).first_name ?? "").trim().length > 0
+    const row = data as { first_name?: unknown; account_type?: unknown }
+    return (
+      String(row.first_name ?? "").trim().length > 0 &&
+      (row.account_type === "company" || row.account_type === "personal")
+    )
   } catch {
     return false
   }
 }
 
-async function tryAutoAcceptInvite(): Promise<boolean> {
+/** Outcome of the sign-in invite-accept attempt:
+ *  - accepted — the backend materialised the invite (membership/workspaces)
+ *  - none     — no pending invite for this email (404)
+ *  - conflict — the invite is from ANOTHER company; the one-user-one-company
+ *               invariant blocks acceptance (409)
+ *  - error    — network/other failure; treated as best-effort no-op */
+type InviteAcceptOutcome = "accepted" | "none" | "conflict" | "error"
+
+async function tryAcceptInvite(): Promise<InviteAcceptOutcome> {
   try {
-    // Lazy import keeps the team-settings module (which transitively pulls
-    // in React-flavoured deps) out of the cold-start path of postLoginPath.
-    const { teamApi } = await import(
-      "../../components/screens/app/settings/TeamSettings"
-    )
+    // Lazy import keeps the api module out of the cold-start path of
+    // postLoginPath (teamApi now lives in lib/teamApi, not TeamSettings).
+    const { teamApi } = await import("../teamApi")
     await teamApi.acceptInvite()
-    return true
-  } catch {
-    return false
+    return "accepted"
+  } catch (err) {
+    const { ApiError } = await import("../api")
+    if (err instanceof ApiError) {
+      if (err.status === 409) return "conflict"
+      if (err.status === 404) return "none"
+    }
+    return "error"
   }
 }

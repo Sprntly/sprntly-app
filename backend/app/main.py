@@ -20,6 +20,12 @@ from fastapi.staticfiles import StaticFiles
 
 from app import auth, db, datasets as datasets_service
 from app.config import settings
+from app.sentry import init_sentry
+
+# Initialise error tracking as early as possible (no-op unless SENTRY_DSN is
+# set) so exceptions raised while importing routes / during startup are caught.
+init_sentry()
+
 from app.db.prototypes import (
     invalidate_orphan_generating_prototypes,
     invalidate_stale_prototypes,
@@ -40,7 +46,6 @@ from app.routes import (
     agent_chat,
     artifacts,
     ask,
-    backlog,
     brief,
     business_context as business_context_routes,
     company,
@@ -51,6 +56,7 @@ from app.routes import (
     design_agent_bundle,
     design_agent_comments,
     feedback,
+    ideation,
     ingest,
     internal_mcp,
     metrics,
@@ -64,6 +70,7 @@ from app.routes import (
     synthesis,
     team,
     tickets,
+    workspaces as workspaces_routes,
     evidence,
     health,
     internal,
@@ -150,6 +157,16 @@ async def lifespan(app: FastAPI):
             ev_orphans,
             prd_orphans,
             ask_orphans,
+        )
+    # Same for `ask_jobs` (the chat Ask flow the client polls). Age-gated rather
+    # than "everything generating", because staging and prod share one Supabase
+    # project — see fail_orphan_generating_ask_jobs. The scheduler repeats this
+    # every 5m so an interrupted ask heals without waiting for a restart.
+    job_ask_orphans = db.fail_orphan_generating_ask_jobs()
+    if job_ask_orphans:
+        logger.info(
+            "Failed %d orphan generating Ask job(s)",
+            job_ask_orphans,
         )
     # Design Agent startup invalidation (prototypes + iterations).
     #
@@ -279,7 +296,7 @@ app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(artifacts.router)
-app.include_router(backlog.router)
+app.include_router(ideation.router)
 app.include_router(ask.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)
@@ -312,6 +329,7 @@ app.include_router(tickets.router)
 app.include_router(conversations.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
+app.include_router(workspaces_routes.router)
 app.include_router(admin.router)
 app.include_router(staff_admin.router)
 app.include_router(staff_admin.claim_router)

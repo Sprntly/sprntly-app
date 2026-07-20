@@ -455,7 +455,7 @@ def test_insert_comment_existing_callsites_unaffected(comments):
 
 _ORIGIN_MIGRATION_PATH = (
     Path(__file__).resolve().parents[2]
-    / "supabase" / "migrations" / "20260716120000_prototype_comments_origin_visitor.sql"
+    / "supabase" / "migrations" / "20260716120500_prototype_comments_origin_visitor.sql"
 )
 
 

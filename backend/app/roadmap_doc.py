@@ -82,11 +82,16 @@ def save_roadmap_doc(
     filename: str,
     data: bytes,
     content_type: Optional[str] = None,
+    workspace_id: Optional[str] = None,
 ) -> RoadmapDoc:
-    """Store (or replace) the company's roadmap upload. Extracts the text and
-    bumps the version past whatever is currently stored. Latest upload wins."""
+    """Store (or replace) the roadmap upload. Extracts the text and bumps the
+    version past whatever is currently stored. Latest upload wins.
+
+    Multi-workspace: one roadmap per WORKSPACE (unique(workspace_id) since
+    20260716124000). Routes pass the active workspace; the legacy no-workspace
+    path (older callers/tests) replaces by company_id manually."""
     extracted = _extract_text(filename, data)
-    current = load_roadmap_doc(company_id)
+    current = load_roadmap_doc(company_id, workspace_id=workspace_id)
     version = (current.version + 1) if current else 1
     uploaded_at = datetime.now(timezone.utc).isoformat()
     row = {
@@ -98,11 +103,16 @@ def save_roadmap_doc(
         "uploaded_at": uploaded_at,
         "version": version,
     }
-    # One row per company: upsert on the UNIQUE company_id so a re-upload
-    # replaces the prior roadmap rather than accumulating rows.
-    require_client().table("roadmap_doc").upsert(
-        row, on_conflict="company_id"
-    ).execute()
+    client = require_client()
+    if workspace_id:
+        row["workspace_id"] = workspace_id
+        # One row per workspace: upsert on the UNIQUE workspace_id so a
+        # re-upload replaces the prior roadmap rather than accumulating rows.
+        client.table("roadmap_doc").upsert(row, on_conflict="workspace_id").execute()
+    elif current:
+        client.table("roadmap_doc").update(row).eq("company_id", company_id).execute()
+    else:
+        client.table("roadmap_doc").insert(row).execute()
     return RoadmapDoc(
         filename=filename,
         content_type=content_type,
@@ -113,14 +123,21 @@ def save_roadmap_doc(
     )
 
 
-def load_roadmap_doc(company_id: str) -> Optional[RoadmapDoc]:
-    """Read the company's roadmap; None if none uploaded / invalid."""
-    r = (
+def load_roadmap_doc(
+    company_id: str, *, workspace_id: Optional[str] = None
+) -> Optional[RoadmapDoc]:
+    """Read the roadmap; None if none uploaded / invalid. With a workspace_id
+    the read is workspace-exact; without one (legacy callers e.g. the
+    synthesis agent, which is company-keyed) it returns the company's first
+    row — in practice the default workspace's roadmap."""
+    q = (
         require_client().table("roadmap_doc")
         .select("filename,content_type,extracted_text,raw_b64,uploaded_at,version")
         .eq("company_id", company_id)
-        .execute()
     )
+    if workspace_id:
+        q = q.eq("workspace_id", workspace_id)
+    r = q.execute()
     if not r.data:
         return None
     raw = r.data[0]

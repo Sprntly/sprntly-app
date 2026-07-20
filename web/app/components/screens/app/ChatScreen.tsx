@@ -11,24 +11,25 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, isTicketsCommand } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isTicketsCommand, prdCommandTask } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { PrdInputQuestions } from "../../shared/PrdInputQuestions"
-import { ChatSuggestionIcon, IconSendUp, IconSparkle } from "../../shared/app-icons"
-import { ApiError, askApi, briefApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
+import { ApiError, askApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
-import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromBacklog, loadPrdById } from "../../../lib/runPrdGeneration"
+import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
 // resumePrdGeneration re-enters polling for an already-kicked-off PRD (the import path).
 import type { PrdTabRequest } from "../../../context/NavigationContext"
-import { runEvidenceGeneration, resumeEvidenceGeneration } from "../../../lib/runEvidenceGeneration"
-import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError } from "../../../lib/runAskGeneration"
+import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight } from "../../../lib/runEvidenceGeneration"
+import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { PrdState, PrdContent } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
+import { GeneratePrototypeCTA } from "../../design-agent/GeneratePrototypeCTA"
 import { prototypePath } from "../../../lib/routes"
 import { useRouter, useSearchParams } from "next/navigation"
 import { prototypeStateForInsight } from "../../design-agent/briefPrototypeMap.helpers"
@@ -36,9 +37,19 @@ import { AGENT_NAME } from "../../../lib/agent"
 
 type ThreadTurn = {
   id: string
+  /** DISPLAY text — the user's typed ask only. Attached-document content is NOT
+   *  folded in here (that goes to the backend separately); the thread renders
+   *  this plus a chip per `attachments` entry, the way Claude's chat does. */
   query: string
+  /** Files attached to this turn, shown as clickable cards above the ask. Each
+   *  carries the extracted/plain-text `content` so the card can open a viewer —
+   *  this is the SAME text folded into the backend query, never re-fetched. */
+  attachments?: { name: string; content?: string }[]
   reply?: AskResponse
   error?: string
+  /** The user stopped this ask before it answered (composer Stop button). Renders
+   *  a muted "stopped" note instead of the thinking skeleton or an error bubble. */
+  stopped?: boolean
 }
 
 type BriefMeta = { briefId: number; insightIndex: number }
@@ -85,19 +96,40 @@ const BRIEF_TAB_ID = "brief"
 // first message on send (see submitAsk's first-send rename).
 export const NEW_CHAT_TITLE = "New chat"
 
+// Build a compact task string from a tab's conversation to seed a chat PRD when
+// a "generate a PRD" command (or the Generate PRD button) carries no explicit
+// topic. Uses the user's own turns — the problem/intent they described — joined
+// and capped to the backend's 4000-char task limit. Returns "" when the tab has
+// no conversation to seed from (the caller then asks for a topic instead of
+// opening an unrelated brief PRD).
+const CHAT_PRD_TASK_MAX = 3500
+function conversationToPrdTask(thread: ThreadTurn[]): string {
+  const joined = thread
+    .map((t) => t.query?.trim())
+    // Skip the PRD/import commands that merely opened artifacts — they're not the
+    // problem the user is discussing, so they'd make a nonsensical PRD seed.
+    .filter((q): q is string => !!q && !isPrdCommand(q))
+    .join("\n\n")
+    .trim()
+  return joined.length > CHAT_PRD_TASK_MAX ? `${joined.slice(0, CHAT_PRD_TASK_MAX)}…` : joined
+}
+
 // The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
 // request). Shown as the reply to the user's seeded command turn, so the chat
 // explains what the spinning panel on the right is doing and how to get back to
 // it (the PRD card above the thread hosts the View PRD button).
 function commandAckReply(req: PrdTabRequest): AskResponse {
   const source = req.source
-  const importing = source.kind === "resume"
+  const importing = source.kind === "resume" && source.origin !== "task"
+  const fromTask = source.kind === "resume" && source.origin === "task"
   const withTickets = source.kind === "resume" && !!source.openTickets
   const answer = withTickets
     ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready. Use the View PRD button above to reopen the panel anytime."
-    : importing
-      ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-      : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+    : fromTask
+      ? "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+      : importing
+        ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+        : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
   return { answer, key_points: [], citations: [], confidence: 1, unanswered: "" }
 }
 
@@ -128,12 +160,234 @@ function AttachmentChips({ attachments, onRemove }: {
   )
 }
 
+/** File extension, upper-cased (e.g. "DOCX"). Empty string when there's none. */
+function fileTypeLabel(name: string): string {
+  const dot = name.lastIndexOf(".")
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : ""
+}
+
+/** Human "12 lines" / "3.4 KB" hint from the extracted text, for the card
+ *  subtitle (mirrors how Claude shows a size/dimension line under a file). */
+function attachmentMeta(name: string, content?: string): string {
+  const type = fileTypeLabel(name)
+  if (!content) return type || "File"
+  const lines = content.split("\n").length
+  return [type, `${lines.toLocaleString()} line${lines === 1 ? "" : "s"}`].filter(Boolean).join(" · ")
+}
+
+/** A clickable file card on a user turn — Claude-style: an icon tile, the file
+ *  name, and a type/size sub-line. Clicking opens the content viewer. */
+function TurnAttachmentCard({
+  name,
+  content,
+  onOpen,
+}: {
+  name: string
+  content?: string
+  onOpen: () => void
+}) {
+  const viewable = !!content
+  return (
+    <button
+      type="button"
+      className="bc-file-card"
+      data-testid="turn-attachment-chip"
+      onClick={viewable ? onOpen : undefined}
+      disabled={!viewable}
+      title={viewable ? `View ${name}` : name}
+      aria-label={viewable ? `View ${name}` : name}
+    >
+      <span className="bc-file-card-icon" aria-hidden>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+        </svg>
+      </span>
+      <span className="bc-file-card-text">
+        <span className="bc-file-card-name">{name}</span>
+        <span className="bc-file-card-meta">{attachmentMeta(name, content)}</span>
+      </span>
+    </button>
+  )
+}
+
+/** Full-screen overlay that renders an attachment's extracted content (the same
+ *  text sent to the agent). Opened by clicking a file card on a user turn. */
+function AttachmentViewer({
+  attachment,
+  onClose,
+}: {
+  attachment: { name: string; content: string }
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose()
+    }
+    document.addEventListener("keydown", onKey)
+    return () => document.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  return (
+    <div className="bc-file-viewer-backdrop" role="dialog" aria-modal="true" aria-label={attachment.name} onClick={onClose}>
+      <div className="bc-file-viewer" onClick={(e) => e.stopPropagation()}>
+        <div className="bc-file-viewer-head">
+          <span className="bc-file-viewer-title" title={attachment.name}>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+            </svg>
+            {attachment.name}
+          </span>
+          <button type="button" className="bc-file-viewer-close" aria-label="Close" onClick={onClose}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        <div className="bc-file-viewer-body">
+          {attachment.content.trim() ? (
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+          ) : (
+            <p className="bc-file-viewer-empty">No preview available for this file.</p>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// Claude-style slash-command palette shown above the composer when the draft
+// starts with "/". Rendered by BOTH composers (landing + thread) — the `inset`
+// prop is the only positional difference (the dock composer is inset 8px).
+// Keyboard-driven: the parent owns `activeIndex` (↑/↓/Enter) and the active row
+// scrolls itself into view.
+function SlashSkillMenu({ skills, activeIndex, onSelect, onHover, inset = false }: {
+  skills: SkillInfo[]
+  activeIndex: number
+  onSelect: (skill: SkillInfo) => void
+  onHover: (index: number) => void
+  inset?: boolean
+}) {
+  const listRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const active = listRef.current?.querySelector<HTMLElement>(".chat-slash-item.is-active")
+    active?.scrollIntoView({ block: "nearest" })
+  }, [activeIndex])
+  if (skills.length === 0) return null
+  return (
+    <div
+      ref={listRef}
+      className={`chat-slash-menu${inset ? " chat-slash-menu--inset" : ""}`}
+      role="listbox"
+      aria-label="Skills"
+    >
+      <div className="chat-slash-head">
+        <span>Skills</span>
+        <span className="chat-slash-count">{skills.length}</span>
+      </div>
+      {skills.map((s, i) => (
+        <button
+          key={s.id}
+          type="button"
+          role="option"
+          aria-selected={i === activeIndex}
+          className={`chat-slash-item${i === activeIndex ? " is-active" : ""}`}
+          // Select on mousedown (before the textarea blurs) so the click always
+          // lands even as focus moves.
+          onMouseDown={(e) => { e.preventDefault(); onSelect(s) }}
+          onMouseEnter={() => onHover(i)}
+        >
+          <span className="chat-slash-trigger">{s.trigger}</span>
+          <span className="chat-slash-text">
+            <span className="chat-slash-label">{s.label}</span>
+            <span className="chat-slash-desc">{s.description}</span>
+          </span>
+          <span className="chat-slash-enter" aria-hidden>↵</span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
 const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
   { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View weekly brief", desc: "", target: "brief" } },
   { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
   { kind: "starter", card: { id: "def-draft", icon: "document", title: "Draft quarterly report", desc: "", target: "ondemand", prompt: "Draft a quarterly product report with key metrics, wins, and next steps." } },
   { kind: "starter", card: { id: "def-proto", icon: "rocket", title: "Prototype", desc: "", target: "ondemand", prompt: "Help me prototype the top feature in our product roadmap." } },
 ]
+
+// The chat surface's artifact action row — EXACTLY two buttons. The first opens
+// the first available artifact (View Evidence when the insight has evidence, else
+// Generate/View PRD); the second is the Generate/View Prototype trigger, disabled
+// until a PRD exists (a prototype is always built FROM a PRD). Shared by the
+// insight-card row and the reply-footer row so the two never drift.
+//
+// The prototype button follows BriefChat's pattern: the shared GeneratePrototypeCTA
+// with `skipExistenceCheck` (the batch prototype map — chatInsightState — is the
+// existence source of truth, so no redundant per-tab getByPrd), driving Generate
+// (open the modal) vs View (navigate) from `prototypeReady`.
+function ChatArtifactActions({
+  evidenceExists,
+  prdExists,
+  prdWaiting,
+  prdGenerating,
+  onViewEvidence,
+  onOpenPrd,
+  prototypePrdId,
+  prototypeReady,
+  onViewPrototype,
+}: {
+  evidenceExists: boolean
+  prdExists: boolean
+  prdWaiting: boolean
+  prdGenerating: boolean
+  onViewEvidence: () => void
+  onOpenPrd: () => void
+  prototypePrdId: number | null
+  prototypeReady: boolean
+  onViewPrototype: () => void
+}) {
+  const first = evidenceExists
+    ? { label: "View Evidence", onClick: onViewEvidence, disabled: false }
+    : {
+        label: prdGenerating
+          ? "Generating PRD…"
+          : prdWaiting ? "Loading…"
+          : prdExists ? "View PRD" : "Generate PRD",
+        onClick: onOpenPrd,
+        disabled: prdGenerating || prdWaiting,
+      }
+  const canPrototype = prototypePrdId != null
+  return (
+    <div className="bc-actions">
+      <button
+        type="button"
+        className="bc-action-btn bc-action-btn--primary"
+        disabled={first.disabled}
+        onClick={first.onClick}
+      >
+        {first.label}
+      </button>
+      <GeneratePrototypeCTA
+        prdId={prototypePrdId}
+        skipExistenceCheck
+        render={({ onClick }) => (
+          <button
+            type="button"
+            className="bc-action-btn"
+            data-testid="chat-prototype-cta"
+            disabled={!canPrototype}
+            title={canPrototype ? undefined : "Generate a PRD first"}
+            onClick={canPrototype && prototypeReady ? onViewPrototype : onClick}
+          >
+            {canPrototype && prototypeReady ? "View Prototype" : "Generate Prototype"}
+          </button>
+        )}
+      />
+    </div>
+  )
+}
 
 export function ChatScreen() {
   const {
@@ -163,17 +417,21 @@ export function ChatScreen() {
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
-  // User+company-scoped localStorage keys: chats are per-user, so neither a
-  // different tenant NOR a different member of the same workspace signing in
-  // on this browser may see these tabs. (Sign-out also purges the
-  // sprntly_chat_tabs_* prefix — this key is the defense in depth.)
+  // Per-tab chat state is SESSION-scoped: it lives in sessionStorage, not
+  // localStorage. So a fresh open (new browser tab/window, or reopening the app
+  // after closing it) starts with ONLY the pinned Weekly-brief tab — never last
+  // session's accumulated chat tabs. It still survives an in-session reload or a
+  // navigate-away-and-back, so clicking around the app never nukes open chats.
+  // Keys are ALSO user+company scoped so neither a different tenant nor a
+  // different teammate signing in on this browser can see these tabs; sign-out
+  // clears them outright (both storages) as defense in depth.
   const authUserId = auth.kind === "authed" ? auth.user.id : "anon"
   const tabsKey = `sprntly_chat_tabs_${authUserId}_${activeCompany}`
   const activeTabKey = `sprntly_chat_active_tab_${authUserId}_${activeCompany}`
 
   const [tabs, setTabs] = useState<ChatTab[]>(() => {
     try {
-      const saved = localStorage.getItem(tabsKey)
+      const saved = sessionStorage.getItem(tabsKey)
       if (!saved) return []
       // Restore with defaults for fields not persisted (prd/evidence are large — re-generate on reload)
       return (JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
@@ -199,7 +457,7 @@ export function ChatScreen() {
   const animatedTurnIds = useRef<Set<string>>(new Set())
   const [activeTabId, setActiveTabId] = useState<string | null>(() => {
     try {
-      const stored = localStorage.getItem(activeTabKey)
+      const stored = sessionStorage.getItem(activeTabKey)
       // First load (no persisted active tab) → default to the pinned brief tab.
       // A persisted "" means the user was on the chat landing/new-chat (active
       // tab = null), so we honour that and DON'T fall back to the brief tab.
@@ -227,14 +485,14 @@ export function ChatScreen() {
   const [prdPanelPending, setPrdPanelPending] = useState(false)
 
   // When the storage key changes (workspace switch OR a different user signs
-  // in), reload tabs from the new user+company-scoped storage so we never
-  // show another tenant's — or another teammate's — chat threads.
+  // in), reload tabs from the new user+company-scoped session storage so we
+  // never show another tenant's — or another teammate's — chat threads.
   const prevTabsKeyRef = useRef(tabsKey)
   useEffect(() => {
     if (prevTabsKeyRef.current === tabsKey) return
     prevTabsKeyRef.current = tabsKey
     try {
-      const saved = localStorage.getItem(tabsKey)
+      const saved = sessionStorage.getItem(tabsKey)
       if (saved) {
         setTabs((JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
           id: t.id ?? "", title: t.title ?? "", thread: t.thread ?? [],
@@ -245,7 +503,7 @@ export function ChatScreen() {
       } else {
         setTabs([])
       }
-      const storedActive = localStorage.getItem(activeTabKey)
+      const storedActive = sessionStorage.getItem(activeTabKey)
       // No persisted active tab for this company → default to the pinned brief
       // tab; a persisted "" honours the chat landing (active tab = null).
       setActiveTabId(storedActive == null ? BRIEF_TAB_ID : storedActive || null)
@@ -255,15 +513,16 @@ export function ChatScreen() {
     }
   }, [activeCompany, tabsKey, activeTabKey])
 
-  // Persist tabs to localStorage — strip large/transient fields (prd, evidence, *Generating)
+  // Persist tabs to sessionStorage (session-scoped; see the key comment above) —
+  // strip large/transient fields (prd, evidence, *Generating)
   useEffect(() => {
     try {
       const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, hydrating: _h, ...rest }) => rest)
-      localStorage.setItem(tabsKey, JSON.stringify(slim))
+      sessionStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
   }, [tabs, tabsKey])
   useEffect(() => {
-    try { localStorage.setItem(activeTabKey, activeTabId ?? "") } catch { /* ignore */ }
+    try { sessionStorage.setItem(activeTabKey, activeTabId ?? "") } catch { /* ignore */ }
   }, [activeTabId, activeTabKey])
 
   // The pinned brief tab is synthesized (not in `tabs`), so when it's active
@@ -282,18 +541,6 @@ export function ChatScreen() {
     if (!activeTab?.briefMeta) return null
     return prototypeStateForInsight(chatEntriesByInsight, activeTab.briefMeta.insightIndex)
   }, [activeTab?.briefMeta, chatEntriesByInsight])
-
-  // VIEW-only prototype affordance. The chat surface never offers "Generate
-  // prototype" — generation lives in the PRD panel — so this button only
-  // renders once the batch map confirms a ready prototype, and clicking it
-  // always navigates. prototypePrdId: the PRD the prototype is actually
-  // attached to (may be an older PRD than the insight's newest after a PRD
-  // regeneration).
-  const handleChatPrototype = useCallback(() => {
-    if (chatInsightState?.prototypeReady && chatInsightState.prdId != null) {
-      router.push(prototypePath(chatInsightState.prototypePrdId ?? chatInsightState.prdId))
-    }
-  }, [chatInsightState, router])
 
   const setThread = useCallback((updater: ThreadTurn[] | ((prev: ThreadTurn[]) => ThreadTurn[])) => {
     setTabs((prev) => prev.map((t) => {
@@ -315,27 +562,110 @@ export function ChatScreen() {
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
   // composer even while another tab is still loading.
   const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
-  // PRD ids known to already have persisted tickets in the DB — flips the chat
-  // action's "Create tickets" label to "View tickets". Populated per active PRD
-  // via storiesApi.getForPrd (see effect below).
-  const [prdsWithTickets, setPrdsWithTickets] = useState<ReadonlySet<number>>(new Set())
-  const checkedTicketPrdsRef = useRef<Set<number>>(new Set())
+  // Insight keys ("briefId:insightIndex") known to already have a saved evidence
+  // brief — flips the chat's first action to "View Evidence" (else it offers the
+  // PRD). Populated per active insight via loadEvidenceByInsight (see effect below).
+  const [insightsWithEvidence, setInsightsWithEvidence] = useState<ReadonlySet<string>>(new Set())
+  const checkedEvidenceRef = useRef<Set<string>>(new Set())
   // Composer busy/disabled + "thinking" indicator reflect ONLY the active tab's
   // in-flight status. Another tab being mid-ask must not disable this composer.
   const busy = isComposerBusy(busyTabs, activeTabId)
   const [showSlash, setShowSlash] = useState(false)
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
+  // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
+  const [slashActive, setSlashActive] = useState(0)
   // `file` is set for document formats (.pdf/.pptx/.docx/.doc): those can't be
   // inlined as text client-side. The File feeds the PRD-import command
   // ("import this as a PRD" → POST /v1/prd/import) or, for a plain question,
   // server-side text extraction at send time (POST /v1/ask/extract-file).
   const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
+  // The attachment whose content is open in the viewer overlay (click a file
+  // card on a user turn). Null = closed.
+  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string } | null>(null)
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
+  // Per-tab STOP flag — a tab id is present while the user has stopped its
+  // in-flight ask. The ask poller reads this (isStopped) to bail; it's cleared
+  // when a fresh ask starts on that tab so a stop never leaks into the next ask.
+  const stoppedTabsRef = useRef<Set<string>>(new Set())
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // The scrolling thread viewport, so a new question (and the assistant's
+  // thinking/answer under it) is scrolled into view instead of staying hidden
+  // below the fold in a long conversation.
+  const threadScrollRef = useRef<HTMLDivElement>(null)
+  // Whether the user is pinned near the bottom. We only auto-follow streaming
+  // replies while pinned, so scrolling up to read history isn't yanked back.
+  const threadPinnedRef = useRef(true)
+  const prevThreadLenRef = useRef(0)
+
+  const scrollThreadToBottom = useCallback((behavior: ScrollBehavior) => {
+    const el = threadScrollRef.current
+    if (!el) return
+    // Defer to the next frame so the just-added turn (and its thinking skeleton)
+    // is laid out before we measure scrollHeight.
+    requestAnimationFrame(() => {
+      try {
+        el.scrollTo({ top: el.scrollHeight, behavior })
+      } catch {
+        // jsdom / older engines without Element.scrollTo — set position directly.
+        el.scrollTop = el.scrollHeight
+      }
+    })
+  }, [])
+
+  // Track whether the user is pinned near the bottom of the thread. Auto-follow
+  // only applies while pinned, so scrolling up to read earlier turns during a
+  // long answer isn't fought by the follow effect.
+  const handleThreadScroll = useCallback(() => {
+    const el = threadScrollRef.current
+    if (!el) return
+    threadPinnedRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 120
+  }, [])
+
+  // Callback ref on the thread's content column. A ResizeObserver here keeps the
+  // viewport pinned to the bottom as content GROWS — the thinking skeleton
+  // appearing, then the answer typing in — not just on the initial render. That
+  // covers the async growth a one-shot scroll misses. Re-attaches whenever the
+  // content element mounts (tab switch, landing → thread), so it never observes
+  // a stale node.
+  const threadResizeObsRef = useRef<ResizeObserver | null>(null)
+  const setThreadContentEl = useCallback((el: HTMLDivElement | null) => {
+    threadResizeObsRef.current?.disconnect()
+    threadResizeObsRef.current = null
+    if (!el || typeof ResizeObserver === "undefined") return
+    const ro = new ResizeObserver(() => {
+      const scroller = threadScrollRef.current
+      if (scroller && threadPinnedRef.current) scroller.scrollTop = scroller.scrollHeight
+    })
+    ro.observe(el)
+    threadResizeObsRef.current = ro
+  }, [])
+  useEffect(() => () => threadResizeObsRef.current?.disconnect(), [])
+
+  // A new turn (the user just asked) → re-pin and smooth-scroll so the question
+  // + the assistant's thinking sit in view; the ResizeObserver then follows the
+  // answer as it grows. Guard on a real length increase so a reply landing on an
+  // existing turn doesn't double-trigger (the observer already handles growth).
+  useEffect(() => {
+    if (thread.length > prevThreadLenRef.current) {
+      threadPinnedRef.current = true
+      scrollThreadToBottom("smooth")
+    }
+    prevThreadLenRef.current = thread.length
+  }, [thread.length, scrollThreadToBottom])
+
+  // On tab switch/open, land at the bottom (newest turn) without animation and
+  // reset the pinned state for the newly shown thread.
+  useEffect(() => {
+    prevThreadLenRef.current = thread.length
+    threadPinnedRef.current = true
+    scrollThreadToBottom("auto")
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabId, scrollThreadToBottom])
 
   // Attach: documents keep the real File (for the PRD-import command); plain-text
   // formats are read as text and inlined into the next ask as context.
@@ -345,14 +675,12 @@ export function ChatScreen() {
     Array.from(files).forEach((file) => {
       if (/\.(pdf|pptx|docx|doc)$/i.test(file.name)) {
         setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
-        showToast("Attached", `"${file.name}" ready — ask about it, or say "import this as a PRD" / "convert this PRD into tickets".`)
         return
       }
       const reader = new FileReader()
       reader.onload = () => {
         const content = reader.result as string
         setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000) }])
-        showToast("Attached", `"${file.name}" added as context.`)
       }
       reader.readAsText(file)
     })
@@ -364,15 +692,15 @@ export function ChatScreen() {
     askApi.skills().then((r) => setSkills(r.skills)).catch(() => {
       // Hardcoded fallback if endpoint not available
       setSkills([
-        { id: "prd-author", label: "Generate PRD", trigger: "/prd", description: "Draft a product requirements document" },
-        { id: "prioritize", label: "Prioritize", trigger: "/prioritize", description: "Rank ideas using RICE, ICE, MoSCoW, or WSJF" },
-        { id: "user-stories", label: "User stories", trigger: "/stories", description: "Break a PRD into user stories" },
-        { id: "backlog-triage", label: "Triage backlog", trigger: "/triage", description: "Clean up backlog: cluster, dedupe" },
-        { id: "decision-memo", label: "Decision memo", trigger: "/decide", description: "Structure a build/buy decision" },
-        { id: "feedback-synthesis", label: "Feedback synthesis", trigger: "/feedback", description: "Synthesize feedback into themes" },
-        { id: "competitive-intelligence-review", label: "Competitive analysis", trigger: "/compete", description: "Competitive intelligence review" },
-        { id: "incident-runbook", label: "Incident runbook", trigger: "/incident", description: "Generate incident response runbook" },
-        { id: "fact-check", label: "Fact-check", trigger: "/factcheck", description: "Verify claims against sources" },
+        { id: "prd-author", label: "Generate PRD", trigger: "/prd", description: "Draft a product requirements document", category: "Documentation & Specification" },
+        { id: "prioritize", label: "Prioritize", trigger: "/prioritize", description: "Rank ideas using RICE, ICE, MoSCoW, or WSJF", category: "Prioritization & Decision" },
+        { id: "user-stories", label: "User stories", trigger: "/stories", description: "Break a PRD into user stories", category: "Documentation & Specification" },
+        { id: "backlog-triage", label: "Triage backlog", trigger: "/triage", description: "Clean up backlog: cluster, dedupe", category: "Prioritization & Decision" },
+        { id: "decision-memo", label: "Decision memo", trigger: "/decide", description: "Structure a build/buy decision", category: "Prioritization & Decision" },
+        { id: "feedback-synthesis", label: "Feedback synthesis", trigger: "/feedback", description: "Synthesize feedback into themes", category: "Stakeholder & Communication" },
+        { id: "competitive-intelligence-review", label: "Competitive analysis", trigger: "/compete", description: "Competitive intelligence review", category: "Strategy & Vision" },
+        { id: "incident-runbook", label: "Incident runbook", trigger: "/incident", description: "Generate incident response runbook", category: "Delivery & Operations" },
+        { id: "fact-check", label: "Fact-check", trigger: "/factcheck", description: "Verify claims against sources", category: "Verification" },
       ])
     })
   }, [])
@@ -410,7 +738,7 @@ export function ChatScreen() {
   // Rehydrate a PRD tab's chat thread from its saved conversation. A PRD's chat
   // is keyed by prd_id in Supabase (conversationsApi.byPrd), so reopening a PRD —
   // even on a new device or after the localStorage tab is gone — restores the
-  // user's earlier questions + Spiky's answers instead of an empty thread. Only
+  // user's earlier questions + Sprntly's answers instead of an empty thread. Only
   // ever fills a still-empty, unconverted tab (guarded again inside the setter so
   // a race with live typing can't clobber it); non-fatal on any failure.
   const hydratePrdThread = useCallback(async (tabId: string, prdId: number) => {
@@ -477,7 +805,7 @@ export function ChatScreen() {
   // the consumer can persist a seeded command turn against it.
   const openPrdInTab = useCallback((req: PrdTabRequest): string => {
     const { title, source } = req
-    const meta = source.kind === "generateBacklog" ? null : source.meta
+    const meta = source.kind === "generateIdeation" ? null : source.meta
     const existing = tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",
@@ -532,28 +860,40 @@ export function ChatScreen() {
       setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
       return tabId
     }
-    // generate | generateBacklog | load | resume — kick off, show the panel's
+    // generate | generateIdeation | load | resume — kick off, show the panel's
     // spinner, then land the result on the tab (and shared content while active).
     setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, briefMeta: meta, prdGenerating: true } : t))
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true })
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     void (async () => {
+      // Live preview: forward the accumulating Part A HTML (throttled inside
+      // runPrdGeneration) into shared content so PrdPanelContent renders the
+      // draft as it streams — only while this tab is still the active one.
+      const onPartial = (html: string) => {
+        if (activeTabIdRef.current === tabId) setContent({ prdPartialHtml: html })
+      }
       try {
         const result =
-          source.kind === "generate" ? await runPrdGeneration(source.meta)
-          : source.kind === "generateBacklog" ? await runPrdGenerationFromBacklog(source.backlogItemId)
-          : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined)
+          source.kind === "generate" ? await runPrdGeneration(source.meta, onPartial)
+          : source.kind === "generateIdeation" ? await runPrdGenerationFromIdeation(source.ideationItemId, onPartial)
+          : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined, onPartial)
           : await loadPrdById(source.prdId)
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
-          if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
-          // "convert this PRD into tickets": the user asked for TICKETS — once the
-          // imported PRD is ready, switch the panel to the Tickets tab (which
-          // kicks off user-stories generation for it). Only while this tab is
+          if (activeTabIdRef.current === tabId) setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+          // "convert this PRD into tickets": the user asked for TICKETS — once
+          // the imported PRD is ready, kick the user-stories generation NOW
+          // (fire-and-forget; the backend dedups in-flight jobs) so work starts
+          // before the Tickets tab even mounts and does its cache-read→generate
+          // round-trip. The tab's own poll picks the job up.
+          if (source.kind === "resume" && source.openTickets) {
+            void storiesApi.generate(result.prd.prd_id).catch(() => {})
+          }
+          // …then switch the panel to the Tickets tab. Only while this tab is
           // still active — never yank the panel out from under another tab.
           if (source.kind === "resume" && source.openTickets && activeTabIdRef.current === tabId) {
             openContentPanel("tickets")
           }
-          // The prd_id was UNKNOWN upfront (generate | generateBacklog — including
+          // The prd_id was UNKNOWN upfront (generate | generateIdeation — including
           // "View PRD" find-or-create, which resolves an EXISTING PRD). Now that we
           // have it, rehydrate the tab's chat by prd_id. New PRDs return no
           // conversation (no-op); an existing one restores the user's prior turns.
@@ -561,12 +901,12 @@ export function ChatScreen() {
           if (knownPrdId == null) void hydratePrdThread(tabId, result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
-          if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })
+          if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
           showToast("PRD unavailable", result.message.slice(0, 200))
         }
       } catch (e) {
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
-        if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false })
+        if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
@@ -615,43 +955,73 @@ export function ChatScreen() {
       }
       return
     }
-    const defaultKey = pickDefaultDetailKey(content.briefDetails)
-    const meta = tab.briefMeta
-      ?? content.detail?.meta
-      ?? (defaultKey ? content.briefDetails[defaultKey]?.meta ?? null : null)
-    if (!meta) {
-      openContentPanel("prd") // panel will show empty state / prompt
+    // No cached PRD and none saved on this tab yet. An insight-anchored tab
+    // (briefMeta) generates that insight's PRD. A PLAIN chat tab (no briefMeta) is
+    // seeded from its CONVERSATION — not the brief's default insight, which served
+    // an unrelated PRD (the bug). With no conversation to seed from, show the empty
+    // prompt instead of an irrelevant document.
+    if (!tab.briefMeta) {
+      const convTask = conversationToPrdTask(tab.thread)
+      if (!convTask) {
+        openContentPanel("prd") // nothing to seed from yet — empty state / prompt
+        return
+      }
+      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
+      setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
+      openContentPanel("prd")
+      try {
+        const { prdApi } = await import("../../../lib/api")
+        const start = await prdApi.generateFromTask(convTask)
+        // Poll the just-kicked-off task PRD onto THIS tab (keeps the chat + PRD
+        // panel together) rather than spawning a separate tab.
+        const result = await resumePrdGeneration(start.prd_id, undefined, (html) => setContent({ prdPartialHtml: html }))
+        if (result.ok) {
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
+          setContent({ prd: result.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
+        } else {
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+          setContent({ prdGenerating: false, prdPartialHtml: null })
+          showToast("PRD generation failed", result.message)
+        }
+      } catch (e) {
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+        setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
+      }
       return
     }
+    // Insight-anchored tab → generate that brief insight's PRD.
+    const meta = tab.briefMeta
     setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
     // Drive the panel's generating spinner via content too (not just per-tab),
     // so the right rail shows in-progress PRD state immediately on open.
-    setContent({ prd: null, prdMeta: null, prdGenerating: true })
+    setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
     openContentPanel("prd")
     try {
-      const result = await runPrdGeneration(meta)
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
-        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-        setContent({ prdGenerating: false })
+        setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", result.message)
       }
     } catch (e) {
       setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-      setContent({ prdGenerating: false })
+      setContent({ prdGenerating: false, prdPartialHtml: null })
       showToast("PRD generation failed", e instanceof Error ? e.message : "Unknown error")
     }
-  }, [activeTabId, chatInsightState, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
+  }, [activeTabId, chatInsightState, openContentPanel, setContent, showToast])
 
   const handleOpenEvidence = useCallback(async () => {
     if (!activeTabId) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
     if (!tab || tab.evidenceGenerating) return
-    // Already generated — sync to context and open panel
+    // Already generated — sync to context and open panel. Stamp the insight meta
+    // so the Evidence tab's "Generate/View PRD" bar knows which insight to act on.
     if (tab.evidence) {
-      setContent({ evidence: tab.evidence })
+      setContent({ evidence: tab.evidence, ...(tab.briefMeta ? { prdMeta: tab.briefMeta } : {}) })
       openContentPanel("evidence")
       return
     }
@@ -663,22 +1033,25 @@ export function ChatScreen() {
       openContentPanel("evidence")
       return
     }
-    setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: true } : t))
-    setContent({ evidence: null, evidenceGenerating: true })
+    const tabId = activeTabId
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: true } : t))
+    setContent({ evidence: null, evidenceGenerating: true, evidencePartialHtml: null, prdMeta: meta })
     openContentPanel("evidence")
     try {
-      const result = await runEvidenceGeneration(meta)
+      const result = await runEvidenceGeneration(meta, undefined, (html) => {
+        if (activeTabIdRef.current === tabId) setContent({ evidencePartialHtml: html })
+      })
       if (result.ok) {
-        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
-        setContent({ evidence: result.evidence, evidenceGenerating: false })
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+        setContent({ evidence: result.evidence, evidenceGenerating: false, evidencePartialHtml: null, prdMeta: meta })
       } else {
-        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
-        setContent({ evidenceGenerating: false })
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false } : t))
+        setContent({ evidenceGenerating: false, evidencePartialHtml: null })
         showToast("Evidence generation failed", result.message)
       }
     } catch (e) {
-      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
-      setContent({ evidenceGenerating: false })
+      setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false } : t))
+      setContent({ evidenceGenerating: false, evidencePartialHtml: null })
       showToast("Evidence generation failed", e instanceof Error ? e.message : "Unknown error")
     }
   }, [activeTabId, content.briefDetails, content.detail?.meta, openContentPanel, setContent, showToast])
@@ -706,20 +1079,20 @@ export function ChatScreen() {
       const prdId = Number(pendingPrd.id)
       if (Number.isFinite(prdId)) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
-        setContent({ prd: null, prdMeta: null, prdGenerating: true })
+        setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
         void (async () => {
           try {
-            const result = await resumePrdGeneration(prdId, meta)
+            const result = await resumePrdGeneration(prdId, meta, (html) => setContent({ prdPartialHtml: html }))
             if (result.ok) {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
-              setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false })
+              setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
             } else {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-              setContent({ prdGenerating: false })
+              setContent({ prdGenerating: false, prdPartialHtml: null })
             }
           } catch {
             setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
-            setContent({ prdGenerating: false })
+            setContent({ prdGenerating: false, prdPartialHtml: null })
           }
         })()
       }
@@ -730,16 +1103,22 @@ export function ChatScreen() {
       const evId = Number(pendingEvidence.id)
       if (Number.isFinite(evId)) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: true } : t))
+        setContent({ evidencePartialHtml: null })
         void (async () => {
           try {
-            const result = await resumeEvidenceGeneration(evId, meta)
+            const result = await resumeEvidenceGeneration(evId, meta, (html) => {
+              if (activeTabIdRef.current === activeTabId) setContent({ evidencePartialHtml: html })
+            })
             if (result.ok) {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
+              setContent({ evidencePartialHtml: null })
             } else {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
+              setContent({ evidencePartialHtml: null })
             }
           } catch {
             setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
+            setContent({ evidencePartialHtml: null })
           }
         })()
       }
@@ -778,6 +1157,52 @@ export function ChatScreen() {
     })
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId, setContent])
+
+  // Chat-task PRDs generate an Evidence artifact server-side (semantic KG
+  // retrieval over the task — skipped when the KG has no backing). Once a tab
+  // carries a chat-sourced PRD, probe for that doc and land it on the tab: a
+  // found row (ready OR still generating) surfaces the Evidence tab (the
+  // hidden-gate in ContentPanel clears when evidence/evidenceGenerating is
+  // set); a 404 (no backing → skipped) leaves the tab hidden. One probe per
+  // (tab, prd) — the ref set is keyed accordingly so a regenerated PRD probes
+  // again but re-renders don't.
+  const evidenceProbedRef = useRef<Set<string>>(new Set())
+  const activePrdId = (() => {
+    const tab = tabs.find((t) => t.id === activeTabId)
+    return tab?.prd?.source === "chat" ? tab.prd.prd_id : null
+  })()
+  useEffect(() => {
+    if (!activeTabId || activePrdId == null) return
+    const tabId = activeTabId
+    const probeKey = `${tabId}:${activePrdId}`
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    if (!tab || tab.evidence || tab.evidenceGenerating) return
+    if (evidenceProbedRef.current.has(probeKey)) return
+    evidenceProbedRef.current.add(probeKey)
+    void (async () => {
+      try {
+        const { prdApi } = await import("../../../lib/api")
+        const rec = await prdApi.evidenceForPrd(activePrdId)
+        if (!rec || rec.status === "failed") return
+        // A doc exists (ready or in-flight): show the Evidence tab's spinner
+        // while resumeEvidenceGeneration polls it to terminal (a ready row
+        // resolves on the first poll).
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: true } : t))
+        if (activeTabIdRef.current === tabId) setContent({ evidenceGenerating: true })
+        const result = await resumeEvidenceGeneration(rec.id, undefined)
+        setTabs((prev) => prev.map((t) => t.id === tabId
+          ? { ...t, evidenceGenerating: false, evidence: result.ok ? result.evidence : null }
+          : t))
+        if (activeTabIdRef.current === tabId) {
+          setContent({ evidenceGenerating: false, ...(result.ok ? { evidence: result.evidence } : {}) })
+        }
+      } catch {
+        // Probe is best-effort — a failed lookup just leaves the tab hidden.
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false } : t))
+        if (activeTabIdRef.current === tabId) setContent({ evidenceGenerating: false })
+      }
+    })()
+  }, [activeTabId, activePrdId, setContent])
 
   useEffect(() => {
     if (!pendingSearchHandoff) return
@@ -841,7 +1266,7 @@ export function ChatScreen() {
   }
   const persistence = persistenceRef.current
 
-  // Resume a conversation from ChatsScreen or BacklogScreen. Two payload
+  // Resume a conversation from ChatsScreen or IdeationScreen. Two payload
   // shapes: with `turns` (built locally / legacy) the tab opens pre-filled;
   // with only a `dbId` (All-chats row click) the tab opens INSTANTLY in a
   // `hydrating` state and the turns are fetched here in the background — the
@@ -875,7 +1300,7 @@ export function ChatScreen() {
         return restored
       }
 
-      // Pre-fetched turns → open filled (BacklogScreen + no-dbId fallback).
+      // Pre-fetched turns → open filled (IdeationScreen + no-dbId fallback).
       const preloaded = buildRestored(data.turns ?? [], "resumed")
       if (preloaded.length > 0) {
         // The resumed tab's dbConvId is set via openTab(..., data.dbId) —
@@ -896,28 +1321,42 @@ export function ChatScreen() {
       setTabs((prev) => prev.map((t) => (t.id === tabId ? { ...t, hydrating: true } : t)))
       const fallback = buildRestored(data.fallbackTurns ?? [], `resumed-fb-${data.dbId}`)
       void (async () => {
-        try {
-          const { conversationsApi } = await import("../../../lib/api")
-          const res = await conversationsApi.listTurns(data.dbId)
-          const restored = buildRestored(res.turns ?? [], `resumed-${data.dbId}`)
-          // Empty server history → the preview-derived fallback thread.
-          const finalThread = restored.length > 0 ? restored : fallback
-          // Guarded fill: never clobber a thread the user started meanwhile.
-          setTabs((prev) => prev.map((t) =>
-            t.id === tabId
-              ? { ...t, hydrating: false, thread: t.thread.length === 0 ? finalThread : t.thread }
-              : t))
-        } catch {
-          // Non-fatal: drop the loading state; show the fallback preview
-          // thread (or an empty, still-usable tab when there isn't one).
-          setTabs((prev) => prev.map((t) =>
-            t.id === tabId
-              ? { ...t, hydrating: false, thread: t.thread.length === 0 ? fallback : t.thread }
-              : t))
+        const { conversationsApi } = await import("../../../lib/api")
+        // Fetch the conversation's turns, RETRYING on a transient failure. This
+        // is the whole point of the resume: a single failed request must never
+        // silently collapse a multi-ask chat down to the preview-only fallback
+        // (a lone opening question that looks like a brand-new chat — the exact
+        // reported bug). `restored === null` means every attempt errored; an
+        // empty array is a genuine empty conversation.
+        let restored: ThreadTurn[] | null = null
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            const res = await conversationsApi.listTurns(data.dbId)
+            restored = buildRestored(res.turns ?? [], `resumed-${data.dbId}`)
+            break
+          } catch {
+            if (attempt < 2) await new Promise((r) => setTimeout(r, 250 * (attempt + 1)))
+          }
+        }
+        // Prefer the fetched thread whenever it has turns; otherwise the
+        // preview-derived fallback keeps the tab usable.
+        const finalThread = restored && restored.length > 0 ? restored : fallback
+        // Guarded fill: never clobber a thread the user started meanwhile, and
+        // never REPLACE a fuller thread (e.g. a reused open tab) with a thinner
+        // preview — only fill a still-empty tab.
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId
+            ? { ...t, hydrating: false, thread: t.thread.length === 0 ? finalThread : t.thread }
+            : t))
+        // If every attempt failed, say so instead of silently showing a partial
+        // thread — silence is what made a temporarily-unreachable history look
+        // like the chat had lost its messages.
+        if (restored === null) {
+          showToast("Couldn't load full chat history", "Showing a preview — reopen the chat to retry.")
         }
       })()
     } catch { /* ignore corrupt data */ }
-  }, [openTab])
+  }, [openTab, showToast])
   // Check on mount + whenever we navigate to this screen
   useEffect(() => { checkResume() }, [checkResume])
   // Re-check when the route lands on chat (covers goTo("chat") from ChatsScreen)
@@ -945,12 +1384,23 @@ export function ChatScreen() {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toISOString()
+      // The DB conversation this tab is bound to, if any. A tab resumed from
+      // Chat history already carries a `dbConvId` but has NO in-memory rail
+      // entry (its conversation lives only in ChatsScreen's DB list). Without
+      // this, a follow-up in a resumed room fell through to the `else` branch
+      // and prepended a phantom new rail row (titled with the follow-up text)
+      // that vanished on reload — the reported bug.
+      const dbConvId = tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ?? null
       // ONE rail entry per chat tab (mirrors the one-conversation-per-tab DB
       // invariant in chatPersistence.ts). A follow-up message in the same room
       // UPDATES that room's entry (latest turn, bumped time, moved to top)
       // instead of prepending a new row — otherwise every message showed up as
-      // its own item in the History list until the next page reload.
-      const existing = prev.find((c) => (c as any)._tabId === targetTabId)
+      // its own item in the History list until the next page reload. Match by
+      // the tab id OR the bound DB conversation id (covers resumed tabs).
+      const existing = prev.find((c) =>
+        (c as any)._tabId === targetTabId ||
+        (dbConvId != null && (c as any)._dbId === dbConvId),
+      )
       if (existing) {
         setContent({
           conversations: [
@@ -967,6 +1417,10 @@ export function ChatScreen() {
               time: timeStr,
               savedTurn: { id: turnId, query },
               _tabId: targetTabId,
+              // Tag with the bound DB conversation id (when resuming an existing
+              // thread) so ChatsScreen's `_dbId` dedup folds this into the real
+              // DB row instead of rendering it as a separate phantom entry.
+              ...(dbConvId != null ? { _dbId: dbConvId } : {}),
             } as ConversationRow,
             ...prev,
           ],
@@ -1020,21 +1474,38 @@ export function ChatScreen() {
   // the DB rather than regenerated.
   const prdCommandFlow = useCallback(async (seedQuery?: string) => {
     try {
-      const brief = await briefApi.current(activeCompany)
-      const insights = brief.insights || []
-      if (!insights.length) {
-        showToast("No brief yet", "Run the pipeline to refresh this week's brief first.")
+      // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
+      // the PRD from the user's own words: the backend synthesizes the insight
+      // (find-or-create keyed on the task text) and returns a generating prd_id
+      // that opens in the standard PRD tab via the resume path.
+      //
+      // A GENERIC "generate a PRD" (no topic) is seeded from THIS conversation —
+      // the user's turns in the active tab — so the PRD is about what was actually
+      // discussed. (Previously a bare command defaulted to the brief's top insight,
+      // which served an unrelated PRD.) With no conversation to seed from, we ask
+      // for a topic rather than opening something irrelevant.
+      const task = seedQuery ? prdCommandTask(seedQuery) : null
+      const activeTabNow = tabsRef.current.find((t) => t.id === activeTabIdRef.current)
+      const effectiveTask = task || conversationToPrdTask(activeTabNow?.thread ?? [])
+      if (effectiveTask) {
+        const { prdApi } = await import("../../../lib/api")
+        const start = await prdApi.generateFromTask(effectiveTask)
+        openPrdTab({
+          title: `PRD · ${start.title}`,
+          seedQuery,
+          source: { kind: "resume", prdId: start.prd_id, meta: null, origin: "task" },
+        })
         return
       }
-      openPrdTab({
-        title: "PRD · Weekly brief",
-        seedQuery,
-        source: { kind: "generate", meta: { briefId: brief.id, insightIndex: 0 } },
-      })
+      // No explicit topic and no conversation to ground it — ask for a topic.
+      showToast(
+        "What should the PRD cover?",
+        "Tell me the topic — e.g. \"generate a PRD for magic-link sign-in\" — or describe the problem first and I'll build one from our chat.",
+      )
     } catch (e) {
       showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
     }
-  }, [activeCompany, openPrdTab, showToast])
+  }, [openPrdTab, showToast])
 
   // A command phrasing over an ATTACHED DOCUMENT is the chat entry to the
   // PRD-import flow: upload the doc to POST /v1/prd/import — the same conversion
@@ -1065,7 +1536,18 @@ export function ChatScreen() {
       // tickets. With a document attached, either phrasing imports the doc as a
       // PRD; "…tickets" additionally lands on the Tickets tab when it's ready.
       const docFile = attachments.find((a) => a.file)?.file ?? null
-      if (isTicketsCommand(trimmed)) {
+      // Deictic-edit guard: with NO attached document, an edit-phrased message
+      // that points at the OPEN artifact ("make this PRD shorter", "shorten
+      // that ticket") beside a PRD tab is a QUESTION about that artifact, not a
+      // command to spawn a new one — let it fall through to the ask agent,
+      // which is grounded on the tab's PRD (+ evidence/tickets) since #786.
+      // With an attachment, "this PRD"/"this document" names the FILE, so the
+      // import flows below still run unchanged.
+      const activeTab = activeTabId ? tabsRef.current.find((t) => t.id === activeTabId) : undefined
+      const isPrdTab = !!(activeTab && (activeTab.prd || activeTab.prdId != null || activeTab.prdGenerating))
+      const deicticPrd = /\b(this|that|the current|my)\s+prd\b/i.test(trimmed)
+      const deicticTicket = /\b(this|that|the current|my)\s+tickets?\b/i.test(trimmed)
+      if (isTicketsCommand(trimmed) && !(!docFile && deicticTicket && isPrdTab)) {
         if (docFile) {
           setAttachments([])
           void importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
@@ -1074,13 +1556,12 @@ export function ChatScreen() {
         // No document: mirror the reply-footer "Create tickets" action when this
         // tab already carries a PRD. Otherwise fall through to the ask agent
         // (the user-stories skill answers in markdown, as before).
-        const tab = activeTabId ? tabsRef.current.find((t) => t.id === activeTabId) : undefined
-        if (tab?.prd) {
-          setContent({ prd: tab.prd, prdMeta: tab.briefMeta })
+        if (activeTab?.prd) {
+          setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
           openContentPanel("tickets")
           return
         }
-      } else if (isPrdCommand(trimmed)) {
+      } else if (isPrdCommand(trimmed) && !(!docFile && deicticPrd && isPrdTab)) {
         if (docFile) {
           setAttachments([])
           void importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
@@ -1097,30 +1578,47 @@ export function ChatScreen() {
       // markdown server-side (POST /v1/ask/extract-file) so a deck attached to
       // a plain question reaches the agent too — they used to be silently
       // dropped here, which read as "no document was attached" replies.
-      let query = trimmed
+      // `displayQuery` is what the thread shows (the user's ask, plus a chip per
+      // attachment — never the raw document dump). `sendQuery` is what the ask
+      // agent receives: the same text with the parsed attachment content folded
+      // in, exactly as before. Keeping them separate means the backend is
+      // unaffected while the UI stays clean, the way Claude's chat renders it.
+      const displayQuery = trimmed
+      let turnAttachments: { name: string; content?: string }[] = []
+      let sendQuery = trimmed
       if (attachments.length > 0) {
         let ctx: string
         try {
-          const parts = await Promise.all(
+          // Extract each attachment's text ONCE: plain-text attachments inline
+          // their content; documents (.pdf/.pptx/.docx/.doc) are parsed to
+          // markdown server-side. Order is preserved via the resolved array so
+          // the same text feeds BOTH the backend query and the clickable card's
+          // viewer — the document is never re-fetched to display it.
+          const extracted = await Promise.all(
             attachments.map(async (a) => {
-              if (!a.file) return `--- ${a.name} ---\n${a.content}`
-              const r = await askApi.extractFile(a.file)
-              return `--- ${a.name} ---\n${r.markdown.slice(0, 50000)}`
+              const text = a.file
+                ? (await askApi.extractFile(a.file)).markdown.slice(0, 50000)
+                : a.content
+              return { name: a.name, content: text }
             }),
           )
           // Clamp the TOTAL context so question + attachments stay under the
           // ask endpoint's 120k question cap even with several attachments.
-          ctx = parts.join("\n\n").slice(0, 100000)
+          ctx = extracted
+            .map((e) => `--- ${e.name} ---\n${e.content}`)
+            .join("\n\n")
+            .slice(0, 100000)
+          turnAttachments = extracted.map((e) => ({ name: e.name, content: e.content }))
         } catch (e) {
           // Keep the attachments so the user can retry or remove the bad one —
           // a silent drop is exactly the failure mode this path exists to fix.
           showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
           return
         }
-        query = `${query}\n\n[Attached files]\n${ctx}`
+        sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
         setAttachments([]) // clear after successful extraction only
       }
-      if (query.length < 1) return
+      if (sendQuery.length < 1) return
       // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
       // before doing any work. (Authoritative per-tab guard happens once
       // targetTabId is resolved below — needed for the no-active-tab case where
@@ -1131,26 +1629,39 @@ export function ChatScreen() {
       // Capture the target tab ID up-front so async callbacks always write to
       // the right tab, even if the user switches tabs while the request is in-flight.
       let targetTabId: string
+      // The thread turn shows the ASK (displayQuery) + a chip per attachment,
+      // never the folded-in document content that rides sendQuery to the backend.
+      const newTurn: ThreadTurn = {
+        id,
+        query: displayQuery,
+        ...(turnAttachments.length ? { attachments: turnAttachments } : {}),
+      }
+      // The tab title/handle falls back to the first attachment's name when the
+      // ask itself is empty, so a doc-only send still reads sensibly in the tab.
+      const handle = displayQuery || turnAttachments[0]?.name || "New chat"
       // No active tab, OR the active "tab" is the synthetic, thread-less brief
       // tab → spawn a FRESH chat tab seeded with the query. A chat started from
       // the weekly brief must never thread inline into it (the brief tab carries
       // no `tabs` entry, so appending would silently no-op anyway).
       if (!activeTabId || activeTabId === BRIEF_TAB_ID) {
-        const title = query.length > 40 ? `${query.slice(0, 37)}…` : query
-        targetTabId = openTab(title, [{ id, query }])
+        const title = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
+        targetTabId = openTab(title, [newTurn])
       } else {
         targetTabId = activeTabId
-        const newTitle = query.length > 40 ? `${query.slice(0, 37)}…` : query
+        const newTitle = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
         setTabs((prev) => prev.map((t) => {
           if (t.id !== targetTabId) return t
           // First message in a placeholder "New chat" tab → give it the real
           // title from the query (rename in place; do NOT spawn a second tab).
           const title = t.thread.length === 0 && t.title === NEW_CHAT_TITLE ? newTitle : t.title
-          return { ...t, title, thread: [...t.thread, { id, query }] }
+          return { ...t, title, thread: [...t.thread, newTurn] }
         }))
       }
-      pushPendingConversation(id, query, targetTabId)
+      pushPendingConversation(id, displayQuery, targetTabId)
       setActiveConv(0)
+      // A fresh ask on this tab clears any leftover Stop flag from a prior ask so
+      // the new one is never treated as pre-stopped.
+      stoppedTabsRef.current.delete(targetTabId)
       // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
       // It returns false (running nothing) if this tab already has an ask in
       // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
@@ -1165,7 +1676,25 @@ export function ChatScreen() {
         // generating server-side, and the active ask_id is persisted per tab
         // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
         // resume effect instead of re-asking.
-        ask: () => runAskGeneration(query, activeCompany, targetTabId, { isCancelled: () => !mountedRef.current }),
+        ask: () => {
+          // PRD-tab chat: send the tab's PRD id (and its conversation for
+          // follow-up history) so the answer is grounded on the open PRD +
+          // its insight/evidence/tickets/prototype. Resolved at send time —
+          // tabsRef, not the closure — so a PRD that finished generating
+          // after the tab opened is still picked up. `sendQuery` carries any
+          // attached-document content; `isStopped` lets the user stop the ask.
+          const targetTab = tabsRef.current.find((t) => t.id === targetTabId)
+          return runAskGeneration(sendQuery, activeCompany, targetTabId, {
+            isCancelled: () => !mountedRef.current,
+            isStopped: () => stoppedTabsRef.current.has(targetTabId),
+            ...(targetTab?.prdId != null
+              ? {
+                  prd_id: targetTab.prdId,
+                  ...(targetTab.dbConvId != null ? { conversation_id: targetTab.dbConvId } : {}),
+                }
+              : {}),
+          })
+        },
         onResult: (tabId, res) => {
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
@@ -1179,6 +1708,9 @@ export function ChatScreen() {
           // ask_id is still persisted, so the mount-time resume effect will
           // re-attach and populate on return. Not a failure — no error UI/toast.
           if (e instanceof AskCancelledError) return
+          // User hit Stop: the stopped turn is already rendered by handleStopAsk.
+          // Not a failure — no error bubble/toast.
+          if (e instanceof AskStoppedError) return
           const detail = e instanceof ApiError && e.body && typeof e.body === "object" && "detail" in e.body
             ? (e.body as { detail: unknown }).detail
             : null
@@ -1208,6 +1740,44 @@ export function ChatScreen() {
     },
     [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdCommandFlow, pushPendingConversation, setContent, showToast],
   )
+
+  // ── Stop an in-flight ask ─────────────────────────────────────────────────
+  // The composer's Send button becomes a Stop button while the active tab's ask
+  // is generating. Stopping is deliberate (unlike a background unmount): it
+  // reclaims the composer AT ONCE, marks the in-flight turn `stopped`, and asks
+  // the backend to cancel so the worker aborts before its next LLM step and any
+  // late answer is discarded server-side.
+  const handleStopAsk = useCallback(() => {
+    const tabId = activeTabId
+    if (!tabId) return
+    // 1) Signal the running poller to bail — it clears the persisted ask_id (so a
+    //    remount won't resume) and rejects with AskStoppedError, which onError
+    //    swallows. Checked on the poll's next tick.
+    stoppedTabsRef.current.add(tabId)
+    // 2) Best-effort backend cancel: the worker polls the job status between LLM
+    //    steps and aborts before the expensive answer call when it lands early.
+    const pending = getPendingAsk(activeCompany, tabId)
+    if (pending) {
+      const askId = Number(pending.id)
+      if (Number.isFinite(askId)) void askApi.cancel(askId).catch(() => {})
+    }
+    // 3) Reclaim the composer immediately rather than waiting for the poll's next
+    //    tick (runTabAsk's finally also clears these — the double-clear is safe).
+    askingTabsRef.current.delete(tabId)
+    setBusyTabs((prev) => removeFromSet(prev, tabId))
+    // 4) Replace the in-flight turn's thinking skeleton with a muted stopped note.
+    //    The in-flight turn is the last one still awaiting a reply.
+    setTabs((prev) => prev.map((t) => {
+      if (t.id !== tabId) return t
+      let idx = -1
+      for (let i = t.thread.length - 1; i >= 0; i--) {
+        const turn = t.thread[i]
+        if (!turn.reply && !turn.error && !turn.stopped) { idx = i; break }
+      }
+      if (idx === -1) return t
+      return { ...t, thread: t.thread.map((turn, i) => i === idx ? { ...turn, stopped: true } : turn) }
+    }))
+  }, [activeTabId, activeCompany, setBusyTabs])
 
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
   // A question typed on the weekly-brief surface must open its OWN chat tab, not
@@ -1361,7 +1931,7 @@ export function ChatScreen() {
       // Re-attach only when the last turn is still awaiting a reply (the
       // canonical "asking…" marker that survives in the persisted thread).
       const last = tab.thread[tab.thread.length - 1]
-      if (!last || last.reply !== undefined || last.error !== undefined) continue
+      if (!last || last.reply !== undefined || last.error !== undefined || last.stopped) continue
       if (askingTabsRef.current.has(tab.id)) continue
       resumedAskTabsRef.current.add(tab.id)
       const turnId = last.id
@@ -1369,9 +1939,16 @@ export function ChatScreen() {
       // Restore the optimistic asking/busy UX for this tab.
       askingTabsRef.current.add(targetTabId)
       setBusyTabs((prev) => addToSet(prev, targetTabId))
+      stoppedTabsRef.current.delete(targetTabId)
       void (async () => {
         try {
-          const res = await resumeAskGeneration(askId, activeCompany, targetTabId, () => !mountedRef.current)
+          const res = await resumeAskGeneration(
+            askId,
+            activeCompany,
+            targetTabId,
+            () => !mountedRef.current,
+            () => stoppedTabsRef.current.has(targetTabId),
+          )
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
               ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, reply: res } : turn),
@@ -1382,6 +1959,9 @@ export function ChatScreen() {
           // Unmounted again mid-resume: leave the marker so the NEXT mount
           // re-attaches. Don't write an error into the thread.
           if (e instanceof AskCancelledError) return
+          // User stopped the resumed ask: the stopped turn is rendered by
+          // handleStopAsk; not a failure, so no error bubble.
+          if (e instanceof AskStoppedError) return
           const msg = e instanceof Error ? e.message : "Something went wrong"
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
@@ -1411,12 +1991,54 @@ export function ChatScreen() {
     void submitAsk(q)
     const ta = composerRef.current
     if (ta) {
-      ta.style.height = "auto"
-      ta.style.height = "24px"
+      // Clear the inline height so the textarea snaps back to its CSS resting
+      // size (min-height + padding). A hardcoded value here is shorter than the
+      // vertical padding and clips the placeholder after sending.
+      ta.style.height = ""
     }
   }
 
+  const filteredSkills = useMemo(
+    () =>
+      skills.filter((s) =>
+        slashFilter === "" ||
+        s.trigger.toLowerCase().includes("/" + slashFilter) ||
+        s.label.toLowerCase().includes(slashFilter) ||
+        s.description.toLowerCase().includes(slashFilter),
+      ),
+    [skills, slashFilter],
+  )
+  const slashOpen = showSlash && filteredSkills.length > 0
+  // Keep the highlight in range as the filtered list shrinks/grows.
+  useEffect(() => {
+    setSlashActive((i) => Math.min(i, Math.max(0, filteredSkills.length - 1)))
+  }, [filteredSkills.length])
+
   const handleComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // When the slash palette is open, arrow keys / Enter / Tab drive it and Esc
+    // dismisses it — the composer's own Enter-to-send yields to the picker.
+    if (slashOpen) {
+      if (e.key === "ArrowDown") {
+        e.preventDefault()
+        setSlashActive((i) => (i + 1) % filteredSkills.length)
+        return
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault()
+        setSlashActive((i) => (i - 1 + filteredSkills.length) % filteredSkills.length)
+        return
+      }
+      if (e.key === "Enter" || e.key === "Tab") {
+        e.preventDefault()
+        handleSlashSelect(filteredSkills[slashActive] ?? filteredSkills[0])
+        return
+      }
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setShowSlash(false)
+        return
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault()
       handleComposerSubmit()
@@ -1432,6 +2054,7 @@ export function ChatScreen() {
     if (val.startsWith("/")) {
       setShowSlash(true)
       setSlashFilter(val.slice(1).toLowerCase())
+      setSlashActive(0)
     } else {
       setShowSlash(false)
     }
@@ -1442,13 +2065,6 @@ export function ChatScreen() {
     setDraft(skill.trigger + " ")
     composerRef.current?.focus()
   }
-
-  const filteredSkills = skills.filter((s) =>
-    slashFilter === "" ||
-    s.trigger.toLowerCase().includes("/" + slashFilter) ||
-    s.label.toLowerCase().includes(slashFilter) ||
-    s.description.toLowerCase().includes(slashFilter)
-  )
 
   const handleStarterChip = (text: string) => {
     void submitAsk(text)
@@ -1543,6 +2159,26 @@ export function ChatScreen() {
     router.replace("/")
   }, [searchParams, startNewThread, router])
 
+  // ── PRD deep-link (`/brief?prd=<id>`) ─────────────────────────────────────
+  // The Slack "your PRD is ready" ping links here carrying the prd id. Open that
+  // PRD as a chat tab + panel via the SAME load flow the command palette / brief
+  // "View PRD" use (openPrdTab → kind:"load"). openPrdTab routes to `/`, which
+  // strips the `?prd=` param, so no separate replace is needed. Latched like the
+  // new-chat handler so it fires once per arrival and re-arms when absent.
+  const consumedPrdRef = useRef(false)
+  useEffect(() => {
+    const raw = searchParams.get("prd")
+    if (raw == null) {
+      consumedPrdRef.current = false
+      return
+    }
+    if (consumedPrdRef.current) return
+    const prdId = Number(raw)
+    if (!Number.isInteger(prdId) || prdId <= 0) return
+    consumedPrdRef.current = true
+    openPrdTab({ title: "PRD", source: { kind: "load", prdId, meta: null } })
+  }, [searchParams, openPrdTab])
+
   const hasThread = thread.length > 0
   // A tab bound to a PRD or brief insight opens with the insight itself as the
   // conversation's first agent message (see the insight turn rendered at the top
@@ -1577,26 +2213,42 @@ export function ChatScreen() {
   // know — but only for an insight-bound tab that has no PRD loaded on it yet
   // (a tab already carrying its prd is authoritative, no wait needed).
   const chatPrdCtaWaiting = !chatPrdExists && !!activeTab?.briefMeta && chatMapLoading
-  // Does the active tab's PRD already have persisted tickets? Check once per PRD
-  // (cache-read only, no generation) so the action reads "View tickets" for a PRD
-  // that's already been broken into stories, else "Create tickets".
-  const activeTicketPrdId = activeTab?.prdId ?? null
+  // Does the active tab's insight already have a saved evidence brief? Check once
+  // per insight (cache-read only, no generation) so the chat's first action reads
+  // "View Evidence" when evidence exists. Uploaded PRDs / plain chats carry no
+  // insight (no briefMeta), so they fall through to the PRD action.
+  const activeEvidenceKey = activeTab?.briefMeta
+    ? `${activeTab.briefMeta.briefId}:${activeTab.briefMeta.insightIndex}`
+    : null
   useEffect(() => {
-    if (activeTicketPrdId == null || checkedTicketPrdsRef.current.has(activeTicketPrdId)) return
-    checkedTicketPrdsRef.current.add(activeTicketPrdId)
+    if (!activeEvidenceKey || checkedEvidenceRef.current.has(activeEvidenceKey)) return
+    checkedEvidenceRef.current.add(activeEvidenceKey)
+    const [bId, iIdx] = activeEvidenceKey.split(":").map(Number)
     let cancelled = false
     void (async () => {
       try {
-        const { storiesApi } = await import("../../../lib/api")
-        const cache = await storiesApi.getForPrd(activeTicketPrdId)
-        if (!cancelled && cache.status === "ready" && cache.stories.length > 0) {
-          setPrdsWithTickets((prev) => new Set(prev).add(activeTicketPrdId))
+        const ev = await loadEvidenceByInsight(bId, iIdx)
+        if (!cancelled && ev) {
+          setInsightsWithEvidence((prev) => new Set(prev).add(activeEvidenceKey))
         }
-      } catch { /* non-fatal: default to "Create tickets" */ }
+      } catch { /* non-fatal: default to the PRD action */ }
     })()
     return () => { cancelled = true }
-  }, [activeTicketPrdId])
-  const chatTicketsExist = activeTicketPrdId != null && prdsWithTickets.has(activeTicketPrdId)
+  }, [activeEvidenceKey])
+  // Evidence exists if it's cached on the tab OR the insight has a saved brief.
+  const chatEvidenceExists =
+    !!activeTab?.evidence || (activeEvidenceKey != null && insightsWithEvidence.has(activeEvidenceKey))
+  // The PRD the chat's prototype button generates/views from (null → disabled).
+  const chatProtoPrdId = activeTab?.prdId ?? chatInsightState?.prdId ?? null
+  // Whether a ready prototype already exists (from the batch map) — drives the
+  // prototype button's View vs Generate face.
+  const chatPrototypeReady = !!chatInsightState?.prototypeReady
+  // Navigate to an already-built prototype (the CTA's skipExistenceCheck path
+  // only GENERATES; the batch map tells us when to VIEW instead).
+  const handleViewPrototype = useCallback(() => {
+    const pid = chatInsightState?.prototypePrdId ?? chatInsightState?.prdId ?? null
+    if (pid != null) router.push(prototypePath(pid))
+  }, [chatInsightState, router])
   const displayChips = useMemo(() => {
     const chips = buildHomeChips(homeCards, starters)
     return chips.length > 0 ? chips : DEFAULT_HOME_CHIPS
@@ -1717,7 +2369,11 @@ export function ChatScreen() {
             <BriefChat />
           ) : (
           <main className={`od-center ${showThreadView ? "od-center--thread" : "od-center--landing"}`}>
-            <div className={`od-center-scroll${!showThreadView ? " od-center-scroll--home-landing" : ""}`}>
+            <div
+              className={`od-center-scroll${!showThreadView ? " od-center-scroll--home-landing" : ""}`}
+              ref={threadScrollRef}
+              onScroll={handleThreadScroll}
+            >
               {!showThreadView ? (
                 <div className="home-landing-eyeline">
                   <div className="od-center-inner od-center-inner--home">
@@ -1732,41 +2388,14 @@ export function ChatScreen() {
 
                     <div className="home-landing-composer">
                       <div className="chat-home-composer" style={{ position: "relative" }}>
-                        {/* Slash command dropdown (home) */}
-                        {showSlash && filteredSkills.length > 0 && (
-                          <div style={{
-                            position: "absolute", bottom: "100%", left: 0, right: 0,
-                            background: "var(--surface, #fff)", borderRadius: 10,
-                            border: "1px solid var(--line, #E8E6E0)",
-                            boxShadow: "0 -4px 20px rgba(0,0,0,0.08)", zIndex: 10,
-                            maxHeight: 280, overflowY: "auto", padding: "6px 0",
-                          }}>
-                            <div style={{ padding: "4px 12px 6px", fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-4)" }}>
-                              Skills
-                            </div>
-                            {filteredSkills.map((s) => (
-                              <button
-                                key={s.id}
-                                type="button"
-                                onClick={() => handleSlashSelect(s)}
-                                style={{
-                                  display: "flex", alignItems: "flex-start", gap: 10, width: "100%",
-                                  padding: "8px 12px", background: "none", border: "none",
-                                  cursor: "pointer", textAlign: "left", fontSize: 13,
-                                }}
-                                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F4F1EA)" }}
-                                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none" }}
-                              >
-                                <span style={{ fontSize: 11, fontWeight: 600, color: "var(--accent, #179463)", fontFamily: "var(--font-mono, monospace)", minWidth: 80, flexShrink: 0 }}>
-                                  {s.trigger}
-                                </span>
-                                <span>
-                                  <span style={{ fontWeight: 500, color: "var(--ink)" }}>{s.label}</span>
-                                  <span style={{ display: "block", fontSize: 11.5, color: "var(--ink-3)", marginTop: 1 }}>{s.description}</span>
-                                </span>
-                              </button>
-                            ))}
-                          </div>
+                        {/* Slash command palette (home) */}
+                        {slashOpen && (
+                          <SlashSkillMenu
+                            skills={filteredSkills}
+                            activeIndex={slashActive}
+                            onSelect={handleSlashSelect}
+                            onHover={setSlashActive}
+                          />
                         )}
                         <textarea
                           ref={composerRef}
@@ -1787,15 +2416,26 @@ export function ChatScreen() {
                               Attach
                             </button>
                           </div>
-                          <button
-                            type="button"
-                            className="chat-home-composer-send"
-                            aria-label="Send"
-                            disabled={busy || draft.trim().length < 3}
-                            onClick={handleComposerSubmit}
-                          >
-                            <IconSendUp size={16} />
-                          </button>
+                          {busy ? (
+                            <button
+                              type="button"
+                              className="chat-home-composer-send chat-home-composer-send--stop"
+                              aria-label="Stop generating"
+                              onClick={handleStopAsk}
+                            >
+                              <IconStop size={14} />
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="chat-home-composer-send"
+                              aria-label="Send"
+                              disabled={draft.trim().length < 3}
+                              onClick={handleComposerSubmit}
+                            >
+                              <IconSendUp size={16} />
+                            </button>
+                          )}
                         </div>
                         {/* Attached files preview — the landing composer must show
                             what's attached too, not rely on the transient toast */}
@@ -1836,7 +2476,7 @@ export function ChatScreen() {
                 </div>
               ) : (
                 <div className="bc-scroll">
-                  <div className="bc-thread">
+                  <div className="bc-thread" ref={setThreadContentEl}>
                     {/* Insight message — the chat opens with its insight as the
                         agent's first message (in the flow, not a pinned heading).
                         Hosts the Generate/View PRD + Generate/View Prototype
@@ -1852,7 +2492,7 @@ export function ChatScreen() {
                           <span className="bc-agent-name">{AGENT_NAME}</span>
                           <span className="bc-agent-badge">
                             <IconSparkle size={10} />
-                            PM COWORKER
+                            Product Coworker
                           </span>
                         </div>
                         <div className="bc-agent-body">
@@ -1868,33 +2508,17 @@ export function ChatScreen() {
                             </div>
                           ) : null}
                         </div>
-                        <div className="bc-actions">
-                          <button
-                            type="button"
-                            className="bc-action-btn bc-action-btn--primary"
-                            disabled={!!activeTab?.prdGenerating || chatPrdCtaWaiting}
-                            onClick={handleOpenPrd}
-                          >
-                            {activeTab?.prdGenerating
-                              ? "Generating PRD…"
-                              : chatPrdCtaWaiting ? "Loading…"
-                              : chatPrdExists ? "View PRD" : "Generate PRD"}
-                          </button>
-                          {/* View-only: rendered ONLY once a ready prototype is
-                              confirmed. Never "Generate prototype" here — the PRD
-                              panel already owns the generate affordance, and while
-                              the map is still loading we show nothing rather than
-                              a label that flips after the fetch lands. */}
-                          {chatInsightState?.prototypeReady ? (
-                            <button
-                              type="button"
-                              className="bc-action-btn"
-                              onClick={handleChatPrototype}
-                            >
-                              View prototype
-                            </button>
-                          ) : null}
-                        </div>
+                        <ChatArtifactActions
+                          evidenceExists={chatEvidenceExists}
+                          prdExists={chatPrdExists}
+                          prdWaiting={chatPrdCtaWaiting}
+                          prdGenerating={!!activeTab?.prdGenerating}
+                          onViewEvidence={handleOpenEvidence}
+                          onOpenPrd={handleOpenPrd}
+                          prototypePrdId={chatProtoPrdId}
+                          prototypeReady={chatPrototypeReady}
+                          onViewPrototype={handleViewPrototype}
+                        />
                       </div>
                     ) : null}
                     {/* "User input needed" items from the PRD, surfaced as chat
@@ -1924,6 +2548,14 @@ export function ChatScreen() {
                     ) : null}
                     {thread.map((turn, idx) => {
                       const isLast = idx === thread.length - 1
+                      // A turn shows the "thinking" skeleton ONLY while its ask is
+                      // genuinely in flight — the active tab is busy AND this is the
+                      // last (in-flight) turn. Any other reply-less turn is terminal:
+                      // an ask that never got a response (failed / stopped / abandoned,
+                      // or a restored orphan turn from history). Basing this on live
+                      // busy state — not merely `reply === undefined` — means a
+                      // sessionStorage-cached thread renders correctly on reload too.
+                      const isGenerating = busy && isLast
                       const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
                       if (hasFreshReply) animatedTurnIds.current.add(turn.id)
                       return (
@@ -1932,7 +2564,21 @@ export function ChatScreen() {
                             <span className="bc-avatar">{userInitials}</span>
                             <span className="bc-user-name">{name}</span>
                           </div>
-                          <div className="bc-user-bubble">{turn.query}</div>
+                          {turn.attachments?.length ? (
+                            <div className="bc-user-attachments">
+                              {turn.attachments.map((a, i) => (
+                                <TurnAttachmentCard
+                                  key={i}
+                                  name={a.name}
+                                  content={a.content}
+                                  onOpen={() =>
+                                    setViewerAttachment({ name: a.name, content: a.content ?? "" })
+                                  }
+                                />
+                              ))}
+                            </div>
+                          ) : null}
+                          {turn.query ? <div className="bc-user-bubble">{turn.query}</div> : null}
                           <div className="bc-agent-head">
                             <span className="bc-agent-mark">
                               <IconSparkle size={14} />
@@ -1940,12 +2586,21 @@ export function ChatScreen() {
                             <span className="bc-agent-name">{AGENT_NAME}</span>
                             <span className="bc-agent-badge">
                               <IconSparkle size={10} />
-                              PM COWORKER
+                              Product Coworker
                             </span>
                           </div>
                           <div className="bc-agent-body">
                             {turn.error ? <div className="bc-error">{turn.error}</div> : null}
-                            {!turn.reply && !turn.error ? <AssistantThinkingSkeleton compact /> : null}
+                            {turn.stopped && !turn.reply ? (
+                              <div className="bc-stopped">You stopped this response.</div>
+                            ) : null}
+                            {!turn.reply && !turn.error && !turn.stopped ? (
+                              isGenerating ? (
+                                <AssistantThinkingSkeleton compact />
+                              ) : (
+                                <div className="bc-stopped">No response was generated for this message.</div>
+                              )
+                            ) : null}
                             {turn.reply ? (
                               <AskReplyBody
                                 reply={turn.reply}
@@ -1954,60 +2609,26 @@ export function ChatScreen() {
                               />
                             ) : null}
                           </div>
-                          {/* Skip the row when the insight/PRD card is shown at the
-                              top of the thread — it already hosts these actions, and
-                              rendering both reads as duplicate button noise. */}
-                          {isLast && turn.reply && !showInsightMsg ? (
-                            <div className="bc-actions">
-                              <button
-                                type="button"
-                                className="bc-action-btn bc-action-btn--primary"
-                                disabled={!!activeTab?.prdGenerating || chatPrdCtaWaiting}
-                                onClick={handleOpenPrd}
-                              >
-                                {activeTab?.prdGenerating
-                                  ? "Generating PRD…"
-                                  : chatPrdCtaWaiting ? "Loading…"
-                                  : chatPrdExists ? "View PRD" : "Generate PRD"}
-                              </button>
-                              <button
-                                type="button"
-                                className="bc-action-btn"
-                                disabled={!!activeTab?.prdGenerating || !activeTab?.prd}
-                                onClick={() => {
-                                  if (activeTab?.prd) {
-                                    setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-                                    openContentPanel("tickets")
-                                  }
-                                }}
-                                title={!activeTab?.prd ? "Generate a PRD first" : undefined}
-                              >
-                                {chatTicketsExist ? "View tickets" : "Create tickets"}
-                              </button>
-                              <button
-                                type="button"
-                                className="bc-action-btn"
-                                disabled={!!activeTab?.evidenceGenerating}
-                                onClick={handleOpenEvidence}
-                              >
-                                {activeTab?.evidenceGenerating
-                                  ? "Generating…"
-                                  : activeTab?.evidence ? "Open evidence" : "View evidence"}
-                              </button>
-                              {/* View-only — same rule as the insight header:
-                                  no "Generate prototype" on the chat surface,
-                                  and nothing at all until the map confirms a
-                                  ready prototype. */}
-                              {chatInsightState?.prototypeReady ? (
-                                <button
-                                  type="button"
-                                  className="bc-action-btn"
-                                  onClick={handleChatPrototype}
-                                >
-                                  View prototype
-                                </button>
-                              ) : null}
-                            </div>
+                          {/* Artifact-action row (Generate/View PRD + prototype)
+                              — ONLY on a PRD-bound tab whose insight card isn't
+                              showing yet (a restored PRD tab: prdId kept, prd not
+                              yet rehydrated, so showInsightMsg is transiently
+                              false). A GENERIC chat answer never shows it: a plain
+                              Q&A reply is not a PRD springboard — to make a PRD
+                              from a chat the user types the request (the "generate
+                              a PRD for …" command), which opens its own PRD tab. */}
+                          {isLast && turn.reply && !showInsightMsg && activeTab?.prdId != null ? (
+                            <ChatArtifactActions
+                              evidenceExists={chatEvidenceExists}
+                              prdExists={chatPrdExists}
+                              prdWaiting={chatPrdCtaWaiting}
+                              prdGenerating={!!activeTab?.prdGenerating}
+                              onViewEvidence={handleOpenEvidence}
+                              onOpenPrd={handleOpenPrd}
+                              prototypePrdId={chatProtoPrdId}
+                              prototypeReady={chatPrototypeReady}
+                              onViewPrototype={handleViewPrototype}
+                            />
                           ) : null}
                         </div>
                       )
@@ -2019,51 +2640,22 @@ export function ChatScreen() {
 
             {/* The composer renders whenever the thread view is shown — including
                 an insight-bound tab whose thread is still empty (opened from the
-                brief/backlog): the user must be able to talk to Sprntly about that
+                brief/ideation): the user must be able to talk to Sprntly about that
                 PRD right away. `hasThread` alone hid it there; `showThreadView`
                 (hasThread || an insight message) restores it. A plain empty chat
                 still uses the landing composer (showThreadView is false), so
                 there's never a double composer. */}
             {showThreadView ? (
               <div className="bc-dock">
-                {/* Slash command dropdown */}
-                {showSlash && filteredSkills.length > 0 && (
-                  <div style={{
-                    position: "absolute", bottom: "100%", left: 8, right: 8,
-                    background: "var(--surface, #fff)", borderRadius: 10,
-                    border: "1px solid var(--line, #E8E6E0)",
-                    boxShadow: "0 -4px 20px rgba(0,0,0,0.08)", zIndex: 10,
-                    maxHeight: 280, overflowY: "auto", padding: "6px 0",
-                  }}>
-                    <div style={{ padding: "4px 12px 6px", fontSize: 10.5, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--ink-4, #B0AEA6)" }}>
-                      Skills
-                    </div>
-                    {filteredSkills.map((s) => (
-                      <button
-                        key={s.id}
-                        type="button"
-                        onClick={() => handleSlashSelect(s)}
-                        style={{
-                          display: "flex", alignItems: "flex-start", gap: 10, width: "100%",
-                          padding: "8px 12px", background: "none", border: "none",
-                          cursor: "pointer", textAlign: "left", fontSize: 13,
-                        }}
-                        onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--surface-2, #F4F1EA)" }}
-                        onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "none" }}
-                      >
-                        <span style={{
-                          fontSize: 11, fontWeight: 600, color: "var(--accent, #179463)",
-                          fontFamily: "var(--font-mono, monospace)", minWidth: 80, flexShrink: 0,
-                        }}>
-                          {s.trigger}
-                        </span>
-                        <span>
-                          <span style={{ fontWeight: 500, color: "var(--ink, #1A1A17)" }}>{s.label}</span>
-                          <span style={{ display: "block", fontSize: 11.5, color: "var(--ink-3, #8C8A84)", marginTop: 1 }}>{s.description}</span>
-                        </span>
-                      </button>
-                    ))}
-                  </div>
+                {/* Slash command palette */}
+                {slashOpen && (
+                  <SlashSkillMenu
+                    skills={filteredSkills}
+                    activeIndex={slashActive}
+                    onSelect={handleSlashSelect}
+                    onHover={setSlashActive}
+                    inset
+                  />
                 )}
                 <div className="bc-composer">
                   <textarea
@@ -2089,15 +2681,26 @@ export function ChatScreen() {
                         <kbd>/</kbd>
                       </span>
                     </div>
-                    <button
-                      type="button"
-                      className="bc-send"
-                      aria-label="Send"
-                      disabled={busy || draft.trim().length < 3}
-                      onClick={handleComposerSubmit}
-                    >
-                      <IconSendUp size={18} />
-                    </button>
+                    {busy ? (
+                      <button
+                        type="button"
+                        className="bc-send bc-send--stop"
+                        aria-label="Stop generating"
+                        onClick={handleStopAsk}
+                      >
+                        <IconStop size={16} />
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        className="bc-send"
+                        aria-label="Send"
+                        disabled={draft.trim().length < 3}
+                        onClick={handleComposerSubmit}
+                      >
+                        <IconSendUp size={18} />
+                      </button>
+                    )}
                   </div>
                 </div>
                 {/* Attached files preview */}
@@ -2108,6 +2711,9 @@ export function ChatScreen() {
           )}
         </div>
       </div>
+      {viewerAttachment ? (
+        <AttachmentViewer attachment={viewerAttachment} onClose={() => setViewerAttachment(null)} />
+      ) : null}
     </AppLayout>
   )
 }

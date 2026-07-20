@@ -166,9 +166,12 @@ class FakeTracker:
     def __init__(self, provider, company_id, destination):
         self.provider, self.company_id, self.destination = provider, company_id, destination
         self.remotes = dict(FakeTracker.seed)
+        # tids the tracker 404s (deleted there) → remote() reports "__gone__".
+        self.gone = set(FakeTracker.gone_seed)
         self.meta = FakeTracker.meta_seed
         self.pushed: list[tuple[str, str]] = []       # (ref, title)
         self.created: list[str] = []                   # titles
+        self.cleared: list[str] = []                   # tids clear_ref'd
         self.status_sets: list[tuple[str, str]] = []   # (ref, status)
         self.field_pushes: list[tuple[str, dict]] = [] # (ref, {fid: value})
         self.type_sets: list[tuple[str, str]] = []     # (ref, issue_type)
@@ -176,6 +179,7 @@ class FakeTracker:
         FakeTracker.instances.append(self)
 
     seed: dict = {}
+    gone_seed: set = set()
     meta_seed: dict | None = None
 
     # Mirrors of the real _Tracker's meta surface (same semantics).
@@ -227,8 +231,15 @@ class FakeTracker:
     def task_ref(self, tid):
         return f"ref-{tid}" if tid in self.remotes else None
 
+    def clear_ref(self, tid):
+        self.cleared.append(tid)
+        self.remotes.pop(tid, None)
+        self.gone.discard(tid)
+
     def remote(self, ref):
         tid = ref.removeprefix("ref-")
+        if tid in self.gone:
+            return {"__gone__": True}
         return self.remotes.get(tid)
 
     def push(self, ref, story):
@@ -259,6 +270,7 @@ class FakeTracker:
 def fake_tracker(monkeypatch):
     FakeTracker.instances = []
     FakeTracker.seed = {}
+    FakeTracker.gone_seed = set()
     FakeTracker.meta_seed = None
     from app.stories import sync as sync_mod
 
@@ -305,6 +317,62 @@ def test_first_sync_bulk_creates_and_baselines(isolated_settings, fake_tracker):
     assert entry["content_hash"] and entry["synced_at"]
     assert entry["status"] == "to do" and entry["url"] == "u"
     assert cfg["sync_status"] == "idle" and cfg["last_synced_at"]
+
+
+def test_tracker_side_deletion_repushes(isolated_settings, fake_tracker):
+    """A ticket DELETED in the tracker (but still present in Sprntly) is
+    RE-PUSHED on the next sync: the stale mapping is cleared and the task
+    re-created. We only push, so a tracker-side delete must never drop the
+    Sprntly ticket."""
+    from app.db.ticket_sync import get_sync_config
+    from app.stories.sync import content_hash, run_prd_sync
+
+    base = Story(title="Login", body="B").to_dict()
+    tid = base["id"]
+    _seed_prd_tickets(CID, 30, [base])
+    # Previously synced (baseline present), THEN deleted in the tracker.
+    prev_hash = content_hash("Login", Story.from_dict(base).to_description())
+    fake_tracker.seed = {tid: {"title": "Login", "status": "to do", "url": "u"}}
+    fake_tracker.gone_seed = {tid}  # the tracker now 404s this task
+    _sync_cfg(30, statuses={tid: {
+        "content_hash": prev_hash, "synced_at": "2026-07-10T00:00:00+00:00",
+        "status": "to do", "sprntly_status": "To do", "url": "u",
+    }})
+
+    result = run_prd_sync(CID, 30)
+
+    tracker = fake_tracker.instances[0]
+    # The stale mapping was cleared and the ticket re-created (not skipped).
+    assert tid in tracker.cleared
+    assert "Login" in tracker.created
+    assert result["pushed"] >= 1
+    # It re-baselines cleanly: a fresh fingerprint is recorded again.
+    cfg = get_sync_config(CID, 30)
+    assert cfg["statuses"][tid]["content_hash"] and cfg["statuses"][tid]["synced_at"]
+
+
+def test_transient_fetch_failure_does_not_repush(isolated_settings, fake_tracker):
+    """A TRANSIENT fetch failure (remote None, not a definite 404) must NOT
+    re-create — that would duplicate the task on a network blip. The ticket is
+    left untouched with its prior state kept."""
+    from app.stories.sync import content_hash, run_prd_sync
+
+    base = Story(title="Login", body="B").to_dict()
+    tid = base["id"]
+    _seed_prd_tickets(CID, 31, [base])
+    prev_hash = content_hash("Login", Story.from_dict(base).to_description())
+    # In remotes (so task_ref is non-None) but remote() returns None (transient).
+    fake_tracker.seed = {tid: None}
+    _sync_cfg(31, statuses={tid: {
+        "content_hash": prev_hash, "synced_at": "2026-07-10T00:00:00+00:00",
+        "status": "to do", "sprntly_status": "To do", "url": "u",
+    }})
+
+    run_prd_sync(CID, 31)
+
+    tracker = fake_tracker.instances[0]
+    assert tracker.cleared == []       # never cleared
+    assert tracker.created == []       # never re-created
 
 
 def test_tracker_edit_imports_back_into_ticket_edits(isolated_settings, fake_tracker):

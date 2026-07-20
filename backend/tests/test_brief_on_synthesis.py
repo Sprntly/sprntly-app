@@ -59,18 +59,21 @@ def test_generate_synthesis_path_runs_run_synthesis(app_client, isolated_setting
     db = isolated_settings["supabase"]
     _seed_company(db, company_id="co-1", slug="acme")
 
-    def _fake_gen(slug):
+    def _fake_gen(slug, **_kw):
         # mirror run_synthesis: persist into briefs, return payload
         payload = _fake_synthesis_payload("acme")
         isolated_settings["db"].save_brief("acme", payload["week_label"], payload,
                                            schema_version=1)
         return payload
 
-    with patch.object(brief_routes, "generate_brief_for", side_effect=_fake_gen) as gen:
+    with patch.object(brief_routes, "generate_brief_for", side_effect=_fake_gen) as gen, \
+         patch.object(brief_routes, "_notify_brief_ready") as ping:
         r = app_client.post("/v1/brief/generate?dataset=acme")
 
     assert r.status_code == 200, r.text
-    gen.assert_called_once_with("acme")
+    # User-triggered: delivery suppressed in synthesis, short ping sent instead.
+    gen.assert_called_once_with("acme", deliver=False)
+    ping.assert_called_once()
     body = r.json()
     assert body["summary_headline"] == "synthesis headline"
     # response preserves the {brief_id, **payload} contract
@@ -81,12 +84,13 @@ def test_generate_synthesis_then_current_reads_back(app_client, isolated_setting
     db = isolated_settings["supabase"]
     _seed_company(db, company_id="co-1", slug="acme")
 
-    def _fake_gen(slug):
+    def _fake_gen(slug, **_kw):
         payload = _fake_synthesis_payload("acme")
         isolated_settings["db"].save_brief("acme", payload["week_label"], payload, 1)
         return payload
 
-    with patch.object(brief_routes, "generate_brief_for", side_effect=_fake_gen):
+    with patch.object(brief_routes, "generate_brief_for", side_effect=_fake_gen), \
+         patch.object(brief_routes, "_notify_brief_ready"):
         app_client.post("/v1/brief/generate?dataset=acme")
 
     # UI read path unchanged: /current returns the saved synthesis brief
@@ -123,9 +127,10 @@ def test_regenerate_synthesis_path_starts_synthesis_bg(app_client, isolated_sett
 
 
 def test_synthesis_bg_runner_invokes_generate_brief_for(isolated_settings, monkeypatch):
-    with patch.object(brief_routes, "generate_brief_for") as gen:
+    with patch.object(brief_routes, "generate_brief_for") as gen, \
+         patch.object(brief_routes, "_notify_brief_ready"):
         asyncio.run(brief_routes._synthesis_generate_bg("acme"))
-    gen.assert_called_once_with("acme")
+    gen.assert_called_once_with("acme", deliver=False)
 
 
 def test_synthesis_bg_runner_swallows_errors(isolated_settings, monkeypatch):
@@ -357,6 +362,46 @@ def test_has_signals_since_is_tenant_scoped(isolated_settings):
     assert facade.has_signals_since("co-2", cutoff) is False  # co-1's s-new invisible
 
 
+def test_has_signals_since_survives_server_page_caps(isolated_settings, monkeypatch):
+    """Regression (prod bug, Lab X 12k+ signals): PostgREST caps an unlimited
+    select at ~1000 rows, and the old full-table scan could get a page holding
+    only OLD signals — the gate then reported "unchanged" forever and the brief
+    never regenerated. The facade must fetch newest-first with a limit, so the
+    answer is correct no matter how many rows the tenant has."""
+    from tests import _fake_supabase as fake
+    from app.graph.facade import GraphFacade
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    db = isolated_settings["supabase"]
+    # 1200 pre-cutoff signals inserted FIRST (so an unordered capped page is
+    # all-old), then one post-cutoff signal.
+    rows = [{
+        "id": f"s-{i}", "enterprise_id": "co-1", "source_type": "revenue",
+        "kind": "x", "content": "y",
+        "valid_at": "2026-06-01T00:00:00+00:00",
+        "transaction_at": "2026-06-01T00:00:00+00:00",
+        "created_at": "2026-06-09T00:00:00+00:00",
+    } for i in range(1200)]
+    rows.append({**rows[0], "id": "s-new",
+                 "created_at": "2026-06-11T00:00:00+00:00"})
+    db.table("kg_signal").insert(rows).execute()
+
+    # Mimic the server-side page cap: an execute() with no explicit limit
+    # returns at most 1000 rows (exactly PostgREST's behavior).
+    orig_execute = fake._Query.execute
+
+    def capped_execute(self):
+        res = orig_execute(self)
+        if getattr(self, "_limit", None) is None and isinstance(res.data, list):
+            res.data = res.data[:1000]
+        return res
+
+    monkeypatch.setattr(fake._Query, "execute", capped_execute)
+
+    assert GraphFacade().has_signals_since(
+        "co-1", "2026-06-10T00:00:00+00:00") is True
+
+
 def test_generate_brief_for_resolves_slug_to_company_id(isolated_settings):
     _seed_company(isolated_settings["supabase"], company_id="co-xyz", slug="globex")
     cid, slug = sb.resolve_company("globex")
@@ -366,6 +411,36 @@ def test_generate_brief_for_resolves_slug_to_company_id(isolated_settings):
 def test_generate_brief_for_unknown_slug_raises(isolated_settings):
     with pytest.raises(ValueError):
         sb.resolve_company("nope-not-here")
+
+
+def test_resolve_company_resolves_nondefault_workspace_dataset_slug(isolated_settings):
+    """A non-default workspace's dataset slug ('<company>--<workspace>') lives in
+    the `datasets` table, not `companies` — resolve_company must still map it to
+    the parent company via the datasets→workspaces binding.
+
+    Regression: the weekly brief tick fans out per workspace and passed each
+    workspace's dataset slug to generate_brief_for → resolve_company, which only
+    consulted the companies table and raised 'No company for slug ...' for every
+    non-default workspace, so those workspaces never got a brief.
+    """
+    from app.db.authcache import workspace_cache
+
+    db = isolated_settings["supabase"]
+    workspace_cache.invalidate("ws-team2")  # no cross-test cache bleed
+    _seed_company(db, company_id="co-1", slug="acme")
+    db.table("workspaces").insert(
+        {"id": "ws-team2", "company_id": "co-1", "name": "Team 2",
+         "slug": "team2", "is_default": False}
+    ).execute()
+    db.table("datasets").insert(
+        {"slug": "acme--team2", "display_name": "Team 2",
+         "workspace_id": "ws-team2"}
+    ).execute()
+
+    cid, slug = sb.resolve_company("acme--team2")
+    assert cid == "co-1"
+    # The dataset slug is preserved (KG is company-scoped; corpus/brief slug-scoped).
+    assert slug == "acme--team2"
 
 
 def test_seed_from_corpus_is_bounded(isolated_settings, monkeypatch):
@@ -580,7 +655,7 @@ def test_synthesis_bg_warms_drilldowns_after_generate(isolated_settings, monkeyp
     """/regenerate's synthesis bg body warms drill-downs after the brief."""
     order: list[str] = []
     with patch.object(brief_routes, "generate_brief_for",
-                      side_effect=lambda slug: order.append("gen")), \
+                      side_effect=lambda slug, **_kw: order.append("gen")), \
          patch.object(brief_routes, "warm_synthesis_drilldowns",
                       side_effect=lambda slug: order.append("warm")) as warm:
         asyncio.run(brief_routes._synthesis_generate_bg("acme"))

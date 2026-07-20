@@ -17,7 +17,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.auth import CompanyContext, require_company
+from app.auth import WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.graph.facade import GraphFacade
 from app.research.competitor import (
     run_competitor_deep_dive,
@@ -38,7 +38,7 @@ class RunIn(BaseModel):
 @router.post("/competitors/run")
 def run_competitors(
     body: RunIn | None = None,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     facade = GraphFacade()
     competitors = body.competitors if body else None
@@ -60,7 +60,7 @@ def run_competitors(
 @router.post("/competitors/deep-dive")
 def run_competitors_deep_dive(
     body: RunIn | None = None,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     facade = GraphFacade()
     try:
@@ -74,7 +74,7 @@ def run_competitors_deep_dive(
 
 
 @router.post("/market/run")
-def run_market(company: CompanyContext = Depends(require_company)):
+def run_market(company: WorkspaceContext = Depends(require_workspace)):
     facade = GraphFacade()
     try:
         result = run_market_research(facade, company.company_id)

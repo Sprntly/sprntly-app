@@ -25,6 +25,7 @@ import logging
 from google.auth.transport.requests import Request as GoogleAuthRequest
 
 from app.connectors import (
+    asana_oauth,
     clickup_oauth,
     figma_oauth,
     fireflies_apikey,
@@ -33,6 +34,8 @@ from app.connectors import (
     hubspot_oauth,
     jira_oauth,
     slack_oauth,
+    sprinklr_oauth,
+    superset_auth,
 )
 from app.connectors.tokens import (
     TokenEncryptionError,
@@ -177,9 +180,92 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
         # Canonical token-validity check: team.info returns {id, name, domain},
         # so the account_label resolves to the Slack workspace name.
         user_obj = slack_oauth.fetch_team_info(access_token) or {}
+    elif provider == asana_oauth.ASANA_PROVIDER:
+        # Asana access tokens live ~1h. Refresh (and persist) an expired
+        # token before probing so a connection stays healthy past the first
+        # hour. Refresh responses may omit the refresh_token — the stored
+        # one is carried forward (token_payload_to_store merge).
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 3600)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 120:
+            try:
+                new_json = asana_oauth.refresh_access_token(refresh_token)
+                token_json = json.loads(
+                    asana_oauth.token_payload_to_store(
+                        new_json, keep_refresh_token=refresh_token,
+                    )
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    asana_oauth.ASANA_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except Exception:  # noqa: BLE001 — non-auth refresh error → soft; the users/me probe below decides
+                logger.warning("Asana probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        user_obj = asana_oauth.fetch_authenticated_user(access_token) or {}
+    elif provider == sprinklr_oauth.SPRINKLR_PROVIDER:
+        # Sprinklr access tokens live ~30 days. Refresh (and persist) near
+        # expiry so a connection stays healthy past the first month —
+        # persisting matters in case Sprinklr rotates the refresh token.
+        import time
+
+        from app import db
+
+        obtained_at = token_json.get("obtained_at", 0)
+        expires_in = token_json.get("expires_in", 2591999)
+        refresh_token = token_json.get("refresh_token")
+        if refresh_token and time.time() > obtained_at + expires_in - 3600:
+            try:
+                new_json = sprinklr_oauth.refresh_access_token(refresh_token)
+                token_json = json.loads(
+                    sprinklr_oauth.token_payload_to_store(new_json)
+                )
+                db.update_connection_tokens(
+                    row.get("company_id") or "",
+                    sprinklr_oauth.SPRINKLR_PROVIDER,
+                    encrypt_token_json(json.dumps(token_json)),
+                )
+            except Exception:  # noqa: BLE001 — non-auth refresh error → soft; the /me probe below decides
+                logger.warning("Sprinklr probe refresh failed", exc_info=True)
+        access_token = token_json.get("access_token") or ""
+        raw_user = sprinklr_oauth.fetch_authenticated_user(access_token) or {}
+        # Normalize Sprinklr's field names onto the keys _label_from_user expects.
+        if raw_user:
+            user_obj = {
+                "email": raw_user.get("email") or raw_user.get("emailId"),
+                "name": raw_user.get("fullName")
+                or " ".join(
+                    x
+                    for x in [raw_user.get("firstName"), raw_user.get("lastName")]
+                    if x
+                ),
+            }
     elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
         api_key = token_json.get("api_key") or ""
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
+    elif provider == superset_auth.SUPERSET_PROVIDER:
+        # No stored tokens to validate — Superset consumers re-login on use
+        # (instance-configured JWT lifetimes), so the probe IS a fresh login.
+        credential = token_json.get(superset_auth.CREDENTIAL_KEY) or ""
+        try:
+            base_url, username, password = superset_auth.parse_credential(credential)
+        except (ValueError, KeyError, json.JSONDecodeError) as e:
+            raise ProbeError("Stored Superset credential unreadable",
+                             reason="unreadable") from e
+        try:
+            tokens = superset_auth.login(base_url, username, password)
+            user_obj = (
+                superset_auth.fetch_current_user(base_url, tokens["access_token"])
+                or {"username": username}
+            )
+        except superset_auth.SupersetAuthError:
+            user_obj = {}  # soft rejection → "reconnect required" below
     else:
         raise ProbeError(
             f"Probe not supported for provider {provider!r}", reason="unsupported"

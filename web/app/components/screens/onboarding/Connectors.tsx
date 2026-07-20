@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
+import { advanceOnboardingStep } from "../../../lib/onboarding/store"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedSignal"
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
@@ -32,10 +32,12 @@ import {
  * so this page tracks Settings automatically (the design kit's hardcoded
  * grid is NOT the source of truth).
  *
- * Everything is optional: there is deliberately NO required-Analytics
- * gate on Continue. Connectable providers open the real OAuth/API-key
- * modal; everything else toggles a "planned" selection that pre-stages
- * intent for Settings → Connectors.
+ * Mandatory for COMPANY accounts (registration spec 2026-07): Continue
+ * requires at least one LIVE connection; the skip link is hidden. PERSONAL
+ * accounts keep everything optional with the "Connect later" skip.
+ * Connectable providers open the real OAuth/API-key modal; everything else
+ * toggles a "planned" selection that pre-stages intent for
+ * Settings → Connectors.
  */
 
 /** Mockup `.conn-step-info .s` copy per catalog category key. */
@@ -43,7 +45,8 @@ const CATEGORY_DESCRIPTIONS: Record<string, string> = {
   analytics: "Product behaviour & cohort data — powers your brief",
   pm: "Roadmap, sprints, capacity",
   docs: "Specs, docs & wikis — product context the agent can read",
-  voice: "Tickets, transcripts, NPS, CSAT",
+  voice: "Tickets, transcripts, reviews, NPS, CSAT",
+  crm: "Accounts, pipeline, lifecycle & revenue signals",
   revenue: "Billing & subscription data — ties work to revenue",
   code: "Repos & PRs — so the agent reads real code and ships fixes",
   monitoring: "Error tracking, APM, paging — powers the On-Call agent",
@@ -86,6 +89,14 @@ const CATEGORY_ICONS: Record<string, (props: SVGProps<SVGSVGElement>) => ReactEl
   voice: (p) => (
     <svg {...iconProps(p)}>
       <path d="M3 20l1.3-3.9A8 8 0 1 1 7.9 19z" />
+    </svg>
+  ),
+  crm: (p) => (
+    <svg {...iconProps(p)}>
+      <circle cx="9" cy="7" r="3" />
+      <path d="M4 21v-2a4 4 0 0 1 4-4h2a4 4 0 0 1 4 4v2" />
+      <path d="M16 3.9a3 3 0 0 1 0 6.2" />
+      <path d="M21 21v-2a4 4 0 0 0-3-3.85" />
     </svg>
   ),
   revenue: (p) => (
@@ -256,26 +267,26 @@ export function Connectors() {
     setOpenCat(firstIncompleteCategory(nextDone, categories.length))
   }
 
-  async function go(skipped: boolean) {
+  async function go() {
     if (!workspace || auth.kind !== "authed") return
     setSaving(true)
     try {
-      if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
-      // Next numbered step is business-context (index 5 in ONBOARDING_STEP_SLUGS).
-      const updated = await advanceOnboardingStep(workspace.id, 5)
+      // Next numbered step is team (index 6 in ONBOARDING_STEP_SLUGS).
+      const updated = await advanceOnboardingStep(workspace.id, 6)
       setWorkspace(updated)
-      router.push("/onboarding/business-context")
+      router.push("/onboarding/team")
     } finally {
       setSaving(false)
     }
   }
+
 
   // Redirect when there's no workspace to anchor the step. Done in an effect
   // (not during render) so navigation never fires as a render side-effect —
   // that path surfaces in production as a client-side exception / error
   // boundary. Render returns the loading shell until the redirect lands.
   useEffect(() => {
-    if (!loading && !workspace) router.replace("/onboarding/business-info")
+    if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
@@ -284,9 +295,11 @@ export function Connectors() {
     .flatMap((c) => c.items)
     .filter((it) => selected.has(it.id)).length
 
+  const hasLiveConnection = connected.size > 0
+
   return (
     <OnboardingChrome
-      step={4}
+      step={5}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -295,22 +308,13 @@ export function Connectors() {
       }
       subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
       footerMeta={
-        <>
-          {selectedCount} connector{selectedCount === 1 ? "" : "s"} selected ·
-          all optional —{" "}
-          <button
-            type="button"
-            className="onb-skip-link"
-            onClick={() => go(true)}
-            disabled={saving}
-          >
-            Connect later
-          </button>
-        </>
+        hasLiveConnection
+          ? `${selectedCount} connector${selectedCount === 1 ? "" : "s"} selected — ready to continue`
+          : "Connect at least one source to continue — it's what your briefs are built from."
       }
       onBack={() => router.push("/onboarding/api-key")}
-      onContinue={() => go(false)}
-      continueDisabled={saving}
+      onContinue={() => void go()}
+      continueDisabled={saving || !hasLiveConnection}
       loading={saving}
     >
       <div className="conn-steps">

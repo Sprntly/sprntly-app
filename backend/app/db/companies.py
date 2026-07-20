@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import uuid
 
+from app.db.authcache import memberships_cache, profile_name_cache
 from app.db.client import require_client, retry_on_disconnect
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,33 @@ def owner_name_for_company(company_id: str | None) -> str | None:
 
 
 @retry_on_disconnect
+def _profile_row_for_user(user_id: str) -> dict | None:
+    """The user's profiles name/email fields, via `profile_name_cache`.
+
+    Caches the ROW (not a derived name) so both name-derivation chains —
+    `display_name_for_user` (email fallback) and `profile_name_for_user`
+    (no email fallback) — share one cache entry. A missing profile is not
+    cached (TTLMap can't distinguish a stored None from a miss); that's
+    fine — cosmetic lookups only, and profile-less users are rare."""
+    cached = profile_name_cache.get(user_id)
+    if cached is not None:
+        return cached
+    profiles = (
+        require_client()
+        .table("profiles")
+        .select("full_name, first_name, last_name, email")
+        .eq("id", user_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    row = profiles[0] if profiles else None
+    if row is not None:
+        profile_name_cache.set(user_id, row)
+    return row
+
+
 def display_name_for_user(user_id: str | None) -> str | None:
     """Best human label for a specific user: profiles.full_name → "first last"
     → email → None. Unlike owner_name_for_company (which resolves the account
@@ -181,19 +209,9 @@ def display_name_for_user(user_id: str | None) -> str | None:
     if not user_id:
         return None
     try:
-        profiles = (
-            require_client()
-            .table("profiles")
-            .select("full_name, first_name, last_name, email")
-            .eq("id", user_id)
-            .limit(1)
-            .execute()
-            .data
-            or []
-        )
-        if not profiles:
+        p = _profile_row_for_user(user_id)
+        if not p:
             return None
-        p = profiles[0]
         return (
             p.get("full_name")
             or f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip()
@@ -201,6 +219,27 @@ def display_name_for_user(user_id: str | None) -> str | None:
             or None
         )
     except Exception:  # noqa: BLE001 — attribution must never break the write
+        return None
+
+
+def profile_name_for_user(user_id: str | None) -> str | None:
+    """The user's display name for `require_company` (CompanyContext.user_name):
+    profiles.full_name → "first last" → None. Deliberately NO email fallback —
+    callers (PRD bylines et al.) fall back to user_email themselves when they
+    want it. Best-effort: any read failure returns None so name resolution
+    never fails the request."""
+    if not user_id:
+        return None
+    try:
+        p = _profile_row_for_user(user_id)
+        if not p:
+            return None
+        return (
+            p.get("full_name")
+            or f"{p.get('first_name') or ''} {p.get('last_name') or ''}".strip()
+            or None
+        )
+    except Exception:  # noqa: BLE001 — name resolution must never fail the request
         return None
 
 
@@ -510,7 +549,17 @@ def memberships_for_user(user_id: str) -> list[dict]:
 
     Returns rows shaped {company_id, role}. Empty list ⇒ the user has no
     company yet (e.g. mid-onboarding).
+
+    Cached via `memberships_cache` (30s TTL) — this runs on EVERY
+    authenticated request (require_company + the LLM-key middleware). Only
+    non-empty results are cached: onboarding inserts company_members from
+    the browser via supabase-js, a write this backend never sees, so a
+    cached empty list would 403 a freshly-onboarded user for a full TTL
+    (see app.db.authcache's module docstring).
     """
+    cached = memberships_cache.get(user_id)
+    if cached is not None:
+        return cached
     client = require_client()
     result = (
         client.table("company_members")
@@ -518,4 +567,7 @@ def memberships_for_user(user_id: str) -> list[dict]:
         .eq("user_id", user_id)
         .execute()
     )
-    return result.data or []
+    rows = result.data or []
+    if rows:
+        memberships_cache.set(user_id, rows)
+    return rows

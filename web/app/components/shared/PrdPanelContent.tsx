@@ -11,12 +11,14 @@ import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
 import { PrdSections } from "./PrdSections"
 import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
+import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
 import { EmptyPane } from "./EmptyPane"
 import { ApiError, multiAgentApi, prdApi } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
+import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
 import { PrdPatchBanner } from "../design-agent/PrdPatchBanner"
-import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
+import { IconTicket } from "@tabler/icons-react"
 import {
   IconGrid,
   IconLinkInsert,
@@ -24,7 +26,7 @@ import {
   IconRedo,
   IconUndo,
 } from "./app-icons"
-import type { PrdDesignBlock, PrdSection, PrdState } from "../../types/content"
+import type { PrdSection, PrdState } from "../../types/content"
 
 const PRD_DRAFT_KEY = (prdId: number) => `sprntly_prd_draft_${prdId}`
 function loadDraft(prdId: number): string | null {
@@ -87,11 +89,39 @@ function PrdToolbar({ hasDoc, saveStatus, exec }: { hasDoc: boolean; saveStatus:
   )
 }
 
-export function PrdPanelContent() {
-  const { showToast } = useNavigation()
+export function PrdPanelContent({ evidenceTabAvailable = true }: {
+  /** Whether the panel's Evidence tab is currently shown. Gates the HTML PRD's
+   *  "View more evidence" link (top-3 evidence fold) — with no Evidence tab to
+   *  jump to, we render the full list instead of a link that goes nowhere. */
+  evidenceTabAvailable?: boolean
+} = {}) {
+  const { showToast, openContentPanel } = useNavigation()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const prd = content.prd
+
+  // Jump to the Evidence tab from the HTML PRD's injected "View more evidence"
+  // link (stable identity so the iframe's one-time load handler never rebinds).
+  const handleViewMoreEvidence = useCallback(() => {
+    openContentPanel("evidence")
+  }, [openContentPanel])
+
+  // Does this PRD already have persisted tickets? Drives the footer button's
+  // "Create tickets" ↔ "View tickets" label (cache-read only, no generation).
+  const [hasTickets, setHasTickets] = useState(false)
+  useEffect(() => {
+    const prdId = prd?.prd_id
+    if (prdId == null) { setHasTickets(false); return }
+    let cancelled = false
+    void (async () => {
+      try {
+        const { storiesApi } = await import("../../lib/api")
+        const cache = await storiesApi.getForPrd(prdId)
+        if (!cancelled) setHasTickets(cache.status === "ready" && cache.stories.length > 0)
+      } catch { /* default to "Create tickets" */ }
+    })()
+    return () => { cancelled = true }
+  }, [prd?.prd_id])
 
   const [prdLoading, setPrdLoading] = useState(false)
 
@@ -249,6 +279,7 @@ export function PrdPanelContent() {
               prdId={prd.prd_id}
               title={prd.title}
               onStatus={setSaveStatus}
+              onViewMoreEvidence={evidenceTabAvailable ? handleViewMoreEvidence : undefined}
             />
             {qaSections.length > 0 && (
               <div className="prd-qa-scenarios" data-testid="prd-qa-scenarios">
@@ -279,6 +310,20 @@ export function PrdPanelContent() {
               )}
             </div>
           </>
+        ) : content.prdGenerating && content.prdPartialHtml ? (
+          // Live streaming preview: partial Part A HTML is already arriving —
+          // render it as it grows, with a slim pulsing indicator instead of the
+          // full-pane spinner. The finished PRD (poll result) replaces this.
+          <div className="prd-body" style={{ minHeight: 280 }}>
+            <div data-testid="prd-streaming" style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 10px", color: "var(--ink-3)", fontSize: 12 }}>
+              <span className="prd-loader" aria-hidden style={{ width: 12, height: 12 }} /> Generating…
+            </div>
+            <StreamingHtmlPreview
+              html={stripLeadingFence(stripHtmlCodeFence(content.prdPartialHtml))}
+              title="PRD draft (generating)"
+              testId="prd-streaming-preview"
+            />
+          </div>
         ) : (
           <div className="prd-body" style={{ minHeight: 280 }}>
             {content.prdGenerating ? (
@@ -386,48 +431,21 @@ export function PrdPanelContent() {
             </svg>
           </button>
 
-          {/* Prototype CTA — the canonical shared affordance (existence check
-              lives inside the hook): reads "Generate Prototype" until one is
-              built for this PRD, then "View Prototype". The weekly brief no
-              longer offers generation on its cards; the PRD footer is the home
-              for this action per the design. */}
+          {/* Next pipeline step from the PRD is TICKETS. Reads "Create tickets"
+              until the PRD has been broken into stories, then "View tickets";
+              either way it just opens the Tickets tab (which generates on first
+              open). The prototype affordance moved to the Tickets tab's bar. */}
           <div style={{ marginLeft: "auto" }}>
-            <GeneratePrototypeCTA
-              prdId={prd.prd_id}
-              figmaFileKey={prd.figma_file_key ?? null}
-              prdTitle={prd.title}
-              // The PRD's own :::design platform_hint (already parsed into the
-              // sections in scope here) seeds the generate panel's platform
-              // default; the toggle still overrides.
-              platformHint={
-                // Optional-chained: a PRD hydrated without parsed sections
-                // (e.g. a bare record) simply yields no hint.
-                prd.sections?.find(
-                  (s): s is PrdDesignBlock => s.type === "prd-design",
-                )?.platformHint ?? null
-              }
-              // Safe here: the panel shows ONE current PRD at a time (like
-              // ApproveModal), so the unscoped da:generating signal can't
-              // mislabel a different PRD's run. Gives the footer a live
-              // "Generating Prototype" state + a refetch on completion.
-              listenForCrossSurfaceGenerating
-              render={({ label, onClick, disabled }) => (
-                <button
-                  type="button"
-                  className="btn btn-primary btn-sm"
-                  data-testid="prd-footer-prototype-cta"
-                  disabled={disabled}
-                  onClick={onClick}
-                  style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 999 }}
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                    <polyline points="16 18 22 12 16 6" />
-                    <polyline points="8 6 2 12 8 18" />
-                  </svg>
-                  {label}
-                </button>
-              )}
-            />
+            <button
+              type="button"
+              className="btn btn-primary btn-sm"
+              data-testid="prd-footer-tickets-cta"
+              onClick={() => openContentPanel("tickets")}
+              style={{ display: "inline-flex", alignItems: "center", gap: 6, borderRadius: 999 }}
+            >
+              <IconTicket size={13} />
+              {hasTickets ? "View tickets" : "Create tickets"}
+            </button>
           </div>
         </div>
       )}

@@ -11,7 +11,15 @@ from __future__ import annotations
 
 import uuid
 
+from app.db.authcache import invalidate_user
 from app.db.client import require_client, retry_on_disconnect
+
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE/ILIKE metacharacters so a pattern matches the value
+    literally (emails routinely contain `_`, which is a single-char
+    wildcard). Backslash first — it is the escape character itself."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 @retry_on_disconnect
@@ -75,14 +83,14 @@ def list_company_members(company_id: str) -> list[dict]:
 def list_pending_invites(company_id: str) -> list[dict]:
     """Pending workspace_invites for `company_id`.
 
-    Each row: {id, email, role, invited_by, created_at}. "Pending" today
-    means "row exists" — accept-flow deletes the row, so there is no
-    accepted/declined state column.
+    Each row: {id, email, role, invited_by, created_at, workspace_ids}.
+    "Pending" today means "row exists" — accept-flow deletes the row, so
+    there is no accepted/declined state column.
     """
     client = require_client()
     result = (
         client.table("workspace_invites")
-        .select("id, email, role, invited_by, created_at")
+        .select("id, email, role, invited_by, created_at, workspace_ids")
         .eq("company_id", company_id)
         .execute()
     )
@@ -112,7 +120,7 @@ def get_invite(invite_id: str) -> dict | None:
     client = require_client()
     rows = (
         client.table("workspace_invites")
-        .select("id, company_id, email, role, invited_by, created_at")
+        .select("id, company_id, email, role, invited_by, created_at, workspace_ids")
         .eq("id", invite_id)
         .limit(1)
         .execute()
@@ -125,34 +133,70 @@ def get_invite(invite_id: str) -> dict | None:
 @retry_on_disconnect
 def member_exists_for_email(*, company_id: str, email: str) -> bool:
     """True iff someone in this company has a profile with this email
-    (case-insensitive). Used to enforce 4-A: block invites at create time
-    when the invitee is already a member of this company."""
+    (case-insensitive — `.ilike` on the escaped needle, no wildcards). Used
+    to enforce 4-A: block invites at create time when the invitee is already
+    a member of this company."""
     client = require_client()
     needle = email.strip().lower()
     if not needle:
         return False
     profile_rows = (
         client.table("profiles")
-        .select("id, email")
+        .select("id")
+        .ilike("email", _escape_like(needle))
         .execute()
         .data
         or []
     )
-    matching_user_ids = {
-        p["id"] for p in profile_rows
-        if (p.get("email") or "").strip().lower() == needle
-    }
+    matching_user_ids = [p["id"] for p in profile_rows]
     if not matching_user_ids:
         return False
     member_rows = (
         client.table("company_members")
         .select("user_id")
         .eq("company_id", company_id)
+        .in_("user_id", matching_user_ids)
+        .limit(1)
         .execute()
         .data
         or []
     )
-    return any(m["user_id"] in matching_user_ids for m in member_rows)
+    return bool(member_rows)
+
+
+@retry_on_disconnect
+def email_belongs_to_other_company(*, company_id: str, email: str) -> bool:
+    """True iff this email's profile is a member of a company OTHER than
+    `company_id` (case-insensitive). Used to refuse invites at send time:
+    the one-user-one-company invariant means such an invitee could never
+    accept, so the inviter gets the clear reason immediately instead of an
+    invite that dangles forever (its accept would 409)."""
+    client = require_client()
+    needle = email.strip().lower()
+    if not needle:
+        return False
+    profile_rows = (
+        client.table("profiles")
+        .select("id")
+        .ilike("email", _escape_like(needle))
+        .execute()
+        .data
+        or []
+    )
+    matching_user_ids = [p["id"] for p in profile_rows]
+    if not matching_user_ids:
+        return False
+    member_rows = (
+        client.table("company_members")
+        .select("user_id")
+        .in_("user_id", matching_user_ids)
+        .neq("company_id", company_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return bool(member_rows)
 
 
 def create_invite(
@@ -161,9 +205,17 @@ def create_invite(
     email: str,
     role: str,
     invited_by: str | None,
+    workspace_ids: list[str] | None = None,
+    job_role: str | None = None,
 ) -> dict:
     """Insert a workspace_invites row. Caller must have validated email +
-    role; this helper performs no validation. Returns the created row.
+    role + workspace ownership; this helper performs no validation. Returns
+    the created row.
+
+    `workspace_ids` are the workspaces the invitee joins on accept. Empty /
+    None means "the company's default workspace, resolved at ACCEPT time"
+    (not stored — so an invite created before extra workspaces exist still
+    lands somewhere sensible).
 
     Raises if the (company_id, email) unique constraint is violated —
     routes should catch and translate to 409.
@@ -176,6 +228,10 @@ def create_invite(
         "email": email,
         "role": role,
         "invited_by": invited_by,
+        "workspace_ids": workspace_ids or [],
+        # The invitee's JOB role (Data Science, Engineer…) from the v6 invite
+        # step — display-only, distinct from the permission `role`.
+        "job_role": job_role,
     }
     client.table("workspace_invites").insert(payload).execute()
     # Re-read so we return the actual created_at the DB stamped.
@@ -209,6 +265,9 @@ def update_member_role(*, company_id: str, user_id: str, role: str) -> dict | No
     require_client().table("company_members").update({"role": role}).eq(
         "company_id", company_id
     ).eq("user_id", user_id).execute()
+    # Invalidate at the write site so every caller (route, test, future code) —
+    # not only the invalidating routes — sees the fresh role on the next read.
+    invalidate_user(user_id)
     return get_member(company_id=company_id, user_id=user_id)
 
 
@@ -216,6 +275,7 @@ def delete_member(*, company_id: str, user_id: str) -> None:
     require_client().table("company_members").delete().eq(
         "company_id", company_id
     ).eq("user_id", user_id).execute()
+    invalidate_user(user_id)
 
 
 @retry_on_disconnect
@@ -249,7 +309,7 @@ def find_pending_invite_for_email_anywhere(email: str) -> dict | None:
         return None
     rows = (
         client.table("workspace_invites")
-        .select("id, company_id, email, role, created_at")
+        .select("id, company_id, email, role, created_at, workspace_ids")
         .eq("email", needle)
         .execute()
         .data
@@ -261,16 +321,55 @@ def find_pending_invite_for_email_anywhere(email: str) -> dict | None:
     return rows[0]
 
 
+def _workspace_role_for_invite(role: str) -> str:
+    """Invite role → workspace_members role. 'owner' never appears on invites
+    (DB CHECK); admin/member/viewer map straight through."""
+    return role if role in ("admin", "member", "viewer") else "member"
+
+
+def _grant_invite_workspaces(
+    *, company_id: str, user_id: str, role: str, workspace_ids: list | None
+) -> list[str]:
+    """Materialise an invite's workspace grants into workspace_members rows.
+
+    Stored ids are validated at accept time — an id that no longer exists or
+    belongs to another company is skipped (invites are ephemeral; a workspace
+    deleted between invite and accept must not break the accept). An empty
+    surviving set falls back to the company's default workspace so every
+    accepted member lands somewhere. Returns the granted workspace ids.
+    """
+    from app.db.workspaces import (
+        ensure_default_workspace,
+        get_workspace,
+        upsert_workspace_member,
+    )
+
+    ws_role = _workspace_role_for_invite(role)
+    granted: list[str] = []
+    for wid in workspace_ids or []:
+        ws = get_workspace(str(wid))
+        if not ws or ws.get("company_id") != company_id:
+            continue
+        upsert_workspace_member(ws["id"], user_id, ws_role)
+        granted.append(ws["id"])
+    if not granted:
+        default = ensure_default_workspace(company_id)
+        upsert_workspace_member(default["id"], user_id, ws_role)
+        granted.append(default["id"])
+    return granted
+
+
 def accept_invite_for_user(
     *,
     user_id: str,
     email: str,
 ) -> dict | None:
-    """Materialise a pending invite into a company_members row for `user_id`.
+    """Materialise a pending invite into a company_members row for `user_id`
+    plus workspace_members rows for the invite's target workspaces.
 
-    Returns {company_id, role} on success, or None if no matching invite.
-    Raises ValueError("already_in_company") if the user already belongs to
-    a different company (one-user-one-company invariant).
+    Returns {company_id, role, workspace_ids} on success, or None if no
+    matching invite. Raises ValueError("already_in_company") if the user
+    already belongs to a different company (one-user-one-company invariant).
 
     The caller's email must already be verified (Supabase Auth handles
     this); this helper does not re-verify.
@@ -289,10 +388,21 @@ def accept_invite_for_user(
     if existing:
         already = existing[0].get("company_id")
         if already == company_id:
-            # Same-company duplicate: idempotent accept. Delete the dangling
-            # invite and return the existing membership.
+            # Same-company duplicate: idempotent accept. Still grant the
+            # invite's workspaces (a SECOND invite to more workspaces must
+            # work), then delete the dangling invite row.
+            granted = _grant_invite_workspaces(
+                company_id=company_id,
+                user_id=user_id,
+                role=role,
+                workspace_ids=invite.get("workspace_ids"),
+            )
             delete_invite(invite["id"])
-            return {"company_id": company_id, "role": existing[0].get("role")}
+            return {
+                "company_id": company_id,
+                "role": existing[0].get("role"),
+                "workspace_ids": granted,
+            }
         raise ValueError("already_in_company")
 
     client = require_client()
@@ -304,8 +414,14 @@ def accept_invite_for_user(
             "role": role,
         }
     ).execute()
+    granted = _grant_invite_workspaces(
+        company_id=company_id,
+        user_id=user_id,
+        role=role,
+        workspace_ids=invite.get("workspace_ids"),
+    )
     delete_invite(invite["id"])
-    return {"company_id": company_id, "role": role}
+    return {"company_id": company_id, "role": role, "workspace_ids": granted}
 
 
 def touch_invite(invite_id: str) -> dict | None:

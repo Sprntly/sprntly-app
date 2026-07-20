@@ -25,7 +25,7 @@ TOKEN_PREFIX = "sprn_mcp_"
 
 # What a token is FOR, chosen at creation time and immutable after:
 #   developer -> the mcp/ service exposes ticket + PRD tools only
-#   pm        -> the full tool set (adds datasets / backlog / brief)
+#   pm        -> the full tool set (adds datasets / ideation / brief)
 # Distinct from the company-membership role (owner/admin/member) that
 # resolve_mcp_token also returns — this one scopes MCP tools, not the app.
 TOKEN_ROLES = ("developer", "pm")

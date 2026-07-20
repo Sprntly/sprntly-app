@@ -46,6 +46,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .. import sentry as _sentry
 from . import agents as _agents
 from . import auth as _auth
 from . import backend_client as _backend
@@ -86,6 +87,8 @@ class PipelineBody(BaseModel):
 
 
 def create_app() -> FastAPI:
+    # No-op unless SENTRY_DSN is set (loaded from .env by the entrypoint).
+    _sentry.init_sentry()
     cfg = _auth.load_config()
     serializer = _auth.make_serializer(cfg)
     sessions = SessionStore()

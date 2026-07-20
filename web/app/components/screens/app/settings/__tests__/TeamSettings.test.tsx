@@ -84,10 +84,10 @@ describe("TeamSettingsView — chrome (mockup-aligned)", () => {
     expect(html).toContain("Anyone on your team can sign in")
   })
 
-  it("renders two set-block cards (combined roster + roles ref)", () => {
+  it("renders a single set-block card (roles ref folded into dropdowns)", () => {
     const html = render()
     const matches = html.match(/class="set-block"/g) || []
-    expect(matches.length).toBeGreaterThanOrEqual(2)
+    expect(matches.length).toBe(1)
   })
 
   it("renders the combined header count ('3 members · 2 pending invites')", () => {
@@ -165,9 +165,69 @@ describe("TeamSettingsView — combined roster", () => {
     expect(html).toContain("themed-select disabled")
   })
 
-  it("includes Viewer in the member role select dropdown", () => {
+  it("renders the role select trigger with the member's current role", () => {
     const html = render({ currentUserRole: "admin", currentUserId: ADMIN_ID })
-    expect(html).toContain(">Viewer<")
+    expect(html).toContain("themed-select-trigger")
+    expect(html).toContain(">Owner<")
+    expect(html).toContain(">Admin<")
+    expect(html).toContain(">Member<")
+  })
+})
+
+describe("TeamSettingsView — workspaces multi-select", () => {
+  const workspaces = [
+    { id: "w1", name: "Default" },
+    { id: "w2", name: "Notifications" },
+  ]
+
+  it("member-role rows get a workspaces multi-select showing their grants", () => {
+    const html = render({
+      members: [members[0], { ...members[2], workspace_ids: ["w1"] }],
+      availableWorkspaces: workspaces,
+      onToggleMemberWorkspace: noop,
+    })
+    expect(html).toContain("set-team-row-ws")
+    expect(html).toContain(">Default<")
+  })
+
+  it("summarises a full selection as All workspaces", () => {
+    const html = render({
+      members: [members[0], { ...members[2], workspace_ids: ["w1", "w2"] }],
+      availableWorkspaces: workspaces,
+      onToggleMemberWorkspace: noop,
+    })
+    expect(html).toContain(">All workspaces<")
+  })
+
+  it("owner/admin rows show the implicit-access label, not a picker", () => {
+    const html = render({
+      members: [members[0], members[1]],
+      availableWorkspaces: workspaces,
+      onToggleMemberWorkspace: noop,
+    })
+    expect(html).toContain("set-team-row-ws-all")
+    expect(html).not.toContain("themed-multi-select")
+  })
+
+  it("single-workspace companies get no workspace pickers", () => {
+    const html = render({
+      members: [{ ...members[2], workspace_ids: ["w1"] }],
+      availableWorkspaces: [workspaces[0]],
+      onToggleMemberWorkspace: noop,
+    })
+    expect(html).not.toContain("set-team-row-ws")
+  })
+
+  it("invite form uses a workspaces dropdown instead of checkboxes", () => {
+    const html = render({
+      showInviteForm: true,
+      availableWorkspaces: workspaces,
+      inviteWorkspaceIds: ["w2"],
+      onToggleInviteWorkspace: noop,
+    })
+    expect(html).toContain("set-team-invite-ws")
+    expect(html).toContain(">Notifications<")
+    expect(html).not.toContain('type="checkbox"')
   })
 })
 
@@ -190,7 +250,7 @@ describe("TeamSettingsView — invite form", () => {
   it("renders inline form when showInviteForm=true", () => {
     const html = render({ showInviteForm: true })
     expect(html).toContain('type="email"')
-    expect(html).toContain(">Viewer<")
+    expect(html).toContain("set-team-invite-select")
   })
 
   it("submit disabled while submitting", () => {
@@ -214,18 +274,10 @@ describe("TeamSettingsView — invite form", () => {
   })
 })
 
-describe("TeamSettingsView — Roles reference block", () => {
-  it("renders all four role descriptions", () => {
+describe("TeamSettingsView — Roles reference card removed", () => {
+  it("no longer renders the standalone Roles card", () => {
     const html = render()
-    expect(html).toMatch(/<strong>\s*Owner\s*<\/strong>/)
-    expect(html).toMatch(/<strong>\s*Admin\s*<\/strong>/)
-    expect(html).toMatch(/<strong>\s*Member\s*<\/strong>/)
-    expect(html).toMatch(/<strong>\s*Viewer\s*<\/strong>/)
-  })
-
-  it("uses the set-row primitives for the role reference", () => {
-    const html = render()
-    const setRows = html.match(/class="set-row"/g) || []
-    expect(setRows.length).toBeGreaterThanOrEqual(4)
+    expect(html).not.toContain('class="set-row"')
+    expect(html).not.toContain("Full access · billing")
   })
 })

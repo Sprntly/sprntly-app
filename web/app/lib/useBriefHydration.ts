@@ -64,10 +64,13 @@ export function notifyBriefRegenerating(): void {
  * Safe to call from anywhere inside the AuthGate. Re-runs on company change.
  */
 export function useBriefHydration(company: string = "asurion"): BriefHydration {
-  const { setContent } = useContent()
+  const { setContent, resetBrief } = useContent()
   const [state, setState] = useState<HydrationState>({ kind: "idle" })
   const [regenerating, setRegenerating] = useState(false)
   const cancelled = useRef(false)
+  // The company this hook last loaded for, so we can tell a genuine workspace
+  // SWITCH from the initial mount (which has nothing stale to clear).
+  const prevCompanyRef = useRef<string | undefined>(undefined)
   // Bumped to (re)start the regen watch: >0 means "actively wait for a regen to
   // appear" (a connector was just added, or a regeneration was kicked off); the
   // initial 0 value only does a one-shot mount check.
@@ -76,6 +79,15 @@ export function useBriefHydration(company: string = "asurion"): BriefHydration {
   // ── Initial load + first-run generation polling ────────────────────────────
   useEffect(() => {
     cancelled.current = false
+    // On a genuine workspace switch, drop the previous workspace's brief from
+    // ContentContext immediately. Otherwise the weekly brief screen keeps
+    // rendering the old brief while the new one loads — and, when the new
+    // workspace has no brief yet, forever (nothing overwrites the merged slice).
+    if (prevCompanyRef.current !== undefined && prevCompanyRef.current !== company) {
+      resetBrief()
+      setRegenerating(false)
+    }
+    prevCompanyRef.current = company
     setState({ kind: "loading" })
 
     const start = Date.now()
@@ -150,7 +162,7 @@ export function useBriefHydration(company: string = "asurion"): BriefHydration {
     return () => {
       cancelled.current = true
     }
-  }, [company, setContent])
+  }, [company, setContent, resetBrief])
 
   // ── Regeneration-over-existing-brief watch ─────────────────────────────────
   // On mount (nonce 0) this is a cheap one-shot: if a regen is already in flight

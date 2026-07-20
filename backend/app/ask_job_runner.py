@@ -15,7 +15,8 @@ import asyncio
 import logging
 
 from app import qa_agent
-from app.db import complete_ask_job, fail_ask_job
+from app.db import complete_ask_job, fail_ask_job, is_ask_cancelled
+from app.qa_agent import AskCancelled
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ def _run_sync(
     dataset: str,
     history: list[dict],
     pinned_skill: str | None,
+    prd_id: int | None,
 ) -> None:
     payload = qa_agent.answer(
         enterprise_id=enterprise_id,
@@ -43,6 +45,11 @@ def _run_sync(
         dataset=dataset,
         history=history,
         pinned_skill=pinned_skill,
+        prd_id=prd_id,
+        # Cooperative cancellation: the user's Stop flips the job row to
+        # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
+        # steps and raises AskCancelled to abort before the expensive answer call.
+        is_cancelled=lambda: is_ask_cancelled(ask_id),
     )
     # Append-only analytics log, same as the old inline path.
     try:
@@ -65,6 +72,7 @@ async def run_ask_job(
     dataset: str,
     history: list[dict] | None = None,
     pinned_skill: str | None = None,
+    prd_id: int | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
     result. A failure marks the row `error` and is swallowed — the worker never
@@ -79,8 +87,14 @@ async def run_ask_job(
             dataset,
             history or [],
             pinned_skill,
+            prd_id,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)
+    except AskCancelled:
+        # The user stopped the ask; the row is already `cancelled` (set by the
+        # cancel endpoint). Leave it as-is — this is NOT a failure, so must not
+        # be marked `error`. The worker just abandons the answer.
+        logger.info("Ask job cancelled ask_id=%s", ask_id)
     except Exception as exc:  # noqa: BLE001 — best-effort; never crash the worker
         msg = f"{type(exc).__name__}: {exc}"
         logger.exception("Ask job failed ask_id=%s", ask_id)

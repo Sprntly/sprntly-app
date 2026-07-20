@@ -38,7 +38,7 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\b(prioriti[sz]e|rank|rice|wsjf|ice\s+score|moscow)\b", re.I),
      "prioritize", "Prioritize ideas", 0.90),
     (re.compile(r"\b(re-?prioriti[sz]e|re-?rank|re-?sequence)\b", re.I),
-     "prioritize", "Re-prioritize backlog", 0.90),
+     "prioritize", "Re-prioritize ideas", 0.90),
 
     # User stories / tickets
     (re.compile(r"\b(create|generate|write)\b.{0,20}\b(ticket|story|stories|task)\b", re.I),
@@ -46,9 +46,9 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\b(user\s+stor|acceptance\s+criteria|ac\s+for)\b", re.I),
      "user-stories", "Generate user stories", 0.85),
 
-    # Backlog triage
-    (re.compile(r"\b(triage|clean\s*up|dedupe|duplicate).{0,20}\bbacklog\b", re.I),
-     "backlog-triage", "Triage backlog", 0.85),
+    # Ideation prioritize ("backlog" kept as a chat alias for the old name)
+    (re.compile(r"\b(triage|clean\s*up|dedupe|duplicate|prioriti[sz]e).{0,20}\b(ideation|ideas|backlog)\b", re.I),
+     "ideation-prioritize", "Prioritize ideation", 0.85),
 
     # Decision memo
     (re.compile(r"\b(decision|build\s+vs?\s+buy|pivot|persevere|trade-?off)\b", re.I),
@@ -147,12 +147,64 @@ def is_call_digest(question: str) -> bool:
 # guidance). Mirrors the router's VoC rule at line ~91.
 _VOC_REPORT_RULE = re.compile(r"\b(voice\s+of\s+customer|voc\s+report)\b", re.I)
 
+# "Summary of feedback from recent customer conversations"-style asks are VoC
+# reports by intent, but carry neither the literal "voice of customer" nor a
+# call-noun — without this rule they fall to the haiku router, which sends them
+# to a synthesis/DS answer instead of the pinned VoC report (user-reported
+# misroute). Requires BOTH a feedback word and a customer-conversation noun, in
+# either order, so plain "customer conversations" questions still route freely.
+_VOC_FEEDBACK_CONVO_RULE = re.compile(
+    r"\bfeedback\b.{0,80}\b(?:customer|user|client)\s+(?:conversations?|discussions?)\b"
+    r"|\b(?:customer|user|client)\s+(?:conversations?|discussions?)\b.{0,80}\bfeedback\b",
+    re.I | re.S,
+)
+
 
 def is_voc_report_request(question: str) -> bool:
-    """True for a bare 'voice of customer' / 'VoC report' request. Distinct from
-    is_call_digest (which needs a call-noun); used by qa_agent to route these to
-    the live call digest when a call source is connected."""
-    return bool(_VOC_REPORT_RULE.search(question))
+    """True for a bare 'voice of customer' / 'VoC report' request, or a
+    feedback-from-customer-conversations phrasing. Distinct from is_call_digest
+    (which needs a call-noun); used by qa_agent to route these to the live call
+    digest when a call source is connected."""
+    return bool(
+        _VOC_REPORT_RULE.search(question) or _VOC_FEEDBACK_CONVO_RULE.search(question)
+    )
+
+
+# ── Data-analysis intent (DS agent) ─────────────────────────────────────────
+# "analyze my data", "what does our usage data show", "run a data analysis" →
+# the deterministic DS engine over the company's uploaded CSV/Excel exports
+# (app/ds/chat_analysis.py). Like call-digest, qa_agent checks this BEFORE the
+# generic skill router: the generic rules would misroute these to a synthesis
+# skill and answer from the KG instead of actually computing over the data.
+_DATA_NOUN = r"(?:data(?:set)?s?|csvs?|spreadsheets?|analytics|product\s+usage|usage\s+data|metrics\s+data|export(?:ed)?\s+(?:data|files?)|exports?)"
+_ANALYZE_VERB = r"(?:analy[sz]e|analysis|dig\s+into|crunch|mine|explore|profile|run\s+the\s+numbers\s+on)"
+_DATA_ANALYSIS_RULES: list[re.Pattern] = [
+    # verb ... noun ("analyze my product data", "crunch the exported CSVs")
+    re.compile(r"\b" + _ANALYZE_VERB + r"\b.{0,40}\b" + _DATA_NOUN + r"\b", re.I),
+    # noun ... verb/insight ("my usage data — any insights?")
+    re.compile(r"\b" + _DATA_NOUN + r"\b.{0,40}\b(?:analy[sz]e|analysis|insights?|patterns?|findings?|anomal(?:y|ies))\b", re.I),
+    # insight ... noun ("any patterns in our dataset?", "insights from the CSVs")
+    re.compile(r"\b(?:insights?|patterns?|findings?|anomal(?:y|ies))\b.{0,40}\b" + _DATA_NOUN + r"\b", re.I),
+    # "what does the data say/show/tell us"
+    re.compile(r"\bwhat\b.{0,30}\b(?:data|numbers|metrics)\b.{0,25}\b(?:say|show|tell|reveal)", re.I),
+    # explicit ask for the DS agent / data-science pass
+    re.compile(r"\b(?:data[\s-]science|ds)\s+(?:agent|analysis|report)\b", re.I),
+]
+# These asks belong to the synthesis/VoC/interview skills even when they contain
+# a data-noun ("analyze the survey data") — qualitative corpora, not tabular
+# exports. Presence of any of them vetoes the DS route.
+_DATA_ANALYSIS_VETO = re.compile(
+    r"\b(?:interviews?|feedback|nps|csat|surveys?|reviews?|calls?|meetings?|transcripts?|tickets?|complaints?)\b",
+    re.I,
+)
+
+
+def is_data_analysis_request(question: str) -> bool:
+    """True if the question asks to analyze the company's uploaded tabular data —
+    the trigger for the DS-engine path (see app/ds/chat_analysis.py)."""
+    if _DATA_ANALYSIS_VETO.search(question):
+        return False
+    return any(p.search(question) for p in _DATA_ANALYSIS_RULES)
 
 
 def detect_intent(question: str) -> SkillMatch | None:

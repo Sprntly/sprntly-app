@@ -1,6 +1,6 @@
 """Ingestion routes — pull a connected provider into the knowledge graph.
 
-POST /v1/ingest/{provider}/sync — tenant-scoped (require_company). Reads the
+POST /v1/ingest/{provider}/sync — tenant-scoped (require_workspace). Reads the
 stored connection, decrypts the credential, runs the provider's puller, and
 routes the records through the generic extractor into the KG.
 
@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 
 from app import db
-from app.auth import CompanyContext, require_company
+from app.auth import WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.graph.facade import GraphFacade
 from app.kg_ingest.runner import PULLERS, sync_provider, token_for
@@ -41,7 +41,7 @@ def _decrypt_provider_token(company_id: str, provider: str) -> str:
 
 
 @router.post("/{provider}/sync")
-def sync(provider: str, company: CompanyContext = Depends(require_company)):
+def sync(provider: str, company: WorkspaceContext = Depends(require_workspace)):
     if company.role not in ("owner", "admin"):
         raise HTTPException(403, "Only admins can trigger connector syncs")
     if provider not in PULLERS:
@@ -74,7 +74,7 @@ _MAX_AUDIO_BYTES = 25 * 1024 * 1024
 async def ingest_audio_route(
     file: Annotated[UploadFile, File(description="Meeting audio (mp3/m4a/wav)")],
     source: Annotated[str, Form()] = "fireflies",
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """Upload a meeting audio file → transcribe (Whisper) → distill into the KG.
 
@@ -118,7 +118,7 @@ class GitHubDeepReadIn(BaseModel):
 @router.post("/github/deep-read")
 def github_deep_read(
     body: GitHubDeepReadIn,
-    company: CompanyContext = Depends(require_company),
+    company: WorkspaceContext = Depends(require_workspace),
 ):
     """On-demand deep-read of one GitHub repo → distilled system map in the KG.
 

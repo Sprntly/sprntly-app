@@ -67,11 +67,11 @@ export function getConnectorRowState(
   }
 
   // Not connected (or connection in a non-active state like "error").
-  // "Connect" is clickable if EITHER an OAuth backend exists OR the
-  // provider uses API-key auth (commit J — Fireflies). Both surface as
-  // "Connect" in the UI; the click handler in ConnectorsSettings picks
-  // the right flow (OAuth redirect vs API-key modal) based on authType.
-  if (item.oauth || item.authType === "apikey") {
+  // "Connect" is clickable if an OAuth backend exists OR the provider uses
+  // API-key auth (commit J — Fireflies) OR a credentials form (Superset).
+  // All surface as "Connect" in the UI; the click handler in
+  // ConnectorsSettings picks the right flow based on authType.
+  if (item.oauth || item.authType === "apikey" || item.authType === "credentials") {
     return {
       status: "off",
       actionLabel: "Connect",

@@ -25,20 +25,20 @@ export type PendingSearchHandoff = { query: string; reply: AskResponse; convId: 
  *  tab seeded with the query (one new tab per chat started from the brief). */
 export type PendingChatHandoff = { query: string }
 
-/** The brief-insight pointer a PRD is generated from / anchored to. Null for a
- *  backlog PRD (no insight_index) — it renders from the PRD payload alone. */
+/** The brief-insight pointer a PRD is generated from / anchored to. Null for
+ *  an ideation PRD (no insight_index) — it renders from the PRD payload alone. */
 export type PrdTabMeta = { briefId: number; insightIndex: number }
 
 /** A request to open a PRD as a NEW CHAT TAB on the chat surface, with the
  *  right-side content panel (Evidence / PRD / Tickets) sliding over it. Every
  *  "view PRD" / "generate PRD" affordance (brief finding cards, the brief
- *  composer, a backlog item) hands one of these off via `openPrdTab`; ChatScreen
+ *  composer, an ideation item) hands one of these off via `openPrdTab`; ChatScreen
  *  consumes it once, spawns a fresh chat tab, drives the source, and opens the
  *  panel. `title` labels the tab. The `source` discriminant says where the PRD
  *  comes from:
  *   - `ready`          — the caller already holds the PrdState (just show it)
  *   - `generate`       — kick off brief-insight PRD generation (runPrdGeneration)
- *   - `generateBacklog`— kick off backlog PRD generation (runPrdGenerationFromBacklog)
+ *   - `generateIdeation`— kick off ideation PRD generation (runPrdGenerationFromIdeation)
  *   - `load`           — fetch an already-generated PRD by id (loadPrdById)
  *   - `resume`         — poll a PRD whose generation was already kicked off
  *                        elsewhere (Artifacts upload, chat PRD-import command) */
@@ -47,7 +47,7 @@ export type PrdTabRequest = {
   /** The insight's body/description text (from the originating brief finding),
    *  shown under the title in the chat insight message so the opening card
    *  carries the finding's content, not just its heading. Optional — only the
-   *  brief-card paths (view/generate PRD) carry it; backlog / ready-from-content
+   *  brief-card paths (view/generate PRD) carry it; ideation / ready-from-content
    *  paths omit it and the body simply isn't rendered. */
   insightBody?: string
   /** The user's typed command that opened this PRD tab (e.g. "convert this PRD
@@ -58,14 +58,16 @@ export type PrdTabRequest = {
   source:
     | { kind: "ready"; prd: PrdState; meta: PrdTabMeta | null }
     | { kind: "generate"; meta: PrdTabMeta }
-    | { kind: "generateBacklog"; backlogItemId: string }
+    | { kind: "generateIdeation"; ideationItemId: string }
     | { kind: "load"; prdId: number; meta: PrdTabMeta | null }
     // Generation was ALREADY kicked off elsewhere (e.g. the PRD-import endpoint
     // returns a 'generating' prd_id): open the tab immediately and re-enter
     // polling in-panel until ready, rather than blocking the caller first.
     // `openTickets` (chat "convert this PRD into tickets" over an attached
     // document) lands the panel on the Tickets tab once the PRD is ready.
-    | { kind: "resume"; prdId: number; meta: PrdTabMeta | null; openTickets?: boolean }
+    // `origin` picks the seeded acknowledgment wording: 'task' (a chat
+    // "generate a PRD for <specific need>" command) vs the default doc-import.
+    | { kind: "resume"; prdId: number; meta: PrdTabMeta | null; openTickets?: boolean; origin?: "import" | "task" }
 }
 
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
@@ -149,6 +151,13 @@ interface NavigationContextType {
    *  and consumes it. The single entry point for "PRD opens in a new chat". */
   openPrdTab: (request: PrdTabRequest) => void
 
+  /** Global search / command palette (⌘K). Rendered once by AppShell; the
+   *  sidebar trigger and the global hotkey both drive this shared state. */
+  paletteOpen: boolean
+  openPalette: () => void
+  closePalette: () => void
+  togglePalette: () => void
+
   /** Narrow icon-only rail vs full labels */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
@@ -180,6 +189,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingOndemandDraft, setPendingOndemandDraft] = useState<string | null>(null)
   const [pendingChatHandoff, setPendingChatHandoff] = useState<PendingChatHandoff | null>(null)
   const [pendingPrdTab, setPendingPrdTab] = useState<PrdTabRequest | null>(null)
+  const [paletteOpen, setPaletteOpen] = useState(false)
   // Default to the collapsed icon rail; a saved "0" preference (see the init
   // effect) expands it on load. Users toggle via the sidebar chevron.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
@@ -361,7 +371,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     // This navigation to `/` is *for* opening the PRD panel — tell the
     // route-change effect not to close the panel when we land there.
     skipPanelCloseOnNavRef.current = true
-    // Route to the chat surface so ChatScreen mounts (from /brief, /backlog, …)
+    // Route to the chat surface so ChatScreen mounts (from /brief, /ideation, …)
     // and its pending-PRD-tab effect consumes the request — spawning the tab and
     // opening the panel. Harmless when already on `/` (the state change alone
     // drives consumption). ChatScreen defers the panel-open past the route
@@ -369,6 +379,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
     router.push("/")
     window.scrollTo({ top: 0, behavior: "instant" })
   }, [router])
+
+  const openPalette = useCallback(() => setPaletteOpen(true), [])
+  const closePalette = useCallback(() => setPaletteOpen(false), [])
+  const togglePalette = useCallback(() => setPaletteOpen((v) => !v), [])
 
   const openDrawer = useCallback((drawer: "claude" | "ticket" | "design-agent") => {
     setActiveDrawer(drawer)
@@ -438,6 +452,10 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         pendingPrdTab,
         setPendingPrdTab,
         openPrdTab,
+        paletteOpen,
+        openPalette,
+        closePalette,
+        togglePalette,
         sidebarCollapsed,
         toggleSidebar,
         aiPanelWidth,
