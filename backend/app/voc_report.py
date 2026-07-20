@@ -32,13 +32,13 @@ _VOC_SKILL = "voice-of-customer-report"
 # finding title in narrow panels.
 _STYLE = """
   :root{
-    --desk:#E9E7E2; --page:#FFFFFF; --ink:#1F241F; --sec:#5B615B; --accent:#1A6B47;
+    --page:#FFFFFF; --ink:#1F241F; --sec:#5B615B; --accent:#1A6B47;
     --happy-bg:#E7F1EA; --happy-fg:#1A6B47; --edge-bg:#FBF0DC; --edge-fg:#8A5A12;
     --fail-bg:#F9E7E4; --fail-fg:#9C3223; --hair:#E3E1DC; --quiet:#F6F5F2;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  body{background:var(--desk);font-family:'Inter',sans-serif;font-size:15px;line-height:1.6;color:var(--ink);padding:40px 16px}
-  .page{max-width:900px;margin:0 auto;background:var(--page);border-radius:2px;box-shadow:0 2px 14px rgba(31,36,31,.10);padding:72px;position:relative}
+  body{background:var(--page);font-family:'Inter',sans-serif;font-size:15px;line-height:1.6;color:var(--ink);padding:0}
+  .page{max-width:900px;margin:0 auto;background:var(--page);padding:56px 64px;position:relative}
   .chips{max-width:900px;margin:0 auto 12px;display:flex;gap:8px;flex-wrap:wrap;font-family:'IBM Plex Mono',monospace;font-size:11.5px}
   .chip{padding:4px 10px;border-radius:2px;background:#fff;color:var(--sec);box-shadow:0 1px 3px rgba(31,36,31,.08)}
   .chip.green{background:var(--happy-bg);color:var(--happy-fg)}
@@ -107,7 +107,7 @@ _STYLE = """
   .cta.ghost{border:1px solid var(--accent);color:var(--accent)}
   .gate{font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--sec);margin:-4px 0 14px}
   @media(max-width:760px){.page{padding:32px 20px}.themes{grid-template-columns:1fr}.tfind{grid-template-columns:38px 1fr}.tfind .side{flex-direction:row;justify-content:flex-start;grid-column:2}}
-  @media print{body{background:#fff;padding:0}.chips{display:none}.page{box-shadow:none;padding:40px}}
+  @media print{.chips{display:none}.page{padding:40px}}
 """
 
 # ── JSON schema for the report DATA (the model returns this, never HTML) ──────
