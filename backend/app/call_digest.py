@@ -5,7 +5,8 @@ generic Ask path answers it badly: KG retrieval is semantic + token-capped, so
 "every call in a window" comes back sampled, and the VoC skill gets no real
 corpus. This module runs the dedicated path instead:
 
-  1. parse the time window from the question (default: last 7 days),
+  1. parse the time window from the question (default: last 7 days, auto-widened
+     to 30 then 90 days when no window was named and the default finds nothing),
   2. fetch EVERY call in that window live from Fireflies — distilled summary plus
      a bounded sample of transient verbatim quotes (never persisted to the KG),
   3. assemble a complete corpus and run the voice-of-customer-report skill over
@@ -30,6 +31,12 @@ logger = logging.getLogger(__name__)
 _VOC_SKILL = "voice-of-customer-report"
 ANSWER_MODEL = "claude-sonnet-4-6"
 _DEFAULT_WINDOW_DAYS = 7
+# When the question names NO explicit window ("recent feedback", bare "voice of
+# customer") and the default window comes back empty, widen the fetch through
+# these steps before giving up — "recent" means "the most recent calls that
+# exist", not a hard 7-day cutoff. Explicit windows are never widened: if the
+# user asked for last week and it was empty, saying so is the honest answer.
+_AUTOWIDEN_DAYS = (30, 90)
 # Bound the corpus handed to the skill so a busy month of calls can't blow the
 # context budget. Calls are newest-first; we keep the most recent under budget.
 _CORPUS_CHAR_BUDGET = 80_000
@@ -40,6 +47,9 @@ class Window:
     since: datetime
     until: datetime
     label: str  # human phrase for the run line, e.g. "last week (Jun 16–22)"
+    # True when the question NAMED this window ("last week", "past 30 days");
+    # False for the fallback default, which answer() may auto-widen when empty.
+    explicit: bool = True
 
 
 @dataclass
@@ -129,9 +139,10 @@ def parse_window(question: str, *, now: datetime | None = None) -> Window:
             return Window(since, this_q_start, f"last quarter ({since:%b}–{prev:%b %Y})")
         return Window(this_q_start, now, f"this quarter")
 
-    # Default: rolling last 7 days.
+    # Default: rolling last 7 days. Marked non-explicit so answer() may widen
+    # it when empty — "recent" is not a hard cutoff.
     since = _start_of_day(now - timedelta(days=_DEFAULT_WINDOW_DAYS))
-    return Window(since, now, f"the last {_DEFAULT_WINDOW_DAYS} days")
+    return Window(since, now, f"the last {_DEFAULT_WINDOW_DAYS} days", explicit=False)
 
 
 # ── Fetch + corpus assembly ──────────────────────────────────────────────────
@@ -219,6 +230,22 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     window = parse_window(question)
     corpus = build_corpus(enterprise_id, window)
 
+    # No explicit window in the question + default window empty → widen through
+    # _AUTOWIDEN_DAYS until calls appear. A generic "summary of recent feedback"
+    # should surface the most recent calls that exist, not dead-end on an
+    # arbitrary 7-day cutoff. Named windows are never widened.
+    if corpus.status == "no_calls" and not window.explicit:
+        now = _utc_now()
+        for days in _AUTOWIDEN_DAYS:
+            wider = Window(
+                _start_of_day(now - timedelta(days=days)), now,
+                f"the last {days} days", explicit=False,
+            )
+            corpus = build_corpus(enterprise_id, wider)
+            window = wider
+            if corpus.status != "no_calls":
+                break
+
     if corpus.status == "not_connected":
         return _plain_payload(
             "I can summarize your customer calls, but no call source is connected "
@@ -233,10 +260,16 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             "Fireflies API key may need reconnecting in Settings → Connectors."
         )
     if corpus.status == "no_calls":
+        if window.explicit:
+            return _plain_payload(
+                f"No customer calls found in Fireflies for {window.label}. Try a "
+                "wider window (e.g. \"summarize calls from the last 30 days\"), or "
+                "check that your meetings are syncing to Fireflies."
+            )
+        # Already auto-widened to the last step — a wider window won't help.
         return _plain_payload(
-            f"No customer calls found in Fireflies for {window.label}. Try a wider "
-            "window (e.g. \"summarize calls from the last 30 days\"), or check that "
-            "your meetings are syncing to Fireflies."
+            f"No customer calls found in Fireflies in {window.label}. Check that "
+            "your meetings are syncing to Fireflies (Settings → Connectors)."
         )
 
     # status == ok → run the VoC skill over the complete corpus and render the
