@@ -55,6 +55,21 @@ class Settings(BaseSettings):
     ticket_gen_fanout: bool = True
     ticket_gen_batch_size: int = 4
     ticket_gen_max_parallel: int = 4
+    # Fast first batch: the leading enrich batch is carved down to this many
+    # stubs so the FIRST tickets reach the UI in roughly half a full batch's
+    # time (a batch's latency is dominated by its output tokens) and the
+    # Tickets tab visibly streams batch-by-batch instead of everything landing
+    # at once. 0 disables (uniform batches). Env: TICKET_GEN_FIRST_BATCH_SIZE.
+    ticket_gen_first_batch_size: int = 2
+    # Prime-then-fanout: sibling batches launch this many seconds after the
+    # first (or as soon as it finishes, whichever comes first), so the first
+    # batch's prompt-cache WRITE of the shared PRD prefix lands before the
+    # siblings prefill — measured live (2026-07-20): simultaneous shards all
+    # miss the cache and each re-pays the full ~15K-token PRD prefill. The
+    # stagger costs nothing end-to-end (siblings are larger and finish last
+    # anyway) and staggers batch completions for progressive rendering.
+    # 0 disables. Env: TICKET_GEN_PRIME_STAGGER_SECONDS.
+    ticket_gen_prime_stagger_seconds: float = 12.0
     # Tier 1 — process-wide cap on how many Design Agent generations may run
     # their HEAVY section (LLM recreate loop + vite build + screenshot) at once.
     # Default 1: on the 2-vCPU prod box, one generation already pins both cores

@@ -210,6 +210,8 @@ async def generate(
                 strategy=strategy,
                 batch_size=settings.ticket_gen_batch_size,
                 max_parallel=settings.ticket_gen_max_parallel,
+                first_batch_size=settings.ticket_gen_first_batch_size,
+                prime_stagger_s=settings.ticket_gen_prime_stagger_seconds,
                 on_batch=_on_batch,
             )
             job = _jobs.get(job_id)
