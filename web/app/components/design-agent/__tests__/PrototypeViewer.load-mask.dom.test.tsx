@@ -57,6 +57,66 @@ describe("load mask lifts on first paint", () => {
   })
 })
 
+// A readiness-aware onBundleLoad (e.g. useViewGrant's notifyBundleLoaded) can
+// return a Promise that resolves only once the async readiness decision is
+// in. The mask must stay up until then, not clear on the raw `load` event.
+describe("load mask bridges an async onBundleLoad readiness signal", () => {
+  const placeholderIn = (container: HTMLElement) =>
+    container.querySelector('[data-testid="da-viewer-placeholder"]')
+
+  it("test_prototype_viewer_mask_stays_up_while_async_onBundleLoad_pending", () => {
+    const { container } = render(
+      <PrototypeViewer
+        bundleUrl={BUNDLE}
+        isComplete={false}
+        maskUntilLoaded
+        onBundleLoad={() => new Promise<void>(() => {})}
+      />,
+    )
+    fireEvent.load(container.querySelector("iframe.da-prototype-iframe")!)
+    // The returned promise never resolves within this test — the mask must
+    // remain up rather than clearing on the raw `load` event.
+    expect(placeholderIn(container)).not.toBeNull()
+  })
+
+  it("test_prototype_viewer_mask_clears_once_pending_onBundleLoad_promise_resolves", async () => {
+    let resolveReadiness: () => void = () => {}
+    const readiness = new Promise<void>((resolve) => {
+      resolveReadiness = resolve
+    })
+    const { container } = render(
+      <PrototypeViewer
+        bundleUrl={BUNDLE}
+        isComplete={false}
+        maskUntilLoaded
+        onBundleLoad={() => readiness}
+      />,
+    )
+    fireEvent.load(container.querySelector("iframe.da-prototype-iframe")!)
+    expect(placeholderIn(container)).not.toBeNull()
+    await act(async () => {
+      resolveReadiness()
+      await readiness
+    })
+    expect(placeholderIn(container)).toBeNull()
+  })
+
+  it("test_prototype_viewer_mask_clears_synchronously_for_non_promise_onBundleLoad", () => {
+    const onBundleLoad = vi.fn(() => undefined)
+    const { container } = render(
+      <PrototypeViewer
+        bundleUrl={BUNDLE}
+        isComplete={false}
+        maskUntilLoaded
+        onBundleLoad={onBundleLoad}
+      />,
+    )
+    fireEvent.load(container.querySelector("iframe.da-prototype-iframe")!)
+    // No act(async ...) needed — the mask clears in the same tick.
+    expect(placeholderIn(container)).toBeNull()
+  })
+})
+
 // A stalled bundle (hung signed-URL fetch, dead asset host) never fires `load`,
 // which would otherwise leave the neutral cover up forever. The timeout is a
 // FALLBACK that lifts the cover only — it must not masquerade as a real load

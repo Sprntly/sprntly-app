@@ -270,8 +270,10 @@ export type PostGenerationResultViewProps = {
   onBundleAssetError?: () => void
   /** Called on the authed iframe `onLoad` so the container can probe the real
    *  status (a 404 body fires `load`, not `error`) and cover a briefly-
-   *  unavailable bundle. Absent on the public surface. */
-  onBundleLoad?: () => void
+   *  unavailable bundle. Absent on the public surface. May return a Promise
+   *  that resolves once the readiness decision is in, so the viewer's load
+   *  mask stays up until then. */
+  onBundleLoad?: () => void | Promise<void>
   /** Bumped on a successful re-mint so the iframe is forced to reload the
    *  now-re-authorized bundle. Folded into the viewer remount key. */
   bundleGrantReloadKey?: number
@@ -1188,6 +1190,7 @@ export function PostGenerationResultView({
       maskUntilLoaded
       onAssetError={onBundleAssetError}
       onBundleLoad={onBundleLoad}
+      iterateRunning={iterateRunning}
     />
   ) : null
 

@@ -1205,14 +1205,28 @@
   display: flex;
   flex-direction: column;
 }
-/* Glitch A: neutral surface cover over the iframe until it paints. Sits inside
-   the position:relative `.proto-stage`, above the iframe; removed on the first
-   `load`. Surface-colored — never black, never the "Applying changes…" copy. */
+/* Glitch A (reskinned): matches .da-bundle-loading's scrim + spinner + label
+   treatment exactly, so the "blank rectangle" reload gap now reads the same as
+   the already-shipped 404-race cover instead of a flat dead surface. Sits
+   inside the position:relative `.proto-stage`, above the iframe; removed once
+   the load+readiness handshake in PrototypeViewer.tsx resolves (see that
+   file's handleLoad for why clearing now waits on more than the raw `load`
+   event). Reuses the SAME .da-spinner / da-bundle-loading-spinner /
+   da-bundle-loading-label rules below — do not fork a second spinner/label
+   style for this. */
 .design-agent-surface .da-viewer-placeholder {
   position: absolute;
   inset: 0;
   z-index: 1;
-  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(3px);
+  color: var(--muted);
+  font-size: 13px;
 }
 
 
@@ -3697,9 +3711,11 @@
    seen. Absolute fill of the position:relative .da-stage. Restyled to the
    Focus scrim, a soft translucent scrim + a larger centered ring
    spinner stacked above the label, off the EXISTING `bundleNotReady` flip — no
-   new driver. The overlay mounts/unmounts entirely on `bundleNotReady`; the
-   `da-bundle-fade` keyframe is a one-shot reveal that fires on mount (cleared
-   by itself), NOT a new state machine. Token-only (no new palette). */
+   new driver. The overlay mounts/unmounts entirely on `bundleNotReady`. No
+   fade-in: a mount-time opacity ramp would technically paint the raw error
+   body underneath at near-zero opacity for its opening frames, contradicting
+   this rule's own coverage guarantee above — the cover renders at full
+   strength the instant it mounts. Token-only (no new palette). */
 .design-agent-surface .da-bundle-loading {
   position: absolute;
   inset: 0;
@@ -3715,9 +3731,6 @@
   color: var(--muted);
   font-size: 13px;
   z-index: 5;
-  /* One-shot mount reveal — fires once when the overlay appears off the
-     existing notReady flip, then self-clears. No JS timer/poll backs it. */
-  animation: da-bundle-fade 0.25s ease;
 }
 /* Larger centered ring spinner — reuses the shared `da-spin` animation via the
    .da-spinner base (do NOT fork a new spinner). The bare <span> gets its ring
@@ -3733,7 +3746,6 @@
 .design-agent-surface .da-bundle-loading-label {
   letter-spacing: 0.01em;
 }
-@keyframes da-bundle-fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* ── Pre-gen screen picker — Suggested + alternatives layout ────────────────
  * Styles the screen-disambiguation picker shown before a generation run when

@@ -77,8 +77,14 @@ export type ViewGrantState = {
    *  `load`, not `error`, so this credentialed probe inspects the real status:
    *  a 401 routes through the bounded re-mint; a 404 sets `notReady` + starts a
    *  bounded readiness retry that reloads the iframe once the bundle is ready;
-   *  an ok clears `notReady`. */
-  notifyBundleLoaded: () => void
+   *  an ok clears `notReady`. Returns a Promise that resolves once the
+   *  readiness decision has been made (handleReadiness has run for this
+   *  call's preflight result) — not merely once the fetch is issued. The
+   *  caller (the viewer) awaits this before clearing its own load mask,
+   *  closing the gap where the mask cleared on the raw `onLoad` while the
+   *  readiness cover hadn't yet had a chance to activate for the same
+   *  reload. */
+  notifyBundleLoaded: () => Promise<void>
 }
 
 /** Pure decision step for `notifyAssetError` — extracted so the bounded-re-mint
@@ -333,9 +339,10 @@ export function useViewGrant(
   // returns `{"detail":"Not found"}` for a not-yet-staged build — the prod
   // incident), so a clean `load` event does NOT mean the real bundle painted.
   // Probe the real status the load event hides and route it via handleReadiness.
-  const notifyBundleLoaded = useCallback(() => {
+  const notifyBundleLoaded = useCallback(async () => {
     if (!grantedBundleUrl) return
-    void preflightBundle(grantedBundleUrl).then(handleReadiness)
+    const status = await preflightBundle(grantedBundleUrl)
+    handleReadiness(status)
   }, [grantedBundleUrl, handleReadiness])
 
   // Clear a pending readiness retry on unmount and whenever the bundle changes,
