@@ -492,6 +492,27 @@ export function useGeneratePrototype(
         setGenLoading(false)
         return
       }
+      if (result && !result.ok) {
+        // Genuine (non-timedOut) failure in the hook's default (non-notify)
+        // mode. Until this fix, control fell straight through to the line
+        // below with pendingResultRef forced to null by the `result?.ok`
+        // check — hideLoading() then closed the overlay with ZERO
+        // user-facing signal that anything was attempted. Mirror the
+        // notify-mode failure branch above (`:469-475`) exactly: same title,
+        // same reasonCopy mapping, same persist flag. Rule #24 (see
+        // GenerationErrorBanner.tsx's file header): never render the raw
+        // backend error string — reasonCopy discards it and returns curated
+        // copy only.
+        showToast(
+          "Generation failed",
+          reasonCopy(result.message),
+          undefined,
+          { persist: true },
+        )
+        clearOverlayTimers()
+        setGenLoading(false)
+        return
+      }
       pendingResultRef.current = result?.ok && result.prototype ? result.prototype : null
       const remaining = MIN_VISIBLE_MS - (Date.now() - shownAtRef.current)
       if (remaining <= 0) {
