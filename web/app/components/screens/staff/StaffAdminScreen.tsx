@@ -343,7 +343,9 @@ function CompanyRow({
 
 const EMPTY_INVITE_FORM: EntitlementFormState = {
   seatLimit: "",
-  prototypeEnabled: false,
+  // Prototype is a default-ON module like agents/weekly_brief (backed by the
+  // companies.prototype_enabled column default) — the toggle is an opt-out.
+  prototypeEnabled: true,
   usePlatformKey: false,
   // Both flag-backed modules default ON for new invites.
   featureFlags: {
