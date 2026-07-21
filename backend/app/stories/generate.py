@@ -29,7 +29,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
@@ -51,6 +51,16 @@ ENRICH_PROMPT_VERSION = "user-stories-enrich-v2"
 # typical PRD (≈8-16 tickets) splits into 2-4 concurrent calls.
 DEFAULT_BATCH_SIZE = 4
 DEFAULT_MAX_PARALLEL = 4
+# Fast first batch + prime-then-fanout (see _generate_fanout). A batch's
+# latency is dominated by its OUTPUT tokens (~1K/ticket at model speed), so a
+# 2-stub leading batch puts the first tickets on screen in roughly half a full
+# batch's time. The stagger holds sibling batches until the first one's prompt
+# cache write of the shared PRD prefix lands (a ~15K-token prefill takes
+# 5-10s); launched simultaneously they ALL miss and each re-pays that prefill
+# (measured live 2026-07-20: every shard cache_read=0). Siblings are larger and
+# finish last anyway, so the stagger doesn't extend the total wall time.
+DEFAULT_FIRST_BATCH_SIZE = 2
+DEFAULT_PRIME_STAGGER_SECONDS = 12.0
 
 # Output contract for the gateway — the skill's canonical ticket. `title`,
 # `body`, and `acceptance_criteria` stay required for backward compatibility
@@ -775,6 +785,8 @@ def _generate_fanout(
     model: Optional[str],
     batch_size: int,
     max_parallel: int,
+    first_batch_size: int = DEFAULT_FIRST_BATCH_SIZE,
+    prime_stagger_s: float = DEFAULT_PRIME_STAGGER_SECONDS,
     stats_out: Optional[dict] = None,
     on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
 ) -> list[Story]:
@@ -783,6 +795,13 @@ def _generate_fanout(
     Falls back to the single path on an empty plan so we never regress to zero
     tickets (a real PRD always yields some). Dependency links stay correct
     because every batch is given the full title roster.
+
+    `first_batch_size` carves a small LEADING batch (0 disables) so the first
+    tickets land early and the UI streams visibly batch-by-batch;
+    `prime_stagger_s` delays the sibling batches behind the first by up to that
+    many seconds (or until the first completes, whichever is sooner) so the
+    first batch's prompt-cache write of the shared PRD prefix is readable by
+    every sibling instead of all of them racing to a cache miss.
 
     `on_batch(stories_so_far, done, total)` — when given, fires once per enrich
     batch as it completes (on THIS orchestrating thread, in the as_completed
@@ -803,7 +822,14 @@ def _generate_fanout(
         )
 
     bs = max(1, batch_size)
-    batches = [stubs[i : i + bs] for i in range(0, len(stubs), bs)]
+    # Carve the fast first batch only when it actually splits work off (a plan
+    # already at/below the first-batch size just runs as one batch).
+    fb = min(max(0, first_batch_size), bs)
+    if fb and len(stubs) > fb:
+        rest = stubs[fb:]
+        batches = [stubs[:fb]] + [rest[i : i + bs] for i in range(0, len(rest), bs)]
+    else:
+        batches = [stubs[i : i + bs] for i in range(0, len(stubs), bs)]
     all_titles = [str(s.get("title")).strip() for s in stubs]
     total = len(batches)
 
@@ -814,8 +840,8 @@ def _generate_fanout(
     stories: list[Story] = []
     workers = max(1, min(max_parallel, total))
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [
-            ex.submit(
+        def _submit(b: list[dict]):
+            return ex.submit(
                 _enrich_batch,
                 enterprise_id,
                 prd_input=prd_input,
@@ -824,8 +850,20 @@ def _generate_fanout(
                 purpose=purpose,
                 model=model,
             )
-            for b in batches
-        ]
+
+        # PRIME-THEN-FANOUT: the first batch goes out alone; siblings follow
+        # after `prime_stagger_s` (or the moment the first batch completes —
+        # futures_wait returns early on a done future, so a tiny/fast first
+        # batch never over-waits). By then the first call's prefill has written
+        # the shared PRD prefix to the prompt cache, so every sibling
+        # cache-reads it instead of re-processing ~15K tokens. A first batch
+        # that FAILS still unblocks here (a failed future counts as done); its
+        # exception surfaces in the as_completed loop below, unchanged.
+        futs = [_submit(batches[0])]
+        if len(batches) > 1:
+            if prime_stagger_s > 0:
+                futures_wait(futs, timeout=prime_stagger_s)
+            futs += [_submit(b) for b in batches[1:]]
         done = 0
         for f in as_completed(futs):
             batch_stories, _ = result = f.result()
@@ -863,6 +901,8 @@ def _generate_fanout(
             n_stubs=len(stubs),
             n_batches=len(batches),
             batch_size=bs,
+            first_batch_size=fb,
+            prime_stagger_s=prime_stagger_s,
             max_parallel=workers,
             n_stories=len(stories),
             calls=(
@@ -882,6 +922,8 @@ def generate_from_input(
     strategy: str = "single",
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_parallel: int = DEFAULT_MAX_PARALLEL,
+    first_batch_size: int = DEFAULT_FIRST_BATCH_SIZE,
+    prime_stagger_s: float = DEFAULT_PRIME_STAGGER_SECONDS,
     stats_out: Optional[dict] = None,
     on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
 ) -> list[Story]:
@@ -896,8 +938,9 @@ def generate_from_input(
     if strategy == "fanout":
         return _generate_fanout(
             enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
-            batch_size=batch_size, max_parallel=max_parallel, stats_out=stats_out,
-            on_batch=on_batch,
+            batch_size=batch_size, max_parallel=max_parallel,
+            first_batch_size=first_batch_size, prime_stagger_s=prime_stagger_s,
+            stats_out=stats_out, on_batch=on_batch,
         )
     return _generate_single(
         enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
@@ -914,6 +957,8 @@ def generate_user_stories(
     strategy: str = "single",
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_parallel: int = DEFAULT_MAX_PARALLEL,
+    first_batch_size: int = DEFAULT_FIRST_BATCH_SIZE,
+    prime_stagger_s: float = DEFAULT_PRIME_STAGGER_SECONDS,
     stats_out: Optional[dict] = None,
     on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
 ) -> list[Story]:
@@ -948,6 +993,8 @@ def generate_user_stories(
         strategy=strategy,
         batch_size=batch_size,
         max_parallel=max_parallel,
+        first_batch_size=first_batch_size,
+        prime_stagger_s=prime_stagger_s,
         stats_out=stats,
         on_batch=on_batch,
     )

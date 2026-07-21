@@ -238,6 +238,11 @@ def llm_call(
                     "input_tokens": result.input_tokens,
                     "output_tokens": result.output_tokens,
                     "cache_read_input_tokens": result.cache_read_input_tokens,
+                    # Cache WRITES too: a fleet of concurrent calls that should
+                    # share one cached prefix but each shows cache_read=0 +
+                    # cache_creation>0 is racing the cache (all prefilling
+                    # before any write lands) — invisible without this field.
+                    "cache_creation_input_tokens": result.cache_creation_input_tokens,
                     "cost_usd": result.cost_usd,
                     "latency_ms": result.latency_ms,
                 },

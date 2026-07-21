@@ -101,7 +101,7 @@ def test_fanout_gives_every_batch_the_full_roster(isolated_settings, monkeypatch
     monkeypatch.setattr(gen, "llm_call", _fake_llm(titles, record=calls, lock=lock))
 
     generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
-                        batch_size=3, max_parallel=3)
+                        batch_size=3, max_parallel=3, first_batch_size=0)
 
     enrich = [c for c in calls if c["prompt_version"] == ENRICH_PROMPT_VERSION]
     assert len(enrich) == 3
@@ -131,7 +131,8 @@ def test_fanout_stats_capture_per_phase(isolated_settings, monkeypatch):
     stats: dict = {}
 
     generate_from_input("ent-A", prd_input="PRD", strategy="fanout",
-                        batch_size=3, max_parallel=3, stats_out=stats)
+                        batch_size=3, max_parallel=3, first_batch_size=0,
+                        stats_out=stats)
 
     assert stats["strategy"] == "fanout"
     assert stats["n_stubs"] == 6
@@ -170,7 +171,7 @@ def test_fanout_on_batch_streams_growing_partial_sets(isolated_settings, monkeyp
 
     result = generate_from_input(
         "ent-A", prd_input="PRD", strategy="fanout",
-        batch_size=3, max_parallel=3, on_batch=_on_batch,
+        batch_size=3, max_parallel=3, first_batch_size=0, on_batch=_on_batch,
     )
 
     assert len(result) == 9
@@ -373,3 +374,138 @@ def test_fanout_prd_rides_cacheable_prefix(isolated_settings, monkeypatch):
         assert "PRD body" not in c["input"]
     # Cache sharing requires the enrich prefixes to be byte-identical.
     assert len({c["user_cacheable_prefix"] for c in enrich_calls}) == 1
+
+
+# ─── fast first batch + prime-then-fanout ────────────────────────────────────
+
+
+def _enrich_batch_titles(calls, stub_titles):
+    """Titles each enrich call was asked to expand, in call order."""
+    out = []
+    for c in calls:
+        if c["prompt_version"] != ENRICH_PROMPT_VERSION:
+            continue
+        section = c["input"].split("Tickets to expand in THIS batch")[-1]
+        out.append([t for t in stub_titles if f"- {t}" in section])
+    return out
+
+
+def test_fanout_carves_a_small_first_batch(isolated_settings, monkeypatch):
+    """10 stubs / batch 4 / first-batch 2 → batches [2, 4, 4]: the leading batch
+    is small so the FIRST tickets land in roughly half a full batch's time."""
+    titles = [f"T{i}" for i in range(10)]
+    calls: list[dict] = []
+    lock = threading.Lock()
+    monkeypatch.setattr(gen, "llm_call", _fake_llm(titles, record=calls, lock=lock))
+
+    stories = generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=4, max_parallel=4, first_batch_size=2, prime_stagger_s=0,
+    )
+
+    assert {s.title for s in stories} == set(titles)
+    sizes = sorted(len(b) for b in _enrich_batch_titles(calls, titles))
+    assert sizes == [2, 4, 4]
+    # The small batch is the LEADING one — it covers the plan's first stubs.
+    first = next(b for b in _enrich_batch_titles(calls, titles) if len(b) == 2)
+    assert set(first) == {"T0", "T1"}
+
+
+def test_fanout_first_batch_zero_keeps_uniform_batches(isolated_settings, monkeypatch):
+    titles = [f"T{i}" for i in range(10)]
+    calls: list[dict] = []
+    lock = threading.Lock()
+    monkeypatch.setattr(gen, "llm_call", _fake_llm(titles, record=calls, lock=lock))
+
+    generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=4, max_parallel=4, first_batch_size=0, prime_stagger_s=0,
+    )
+    # Uniform chunking: the leading batch (the one holding T0) is FULL-size —
+    # no small batch was carved off the front.
+    leading = next(b for b in _enrich_batch_titles(calls, titles) if "T0" in b)
+    assert len(leading) == 4
+    assert sorted(len(b) for b in _enrich_batch_titles(calls, titles)) == [2, 4, 4]
+
+
+def test_fanout_tiny_plan_runs_as_one_batch(isolated_settings, monkeypatch):
+    """A plan at/below the first-batch size doesn't split — one enrich call."""
+    titles = ["T0", "T1"]
+    calls: list[dict] = []
+    monkeypatch.setattr(gen, "llm_call", _fake_llm(titles, record=calls))
+
+    stories = generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=4, max_parallel=4, first_batch_size=2,
+    )
+    assert {s.title for s in stories} == set(titles)
+    assert len(_enrich_batch_titles(calls, titles)) == 1
+
+
+def test_fanout_prime_stagger_delays_siblings(isolated_settings, monkeypatch):
+    """Sibling batches launch only after the stagger window: the first batch's
+    prompt-cache write of the shared PRD prefix must land before they prefill."""
+    import time as _time
+
+    titles = [f"T{i}" for i in range(10)]
+    starts: dict[str, float] = {}
+    lock = threading.Lock()
+
+    def _call(**kw):
+        pv = kw.get("prompt_version", "")
+        if pv == ENRICH_PROMPT_VERSION:
+            section = kw["input"].split("Tickets to expand in THIS batch")[-1]
+            batch = tuple(t for t in titles if f"- {t}" in section)
+            with lock:
+                starts[batch] = _time.monotonic()
+            if "T0" in batch:
+                _time.sleep(0.5)  # first batch outlives the stagger window
+            return _result({"stories": [_story(t) for t in batch]})
+        if pv == PLAN_PROMPT_VERSION:
+            return _result({"stubs": [{"title": t} for t in titles]})
+        return _result({"stories": [_story(t) for t in titles]})
+
+    monkeypatch.setattr(gen, "llm_call", _call)
+    generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=4, max_parallel=4, first_batch_size=2, prime_stagger_s=0.15,
+    )
+
+    first_start = next(v for k, v in starts.items() if "T0" in k)
+    sibling_starts = [v for k, v in starts.items() if "T0" not in k]
+    assert sibling_starts, "siblings ran"
+    assert min(sibling_starts) - first_start >= 0.12, (
+        "siblings must wait out the prime stagger")
+
+
+def test_fanout_prime_stagger_releases_early_when_first_batch_finishes(
+        isolated_settings, monkeypatch):
+    """A long stagger never blocks longer than the first batch itself — with an
+    instant first batch the whole run finishes far inside the stagger window."""
+    import time as _time
+
+    titles = [f"T{i}" for i in range(10)]
+    monkeypatch.setattr(gen, "llm_call", _fake_llm(titles))
+
+    t0 = _time.monotonic()
+    stories = generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=4, max_parallel=4, first_batch_size=2, prime_stagger_s=30,
+    )
+    assert {s.title for s in stories} == set(titles)
+    assert _time.monotonic() - t0 < 5, "wait(timeout) must return on completion"
+
+
+def test_fanout_stats_carry_first_batch_and_stagger(isolated_settings, monkeypatch):
+    titles = [f"T{i}" for i in range(6)]
+    monkeypatch.setattr(gen, "llm_call", _fake_llm(titles))
+    stats: dict = {}
+
+    generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=4, max_parallel=4, first_batch_size=2, prime_stagger_s=0,
+        stats_out=stats,
+    )
+    assert stats["first_batch_size"] == 2
+    assert stats["prime_stagger_s"] == 0
+    assert stats["n_batches"] == 2  # [2, 4]
