@@ -2336,7 +2336,7 @@ export function ChatScreen() {
                 userSelect: "none", flexShrink: 0,
               }}
             >
-              <span style={{ lineHeight: "1.3" }}>Weekly brief</span>
+              <span style={{ lineHeight: "1.3" }}>Top Insights</span>
             </div>
             {tabs.map((tab) => {
               const isActive = activeTabId === tab.id

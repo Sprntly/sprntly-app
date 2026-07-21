@@ -130,6 +130,12 @@ const PLAIN_EMPTY_BRIEF: BriefV2State = {
   insufficientEvidence: false,
 }
 
+// These scenarios gate CTAs on an EMPTY brief, which presupposes the workspace
+// has a source to have gotten a brief from. With no connector BriefChat shows
+// the "connect a source" page instead (BriefChat.no-connector.dom.test.tsx),
+// so seed an evidence connector to reach the greeting under test.
+const WITH_SOURCE = { connectedConnectorIds: ["superset"] }
+
 function Harness() {
   const { setContent } = useContent()
   const set = (patch: Partial<AppContentState>) => setContent(patch)
@@ -149,7 +155,7 @@ function Harness() {
       {
         "data-testid": "set-insufficient-evidence",
         onClick: () =>
-          set({ briefHydration: "ready", briefV2: INSUFFICIENT_EVIDENCE_BRIEF }),
+          set({ briefHydration: "ready", briefV2: INSUFFICIENT_EVIDENCE_BRIEF, ...WITH_SOURCE }),
       },
       "insufficient-evidence",
     ),
@@ -157,7 +163,7 @@ function Harness() {
       "button",
       {
         "data-testid": "set-plain-empty",
-        onClick: () => set({ briefHydration: "ready", briefV2: PLAIN_EMPTY_BRIEF }),
+        onClick: () => set({ briefHydration: "ready", briefV2: PLAIN_EMPTY_BRIEF, ...WITH_SOURCE }),
       },
       "plain-empty",
     ),

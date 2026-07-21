@@ -158,8 +158,9 @@ export function WorkspacesSettings() {
       <div className="pset-body">
         <h2 className="pset-title">Workspaces</h2>
         <p className="pset-sub">
-          Each workspace has its own briefs, tickets, and chats — one per
-          product area or team. Switch from the sidebar; manage them here.
+          A workspace is the space where you and your team collaborate. It is
+          where we send insights, you draft PRD, tickets etc. Create different
+          workspaces for different teams.
         </p>
 
         {error && <SettingsMessage kind="error">{error}</SettingsMessage>}

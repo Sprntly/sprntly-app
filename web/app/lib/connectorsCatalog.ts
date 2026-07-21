@@ -228,6 +228,48 @@ export function connectableCatalog(
   })).filter((cat) => cat.items.length > 0)
 }
 
+// ── Information-gathering connectors ─────────────────────────────────────────
+//
+// The Top Insights brief is synthesized from connectors that BRING IN evidence
+// about the product and its customers. Three categories don't do that, so they
+// can't satisfy the brief on their own:
+//
+//   comms  Slack / Teams  — a DELIVERY target (where the brief gets posted),
+//                           not a source of findings.
+//   pm     Jira / ClickUp / Asana — where work is TRACKED once decided; the
+//                           brief's output flows to them, not from them.
+//   code   GitHub         — what was BUILT, not what users need.
+//
+// Everything else (analytics, voice, crm, monitoring, design, docs, revenue)
+// feeds the brief. Defined as a deny-list of category keys rather than an
+// allow-list so a new evidence category added to CONNECTOR_CATALOG counts
+// automatically — the failure mode is "brief attempts to generate", which is
+// far safer than silently blocking it behind an empty state.
+export const NON_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set(["comms", "pm", "code"])
+
+/** Provider ids in the evidence-bearing categories (see NON_EVIDENCE_CATEGORIES). */
+const EVIDENCE_PROVIDER_IDS: ReadonlySet<string> = new Set(
+  CONNECTOR_CATALOG
+    .filter((cat) => !NON_EVIDENCE_CATEGORIES.has(cat.key))
+    .flatMap((cat) => cat.items.map((i) => i.id)),
+)
+
+/** True iff `id` is a connector that feeds the brief with evidence. Unknown ids
+ *  return false — an id we don't recognize can't be shown to gather anything. */
+export function isEvidenceConnector(id: string): boolean {
+  return EVIDENCE_PROVIDER_IDS.has(id)
+}
+
+/**
+ * True iff at least one connected provider can feed the brief. Drives the Top
+ * Insights empty state: with no evidence connector there is nothing to
+ * synthesize from, so we show the "connect a source" page instead of an
+ * indefinitely blank brief.
+ */
+export function hasEvidenceConnector(connectedIds: readonly string[]): boolean {
+  return connectedIds.some(isEvidenceConnector)
+}
+
 // ── Connector types ──────────────────────────────────────────────────────────
 //
 // Every catalog item carries its type (what the tool IS), the mirror of the
