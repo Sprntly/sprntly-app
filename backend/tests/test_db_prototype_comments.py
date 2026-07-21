@@ -45,7 +45,10 @@ CREATE TABLE prototype_comments (
     pin_x_pct          REAL,
     pin_y_pct          REAL,
     resolved_anchor_id TEXT,
-    user_id            TEXT
+    user_id            TEXT,
+    origin        TEXT NOT NULL DEFAULT 'internal'
+                  CHECK (origin IN ('internal', 'public')),
+    visitor_id    TEXT
 );
 """
 
@@ -446,6 +449,131 @@ def test_insert_comment_existing_callsites_unaffected(comments):
     assert row["status"] == "open"
     assert row["anchor_id"] == "legacy-anchor"
     assert row.get("pin_x_pct") is None
+
+
+# ─── Comment origin + visitor identity (public/internal isolation) ─────────
+
+_ORIGIN_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "supabase" / "migrations" / "20260716120500_prototype_comments_origin_visitor.sql"
+)
+
+
+def test_insert_comment_origin_default_internal(comments):
+    # Default origin is 'internal' (carried by the column DEFAULT); an explicit
+    # 'public' is stored as-is.
+    default_row = comments.insert_comment(
+        prototype_id=1, workspace_id="app", anchor_id="aaaa1111", body="team note",
+    )
+    assert default_row["origin"] == "internal"
+
+    public_row = comments.insert_comment(
+        prototype_id=1, workspace_id="app", anchor_id="bbbb2222", body="viewer note",
+        origin="public", visitor_id="visitor-abc-000000000001",
+    )
+    assert public_row["origin"] == "public"
+    assert public_row["visitor_id"] == "visitor-abc-000000000001"
+
+
+def test_insert_comment_rejects_unknown_origin(comments):
+    # An origin outside {'internal','public'} is a programming bug → ValueError,
+    # and nothing is written.
+    with pytest.raises(ValueError):
+        comments.insert_comment(
+            prototype_id=1, workspace_id="app", anchor_id="aaaa1111", body="x",
+            origin="bogus",
+        )
+    assert comments.list_comments(prototype_id=1, workspace_id="app") == []
+
+
+def test_list_comments_origin_filter(comments):
+    # origin=None returns ALL rows (today's behaviour); origin='public' returns
+    # only public rows. The origin filter is additional to the workspace filter,
+    # never a replacement.
+    comments.insert_comment(
+        prototype_id=9, workspace_id="app", anchor_id="a-int", body="internal row",
+    )
+    comments.insert_comment(
+        prototype_id=9, workspace_id="app", anchor_id="a-pub", body="public row",
+        origin="public", visitor_id="visitor-xyz-000000000001",
+    )
+    all_rows = comments.list_comments(prototype_id=9, workspace_id="app")
+    assert len(all_rows) == 2
+
+    public_rows = comments.list_comments(prototype_id=9, workspace_id="app", origin="public")
+    assert [r["body"] for r in public_rows] == ["public row"]
+
+    # Workspace isolation still applies WITH the origin filter.
+    assert comments.list_comments(prototype_id=9, workspace_id="demo", origin="public") == []
+
+
+def test_insert_payload_omits_default_origin_and_null_visitor(comments, monkeypatch):
+    # Conditional-write pin: an internal insert's payload carries NEITHER key
+    # (the DB default carries 'internal'; null visitor is honest absence); a
+    # public insert carries both. This keeps every insert path compatible with
+    # schemas that predate the two columns.
+    captured: list[dict] = []
+    real_client = comments.require_client()
+
+    class _TableSpy:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def insert(self, payload):
+            captured.append(dict(payload))
+            return self._inner.insert(payload)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    class _ClientSpy:
+        def table(self, name):
+            return _TableSpy(real_client.table(name))
+
+        def __getattr__(self, name):
+            return getattr(real_client, name)
+
+    monkeypatch.setattr(comments, "require_client", lambda: _ClientSpy())
+
+    comments.insert_comment(
+        prototype_id=1, workspace_id="app", anchor_id="aaaa1111", body="internal row",
+    )
+    assert "origin" not in captured[0]
+    assert "visitor_id" not in captured[0]
+
+    comments.insert_comment(
+        prototype_id=1, workspace_id="app", anchor_id="bbbb2222", body="public row",
+        origin="public", visitor_id="visitor-spy-000000000001",
+    )
+    assert captured[1]["origin"] == "public"
+    assert captured[1]["visitor_id"] == "visitor-spy-000000000001"
+
+
+def test_origin_migration_idempotent_and_complete():
+    # Idempotency at the SQL-string level (house convention — a live-Postgres
+    # apply-twice is deferred to the phase smoke): every ADD COLUMN carries
+    # IF NOT EXISTS; both columns are declared; origin is NOT NULL DEFAULT
+    # 'internal' with the two-value CHECK; visitor_id is nullable with NO
+    # DEFAULT.
+    assert _ORIGIN_MIGRATION_PATH.exists()
+    sql = _ORIGIN_MIGRATION_PATH.read_text().lower()
+    lines_no_comments = "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+
+    add_column_blocks = re.findall(
+        r"add\s+column\s+(if\s+not\s+exists)?\s*\w+", lines_no_comments
+    )
+    assert add_column_blocks, "migration declares no ADD COLUMN at all"
+    for block in add_column_blocks:
+        assert block, "found an ALTER TABLE ADD COLUMN without IF NOT EXISTS — not idempotent"
+
+    assert re.search(r"origin\s+text\s+not\s+null\s+default\s+'internal'", lines_no_comments)
+    assert "check (origin in ('internal', 'public'))" in lines_no_comments
+    assert re.search(r"visitor_id\s+text", lines_no_comments)
+    assert not re.search(r"visitor_id\s+text\s+not\s+null", lines_no_comments), \
+        "visitor_id must stay nullable (internal rows have no visitor identity)"
+    assert not re.search(r"visitor_id\s+text\s+default", lines_no_comments), \
+        "visitor_id must NOT carry a DEFAULT (null is honest absence)"
+    assert "create table" not in lines_no_comments  # additive only — no new table
 
 
 def test_migration_idempotent_apply_twice():

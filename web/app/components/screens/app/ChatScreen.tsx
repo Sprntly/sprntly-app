@@ -867,7 +867,12 @@ export function ChatScreen() {
     }
     // generate | generateIdeation | load | resume — kick off, show the panel's
     // spinner, then land the result on the tab (and shared content while active).
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, briefMeta: meta, prdGenerating: true } : t))
+    // When the prd_id is known UPFRONT (load/resume — incl. chat-task PRDs whose
+    // generation was kicked before this tab opened), stamp it on the tab NOW,
+    // not only on success: `prdId` is what survives the sessionStorage
+    // round-trip, so a reload mid-generation can find and resume the run
+    // instead of orphaning it client-side.
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, prdId: knownPrdId ?? t.prdId, briefMeta: meta, prdGenerating: true } : t))
     setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     void (async () => {
       // Live preview: forward the accumulating Part A HTML (throttled inside
@@ -948,6 +953,22 @@ export function ChatScreen() {
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
           setContent({ prd: result.prd, prdMeta: tab.briefMeta, prdGenerating: false })
+        } else if (result.generating) {
+          // A healthy IN-FLIGHT PRD, not a failure — e.g. a reload restored this
+          // tab mid-generation (the stamped-at-kickoff prdId is how we know it).
+          // Re-enter poll+stream instead of toasting: the SSE replay frame
+          // repaints everything generated so far, then live deltas continue.
+          const resumed = await resumePrdGeneration(prdId, undefined, (html) => {
+            if (activeTabIdRef.current === activeTabId) setContent({ prdPartialHtml: html })
+          })
+          if (resumed.ok) {
+            setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: resumed.prd, prdId: resumed.prd.prd_id } : t))
+            if (activeTabIdRef.current === activeTabId) setContent({ prd: resumed.prd, prdMeta: tab.briefMeta, prdGenerating: false, prdPartialHtml: null })
+          } else {
+            setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+            if (activeTabIdRef.current === activeTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+            showToast("PRD generation failed", resumed.message)
+          }
         } else {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
           setContent({ prdGenerating: false })
@@ -977,6 +998,9 @@ export function ChatScreen() {
       try {
         const { prdApi } = await import("../../../lib/api")
         const start = await prdApi.generateFromTask(convTask)
+        // Stamp the id on the tab NOW (it persists to sessionStorage) so a
+        // reload mid-generation can resume this run instead of orphaning it.
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdId: start.prd_id } : t))
         // Poll the just-kicked-off task PRD onto THIS tab (keeps the chat + PRD
         // panel together) rather than spawning a separate tab.
         const result = await resumePrdGeneration(start.prd_id, undefined, (html) => setContent({ prdPartialHtml: html }))
@@ -1074,6 +1098,9 @@ export function ChatScreen() {
     if (!activeTabId) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
     const meta = tab?.briefMeta
+    // Chat-task tabs (no briefMeta) resume through the reload-restore effect →
+    // handleOpenPrd, whose DB-load branch re-enters poll+stream when the tab's
+    // persisted prdId points at a still-generating PRD.
     if (!meta) return
     if (resumedTabsRef.current.has(activeTabId)) return
     resumedTabsRef.current.add(activeTabId)
@@ -2194,7 +2221,11 @@ export function ChatScreen() {
   // Also shown while a PRD is still GENERATING (import/resume tabs carry no
   // briefMeta and no prd yet) — the card's button reads "Generating PRD…" and
   // flips to "View PRD" on landing, so the panel is always reopenable from chat.
-  const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta || activeTab?.prdGenerating)
+  // `prdId` counts too: a reloaded chat-task tab has no loaded `prd`, no
+  // briefMeta and no in-flight flag, but its persisted prdId proves a PRD
+  // belongs to this tab — without it the card (and its View PRD button)
+  // vanished after any reload of a task-PRD thread.
+  const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta || activeTab?.prdGenerating || activeTab?.prdId != null)
   // A resumed tab whose history is still fetching shows the thread view (with
   // a loading skeleton) — never the "Welcome back" landing.
   const showThreadView = hasThread || showInsightMsg || !!activeTab?.hydrating

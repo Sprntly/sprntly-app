@@ -131,6 +131,51 @@ describe("subscribeToGenerationStream", () => {
     expect(seen[seen.length - 1]).toBe("<!doctype html><p>two</p>")
   })
 
+  it("seeds the accumulator from a replay frame, then appends live deltas", async () => {
+    const seen: string[] = []
+    subscribeToGenerationStream(() => "http://api.test/s", { onDelta: (f) => seen.push(f) })
+    await flush()
+
+    const es = MockEventSource.latest()
+    // A warm-started generation (brief-insight PRD/evidence) replays everything
+    // emitted before this client connected, then streams live.
+    es.emit({ kind: "replay", text: "<!doctype html><body>head of the doc " })
+    es.emit({ kind: "delta", text: "then the tail" })
+    expect(seen).toEqual([
+      "<!doctype html><body>head of the doc ",
+      "<!doctype html><body>head of the doc then the tail",
+    ])
+  })
+
+  it("normalizes a replay that contains a glued backend retry", async () => {
+    const seen: string[] = []
+    subscribeToGenerationStream(() => "http://api.test/s", { onDelta: (f) => seen.push(f) })
+    await flush()
+
+    // The server buffer accumulates raw deltas, so a mid-generation retry can
+    // leave two document opens glued inside the replay text — the same restart
+    // guard applies and only the fresh document renders.
+    MockEventSource.latest().emit({
+      kind: "replay",
+      text: "<!doctype html><p>one</p><!doctype html><p>two</p>",
+    })
+    expect(seen).toEqual(["<!doctype html><p>two</p>"])
+  })
+
+  it("ignores a replay frame once deltas have already accumulated", async () => {
+    const seen: string[] = []
+    subscribeToGenerationStream(() => "http://api.test/s", { onDelta: (f) => seen.push(f) })
+    await flush()
+
+    const es = MockEventSource.latest()
+    es.emit({ kind: "delta", text: "live text" })
+    // The server sends replay strictly first; a late/duplicate one must not
+    // clobber (or double) what already accumulated.
+    es.emit({ kind: "replay", text: "stale backlog" })
+    es.emit({ kind: "delta", text: " continues" })
+    expect(seen).toEqual(["live text", "live text continues"])
+  })
+
   it("cleanup before the token resolves never opens a stream", async () => {
     const stop = subscribeToGenerationStream(() => "http://api.test/s", { onDelta: () => {} })
     stop() // closed while getAccessToken() is still pending

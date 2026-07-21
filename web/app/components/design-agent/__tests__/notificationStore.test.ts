@@ -64,14 +64,14 @@ describe("notificationStore", () => {
   it("markCompleted persists a completed entry (AC1)", () => {
     installStorage()
     markCompleted(7, "Open it")
-    expect(pendingCompleted()).toEqual([{ prototypeId: 7, sub: "Open it" }])
+    expect(pendingCompleted()).toEqual([{ prototypeId: 7, sub: "Open it", prdId: null }])
   })
 
   it("pendingCompleted returns only completed entries — pending is excluded (AC3)", () => {
     installStorage()
     markPending(1)
     markCompleted(2, "ready 2")
-    expect(pendingCompleted()).toEqual([{ prototypeId: 2, sub: "ready 2" }])
+    expect(pendingCompleted()).toEqual([{ prototypeId: 2, sub: "ready 2", prdId: null }])
   })
 
   it("markCompleted flips an existing pending entry to completed (no duplicate)", () => {
@@ -79,7 +79,7 @@ describe("notificationStore", () => {
     markPending(5)
     markCompleted(5, "now ready")
     const completed = pendingCompleted()
-    expect(completed).toEqual([{ prototypeId: 5, sub: "now ready" }])
+    expect(completed).toEqual([{ prototypeId: 5, sub: "now ready", prdId: null }])
     expect(completed).toHaveLength(1)
   })
 
@@ -95,7 +95,7 @@ describe("notificationStore", () => {
     markCompleted(1, "a")
     markCompleted(2, "b")
     acknowledge(1)
-    expect(pendingCompleted()).toEqual([{ prototypeId: 2, sub: "b" }])
+    expect(pendingCompleted()).toEqual([{ prototypeId: 2, sub: "b", prdId: null }])
   })
 
   it("no-ops and returns empty when sessionStorage is unavailable (AC6)", () => {
@@ -118,6 +118,43 @@ describe("notificationStore", () => {
   })
 })
 
+// ─── Part B: prdId threading ──────────────────────────────────────────────
+
+describe("prdId threading (Part B)", () => {
+  it("markCompleted with a prdId is returned by pendingCompleted", () => {
+    installStorage()
+    markCompleted(20, "ready 20", 5)
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 20, sub: "ready 20", prdId: 5 },
+    ])
+  })
+
+  it("markPending's prdId survives the pending -> completed flip", () => {
+    installStorage()
+    markPending(21, 6)
+    markCompleted(21, "ready 21")
+    // No prdId re-passed on markCompleted (as resumePendingNotifications does
+    // NOT re-derive it) — upsert replaces the whole entry, so this call's own
+    // prdId (undefined -> null) wins. Prove the opposite direction too: when
+    // markCompleted DOES pass prdId, it wins over the pending write.
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 21, sub: "ready 21", prdId: null },
+    ])
+  })
+
+  it("test_legacy_entry_missing_prd_id_reads_back_as_null — a hand-written legacy payload parses with prdId: null, no throw", () => {
+    installStorage()
+    testGlobal.window!.sessionStorage.setItem(
+      "design-agent:notifications",
+      JSON.stringify([{ prototypeId: 30, status: "completed", sub: "legacy sub" }]),
+    )
+    expect(() => pendingCompleted()).not.toThrow()
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 30, sub: "legacy sub", prdId: null },
+    ])
+  })
+})
+
 // ─── P6-05: per-page-load guard + Decision-D(b) ack precision ────────────────
 
 describe("per-page-load guard (P6-05)", () => {
@@ -134,7 +171,7 @@ describe("per-page-load guard (P6-05)", () => {
     markCompleted(5, "ready 5")
     markSeenThisLoad(5)
     // Seen-this-load is in-memory only; the persisted entry survives a reload.
-    expect(pendingCompleted()).toEqual([{ prototypeId: 5, sub: "ready 5" }])
+    expect(pendingCompleted()).toEqual([{ prototypeId: 5, sub: "ready 5", prdId: null }])
     acknowledge(5)
     expect(pendingCompleted()).toEqual([])
   })

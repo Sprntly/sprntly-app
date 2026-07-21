@@ -172,18 +172,33 @@ def _assemble(
 
 
 def _render_design_source(prototype: dict[str, Any]) -> str:
-    """Render the Design Source section (F16) — names the Figma file the prototype
-    was generated from. Returns "" (omit the section entirely) when the prototype
-    carries no `figma_file_key` (Scenario B website / Scenario 0 no-input).
+    """Render the Design Source section (F16) — names the design inputs the
+    prototype was generated from: the Figma file key and/or an uploaded
+    screenshot reference. Returns "" (omit the section entirely) when the
+    prototype carries neither (Scenario B website / Scenario 0 no-input).
+    When both are present, one section carries both lines, Figma first.
 
-    Emits the BARE file key in a code span, NOT a constructed figma.com URL: the
-    codebase builds no `figma.com/file/<key>` URL anywhere, so inventing a path /
-    node-id format would be a guess. The reader pastes the key into Figma's opener.
+    Emits the BARE Figma file key in a code span, NOT a constructed figma.com
+    URL: the codebase builds no `figma.com/file/<key>` URL anywhere, so
+    inventing a path / node-id format would be a guess. The reader pastes the
+    key into Figma's opener.
+
+    The screenshot line is a plain sentence — the `screenshot_key` storage key
+    is NEVER printed: it embeds the workspace id and a storage-internal path,
+    and this document gets pasted into third-party coding agents. Likewise no
+    link to the stored image is constructed. Provenance is the sentence, not
+    the key.
     """
     figma_file_key = prototype.get("figma_file_key")
-    if not figma_file_key:
+    screenshot_key = prototype.get("screenshot_key")
+    lines: list[str] = []
+    if figma_file_key:
+        lines.append(f"Generated from Figma file `{figma_file_key}`.")
+    if screenshot_key:
+        lines.append("Generated from an uploaded screenshot reference.")
+    if not lines:
         return ""
-    return f"## Design Source\n\nGenerated from Figma file `{figma_file_key}`."
+    return "## Design Source\n\n" + "\n".join(lines)
 
 
 def _render_resolved_feedback(resolved_comments: list[dict[str, Any]]) -> str:

@@ -114,6 +114,26 @@ export function figmaKeyForPrototype(
   return contentPrd.figma_file_key ?? null
 }
 
+/** Pure: resolve the PRD's declared platform hint (the parsed :::design block's
+ *  platform_hint) to seed the generate panel's platform DEFAULT, given the URL's
+ *  prd id and the PRD currently loaded in ContentContext. Mirrors
+ *  figmaKeyForPrototype's stale-PRD guard: the hint is read ONLY when the
+ *  content PRD's prd_id matches the URL (a stale PRD from a prior screen never
+ *  leaks its hint), else null. Direct-nav/refresh (no PRD in ContentContext)
+ *  yields null — no supplemental fetch is added for the hint. */
+export function platformHintForPrototype(
+  urlPrdId: number | null,
+  contentPrd: {
+    prd_id: number
+    sections?: { type: string; platformHint?: "desktop" | "mobile" | "both" }[]
+  } | null,
+): "desktop" | "mobile" | "both" | null {
+  if (urlPrdId == null || !contentPrd) return null
+  if (contentPrd.prd_id !== urlPrdId) return null
+  const design = contentPrd.sections?.find((s) => s.type === "prd-design")
+  return design?.platformHint ?? null
+}
+
 /** Pure: resolve the PRD TITLE for the breadcrumb / in-tab title bar / left
  *  header. Prefers ContentContext when it holds the matching PRD; on direct-nav /
  *  refresh ContentContext is empty (no PRD loaded for `?prd=<id>`), so we fall
@@ -505,6 +525,7 @@ export function PrototypeRoute() {
   const prdId = prdIdFromPrototypeSearch(search.get("prd"))
   const handoffPrototypeId = prototypeHintFromSearch(search.get("pid"))
   const figmaFileKey = figmaKeyForPrototype(prdId, content.prd)
+  const platformHint = platformHintForPrototype(prdId, content.prd)
   const savedPreference = workspace?.design_source ?? null
 
   // Explicit-generate-intent signal carried by a "Generate Prototype" navigation
@@ -575,6 +596,33 @@ export function PrototypeRoute() {
     setGenProtoId(handoffPrototypeId)
     genLoadingRef.current = true
     setGenLoading(true)
+  }, [handoffPrototypeId])
+
+  // Deep-link resolution for the `pid` hint: the prototype-ready notification
+  // links `/prototype?pid=<id>` (no `?prd=`), and that link arrives AFTER the
+  // row is ready — not the just-started shape the seed effect above serves.
+  // Resolve the row by id and, when it is READY, select it directly (the
+  // ready render branch below wins even without a `?prd=` context). Any other
+  // status, or a failed/foreign lookup, changes nothing: with `?prd=` present
+  // the PRD-level lookup stays authoritative, and a pid-only URL falls back to
+  // the existing no-PRD empty state.
+  useEffect(() => {
+    if (handoffPrototypeId == null) return
+    let cancelled = false
+    designAgentApi
+      .get(handoffPrototypeId)
+      .then((row) => {
+        if (cancelled || !row || row.status !== "ready") return
+        setProto(row)
+        genLoadingRef.current = false
+        setGenLoading(false)
+      })
+      .catch(() => {
+        /* degrade — the seed/lookup effects own every non-ready path. */
+      })
+    return () => {
+      cancelled = true
+    }
   }, [handoffPrototypeId])
 
   // Resolve the PRD's prototype read-only on prd change, and RE-ATTACH to an
@@ -827,8 +875,10 @@ export function PrototypeRoute() {
 
   // No PRD context (bare /prototype): there is nothing to generate from. Send the
   // user to the weekly brief, where a PRD opens in the right-rail card and offers
-  // "Generate Prototype".
-  if (prdId == null) {
+  // "Generate Prototype". EXCEPT when a resolved prototype exists — a pid-only
+  // deep link (the prototype-ready notification) selects a ready prototype with
+  // no `?prd=` in the URL, so the ready branch below must win over this one.
+  if (prdId == null && proto == null) {
     return (
       <AppLayout>
         <PrototypeEmptyState
@@ -1039,6 +1089,7 @@ export function PrototypeRoute() {
             )}
             prdId={prdId}
             figmaFileKey={figmaFileKey}
+            platformHint={platformHint}
             onGenStart={handleGenStart}
             onKickoff={(id) => setGenProtoId(id)}
             onGenDone={handleGenDone}

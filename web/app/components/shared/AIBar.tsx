@@ -1,9 +1,11 @@
 "use client"
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react"
+import { useRouter } from "next/navigation"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
+import { prototypePath } from "../../lib/routes"
 import { AI_BAR_SCREENS, AI_CONTEXTS } from "../../types"
 import { ApiError, briefApi, prdApi, type AskResponse } from "../../lib/api"
 import { runAskGeneration } from "../../lib/runAskGeneration"
@@ -39,6 +41,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
     expandAiPanel,
     openContentPanel,
   } = useNavigation()
+  const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -491,7 +494,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                       Create tickets
                     </button>
                     <button type="button" className="ai-bar-agent-btn" onClick={() => {
-                      if (content.prd) goTo("prototype")
+                      if (content.prd) router.push(prototypePath(content.prd.prd_id))
                     }}>
                       Generate prototype
                     </button>
@@ -667,7 +670,7 @@ export function AIBar({ inline = false }: { inline?: boolean }) {
                           Create tickets
                         </button>
                         <button type="button" className="ai-bar-agent-btn" onClick={() => {
-                          if (content.prd) goTo("prototype")
+                          if (content.prd) router.push(prototypePath(content.prd.prd_id))
                         }}>
                           Generate prototype
                         </button>

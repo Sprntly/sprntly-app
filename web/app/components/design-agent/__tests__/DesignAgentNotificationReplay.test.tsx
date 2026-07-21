@@ -4,6 +4,9 @@
 // null assertion and exercise the pure exported units the component composes
 // (`replayCompletedNotifications` show/no-ack + `shouldAckOnClear` ack precision)
 // directly. The component itself is a thin effect wrapper over those units.
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -30,6 +33,12 @@ import {
 } from "../notificationStore"
 
 const READY = "Prototype ready"
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const COMPONENT_SRC = readFileSync(
+  join(HERE, "..", "DesignAgentNotificationReplay.tsx"),
+  "utf8",
+)
 
 function makeSessionStorage(): Storage {
   let store: Record<string, string> = {}
@@ -76,6 +85,13 @@ describe("DesignAgentNotificationReplay — renders null (AC7)", () => {
   })
 })
 
+describe("mount effect calls both replay and resume (Part C, AC14)", () => {
+  it("test_replay_component_effect_calls_both_replay_and_resume — source-level pin (effects don't fire under SSR render)", () => {
+    expect(COMPONENT_SRC).toContain("replayCompletedNotifications(showToast)")
+    expect(COMPONENT_SRC).toContain("resumePendingNotifications(showToast)")
+  })
+})
+
 describe("shell replay path (AC1) — fires without the drawer", () => {
   it("shows a completed entry's toast via the shell path (test_replay_fires_on_shell_mount_without_drawer)", () => {
     installStorage()
@@ -100,7 +116,9 @@ describe("acked-until-user-acks (AC3) — no auto-ack on first show", () => {
     replayCompletedNotifications(showToast)
     // Shown — but NOT acknowledged: the sessionStorage entry survives.
     expect(showToast).toHaveBeenCalledTimes(1)
-    expect(pendingCompleted()).toEqual([{ prototypeId: 3, sub: "sub3" }])
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 3, sub: "sub3", prdId: null },
+    ])
     // Same page-load: a second replay does NOT re-show (per-page-load guard).
     const showToast2 = vi.fn()
     replayCompletedNotifications(showToast2)
@@ -142,7 +160,9 @@ describe("ack-on-toast-clear precision (AC3 / AC11)", () => {
     )
     expect(ackId).toBeNull()
     // The replay's entry is untouched — it waits for a clear of its OWN toast.
-    expect(pendingCompleted()).toEqual([{ prototypeId: 9, sub: "sub9" }])
+    expect(pendingCompleted()).toEqual([
+      { prototypeId: 9, sub: "sub9", prdId: null },
+    ])
   })
 
   it("does NOT ack on a non-clear transition (prev null, or current still set)", () => {

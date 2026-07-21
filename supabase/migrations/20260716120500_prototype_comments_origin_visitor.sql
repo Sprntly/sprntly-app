@@ -28,6 +28,5 @@
 alter table prototype_comments
     add column if not exists origin text not null default 'internal'
         check (origin in ('internal', 'public'));
-
 alter table prototype_comments
     add column if not exists visitor_id text;

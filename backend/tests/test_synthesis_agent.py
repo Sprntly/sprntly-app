@@ -1000,6 +1000,49 @@ def test_classify_no_tree_skips_classification(facade):
     assert "goal_fit" not in ent.properties
 
 
+def test_classify_theme_fit_lane_follows_background_flag(facade):
+    """`background` reaches llm_call: True → the gate's background lane (the
+    ideation sweep), default False → interactive (the brief ranker the user is
+    actively waiting on)."""
+    from app.synthesis import scoring
+
+    tc = _theme_conv(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 1)])
+    calls = []
+
+    def fake_llm(**kw):
+        calls.append(kw)
+        return _llm_result({"fit": "high", "reasoning": "moves NRR"})
+
+    with patch.object(scoring, "llm_call", fake_llm):
+        scoring.classify_theme_fit(facade, "ent-A", tc, _kpi_tree(version=1),
+                                   background=True)
+        # bump the tree version so the cache misses and the call really repeats
+        scoring.classify_theme_fit(facade, "ent-A", tc, _kpi_tree(version=2))
+
+    assert calls[0]["background"] is True
+    assert calls[1]["background"] is False
+
+
+def test_score_candidates_threads_background_to_classifier(facade):
+    """score_candidates(background=True) hands the flag to every classify call
+    — the seam the ideation sequencer relies on to stay off the interactive
+    lane."""
+    from app.synthesis import scoring
+
+    tc = _theme_conv(facade, "ent-A", "SSO", [("revenue", "deal_blocker", {}, 1)])
+    seen = []
+
+    def fake_classifier(facade_, ent, cand, tree, *, agent, background=False):
+        seen.append(background)
+        return "high"
+
+    scoring.score_candidates(
+        facade, "ent-A", [tc], _kpi_tree(),
+        goal_enabled=True, goal_weight=1.0, classifier=fake_classifier,
+        background=True)
+    assert seen == [True]
+
+
 def test_goal_factor_math():
     from app.synthesis.scoring import goal_factor
     assert goal_factor("high") == 1.0

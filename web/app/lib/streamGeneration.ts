@@ -43,7 +43,19 @@ export function subscribeToGenerationStream(
       } catch {
         return // ignore a malformed frame; the next one or the poll recovers
       }
-      if (frame.kind === "delta" && frame.text) {
+      if (frame.kind === "replay" && frame.text) {
+        // Catch-up frame for a mid-generation join (warm-started brief PRDs /
+        // evidence): everything the generation emitted before we connected.
+        // The server sends it strictly first; if deltas somehow beat it here,
+        // replacing them with the (longer) backlog would drop text, so a
+        // non-empty accumulator ignores it and stays live-only.
+        if (acc === "") {
+          acc = frame.text
+          const restart = acc.toLowerCase().lastIndexOf("<!doctype")
+          if (restart > 0) acc = acc.slice(restart)
+          handlers.onDelta(acc, frame.text)
+        }
+      } else if (frame.kind === "delta" && frame.text) {
         acc += frame.text
         // A backend mid-generation retry re-emits the document from zero on
         // the same channel. A second document open (a doctype past position 0)

@@ -2270,16 +2270,37 @@
   background: transparent;
   border-color: transparent;
 }
-.design-agent-surface.proto-gen-overlay .proto-gen-notify-btn {
-  /* inherits .btn .btn-ghost .btn-sm; no override needed here */
-}
-/* Hover: plain underlined text — no background/border box. */
-.design-agent-surface.proto-gen-overlay .proto-gen-notify-btn:hover {
-  text-decoration: underline;
-  background: transparent;
-  border-color: transparent;
-}
+/* The notify control is now `btn btn-primary` in every mode, so the shared
+   .btn-primary hover (accent-hover fill) owns its hover state. The former
+   ghost-era override lived here and forced `background: transparent` on hover;
+   at 4-class specificity it outranked `.btn-primary:hover:not(:disabled)` and
+   flashed the panel white. Removed — do not reintroduce a hover override here
+   without also matching the shared button hover. */
 /* === generation loading overlay (end) ===================================== */
+
+/* === notify-when-ready promotion (start) =====================================
+ * Treatment B (moderate) — the footer becomes the primary decision point
+ * during the generation wait: a full-width primary-weight action with
+ * supporting microcopy, plus a persistent (non-auto-dismissing) in-panel
+ * confirmation once armed. See sprntly/mockups/notify-when-ready.html.
+ * =========================================================================== */
+.design-agent-surface.proto-gen-overlay .proto-gen-footer--stacked { flex-direction: column; align-items: stretch; gap: 10px; }
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-block { width: 100%; display: flex; flex-direction: column; align-items: stretch; gap: 10px; }
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-copy { font-size: 12px; color: var(--ink-3); text-align: center; line-height: 1.45; }
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-btn.btn-primary { width: 100%; padding: 12px 16px; font-size: 13.5px; font-weight: 600; }
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-cancel-row { display: flex; justify-content: center; }
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-armed {
+  width: 100%; display: flex; flex-direction: column; gap: 8px; text-align: center;
+  background: var(--accent-muted); border: 1px solid var(--accent-2); border-radius: var(--radius); padding: 14px 16px;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-armed-title { font-size: 12.5px; font-weight: 600; color: var(--accent-ink); }
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-armed-sub { font-size: 11.5px; color: var(--ink-2); line-height: 1.4; }
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-back-link {
+  align-self: center; display: inline-flex; align-items: center; gap: 6px;
+  background: var(--surface-2); border-color: var(--line-strong); color: var(--ink); font-weight: 600;
+}
+.design-agent-surface.proto-gen-overlay .proto-gen-notify-back-link:hover { background: var(--surface-3); border-color: var(--ink-3); }
+/* === notify-when-ready promotion (end) ================================ */
 
 /* =============================================================================
  * full-screen post-generation canvas overlay.
@@ -4136,3 +4157,61 @@
   justify-content: flex-end;
   gap: 8px;
 }
+
+/* === public-pin variant + clusters (start) =================================
+ * Appended block (append-only convention — no edits inside earlier blocks).
+ * The public-origin pin variant rides the EXISTING Lightfield `--info` blue
+ * tokens (globals.css) — one blue, no literal hexes, no new palette. The
+ * cluster marker aggregates nearby pins into a count badge (same teardrop
+ * geometry + drop animation as `.pc-pin`) and is the one interactive element
+ * in the otherwise pointer-inert pin layer.
+ * =========================================================================== */
+
+/* Public-origin pin (anon share-link viewers — hydrated + just-dropped):
+   blue fill in place of the internal accent green. */
+.design-agent-surface .pc-pin.pc-pin--public {
+  background: var(--info);
+  box-shadow: 0 2px 8px var(--info-soft);
+}
+
+/* Cluster marker: a slightly larger teardrop whose number is the MEMBER COUNT.
+   Rendered as a button (click expands/collapses) — reset button chrome and
+   re-enable pointer events (the layer is pointer-events: none). */
+.design-agent-surface .pc-pin-cluster {
+  position: absolute;
+  width: 32px;
+  height: 32px;
+  margin-left: -16px;
+  margin-top: -32px;
+  padding: 0;
+  border: 0;
+  background: var(--accent);
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+  box-shadow: 0 2px 8px var(--accent-alpha-40);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  cursor: pointer;
+}
+.design-agent-surface .pc-pin-cluster.pc-pin--public {
+  background: var(--info);
+  box-shadow: 0 2px 8px var(--info-soft);
+}
+.design-agent-surface .pc-pin-cluster .pc-pin-num {
+  transform: rotate(45deg);
+  color: var(--surface-2);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+}
+.design-agent-surface .pc-pin-cluster.placed {
+  animation: pinDrop 0.3s ease;
+}
+/* Expanded: the members render individually; the marker stays mounted as the
+   collapse affordance, de-emphasised so the member pins read as primary. */
+.design-agent-surface .pc-pin-cluster.expanded {
+  opacity: 0.55;
+}
+/* === public-pin variant + clusters (end) =================================== */

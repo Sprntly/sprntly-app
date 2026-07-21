@@ -101,6 +101,7 @@ CREATE TABLE prototypes (
     figma_file_key         TEXT,
     website_url            TEXT,
     github_installation_id INTEGER,
+    created_by_user_id     TEXT,
     bundle_url             TEXT,
     current_checkpoint_id  INTEGER,
     error                  TEXT,
@@ -136,7 +137,10 @@ CREATE TABLE prototype_comments (
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT,
-    user_id        TEXT
+    user_id        TEXT,
+    origin        TEXT NOT NULL DEFAULT 'internal'
+                  CHECK (origin IN ('internal', 'public')),
+    visitor_id    TEXT
 );
 CREATE TABLE prototype_pending_iterations (
     id                 INTEGER PRIMARY KEY AUTOINCREMENT,

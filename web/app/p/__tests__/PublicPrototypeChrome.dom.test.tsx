@@ -149,6 +149,46 @@ describe("PublicPrototypeChrome — edge cases", () => {
   })
 })
 
+describe("PublicPrototypeChrome — load mask", () => {
+  const placeholderIn = (container: HTMLElement) =>
+    container.querySelector('[data-testid="da-viewer-placeholder"]')
+
+  it("test_public_chrome_masks_iframe_until_load: the neutral cover renders from first paint and lifts on the iframe load", async () => {
+    const { container } = renderChrome()
+    // Present synchronously on FIRST render — the anon viewer must never see the
+    // unmasked white/black pre-paint while the bundle loads.
+    expect(placeholderIn(container)).not.toBeNull()
+    await waitFor(() => expect(screen.getByTestId("da-ready")).toBeTruthy())
+    // Still covered after mount effects settle (only the load event lifts it)…
+    expect(placeholderIn(container)).not.toBeNull()
+    const iframe = container.querySelector("iframe.da-prototype-iframe")
+    expect(iframe).not.toBeNull()
+    fireEvent.load(iframe!)
+    // …and gone once the bundle painted.
+    expect(placeholderIn(container)).toBeNull()
+  })
+
+  it("test_public_chrome_remasks_on_bundle_url_change: a new bundleUrl remounts the viewer and re-shows the cover", async () => {
+    const NEW_BUNDLE_URL = "https://cdn.example/p/rotated/index.html"
+    const { container, rerender } = renderChrome()
+    await waitFor(() => expect(screen.getByTestId("da-ready")).toBeTruthy())
+    fireEvent.load(container.querySelector("iframe.da-prototype-iframe")!)
+    expect(placeholderIn(container)).toBeNull()
+    // Token re-resolution / signed-URL rotation hands the chrome a fresh
+    // bundleUrl — the viewer must remount and re-mask until the new bundle paints.
+    rerender(
+      <PublicPrototypeChrome
+        token="tok"
+        bundleUrl={NEW_BUNDLE_URL}
+        isComplete={false}
+        targetPlatform="both"
+      />,
+    )
+    expect(placeholderIn(container)).not.toBeNull()
+    expect(container.querySelector("iframe")!.getAttribute("src")).toBe(NEW_BUNDLE_URL)
+  })
+})
+
 describe("PublicPrototypeChrome — regression (extraction moved logic, did not duplicate it)", () => {
   it("test_chrome_pin_create_routes_via_token_not_authed: usePinMarking's injected onCreate calls createCommentByToken(token), end-to-end through a real pin drop + submit", async () => {
     renderChrome({ token: "regress-tok" })

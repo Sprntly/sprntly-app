@@ -96,7 +96,10 @@ CREATE TABLE prototype_comments (
                   CHECK (status IN ('open', 'resolved', 'orphaned')),
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     resolved_at   TEXT,
-    user_id        TEXT
+    user_id        TEXT,
+    origin        TEXT NOT NULL DEFAULT 'internal'
+                  CHECK (origin IN ('internal', 'public')),
+    visitor_id    TEXT
 );
 """
 

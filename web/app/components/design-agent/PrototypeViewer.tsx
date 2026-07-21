@@ -13,9 +13,17 @@
 // 580px dominant height + head/stage layout (see design-agent.css). The
 // `da-prototype-chrome` + `da-prototype-iframe` classNames are LOCKED —
 // ManualEditOverlay reaches the iframe by selector and tests query the slot.
-import { useState, type ReactNode } from "react"
+import { useEffect, useState, type ReactNode } from "react"
 
 export type Platform = "desktop" | "mobile"
+
+/** Load-mask fallback deadline: a stalled bundle (hung signed-URL fetch, dead
+ *  asset host) may never fire `load`, and the neutral cover must not stay up
+ *  forever. Bundles are static SPAs that typically paint in well under 2s;
+ *  8s covers a slow cold signed-URL fetch while capping the worst-case blank
+ *  cover. The timeout lifts the COVER only — it never synthesizes a load
+ *  signal (`onBundleLoad` stays a real load-event callback). */
+const MASK_TIMEOUT_MS = 8000
 
 /** The stage wrapper class for a platform. The toggle swaps THIS class (not the
  *  iframe), which the CSS uses to constrain width + apply the phone bezel.
@@ -101,12 +109,15 @@ type Props = {
    *  passes no stageOverlay) is byte-for-byte unchanged. */
   stageOverlay?: ReactNode
   /** Opt-in load mask (Glitch A): while set, a NEUTRAL surface-colored cover is
-   *  rendered over the iframe until its FIRST `load` event fires, so the black
-   *  initial-paint / grant-mint gap is never shown to the user. The cover is keyed
-   *  to THIS viewer instance's mount, so a genuine reload (a new `key` remounts the
-   *  viewer) re-shows it until the fresh bundle paints. Undefined/false on the
-   *  public `/p/<token>` surface and every other caller → nothing extra renders, so
-   *  those paths are byte-for-byte unchanged. */
+   *  rendered over the iframe until its FIRST `load` event fires — or until the
+   *  MASK_TIMEOUT_MS fallback lifts it for a bundle that never loads — so the
+   *  black/white initial-paint / grant-mint gap is never shown to the user. The
+   *  cover is keyed to THIS viewer instance's mount, so a genuine reload (a new
+   *  `key` remounts the viewer) re-shows it until the fresh bundle paints. Both
+   *  production mounts opt in (the signed-in editor's PostGenerationResult and
+   *  the public/passcode PublicPrototypeChrome); undefined/false — the default
+   *  for any direct mount that doesn't opt in — renders nothing extra, keeping
+   *  that path byte-for-byte unchanged. */
   maskUntilLoaded?: boolean
 }
 
@@ -137,6 +148,16 @@ export function PrototypeViewer({
     setLoaded(true)
     onBundleLoad?.()
   }
+  // Timeout fallback: while masking and still unloaded, lift the cover after
+  // MASK_TIMEOUT_MS so a stalled bundle can never leave it up forever. Lifting
+  // reuses the same `loaded` state the `load` handler sets (no second flag) but
+  // deliberately does NOT call `onBundleLoad` — that stays a load-event signal.
+  // No-op for callers without `maskUntilLoaded`; cleared on unmount / on load.
+  useEffect(() => {
+    if (!maskUntilLoaded || loaded) return
+    const t = setTimeout(() => setLoaded(true), MASK_TIMEOUT_MS)
+    return () => clearTimeout(t)
+  }, [maskUntilLoaded, loaded])
   // UX-EXPLORE (throwaway — REVERT): controlled when a `platform` prop is given;
   // otherwise own the state locally as before. Either way `platform` below is the
   // effective value the stage class reads, so the single iframe is never
@@ -249,9 +270,10 @@ export function PrototypeViewer({
               maskUntilLoaded || onBundleLoad ? handleLoad : undefined
             }
           />
-          {/* Glitch A: neutral surface cover over the iframe until it paints.
-              Opt-in (signed-in editor + fullscreen) — the public surface omits
-              `maskUntilLoaded` so it renders nothing here. */}
+          {/* Glitch A: neutral surface cover over the iframe until it paints
+              (or the MASK_TIMEOUT_MS fallback lifts it). Opt-in — both
+              production mounts (signed-in editor + public/passcode chrome) set
+              `maskUntilLoaded`; the default renders nothing here. */}
           {maskUntilLoaded && !loaded && (
             <div
               className="da-viewer-placeholder"

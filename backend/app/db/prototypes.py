@@ -123,19 +123,22 @@ def start_prototype(
     figma_file_key: str | None = None,
     website_url: str | None = None,
     github_installation_id: int | None = None,
+    screenshot_key: str | None = None,
+    created_by_user_id: str | None = None,
 ) -> int:
     """Insert a generating row, return its id. State transition: prototype_created.
 
-    Scenario inputs (figma_file_key, website_url, github_installation_id) are
-    stored as snapshots of what was available at generate time. Scenario LABELS
-    (A/B/C/0) are computed at read time via infer_scenario(...); never persisted.
+    Scenario inputs (figma_file_key, website_url, github_installation_id,
+    screenshot_key) are stored as snapshots of what was available at generate
+    time. Scenario LABELS (A/B/C/0) are computed at read time via
+    infer_scenario(...); never persisted.
 
     Keyword-only args (the `*`) prevent positional confusion between `prd_id`,
     `workspace_id`, and `template_version` — cheap discipline given that a
     workspace_id mix-up is a cross-tenant-leak class of bug.
     """
     c = require_client()
-    resp = c.table(_TABLE).insert({
+    payload: dict[str, Any] = {
         "prd_id": prd_id,
         "workspace_id": workspace_id,
         "status": "generating",
@@ -151,7 +154,20 @@ def start_prototype(
         # resolver 404s private rows); set_share_config flips the mode without
         # rotating this token, giving one permanent /p/<slug>/<token> URL.
         "share_token": str(uuid.uuid4()),
-    }).execute()
+    }
+    # Write screenshot_key only when supplied — the optional-column convention
+    # (mirrors db/prototype_comments.insert_comment): a keyless insert's payload
+    # carries exactly the prior column set, so environments whose schema predates
+    # the column keep working and the null stays an honest "no screenshot" signal.
+    if screenshot_key is not None:
+        payload["screenshot_key"] = screenshot_key
+    # created_by_user_id (the generating user, for the prototype-ready
+    # notification) follows the same optional-column convention: written only
+    # when the caller supplied an identity, so schemas that predate the column
+    # keep inserting cleanly and legacy rows stay an honest NULL ("no recipient").
+    if created_by_user_id is not None:
+        payload["created_by_user_id"] = created_by_user_id
+    resp = c.table(_TABLE).insert(payload).execute()
     row_id = resp.data[0]["id"]
     # Inferred-scenario logged for observability; never written to the row.
     # Only the derived label (A/B/C/0) is logged — never the input *values*
