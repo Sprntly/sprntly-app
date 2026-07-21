@@ -37,11 +37,16 @@ AGENT = "evidence"
 
 
 def _run_sync(
-    evidence_id: int, brief_id: int, insight_index: int, on_delta=None
+    evidence_id: int, brief_id: int, insight_index: int, on_delta=None,
+    background: bool = False,
 ) -> None:
     # `on_delta(text)` — optional; forwards each HTML text delta as it streams
     # (threaded through from the KG runner's fallback so the corpus path
     # streams over the same `evidence:<id>` channel — see app.graph.token_stream).
+    # `background=True` routes the model call through the LLM gate's low-priority
+    # lane (capped, always behind interactive waiters) — set by the post-brief
+    # warm storm so pre-warming every insight's evidence never queues a user's
+    # own generation behind it.
     brief = get_brief_by_id(brief_id)
     if not brief:
         raise RuntimeError(f"brief_id={brief_id} not found")
@@ -75,6 +80,7 @@ def _run_sync(
         # streams on the long read timeout (the HTML brief is a big generation).
         skill="evidence-brief",
         on_delta=on_delta,
+        background=background,
     )
     raw = result.output if isinstance(result.output, str) else str(result.output)
     # Strip any ```html code fence the model added so the stored payload is raw HTML.
@@ -87,9 +93,13 @@ def _run_sync(
 
 
 async def generate_evidence(
-    evidence_id: int, brief_id: int, insight_index: int
+    evidence_id: int, brief_id: int, insight_index: int,
+    background: bool = False,
 ) -> None:
-    """Run evidence generation in a worker thread; update DB with result."""
+    """Run evidence generation in a worker thread; update DB with result.
+
+    `background=True` (the brief warm storm) demotes the LLM call to the gate's
+    low-priority lane so warming never delays an interactive generation."""
     logger.info(
         "Evidence generation starting evidence_id=%s brief_id=%s insight_index=%s",
         evidence_id,
@@ -97,7 +107,10 @@ async def generate_evidence(
         insight_index,
     )
     try:
-        await asyncio.to_thread(_run_sync, evidence_id, brief_id, insight_index)
+        await asyncio.to_thread(
+            _run_sync, evidence_id, brief_id, insight_index,
+            background=background,
+        )
         logger.info("Evidence generation succeeded evidence_id=%s", evidence_id)
     except Exception as exc:
         msg = f"{type(exc).__name__}: {exc}"

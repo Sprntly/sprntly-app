@@ -157,17 +157,6 @@ async def generate(
     if existing is not None:
         return {"job_id": existing, "status": "generating"}
 
-    # Pre-warm the Implementation Spec (Part B) in the background so tickets can
-    # INHERIT acceptance criteria from it. New PRDs are already warmed at
-    # creation (a cache hit here); this covers PRDs that predate that — their
-    # spec generates in the background now so the NEXT regenerate inherits, while
-    # THIS ticket run stays a single fast call over the already-rendered PRD
-    # (never blocked on Part B, never regenerating the PRD).
-    if body.prd_id is not None:
-        warm = asyncio.create_task(warm_impl_spec(body.prd_id))
-        _inflight_tasks.add(warm)
-        warm.add_done_callback(_inflight_tasks.discard)
-
     job_id = next(_job_ids)
     _jobs[job_id] = {
         "id": job_id,
@@ -176,6 +165,7 @@ async def generate(
         "insight": body.insight,
         "status": "generating",
         "stories": None,
+        "stubs": None,  # planned ticket roster (fan-out), for skeleton rows
         "progress": None,  # {"done": n, "total": m} once fan-out batches land
         "error": None,
     }
@@ -202,6 +192,29 @@ async def generate(
 
         loop.call_soon_threadsafe(_apply)
 
+    def _on_plan(stubs: list[dict], total: int) -> None:
+        # The plan completes ~20-35s in — long before the first enrich batch
+        # (which on a single-wave run is the very END). Publish the roster so
+        # the poll can render skeleton tickets immediately. Keep only display
+        # fields; a stub is untrusted model output.
+        snapshot = [
+            {
+                "title": str(s.get("title") or "").strip(),
+                "summary": str(s.get("summary") or "").strip(),
+                "prd_section": str(s.get("prd_section") or "").strip(),
+            }
+            for s in stubs
+            if isinstance(s, dict) and str(s.get("title") or "").strip()
+        ]
+
+        def _apply() -> None:
+            job = _jobs.get(job_id)
+            if job is not None and job["status"] == "generating":
+                job["stubs"] = snapshot
+                job["progress"] = {"done": 0, "total": total}
+
+        loop.call_soon_threadsafe(_apply)
+
     async def _run() -> None:
         try:
             stories = await asyncio.to_thread(
@@ -211,12 +224,26 @@ async def generate(
                 batch_size=settings.ticket_gen_batch_size,
                 max_parallel=settings.ticket_gen_max_parallel,
                 on_batch=_on_batch,
+                on_plan=_on_plan,
             )
             job = _jobs.get(job_id)
             if job is not None:
                 job["status"] = "ready"
                 job["stories"] = [s.to_dict() for s in stories]
+                job["stubs"] = None
                 job["progress"] = None
+            # Pre-warm the Implementation Spec (Part B) AFTER the run so the
+            # NEXT regenerate can INHERIT acceptance criteria from it. This used
+            # to fire alongside the kick, but the warm (a ~3-4 min, 10K+ token
+            # generation) competed with this very run's enrich shards for the
+            # process-wide LLM gate — observed on prod as a 93.6s wait for a
+            # concurrency slot. THIS run never needed it (it generates over the
+            # already-rendered PRD), so deferring costs nothing and frees the
+            # gate while the user is actually watching.
+            if body.prd_id is not None:
+                warm = asyncio.create_task(warm_impl_spec(body.prd_id))
+                _inflight_tasks.add(warm)
+                warm.add_done_callback(_inflight_tasks.discard)
         except PRDNotFoundError as exc:
             job = _jobs.get(job_id)
             if job is not None:
@@ -252,8 +279,12 @@ def get_job(
     elif job["status"] == "generating":
         # Stream partial results: fan-out publishes tickets batch-by-batch, so a
         # poll mid-run can render what's landed already instead of an empty spin.
+        # The planned stub roster comes first (~20-35s in) so the client can put
+        # up skeleton rows for the whole set before any full ticket exists.
         if job.get("stories"):
             out["stories"] = job["stories"]
+        if job.get("stubs"):
+            out["stubs"] = job["stubs"]
         if job.get("progress"):
             out["progress"] = job["progress"]
     return out
