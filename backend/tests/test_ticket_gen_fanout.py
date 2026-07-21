@@ -193,6 +193,59 @@ def test_single_strategy_never_calls_on_batch(isolated_settings, monkeypatch):
     assert fired == [], "the single path has no batches to stream"
 
 
+def test_fanout_on_plan_fires_once_before_any_enrich(isolated_settings, monkeypatch):
+    """on_plan delivers the full stub roster + batch count as soon as the plan
+    leg completes — BEFORE any enrich call, so a UI can render skeletons ~20-35s
+    in instead of waiting for the first full batch (on a single-wave run that's
+    the very end)."""
+    lock = threading.Lock()
+    record: list[dict] = []
+    monkeypatch.setattr(
+        gen, "llm_call", _fake_llm(["A", "B", "C"], record=record, lock=lock)
+    )
+    planned: list[tuple[list[dict], int]] = []
+
+    def _on_plan(stubs, total):
+        # At callback time only the plan call has gone out.
+        with lock:
+            assert [kw["prompt_version"] for kw in record] == [PLAN_PROMPT_VERSION]
+        planned.append((stubs, total))
+
+    result = generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=2, max_parallel=2, on_plan=_on_plan,
+    )
+
+    assert len(result) == 3
+    assert len(planned) == 1, "on_plan fires exactly once"
+    stubs, total = planned[0]
+    assert [s["title"] for s in stubs] == ["A", "B", "C"]
+    assert stubs[0]["summary"] == "do A"
+    assert total == 2, "3 stubs at batch_size=2 → 2 batches"
+
+
+def test_fanout_on_plan_exception_never_breaks_generation(isolated_settings, monkeypatch):
+    monkeypatch.setattr(gen, "llm_call", _fake_llm(["A", "B"]))
+
+    def _boom(stubs, total):
+        raise RuntimeError("display hiccup")
+
+    result = generate_from_input(
+        "ent-A", prd_input="PRD", strategy="fanout",
+        batch_size=2, max_parallel=2, on_plan=_boom,
+    )
+    assert sorted(s.title for s in result) == ["A", "B"]
+
+
+def test_single_strategy_never_calls_on_plan(isolated_settings, monkeypatch):
+    monkeypatch.setattr(gen, "llm_call",
+                        lambda **kw: _result({"stories": [_story("Only")]}))
+    fired = []
+    generate_from_input("ent-A", prd_input="PRD", strategy="single",
+                        on_plan=lambda *a: fired.append(a))
+    assert fired == [], "the single path has no plan leg"
+
+
 def test_enrich_tolerates_string_items_in_stories(isolated_settings, monkeypatch):
     """Regression: a real PRD made the enrich model return a bare string inside
     `stories`; `s.get('title')` then raised 'str has no attribute get' and failed

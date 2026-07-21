@@ -2494,12 +2494,22 @@ export type StoryPushResult = {
   errors: { story: string; error: string }[]
 }
 
+// One planned-but-not-yet-written ticket from the fan-out's plan leg — enough
+// to render a skeleton row (~20-35s in) while the full tickets generate.
+export type TicketStub = {
+  title: string
+  summary?: string
+  prd_section?: string
+}
+
 export type StoryJob = {
   job_id: number
   status: "generating" | "ready" | "failed"
   stories?: GeneratedStory[]
   // Fan-out streams tickets batch-by-batch: while `generating`, `stories` may
   // hold the partial set landed so far and `progress` the batch counter.
+  // `stubs` arrives first — the planned roster, before any full ticket exists.
+  stubs?: TicketStub[]
   progress?: { done: number; total: number }
   error?: string
 }

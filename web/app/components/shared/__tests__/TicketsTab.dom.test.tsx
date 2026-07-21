@@ -144,6 +144,66 @@ describe("TicketsTab — generate from the PRD, push to ClickUp", () => {
     expect(screen.queryByTestId("tickets-generating")).toBeNull()
   })
 
+  it("renders the planned roster as skeleton rows before any batch lands", async () => {
+    content = { prd: { prd_id: 42, title: "Workspaces PRD" }, connectedConnectorIds: [] }
+    generate.mockResolvedValue({ job_id: 7, status: "generating" })
+    // The plan leg finished (~20-35s in) but no enrich batch has: the poll
+    // carries only the stub roster + a zero-progress counter.
+    getJob.mockResolvedValue({
+      job_id: 7,
+      status: "generating",
+      stubs: [
+        { title: "Create workspace", summary: "Workspace CRUD", prd_section: "Part A §5 R1" },
+        { title: "Invite teammates" },
+      ],
+      progress: { done: 0, total: 2 },
+    })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+
+    // Both planned tickets render as inert skeleton rows — full roster visible
+    // long before the first real ticket exists — with a planning banner (not
+    // "batch 0 of 2") and the full planned count in the intro line.
+    await waitFor(() => expect(screen.getAllByTestId("ticket-skeleton")).toHaveLength(2))
+    expect(screen.getByText("Create workspace")).toBeTruthy()
+    expect(screen.getByText(/Workspace CRUD/)).toBeTruthy()
+    expect(screen.getByText("Invite teammates")).toBeTruthy()
+    expect(screen.getByText(/Planned 2 tickets — writing them now/i)).toBeTruthy()
+    expect(screen.getByText(/2 implementable tickets/)).toBeTruthy()
+    expect(screen.queryByTestId("tickets-generating")).toBeNull()
+  })
+
+  it("a landed story replaces its skeleton; unlanded stubs stay skeletal", async () => {
+    content = { prd: { prd_id: 42, title: "Workspaces PRD" }, connectedConnectorIds: [] }
+    generate.mockResolvedValue({ job_id: 7, status: "generating" })
+    // Mid-run: batch 1 landed "Create workspace"; "Invite teammates" is planned
+    // but still being written.
+    getJob.mockResolvedValue({
+      job_id: 7,
+      status: "generating",
+      stories: [{ title: "Create workspace", body: "", acceptance_criteria: [], priority: null, route: null }],
+      stubs: [
+        { title: "Create workspace", summary: "Workspace CRUD" },
+        { title: "Invite teammates", summary: "Email invites" },
+      ],
+      progress: { done: 1, total: 2 },
+    })
+
+    await act(async () => {
+      render(React.createElement(TicketsTab))
+    })
+
+    // One real row + one skeleton; the landed title is NOT doubled as a skeleton.
+    await waitFor(() => expect(screen.getAllByTestId("ticket-skeleton")).toHaveLength(1))
+    expect(screen.getAllByText("Create workspace")).toHaveLength(1)
+    expect(screen.getByText("Invite teammates")).toBeTruthy()
+    expect(screen.getByText(/batch 1 of 2/i)).toBeTruthy()
+    // Total count covers landed + still-writing.
+    expect(screen.getByText(/2 implementable tickets/)).toBeTruthy()
+  })
+
   it("serves persisted tickets without regenerating when the PRD is unchanged", async () => {
     content = { prd: { prd_id: 42, title: "Onboarding PRD" }, connectedConnectorIds: [] }
     // Fresh cache hit → render the stored stories, never call generate.

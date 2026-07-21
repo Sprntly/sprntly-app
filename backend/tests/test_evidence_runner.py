@@ -101,6 +101,48 @@ def test_run_sync_binds_skill_and_grounds_on_corpus(
     assert "HTML" in captured["system"] and "self-contained" in captured["system"]
 
 
+def test_run_sync_defaults_to_interactive_lane(isolated_settings, monkeypatch):
+    """A user-initiated evidence generation (the KG fallback path) stays in the
+    LLM gate's interactive lane."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    evidence_id = db_mod.start_evidence(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=4, variant="v3",
+    )
+    captured = _patch_gateway(monkeypatch)
+
+    evidence_runner._run_sync(evidence_id, brief_id, 0)
+
+    assert captured["background"] is False
+
+
+def test_generate_evidence_background_rides_to_gateway(
+    isolated_settings, monkeypatch
+):
+    """The brief warm storm passes background=True; it must reach llm_call so
+    warming waits in the gate's low-priority lane instead of queueing user
+    generations behind it (the post-brief 'tickets are slow' contention)."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    evidence_id = db_mod.start_evidence(
+        brief_id=brief_id, insight_index=0, title="t",
+        template_version=4, variant="v3",
+    )
+    captured = _patch_gateway(monkeypatch)
+
+    asyncio.run(
+        evidence_runner.generate_evidence(
+            evidence_id, brief_id, 0, background=True
+        )
+    )
+
+    assert captured["background"] is True
+    assert db_mod.get_evidence(evidence_id)["status"] == "ready"
+
+
 def test_run_sync_missing_brief_raises(isolated_settings):
     with pytest.raises(RuntimeError):
         evidence_runner._run_sync(1, brief_id=9999, insight_index=0)

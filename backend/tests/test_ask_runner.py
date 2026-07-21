@@ -41,6 +41,15 @@ def test_generate_one_sync_calls_llm_and_returns_payload(
     assert len(fake_llm["calls"]) == 1
 
 
+def test_generate_one_sync_runs_in_background_lane(isolated_settings, fake_llm):
+    """Ask warming is pre-computation, never a user waiting — the call must ride
+    the LLM gate's low-priority background lane so the post-brief warm storm
+    can't queue a user's own generation behind it."""
+    _seed_corpus(isolated_settings["data_dir"])
+    ask_runner._generate_one_sync("asurion", "Some question?")
+    assert fake_llm["calls"][0]["kwargs"]["background"] is True
+
+
 def test_generate_one_sync_passes_question_into_user_prompt(
     isolated_settings, fake_llm
 ):
