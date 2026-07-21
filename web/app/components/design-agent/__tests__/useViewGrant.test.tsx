@@ -538,6 +538,41 @@ describe("useViewGrant — bundle-readiness recovery via the iframe onLoad probe
     // The 404 drove the readiness retry, NOT the grant re-mint (cap-1) path.
     expect(viewGrant).toHaveBeenCalledTimes(1)
   })
+
+  it("test_use_view_grant_notify_bundle_loaded_resolves_only_after_readiness_settles", async () => {
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    // Let the post-mint preflight (default 200) settle before swapping the mock,
+    // so we don't race an in-flight preflight the mint itself already started.
+    await waitFor(() => expect(result.current.notReady).toBe(false))
+
+    let resolveFetch: (value: Response) => void = () => {}
+    fetchMock.mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolveFetch = resolve
+        }),
+    )
+
+    let settled = false
+    let notifyPromise: Promise<void> = Promise.resolve()
+    await act(async () => {
+      notifyPromise = result.current.notifyBundleLoaded()
+      notifyPromise.then(() => {
+        settled = true
+      })
+      await Promise.resolve()
+    })
+    // The preflight fetch is still pending — the readiness decision hasn't
+    // been made, so the returned promise must not have resolved yet.
+    expect(settled).toBe(false)
+
+    await act(async () => {
+      resolveFetch(new Response("<!doctype html>", { status: 200 }))
+      await notifyPromise
+    })
+    expect(settled).toBe(true)
+  })
 })
 
 describe("GRANT_REFRESH_INTERVAL_MS — env-tunable, prod-default-locked", () => {

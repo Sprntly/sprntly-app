@@ -501,14 +501,17 @@ describe("load mask (Glitch A)", () => {
     )
   }
 
-  it("renders a neutral surface placeholder before load when masking is opted in", () => {
+  it("renders the reskinned load-mask placeholder (spinner + iterate-aware label) before load when masking is opted in", () => {
     const html = renderWithMask(true)
     expect(html).toContain('data-testid="da-viewer-placeholder"')
-    // NOT the black / apply copy — it's a bare neutral cover.
+    // NOT the apply copy — the default (no iterateRunning) reads neutral.
     expect(html).not.toContain("Applying changes")
-    // The neutral cover is surface-colored via a scoped CSS rule.
+    expect(html).toContain("Loading…")
+    expect(html).toContain("da-bundle-loading-spinner")
+    expect(html).toContain("da-bundle-loading-label")
+    // The reskinned cover reuses the .da-bundle-loading scrim treatment.
     expect(CSS).toMatch(
-      /\.design-agent-surface\s+\.da-viewer-placeholder\s*\{[^}]*background:\s*var\(--surface\)/,
+      /\.design-agent-surface\s+\.da-viewer-placeholder\s*\{[^}]*background:\s*color-mix\(in srgb,\s*var\(--surface\)/,
     )
   })
 
@@ -517,5 +520,18 @@ describe("load mask (Glitch A)", () => {
     expect(html).not.toContain('data-testid="da-viewer-placeholder"')
     // default renderViewer (no prop at all) is also clean
     expect(renderViewer()).not.toContain('data-testid="da-viewer-placeholder"')
+  })
+
+  it('renders the "Applying changes…" label when iterateRunning is true', () => {
+    const html = renderToStaticMarkup(
+      React.createElement(PrototypeViewer, {
+        bundleUrl: BUNDLE,
+        isComplete: false,
+        maskUntilLoaded: true,
+        iterateRunning: true,
+      }),
+    )
+    expect(html).toContain("Applying changes…")
+    expect(html).not.toContain("Loading…")
   })
 })
