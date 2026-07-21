@@ -100,13 +100,13 @@ describe("Sidebar — New chat wiring", () => {
 // deliberately does NOT appear here: it moved to Settings → Account, and the
 // rail's user row is display-only.
 describe("Sidebar — nav affordances preserved after restyle", () => {
-  it("renders New chat, Weekly brief, All chats, Sources, Settings + Feedback", () => {
+  it("renders New chat, Weekly brief, All chats, Settings + Feedback", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
       "Weekly brief",
       "Chat history",
-      "Sources",
+      "Ideation",
       "Settings",
       "Feedback",
     ]) {
@@ -114,14 +114,20 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     }
   })
 
+  it("no longer renders a Sources rail item (hidden from the rail; screen + route kept)", () => {
+    render(React.createElement(Sidebar))
+    expect(screen.queryByLabelText("Sources")).toBeNull()
+  })
+
   it("no longer renders a Sign out affordance (it lives in Settings → Account)", () => {
     render(React.createElement(Sidebar))
     expect(screen.queryByLabelText("Sign out")).toBeNull()
   })
 
-  it("no longer renders the Ideation rail icon (functionality kept, icon removed)", () => {
+  it("renders the Ideation rail icon (restored to the nav)", () => {
     render(React.createElement(Sidebar))
-    expect(screen.queryByLabelText("Ideation")).toBeNull()
+    fireEvent.click(screen.getByLabelText("Ideation"))
+    expect(goTo).toHaveBeenCalledWith("ideation")
   })
 
   it("Feedback opens the feedback modal (not a nav)", () => {

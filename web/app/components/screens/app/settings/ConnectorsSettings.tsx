@@ -3,7 +3,8 @@
  *
  * Renders connectors GROUPED BY CATEGORY — one card per catalog category
  * (Analytics · required, Project Management, …), each with its connector
- * rows and a per-category upload strip at the card's foot. Only connectors
+ * rows and a per-category upload strip at the card's foot (suppressed for
+ * categories with `allowsManualUpload: false` — see the catalog). Only connectors
  * with a working integration (OAuth / API key) are shown
  * (`connectableCatalog`) — "Coming soon" connectors are hidden so we don't
  * surface things the user can't use.
@@ -348,34 +349,41 @@ export function ConnectorsSettingsView({
             )
           })}
 
-          <label
-            className={`set-conn-upload${uploading ? " is-uploading" : ""}`}
-            title={uploading ? "Uploading…" : `Upload ${cat.title.toLowerCase()} files`}
-            aria-busy={uploading}
-          >
-            <i
-              className={`ti ${uploading ? "ti-loader-2 ti-spin" : "ti-cloud-upload"}`}
-              aria-hidden
-            />
-            {uploading ? "Uploading…" : `Upload ${cat.title.toLowerCase()} export`}
-            <span className="muted">{cat.uploadAccept ?? UPLOAD_ACCEPT_HINT}</span>
-            <input
-              type="file"
-              multiple
-              accept={(cat.uploadExtensions ?? UPLOAD_EXTENSIONS).join(",")}
-              // Block re-selection while a previous batch is still ingesting so
-              // the user can't fire overlapping uploads mid-flight.
-              disabled={uploading}
-              style={{ display: "none" }}
-              onChange={(e) => {
-                if (e.target.files && e.target.files.length > 0) {
-                  onUpload(cat.key, e.target.files)
-                  // Reset so the same file can be picked again after a failed run.
-                  e.target.value = ""
-                }
-              }}
-            />
-          </label>
+          {/* Manual upload strip. Hidden for categories that opt out via
+              `allowsManualUpload: false` in the catalog (Communications,
+              Codebase, Project Management) — those must be populated by
+              connecting the real integration. Flip the catalog flag to
+              restore; the backend upload path is unchanged. */}
+          {cat.allowsManualUpload !== false ? (
+            <label
+              className={`set-conn-upload${uploading ? " is-uploading" : ""}`}
+              title={uploading ? "Uploading…" : `Upload ${cat.title.toLowerCase()} files`}
+              aria-busy={uploading}
+            >
+              <i
+                className={`ti ${uploading ? "ti-loader-2 ti-spin" : "ti-cloud-upload"}`}
+                aria-hidden
+              />
+              {uploading ? "Uploading…" : `Upload ${cat.title.toLowerCase()} export`}
+              <span className="muted">{cat.uploadAccept ?? UPLOAD_ACCEPT_HINT}</span>
+              <input
+                type="file"
+                multiple
+                accept={(cat.uploadExtensions ?? UPLOAD_EXTENSIONS).join(",")}
+                // Block re-selection while a previous batch is still ingesting so
+                // the user can't fire overlapping uploads mid-flight.
+                disabled={uploading}
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  if (e.target.files && e.target.files.length > 0) {
+                    onUpload(cat.key, e.target.files)
+                    // Reset so the same file can be picked again after a failed run.
+                    e.target.value = ""
+                  }
+                }}
+              />
+            </label>
+          ) : null}
         </section>
       ))}
 

@@ -320,6 +320,19 @@ export interface ConnectorCategoryRow {
    * attribute, e.g. [".pdf", ".csv", ".xlsx"].
    */
   uploadExtensions?: string[]
+  /**
+   * Whether the Settings → Connectors card for this category shows its manual
+   * "Upload <category> export" dropzone. Defaults to TRUE when unset — only
+   * categories that explicitly set `false` hide the strip.
+   *
+   * Turned off for categories whose data should only ever arrive through the
+   * real integration (Communications, Codebase, Project Management): a hand-
+   * uploaded Slack/GitHub/Jira export has no sync, no permissions model, and
+   * no incremental updates, so it produces stale, misleading sources.
+   * The backend upload path is untouched — flip this back to `true` (or drop
+   * the field) to restore the dropzone.
+   */
+  allowsManualUpload?: boolean
 }
 
 export interface DetailQuoteRow {

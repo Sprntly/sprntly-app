@@ -13,7 +13,13 @@
 import { CONNECTOR_CATALOG, connectableCatalog } from "../connectorsCatalog"
 import type { ConnectorCategoryRow } from "../../types/content"
 
-/** The category id that gates Continue — at least one must be connected. */
+/**
+ * The Analytics category key.
+ *
+ * Nothing in onboarding is mandatory — Continue is never gated on a connector
+ * — but a LIVE connection in this category is what decides whether the
+ * post-review define-metrics sub-flow runs (see hasLiveAnalyticsConnection).
+ */
 export const REQUIRED_CATEGORY_KEY = "analytics"
 
 /**
@@ -53,18 +59,32 @@ export function wizardCategories(
   )
 }
 
-/** Connector ids belonging to the required (Analytics) category. */
+/** Connector ids belonging to the Analytics category. */
 export function requiredCategoryIds(): string[] {
   const cat = CONNECTOR_CATALOG.find((c) => c.key === REQUIRED_CATEGORY_KEY)
   return cat ? cat.items.map((i) => i.id) : []
 }
 
 /**
- * Has the PM satisfied the hard requirement (≥1 Analytics connector,
- * whether live or selected-this-session)?
+ * Is there a LIVE analytics connection (not merely "planned this session")?
+ *
+ * Gates the post-review define-metrics sub-flow: that flow exists to map each
+ * metric onto real analytics events, so with no analytics connector it has
+ * nothing to detect and we finish onboarding straight from Review instead.
+ *
+ * Prefers the backend's `types` (source of truth, mirrors
+ * backend/app/connectors/catalog.py) and falls back to the local catalog's
+ * Analytics ids for older payloads that predate the field.
  */
-export function hasRequiredConnector(selected: ReadonlySet<string>): boolean {
-  return requiredCategoryIds().some((id) => selected.has(id))
+export function hasLiveAnalyticsConnection(
+  connections: readonly { provider: string; status: string; types?: string[] }[],
+): boolean {
+  const analyticsIds = new Set(requiredCategoryIds())
+  return connections.some(
+    (c) =>
+      c.status === "active" &&
+      (c.types?.includes(REQUIRED_CATEGORY_KEY) || analyticsIds.has(c.provider)),
+  )
 }
 
 /** Clamp a category index into [0, lastCategory]. */

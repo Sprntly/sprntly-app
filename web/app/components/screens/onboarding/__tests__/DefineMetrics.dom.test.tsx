@@ -6,7 +6,8 @@
 // (AI-drafted definition + analytics mapping, both editable), then a review
 // table (metric / mapping / baseline with "—" fallback), and "Looks right ·
 // generate knowledge graph" persists companies.metric_definitions, COMPLETES
-// onboarding, kicks the first brief and enters the app at /brief.
+// onboarding, kicks the first brief and enters the app at /settings (the brief
+// is still generating server-side; setup is the useful next move).
 //
 // Covers: drafts requested from onboardingApi.draftMetricDefinitions (unless
 // definitions are already saved on the company); per-metric confirm walks
@@ -176,7 +177,7 @@ describe("DefineMetrics (unnumbered define-metrics sub-flow)", () => {
     })
 
     await waitFor(() => {
-      expect(routerMock.replace).toHaveBeenCalledWith("/brief")
+      expect(routerMock.replace).toHaveBeenCalledWith("/settings")
     })
     // Definitions persisted as confirmed (metric/definition/mapping/baseline).
     expect(saveDefsMock).toHaveBeenCalledTimes(1)

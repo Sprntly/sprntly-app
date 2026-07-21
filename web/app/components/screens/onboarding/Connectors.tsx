@@ -6,7 +6,10 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { advanceOnboardingStep } from "../../../lib/onboarding/store"
+import {
+  advanceOnboardingStep,
+  markSkippedFields,
+} from "../../../lib/onboarding/store"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedSignal"
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
@@ -32,9 +35,13 @@ import {
  * so this page tracks Settings automatically (the design kit's hardcoded
  * grid is NOT the source of truth).
  *
- * Mandatory for COMPANY accounts (registration spec 2026-07): Continue
- * requires at least one LIVE connection; the skip link is hidden. PERSONAL
- * accounts keep everything optional with the "Connect later" skip.
+ * Every connector is OPTIONAL: Continue is never gated on having a live
+ * connection, and a "Skip for now" link in the footer leaves with none (it
+ * stamps `connectors` onto the profile's skipped_fields so we can nudge the
+ * PM later). Downstream handles the no-connector case — Review finishes
+ * onboarding directly rather than handing off to define-metrics, which has
+ * nothing to detect without analytics.
+ *
  * Connectable providers open the real OAuth/API-key modal; everything else
  * toggles a "planned" selection that pre-stages intent for
  * Settings → Connectors.
@@ -267,10 +274,16 @@ export function Connectors() {
     setOpenCat(firstIncompleteCategory(nextDone, categories.length))
   }
 
-  async function go() {
+  /**
+   * Leave the step. `skipped` records that the PM moved on without wiring
+   * anything, so Settings / later nudges can pick it back up; it never blocks
+   * the advance either way.
+   */
+  async function go(skipped: boolean) {
     if (!workspace || auth.kind !== "authed") return
     setSaving(true)
     try {
+      if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
       // Next numbered step is team (index 6 in ONBOARDING_STEP_SLUGS).
       const updated = await advanceOnboardingStep(workspace.id, 6)
       setWorkspace(updated)
@@ -295,8 +308,6 @@ export function Connectors() {
     .flatMap((c) => c.items)
     .filter((it) => selected.has(it.id)).length
 
-  const hasLiveConnection = connected.size > 0
-
   return (
     <OnboardingChrome
       step={5}
@@ -308,13 +319,22 @@ export function Connectors() {
       }
       subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
       footerMeta={
-        hasLiveConnection
-          ? `${selectedCount} connector${selectedCount === 1 ? "" : "s"} selected — ready to continue`
-          : "Connect at least one source to continue — it's what your briefs are built from."
+        <>
+          {selectedCount} connector{selectedCount === 1 ? "" : "s"} selected ·
+          all optional —{" "}
+          <button
+            type="button"
+            className="onb-skip-link"
+            onClick={() => void go(true)}
+            disabled={saving}
+          >
+            Skip for now
+          </button>
+        </>
       }
       onBack={() => router.push("/onboarding/api-key")}
-      onContinue={() => void go()}
-      continueDisabled={saving || !hasLiveConnection}
+      onContinue={() => void go(false)}
+      continueDisabled={saving}
       loading={saving}
     >
       <div className="conn-steps">
@@ -344,22 +364,14 @@ export function Connectors() {
                     {CATEGORY_DESCRIPTIONS[cat.key] ?? cat.subtitle ?? ""}
                   </div>
                 </div>
-                <span
-                  className="conn-step-state"
-                  data-state={isDone ? "done" : isOpen ? "open" : unlocked ? "ready" : "locked"}
-                >
-                  {isDone ? (
-                    <>
-                      <Check style={{ width: 12, height: 12 }} aria-hidden /> Done
-                    </>
-                  ) : isOpen ? (
-                    "In progress"
-                  ) : unlocked ? (
-                    "Up next"
-                  ) : (
+                {/* No status text on these cards — the only affordance in the
+                    header slot is the lock on categories that aren't reachable
+                    yet; Skip / Done·next live in the body footer. */}
+                {!unlocked && (
+                  <span className="conn-step-state" data-state="locked">
                     <LockIcon aria-label="Locked" />
-                  )}
-                </span>
+                  </span>
+                )}
               </button>
 
               {isOpen && (

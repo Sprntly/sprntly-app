@@ -74,6 +74,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     title: "Project Management",
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
+    // Ticket data must come from the live Jira/ClickUp/Asana integration —
+    // a one-off export can't sync or stay current. See `allowsManualUpload`.
+    allowsManualUpload: false,
     items: [
       { id: "linear",       name: "Linear",      logo: "L", logoText: "L", logoColor: "#5E6AD2", logoSvg: "/connectors/linear.svg", oauth: false, types: ["task-management"] },
       { id: "jira",         name: "Jira",        logo: "J", logoText: "J", logoColor: "#0052CC", logoSvg: "/connectors/jira.svg", oauth: true, types: ["task-management"] },
@@ -114,6 +117,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     title: "Codebase",
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
+    // Repo content must come from the live GitHub/GitLab integration —
+    // an uploaded archive can't sync or stay current. See `allowsManualUpload`.
+    allowsManualUpload: false,
     items: [
       { id: "github",    name: "GitHub",    logo: "G", logoText: "G", logoColor: "#181717", logoSvg: "/connectors/github.svg", oauth: true, types: ["code"] },
       { id: "gitlab",    name: "GitLab",    logo: "G", logoText: "G", logoColor: "#FC6D26", logoSvg: "/connectors/gitlab.svg", oauth: false, types: ["code"] },
@@ -125,6 +131,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     title: "Communications",
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
+    // Messages must come from the live Slack/Teams integration — an exported
+    // transcript has no channel/permission model. See `allowsManualUpload`.
+    allowsManualUpload: false,
     items: [
       // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
       // (Slack Marketplace requires OAuth install, not a pasted bot token).

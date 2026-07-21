@@ -19,6 +19,8 @@ import type { IdeationItem, IdeationList, CompletedList } from "../../../../lib/
 
 const listMock = vi.fn<() => Promise<IdeationList>>()
 const completedMock = vi.fn<() => Promise<CompletedList>>()
+// The detail popup fetches the idea's evidence trail when it opens.
+const detailMock = vi.fn<(id: string) => Promise<unknown>>()
 
 // Mock the API client — the screen reads the ideas through ideationApi.list()
 // and the Completed tab through ideationApi.completed().
@@ -27,6 +29,7 @@ vi.mock("../../../../lib/api", () => ({
     list: () => listMock(),
     completed: () => completedMock(),
     setStatus: vi.fn(),
+    detail: (id: string) => detailMock(id),
     create: vi.fn(),
     reorder: vi.fn(),
   },
@@ -86,6 +89,12 @@ beforeEach(() => {
   // Default: Proposed-tab tests don't need completed data, but the mock must
   // resolve in case the tab is exercised.
   completedMock.mockResolvedValue({ items: [], count: 0 })
+  detailMock.mockReset()
+  detailMock.mockResolvedValue({
+    id: "a", theme_id: "t4", title: "Rank-4 idea", tag: "something_broken",
+    rank: 4, score: 0.5, status: "proposed", reasoning: "Checkout keeps failing",
+    evidence: [], evidence_count: 0, sources: [], is_manual: false,
+  })
 })
 
 afterEach(() => {
@@ -136,13 +145,23 @@ describe("IdeationScreen — Proposed tab", () => {
     expect(screen.queryByText("Co-authoring nudge to amplify the viral loop")).toBeNull()
   })
 
-  it("opens the restyled idea-detail panel (design .rbd-*) on row click", async () => {
-    // Visual restyle (#475): selecting an idea opens the right-hand
-    // detail pane, now styled via the `.bl-detail` / serif `.bl-detail-title`
-    // classes. Assert the pane + its design hooks render with the idea's data.
+  it("opens the idea-detail popup with problem framing + evidence on row click", async () => {
+    // Clicking an ideation idea opens a modal (was a right-hand pane) that
+    // fetches the idea's evidence trail and frames the problem: why it wasn't
+    // prioritized, the pain-point TL;DR, the framing lens, and the quotes.
     listMock.mockResolvedValue({
       items: [item({ id: "a", theme_id: "t4", title: "Rank-4 idea", rank: 4 })],
       count: 1,
+    })
+    detailMock.mockResolvedValue({
+      id: "a", theme_id: "t4", title: "Rank-4 idea", tag: "something_broken",
+      rank: 4, score: 0.5, status: "proposed",
+      reasoning: "Checkout keeps failing for enterprise buyers",
+      evidence: [
+        { signal_id: "s1", content: "I gave up and emailed sales instead.",
+          kind: "complaint", source_type: "zendesk", provenance: {}, confidence: 0.9 },
+      ],
+      evidence_count: 3, sources: ["zendesk", "hubspot"], is_manual: false,
     })
 
     const { container } = render(<IdeationScreen />)
@@ -152,12 +171,29 @@ describe("IdeationScreen — Proposed tab", () => {
       fireEvent.click(screen.getByText("Rank-4 idea"))
     })
 
-    const detail = container.querySelector(".bl-detail")
-    expect(detail).toBeTruthy()
-    expect(detail!.querySelector(".bl-detail-title")?.textContent).toBe("Rank-4 idea")
-    // Brand rank pill + the three next-step CTAs are present.
-    expect(detail!.querySelector(".bl-detail-rank")?.textContent).toBe("#4")
-    expect(detail!.querySelectorAll(".bl-detail-btn").length).toBe(3)
+    const modal = container.querySelector(".bl-modal")
+    expect(modal).toBeTruthy()
+    expect(modal!.getAttribute("role")).toBe("dialog")
+    expect(modal!.querySelector(".bl-detail-title")?.textContent).toBe("Rank-4 idea")
+    expect(modal!.querySelector(".bl-detail-rank")?.textContent).toBe("#4")
+
+    // It was fetched by id, and the detail's evidence is rendered as a quote
+    // attributed to its source.
+    await waitFor(() => expect(detailMock).toHaveBeenCalledWith("a"))
+    await waitFor(() =>
+      expect(screen.getByText("I gave up and emailed sales instead.")).toBeTruthy())
+    expect(screen.getByText("Zendesk")).toBeTruthy()
+
+    // Pain-point TL;DR + the tag-derived framing lens.
+    expect(screen.getByText("Checkout keeps failing for enterprise buyers")).toBeTruthy()
+    expect(screen.getByText(/Something is broken/)).toBeTruthy()
+    // Breadth line counts the WHOLE trail, not just the shown head.
+    expect(screen.getByText(/3 signals across 2 sources/)).toBeTruthy()
+    // Why it's in Ideation at all.
+    expect(screen.getByText(/Not prioritized in the weekly brief/)).toBeTruthy()
+
+    // CTA into the chat → PRD → tickets → prototype funnel.
+    expect(screen.getByText("Generate a brief")).toBeTruthy()
   })
 
   it("shows the weekly-prioritization indicator, not the old framework dropdown", async () => {

@@ -1,0 +1,11 @@
+-- Prototype-ready notification: store the generating user's identity on the row.
+--
+-- `created_by_user_id` is a generate-time snapshot of the authenticated user who
+-- kicked off the generation (require_company's user_id), mirroring the other
+-- input-snapshot columns (figma_file_key / website_url / screenshot_key). Its one
+-- consumer is design_agent/notify.py, which resolves "who do we DM when this
+-- prototype reaches ready" from it. Nullable — existing rows and any legacy
+-- writer read NULL, which the notifier treats as "no recipient" (nobody is
+-- notified; the generation itself is unaffected). Additive + idempotent for
+-- migrate-on-deploy; no index (only ever read by primary-key row fetch).
+alter table prototypes add column if not exists created_by_user_id text;

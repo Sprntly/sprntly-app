@@ -290,8 +290,9 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  *                                         the token-heavy knowledge-graph build
  *                                         runs on it, or later in Settings →
  *                                         Admin)
- *   5. connectors  → Connectors          (connect your tools — ≥1 live
- *                                         connection required)
+ *   5. connectors  → Connectors          (connect your tools — OPTIONAL,
+ *                                         skippable; zero connectors is a
+ *                                         supported finish)
  *   6. team        → TeamStep            (team name* + scope of work*)
  *   7. strategy    → StrategyRoadmapStep (team strategy + team roadmap —
  *                                         upload OR type; optional, skippable)

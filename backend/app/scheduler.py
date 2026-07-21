@@ -32,6 +32,8 @@ from app import db
 from app.brief_schedule import (
     GENERATION_LEAD,
     previous_fire_time,
+    resolve_anchor,
+    resolve_frequency,
     resolve_schedule,
     resolve_user_timezone,
     should_generate_weekly_brief,
@@ -202,9 +204,13 @@ async def _run_synthesis_for_all_companies() -> None:
 
 
 def _resolve_company_schedule(company: dict) -> tuple[object, dict]:
-    """Resolve one company row's (timezone, {weekday, hour, minute}) from its
-    Comms & Brief settings, falling back to the owner's profile timezone / the
-    Monday-06:00 defaults."""
+    """Resolve one company row's (timezone, {weekday, hour, minute, frequency,
+    anchor}) from its Comms & Brief settings, falling back to the owner's
+    profile timezone / the weekly Monday-06:00 defaults.
+
+    The returned dict is splatted straight into the pure app.brief_schedule
+    decisions, so the cadence a user picks on the settings page is what the
+    tick actually honours."""
     ns = company.get("notification_settings") or {}
     # Timezone: prefer the company's chosen tz (Comms & Brief settings),
     # else the owner's profile timezone, else UTC.
@@ -215,7 +221,13 @@ def _resolve_company_schedule(company: dict) -> tuple[object, dict]:
         else resolve_user_timezone(company.get("owner_timezone"))
     )
     weekday, hour, minute = resolve_schedule(ns)
-    return tz, {"weekday": weekday, "hour": hour, "minute": minute}
+    return tz, {
+        "weekday": weekday,
+        "hour": hour,
+        "minute": minute,
+        "frequency": resolve_frequency(ns),
+        "anchor": resolve_anchor(ns),
+    }
 
 
 async def _run_weekly_brief_tick(now: datetime | None = None) -> None:

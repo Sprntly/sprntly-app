@@ -3,7 +3,7 @@ import {
   categoryTitle,
   clampStep,
   firstIncompleteCategory,
-  hasRequiredConnector,
+  hasLiveAnalyticsConnection,
   isCategoryUnlocked,
   isLastCategory,
   markCategoryDone,
@@ -53,15 +53,43 @@ describe("wizard categories", () => {
   })
 })
 
-describe("hasRequiredConnector", () => {
-  it("is false with nothing selected", () => {
-    expect(hasRequiredConnector(new Set())).toBe(false)
+// Gates the post-review define-metrics sub-flow, so "live" is strict: only an
+// ACTIVE analytics connection counts.
+describe("hasLiveAnalyticsConnection", () => {
+  it("is false with no connections at all", () => {
+    expect(hasLiveAnalyticsConnection([])).toBe(false)
   })
-  it("is true once any Analytics connector is selected", () => {
-    expect(hasRequiredConnector(new Set(["mixpanel"]))).toBe(true)
+
+  it("is true for an active connection typed analytics by the backend", () => {
+    expect(
+      hasLiveAnalyticsConnection([
+        { provider: "posthog", status: "active", types: ["analytics"] },
+      ]),
+    ).toBe(true)
   })
-  it("is false when only non-Analytics connectors are selected", () => {
-    expect(hasRequiredConnector(new Set(["linear"]))).toBe(false)
+
+  it("falls back to the local catalog when the payload predates `types`", () => {
+    expect(
+      hasLiveAnalyticsConnection([{ provider: "amplitude", status: "active" }]),
+    ).toBe(true)
+  })
+
+  it("is false when the only analytics connection is not active", () => {
+    expect(
+      hasLiveAnalyticsConnection([
+        { provider: "mixpanel", status: "revoked", types: ["analytics"] },
+        { provider: "heap", status: "error", types: ["analytics"] },
+      ]),
+    ).toBe(false)
+  })
+
+  it("is false for active connections in other categories", () => {
+    expect(
+      hasLiveAnalyticsConnection([
+        { provider: "github", status: "active", types: ["code"] },
+        { provider: "linear", status: "active", types: ["task-management"] },
+      ]),
+    ).toBe(false)
   })
 })
 

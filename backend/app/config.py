@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     # allowlist had when empty.
     staff_admin_id: str = ""
     staff_admin_password_hash: str = ""
+    # Internal transcript viewer (/v1/transcripts + the obscure review page) —
+    # a single shared access code (argon2id hash), SEPARATE from the staff
+    # credential so read-only transcript access doesn't also grant entitlement
+    # edits. Unset ⇒ the whole surface, login included, 404s (fail closed).
+    transcripts_access_code_hash: str = ""
     # Design Agent bundle staging. Supabase Storage is the PRIMARY
     # destination (bucket named by the SUPABASE_STORAGE_BUCKET env var, read
     # directly in design_agent/storage.py). These two settings drive the
