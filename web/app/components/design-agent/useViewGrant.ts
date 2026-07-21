@@ -69,6 +69,14 @@ export type ViewGrantState = {
    *  Re-mints ONCE (bounded by VIEW_GRANT_REMINT_CAP); a second failure surfaces
    *  an error instead of re-minting again. No-op once the cap is hit. */
   notifyAssetError: () => void
+  /** Manual recovery for the TERMINAL error state (initial mint failed, or the
+   *  bounded re-mint was exhausted) — wired to the caller's own "Refresh
+   *  preview" action. Resets the re-mint budget and retries the mint via the
+   *  SAME path `notifyAssetError` uses (no duplicated mint-dispatch logic).
+   *  No-op while healthy (`error === null`) — an explicit refresh click on an
+   *  already-working viewer must not trigger a spurious extra mint/reload; the
+   *  caller's own bundle-reload-nonce cascade already covers that case. */
+  retryAfterError: () => void
   /** True while the bundle is briefly unavailable (a 404 through the proxy), so
    *  the caller can cover the iframe with a neutral loading state instead of the
    *  raw 404 body. Cleared automatically once a re-probe sees the bundle ready. */
@@ -262,6 +270,20 @@ export function useViewGrant(
     }
   }, [bundleUrl, mint])
 
+  // Manual recovery for the state notifyAssetError's own cap has exhausted (or
+  // the very first mint failed). Mirrors recoverIfLapsed's reset-then-remint
+  // shape (below) but guards on `error` rather than preflighting
+  // `grantedBundleUrl` — in the terminal state grantedBundleUrl is ALREADY
+  // null, so there is nothing to preflight; the caller (an explicit "Refresh
+  // preview" click) already knows the grant is broken, so we skip straight to
+  // a fresh, single bounded remint. No-op while healthy — an explicit refresh
+  // on an already-working viewer must not remint spuriously.
+  const retryAfterError = useCallback(() => {
+    if (error === null) return
+    remintAttemptsRef.current = 0
+    notifyAssetError()
+  }, [error, notifyAssetError])
+
   // Cancel a pending readiness-retry loop (on unmount / bundle change).
   const clearReadyRetry = useCallback(() => {
     if (readyRetryTimerRef.current !== null) {
@@ -430,6 +452,7 @@ export function useViewGrant(
     pending,
     reloadKey,
     notifyAssetError,
+    retryAfterError,
     notReady,
     notifyBundleLoaded,
   }

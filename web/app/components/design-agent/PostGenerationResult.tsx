@@ -1694,7 +1694,22 @@ export function PostGenerationResult({
       onSkipQuestion={onSkipQuestion}
       onPinIterate={onPinIterate}
       bundleReloadNonce={bundleReloadNonce}
-      onRefreshBundle={onRefreshBundle}
+      // Compose the caller's own refresh action (PrototypeRoute's
+      // bundleReloadNonce bump) with a grant-recovery retry: retryAfterError
+      // is a no-op while the grant is healthy, so this changes NOTHING for the
+      // already-working case — it only gives the terminal-error state (where
+      // the caller's nonce bump does nothing, since `viewer` is unmounted) a
+      // real recovery path. Composed here (not in PrototypeRoute) because
+      // `grant` — the only thing that can reset the re-mint budget — is owned
+      // by THIS container, one level above where onRefreshBundle is received.
+      onRefreshBundle={
+        onRefreshBundle
+          ? () => {
+              grant.retryAfterError()
+              onRefreshBundle()
+            }
+          : undefined
+      }
       computedPinPositions={pin.computedPinPositions}
       occludedPins={pin.occludedPins}
       leftPanelRef={leftPanelRef}
