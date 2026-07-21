@@ -6,7 +6,7 @@
 // to the pinned Weekly-brief tab on a fresh load. So the sidebar "New chat" `+`
 // must NOT use the plain goTo("chat") nav (that would land on the brief) — it
 // uses goToNewChat() (→ `/?new=1`, consumed by ChatScreen to start a fresh chat).
-// The "Weekly brief" and "All chats" rail items keep their plain goTo() nav.
+// The "Top Insights" and "All chats" rail items keep their plain goTo() nav.
 //
 // These tests mount the REAL Sidebar, mocking only the context boundaries it
 // reads, and assert the click→nav wiring (not a re-implementation).
@@ -83,9 +83,9 @@ describe("Sidebar — New chat wiring", () => {
     expect(goTo).not.toHaveBeenCalledWith("chat")
   })
 
-  it("'Weekly brief' and 'All chats' rail items keep their plain goTo() nav", () => {
+  it("'Top Insights' and 'All chats' rail items keep their plain goTo() nav", () => {
     render(React.createElement(Sidebar))
-    fireEvent.click(screen.getByLabelText("Weekly brief"))
+    fireEvent.click(screen.getByLabelText("Top Insights"))
     expect(goTo).toHaveBeenCalledWith("brief")
     fireEvent.click(screen.getByLabelText("Chat history"))
     expect(goTo).toHaveBeenCalledWith("chats")
@@ -100,11 +100,11 @@ describe("Sidebar — New chat wiring", () => {
 // deliberately does NOT appear here: it moved to Settings → Account, and the
 // rail's user row is display-only.
 describe("Sidebar — nav affordances preserved after restyle", () => {
-  it("renders New chat, Weekly brief, All chats, Settings + Feedback", () => {
+  it("renders New chat, Top Insights, All chats, Settings + Feedback", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
-      "Weekly brief",
+      "Top Insights",
       "Chat history",
       "Ideation",
       "Settings",

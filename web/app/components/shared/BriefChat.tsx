@@ -12,6 +12,7 @@ import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
 import { runMultiAgentGeneration } from "../../lib/runMultiAgentGeneration"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
 import { AGENT_NAME } from "../../lib/agent"
+import { hasEvidenceConnector } from "../../lib/connectorsCatalog"
 import type {
   BriefV2CompactFinding,
   BriefV2HeroFinding,
@@ -467,8 +468,62 @@ function BriefRefreshingBanner() {
   )
 }
 
+// ── No-evidence-connector empty state ────────────────────────────────────────
+// Shown IN PLACE OF the brief when the workspace has no evidence-bearing
+// connector (see hasEvidenceConnector). This is a dead end the user cannot
+// resolve by waiting — the brief will never generate — so unlike the greeting's
+// soft "add more sources" line it explains the causal chain and hands over a
+// single primary action. Delivery-only connectors (Slack) and work trackers
+// (Jira) don't clear this state, which is exactly the confusion the copy names:
+// a user who connected Slack has "connected something" and needs to be told why
+// the brief is still empty.
+function BriefNoConnectorState({ onConnect }: { onConnect: () => void }) {
+  return (
+    <div className="bc-empty" role="region" aria-labelledby="bc-empty-title">
+      <span className="bc-empty-mark" aria-hidden>
+        <IconSparkle size={22} />
+      </span>
+      <h2 className="bc-empty-title" id="bc-empty-title">
+        Connect a source to see your Top Insights
+      </h2>
+      <p className="bc-empty-lede">
+        Top Insights reads what your customers and product data are already
+        telling you, then ranks the few things worth acting on this week. It
+        needs at least one source to read from.
+      </p>
+      <ul className="bc-empty-list">
+        <li className="bc-empty-item">
+          <span className="bc-empty-item-label">Analytics</span>
+          <span className="bc-empty-item-text">
+            Where users drop off, what they never find
+          </span>
+        </li>
+        <li className="bc-empty-item">
+          <span className="bc-empty-item-label">Customer voice</span>
+          <span className="bc-empty-item-text">
+            Support tickets and calls, themed into patterns
+          </span>
+        </li>
+        <li className="bc-empty-item">
+          <span className="bc-empty-item-label">CRM &amp; revenue</span>
+          <span className="bc-empty-item-text">
+            Which accounts the friction is actually costing you
+          </span>
+        </li>
+      </ul>
+      <button type="button" className="btn btn-primary bc-empty-cta" onClick={onConnect}>
+        Connect a source
+      </button>
+      <p className="bc-empty-foot">
+        Already connected Slack or Jira? Those deliver and track the work —
+        Top Insights still needs a source that brings evidence in.
+      </p>
+    </div>
+  )
+}
+
 export function BriefChat() {
-  const { aiBarValue, setAIBarValue, openContentPanel, openPrdTab, showToast, setPendingChatHandoff } = useNavigation()
+  const { aiBarValue, setAIBarValue, openContentPanel, openPrdTab, showToast, setPendingChatHandoff, goTo } = useNavigation()
   const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
@@ -1112,6 +1167,15 @@ export function BriefChat() {
   // the existing brief. Skip when generatingBrief already owns the surface (no
   // brief yet — the full generating state covers that case).
   const refreshingBrief = content.briefRegenerating && !generatingBrief
+  // No connector can feed the brief AND there's nothing on screen to lose, so
+  // the surface is a dead end — show the "connect a source" page instead. Both
+  // halves matter: a workspace that already has findings keeps showing them even
+  // if its connector was later revoked (never hide work the user can see), and
+  // a generating brief owns the surface first (that path is about to resolve).
+  const noEvidenceConnector =
+    findings.length === 0
+    && !generatingBrief
+    && !hasEvidenceConnector(content.connectedConnectorIds)
 
   return (
     <section className="briefx" aria-label="Weekly brief">
@@ -1135,6 +1199,8 @@ export function BriefChat() {
               <div className="bc-agent-body">
                 {generatingBrief ? (
                   <BriefGeneratingState />
+                ) : noEvidenceConnector ? (
+                  <BriefNoConnectorState onConnect={() => goTo("connectors")} />
                 ) : (
                 <>
                 {refreshingBrief ? <BriefRefreshingBanner /> : null}

@@ -174,7 +174,7 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
 
     // A new chat tab chip appears alongside the pinned brief tab, and it's active.
     await waitFor(() => expect(tabBar().getByText("PRD · Ready doc")).toBeTruthy())
-    expect(tabBar().getByText("Weekly brief")).toBeTruthy()
+    expect(tabBar().getByText("Top Insights")).toBeTruthy()
     expect(briefSection()).toBeNull()
     // The right-side panel opened on the PRD tab.
     await waitFor(() => expect(panelProbe()).toBe("prd"))
@@ -221,7 +221,7 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await clickOpenPrd()
     await waitFor(() => expect(tabBar().getByText("PRD · Ready doc")).toBeTruthy())
     // Switch to the brief tab, then re-open the same PRD.
-    await act(async () => { fireEvent.click(tabBar().getByText("Weekly brief")) })
+    await act(async () => { fireEvent.click(tabBar().getByText("Top Insights")) })
     await clickOpenPrd()
 
     expect(tabBar().getAllByText("PRD · Ready doc")).toHaveLength(1)
@@ -319,7 +319,7 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     // Panel is open over the new PRD tab.
     await waitFor(() => expect(panelProbe()).toBe("prd"))
     // Switch back to the pinned brief tab → the global panel must not linger.
-    await act(async () => { fireEvent.click(tabBar().getByText("Weekly brief")) })
+    await act(async () => { fireEvent.click(tabBar().getByText("Top Insights")) })
     await waitFor(() => expect(panelProbe()).toBe("none"))
     // Brief surface is showing, panel is gone.
     expect(briefSection()).toBeTruthy()
@@ -344,7 +344,7 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     await clickOpenPrd()
     await waitFor(() => expect(panelProbe()).toBe("prd"))
     // Switch away to the brief → panel closes.
-    await act(async () => { fireEvent.click(tabBar().getByText("Weekly brief")) })
+    await act(async () => { fireEvent.click(tabBar().getByText("Top Insights")) })
     await waitFor(() => expect(panelProbe()).toBe("none"))
     // Refocus the PRD tab → the panel comes back.
     await act(async () => { fireEvent.click(tabBar().getByText("PRD · Ready doc")) })

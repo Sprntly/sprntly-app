@@ -138,6 +138,14 @@ const PLAIN_EMPTY_BRIEF: BriefV2State = {
   insufficientEvidence: false,
 }
 
+// Every EMPTY-brief scenario below (failed / insufficient-evidence / plain
+// empty) is about which GREETING an empty brief gets — which presupposes the
+// workspace has a source to have gotten a brief from at all. Without a
+// connector, BriefChat short-circuits to the "connect a source" page instead
+// (BriefChat.no-connector.dom.test.tsx owns that path), so these seed an
+// evidence connector to reach the greeting under test.
+const WITH_SOURCE = { connectedConnectorIds: ["superset"] }
+
 // Harness: renders BriefChat plus a hidden button per state we want to set, so
 // each test can flip `content` (briefHydration + briefV2) imperatively.
 function Harness() {
@@ -166,7 +174,7 @@ function Harness() {
       "button",
       {
         "data-testid": "set-failed",
-        onClick: () => set({ briefHydration: "failed", briefV2: null }),
+        onClick: () => set({ briefHydration: "failed", briefV2: null, ...WITH_SOURCE }),
       },
       "failed",
     ),
@@ -175,7 +183,7 @@ function Harness() {
       {
         "data-testid": "set-insufficient-evidence",
         onClick: () =>
-          set({ briefHydration: "ready", briefV2: INSUFFICIENT_EVIDENCE_BRIEF }),
+          set({ briefHydration: "ready", briefV2: INSUFFICIENT_EVIDENCE_BRIEF, ...WITH_SOURCE }),
       },
       "insufficient-evidence",
     ),
@@ -183,7 +191,7 @@ function Harness() {
       "button",
       {
         "data-testid": "set-plain-empty",
-        onClick: () => set({ briefHydration: "ready", briefV2: PLAIN_EMPTY_BRIEF }),
+        onClick: () => set({ briefHydration: "ready", briefV2: PLAIN_EMPTY_BRIEF, ...WITH_SOURCE }),
       },
       "plain-empty",
     ),
