@@ -188,6 +188,16 @@ export function hourLabel(h: number): string {
   return `${display}:00 ${period}`
 }
 
+// Runtimes disagree about UTC's short generic name: measured on Linux, Node
+// 20/22/24 all render "GMT+0", while Node 24 on Windows renders "GMT" — same
+// ICU major, different answer, so it tracks the platform's ICU build rather
+// than any version we could depend on. That variance belongs to whatever
+// browser the user opened, not to us, so pin it: collapse the zero-offset
+// spellings onto "GMT" and let every other zone pass through untouched.
+function normalizeGmt(name: string): string {
+  return /^(GMT|UTC)([+-]0+(:00)?)?$/.test(name) ? "GMT" : name
+}
+
 /** "America/Los_Angeles" → "PT" (generic short name), cached per zone. */
 const tzShortCache = new Map<string, string>()
 export function tzShort(tz: string): string {
@@ -198,7 +208,7 @@ export function tzShort(tz: string): string {
         timeZone: tz,
         timeZoneName: "shortGeneric",
       }).formatToParts(new Date())
-      s = parts.find((p) => p.type === "timeZoneName")?.value ?? ""
+      s = normalizeGmt(parts.find((p) => p.type === "timeZoneName")?.value ?? "")
     } catch {
       s = ""
     }

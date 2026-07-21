@@ -15,6 +15,7 @@ import {
   nextBriefLabel,
   nextFireDay,
   resolveFrequency,
+  tzShort,
 } from "../briefSchedule"
 
 /** ISO date of the next fire day — the assertable core, free of tz-label noise. */
@@ -216,7 +217,8 @@ describe("nextBriefLabel", () => {
       nextBriefLabel(new Date("2026-07-20T04:00:00Z"), "UTC", {
         weekday: 0, hour: 7, frequency: "weekly",
       }),
-      // Intl renders UTC's short *generic* zone name as "GMT".
+      // UTC's short generic name normalizes to "GMT" — see tzShort, which
+      // pins this across ICU versions that would otherwise say "GMT+0".
     ).toBe("Monday, July 20 · 7:00 AM GMT")
   })
 
@@ -226,6 +228,28 @@ describe("nextBriefLabel", () => {
         weekday: 0, hour: 7, frequency: "weekly",
       }),
     ).toBeNull()
+  })
+})
+
+describe("tzShort", () => {
+  // UTC's shortGeneric is "GMT+0" on Linux (Node 20/22/24 alike) and "GMT" on
+  // Windows, so CI and a Windows dev machine genuinely disagreed on the label.
+  // tzShort normalizes it; this pins the normalized spelling on both.
+  it("renders UTC as GMT regardless of the runtime's ICU version", () => {
+    expect(tzShort("UTC")).toBe("GMT")
+  })
+
+  it("keeps a real offset zone's suffix", () => {
+    // Whatever ICU calls it, a non-zero offset must not collapse to "GMT".
+    expect(tzShort("Etc/GMT+5")).not.toBe("GMT")
+  })
+
+  it("leaves named zones untouched", () => {
+    expect(tzShort("America/Los_Angeles")).toBe("PT")
+  })
+
+  it("returns an empty string for a bogus zone", () => {
+    expect(tzShort("Not/AZone")).toBe("")
   })
 })
 
