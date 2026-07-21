@@ -245,7 +245,7 @@ export function ProductStep() {
         <div className="form-grid" style={{ marginTop: 18 }}>
           <div className="field full" data-field="monetization">
             <div className="field-l">
-              Monetization <span className="opt">optional</span>
+              Monetization <span className="opt">(how does it earn?)</span>
             </div>
             <select
               className="inp"
@@ -253,7 +253,11 @@ export function ProductStep() {
               onChange={(e) => setMonetization(e.target.value)}
               aria-label="Monetization"
             >
-              <option value="">How does it earn?</option>
+              {/* The empty option has to exist — it's what the select shows
+                  while nothing is picked (monetization is optional). `hidden`
+                  keeps it out of the dropdown list itself; the prompt it used
+                  to carry now lives in the field label. */}
+              <option value="" hidden />
               {MONETIZATION_OPTIONS.map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}

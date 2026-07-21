@@ -291,6 +291,89 @@ def require_staff(authorization: str | None = Header(default=None)) -> dict:
     return payload
 
 
+# ──────────────────── Transcript viewer surface (/v1/transcripts) ────────────────────
+#
+# An internal, read-only window onto customer chat transcripts, used to spot
+# check what the AI is actually replying. Like the staff panel it does NOT use
+# Supabase login, but it is a SEPARATE credential — a single shared access code
+# (TRANSCRIPTS_ACCESS_CODE_HASH, argon2id), no id — so handing it to someone who
+# needs to read transcripts does not also hand them the staff panel's ability to
+# edit entitlements and invite organizations. Distinct audience
+# (aud=sprntly-transcripts) means a staff token can't read transcripts and a
+# transcripts token can't touch /v1/staff.
+#
+# NOTE: the page this gates lives at an obscure URL, but that path is NOT a
+# security control — the frontend is a static export, so its JS ships to every
+# visitor. This gate is what actually protects the data.
+
+TRANSCRIPTS_AUD = "sprntly-transcripts"
+TRANSCRIPTS_SUB = "transcripts"
+TRANSCRIPTS_ROLE = "transcript_viewer"
+TRANSCRIPTS_TOKEN_TTL_HOURS = 12
+
+
+def transcripts_surface_enabled() -> bool:
+    """True iff the access-code hash is set. Unset ⇒ every /v1/transcripts
+    route — login included — 404s (fail closed, invisible), matching the
+    staff surface's posture."""
+    return bool((settings.transcripts_access_code_hash or "").strip())
+
+
+def verify_transcripts_code(code: str) -> bool:
+    """Check the shared transcript access code. Never raises."""
+    if not transcripts_surface_enabled():
+        return False
+    from argon2 import PasswordHasher
+
+    try:
+        return bool(
+            PasswordHasher().verify(
+                settings.transcripts_access_code_hash.strip(), code or ""
+            )
+        )
+    except Exception:  # noqa: BLE001 — wrong code / malformed hash ⇒ False
+        return False
+
+
+def make_transcripts_token() -> str:
+    """Mint the short-lived (12h) transcript-viewer JWT after a successful login."""
+    now = int(time.time())
+    payload = {
+        "sub": TRANSCRIPTS_SUB,
+        "role": TRANSCRIPTS_ROLE,
+        "aud": TRANSCRIPTS_AUD,
+        "iat": now,
+        "exp": now + TRANSCRIPTS_TOKEN_TTL_HOURS * 3600,
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm=JWT_ALG)
+
+
+def require_transcripts(authorization: str | None = Header(default=None)) -> dict:
+    """Gate for the internal transcript viewer (/v1/transcripts).
+
+    Requires the dedicated transcripts JWT as `Authorization: Bearer …`.
+    Anything else — no token, an expired/garbage token, a Supabase user token,
+    a staff token (same signing secret, wrong audience), or the surface being
+    disabled via env — gets a 404, so the surface is invisible.
+    """
+    if not transcripts_surface_enabled():
+        raise HTTPException(404, "Not found")
+    token = ""
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ").strip()
+    if not token:
+        raise HTTPException(404, "Not found")
+    try:
+        payload = jwt.decode(
+            token, settings.jwt_secret, algorithms=[JWT_ALG], audience=TRANSCRIPTS_AUD
+        )
+    except jwt.PyJWTError as e:
+        raise HTTPException(404, "Not found") from e
+    if payload.get("sub") != TRANSCRIPTS_SUB or payload.get("role") != TRANSCRIPTS_ROLE:
+        raise HTTPException(404, "Not found")
+    return payload
+
+
 def require_app_session(
     sprntly_app_session: str | None = Cookie(default=None),
 ) -> dict:

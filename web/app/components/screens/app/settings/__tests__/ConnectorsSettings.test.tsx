@@ -270,16 +270,31 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
 })
 
 describe("ConnectorsSettingsView — per-category upload strips", () => {
-  it("renders one upload strip per category card", () => {
+  it("renders one upload strip per category card that allows manual upload", () => {
     const html = render()
     const matches = html.match(/class="set-conn-upload"/g) ?? []
-    expect(matches.length).toBe(CONNECTOR_CATALOG.length)
+    expect(matches.length).toBe(
+      CONNECTOR_CATALOG.filter((c) => c.allowsManualUpload !== false).length,
+    )
   })
 
   it("labels each strip with its category (e.g. 'Upload analytics export')", () => {
     const html = render()
     expect(html).toContain("Upload analytics export")
-    expect(html).toContain("Upload project management export")
+    expect(html).toContain("Upload business documentation export")
+  })
+
+  it("hides the upload strip for integration-only categories (comms, code, pm)", () => {
+    const html = render()
+    // Those categories must be populated by connecting the real integration,
+    // so they opt out via `allowsManualUpload: false` in the catalog.
+    expect(html).not.toContain("Upload communications export")
+    expect(html).not.toContain("Upload codebase export")
+    expect(html).not.toContain("Upload project management export")
+    // The connector rows themselves are untouched.
+    expect(html).toContain("Slack")
+    expect(html).toContain("GitHub")
+    expect(html).toContain("Jira")
   })
 
   it("advertises the shared accepted-types hint", () => {
@@ -366,13 +381,13 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     const html = render({ categories: connectableCatalog() })
     const keptCategories = connectableCatalog()
     // 11 wired connector rows across the surviving categories, one upload
-    // strip per surviving category.
+    // strip per surviving category that allows manual upload.
     expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(11)
     expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
       keptCategories.length,
     )
     expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(
-      keptCategories.length,
+      keptCategories.filter((c) => c.allowsManualUpload !== false).length,
     )
     // Categories with no wired connectors (e.g. Monitoring) are dropped.
     expect(html).not.toContain("powers On-Call Agent")

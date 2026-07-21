@@ -19,6 +19,8 @@ import type { IdeationItem, IdeationList, CompletedList } from "../../../../lib/
 
 const listMock = vi.fn<() => Promise<IdeationList>>()
 const completedMock = vi.fn<() => Promise<CompletedList>>()
+// The detail popup fetches the idea's evidence trail when it opens.
+const detailMock = vi.fn<(id: string) => Promise<unknown>>()
 const createMock = vi.fn()
 const reorderMock = vi.fn()
 const runFromIdeationMock = vi.fn()
@@ -32,6 +34,7 @@ vi.mock("../../../../lib/api", () => ({
     list: () => listMock(),
     completed: () => completedMock(),
     setStatus: vi.fn(),
+    detail: (id: string) => detailMock(id),
     create: (title: string, tag: unknown) => createMock(title, tag),
     reorder: (ids: string[]) => reorderMock(ids),
   },
@@ -88,6 +91,12 @@ async function selectFirstIdea(title: string) {
 beforeEach(() => {
   listMock.mockReset()
   completedMock.mockReset().mockResolvedValue({ items: [], count: 0 })
+  detailMock.mockReset().mockResolvedValue({
+    id: "a", theme_id: "t4", title: "Bulk onboarding", tag: "something_new",
+    rank: 4, score: 0.5, status: "proposed",
+    reasoning: "Admins re-key every seat by hand",
+    evidence: [], evidence_count: 0, sources: [], is_manual: false,
+  })
   createMock.mockReset().mockResolvedValue(item({ id: "new-1", title: "Fresh idea" }))
   reorderMock.mockReset().mockResolvedValue({ items: [], count: 0 })
   runFromIdeationMock.mockReset()
@@ -100,18 +109,23 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe("IdeationScreen — wired actions", () => {
-  it("Generate PRD opens the PRD as a new chat tab (openPrdTab handoff)", async () => {
+  it("Generate a brief opens the PRD as a new chat tab (openPrdTab handoff)", async () => {
     await renderWith([item({ id: "a", theme_id: "t4", title: "Bulk onboarding", rank: 4 })])
     await selectFirstIdea("Bulk onboarding")
 
-    await act(async () => { fireEvent.click(screen.getByText("Generate PRD")) })
+    await act(async () => { fireEvent.click(screen.getByText("Generate a brief")) })
 
     // An ideation PRD opens as a NEW chat tab (with the Evidence/PRD/Tickets
     // panel over it) — IdeationScreen hands the generation off via openPrdTab,
     // and ChatScreen drives it — instead of streaming into an in-place panel.
+    // The seed fields ground the thread in the idea: the pain point becomes the
+    // opening insight card, the ask becomes a real user turn.
     await waitFor(() => expect(openPrdTabMock).toHaveBeenCalledTimes(1))
     expect(openPrdTabMock).toHaveBeenCalledWith({
       title: "PRD · Bulk onboarding",
+      insightBody: "Admins re-key every seat by hand",
+      seedQuery:
+        "Generate a brief for \"Bulk onboarding\" — an ideation idea that didn't make this week's top 3.",
       source: { kind: "generateIdeation", ideationItemId: "a" },
     })
     // Generation no longer runs on the ideation surface itself.

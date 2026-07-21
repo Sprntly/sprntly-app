@@ -338,12 +338,46 @@ export type CompletedItem = {
 
 export type CompletedList = { items: CompletedItem[]; count: number }
 
+/** One supporting excerpt behind an idea, pulled from the knowledge graph.
+ *  `content` is the extractor-distilled signal text — the closest thing we
+ *  persist to a customer's own words (raw transcripts are never stored). */
+export type IdeationEvidence = {
+  signal_id: string
+  content: string
+  kind: string | null
+  source_type: string | null
+  provenance: Record<string, unknown>
+  confidence: number | null
+}
+
+/** An idea plus the evidence behind it — backs the Ideation detail popup.
+ *  `evidence` is capped to the strongest few; `evidence_count` is the true
+ *  total, and `sources` spans the whole trail (breadth, not just the head). */
+export type IdeationDetail = {
+  id: string
+  theme_id: string
+  title: string
+  tag: IdeationTag | null
+  rank: number
+  score: number
+  status: IdeationStatus
+  reasoning: string | null
+  evidence: IdeationEvidence[]
+  evidence_count: number
+  sources: string[]
+  is_manual: boolean
+}
+
 export const ideationApi = {
   /** The visible ideas (rank-ascending): the weekly shortlist + user-pinned
    *  rows. Empty when no brief exists. */
   list: () => api.get<IdeationList>("/v1/ideation"),
   /** Completed findings (prd_created | done) for the Completed tab. */
   completed: () => api.get<CompletedList>("/v1/ideation/completed"),
+  /** One idea + the KG evidence behind it (the detail popup). Manual ideas
+   *  have no theme, so they come back with an empty trail. */
+  detail: (itemId: string) =>
+    api.get<IdeationDetail>(`/v1/ideation/${encodeURIComponent(itemId)}/detail`),
   /** Move one item to a new status (in_progress | done | dismissed). */
   setStatus: (itemId: string, status: "in_progress" | "done" | "dismissed") =>
     api.patch<IdeationItem>(`/v1/ideation/${encodeURIComponent(itemId)}`, { status }),
@@ -2711,17 +2745,18 @@ export function clearStaffToken(): void {
   }
 }
 
-/** Like `request`, but authed with the staff JWT from sessionStorage instead
- *  of the app session (no cookies, no Supabase token provider). */
-async function staffRequest<T>(
+/** Like `request`, but authed with an explicit internal-surface JWT instead of
+ *  the app session (no cookies, no Supabase token provider). Shared by the
+ *  staff panel and the transcript viewer, which hold separate credentials. */
+async function bearerRequest<T>(
   method: "GET" | "POST" | "PATCH" | "DELETE",
   path: string,
+  token: string | null,
   body?: unknown,
 ): Promise<T> {
   const headers: Record<string, string> = body
     ? { "Content-Type": "application/json", Accept: "application/json" }
     : { Accept: "application/json" }
-  const token = getStaffToken()
   if (token) headers.Authorization = `Bearer ${token}`
   const res = await fetch(`${API_URL}${path}`, {
     method,
@@ -2742,6 +2777,12 @@ async function staffRequest<T>(
   }
   return parsed as T
 }
+
+const staffRequest = <T,>(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  body?: unknown,
+) => bearerRequest<T>(method, path, getStaffToken(), body)
 
 export const staffAuth = {
   /** Dedicated staff login. Stores the returned token on success. */
@@ -2824,6 +2865,132 @@ export const staffApi = {
     staffRequest<void>("DELETE", `/v1/staff/invites/${inviteId}`),
   resendInvite: (inviteId: string) =>
     staffRequest<OrgInvite>("POST", `/v1/staff/invites/${inviteId}/resend`),
+}
+
+// ── Internal transcript viewer (/v1/transcripts) ──
+// Read-only cross-tenant chat review, gated by its own SHARED ACCESS CODE —
+// deliberately a different credential from the staff panel above, so reading
+// transcripts doesn't also grant entitlement edits. The page lives at an
+// obscure URL, but that path is cosmetic: this is a static export, so the
+// backend code check is the only real gate. Same 401/404 ⇒ signed-out posture
+// as the staff panel.
+
+export const TRANSCRIPTS_TOKEN_KEY = "sprntly_transcripts_token"
+
+export function getTranscriptsToken(): string | null {
+  if (typeof window === "undefined") return null
+  try {
+    return window.sessionStorage.getItem(TRANSCRIPTS_TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function setTranscriptsToken(token: string): void {
+  if (typeof window === "undefined") return
+  try {
+    window.sessionStorage.setItem(TRANSCRIPTS_TOKEN_KEY, token)
+  } catch {
+    // Storage unavailable (e.g. blocked) — the viewer just won't stay signed in.
+  }
+}
+
+export function clearTranscriptsToken(): void {
+  if (typeof window === "undefined") return
+  try {
+    window.sessionStorage.removeItem(TRANSCRIPTS_TOKEN_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+const transcriptsRequest = <T,>(
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  path: string,
+  body?: unknown,
+) => bearerRequest<T>(method, path, getTranscriptsToken(), body)
+
+export const transcriptsAuth = {
+  /** Shared-access-code login. Stores the returned token on success. */
+  login: async (code: string) => {
+    const out = await transcriptsRequest<{
+      token: string
+      token_type: "bearer"
+      expires_in: number
+    }>("POST", "/v1/transcripts/login", { code })
+    setTranscriptsToken(out.token)
+    return out
+  },
+  logout: () => clearTranscriptsToken(),
+  hasToken: () => getTranscriptsToken() != null,
+}
+
+export type TranscriptSummary = {
+  id: number
+  company_id: string
+  /** Resolved display name, falling back to the raw id. */
+  company_name: string
+  user_id: string | null
+  /** Full name / email of the member who had the chat; null for legacy rows. */
+  user_label: string | null
+  title: string
+  preview: string
+  agent_type: string
+  prd_id: number | null
+  turn_count: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+export type TranscriptTurn = {
+  id: number
+  /** A turn is ONE message, not a user+AI pair. */
+  role: "user" | "assistant"
+  content: string
+  created_at: string | null
+}
+
+export type TranscriptDetail = {
+  conversation: TranscriptSummary & {
+    /** Legacy single-shot shape — populated on old rows that have no turns. */
+    query: string
+    reply: string
+  }
+  turns: TranscriptTurn[]
+}
+
+export type TranscriptFilters = {
+  /** Inclusive, YYYY-MM-DD (UTC). */
+  date_from?: string
+  /** Inclusive, YYYY-MM-DD (UTC). */
+  date_to?: string
+  company_id?: string
+  limit?: number
+}
+
+export const transcriptsApi = {
+  listCompanies: () =>
+    transcriptsRequest<{ companies: { id: string; display_name: string }[] }>(
+      "GET",
+      "/v1/transcripts/companies",
+    ),
+  listConversations: (filters: TranscriptFilters = {}) => {
+    const qs = new URLSearchParams()
+    if (filters.date_from) qs.set("date_from", filters.date_from)
+    if (filters.date_to) qs.set("date_to", filters.date_to)
+    if (filters.company_id) qs.set("company_id", filters.company_id)
+    if (filters.limit != null) qs.set("limit", String(filters.limit))
+    const q = qs.toString()
+    return transcriptsRequest<{
+      conversations: TranscriptSummary[]
+      has_more: boolean
+    }>("GET", `/v1/transcripts/conversations${q ? `?${q}` : ""}`)
+  },
+  getConversation: (id: number) =>
+    transcriptsRequest<TranscriptDetail>(
+      "GET",
+      `/v1/transcripts/conversations/${id}`,
+    ),
 }
 
 export const orgInviteApi = {

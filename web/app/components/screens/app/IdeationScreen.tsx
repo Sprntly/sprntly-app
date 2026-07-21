@@ -7,7 +7,7 @@ import { useNavigation } from "../../../context/NavigationContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { runPrdGenerationFromIdeation } from "../../../lib/runPrdGeneration"
 import { prototypePath } from "../../../lib/routes"
-import { ideationApi, type IdeationItem, type IdeationTag, type CompletedItem } from "../../../lib/api"
+import { ideationApi, type IdeationItem, type IdeationTag, type IdeationDetail, type CompletedItem } from "../../../lib/api"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -635,6 +635,188 @@ function CompletedContent({ onCountChange }: { onCountChange?: (count: number) =
   )
 }
 
+// ── Idea detail modal ─────────────────────────────────────────────────────────
+
+// How we FRAME the problem, per triage tag. Ideation's job is not to restate
+// the title — it's to hand a PM the lens and the question that turns a one-line
+// idea into a scoped problem. Keyed by tag (the backend's taxonomy) rather than
+// the UI's idea-type, since Infra/Research have no tag and fall through.
+const TAG_FRAMING: Record<IdeationTag, { lens: string; question: string }> = {
+  something_broken: {
+    lens: "Something is broken",
+    question:
+      "What exactly fails, for whom, and how often? A fix is worth scoping when the failure is repeatable and the workaround costs more than the fix.",
+  },
+  something_new: {
+    lens: "Something is missing",
+    question:
+      "What are people trying to do that they can't do today? Scope this when the job-to-be-done is clear and nothing in the product serves it.",
+  },
+  something_better: {
+    lens: "Something is harder than it should be",
+    question:
+      "Where does the current path cost people time or attention? Scope this when the friction is measurable and recurring.",
+  },
+}
+
+const DEFAULT_FRAMING = {
+  lens: "Worth a closer look",
+  question:
+    "What problem would this solve, for whom, and how would we know it worked?",
+}
+
+/** Human label for a KG signal's source type ("zendesk" → "Zendesk"). */
+function sourceLabel(s: string | null): string {
+  if (!s) return "Unknown source"
+  return s.charAt(0).toUpperCase() + s.slice(1).replace(/[_-]/g, " ")
+}
+
+function IdeaDetailModal({
+  idea,
+  onClose,
+  onGenerateBrief,
+  onGeneratePrototype,
+  busy,
+}: {
+  idea: IdeationIdea
+  onClose: () => void
+  onGenerateBrief: (idea: IdeationIdea, detail: IdeationDetail | null) => void
+  onGeneratePrototype: (idea: IdeationIdea) => void
+  busy: null | "prd" | "prototype"
+}) {
+  const [detail, setDetail] = useState<IdeationDetail | null>(null)
+  const [load, setLoad] = useState<LoadState>("loading")
+
+  // Pull the idea's evidence trail. The list route doesn't carry it (the table
+  // doesn't need it), so the popup fetches per-idea on open.
+  useEffect(() => {
+    let cancelled = false
+    setLoad("loading")
+    setDetail(null)
+    ideationApi
+      .detail(idea.id)
+      .then((d) => {
+        if (cancelled) return
+        setDetail(d)
+        setLoad("ready")
+      })
+      .catch(() => {
+        if (cancelled) return
+        setLoad("error")
+      })
+    return () => { cancelled = true }
+  }, [idea.id])
+
+  // Escape closes, matching every other overlay in the app.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose() }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [onClose])
+
+  const framing = detail?.tag ? TAG_FRAMING[detail.tag] : DEFAULT_FRAMING
+  const painPoint = detail?.reasoning || idea.sub
+  const evidence = detail?.evidence ?? []
+
+  return (
+    <div className="bl-modal-backdrop" onClick={onClose} role="presentation">
+      <div
+        className="bl-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label={idea.title}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="bl-detail-top">
+          <span className="bl-detail-kicker">{idea.type}</span>
+          <span className="bl-detail-rank">#{idea.rank}</span>
+          <button type="button" className="bl-detail-close" onClick={onClose} aria-label="Close">×</button>
+        </div>
+
+        <div className="bl-detail-body">
+          <h2 className="bl-detail-title">{idea.title}</h2>
+
+          {/* Why it's here: Ideation is defined by NOT being prioritized. */}
+          <p className="bl-modal-why">
+            Not prioritized in the weekly brief — it ranked #{idea.rank} behind
+            this week&apos;s top 3.
+          </p>
+
+          {/* TL;DR of the pain point */}
+          <div className="bl-detail-label">The pain point</div>
+          <p className="bl-detail-sub">
+            {painPoint || "No rationale was recorded for this idea."}
+          </p>
+
+          {/* Problem framing */}
+          <div className="bl-detail-label">Framing the problem</div>
+          <div className="bl-modal-framing">
+            <strong>{framing.lens}.</strong> {framing.question}
+          </div>
+
+          {/* Evidence — what we actually heard */}
+          <div className="bl-detail-label">
+            What we&apos;re hearing
+            {detail && detail.evidence_count > 0 && (
+              <span className="bl-modal-evidence-count">
+                {detail.evidence_count} signal{detail.evidence_count === 1 ? "" : "s"}
+                {detail.sources.length > 0 && ` across ${detail.sources.length} source${detail.sources.length === 1 ? "" : "s"}`}
+              </span>
+            )}
+          </div>
+
+          {load === "loading" && (
+            <p className="bl-modal-muted" role="status" aria-live="polite">Loading the evidence behind this…</p>
+          )}
+          {load === "error" && (
+            <p className="bl-modal-muted" role="alert">Couldn&apos;t load the evidence for this idea.</p>
+          )}
+          {load === "ready" && evidence.length === 0 && (
+            <p className="bl-modal-muted">
+              {detail?.is_manual
+                ? "You added this idea by hand, so there's no source evidence behind it yet."
+                : "No supporting signals are attached to this theme yet."}
+            </p>
+          )}
+          {evidence.map((e) => (
+            <blockquote key={e.signal_id} className="bl-modal-quote">
+              <p>{e.content}</p>
+              <cite>{sourceLabel(e.source_type)}</cite>
+            </blockquote>
+          ))}
+
+          {/* CTA — into the existing chat → PRD → tickets → prototype pipeline */}
+          <div className="bl-detail-label">Next steps</div>
+          <div className="bl-detail-actions">
+            <button
+              type="button"
+              className="bl-detail-btn bl-detail-btn--primary"
+              disabled={busy !== null}
+              onClick={() => onGenerateBrief(idea, detail)}
+            >
+              <SparkleIcon size={13} />
+              Generate a brief
+            </button>
+            <button
+              type="button"
+              className="bl-detail-btn bl-detail-btn--ghost"
+              disabled={busy !== null}
+              onClick={() => onGeneratePrototype(idea)}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+              {busy === "prototype" ? "Preparing prototype…" : "Generate prototype"}
+            </button>
+          </div>
+          <p className="bl-modal-hint">
+            Opens a chat thread and drafts a PRD you can turn into tickets and a
+            prototype.
+          </p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Sync loading overlay ──────────────────────────────────────────────────────
 
 function SyncingOverlay() {
@@ -681,16 +863,26 @@ export function IdeationScreen() {
     }, 800)
   }
 
-  // Generate PRD from an idea: open it as a NEW CHAT TAB on the chat surface,
-  // with the Evidence / PRD / Tickets panel sliding over it. openPrdTab routes
-  // to `/` and ChatScreen drives runPrdGenerationFromIdeation in that tab. An
-  // ideation PRD isn't at a brief insight_index, so the tab carries no meta —
-  // it renders from the PRD payload alone.
-  const handleGeneratePrd = useCallback((idea: IdeationIdea) => {
+  // Generate a brief from an Ideation idea: open it as a NEW CHAT TAB on the
+  // chat surface, with the Evidence / PRD / Tickets panel sliding over it.
+  // openPrdTab routes to `/` and ChatScreen drives runPrdGenerationFromIdeation
+  // in that tab — the same funnel the brief and command-palette paths use, so
+  // the PRD flows on to tickets and prototype unchanged. An ideation PRD isn't
+  // at a brief insight_index, so the tab carries no meta — it renders from the
+  // PRD payload alone.
+  //
+  // `seedQuery` puts the user's ask in the thread as a real turn and `insightBody`
+  // renders the problem framing as the opening card, so the chat the user lands
+  // in is grounded in the idea rather than empty next to a spinning panel.
+  const handleGenerateBrief = useCallback((idea: IdeationIdea, detail: IdeationDetail | null) => {
+    const painPoint = detail?.reasoning || idea.sub
     openPrdTab({
       title: `PRD · ${idea.title}`,
+      insightBody: painPoint || undefined,
+      seedQuery: `Generate a brief for "${idea.title}" — an ideation idea that didn't make this week's top 3.`,
       source: { kind: "generateIdeation", ideationItemId: idea.id },
     })
+    setSelectedIdea(null)
   }, [openPrdTab])
 
   // Generate a prototype from an idea: a prototype builds from a PRD, so
@@ -768,7 +960,7 @@ export function IdeationScreen() {
           </div>
         </div>
 
-        {/* ── Scrollable content + right panel ── */}
+        {/* ── Scrollable content ── */}
         <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
           <div className="bl-body" style={{ flex: 1, overflow: "auto" }}>
             {tab === "proposed"
@@ -776,77 +968,15 @@ export function IdeationScreen() {
               : <CompletedContent onCountChange={setCompletedCount} />}
           </div>
 
-          {/* ── Right panel: idea detail + PRD generation ── */}
+          {/* ── Detail popup: problem framing + evidence + brief CTA ── */}
           {selectedIdea && (
-            <aside className="bl-detail">
-              {/* Header */}
-              <div className="bl-detail-top">
-                <span className="bl-detail-kicker">{selectedIdea.type}</span>
-                <span className="bl-detail-rank">#{selectedIdea.rank}</span>
-                <button type="button" className="bl-detail-close" onClick={() => setSelectedIdea(null)} aria-label="Close">×</button>
-              </div>
-
-              {/* Body */}
-              <div className="bl-detail-body">
-                <h2 className="bl-detail-title">{selectedIdea.title}</h2>
-                <p className="bl-detail-sub">{selectedIdea.sub}</p>
-
-                {/* Impact */}
-                <div className="bl-detail-impact">
-                  <strong>Impact:</strong>{" "}
-                  <span style={{ color: "var(--ink)" }}>{selectedIdea.impact}</span>
-                </div>
-
-                {/* Chat thread */}
-                <div className="bl-detail-label">Chat thread</div>
-                <div className="bl-detail-msg bl-detail-msg--you">
-                  <div className="bl-detail-msg-from">You</div>
-                  <div>Tell me more about &ldquo;{selectedIdea.title}&rdquo; — what&apos;s the problem, who&apos;s affected, and what would a solution look like?</div>
-                </div>
-                <div className="bl-detail-msg bl-detail-msg--ai">
-                  <div className="bl-detail-msg-from">Sprntly</div>
-                  <div style={{ lineHeight: 1.55 }}>
-                    <strong>{selectedIdea.title}</strong> — {selectedIdea.sub}. This idea has an estimated impact of <strong>{selectedIdea.impact}</strong>.
-                    Based on the data, I recommend generating a PRD to scope this properly before moving to implementation.
-                  </div>
-                </div>
-
-                {/* Actions */}
-                <div className="bl-detail-label">Next steps</div>
-                <div className="bl-detail-actions">
-                  <button
-                    type="button"
-                    className="bl-detail-btn bl-detail-btn--primary"
-                    disabled={busy !== null}
-                    onClick={() => handleGeneratePrd(selectedIdea)}
-                  >
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-                    {busy === "prd" ? "Generating PRD…" : "Generate PRD"}
-                  </button>
-                  <button type="button" className="bl-detail-btn bl-detail-btn--ghost" onClick={() => {
-                    localStorage.setItem("sprntly_resume_conv", JSON.stringify({
-                      dbId: 0, title: selectedIdea.title,
-                      turns: [
-                        { role: "user", content: `Deep dive into "${selectedIdea.title}": ${selectedIdea.sub}. What evidence do we have? What are the risks? Who should own this?` },
-                      ],
-                    }))
-                    window.location.href = "/"
-                  }}>
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    Continue in chat
-                  </button>
-                  <button
-                    type="button"
-                    className="bl-detail-btn bl-detail-btn--ghost"
-                    disabled={busy !== null}
-                    onClick={() => handleGeneratePrototype(selectedIdea)}
-                  >
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
-                    {busy === "prototype" ? "Preparing prototype…" : "Generate prototype"}
-                  </button>
-                </div>
-              </div>
-            </aside>
+            <IdeaDetailModal
+              idea={selectedIdea}
+              onClose={() => setSelectedIdea(null)}
+              onGenerateBrief={handleGenerateBrief}
+              onGeneratePrototype={handleGeneratePrototype}
+              busy={busy}
+            />
           )}
         </div>
 

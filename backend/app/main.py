@@ -70,6 +70,7 @@ from app.routes import (
     synthesis,
     team,
     tickets,
+    transcripts,
     workspaces as workspaces_routes,
     evidence,
     health,
@@ -333,6 +334,7 @@ app.include_router(workspaces_routes.router)
 app.include_router(admin.router)
 app.include_router(staff_admin.router)
 app.include_router(staff_admin.claim_router)
+app.include_router(transcripts.router)
 app.include_router(feedback.router)
 app.include_router(mcp_tokens.router)
 app.include_router(internal_mcp.resolve_router)

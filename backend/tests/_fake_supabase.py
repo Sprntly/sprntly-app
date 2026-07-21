@@ -233,6 +233,12 @@ class _Query:
         self._raw_args.append(val)
         return self
 
+    def gte(self, col: str, val: Any) -> "_Query":
+        """`col >= ?` — used by the transcript viewer's date-range filter."""
+        self._raw_where.append(f"{col} >= ?")
+        self._raw_args.append(val)
+        return self
+
     @property
     def not_(self) -> "_Query":
         """Negate the next filter. Mirrors supabase-py's `.not_.is_(...)`."""

@@ -34,6 +34,8 @@ from app.auth import CompanyContext, require_company
 from app.db.ideation import (
     PATCHABLE_STATUSES,
     create_manual_ideation_item,
+    get_ideation_item,
+    is_manual_item,
     list_ideation_items,
     list_visible_ideation_items,
     reorder_ideation_items,
@@ -42,6 +44,9 @@ from app.db.ideation import (
 from app.db.briefs import get_current_brief
 from app.db.companies import slug_for_company_id
 from app.db.finding_state import COMPLETED_ACTIONS, list_findings_by_action
+from app.evidence_kg import gather_evidence_trail
+from app.graph.facade import GraphFacade
+from app.graph.retrieval import resolve_insight_hypothesis
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +125,90 @@ def get_completed(company: CompanyContext = Depends(require_company)):
         for r in rows
     ]
     return {"items": items, "count": len(items)}
+
+
+# How many evidence excerpts the detail popup shows. The trail is sorted
+# strongest-first (weight, then confidence), so the head is the useful part; a
+# popup that lists 40 signals is a wall, not problem framing.
+_DETAIL_EVIDENCE_CAP = 6
+
+
+@router.get("/{item_id}/detail")
+def get_ideation_item_detail(
+    item_id: str,
+    company: CompanyContext = Depends(require_company),
+):
+    """One idea, with the KG evidence behind it — backs the Ideation popup.
+
+    The list route returns only what the table needs (title/rank/tag/reasoning).
+    Opening an idea asks a different question: *why does this matter?* That
+    answer lives in the knowledge graph, not in `ideation_items` — the row
+    carries a one-line ranking rationale and nothing else. So we resolve the
+    row's theme the same way the ideation PRD path does (see routes/prd.py's
+    generate-from-ideation: synthesize an insight from the row, then walk the
+    trail) and return the supporting signals as the evidence excerpts the popup
+    frames the problem with.
+
+    Manual "+ Add idea" rows have a synthetic ``manual:`` theme_id with no KG
+    theme behind them, so they have no recoverable evidence — they return an
+    empty trail rather than a misleading one.
+
+    Best-effort on the KG read: a graph failure degrades to an empty trail (the
+    popup still renders the idea + its rationale) instead of 500-ing.
+    """
+    item = get_ideation_item(company.company_id, item_id)
+    if item is None:
+        raise HTTPException(404, "Ideation item not found")
+
+    theme_id = item.get("theme_id")
+    trail: list[dict] = []
+    if theme_id and not is_manual_item(item):
+        try:
+            facade = GraphFacade()
+            hypothesis = resolve_insight_hypothesis(
+                facade, company.company_id, theme_id, item.get("title")
+            )
+            trail = gather_evidence_trail(
+                facade,
+                company.company_id,
+                theme_id=theme_id,
+                hypothesis=hypothesis,
+            )
+        except Exception as exc:  # noqa: BLE001 — detail must not hard-fail
+            logger.info(
+                "ideation detail: evidence trail failed for %s (%s)", item_id, exc
+            )
+            trail = []
+
+    evidence = [
+        {
+            "signal_id": s.get("signal_id"),
+            "content": s.get("content"),
+            "kind": s.get("kind"),
+            "source_type": s.get("source_type"),
+            "provenance": s.get("provenance") or {},
+            "confidence": s.get("confidence"),
+        }
+        for s in trail[:_DETAIL_EVIDENCE_CAP]
+    ]
+    # Distinct source types across the WHOLE trail (not just the shown head) —
+    # "heard across 3 sources" is a breadth claim about all the evidence.
+    sources = sorted({str(s.get("source_type")) for s in trail if s.get("source_type")})
+
+    return {
+        "id": item.get("id"),
+        "theme_id": theme_id,
+        "title": item.get("title"),
+        "tag": item.get("tag"),
+        "rank": item.get("rank"),
+        "score": item.get("score"),
+        "status": item.get("status"),
+        "reasoning": item.get("reasoning"),
+        "evidence": evidence,
+        "evidence_count": len(trail),
+        "sources": sources,
+        "is_manual": is_manual_item(item),
+    }
 
 
 @router.post("")

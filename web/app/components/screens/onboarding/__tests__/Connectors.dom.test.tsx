@@ -11,10 +11,10 @@
 //   - live connections render a non-togglable "Live" card (and keep an
 //     otherwise-unsupported provider/category visible)
 //   - connectable cards open the connect modal with the right provider
-//   - the ≥1-live-connection gate applies to EVERYONE (no "Connect later")
-//   - Continue advances to step 5 and routes to /onboarding/team; Back goes
-//     to /onboarding/metrics
-//     and routes to /onboarding/review
+//   - connectors are OPTIONAL: Continue is enabled with zero connections and
+//     a "Skip for now" link leaves the step, stamping skipped_fields
+//   - Continue advances to step 6 and routes to /onboarding/team; Back goes
+//     to /onboarding/api-key
 //   - the no-workspace redirect happens in an EFFECT, never during render
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
@@ -105,9 +105,12 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     SHOWN_CATEGORIES.forEach((cat, i) => {
       expect(steps[i].getAttribute("data-conn")).toBe(cat.key)
     })
-    // first category open ("In progress"), its supported items in the grid
+    // first category open, its supported items in the grid. Headers carry NO
+    // status text — the only header slot left is the lock on locked steps.
     expect(steps[0].classList.contains("open")).toBe(true)
-    expect(screen.getByText("In progress")).not.toBeNull()
+    expect(screen.queryByText("In progress")).toBeNull()
+    expect(screen.queryByText("Up next")).toBeNull()
+    expect(steps[0].querySelector(".conn-step-state")).toBeNull()
     for (const item of SHOWN_CATEGORIES[0].items) {
       expect(screen.getByText(item.name)).not.toBeNull()
     }
@@ -294,16 +297,31 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
 
-  it("gates EVERYONE: Continue disabled with zero live connections, no 'Connect later' link", () => {
+  it("lets the PM continue with ZERO connectors — nothing here is required", async () => {
     mountLoaded([])
     const btn = screen.getByText("Continue").closest("button") as HTMLButtonElement
-    expect(btn.disabled).toBe(true)
-    expect(screen.queryByText("Connect later")).toBeNull()
-    expect(
-      screen.getByText(
-        "Connect at least one source to continue — it's what your briefs are built from.",
-      ),
-    ).not.toBeNull()
+    expect(btn.disabled).toBe(false)
+    // The footer says so, and offers the skip affordance.
+    expect(screen.getByText(/all optional/)).not.toBeNull()
+    expect(screen.getByText("Skip for now")).not.toBeNull()
+
+    fireEvent.click(btn)
+    await waitFor(() => {
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/team")
+    })
+    // Continue (not Skip) doesn't stamp the field as skipped.
+    expect(markSkippedMock).not.toHaveBeenCalled()
+  })
+
+  it("'Skip for now' advances the step and records the skipped field", async () => {
+    mountLoaded([])
+    fireEvent.click(screen.getByText("Skip for now"))
+    await waitFor(() => {
+      expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/team")
+    })
   })
 
   it("Back routes to the api-key step", () => {

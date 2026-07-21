@@ -5,18 +5,12 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { useContent } from "../../../context/ContentContext"
-import {
-  completeOnboarding,
-  saveMetricDefinitions,
-} from "../../../lib/onboarding/store"
+import { saveMetricDefinitions } from "../../../lib/onboarding/store"
 import type { MetricDefinition } from "../../../lib/onboarding/types"
-import { briefToContentPatch } from "../../../lib/brief-adapter"
 import {
-  ensureDatasetForWorkspace,
-  fetchBriefWhenReady,
-  seedWorkspaceContextFiles,
-  startBriefGeneration,
-} from "../../../lib/workspace-brief"
+  finishOnboardingAndEnterApp,
+  POST_ONBOARDING_PATH,
+} from "../../../lib/onboarding/finishOnboarding"
 import { prefetchMetricDefinitions } from "../../../lib/onboarding/draftPrefetch"
 import { ArrowLeft, ArrowRight } from "../../auth/icons"
 
@@ -111,28 +105,11 @@ export function DefineMetrics() {
     setError(null)
     setFinishing(true)
     try {
-      // 1) Persist the confirmed definitions (best-effort content, hard save).
+      // Persist the confirmed definitions (best-effort content, hard save),
+      // then run the shared closer (first brief + complete onboarding).
       if (defs.length) await saveMetricDefinitions(workspace.id, defs)
-
-      // 2) Kick the first brief (fire-and-forget). It lands on the Brief page.
-      void (async () => {
-        try {
-          await ensureDatasetForWorkspace(workspace)
-          await seedWorkspaceContextFiles(workspace)
-          const existing = await fetchBriefWhenReady(workspace.slug)
-          if (existing) setContent(briefToContentPatch(existing))
-          else await startBriefGeneration(workspace.slug)
-        } catch {
-          /* generation runs server-side; the Brief page reflects status */
-        }
-      })()
-
-      // 3) Complete onboarding and enter the app.
-      await completeOnboarding(workspace.id, auth.user.id)
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("sprntly_active_company", workspace.slug)
-      }
-      router.replace("/brief")
+      await finishOnboardingAndEnterApp(workspace, auth.user.id, setContent)
+      router.replace(POST_ONBOARDING_PATH)
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Couldn't finish setting up your workspace.",
