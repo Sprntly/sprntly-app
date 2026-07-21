@@ -364,9 +364,9 @@ CREATE TABLE companies (
     onboarding_completed_at TEXT,
     -- Staff-panel entitlements (mirrors
     -- 20260712150000_org_invites_admin_entitlements.sql). seat_limit NULL =
-    -- unlimited. prototype_enabled defaults 1 here (unlike the migration's 0)
-    -- because the migration backfills existing companies to true — test
-    -- companies are "existing" for the DA route suites.
+    -- unlimited. prototype_enabled defaults 1, matching the real column since
+    -- 20260721130000_prototype_enabled_default_true.sql (prototype is a
+    -- default-ON module; the staff toggle is an opt-out).
     feature_flags       TEXT NOT NULL DEFAULT '{}',
     seat_limit          INTEGER,
     prototype_enabled   INTEGER NOT NULL DEFAULT 1,
@@ -556,7 +556,8 @@ CREATE TABLE org_invites (
     company_name      TEXT NOT NULL,
     invited_by        TEXT,
     seat_limit        INTEGER,
-    prototype_enabled INTEGER NOT NULL DEFAULT 0,
+    -- Default ON since 20260721130000_prototype_enabled_default_true.sql.
+    prototype_enabled INTEGER NOT NULL DEFAULT 1,
     use_platform_key  INTEGER NOT NULL DEFAULT 0,
     feature_flags     TEXT NOT NULL DEFAULT '{}',
     status            TEXT NOT NULL DEFAULT 'pending'

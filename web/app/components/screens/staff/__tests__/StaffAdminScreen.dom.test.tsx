@@ -440,12 +440,14 @@ describe("StaffAdminScreen invites", () => {
     fireEvent.change(screen.getByPlaceholderText("Acme Corp"), {
       target: { value: "Customer Inc" },
     })
-    fireEvent.click(screen.getByLabelText(/^Prototype/))
+    // Prototype defaults ON like the flag-backed modules — no click needed.
+    const prototypeToggle = screen.getByLabelText(/^Prototype/) as HTMLInputElement
+    expect(prototypeToggle.checked).toBe(true)
     await act(async () => {
       fireEvent.click(screen.getByText("Send invite"))
     })
 
-    // Both flag-backed modules default ON for new invites.
+    // All three modules default ON for new invites (prototype column-backed).
     expect(createInvite).toHaveBeenCalledWith(
       expect.objectContaining({
         email: "admin@customer.com",

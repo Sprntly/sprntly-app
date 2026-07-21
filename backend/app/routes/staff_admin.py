@@ -82,7 +82,9 @@ class OrgInviteIn(BaseModel):
     email: str = Field(..., min_length=3, max_length=320)
     company_name: str = Field(..., min_length=1, max_length=200)
     seat_limit: int | None = Field(default=None, ge=1, le=100000)
-    prototype_enabled: bool = False
+    # Prototype is a default-ON module for every organization (matching the
+    # companies.prototype_enabled column default) — the toggle is an opt-OUT.
+    prototype_enabled: bool = True
     use_platform_key: bool = False
     feature_flags: dict[str, bool] = Field(default_factory=dict)
 
