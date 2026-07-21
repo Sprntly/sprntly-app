@@ -156,6 +156,23 @@ def slack_spy(monkeypatch):
     return calls
 
 
+@pytest.fixture
+def email_spy(env, monkeypatch):
+    """Record every send_drip_email call at the outbound boundary (no
+    network) — mirrors slack_spy. Explicitly depends on `env` (unlike
+    slack_spy) because notify.py binds `send_drip_email` as a direct name
+    import (not a module reference like slack_oauth), so the patch target
+    must be `env.notify.send_drip_email`, resolved AFTER env's reload."""
+    calls: list[dict] = []
+
+    def _spy(*, to_email, subject, body_text):
+        calls.append({"to_email": to_email, "subject": subject, "body_text": body_text})
+        return True
+
+    monkeypatch.setattr(env.notify, "send_drip_email", _spy)
+    return calls
+
+
 # ─── helpers ─────────────────────────────────────────────────────────────────
 
 
@@ -184,6 +201,11 @@ def _seed_slack_connection(env, *, user_id: str, authed_user_id: str) -> None:
         scopes="chat:write,im:write",
         config_json=json.dumps({"target_type": "channel", "channel_id": "C-brief"}),
     )
+
+
+def _seed_profile_email(*, user_id: str, email: str | None) -> None:
+    from app.db.client import require_client
+    require_client().table("profiles").insert({"id": user_id, "email": email}).execute()
 
 
 def _seed_ready_prototype(env, *, prd_id: int = 1, created_by: str | None = None) -> int:
@@ -297,13 +319,13 @@ def test_notify_no_recipient_reasons(env, slack_spy):
     )
     assert result == {"delivered": False, "provider": None, "reason": "no_recipient"}
 
+    # No Slack connection AND no profile row for user-z: the email fallback
+    # triggers (this ticket) but can't resolve a recipient address either.
     unconnected_pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-z")
     result = env.notify.notify_prototype_ready(
         prototype_id=unconnected_pid, workspace_id=_TEST_COMPANY_ID
     )
-    assert result == {
-        "delivered": False, "provider": "slack", "reason": "slack_not_connected",
-    }
+    assert result == {"delivered": False, "provider": "email", "reason": "no_email"}
 
     assert slack_spy == []
 
@@ -397,6 +419,197 @@ def test_notify_logs_identifiers_only(env, slack_spy, caplog):
         assert "Checkout Flow" not in message   # no PRD title
         assert "U-AAA" not in message           # no Slack recipient id
         assert "xoxb-" not in message           # no token material
+
+
+# ─── Slack -> email fallback (this ticket) ───────────────────────────────────
+
+
+def test_notify_falls_back_to_email_when_slack_not_connected(env, email_spy):
+    # AC1: no Slack connection at all for the creator; a resolvable profile
+    # email → the email provider delivers.
+    prd_id = _seed_prd(env.db)
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+    _seed_profile_email(user_id="user-a", email="creator@example.com")
+
+    result = env.notify.notify_prototype_ready(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID
+    )
+
+    assert result == {"delivered": True, "provider": "email", "reason": None}
+    assert len(email_spy) == 1
+    assert email_spy[0]["to_email"] == "creator@example.com"
+
+
+def test_notify_email_fallback_carries_title_and_deep_link(env, email_spy):
+    # AC1: the email body carries the same title + deep-link copy the Slack
+    # provider would have sent.
+    prd_id = _seed_prd(env.db, title="Checkout Flow")
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+    _seed_profile_email(user_id="user-a", email="creator@example.com")
+
+    env.notify.notify_prototype_ready(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+
+    assert len(email_spy) == 1
+    body_text = email_spy[0]["body_text"]
+    assert "Checkout Flow" in body_text
+    assert f"/prototype?pid={pid}" in body_text
+
+
+def test_notify_email_fallback_no_profile_row_reason(env, email_spy):
+    # AC2: no Slack connection AND no profiles row at all for the creator.
+    prd_id = _seed_prd(env.db)
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+
+    result = env.notify.notify_prototype_ready(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID
+    )
+
+    assert result == {"delivered": False, "provider": "email", "reason": "no_email"}
+    assert email_spy == []
+
+
+def test_notify_email_fallback_blank_profile_email_reason(env, email_spy):
+    # AC2 (edge case): a profiles row exists but its email is blank — collapses
+    # to the same reason as a missing row (emails_for_user_ids' truthy filter).
+    prd_id = _seed_prd(env.db)
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+    _seed_profile_email(user_id="user-a", email="")
+
+    result = env.notify.notify_prototype_ready(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID
+    )
+
+    assert result == {"delivered": False, "provider": "email", "reason": "no_email"}
+    assert email_spy == []
+
+
+def test_notify_email_fallback_send_failed_reason(env, monkeypatch):
+    # AC3: a resolvable email, but send_drip_email itself reports failure.
+    prd_id = _seed_prd(env.db)
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+    _seed_profile_email(user_id="user-a", email="creator@example.com")
+    monkeypatch.setattr(env.notify, "send_drip_email", lambda **kwargs: False)
+
+    result = env.notify.notify_prototype_ready(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID
+    )
+
+    assert result == {"delivered": False, "provider": "email", "reason": "send_failed"}
+
+
+def test_notify_token_unreadable_does_not_fall_back_to_email(env, email_spy):
+    # AC4: a Slack connection row EXISTS but its stored ciphertext is garbage
+    # (not valid Fernet) — this is a broken connection, not an absent one;
+    # the email fallback must NOT trigger.
+    prd_id = _seed_prd(env.db)
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+    _seed_profile_email(user_id="user-a", email="creator@example.com")
+    env.db.upsert_slack_connection(
+        company_id=_TEST_COMPANY_ID,
+        user_id="user-a",
+        token_encrypted="not-valid-ciphertext",
+        scopes="chat:write,im:write",
+        config_json=json.dumps({"target_type": "channel", "channel_id": "C-brief"}),
+    )
+
+    result = env.notify.notify_prototype_ready(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID
+    )
+
+    assert result == {"delivered": False, "provider": "slack", "reason": "token_unreadable"}
+    assert email_spy == []
+
+
+def test_notify_no_bot_token_does_not_fall_back_to_email(env, email_spy):
+    # AC4: a Slack connection row EXISTS, decrypts cleanly, but the decrypted
+    # token JSON carries no access_token — again a broken (not absent)
+    # connection; the email fallback must NOT trigger.
+    from app.connectors.tokens import encrypt_token_json
+
+    prd_id = _seed_prd(env.db)
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+    _seed_profile_email(user_id="user-a", email="creator@example.com")
+    enc = encrypt_token_json(json.dumps({"authed_user_id": "U-AAA"}))
+    env.db.upsert_slack_connection(
+        company_id=_TEST_COMPANY_ID,
+        user_id="user-a",
+        token_encrypted=enc,
+        scopes="chat:write,im:write",
+        config_json=json.dumps({"target_type": "channel", "channel_id": "C-brief"}),
+    )
+
+    result = env.notify.notify_prototype_ready(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID
+    )
+
+    assert result == {"delivered": False, "provider": "slack", "reason": "no_bot_token"}
+    assert email_spy == []
+
+
+def test_notify_successful_slack_skips_email_fallback(env, slack_spy, email_spy):
+    # AC5: Slack delivers successfully — no email attempt, unmodified result.
+    prd_id = _seed_prd(env.db)
+    _seed_slack_connection(env, user_id="user-a", authed_user_id="U-AAA")
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+    _seed_profile_email(user_id="user-a", email="creator@example.com")
+
+    result = env.notify.notify_prototype_ready(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID
+    )
+
+    assert result["provider"] == "slack"
+    assert email_spy == []
+
+
+def test_notify_email_fallback_exception_never_raises(env, monkeypatch):
+    # AC7: the email provider itself raises — the entry point's never-raises
+    # guard still catches it and returns the email-provider error shape.
+    prd_id = _seed_prd(env.db)
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+    _seed_profile_email(user_id="user-a", email="creator@example.com")
+
+    def _boom(**kwargs):
+        raise RuntimeError("resend exploded")
+
+    monkeypatch.setattr(env.notify, "send_drip_email", _boom)
+
+    result = env.notify.notify_prototype_ready(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID
+    )
+
+    assert result == {"delivered": False, "provider": "email", "reason": "error"}
+
+
+def test_notify_email_fallback_logs_identifiers_only(env, email_spy, caplog):
+    # AC8: the ONE log line _log_outcome itself emits carries identifiers
+    # only — never the recipient's email address or the PRD title. (The
+    # pre-existing send_drip_email logging is out of scope — see AC8.)
+    prd_id = _seed_prd(env.db, title="Checkout Flow")
+    pid = _seed_ready_prototype(env, prd_id=prd_id, created_by="user-a")
+    _seed_profile_email(user_id="user-a", email="creator@example.com")
+
+    with caplog.at_level(logging.INFO, logger=NOTIFY_LOGGER):
+        env.notify.notify_prototype_ready(
+            prototype_id=pid, workspace_id=_TEST_COMPANY_ID
+        )
+
+    lines = [
+        r.getMessage() for r in caplog.records
+        if "prototype_ready_notify" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    assert f"prototype_id={pid}" in lines[0]
+    assert "delivered=True" in lines[0]
+    assert "reason=None" in lines[0]
+    assert "creator@example.com" not in lines[0]
+    assert "Checkout Flow" not in lines[0]
+
+
+def test_notify_registry_gains_email_provider_default_stays_slack(env):
+    # AC9: the registry now carries exactly two entries; the default is
+    # unchanged — email is fallback-only, never selected by default.
+    assert set(env.notify._PROVIDERS) == {"slack", "email"}
+    assert env.notify._DEFAULT_PROVIDER == "slack"
 
 
 # ═══ Layer 2 — created_by_user_id threading ══════════════════════════════════
