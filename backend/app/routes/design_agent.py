@@ -884,9 +884,19 @@ def get_active_by_prd(
     workspace_id = company.company_id
     row = None
     for attempt in range(_ACTIVE_LOOKUP_RETRY_ATTEMPTS):
-        row = find_prototype_by_prd(
-            prd_id=prd_id, workspace_id=workspace_id, statuses=["ready", "generating"],
+        candidate = find_prototype_by_prd(
+            prd_id=prd_id, workspace_id=workspace_id,
+            statuses=["ready", "generating", "failed"],
         )
+        # A 'failed' row only counts as active when it already has a bundle from
+        # an earlier successful stage — recovers visibility of a prototype whose
+        # LATEST iterate/manual-edit failed without destroying its working
+        # bundle (fail_prototype never touches bundle_url/current_checkpoint_id).
+        # A 'failed' row with no bundle_url never succeeded at all — treat
+        # exactly as "not found," unchanged from today.
+        if candidate is not None and candidate.get("status") == "failed" and not candidate.get("bundle_url"):
+            candidate = None
+        row = candidate
         if row is not None:
             if attempt > 0:
                 logger.info(

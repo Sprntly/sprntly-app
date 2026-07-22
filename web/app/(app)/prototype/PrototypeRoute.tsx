@@ -248,7 +248,7 @@ export type ActiveProtoAction =
 export function actionForActiveProto(
   found: PrototypeRecord | null,
 ): ActiveProtoAction {
-  if (found && found.status === "ready" && found.bundle_url) {
+  if (found && (found.status === "ready" || found.status === "failed") && found.bundle_url) {
     return { kind: "reveal", proto: found }
   }
   if (found && found.status === "generating") {

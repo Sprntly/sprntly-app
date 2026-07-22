@@ -846,6 +846,42 @@ def test_active_by_prd_three_segment_resolves(env, client):
     assert client.get("/v1/design-agent/by-prd/176/active").status_code == 200
 
 
+def test_active_by_prd_returns_failed_prototype_that_has_a_bundle(env, client):
+    # A prototype that reached 'ready' (real bundle_url) and later had a
+    # comment-driven iterate fail still resolves here: 'failed' with a bundle
+    # is a working prototype whose LATEST attempt failed, not a prototype that
+    # never succeeded — the exact incident scenario.
+    pid = _seed_ready_prototype(env, prd_id=177, workspace_id=_TEST_COMPANY_ID)
+    env.proto.fail_prototype(
+        prototype_id=pid,
+        workspace_id=_TEST_COMPANY_ID,
+        error=(
+            "iterate agent_loop ended with status=error iters=1 | "
+            "error_message=... | error_class=PROVIDER_BILLING"
+        ),
+    )
+    resp = client.get("/v1/design-agent/by-prd/177/active")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["id"] == pid
+    assert body["status"] == "failed"
+    assert body["bundle_url"]
+
+
+def test_active_by_prd_still_404s_for_failed_prototype_with_no_bundle(env, client):
+    # A prototype whose FIRST-EVER generation failed (bundle_url never set,
+    # complete_prototype never reached) still 404s here, unchanged from today.
+    pid = env.proto.start_prototype(
+        prd_id=178, workspace_id=_TEST_COMPANY_ID, template_version=1
+    )
+    env.proto.fail_prototype(
+        prototype_id=pid,
+        workspace_id=_TEST_COMPANY_ID,
+        error="build agent_loop ended with status=error iters=1 | error_class=ViteBuildError",
+    )
+    assert client.get("/v1/design-agent/by-prd/178/active").status_code == 404
+
+
 # ─── GET /by-prd/{prd_id}/active — bounded read-after-write retry ────────────
 #
 # A synchronously-committed 'generating' row (just inserted by POST /generate,
