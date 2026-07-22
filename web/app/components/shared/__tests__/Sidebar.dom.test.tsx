@@ -100,18 +100,32 @@ describe("Sidebar — New chat wiring", () => {
 // deliberately does NOT appear here: it moved to Settings → Account, and the
 // rail's user row is display-only.
 describe("Sidebar — nav affordances preserved after restyle", () => {
-  it("renders New chat, Top Insights, All chats, Settings + Feedback", () => {
+  it("renders New chat, Top Insights, All chats, Guide, Settings + Feedback", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
       "Top Insights",
       "Chat history",
       "Ideation",
+      "Guide",
       "Settings",
       "Feedback",
     ]) {
       expect(screen.getByLabelText(label)).toBeTruthy()
     }
+  })
+
+  it("Guide is an anchor to the public /docs site (not a goTo screen), opening safely in a new tab", () => {
+    render(React.createElement(Sidebar))
+    const guide = screen.getByTestId("sidebar-guide-link") as HTMLAnchorElement
+    expect(guide.tagName).toBe("A")
+    expect(guide.getAttribute("href")).toBe("/docs")
+    expect(guide.getAttribute("target")).toBe("_blank")
+    expect(guide.getAttribute("rel")).toBe("noopener noreferrer")
+    // It navigates via the anchor, never through the SPA screen router.
+    fireEvent.click(guide)
+    expect(goTo).not.toHaveBeenCalled()
+    expect(goToNewChat).not.toHaveBeenCalled()
   })
 
   it("no longer renders a Sources rail item (hidden from the rail; screen + route kept)", () => {
