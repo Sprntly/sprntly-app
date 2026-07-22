@@ -1698,6 +1698,14 @@ export type PrototypeRecord = {
   //    so the column flows through at runtime; typed OPTIONAL so existing
   //    `PrototypeRecord` literals keep typechecking.
   prd_id?: number
+  // ── (append-only): the checkpoint id a completed iterate/generation last
+  //    advanced to. GET /{id} does `select("*")`, so the column flows through
+  //    automatically — no api method change. Typed OPTIONAL/nullable (older
+  //    rows predating the checkpoint concept may carry null) so existing
+  //    `PrototypeRecord` literals keep typechecking. Consumed by
+  //    PostGenerationResult's useViewGrant call so the view-grant re-mints the
+  //    moment the checkpoint advances, not just on a bundle_url change.
+  current_checkpoint_id?: number | null
 }
 
 /** 202 kickoff response from POST /v1/design-agent/generate. */

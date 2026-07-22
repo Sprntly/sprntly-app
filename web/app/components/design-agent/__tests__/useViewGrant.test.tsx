@@ -587,7 +587,16 @@ describe("useViewGrant — bundle-readiness recovery via the iframe onLoad probe
       await Promise.resolve()
     })
     await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2)) // one re-mint
-    expect(result.current.notReady).toBe(false)
+    // The re-mint succeeds, but this test's fetchMock never stops 401ing, so the
+    // post-remint preflight consumes the cap's second (terminal) check and
+    // surfaces the error — bounded at exactly 2 total viewGrant calls, no third.
+    // notReady now masks the iframe for the whole recovery window (the fix this
+    // ticket adds) and is intentionally left set once the terminal error lands;
+    // grantedBundleUrl going null unmounts the viewer, so the stuck flag has no
+    // visible render effect (see useViewGrant.ts's handleReadiness doc comment).
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+    expect(result.current.grantedBundleUrl).toBeNull()
+    expect(viewGrant).toHaveBeenCalledTimes(2)
   })
 
   it("REPRO→FIX: the post-mint preflight (not onLoad) that sees 404 sets notReady + recovers", async () => {
@@ -663,6 +672,169 @@ describe("useViewGrant — bundle-readiness recovery via the iframe onLoad probe
       await notifyPromise
     })
     expect(settled).toBe(true)
+  })
+})
+
+// The checkpoint-advance stale-grant incident: `da_view_grant` is bound to a
+// checkpoint at mint time, and an iterate that overwrites the bundle in place
+// (the common case — bundle_url unchanged) leaves a grant that LOOKS fine but
+// is semantically stale — the bundle-proxy 401s ("grant stale") the moment the
+// next checkpoint outpaces it. The mint-triggering effect used to key ONLY on
+// bundleUrl, so a checkpoint-only change was inert until the next reload
+// tripped the stale-grant 401. These prove the third `checkpointId` parameter
+// closes that gap proactively.
+describe("useViewGrant — checkpoint-id change triggers a fresh mint", () => {
+  it("test_use_view_grant_checkpoint_id_change_triggers_fresh_mint_bundle_url_unchanged", async () => {
+    const { result, rerender } = renderHook(
+      ({ cp }: { cp: number | null }) => useViewGrant(PID, BUNDLE, cp),
+      { initialProps: { cp: 1 } },
+    )
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    // The checkpoint alone advances — bundle_url is IDENTICAL throughout (the
+    // in-place-overwrite iterate case) — yet a fresh mint must fire.
+    rerender({ cp: 2 })
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+    // Same derived view-grant URL — proving the trigger was the checkpoint
+    // change, not a (nonexistent) bundle_url change.
+    expect(viewGrant.mock.calls[1][0]).toBe(viewGrant.mock.calls[0][0])
+    expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+  })
+
+  it("test_use_view_grant_remint_cap_still_bounded_when_checkpoint_driven", async () => {
+    const { result, rerender } = renderHook(
+      ({ cp }: { cp: number | null }) => useViewGrant(PID, BUNDLE, cp),
+      { initialProps: { cp: 1 } },
+    )
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+
+    // Exhaust the re-mint budget on checkpoint 1 (initial + 1 re-mint, then cap).
+    await act(async () => result.current.notifyAssetError())
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+    await act(async () => result.current.notifyAssetError())
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+    expect(viewGrant).toHaveBeenCalledTimes(2) // still bounded for checkpoint 1
+
+    // A NEW checkpoint arrives — a fresh mint AND a fresh re-mint budget, not a
+    // second uncapped path around VIEW_GRANT_REMINT_CAP.
+    rerender({ cp: 2 })
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(3))
+    expect(result.current.error).toBeNull()
+
+    await act(async () => result.current.notifyAssetError())
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(4))
+    await act(async () => result.current.notifyAssetError())
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+    expect(viewGrant).toHaveBeenCalledTimes(4) // bounded again for checkpoint 2
+  })
+
+  it("test_use_view_grant_bundle_url_change_still_triggers_fresh_mint", async () => {
+    // Regression-pin: the checkpoint-dependency addition must not disturb the
+    // pre-existing bundleUrl-change trigger — checkpointId held stable here.
+    const { result, rerender } = renderHook(
+      ({ url }: { url: string | null }) => useViewGrant(PID, url, 7),
+      { initialProps: { url: BUNDLE } },
+    )
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    const NEXT = BUNDLE.replace("index.html", "v2.html")
+    rerender({ url: NEXT })
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(NEXT))
+    expect(viewGrant).toHaveBeenCalledTimes(2)
+  })
+
+  it("test_use_view_grant_unrelated_rerender_no_extra_mint", async () => {
+    const { result, rerender } = renderHook(
+      ({ cp }: { cp: number | null }) => useViewGrant(PID, BUNDLE, cp),
+      { initialProps: { cp: 3 } },
+    )
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    // Re-render with the SAME bundleUrl and SAME checkpointId (an unrelated
+    // prop change elsewhere in the tree) — no additional mint.
+    rerender({ cp: 3 })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_use_view_grant_checkpoint_id_null_by_default_is_a_noop_change", async () => {
+    const { result, rerender } = renderHook(
+      ({ withCp }: { withCp: boolean }) =>
+        withCp ? useViewGrant(PID, BUNDLE, null) : useViewGrant(PID, BUNDLE),
+      { initialProps: { withCp: false } },
+    )
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    // Switching from the implicit (omitted third arg) default to an EXPLICIT
+    // null is the same value — no spurious re-mint from the default itself.
+    rerender({ withCp: true })
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+  })
+})
+
+// The masking-during-recovery bug: `handleReadiness`'s "remint" branch called
+// `setNotReady(false)` right as the bounded 401 re-mint kicked off, so the raw
+// 401-bodied response stayed visible for the 1-3s recovery window — the actual
+// "red error, doesn't load" David reported. The fix masks the iframe for the
+// duration of ANY 401 recovery (not just the pre-existing 404 case).
+describe("useViewGrant — the 401-recovery masking fix", () => {
+  it("test_use_view_grant_remint_masks_the_iframe_during_401_recovery", async () => {
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    // Let the initial post-mint preflight (default 200) settle before driving
+    // the scenario below, so it can't race the 401 preflight we queue next.
+    await waitFor(() => expect(result.current.notReady).toBe(false))
+
+    // The next preflight (driven by the iframe onLoad probe) reports a 401 —
+    // the grant lapsed. Hold the re-mint's viewGrant POST pending so we can
+    // observe the masking state WHILE the recovery is still in flight.
+    fetchMock.mockResolvedValueOnce(
+      new Response('{"detail":"grant required"}', { status: 401 }),
+    )
+    let remintResolved = false
+    let resolveRemint: (() => void) | null = null
+    viewGrant.mockImplementationOnce(
+      () =>
+        new Promise<void>((res) => {
+          resolveRemint = () => {
+            remintResolved = true
+            res()
+          }
+        }),
+    )
+
+    await act(async () => {
+      result.current.notifyBundleLoaded()
+      await Promise.resolve()
+    })
+
+    // The actual bug: pre-fix, this branch called setNotReady(false), so
+    // notReady never went true during the recovery window.
+    await waitFor(() => expect(result.current.notReady).toBe(true))
+    expect(remintResolved).toBe(false) // still masked WHILE the re-mint is pending
+    expect(viewGrant).toHaveBeenCalledTimes(2) // initial + the in-flight re-mint
+
+    // Resolve the re-mint; the post-remint preflight (bumped reloadKey) then
+    // reports healthy — the loop closes via the EXISTING "clear" branch, with
+    // no new polling mechanism.
+    fetchMock.mockResolvedValue(new Response("<!doctype html>", { status: 200 }))
+    await act(async () => {
+      resolveRemint?.()
+      await Promise.resolve()
+    })
+
+    await waitFor(() => expect(result.current.notReady).toBe(false))
+    expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+    expect(result.current.error).toBeNull()
   })
 })
 
