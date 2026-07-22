@@ -39,6 +39,15 @@ export const POST_ONBOARDING_PATH = "/?new=1"
 /**
  * Kick the first brief (fire-and-forget) and complete onboarding.
  *
+ * The brief is generated ONLY when a real data source is connected
+ * (`hasDataSource` — analytics, customer support/calls/feedback, CRM, revenue,
+ * monitoring, or docs). Without one, we deliberately do NOT seed the onboarding
+ * context file or start generation: onboarding info alone must not produce a
+ * brief. Those users land on the new-chat tab, and their brief appears once
+ * they connect a data source (Settings → Connectors → Regenerate brief).
+ * Slack/Teams/Email, Jira & other PM tools, GitHub, and Figma do not count as
+ * data sources.
+ *
  * Resolves once onboarding is actually marked complete — the caller should
  * then route into the app. Throws if completion fails, so the caller can keep
  * the user on the step with an error rather than stranding them mid-flow.
@@ -47,11 +56,16 @@ export async function finishOnboardingAndEnterApp(
   workspace: WorkspaceCompany,
   userId: string,
   setContent: (patch: ReturnType<typeof briefToContentPatch>) => void,
+  hasDataSource: boolean,
 ): Promise<void> {
-  // 1) Kick the first brief (fire-and-forget). It lands on the Brief page.
+  // 1) Register the dataset always (so a later connector has something to attach
+  //    to), but only seed onboarding context + kick the first brief when a real
+  //    data source is connected — otherwise the brief would be built from
+  //    onboarding info alone, which we avoid by design.
   void (async () => {
     try {
       await ensureDatasetForWorkspace(workspace)
+      if (!hasDataSource) return
       await seedWorkspaceContextFiles(workspace)
       const existing = await fetchBriefWhenReady(workspace.slug)
       if (existing) setContent(briefToContentPatch(existing))

@@ -11,6 +11,7 @@ import { updateWorkspace } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { hasLiveAnalyticsConnection } from "../../../lib/onboarding/connectorsWizard"
+import { hasDataSourceConnection } from "../../../lib/connectorsCatalog"
 import { prefetchMetricDefinitions } from "../../../lib/onboarding/draftPrefetch"
 import {
   POST_ONBOARDING_PATH,
@@ -209,11 +210,15 @@ export function PersonalizeStep() {
         return
       }
       // No analytics connector — nothing to map metrics onto, so this is the
-      // last screen. Run the same closer define-metrics would have.
+      // last screen. Run the same closer define-metrics would have. Only kick
+      // the first brief if a real data source is connected (a non-analytics one
+      // can still qualify — e.g. Zendesk/HubSpot); otherwise the brief would be
+      // built from onboarding info alone, which we avoid.
       await finishOnboardingAndEnterApp(
         { ...updated, product: workspace.product },
         auth.user.id,
         setContent,
+        hasDataSourceConnection(connections),
       )
       router.replace(POST_ONBOARDING_PATH)
     } catch (e) {
