@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest"
 import {
   GenerationErrorBanner,
   isRetryableFailure,
+  iterateFailureCopy,
   reasonCopy,
 } from "../GenerationErrorBanner"
 
@@ -228,6 +229,65 @@ describe("reasonCopy — provider error classes", () => {
     expect(isRetryableFailure("error_class=PROVIDER_CAPACITY")).toBe(true)
     expect(isRetryableFailure("error_class=PROVIDER_UNAVAILABLE")).toBe(true)
     expect(isRetryableFailure("ViteBuildError: exit=1")).toBe(true)
+  })
+})
+
+describe("iterateFailureCopy — iterate-context curated copy", () => {
+  it("test_iterate_copy_maps_provider_billing_and_auth_to_reassuring_ref_line", () => {
+    expect(
+      iterateFailureCopy(
+        "iterate agent_loop ended with status=error iters=1 | error_message=x | error_class=PROVIDER_BILLING",
+        42,
+      ),
+    ).toBe("Something went wrong on our end — we've been notified. (Ref: 42)")
+    expect(
+      iterateFailureCopy("error_class=PROVIDER_AUTH | error_message=x", 42),
+    ).toBe("Something went wrong on our end — we've been notified. (Ref: 42)")
+    // Omitting refId omits the "(Ref: ...)" suffix.
+    expect(iterateFailureCopy("error_class=PROVIDER_BILLING")).toBe(
+      "Something went wrong on our end — we've been notified.",
+    )
+  })
+
+  it("test_iterate_copy_maps_provider_unavailable_and_capacity", () => {
+    expect(iterateFailureCopy("error_class=PROVIDER_UNAVAILABLE | error_message=x")).toBe(
+      "The prototype service is temporarily unavailable. Try again shortly.",
+    )
+    expect(iterateFailureCopy("error_class=PROVIDER_CAPACITY | error_message=x")).toBe(
+      "High demand right now — try again in a few minutes.",
+    )
+  })
+
+  it("test_iterate_copy_maps_build_failure_without_leaking_raw_exception_text", () => {
+    const viteRaw =
+      "ViteBuildError: vite build exit=1: src/App.tsx(12,3): error TS2304"
+    const viteCopy = iterateFailureCopy(viteRaw)
+    expect(viteCopy).toBe(
+      "The change couldn't be built. Try again, or adjust your comment and resubmit.",
+    )
+    expect(viteCopy).not.toContain("ViteBuildError")
+    expect(viteCopy).not.toContain("exit=1")
+    expect(viteCopy).not.toContain("TS2304")
+
+    const typeCheckRaw = "TypeCheckError: TS2322 in App.tsx"
+    const typeCheckCopy = iterateFailureCopy(typeCheckRaw)
+    expect(typeCheckCopy).toBe(
+      "The change couldn't be built. Try again, or adjust your comment and resubmit.",
+    )
+    expect(typeCheckCopy).not.toContain("TypeCheckError")
+    expect(typeCheckCopy).not.toContain("TS2322")
+  })
+
+  it("test_iterate_copy_maps_emitted_no_files", () => {
+    expect(
+      iterateFailureCopy("iterate agent_loop completed but emitted no files"),
+    ).toBe("The agent didn't produce a change. Try again.")
+  })
+
+  it("test_iterate_copy_falls_back_to_generic_for_unrecognized_text", () => {
+    expect(iterateFailureCopy("build blew up")).toBe(
+      "Couldn't apply the change. Try again.",
+    )
   })
 })
 

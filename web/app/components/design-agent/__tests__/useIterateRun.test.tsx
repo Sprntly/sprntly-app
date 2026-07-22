@@ -980,8 +980,75 @@ describe("useIterateRun — iterate keeps status 'ready'; done summary + fresh b
     })
 
     expect(hasChangeApplied(result.current.activity)).toBe(false)
-    expect(result.current.error).toBe("build blew up")
+    expect(result.current.error).toBe("Couldn't apply the change. Try again.")
     expect(onComplete).not.toHaveBeenCalled()
     expect(result.current.running).toBe(false)
+  })
+
+  it("test_iterate_run_surfaces_curated_copy_for_provider_billing_not_raw_debug_string: a PROVIDER_BILLING failure never leaks the raw agent-loop debug string", async () => {
+    // The exact raw string from the live incident that motivated this fix.
+    const RAW_BILLING_ERROR =
+      "iterate agent_loop ended with status=error iters=1 | error_message=The prototype service is temporarily unavailable. | error_class=PROVIDER_BILLING"
+
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValueOnce(ready(OLD_BUNDLE)) // baseline
+      .mockResolvedValue({
+        id: PROTOTYPE_ID,
+        status: "failed",
+        bundle_url: OLD_BUNDLE,
+        error: RAW_BILLING_ERROR,
+        pending_question: null,
+      })
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("apply the comment")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    const CURATED = `Something went wrong on our end — we've been notified. (Ref: ${PROTOTYPE_ID})`
+    expect(result.current.error).toBe(CURATED)
+    expect(result.current.error).not.toContain("error_class")
+    expect(result.current.error).not.toContain("agent_loop")
+    expect(result.current.error).not.toContain("PROVIDER_BILLING")
+
+    const errorTurns = result.current.activity.filter((e) => e.kind === "error")
+    expect(errorTurns).toHaveLength(1)
+    expect(errorTurns[0].kind === "error" && errorTurns[0].text).toBe(CURATED)
+    expect(onComplete).not.toHaveBeenCalled()
+  })
+
+  it("test_iterate_run_timeout_path_is_unaffected_by_the_copy_mapping: the client-side MAX_MS timeout still surfaces its own clean string, untouched by the new copy mapping", async () => {
+    // Never resolves to a terminal status — the poll keeps returning
+    // 'generating' until the run hits MAX_MS and the client-side timeout
+    // throw fires. That throw is NOT routed through iterateFailureCopy (see
+    // useIterateRun.ts:355) and must keep surfacing exactly its own string.
+    const get = vi
+      .fn<(id: number) => Promise<PrototypeRecord>>()
+      .mockResolvedValue(proto("generating"))
+
+    const onComplete = vi.fn()
+    const api = makeApi(get)
+
+    const { result } = renderHook(() =>
+      useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
+    )
+
+    await act(async () => {
+      const run = result.current.runIterate("make it pop")
+      await vi.runAllTimersAsync()
+      await run
+    })
+
+    expect(result.current.error).toBe("Iteration timed out")
+    expect(onComplete).not.toHaveBeenCalled()
   })
 })

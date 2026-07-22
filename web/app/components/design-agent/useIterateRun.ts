@@ -33,6 +33,7 @@ import {
   type PendingQuestion,
   type PrototypeRecord,
 } from "../../lib/api"
+import { iterateFailureCopy } from "./GenerationErrorBanner"
 
 // ---- the modular activity event model (the SSE seam) ------------------------
 
@@ -349,7 +350,7 @@ export function useIterateRun({
 
         // 5b) Hard-failure / timeout surface as an error (never a done line).
         if (proto.status === "failed") {
-          throw new Error(proto.error || "Iteration failed")
+          throw new Error(iterateFailureCopy(proto.error ?? "", prototypeId))
         }
         if (!sseDone.settled && Date.now() - startedAt >= MAX_MS) {
           throw new Error("Iteration timed out")
@@ -374,7 +375,7 @@ export function useIterateRun({
             return resolvePendingQuestion(proto)
           }
           if (proto.status === "failed") {
-            throw new Error(proto.error || "Iteration failed")
+            throw new Error(iterateFailureCopy(proto.error ?? "", prototypeId))
           }
         }
 
