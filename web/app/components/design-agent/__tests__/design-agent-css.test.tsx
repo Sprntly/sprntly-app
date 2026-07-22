@@ -421,14 +421,71 @@ describe("bundle-loading cover has no fade-in (residual-exposure closure)", () =
 
 // ── Done-turn response body colour (branding: ink, not accent) ────────────
 describe("done-turn response body colour", () => {
-  it("test_da_activity_done_body_color_is_ink_not_accent — .da-activity-done-body renders in the plain ink colour, not accent-ink", () => {
+  it("test_da_activity_done_body_deemphasized_typography — .da-activity-done-body reads as de-emphasized body copy, not a shouted accent label", () => {
     const match = CSS.match(
       /\.design-agent-surface\s+\.da-activity-done-body\s*\{([^}]*)\}/,
     )
     expect(match).not.toBeNull()
     const rule = match![1]
-    expect(rule).toContain("color: var(--ink);")
+    expect(rule).toContain("font-weight: 400;")
+    expect(rule).toContain("color: var(--ink-2);")
+    expect(rule).toContain("align-items: flex-start;")
+    expect(rule).not.toContain("font-weight: 600;")
+    expect(rule).not.toContain("color: var(--ink);")
     expect(rule).not.toContain("var(--accent-ink)")
+    expect(rule).not.toContain("align-items: center;")
+  })
+
+  it("test_da_activity_done_body_layout_declarations_unchanged — .da-activity-done-body keeps its display/gap layout declarations", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-done-body\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("display: flex;")
+    expect(rule).toContain("gap: 8px;")
+  })
+
+  it("test_da_activity_done_icon_has_optical_margin_nudge — .da-activity-done-icon gains a 1px top margin to align with the de-emphasized, top-aligned body", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-done-icon\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("margin-top: 1px;")
+  })
+
+  it("test_da_activity_done_icon_other_declarations_unchanged — .da-activity-done-icon's other declarations are byte-unchanged", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-done-icon\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("flex-shrink: 0;")
+    expect(rule).toContain("width: 16px;")
+    expect(rule).toContain("height: 16px;")
+    expect(rule).toContain("background: var(--accent-soft);")
+    expect(rule).toContain("color: var(--accent);")
+    expect(rule).toContain("border-radius: 50%;")
+    expect(rule).toContain("font-size: 10px;")
+  })
+
+  it("test_da_activity_terminal_done_label_has_scoped_margin — a new, more-specific selector scopes the done-card label's margin to 6px", () => {
+    const block = [
+      ".design-agent-surface .da-activity-terminal--done .da-activity-agent-label {",
+      "  margin: 0 0 6px;",
+      "}",
+    ].join("\n")
+    expect(CSS).toContain(block)
+  })
+
+  it("test_da_activity_agent_label_base_rule_unaffected_by_scoped_override — the BASE, unscoped .da-activity-agent-label rule keeps its 4px margin", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-agent-label\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("margin: 0 0 4px;")
   })
 
   it("test_da_activity_agent_label_color_unchanged — .da-activity-agent-label keeps its accent colour (regression pin, label unaffected)", () => {
