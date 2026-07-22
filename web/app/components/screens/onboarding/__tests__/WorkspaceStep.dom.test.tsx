@@ -23,6 +23,7 @@ const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const updateWorkspaceMock = vi.fn()
+const createWorkspaceMock = vi.fn()
 const companyDocUploadMock = vi.fn()
 const roadmapUploadMock = vi.fn()
 
@@ -37,6 +38,7 @@ vi.mock("../../../../lib/onboarding/store", () => ({
 vi.mock("../../../../lib/api", () => ({
   companyDocsApi: { upload: (...a: unknown[]) => companyDocUploadMock(...a) },
   roadmapDocApi: { upload: (...a: unknown[]) => roadmapUploadMock(...a) },
+  onboardingApi: { createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a) },
 }))
 
 import { WorkspaceStep } from "../WorkspaceStep"
@@ -46,6 +48,12 @@ function mount(workspace = makeWorkspace({ onboarding_step: 6 })) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace }))
   updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 7 }))
+  createWorkspaceMock.mockResolvedValue({
+    id: "ws-default",
+    name: "Nutrition & Sleep",
+    slug: "default",
+    is_default: true,
+  })
   companyDocUploadMock.mockResolvedValue({ ok: true })
   roadmapUploadMock.mockResolvedValue({ ok: true })
   return render(React.createElement(WorkspaceStep))
@@ -106,6 +114,7 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     await act(async () => {
       continueBtn().click()
     })
+    expect(createWorkspaceMock).not.toHaveBeenCalled()
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
     expect(routerMock.push).not.toHaveBeenCalled()
 
@@ -114,11 +123,12 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     await act(async () => {
       continueBtn().click()
     })
+    expect(createWorkspaceMock).not.toHaveBeenCalled()
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("a valid Continue persists every merged field and routes to invite", async () => {
+  it("a valid Continue writes the six fields to the workspace and only advances the step on companies", async () => {
     mount()
     fireEvent.change(nameInput(), { target: { value: "Nutrition & Sleep" } })
     fireEvent.change(scopeInput(), {
@@ -141,14 +151,18 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
     })
-    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
-      team_name: "Nutrition & Sleep",
+    // The six "Your workspace" fields go to the DEFAULT workspace row via the
+    // onboarding workspace endpoint (name → workspaces.name the switcher shows).
+    expect(createWorkspaceMock).toHaveBeenCalledWith("Nutrition & Sleep", {
       team_scope: "Owns food logging and sleep tracking end to end.",
       team_strategy: null,
       team_roadmap: null,
-      // Reuses the column Settings → Process already owns — NOT a new one.
       sizing_methodology: "Fibonacci points, sized by the whole squad.",
       additional_context: "We call the pairing flow 'sleep sync' internally.",
+    })
+    // The ONLY companies write is the onboarding step marker — none of the six
+    // fields land on companies anymore.
+    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       onboarding_step: 7,
     })
   })

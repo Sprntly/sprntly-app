@@ -249,6 +249,13 @@ def _record_welcome(drip_db, company_id, user_id, email, *, status):
 
 class WorkspaceNameIn(BaseModel):
     name: str
+    # Workspace-owned fields (2026-07-22, moved off the companies row). Sent by
+    # the onboarding "Your workspace" step alongside the name; each optional.
+    team_scope: str | None = None
+    team_strategy: str | None = None
+    team_roadmap: str | None = None
+    sizing_methodology: str | None = None
+    additional_context: str | None = None
 
     @property
     def clean_name(self) -> str:
@@ -287,7 +294,15 @@ def post_onboarding_workspace(
     )
 
     ws = ensure_default_workspace(company.company_id)
-    updated = update_workspace(ws["id"], name=name) or {**ws, "name": name}
+    updated = update_workspace(
+        ws["id"],
+        name=name,
+        team_scope=body.team_scope,
+        team_strategy=body.team_strategy,
+        team_roadmap=body.team_roadmap,
+        sizing_methodology=body.sizing_methodology,
+        additional_context=body.additional_context,
+    ) or {**ws, "name": name}
     upsert_workspace_member(ws["id"], company.user_id, "admin")
     company_slug = slug_for_company_id(company.company_id)
     if company_slug:

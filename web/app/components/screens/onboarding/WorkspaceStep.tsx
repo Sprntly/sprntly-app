@@ -10,7 +10,7 @@ import { UploadOrTypeBlock } from "../../onboarding/UploadOrTypeBlock"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { updateWorkspace } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
-import { companyDocsApi, roadmapDocApi } from "../../../lib/api"
+import { companyDocsApi, onboardingApi, roadmapDocApi } from "../../../lib/api"
 
 const DRAFT_KEY = "workspace-step"
 
@@ -38,24 +38,26 @@ const EMPTY_BLOCK: BlockState = {
  * this team owns.
  *
  *   - Workspace name* + what it works on* — the old team step. Both are
- *     COMPANY fields (companies.team_name / team_scope), deliberately not the
- *     workspaces row, which stays "Default" until renamed in
- *     Settings → Workspaces.
+ *     WORKSPACE-owned fields (2026-07-22): the name IS the workspaces.name the
+ *     left-sidebar switcher displays, and scope is workspaces.team_scope. They
+ *     are written to the DEFAULT workspace row via onboardingApi.createWorkspace
+ *     — a single source of truth shared with Settings → Process.
  *   - Team strategy + roadmap — the old strategy step, kept as TWO
  *     upload-or-type blocks under one heading. The spec draws them as a single
  *     block, but they persist to different columns and different upload
  *     endpoints (roadmapDocApi feeds the brief as a high-weight priorities
  *     signal), so merging them would silently drop that routing.
- *   - Sizing + anything else, behind "Add more". Sizing is new to onboarding
- *     but NOT a new column — it reuses companies.sizing_methodology, already
- *     owned by Settings → Process, so the two surfaces stay in sync. "Anything
- *     else" is the old decisions step's additional_context; the spec folds
- *     "how decisions get made" into that free-text prompt rather than keeping
- *     a dedicated field, and companies.decision_process (which still feeds the
- *     business-context draft) stays populated via Settings → Process.
+ *   - Sizing + anything else, behind "Add more". Both are workspace-owned too
+ *     (workspaces.sizing_methodology / additional_context), shared with
+ *     Settings → Process. "Anything else" is the old decisions step's field; the
+ *     spec folds "how decisions get made" into that free-text prompt rather than
+ *     keeping a dedicated field, and companies.decision_process (which still
+ *     feeds the business-context draft) stays populated via Settings → Process.
  *
  * Uploads fire inline as picked (a transient failure is a non-blocking
- * notice); typed text persists on Continue.
+ * notice); typed text persists on Continue. The onboarding_step marker is the
+ * only companies write here (updateWorkspace) — the six fields go to the
+ * workspace row.
  */
 export function WorkspaceStep() {
   const auth = useAuth()
@@ -209,15 +211,21 @@ export function WorkspaceStep() {
     if (!validate().ok) return
     setSaving(true)
     try {
-      const updated = await updateWorkspace(workspace.id, {
-        team_name: teamName.trim() || null,
+      // The six "Your workspace" fields live on the DEFAULT workspace row
+      // (2026-07-22 — moved off companies). Write them via the onboarding
+      // workspace endpoint (name → the workspaces.name the switcher shows, plus
+      // the five typed blocks).
+      await onboardingApi.createWorkspace(teamName.trim(), {
         team_scope: teamScope.trim() || null,
         team_strategy: teamStrategy.trim() || null,
         team_roadmap: teamRoadmap.trim() || null,
         sizing_methodology: sizingMethodology.trim() || null,
         additional_context: additionalContext.trim() || null,
-        onboarding_step: 7,
       })
+      // Advance onboarding (ONLY the step marker — a companies field). The
+      // returned WorkspaceCompany re-reads the just-written workspace row, so
+      // team_* reflect the typed values and back-navigation re-seeds from them.
+      const updated = await updateWorkspace(workspace.id, { onboarding_step: 7 })
       setWorkspace({ ...updated, product: workspace.product })
       clearDraft(DRAFT_KEY)
       router.push("/onboarding/invite")

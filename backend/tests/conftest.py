@@ -507,6 +507,13 @@ CREATE TABLE workspaces (
     name        TEXT NOT NULL,
     slug        TEXT NOT NULL,
     is_default  INTEGER NOT NULL DEFAULT 0,
+    -- Workspace-owned "Your workspace" fields (mirrors
+    -- 20260722120000_workspace_owned_fields.sql — moved off companies).
+    team_scope          TEXT,
+    team_strategy       TEXT,
+    team_roadmap        TEXT,
+    sizing_methodology  TEXT,
+    additional_context  TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, slug)
