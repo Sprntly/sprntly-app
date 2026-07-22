@@ -59,6 +59,7 @@ import {
 import { GenerationErrorBanner, reasonCopy, isRetryableFailure } from "../../components/design-agent/GenerationErrorBanner"
 import { GenerateSurfaceErrorBoundary } from "../../components/design-agent/GenerateSurfaceErrorBoundary"
 import { GenerationLoadingScreen } from "../../components/design-agent/GenerationLoadingScreen"
+import { useDesignAgentLiveTerminal } from "../../components/design-agent/useDesignAgentLiveTerminal"
 import { PostGenerationResult } from "../../components/design-agent/PostGenerationResult"
 import { PrototypeEmptyState } from "../../components/design-agent/PrototypeEmptyState"
 import { CommentsPanel } from "../../components/design-agent/CommentsPanel"
@@ -850,6 +851,38 @@ export function PrototypeRoute() {
     }
   }
 
+  // Late SSE terminal event, delivered by useDesignAgentLiveTerminal after this
+  // route's own GenerationLoadingScreen instance has already unmounted (its
+  // render branch is one arm of the early-return chain below, not always
+  // mounted — see useDesignAgentLiveTerminal's file header). Re-fetches the
+  // real backend truth rather than trusting the bare "done"/"error" tag, so
+  // there is one source of truth for the status→result mapping (the same one
+  // runDesignAgentGeneration.ts already owns). Calling handleGenDone a second
+  // time is safe here: unlike useGeneratePrototype's handleGenDone (which
+  // toasts and dispatches an event, needing a resolvedRef dedup guard), this
+  // handleGenDone only sets local component state — re-setting the same
+  // values twice is a harmless no-op re-render.
+  const handleLiveTerminal = (_kind: "done" | "error") => {
+    if (genProtoId == null) return
+    designAgentApi
+      .get(genProtoId)
+      .then((proto) => {
+        if (proto.status === "ready") {
+          handleGenDone({ ok: true, prototype: proto })
+        } else if (proto.status === "failed") {
+          handleGenDone({ ok: false, message: proto.error || "Generation failed" })
+        } else if (proto.status === "invalidated") {
+          handleGenDone({ ok: false, message: "Template invalidated; retry" })
+        }
+        // status === "generating": the SSE terminal event race-beat the DB
+        // read catching up. No-op — a second terminal event or the existing
+        // markPending/resumePendingNotifications recovery path still covers it.
+      })
+      .catch(() => {
+        /* transient GET failure — sessionStorage recovery path still covers it */
+      })
+  }
+
   // Retry from the generation-error state. Mirrors GenerateModal's locate Retry:
   // clear the failure and re-open the generate panel so the user re-initiates the
   // run explicitly (re-using the existing kickoff path — the empty-state →
@@ -880,6 +913,16 @@ export function PrototypeRoute() {
       router.push(prototypePath(prdId!))
     }
   }, [showToast, genProtoId, prdId, router])
+
+  // Mounted unconditionally, BEFORE the early-return chain below — this is
+  // the entire point. This route's own GenerationLoadingScreen instance sits
+  // behind that chain (one arm of it, not always mounted), so its SSE
+  // connection is torn down the moment genLoading flips false and the
+  // component swaps to a different render branch. This hook's own effect
+  // (keyed only on prototypeId) is not inside any branch that can unmount, so
+  // it keeps listening for the real backend terminal event after the overlay
+  // is gone — the exact gap the client's local 6-minute poll timeout exposed.
+  useDesignAgentLiveTerminal(genProtoId, handleLiveTerminal)
 
   // No PRD context (bare /prototype): there is nothing to generate from. Send the
   // user to the weekly brief, where a PRD opens in the right-rail card and offers

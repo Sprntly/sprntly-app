@@ -30,6 +30,11 @@ vi.hoisted(() => {
   ;(globalThis as Record<string, unknown>).React = require("react")
 })
 
+// Real (unmocked, via the ...actual spread on the lib/api mock below) —
+// controls whether useDesignAgentLiveTerminal's effect proceeds past its
+// `if (!token) return` guard far enough to construct an EventSource.
+import { setAccessTokenProvider } from "../../../lib/api"
+
 // ── Router / search-params (real PrototypeRoute reads useSearchParams + useRouter)
 const replace = vi.fn()
 const routerBack = vi.fn()
@@ -67,6 +72,18 @@ vi.mock("../../../components/screens/app/AppLayout", () => ({
 // ── GenerationLoadingScreen → inert stub (not under test here).
 vi.mock("../../../components/design-agent/GenerationLoadingScreen", () => ({
   GenerationLoadingScreen: () => null,
+}))
+
+// ── PostGenerationResult → trivial stub (mirrors PrototypeRoute.pidparam.test.tsx's
+//    established pattern) so the `if (proto) return …` ready branch can mount
+//    InTabCanvas without pulling in the full canvas/comments/iterate UI tree.
+vi.mock("../../../components/design-agent/PostGenerationResult", () => ({
+  PostGenerationResult: ({ prototype }: { prototype: { id: number } }) =>
+    React.createElement(
+      "div",
+      { "data-testid": "rendered-prototype" },
+      `prototype ${prototype.id}`,
+    ),
 }))
 
 // ── GenerateModal stub: exposes a button that fires onGenDone with whatever
@@ -131,7 +148,10 @@ vi.mock("../../../components/design-agent/notificationStore", async () => {
 })
 
 // ── api: getActiveByPrd resolves null (no existing/in-flight proto → generate
-//    panel), getByPrd null. Real GenerationErrorBanner / boundary are NOT mocked.
+//    panel), getByPrd null. `get` is controllable per-test (used by the new
+//    handleLiveTerminal re-fetch tests below). Real GenerationErrorBanner /
+//    boundary are NOT mocked.
+const { getProto } = vi.hoisted(() => ({ getProto: vi.fn() }))
 vi.mock("../../../lib/api", async () => {
   const actual = await vi.importActual<typeof import("../../../lib/api")>(
     "../../../lib/api",
@@ -142,6 +162,7 @@ vi.mock("../../../lib/api", async () => {
       ...actual.designAgentApi,
       getActiveByPrd: vi.fn(async () => null),
       getByPrd: vi.fn(async () => null),
+      get: (...args: [number]) => getProto(...args),
     },
   }
 })
@@ -155,6 +176,7 @@ beforeEach(() => {
   replace.mockClear()
   goTo.mockClear()
   markPending.mockClear()
+  getProto.mockReset()
 })
 
 afterEach(() => {
@@ -285,5 +307,169 @@ describe("PrototypeRoute — generation-failure recovery", () => {
       expect(screen.queryByTestId("prototype-route-gen-error")).toBeNull(),
     )
     expect(screen.queryByTestId("generation-error-banner")).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// useDesignAgentLiveTerminal mount + late-SSE-terminal-event handling
+// ---------------------------------------------------------------------------
+
+/** Minimal EventSource mock — same shape as useIterateRun.test.tsx's
+ *  MockEventSource (constructor captures the URL, `.emit(data)` simulates a
+ *  message, `.error()` simulates onerror, static instance tracking). Copied
+ *  by convention (test-local), not imported cross-file. */
+class MockEventSource {
+  url: string
+  onmessage: ((e: { data: string }) => void) | null = null
+  onerror: ((e: Event) => void) | null = null
+  close = vi.fn()
+
+  constructor(url: string) {
+    this.url = url
+    MockEventSource.instances.push(this)
+  }
+
+  emit(data: unknown) {
+    this.onmessage?.({ data: JSON.stringify(data) })
+  }
+
+  error() {
+    this.onerror?.(new Event("error"))
+  }
+
+  static instances: MockEventSource[] = []
+  static clear() {
+    MockEventSource.instances = []
+  }
+  static latest(): MockEventSource {
+    return MockEventSource.instances[MockEventSource.instances.length - 1]
+  }
+}
+
+async function flushMicrotasks() {
+  // getAccessToken() is itself async and awaits a resolved promise, so two
+  // microtask yields are needed before EventSource is constructed.
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
+describe("PrototypeRoute — useDesignAgentLiveTerminal (AC9/AC10/AC11)", () => {
+  beforeEach(() => {
+    MockEventSource.clear()
+    setAccessTokenProvider(() => Promise.resolve("test-bearer"))
+    vi.stubGlobal("EventSource", MockEventSource)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    setAccessTokenProvider(() => Promise.resolve(null))
+  })
+
+  it("test_use_design_agent_live_terminal_mounted_outside_gen_loading_branch — AC9: the hook's EventSource opens (and stays open) even while the route is in the genError branch, not only while genLoading is true", async () => {
+    await mountAndFail(
+      { ok: false, message: "boom" },
+      { kickoffId: 910 },
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId("prototype-route-gen-error")).toBeTruthy(),
+    )
+    await act(async () => {
+      await flushMicrotasks()
+    })
+
+    // The hook opened a connection for genProtoId (910) despite the route
+    // now being in the genError branch, not the genLoading branch.
+    const opened = MockEventSource.instances.find((es) =>
+      es.url.includes("/910/events"),
+    )
+    expect(opened).toBeTruthy()
+    expect(opened!.close).not.toHaveBeenCalled()
+  })
+
+  it("test_prototype_route_live_terminal_reveals_after_overlay_already_dismissed — AC10: a late SSE done event, after the poll already gave up and the overlay is gone, reveals the ready prototype in-tab", async () => {
+    await mountAndFail(
+      { ok: false, message: "Generation timed out (6 minutes)", timedOut: true },
+      { kickoffId: 920 },
+    )
+    // The overlay is gone (genLoading false) and no genError surfaced — the
+    // exact reported scenario: the user is back looking at the generate
+    // panel / empty state, unaware the run is still going.
+    expect(screen.queryByTestId("prototype-route-gen-error")).toBeNull()
+    await act(async () => {
+      await flushMicrotasks()
+    })
+
+    const es = MockEventSource.instances.find((e) => e.url.includes("/920/events"))
+    expect(es).toBeTruthy()
+
+    getProto.mockResolvedValue({
+      id: 920,
+      status: "ready",
+      bundle_url: "https://cdn.example/920/index.html",
+      error: null,
+      is_complete: false,
+      share_token: null,
+    })
+
+    await act(async () => {
+      es!.emit({ kind: "done" })
+      await flushMicrotasks()
+    })
+
+    await waitFor(() =>
+      expect(screen.getByTestId("rendered-prototype").textContent).toContain("920"),
+    )
+    expect(getProto).toHaveBeenCalledWith(920)
+  })
+
+  it("test_prototype_route_live_terminal_generating_status_is_noop — AC11: a re-fetch reporting status still 'generating' (race: event beat the DB read) is a no-op, no crash", async () => {
+    await mountAndFail(
+      { ok: false, message: "Generation timed out (6 minutes)", timedOut: true },
+      { kickoffId: 930 },
+    )
+    await act(async () => {
+      await flushMicrotasks()
+    })
+    const es = MockEventSource.instances.find((e) => e.url.includes("/930/events"))
+    expect(es).toBeTruthy()
+
+    getProto.mockResolvedValue({
+      id: 930,
+      status: "generating",
+      bundle_url: null,
+      error: null,
+    })
+
+    await act(async () => {
+      es!.emit({ kind: "done" })
+      await flushMicrotasks()
+    })
+
+    expect(getProto).toHaveBeenCalledWith(930)
+    expect(screen.queryByTestId("rendered-prototype")).toBeNull()
+    expect(screen.queryByTestId("prototype-route-gen-error")).toBeNull()
+  })
+
+  it("test_prototype_route_live_terminal_get_failure_does_not_throw — a rejected designAgentApi.get inside handleLiveTerminal degrades silently, not a throw into the SSE handler", async () => {
+    await mountAndFail(
+      { ok: false, message: "Generation timed out (6 minutes)", timedOut: true },
+      { kickoffId: 940 },
+    )
+    await act(async () => {
+      await flushMicrotasks()
+    })
+    const es = MockEventSource.instances.find((e) => e.url.includes("/940/events"))
+    expect(es).toBeTruthy()
+
+    getProto.mockRejectedValue(new Error("transient GET failure"))
+
+    await expect(
+      act(async () => {
+        es!.emit({ kind: "done" })
+        await flushMicrotasks()
+      }),
+    ).resolves.not.toThrow()
+
+    expect(screen.queryByTestId("rendered-prototype")).toBeNull()
   })
 })

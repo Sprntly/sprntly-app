@@ -176,6 +176,7 @@ export type GenerationLoadingScreenWiredProps = {
   prototypeId: number | null
   onCancel: () => void
   onNotifyWhenReady: () => void
+  onLiveTerminal?: (kind: "done" | "error") => void
 }
 
 export type UseGeneratePrototypeResult = {
@@ -353,6 +354,12 @@ export function useGeneratePrototype(
 
   const shownAtRef = useRef(0)
   const resolvedRef = useRef(false)
+  // True only once the client's own poll has given up via timeout — distinct
+  // from resolvedRef, which also flips true on a genuine success/failure.
+  // handleLiveTerminal gates on this narrower flag so a late SSE done event
+  // arriving a beat after a normal successful poll resolution does not fire a
+  // second, redundant "Prototype ready" toast.
+  const timedOutRef = useRef(false)
   const safetyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const minTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // The prototype to hand off (navigate / onSuccess) once the overlay actually
@@ -395,6 +402,7 @@ export function useGeneratePrototype(
       setGenProtoId(null)
       shownAtRef.current = Date.now()
       resolvedRef.current = false
+      timedOutRef.current = false
       notifyModeRef.current = false
       pendingResultRef.current = null
       setGenLoading(true)
@@ -464,6 +472,7 @@ export function useGeneratePrototype(
           // (written by markPending at kickoff) untouched so
           // resumePendingNotifications notifies honestly once the run truly
           // resolves.
+          timedOutRef.current = true
           clearOverlayTimers()
           return
         } else if (result && !result.ok) {
@@ -488,6 +497,7 @@ export function useGeneratePrototype(
             new CustomEvent("da:generating", { detail: { prototypeId: genProtoId } }),
           )
         }
+        timedOutRef.current = true
         clearOverlayTimers()
         setGenLoading(false)
         return
@@ -523,6 +533,38 @@ export function useGeneratePrototype(
       }
     },
     [hideLoading, clearOverlayTimers, showToast, onSuccess, router, prdId, skipExistenceCheck, onGenerationSettled, genProtoId],
+  )
+
+  // Late SSE terminal event, arriving from GenerationLoadingScreen's own
+  // stream after the client's local 6-minute poll already gave up. Gated on
+  // timedOutRef (NOT resolvedRef): resolvedRef also flips true on a genuine
+  // success/failure, and gating on it would fire a second, redundant toast
+  // when the SSE's own done event simply arrives a beat after a normal poll
+  // success. timedOutRef is true only when the client gave up without an
+  // answer — the one case with no other notification path yet.
+  const handleLiveTerminal = useCallback(
+    (_kind: "done" | "error") => {
+      if (!timedOutRef.current) return
+      if (genProtoId == null) return
+      designAgentApi
+        .get(genProtoId)
+        .then((proto) => {
+          if (proto.status !== "ready") return
+          // Same shape as the existing notify-mode success branch above —
+          // reused verbatim so useGenerationNotify's own poll dedupes via the
+          // same da:generating-done signal instead of double-notifying.
+          showToast("Prototype ready", "Your prototype finished generating.", "Open", {
+            persist: true,
+            onAction: () =>
+              onSuccess ? onSuccess(proto) : router.push(prototypePath(prdId)),
+          })
+          window.dispatchEvent(new CustomEvent("da:generating-done"))
+        })
+        .catch(() => {
+          /* transient GET failure — sessionStorage recovery path still covers it */
+        })
+    },
+    [genProtoId, showToast, onSuccess, router, prdId],
   )
 
   // Default "Notify me when ready" side effects — reproduces
@@ -619,6 +661,7 @@ export function useGeneratePrototype(
     prototypeId: genProtoId,
     onCancel: handleCancel,
     onNotifyWhenReady: handleNotifyWhenReady,
+    onLiveTerminal: handleLiveTerminal,
   }
 
   return {

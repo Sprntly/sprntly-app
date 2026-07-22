@@ -77,6 +77,7 @@ export function GenerationLoadingScreen({
   prototypeId,
   onNotifyWhenReady,
   onCancel,
+  onLiveTerminal,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   locatePhase: _locatePhase,
 }: {
@@ -101,6 +102,13 @@ export function GenerationLoadingScreen({
    *  best-effort (it halts future LLM turns, not the current one), so copy stays
    *  "Cancel" / "Stop generating" — never "instant abort". */
   onCancel?: () => void
+  /** Fired once, right after the SSE stream's own done/error branch flips
+   *  `isLiveDone`, with the terminal kind the stream reported. Optional and
+   *  purely additive — existing callers that don't pass it are unaffected.
+   *  Read via a ref inside the SSE effect so this prop's identity changing on
+   *  every render (neither current host memoizes it) never forces the SSE
+   *  effect itself to re-run. */
+  onLiveTerminal?: (kind: "done" | "error") => void
   /** The pre-build locate phase (locating / crumb / picker) emitted by
    *  GenerateModal. Reserved for the locate-in-loading-screen rollout; accepted
    *  here so PrototypeRoute can pass it without a type error. */
@@ -165,8 +173,17 @@ export function GenerationLoadingScreen({
   const [exiting, setExiting] = useState(false)
   const esRef = useRef<EventSource | null>(null)
 
+  // Read via a ref (updated every render, zero deps) rather than the prop
+  // directly — the SSE effect's onmessage closure reads this ref, so a new
+  // onLiveTerminal identity on every render (neither current host memoizes it)
+  // never forces the SSE effect itself to re-run.
+  const onLiveTerminalRef = useRef(onLiveTerminal)
   useEffect(() => {
-    if (!open || !prototypeId || mode !== "generate") {
+    onLiveTerminalRef.current = onLiveTerminal
+  })
+
+  useEffect(() => {
+    if (!prototypeId || mode !== "generate") {
       setLiveSteps([])
       setIsLiveDone(false)
       return
@@ -213,6 +230,7 @@ export function GenerationLoadingScreen({
                 ),
               )
               setIsLiveDone(true)
+              onLiveTerminalRef.current?.(event.kind)
               es.close()
               esRef.current = null
             }
@@ -221,10 +239,13 @@ export function GenerationLoadingScreen({
           }
         }
 
-        es.onerror = () => {
-          es.close()
-          esRef.current = null
-        }
+        // No eager close on transient error. EventSource has native
+        // browser-level auto-reconnect for transient network blips
+        // (backgrounded tab, brief hiccup) — eagerly closing here defeated
+        // reconnect for exactly the cases it exists for. The effect's own
+        // cleanup below still closes the connection on a genuine
+        // (prototypeId, mode) change or true unmount.
+        es.onerror = () => {}
       } catch {
         // degrade to cosmetic if EventSource construction fails
       }
@@ -239,7 +260,7 @@ export function GenerationLoadingScreen({
       setLiveSteps([])
       setIsLiveDone(false)
     }
-  }, [open, prototypeId, mode])
+  }, [prototypeId, mode])
 
   // ── onDone hook ────────────────────────────────────────────────────────────
   const prevOpen = useRef(open)
