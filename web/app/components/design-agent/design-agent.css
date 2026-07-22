@@ -3009,13 +3009,14 @@
    icon + text sit inline within the body row. */
 .design-agent-surface .da-activity-done-body {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  font-weight: 600;
-  color: var(--ink);
+  font-weight: 400;
+  color: var(--ink-2);
 }
 .design-agent-surface .da-activity-done-icon {
   flex-shrink: 0;
+  margin-top: 1px;
   width: 16px;
   height: 16px;
   display: inline-flex;
@@ -3025,6 +3026,9 @@
   color: var(--accent);
   border-radius: 50%;
   font-size: 10px;
+}
+.design-agent-surface .da-activity-terminal--done .da-activity-agent-label {
+  margin: 0 0 6px;
 }
 .design-agent-surface .da-activity-error {
   font-size: 12px;
