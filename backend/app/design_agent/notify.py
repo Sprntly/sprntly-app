@@ -18,6 +18,14 @@ Side-effect discipline (mirrors brief_nudge._deliver_to_one): this module
 NEVER raises — every failure path returns a `reason` dict — and log lines
 carry identifiers only (prototype ids, delivered flags, reason codes; never
 PRD titles/bodies, Slack display names, or token material).
+
+When the recipient's workspace has NO Slack connection at all
+(`_deliver_slack` returns `reason="slack_not_connected"`), the entry point
+retries once via the `email` provider — the same transactional-ping copy,
+sent through the existing drip-email transport. A connection that EXISTS but
+is broken (`token_unreadable` / `no_bot_token`) does NOT fall back to email;
+those indicate a live connection-level problem an operator should see, not a
+delivery gap to paper over.
 """
 from __future__ import annotations
 
@@ -30,7 +38,9 @@ from app.connectors import slack_oauth
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.db.connections import list_slack_connections
 from app.db.prds import get_prd
+from app.db.profiles import emails_for_user_ids
 from app.db.prototypes import get_prototype
+from app.drip_email import send_drip_email
 
 logger = logging.getLogger(__name__)
 
@@ -93,12 +103,58 @@ def _deliver_slack(
     return {"delivered": True, "provider": "slack", "reason": None}
 
 
+def _deliver_email(
+    *,
+    workspace_id: str,
+    recipient_user_id: str,
+    prototype_id: int,
+    text: str,
+    blocks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Email fallback provider arm — dispatched ONLY when the Slack provider
+    reports 'slack_not_connected' (see the fallback branch in
+    notify_prototype_ready). Resolves the recipient's email via the existing
+    profiles lookup (emails_for_user_ids) and sends the SAME title+deep-link
+    copy the Slack provider would have sent (the `text` field of the
+    channel-neutral payload) through the existing drip-email Resend
+    transport (send_drip_email) and its already-branded HTML template
+    (render_drip_html, applied internally by send_drip_email) — no new
+    sender, no new template.
+
+    `workspace_id` (email has no per-workspace concept) and `blocks`
+    (Slack-only) are accepted for call-site symmetry — every provider in the
+    registry is dispatched with the same normalized payload — but unused
+    here."""
+    del workspace_id, blocks
+    email = (emails_for_user_ids([recipient_user_id]) or {}).get(recipient_user_id)
+    if not email:
+        return {"delivered": False, "provider": "email", "reason": "no_email"}
+    # Subject is a static string, not threaded through the shared payload:
+    # adding a `subject` field would widen the channel-neutral payload and
+    # break test_provider_registry_dispatch's exact-key-set pin (Check 6
+    # below). Title + deep link both already live in `text`, which becomes
+    # the email body — the recipient reads the identical content either
+    # channel would have shown them.
+    ok = send_drip_email(
+        to_email=email,
+        subject="Your prototype is ready",
+        body_text=text,
+    )
+    if not ok:
+        return {"delivered": False, "provider": "email", "reason": "send_failed"}
+    return {"delivered": True, "provider": "email", "reason": None}
+
+
 # Provider registry: name → callable taking the normalized payload. Adding a
 # channel = one function above + one entry here (+ config to select it).
-_PROVIDERS: dict[str, Callable[..., dict[str, Any]]] = {"slack": _deliver_slack}
+_PROVIDERS: dict[str, Callable[..., dict[str, Any]]] = {
+    "slack": _deliver_slack,
+    "email": _deliver_email,
+}
 
 # Which provider the completion hook uses today. A future channel answer
-# (Teams / shared channel / email) swaps this via config — not the call-site.
+# (Teams / shared channel) swaps this via config — not the call-site. Email
+# is fallback-only (see notify_prototype_ready) and never the default.
 _DEFAULT_PROVIDER = "slack"
 
 
@@ -154,16 +210,27 @@ def notify_prototype_ready(*, prototype_id: int, workspace_id: str) -> dict[str,
         deliver = _PROVIDERS[provider_name]
         # The normalized payload every provider receives — channel-neutral by
         # contract (the seam's whole point; pinned by the registry tests).
-        return _log_outcome(
-            prototype_id,
-            deliver(
-                workspace_id=workspace_id,
-                recipient_user_id=recipient_user_id,
-                prototype_id=prototype_id,
-                text=text,
-                blocks=blocks,
-            ),
+        payload = dict(
+            workspace_id=workspace_id,
+            recipient_user_id=recipient_user_id,
+            prototype_id=prototype_id,
+            text=text,
+            blocks=blocks,
         )
+        outcome = deliver(**payload)
+        # Slack -> email fallback (this ticket): ONLY when the default
+        # provider is "slack" and it reports the recipient has NO Slack
+        # connection at all ("slack_not_connected"). A connection that
+        # EXISTS but is broken ("token_unreadable" / "no_bot_token") does
+        # NOT fall back here — see the module docstring / Context.
+        if (
+            provider_name == "slack"
+            and not outcome.get("delivered")
+            and outcome.get("reason") == "slack_not_connected"
+        ):
+            provider_name = "email"
+            outcome = _PROVIDERS["email"](**payload)
+        return _log_outcome(prototype_id, outcome)
     except Exception as exc:  # noqa: BLE001 — a notify failure never propagates.
         # Identifiers + error class only: the exception text can carry Slack
         # API detail we don't want in logs.

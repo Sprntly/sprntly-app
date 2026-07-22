@@ -777,6 +777,7 @@ def _generate_fanout(
     max_parallel: int,
     stats_out: Optional[dict] = None,
     on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
+    on_plan: Optional[Callable[[list[dict], int], None]] = None,
 ) -> list[Story]:
     """Fan-out: plan the ticket set, then expand batches in parallel.
 
@@ -790,6 +791,13 @@ def _generate_fanout(
     accumulated so far. Lets the caller stream partial results to the UI instead
     of blocking on the whole set. Exceptions from the callback are swallowed so
     a display hiccup never breaks generation.
+
+    `on_plan(stubs, total_batches)` — when given, fires ONCE as soon as the
+    plan leg completes (~20-35s in), before any enrich call. Carries the full
+    stub roster so the caller can render skeleton tickets immediately — without
+    it the UI shows nothing until the first enrich batch lands, which on a
+    single-wave run (batches <= max_parallel) is the very END of the run.
+    Exceptions are swallowed like on_batch.
     """
     t0 = time.monotonic()
     stubs, plan_result = _plan_tickets(
@@ -806,6 +814,11 @@ def _generate_fanout(
     batches = [stubs[i : i + bs] for i in range(0, len(stubs), bs)]
     all_titles = [str(s.get("title")).strip() for s in stubs]
     total = len(batches)
+    if on_plan is not None:
+        try:
+            on_plan([dict(s) for s in stubs], total)
+        except Exception:  # noqa: BLE001 — a display hiccup never breaks gen
+            logger.exception("ticket on_plan callback failed (continuing)")
 
     enriched: list[tuple[list[Story], Any]] = []
     # Dedup by content id (stable_id) as batches land — batches are disjoint by
@@ -884,20 +897,22 @@ def generate_from_input(
     max_parallel: int = DEFAULT_MAX_PARALLEL,
     stats_out: Optional[dict] = None,
     on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
+    on_plan: Optional[Callable[[list[dict], int], None]] = None,
 ) -> list[Story]:
     """Generate tickets from an already-assembled model input string.
 
     The strategy-dispatch core shared by the DB-backed `generate_user_stories`
     and the benchmark harness (which feeds a PRD markdown fixture directly, no
     DB). `strategy` is "single" (one big call, the baseline) or "fanout" (plan →
-    parallel enrich). `on_batch` streams partial results (fanout only). Never
-    persists — callers own persistence.
+    parallel enrich). `on_batch` streams partial results and `on_plan` the
+    planned stub roster (both fanout only). Never persists — callers own
+    persistence.
     """
     if strategy == "fanout":
         return _generate_fanout(
             enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
             batch_size=batch_size, max_parallel=max_parallel, stats_out=stats_out,
-            on_batch=on_batch,
+            on_batch=on_batch, on_plan=on_plan,
         )
     return _generate_single(
         enterprise_id, prd_input=prd_input, purpose=purpose, model=model,
@@ -916,6 +931,7 @@ def generate_user_stories(
     max_parallel: int = DEFAULT_MAX_PARALLEL,
     stats_out: Optional[dict] = None,
     on_batch: Optional[Callable[[list[Story], int, int], None]] = None,
+    on_plan: Optional[Callable[[list[dict], int], None]] = None,
 ) -> list[Story]:
     """Generate tickets for a company from a PRD or a free-form insight.
 
@@ -926,7 +942,8 @@ def generate_user_stories(
     `strategy` selects the generation path: "single" (baseline, one big call) or
     "fanout" (decompose then enrich batches in parallel). Output contract is
     identical; only latency differs. `on_batch` (fanout only) streams partial
-    tickets as each batch completes.
+    tickets as each batch completes; `on_plan` (fanout only) delivers the
+    planned stub roster before enrichment starts.
     """
     if (prd_id is None) == (insight is None):
         raise ValueError("provide exactly one of prd_id or insight")
@@ -950,6 +967,7 @@ def generate_user_stories(
         max_parallel=max_parallel,
         stats_out=stats,
         on_batch=on_batch,
+        on_plan=on_plan,
     )
     # Resolved model / prompt-version for the decision log come from the last
     # underlying call (both paths populate `stats["calls"]`).

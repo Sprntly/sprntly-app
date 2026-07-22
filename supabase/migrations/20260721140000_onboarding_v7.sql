@@ -25,6 +25,7 @@
 -- replaced, not appended to).
 alter table company_document
     drop constraint if exists company_document_doc_type_check;
+
 alter table company_document
     add constraint company_document_doc_type_check
         check (doc_type in (
@@ -54,6 +55,7 @@ alter table company_document
 -- exactly the semantics we want.
 alter table companies
     drop constraint if exists companies_brief_insight_types_check;
+
 alter table companies
     add constraint companies_brief_insight_types_check
         check (

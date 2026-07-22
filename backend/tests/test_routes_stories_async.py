@@ -64,6 +64,95 @@ def test_poll_streams_partial_batches_before_ready(isolated_settings, monkeypatc
     assert "progress" not in final, "progress cleared once complete"
 
 
+def test_poll_surfaces_planned_stubs_before_any_batch(isolated_settings, monkeypatch):
+    """The plan leg publishes the stub roster long before the first enrich batch
+    — a poll in that window sees `stubs` + a zero-progress counter (skeleton
+    rows), and the roster disappears once the run is ready."""
+    gate = threading.Event()
+
+    def _staged(cid, prd_id=None, insight=None, on_batch=None, on_plan=None, **kw):
+        on_plan(
+            [
+                {"title": "A", "summary": "do A", "prd_section": "Part A §5 R1",
+                 "ears_ids": ["E1"]},  # extra fields must not leak to the client
+                {"title": "B"},
+                {"title": ""},  # untitled model junk is dropped
+            ],
+            2,
+        )
+        gate.wait(2)  # hold in 'generating' so the test can observe the stubs
+        both = [Story(title="A", body="b"), Story(title="B", body="b")]
+        on_batch(both, 2, 2)
+        return both
+
+    monkeypatch.setattr(stories, "generate_user_stories", _staged)
+
+    async def _flow():
+        resp = await stories.generate(stories.GenerateIn(insight="x"), _ctx())
+        jid = resp["job_id"]
+        mid = None
+        for _ in range(100):
+            await asyncio.sleep(0.02)
+            j = stories.get_job(jid, _ctx())
+            if j["status"] == "generating" and j.get("stubs"):
+                mid = j
+                break
+        assert mid is not None, "planned stubs never surfaced in the poll"
+        assert mid["stubs"] == [
+            {"title": "A", "summary": "do A", "prd_section": "Part A §5 R1"},
+            {"title": "B", "summary": "", "prd_section": ""},
+        ]
+        assert mid["progress"] == {"done": 0, "total": 2}
+        assert "stories" not in mid, "no full ticket exists yet"
+        gate.set()
+        await _drain(jid)
+        return stories.get_job(jid, _ctx())
+
+    final = asyncio.run(_flow())
+    assert final["status"] == "ready"
+    assert [s["title"] for s in final["stories"]] == ["A", "B"]
+    assert "stubs" not in final, "the roster is gone once the real set exists"
+
+
+def test_impl_spec_warm_deferred_until_generation_completes(
+    isolated_settings, monkeypatch
+):
+    """The Part B pre-warm must NOT run alongside generation — it used to fire
+    at kick time and compete with this very run's enrich shards for the LLM
+    gate (93.6s slot waits observed on prod). It now runs after the job is
+    ready, purely for the NEXT regenerate to inherit AC from."""
+    warm_calls: list[int] = []
+
+    async def _fake_warm(prd_id, ctx=None):
+        warm_calls.append(prd_id)
+
+    monkeypatch.setattr(stories, "warm_impl_spec", _fake_warm)
+    gate = threading.Event()
+
+    def _gen(cid, prd_id=None, insight=None, **kw):
+        gate.wait(2)
+        return [Story(title="A", body="b")]
+
+    monkeypatch.setattr(stories, "generate_user_stories", _gen)
+
+    async def _flow():
+        resp = await stories.generate(stories.GenerateIn(prd_id=7), _ctx())
+        jid = resp["job_id"]
+        await asyncio.sleep(0.1)  # generation is parked on the gate
+        assert warm_calls == [], "warm ran while generation was still in flight"
+        gate.set()
+        await _drain(jid)
+        for _ in range(100):  # the warm task is scheduled after ready — let it run
+            if warm_calls:
+                break
+            await asyncio.sleep(0.02)
+        assert warm_calls == [7]
+        return stories.get_job(jid, _ctx())
+
+    final = asyncio.run(_flow())
+    assert final["status"] == "ready"
+
+
 def test_generate_returns_job_id_then_polls_ready(isolated_settings, monkeypatch):
     monkeypatch.setattr(
         stories, "generate_user_stories",

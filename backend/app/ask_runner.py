@@ -66,7 +66,12 @@ _ASK_RESPONSE_SCHEMA: dict = {
 
 
 def _generate_one_sync(dataset: str, question: str) -> dict:
-    """Run the same Anthropic call that /v1/ask would run for a given Q."""
+    """Run the same Anthropic call that /v1/ask would run for a given Q.
+
+    Only the warm paths call this (a user's ask goes through
+    `compose_ask_answer`), so the call rides the LLM gate's low-priority
+    background lane — pre-warming Ask answers must never queue a user's own
+    generation behind it."""
     corpus = load_corpus(dataset)
     cacheable = f"Source material:\n\n{corpus.joined()}"
     user = ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
@@ -90,6 +95,7 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
             user_cacheable_prefix=cacheable,
             schema=_ASK_RESPONSE_SCHEMA,
             max_tokens=12000,
+            background=True,
         )
 
 

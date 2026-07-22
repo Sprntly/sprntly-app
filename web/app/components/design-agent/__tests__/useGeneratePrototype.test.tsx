@@ -201,7 +201,7 @@ describe("useGeneratePrototype — handleCtaClick view re-verify", () => {
 })
 
 describe("useGeneratePrototype — onGenDone terminal outcomes", () => {
-  it("default path navigates once on success with no onSuccess supplied", async () => {
+  it("test_handle_gen_done_success_still_shows_no_toast — default path navigates once on success with no onSuccess supplied, AC6 regression pin", async () => {
     getByPrd.mockResolvedValue(null)
     let latest!: UseGeneratePrototypeResult
     render(
@@ -218,6 +218,7 @@ describe("useGeneratePrototype — onGenDone terminal outcomes", () => {
     })
     expect(push).toHaveBeenCalledTimes(1)
     expect(push).toHaveBeenCalledWith(prototypePath(11))
+    expect(showToast).not.toHaveBeenCalled()
   })
 
   it("calls onSuccess instead of navigating when supplied", async () => {
@@ -259,7 +260,7 @@ describe("useGeneratePrototype — onGenDone terminal outcomes", () => {
     expect(push).not.toHaveBeenCalled()
   })
 
-  it("test_handle_gen_done_genuine_failure_unchanged — AC11 regression pin: a genuine (timedOut absent) failure calls neither showToast, onSuccess, nor push from within the hook", async () => {
+  it("test_handle_gen_done_genuine_failure_now_shows_toast — AC1 regression pin: a genuine (timedOut absent) failure shows a persistent failure toast with curated copy", async () => {
     const onSuccess = vi.fn()
     let latest!: UseGeneratePrototypeResult
     render(
@@ -274,9 +275,64 @@ describe("useGeneratePrototype — onGenDone terminal outcomes", () => {
     await act(async () => {
       latest.generateModalProps.onGenDone({ ok: false, message: "boom" })
     })
-    expect(showToast).not.toHaveBeenCalled()
-    expect(onSuccess).not.toHaveBeenCalled()
-    expect(push).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledTimes(1)
+    expect(showToast).toHaveBeenCalledWith(
+      "Generation failed",
+      reasonCopy("boom"),
+      undefined,
+      { persist: true },
+    )
+  })
+
+  it("test_handle_gen_done_genuine_failure_dismisses_overlay_in_same_act_as_toast — AC2", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={34}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(504)
+    })
+    expect(latest.loadingScreenProps.open).toBe(true)
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: false, message: "boom" })
+    })
+
+    expect(latest.loadingScreenProps.open).toBe(false)
+    expect(showToast).toHaveBeenCalledWith(
+      "Generation failed",
+      reasonCopy("boom"),
+      undefined,
+      { persist: true },
+    )
+  })
+
+  it("test_handle_gen_done_genuine_failure_second_call_is_noop — AC4", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={35}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: false, message: "boom" })
+    })
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: false, message: "different" })
+    })
+
+    expect(showToast).toHaveBeenCalledTimes(1)
   })
 })
 
@@ -438,6 +494,33 @@ describe("useGeneratePrototype — handleGenDone timedOut branch (non-notify-mod
       "Still generating",
       "This is taking longer than expected — we'll notify you when it's ready.",
     )
+  })
+
+  it("test_handle_gen_done_timed_out_never_shows_generation_failed_toast — AC5 boundary pin: the new genuine-failure branch cannot fire for a timed-out result", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={37}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(505)
+    })
+
+    await act(async () => {
+      latest.generateModalProps.onGenDone({
+        ok: false,
+        timedOut: true,
+        message: "Generation timed out (6 minutes)",
+      })
+    })
+
+    expect(showToast.mock.calls.some((call) => call[0] === "Generation failed")).toBe(false)
   })
 })
 

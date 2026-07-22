@@ -16,7 +16,7 @@ import { useRouter } from "next/navigation"
 import {
   ApiError, storiesApi,
   type ClickUpList, type ClickUpTicketState, type GeneratedStory,
-  type JiraProject, type TicketSyncState, type TrackerMeta,
+  type JiraProject, type TicketStub, type TicketSyncState, type TrackerMeta,
   type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
@@ -633,6 +633,29 @@ function StoryRow({ story, index, onOpen, synced, tool }: {
   )
 }
 
+// A planned-but-not-yet-written ticket (fan-out plan stub): same card shape as
+// StoryRow so the list doesn't reflow when the full ticket replaces it, but
+// dimmed and inert — there's no detail to open yet.
+function StubRow({ stub, index }: { stub: TicketStub; index: number }) {
+  return (
+    <div
+      className="tkv2-card"
+      data-testid="ticket-skeleton"
+      aria-busy="true"
+      style={{ opacity: 0.55, cursor: "default" }}
+    >
+      <span className="tkv2-key">{`T-${index + 1}`}</span>
+      <div className="tkv2-card-main">
+        <div className="tkv2-card-title">{stub.title}</div>
+        <div className="tkv2-story">
+          {stub.summary || "Writing this ticket…"}
+          {stub.prd_section ? <span className="ctx"> Context: {stub.prd_section}</span> : null}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Ticket trackers ──────────────────────────────────────────────────────────
 // The task-management tools tickets can sync with — derived from the
 // connector catalog's TYPES (connectors typed "task-management" that the
@@ -689,6 +712,9 @@ export function TicketsTab() {
         streaming?: boolean
         /** Batch progress while `streaming`, e.g. {done: 2, total: 4}. */
         progress?: { done: number; total: number }
+        /** The planned roster (fan-out plan leg, ~20-35s in). Stubs not yet
+         *  covered by a landed story render as skeleton rows. */
+        pendingStubs?: TicketStub[]
       }
     | { kind: "error"; message: string }
   const [genState, setGenState] = useState<GenState>({ kind: "idle" })
@@ -697,6 +723,15 @@ export function TicketsTab() {
   const refreshError = genState.kind === "ready" ? genState.refreshError ?? null : null
   const streaming = genState.kind === "ready" && Boolean(genState.streaming)
   const streamProgress = genState.kind === "ready" ? genState.progress ?? null : null
+  // Planned-but-not-yet-written tickets: the stub roster minus any title a
+  // landed story already covers (titles are unique within a plan by contract).
+  const landedTitles = new Set(stories.map((s) => s.title.trim().toLowerCase()))
+  const skeletonStubs =
+    genState.kind === "ready" && genState.streaming
+      ? (genState.pendingStubs ?? []).filter(
+          (st) => !landedTitles.has(st.title.trim().toLowerCase()),
+        )
+      : []
 
   // Which ticket (if any) is open in the in-panel editable detail view.
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
@@ -779,15 +814,18 @@ export function TicketsTab() {
             fail(new Error(j.error || "Couldn't generate tickets"))
           } else {
             // Still generating. On a FIRST generation (nothing older on screen),
-            // stream the partial set as fan-out batches land instead of holding a
-            // blank spinner. While REFRESHING an edited PRD we keep the previous
-            // complete set untouched — swapping it for a partial would flicker.
-            if (!prevStories?.length && j.stories?.length) {
+            // stream in what exists: the planned stub roster first (skeleton
+            // rows, ~20-35s in), then the partial set as fan-out batches land —
+            // instead of holding a blank spinner. While REFRESHING an edited PRD
+            // we keep the previous complete set untouched — swapping it for a
+            // partial would flicker.
+            if (!prevStories?.length && (j.stories?.length || j.stubs?.length)) {
               setGenState({
                 kind: "ready",
-                stories: j.stories,
+                stories: j.stories ?? [],
                 streaming: true,
                 progress: j.progress,
+                pendingStubs: j.stubs,
               })
             }
             timer = setTimeout(() => poll(jobId), 2000)
@@ -1108,8 +1146,9 @@ export function TicketsTab() {
   // A ready-but-empty result means generation didn't return any tickets (a
   // transient/truncated run — a real PRD always yields some). Don't show the
   // "0 tickets" success chrome; offer a retry instead. The empty set was not
-  // cached (backend), so Regenerate re-runs cleanly.
-  if (genState.kind === "ready" && stories.length === 0) {
+  // cached (backend), so Regenerate re-runs cleanly. NOT hit mid-stream: with
+  // no landed story yet the planned roster still renders as skeleton rows.
+  if (genState.kind === "ready" && stories.length === 0 && skeletonStubs.length === 0) {
     return (
       <div className="cpanel-empty" data-testid="tickets-empty">
         <IconSparkle size={20} />
@@ -1280,7 +1319,9 @@ export function TicketsTab() {
       {streaming && (
         <div className="tkt-push-status" data-testid="tickets-streaming">
           <span className="tkv2-spin" aria-hidden style={{ verticalAlign: "-2px", marginRight: 6 }}><IconRefresh size={13} /></span>
-          Generating tickets{streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}. Showing them as they land…
+          {stories.length === 0 && skeletonStubs.length > 0
+            ? `Planned ${skeletonStubs.length} ticket${skeletonStubs.length !== 1 ? "s" : ""} — writing them now…`
+            : `Generating tickets${streamProgress ? ` — batch ${streamProgress.done} of ${streamProgress.total}` : ""}. Showing them as they land…`}
         </div>
       )}
       {refreshing && (
@@ -1318,7 +1359,9 @@ export function TicketsTab() {
         <span className="tkv2-spark">✳</span>
         <div>
           I&apos;ve broken <em>{prdTitle}</em> into{" "}
-          <b>{stories.length} implementable ticket{stories.length !== 1 ? "s" : ""}</b> — scoped and
+          {/* While streaming, count the whole planned set (landed + skeletons)
+              so the number doesn't creep up batch by batch. */}
+          <b>{stories.length + skeletonStubs.length} implementable ticket{stories.length + skeletonStubs.length !== 1 ? "s" : ""}</b> — scoped and
           prioritized from the PRD. Review, then push to your tracker.
         </div>
       </div>
@@ -1330,6 +1373,13 @@ export function TicketsTab() {
             synced={s.id ? syncState?.statuses?.[s.id] : undefined}
             tool={currentTool}
           />
+        ))}
+        {/* Planned-but-not-yet-written tickets: the plan leg finishes ~20-35s
+            in, so the user sees the full roster as skeletons long before the
+            first enriched batch lands (on single-wave runs that's the very
+            end of the run). */}
+        {skeletonStubs.map((st, i) => (
+          <StubRow key={`stub-${st.title}`} stub={st} index={stories.length + i} />
         ))}
       </div>
 

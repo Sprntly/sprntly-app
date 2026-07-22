@@ -369,3 +369,52 @@ describe("no new palette (AC6)", () => {
     }
   })
 })
+
+// ── Reskinned viewer placeholder (iterate-reload load mask) ────────────────
+describe("viewer placeholder layout matches the bundle-loading cover", () => {
+  it("test_design_agent_css_viewer_placeholder_matches_bundle_loading_layout", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-viewer-placeholder\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("display: flex")
+    expect(rule).toContain("align-items: center")
+    expect(rule).toContain("justify-content: center")
+    expect(rule).toContain("backdrop-filter: blur(")
+  })
+})
+
+describe("public chrome PrototypeViewer mount stays timing-unaffected", () => {
+  it("test_public_chrome_prototype_viewer_has_no_on_bundle_load_prop", () => {
+    const start = PUBLIC_CHROME.indexOf("<PrototypeViewer")
+    expect(start).toBeGreaterThan(-1)
+    // The mount's own self-closing `/>` sits at the SAME indent as the opening
+    // tag; nested JSX (e.g. headControls/stageOverlay children) closes at a
+    // deeper indent, so matching on indent (not the first `/>` seen) finds the
+    // mount's real end rather than a nested self-closing child element.
+    const lineStart = PUBLIC_CHROME.lastIndexOf("\n", start) + 1
+    const indent = PUBLIC_CHROME.slice(lineStart, start)
+    const closeMarker = `\n${indent}/>`
+    const end = PUBLIC_CHROME.indexOf(closeMarker, start)
+    expect(end).toBeGreaterThan(start)
+    const block = PUBLIC_CHROME.slice(start, end)
+    expect(block).not.toContain("onBundleLoad=")
+  })
+})
+
+describe("bundle-loading cover has no fade-in (residual-exposure closure)", () => {
+  it("test_da_bundle_loading_has_no_fade_in_animation", () => {
+    // A mount-time opacity ramp would technically paint whatever sits
+    // underneath (including a raw error body) at near-zero opacity during
+    // its opening frames — the cover must render at full strength the
+    // instant it mounts, with no animation at all.
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-bundle-loading\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).not.toMatch(/animation:/)
+    expect(CSS).not.toContain("@keyframes da-bundle-fade")
+  })
+})
