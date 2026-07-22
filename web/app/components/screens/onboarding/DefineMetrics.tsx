@@ -108,7 +108,9 @@ export function DefineMetrics() {
       // Persist the confirmed definitions (best-effort content, hard save),
       // then run the shared closer (first brief + complete onboarding).
       if (defs.length) await saveMetricDefinitions(workspace.id, defs)
-      await finishOnboardingAndEnterApp(workspace, auth.user.id, setContent)
+      // define-metrics is only reached with a live analytics connection, which
+      // is itself a data source — so always kick the first brief here.
+      await finishOnboardingAndEnterApp(workspace, auth.user.id, setContent, true)
       router.replace(POST_ONBOARDING_PATH)
     } catch (e) {
       setError(

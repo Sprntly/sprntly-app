@@ -231,21 +231,30 @@ export function connectableCatalog(
 // ── Information-gathering connectors ─────────────────────────────────────────
 //
 // The Top Insights brief is synthesized from connectors that BRING IN evidence
-// about the product and its customers. Three categories don't do that, so they
-// can't satisfy the brief on their own:
+// about the product and its customers — the "data sources". Four categories
+// don't do that, so they can't satisfy the brief on their own and don't count
+// as a data source:
 //
 //   comms  Slack / Teams  — a DELIVERY target (where the brief gets posted),
-//                           not a source of findings.
+//                           not a source of findings. (Email is a delivery
+//                           destination too, not a connector at all.)
 //   pm     Jira / ClickUp / Asana — where work is TRACKED once decided; the
 //                           brief's output flows to them, not from them.
 //   code   GitHub         — what was BUILT, not what users need.
+//   design Figma / Framer — design surfaces, not customer/product signal.
 //
-// Everything else (analytics, voice, crm, monitoring, design, docs, revenue)
-// feeds the brief. Defined as a deny-list of category keys rather than an
-// allow-list so a new evidence category added to CONNECTOR_CATALOG counts
-// automatically — the failure mode is "brief attempts to generate", which is
-// far safer than silently blocking it behind an empty state.
-export const NON_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set(["comms", "pm", "code"])
+// Everything else (analytics, voice = support/calls/feedback, crm, monitoring,
+// docs, revenue) is a data source and feeds the brief. Defined as a deny-list
+// of category keys rather than an allow-list so a new evidence category added
+// to CONNECTOR_CATALOG counts automatically. Note this is CATEGORY-based, so
+// Intercom (category `voice`, though its type is `communication`) correctly
+// counts as customer-support evidence.
+export const NON_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set([
+  "comms",
+  "pm",
+  "code",
+  "design",
+])
 
 /** Provider ids in the evidence-bearing categories (see NON_EVIDENCE_CATEGORIES). */
 const EVIDENCE_PROVIDER_IDS: ReadonlySet<string> = new Set(
@@ -268,6 +277,22 @@ export function isEvidenceConnector(id: string): boolean {
  */
 export function hasEvidenceConnector(connectedIds: readonly string[]): boolean {
   return connectedIds.some(isEvidenceConnector)
+}
+
+/**
+ * True iff the workspace has at least one ACTIVE "data source" connection — an
+ * evidence-bearing connector (see NON_EVIDENCE_CATEGORIES). This is the gate for
+ * whether onboarding kicks the first brief: a real data source (analytics,
+ * customer support/calls/feedback, CRM, revenue, monitoring, docs) must be
+ * connected before we generate. Slack/Teams/Email, Jira & PM tools, GitHub, and
+ * Figma do NOT count. Onboarding info alone never produces a brief.
+ */
+export function hasDataSourceConnection(
+  connections: readonly { provider: string; status: string }[],
+): boolean {
+  return hasEvidenceConnector(
+    connections.filter((c) => c.status === "active").map((c) => c.provider),
+  )
 }
 
 // ── Connector types ──────────────────────────────────────────────────────────
