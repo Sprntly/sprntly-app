@@ -170,15 +170,34 @@ def _all_call_text(client: _RecordingClient) -> str:
 # ─── Pure helper — creation / projection (AC1) ──────────────────────────────
 
 
-def test_project_next_iter_cost_doubles_current():
+def test_project_next_iter_cost_scales_by_iteration_average():
     usage = RunUsage(output_tokens=1_000)  # $0.015 current
     current = usage.est_cost_usd(SONNET)
     assert current > 0
-    assert project_next_iter_cost(usage, SONNET) == pytest.approx(2 * current)
+    # Boundary case: at iters=1 the average-rate formula (current × (1 + 1/1))
+    # coincides with the old flat-doubling formula — a genuine regression pin,
+    # not just algebraic coincidence.
+    assert project_next_iter_cost(usage, SONNET, iters=1) == pytest.approx(2 * current)
+    # The direct proof of the fix: at iters=16 the projection is current ×
+    # 17/16, NOT current × 2 — the two formulas diverge past iters=1.
+    assert project_next_iter_cost(usage, SONNET, iters=16) == pytest.approx(current * 17 / 16)
+    assert project_next_iter_cost(usage, SONNET, iters=16) < 2 * current
 
 
 def test_project_next_iter_cost_zero_on_empty_usage():
-    assert project_next_iter_cost(RunUsage(), SONNET) == 0.0
+    assert project_next_iter_cost(RunUsage(), SONNET, iters=1) == 0.0
+
+
+def test_project_next_iter_cost_zero_on_iters_zero():
+    # New defensive branch: iters<=0 returns 0.0 even with non-empty usage.
+    usage = RunUsage(output_tokens=1_000)
+    assert project_next_iter_cost(usage, SONNET, iters=0) == 0.0
+
+
+def test_project_next_iter_cost_negative_iters_returns_zero():
+    # Same defensive branch as iters=0 — must not raise or misbehave.
+    usage = RunUsage(output_tokens=1_000)
+    assert project_next_iter_cost(usage, SONNET, iters=-1) == 0.0
 
 
 # ─── Pure helper — soft-cap decision (AC2) ──────────────────────────────────
@@ -187,19 +206,19 @@ def test_project_next_iter_cost_zero_on_empty_usage():
 def test_should_wrap_up_true_at_and_above_cap():
     # Clearly above: projection $0.60 >= $0.50.
     over = RunUsage(output_tokens=_OVER_CAP_OUT)
-    assert should_wrap_up(over, SONNET, 0.50) is True
+    assert should_wrap_up(over, SONNET, 0.50, iters=1) is True
     # Boundary-exact (inclusive): cap == projection -> True. Computed from the
     # usage itself so the equality is exact regardless of token granularity.
-    proj = project_next_iter_cost(over, SONNET)
-    assert should_wrap_up(over, SONNET, proj) is True
+    proj = project_next_iter_cost(over, SONNET, iters=1)
+    assert should_wrap_up(over, SONNET, proj, iters=1) is True
 
 
 def test_should_wrap_up_false_below_cap():
     under = RunUsage(output_tokens=_UNDER_CAP_OUT)  # projection $0.03
-    assert should_wrap_up(under, SONNET, 0.50) is False
+    assert should_wrap_up(under, SONNET, 0.50, iters=1) is False
     # Just above the projection the cap is not reached.
-    proj = project_next_iter_cost(under, SONNET)
-    assert should_wrap_up(under, SONNET, proj + 1e-9) is False
+    proj = project_next_iter_cost(under, SONNET, iters=1)
+    assert should_wrap_up(under, SONNET, proj + 1e-9, iters=1) is False
 
 
 # ─── Pure helper — fail closed + single pricing table (AC3) ─────────────────
@@ -208,9 +227,9 @@ def test_should_wrap_up_false_below_cap():
 def test_cost_guard_helpers_fail_closed_unknown_model():
     usage = RunUsage(output_tokens=1_000)
     with pytest.raises(UnknownModelError):
-        project_next_iter_cost(usage, "claude-not-a-real-model")
+        project_next_iter_cost(usage, "claude-not-a-real-model", iters=1)
     with pytest.raises(UnknownModelError):
-        should_wrap_up(usage, "claude-not-a-real-model", 0.50)
+        should_wrap_up(usage, "claude-not-a-real-model", 0.50, iters=1)
 
 
 def test_single_pricing_table():
@@ -384,6 +403,43 @@ def test_cost_summary_log_still_emitted_with_guard(monkeypatch, caplog):
     assert "jane.doe@example.com" not in guard_msg
 
 
+# ─── Iteration-aware projection regression (AC4) ────────────────────────────
+
+
+def test_multi_iteration_run_does_not_prematurely_abort(monkeypatch):
+    # Direct reproduction of the production incident: 16 iterations of modest
+    # per-turn output land cumulative spend near $2.61 at sonnet pricing — the
+    # SAME real numbers as the incident (est_cost_usd≈2.6108 at iters=16). At
+    # iters=16, the old flat-doubling formula computes 2.61 × 2 ≈ $5.22, which
+    # crosses the $5.00 hard cap and aborts a run that should complete. The
+    # iteration-aware formula computes 2.61 × 17/16 ≈ $2.77, well under the cap.
+    #
+    # Fails on unfixed code: the old `project_next_iter_cost` (flat × 2, no
+    # `iters` awareness) would abort this run at iteration 16.
+    per_iter_out = 10_878  # 10_878 * 1.5e-5 $/tok ≈ $0.16317/iter
+    responses = [
+        _msg("tool_use", [_tool_use(f"t{i}", "view", {"path": "x"})],
+             usage=_usage(out=per_iter_out))
+        for i in range(1, 16)
+    ]
+    responses.append(_msg("end_turn", [_text("done")], usage=_usage(out=per_iter_out)))
+    client = _install_client(monkeypatch, responses)
+    _stub_dispatch(monkeypatch)
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+
+    # At minimum, the run must not be aborted by the cost guard through
+    # iteration 16 — the direct proof of the fix. The harness also reaches
+    # convergence in exactly 16 turns here, so we assert the stronger outcome.
+    assert result.status != "aborted"
+    assert result.status == "complete"
+    assert result.iters == 16
+    assert len(client.calls) == 16
+    # Sanity-check the incident's own numbers are actually being reproduced.
+    final_cost = result.usage.est_cost_usd(SONNET)
+    assert final_cost == pytest.approx(per_iter_out * 16 * 15.0 / 1_000_000)
+    assert 2.5 < final_cost < 2.7
+
+
 # ─── Non-breakage of the shared module (AC8) ────────────────────────────────
 
 
@@ -400,6 +456,11 @@ def test_llm_telemetry_existing_exports_unchanged():
     params = inspect.signature(log_llm_run).parameters
     for name in ("operation", "identifier", "usage", "duration_ms", "status", "model", "error_class"):
         assert name in params, f"log_llm_run lost keyword {name!r}"
+
+    # should_wrap_up / project_next_iter_cost signatures: `iters` is now a
+    # deliberate, REQUIRED 4th/3rd argument (see llm_telemetry.py docstrings).
+    assert list(inspect.signature(should_wrap_up).parameters) == ["usage", "model", "soft_cap", "iters"]
+    assert list(inspect.signature(project_next_iter_cost).parameters) == ["usage", "model", "iters"]
 
     # The module still compiles cleanly with the additions.
     py_compile.compile(inspect.getsourcefile(__import__("app.llm_telemetry", fromlist=["x"])),

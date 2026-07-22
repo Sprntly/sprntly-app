@@ -180,26 +180,26 @@ def _records(caplog, logger_name, needle):
 def test_should_abort_true_at_and_above_cap():
     # Clearly above: realized $3.00 → projection $6.00 >= the $2.00 arg.
     over = RunUsage(output_tokens=_ABORT_OUT)
-    assert should_abort(over, SONNET, 2.00) is True
+    assert should_abort(over, SONNET, 2.00, iters=1) is True
     # Boundary-exact (inclusive): cap == projection -> True. Computed from the
     # usage itself so the equality is exact regardless of token granularity.
-    proj = project_next_iter_cost(over, SONNET)
-    assert should_abort(over, SONNET, proj) is True
+    proj = project_next_iter_cost(over, SONNET, iters=1)
+    assert should_abort(over, SONNET, proj, iters=1) is True
 
 
 def test_should_abort_false_below_cap():
     # Observed-legit run: realized $0.76 → projection $1.52 < the $2.00 arg.
     legit = RunUsage(output_tokens=_LEGIT_076_OUT)
-    assert should_abort(legit, SONNET, 2.00) is False
+    assert should_abort(legit, SONNET, 2.00, iters=1) is False
     # Just above the projection the cap is not reached.
-    proj = project_next_iter_cost(legit, SONNET)
-    assert should_abort(legit, SONNET, proj + 1e-9) is False
+    proj = project_next_iter_cost(legit, SONNET, iters=1)
+    assert should_abort(legit, SONNET, proj + 1e-9, iters=1) is False
 
 
 def test_should_abort_is_pure_and_deterministic():
     usage = RunUsage(output_tokens=_ABORT_OUT)
-    a = should_abort(usage, SONNET, 2.00)
-    b = should_abort(usage, SONNET, 2.00)
+    a = should_abort(usage, SONNET, 2.00, iters=1)
+    b = should_abort(usage, SONNET, 2.00, iters=1)
     assert a is b is True
     # No mutation of the usage object.
     assert usage.output_tokens == _ABORT_OUT
@@ -211,7 +211,7 @@ def test_should_abort_is_pure_and_deterministic():
 def test_should_abort_fails_closed_unknown_model():
     usage = RunUsage(output_tokens=1_000)
     with pytest.raises(UnknownModelError):
-        should_abort(usage, "claude-not-a-real-model", 2.00)
+        should_abort(usage, "claude-not-a-real-model", 2.00, iters=1)
 
 
 def test_single_pricing_table():
@@ -231,16 +231,18 @@ def test_single_pricing_table():
 # ─── Pure helper — hard cap > soft cap invariant (AC3) ──────────────────────
 
 
-def test_hard_cap_implies_soft_cap():
-    # For any usage: if should_abort(hard) is True, should_wrap_up(soft) is too —
-    # both use the same projection and HARD_CAP_USD (5.00) > SOFT_CAP_USD (0.50),
-    # so the hard cap can never fire before the soft nudge for a given run.
+@pytest.mark.parametrize("iters", [1, 5, 16])
+def test_hard_cap_implies_soft_cap_across_iteration_counts(iters):
+    # For any usage AND any iteration count: if should_abort(hard) is True,
+    # should_wrap_up(soft) is too — both share the same iteration-aware
+    # projection and HARD_CAP_USD (5.00) > SOFT_CAP_USD (0.50), so the hard cap
+    # can never fire before the soft nudge for a given run, regardless of iters.
     assert HARD_CAP_USD == 5.00
     assert SOFT_CAP_USD == 0.50
     for out in (_ABORT_OUT, _ABORT_OUT * 2, _ABORT_OUT * 5):
         usage = RunUsage(output_tokens=out)
-        if should_abort(usage, SONNET, HARD_CAP_USD):
-            assert should_wrap_up(usage, SONNET, SOFT_CAP_USD) is True
+        if should_abort(usage, SONNET, HARD_CAP_USD, iters=iters):
+            assert should_wrap_up(usage, SONNET, SOFT_CAP_USD, iters=iters) is True
 
 
 # ─── Regression (fail on unfixed code) ───────────────────────────────────────
@@ -468,11 +470,12 @@ def test_llm_telemetry_existing_exports_unchanged():
         assert hasattr(u, field)
     assert hasattr(u, "est_cost_usd")
 
-    # should_wrap_up / project_next_iter_cost signatures unchanged.
-    assert list(inspect.signature(should_wrap_up).parameters) == ["usage", "model", "soft_cap"]
-    assert list(inspect.signature(project_next_iter_cost).parameters) == ["usage", "model"]
+    # should_wrap_up / project_next_iter_cost signatures: `iters` is now a
+    # deliberate, REQUIRED 4th/3rd argument (see llm_telemetry.py docstrings).
+    assert list(inspect.signature(should_wrap_up).parameters) == ["usage", "model", "soft_cap", "iters"]
+    assert list(inspect.signature(project_next_iter_cost).parameters) == ["usage", "model", "iters"]
     # should_abort mirrors the soft-cap helper's shape.
-    assert list(inspect.signature(should_abort).parameters) == ["usage", "model", "hard_cap"]
+    assert list(inspect.signature(should_abort).parameters) == ["usage", "model", "hard_cap", "iters"]
 
     params = inspect.signature(log_llm_run).parameters
     for name in ("operation", "identifier", "usage", "duration_ms", "status", "model", "error_class"):
