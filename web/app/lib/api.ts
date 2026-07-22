@@ -1060,11 +1060,13 @@ export type CompanyDocType =
   | "team_priorities"
   | "research"
   | "company_strategy"
-  // v6 onboarding steps 6-7 upload-or-type blocks.
+  // Onboarding workspace-step upload-or-type blocks.
   | "team_strategy"
   | "team_roadmap"
   | "decision_process"
   | "additional_context"
+  // The workspace step's "Attach a previous sizing doc" affordance.
+  | "sizing_doc"
 
 /** One stored company document, as the list view reads it. Never carries the
  *  raw file bytes — only metadata + the extracted-char count. */

@@ -160,7 +160,7 @@ def _ticket_contexts(company_id: str, prd_id: int) -> list[dict[str, Any]]:
 
     edits = (
         require_client().table("ticket_edits")
-        .select("ticket_key, title, description, acceptance_criteria, priority, subtasks, status, custom_fields, issue_type, updated_at")
+        .select("ticket_key, title, description, acceptance_criteria, priority, subtasks, status, custom_fields, issue_type, assignee, updated_at")
         .eq("company_id", company_id)
         .like("ticket_key", f"prd-{prd_id}-%")
         .execute()
@@ -346,6 +346,9 @@ class _Tracker:
             self.meta = get_cached_meta(company_id, provider, destination)
         except Exception:  # noqa: BLE001 — meta is an enhancement, never a gate
             self.meta = None
+        # Lazily-built email→accountId map for assignee resolution (Jira only).
+        # None = not fetched yet; one assignable-users call serves the whole pass.
+        self._assignee_map: dict[str, str] | None = None
 
     def meta_status(self, name: str | None) -> dict[str, Any] | None:
         """The meta's status entry matching `name` (case-insensitive), or None
@@ -657,6 +660,58 @@ class _Tracker:
             return asana_oauth.add_task_comment(self._token, ref, text)
         return jira_oauth.add_issue_comment(self._token, self._cloud, ref, text)
 
+    def _jira_assignee_map(self) -> dict[str, str]:
+        """Lower-cased email → Atlassian accountId for the destination project's
+        assignable users, fetched once per pass and cached. Best-effort: an
+        empty map (bad token / API down) just means no assignee resolves, never
+        an error. Jira exposes an email only for users who've made it public, so
+        some members legitimately have no entry."""
+        if self._assignee_map is None:
+            m: dict[str, str] = {}
+            try:
+                for u in jira_oauth.list_assignable_users(
+                    self._token, self._cloud, self.destination
+                ):
+                    email = (u.get("email") or "").strip().lower()
+                    acct = u.get("accountId")
+                    if email and acct:
+                        m.setdefault(email, acct)
+            except Exception:  # noqa: BLE001 — assignee resolve never blocks a pass
+                logger.warning(
+                    "assignee resolve: assignable-users lookup failed for %s",
+                    self.destination,
+                )
+            self._assignee_map = m
+        return self._assignee_map
+
+    def assignee_ref(self, assignee: dict[str, Any] | None) -> str | None:
+        """Resolve a Sprntly assignee ({email, display_name, …}) to the tracker's
+        own user id. Jira: the accountId whose public email matches the Sprntly
+        member's email (case-insensitive). None when there's no assignee, no
+        email, no match, or a non-Jira provider — assignee sync is Jira-only for
+        now (ClickUp/Asana use different assignee models)."""
+        if self.provider != "jira" or not isinstance(assignee, dict):
+            return None
+        email = (assignee.get("email") or "").strip().lower()
+        if not email:
+            return None
+        return self._jira_assignee_map().get(email)
+
+    def set_assignee(self, ref: str, account_id: str) -> bool:
+        """Best-effort Sprntly→Jira assignee write (an Atlassian accountId from
+        assignee_ref). Jira-only; other providers are a no-op. Failure is
+        non-fatal — the next pass retries."""
+        if self.provider != "jira":
+            return False
+        try:
+            jira_oauth.update_issue(
+                self._token, self._cloud, ref, assignee_account_id=account_id
+            )
+            return True
+        except Exception:  # noqa: BLE001 — assignee push never fails the pass
+            logger.info("assignee push failed for %s (%s)", ref, account_id)
+            return False
+
     def set_issue_type(self, ref: str, issue_type: str) -> bool:
         """Best-effort Sprntly→Jira issue-type write. Jira may refuse a type
         change (cross-workflow moves need its Move wizard), so failure is
@@ -819,6 +874,16 @@ def kick_comment_push(
             tracker_cid = tracker.add_comment(ref, _comment_text(author, body))
             if tracker_cid:
                 _mark_comment_pushed(comment_id, tracker_cid)
+            else:
+                # The tracker call failed (its own log has the HTTP reason).
+                # Leave the comment unmarked so the next sync pass retries it,
+                # but say so — a silent None here is what makes a "my comment
+                # never synced" report impossible to diagnose from the logs.
+                logger.warning(
+                    "instant comment push for %s (%s) returned no id — "
+                    "unmarked, the next sync pass will retry",
+                    ticket_key, ref,
+                )
         except Exception:  # noqa: BLE001 — best-effort; the pass retries
             logger.warning("instant comment push failed for %s", ticket_key)
 
@@ -911,6 +976,14 @@ def _two_way_pass(
 
     tracker = _Tracker(provider, company_id, destination)
     now = utc_now()
+    # Resolve each ticket's Sprntly assignee → tracker user id ONCE (Jira:
+    # email→accountId via one assignable-users lookup, cached on the tracker).
+    # Stashed on the merged story so both the create path (push_stories_to_jira
+    # reads story.assignee_account_id) and the per-ticket reconcile below use it.
+    for c in ctxs:
+        c["merged"].assignee_account_id = tracker.assignee_ref(
+            (c["edit"] or {}).get("assignee")
+        )
     # Comments not yet pushed (instant push failed / made while the pass ran),
     # post-binding only — see _unpushed_comments.
     try:
@@ -1088,6 +1161,18 @@ def _two_way_pass(
         ):
             tracker.set_issue_type(ref, tracker.meta_issue_type(local_type))
 
+        # ── Assignee (Jira), resolved from the Sprntly assignee's email ──
+        # Sprntly owns assignment: whenever the resolved accountId changes
+        # since last pass, write it out best-effort (reconciled independently
+        # of content direction, like status/priority, so an assignee-only
+        # change still lands). Matched by email in assignee_ref; a member with
+        # no public Jira email / no match → want_account is None and Jira's
+        # assignee is left untouched (never force-unassigned). Non-Jira
+        # providers resolve to None here, so this is a no-op for them.
+        want_account = getattr(c["merged"], "assignee_account_id", None)
+        if want_account and want_account != prev.get("assignee_account_id"):
+            tracker.set_assignee(ref, want_account)
+
         # ── Custom fields, tracker-native only (meta present) ──
         # Field-by-field: the tracker changed a field since last pass →
         # import (merged into the edit row). A LOCAL OVERRIDE that differs
@@ -1153,6 +1238,10 @@ def _two_way_pass(
         statuses[tid] = {
             "status": remote_status,
             "assignee": remote.get("assignee"),
+            # The accountId we last wrote for this ticket (from the Sprntly
+            # assignee's email). Kept when unresolved so we neither re-push a
+            # matched assignee every pass nor lose the last-known mapping.
+            "assignee_account_id": want_account or prev.get("assignee_account_id"),
             "url": remote.get("url"),
             "content_hash": remote_hash,
             "synced_at": now,

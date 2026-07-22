@@ -46,7 +46,7 @@ vi.mock("../../../../lib/onboarding/draftPrefetch", () => ({
   prefetchBusinessContextDraft: (...a: unknown[]) => prefetchDraftMock(...a),
 }))
 
-import { InviteStep, parseInvitesCsv } from "../InviteStep"
+import { InviteStep, parseInvitesCsv, parsePastedEmails } from "../InviteStep"
 import { JOB_ROLE_OPTIONS, ONBOARDING_STEP_COUNT } from "../../../../lib/onboarding/types"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
@@ -137,7 +137,7 @@ describe("parseInvitesCsv — teammate CSV import", () => {
   })
 })
 
-describe("InviteStep (onboarding step 08 — email + job role + permission rows)", () => {
+describe("InviteStep (onboarding step 07 — email + job role + permission rows)", () => {
   it("renders one starter row: email input, JOB_ROLE_OPTIONS role select, permission select", () => {
     const { container } = mount()
     expect(screen.getByText(/Invite your/)).not.toBeNull()
@@ -154,7 +154,16 @@ describe("InviteStep (onboarding step 08 — email + job role + permission rows)
       "viewer",
     ])
     expect(perm.value).toBe("member")
-    // The CSV import affordance is present.
+    // CSV import + bulk paste moved behind the "Add multiple people at once"
+    // disclosure — the default card is one clean row plus "Add teammate", so
+    // the hidden file input isn't mounted until the disclosure opens.
+    expect(screen.queryByText(/Import CSV/)).toBeNull()
+    expect(
+      container.querySelector('input[aria-label="Import teammates CSV"]'),
+    ).toBeNull()
+    expect(screen.getByText(/Add multiple people at once/)).not.toBeNull()
+
+    fireEvent.click(screen.getByText(/Add multiple people at once/))
     expect(screen.getByText(/Import CSV/)).not.toBeNull()
     expect(
       container.querySelector('input[aria-label="Import teammates CSV"]'),
@@ -235,10 +244,10 @@ describe("InviteStep (onboarding step 08 — email + job role + permission rows)
     expect(inviteMock).not.toHaveBeenCalled()
   })
 
-  it("Back routes to the decisions step", () => {
+  it("Back routes to the workspace step", () => {
     mount()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/decisions")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
   })
 
   it("shows the loading shell while the workspace is loading", () => {
@@ -263,5 +272,48 @@ describe("InviteStep (onboarding step 08 — email + job role + permission rows)
       .map(String)
       .filter((m) => /while rendering a different component|Cannot update a component/.test(m))
     expect(sideEffectInRender).toEqual([])
+  })
+})
+
+describe("parsePastedEmails — the bulk paste field", () => {
+  it("splits on commas, semicolons, newlines and stray whitespace", () => {
+    const rows = parsePastedEmails(
+      "a@acme.com, b@acme.com;c@acme.com\nd@acme.com  e@acme.com",
+    )
+    expect(rows.map((r) => r.email)).toEqual([
+      "a@acme.com",
+      "b@acme.com",
+      "c@acme.com",
+      "d@acme.com",
+      "e@acme.com",
+    ])
+    // Pasted rows default to the first job role + member permission.
+    expect(rows[0].permission).toBe("member")
+  })
+
+  it("drops malformed addresses, self-duplicates, and ones already listed", () => {
+    const rows = parsePastedEmails(
+      "GOOD@acme.com, not-an-email, good@acme.com, dupe@acme.com",
+      [{ email: "Dupe@acme.com", jobRole: "Engineer", permission: "admin" }],
+    )
+    expect(rows.map((r) => r.email)).toEqual(["good@acme.com"])
+  })
+
+  it("adds pasted rows to the list, replacing a blank starter row", () => {
+    mount()
+    fireEvent.click(screen.getByText(/Add multiple people at once/))
+    fireEvent.change(
+      document.querySelector('[data-field="bulkEmails"] input') as HTMLInputElement,
+      { target: { value: "a@acme.com, b@acme.com" } },
+    )
+    fireEvent.click(screen.getByText("Add").closest("button") as HTMLElement)
+    const emails = Array.from(
+      document.querySelectorAll('input[type="email"], .onb-card input[placeholder*="@"]'),
+    )
+      .map((el) => (el as HTMLInputElement).value)
+      .filter(Boolean)
+    expect(emails).toContain("a@acme.com")
+    expect(emails).toContain("b@acme.com")
+    expect(screen.getByText(/2 teammates added/)).not.toBeNull()
   })
 })

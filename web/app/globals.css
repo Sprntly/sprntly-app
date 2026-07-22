@@ -16547,10 +16547,9 @@
     transition: opacity 0.25s, border-color 0.2s;
   }
 
-  .onb-card .conn-step.locked {
-    opacity: 0.5;
-  }
-
+  /* `.locked` is retained for the header's disabled state only — unreached
+     categories are no longer RENDERED (the card grows one category at a time),
+     so nothing should normally carry this class. */
   .onb-card .conn-step.locked .conn-step-h {
     cursor: default;
   }
@@ -16611,6 +16610,94 @@
     display: inline-flex;
     align-items: center;
     gap: 4px;
+  }
+
+  /* A reviewed category collapses to Connected (wired or uploaded) or
+     Skipped, so the accordion reads as a checklist once past it. */
+  .onb-card .conn-step-state[data-state="connected"] {
+    color: var(--accent);
+  }
+
+  /* Progress WITHIN the connectors step — distinct from the header step dots,
+     which track progress across the whole wizard. */
+  .onb-card .conn-progress {
+    height: 4px;
+    border-radius: 2px;
+    background: var(--surface-4);
+    overflow: hidden;
+    margin-bottom: 16px;
+  }
+
+  .onb-card .conn-progress-fill {
+    display: block;
+    height: 100%;
+    background: var(--ink);
+    border-radius: 2px;
+    transition: width 0.25s ease;
+  }
+
+  /* Secondary "attach a doc" affordance under a textarea (workspace step's
+     sizing block). Lighter than .onb-up-card — the typed answer is primary
+     and the attachment is a bonus. */
+  .onb-card .onb-attach {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 9px;
+    padding: 8px 12px;
+    border: 1px dashed var(--line);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--ink-2);
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .onb-card .onb-attach:hover {
+    border-color: var(--accent-2);
+    background: var(--accent-alpha-05);
+  }
+
+  .onb-card .onb-attach-t {
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+
+  .onb-card .onb-attach-s {
+    font-size: 11.5px;
+    color: var(--ink-3);
+  }
+
+  /* Manual-upload fallback strip inside an open category. */
+  .onb-card .conn-upload {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 12px;
+    padding: 11px 13px;
+    border: 1px dashed var(--line);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    color: var(--ink-2);
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .onb-card .conn-upload:hover {
+    border-color: var(--accent-2);
+    background: var(--accent-alpha-05);
+  }
+
+  .onb-card .conn-upload[aria-busy="true"] {
+    cursor: progress;
+  }
+
+  .onb-card .conn-upload .t {
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+
+  .onb-card .conn-upload .s {
+    font-size: 11.5px;
+    color: var(--ink-3);
   }
 
   .onb-card .conn-step-body {

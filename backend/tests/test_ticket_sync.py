@@ -176,11 +176,28 @@ class FakeTracker:
         self.field_pushes: list[tuple[str, dict]] = [] # (ref, {fid: value})
         self.type_sets: list[tuple[str, str]] = []     # (ref, issue_type)
         self.comments: list[tuple[str, str]] = []      # (ref, text)
+        self.assignee_sets: list[tuple[str, str]] = [] # (ref, account_id)
+        self.assignee_map = dict(FakeTracker.assignee_seed)
         FakeTracker.instances.append(self)
 
     seed: dict = {}
     gone_seed: set = set()
     meta_seed: dict | None = None
+    assignee_seed: dict = {}  # lower-cased email → accountId (assignable users)
+
+    def assignee_ref(self, assignee):
+        # Mirrors the real _Tracker: resolve the Sprntly assignee's email to a
+        # tracker accountId; None when absent / no match.
+        if not isinstance(assignee, dict):
+            return None
+        email = (assignee.get("email") or "").strip().lower()
+        if not email:
+            return None
+        return self.assignee_map.get(email)
+
+    def set_assignee(self, ref, account_id):
+        self.assignee_sets.append((ref, account_id))
+        return True
 
     # Mirrors of the real _Tracker's meta surface (same semantics).
     def meta_status(self, name):
@@ -272,6 +289,7 @@ def fake_tracker(monkeypatch):
     FakeTracker.seed = {}
     FakeTracker.gone_seed = set()
     FakeTracker.meta_seed = None
+    FakeTracker.assignee_seed = {}
     from app.stories import sync as sync_mod
 
     monkeypatch.setattr(sync_mod, "_Tracker", FakeTracker)
@@ -541,6 +559,77 @@ def test_local_status_change_pushes_out_best_effort(isolated_settings, fake_trac
     assert tracker.pushed == []
 
 
+def test_assignee_resolves_by_email_and_pushes_out(isolated_settings, fake_tracker):
+    """A Sprntly ticket assigned to a member whose email matches a tracker user
+    pushes that user's accountId out — the 'assign here → assign there, same
+    person by email' behavior. The written accountId is snapshotted so a later
+    pass with no assignee change does NOT re-push it."""
+    from app.db.ticket_sync import get_sync_config
+    from app.stories.sync import content_hash, run_prd_sync
+
+    base = Story(title="Login", body="Original").to_dict()
+    _seed_prd_tickets(CID, 7, [base])
+    tid = base["id"]
+    fake_tracker.seed = {tid: {
+        "title": "Login", "description": "Original", "status": "to do",
+        "assignee": None, "url": "u", "updated_at": "2026-07-01T00:00:00+00:00",
+    }}
+    # The tracker's assignable users, keyed by their public email.
+    fake_tracker.assignee_seed = {"sam@acme.com": "acct-sam"}
+    _sync_cfg(7, statuses={tid: {
+        "status": "to do", "content_hash": content_hash("Login", "Original"),
+        "synced_at": "2026-07-02T00:00:00+00:00", "sprntly_status": None,
+    }})
+    # Assigned in Sprntly (assignee dict carries the member's email).
+    _edit_row(
+        CID, f"prd-7-{tid}",
+        assignee={"user_id": "u1", "display_name": "Sam", "email": "Sam@Acme.com"},
+        updated_at="2026-07-01T00:00:00+00:00",
+    )
+
+    run_prd_sync(CID, 7)
+
+    tracker = fake_tracker.instances[0]
+    # Matched case-insensitively → the tracker issue is assigned by accountId.
+    assert tracker.assignee_sets == [(f"ref-{tid}", "acct-sam")]
+    cfg = get_sync_config(CID, 7)
+    assert cfg["statuses"][tid]["assignee_account_id"] == "acct-sam"
+
+    # Second pass, nothing changed → the already-set assignee is NOT re-pushed.
+    tracker.assignee_sets.clear()
+    run_prd_sync(CID, 7)
+    assert fake_tracker.instances[-1].assignee_sets == []
+
+
+def test_assignee_unmatched_email_leaves_tracker_untouched(isolated_settings, fake_tracker):
+    """A Sprntly assignee whose email matches no tracker user (e.g. their Jira
+    email isn't public) must NOT touch the tracker's assignee — never force an
+    unassign or guess."""
+    from app.stories.sync import content_hash, run_prd_sync
+
+    base = Story(title="Login", body="Original").to_dict()
+    _seed_prd_tickets(CID, 7, [base])
+    tid = base["id"]
+    fake_tracker.seed = {tid: {
+        "title": "Login", "description": "Original", "status": "to do",
+        "assignee": None, "url": "u", "updated_at": "2026-07-01T00:00:00+00:00",
+    }}
+    fake_tracker.assignee_seed = {"someone-else@acme.com": "acct-x"}
+    _sync_cfg(7, statuses={tid: {
+        "status": "to do", "content_hash": content_hash("Login", "Original"),
+        "synced_at": "2026-07-02T00:00:00+00:00", "sprntly_status": None,
+    }})
+    _edit_row(
+        CID, f"prd-7-{tid}",
+        assignee={"user_id": "u1", "display_name": "Sam", "email": "sam@acme.com"},
+        updated_at="2026-07-01T00:00:00+00:00",
+    )
+
+    run_prd_sync(CID, 7)
+
+    assert fake_tracker.instances[0].assignee_sets == []
+
+
 def test_run_prd_sync_records_failure_and_reraises(isolated_settings, monkeypatch):
     from app.db.ticket_sync import get_sync_config, upsert_sync_config
     from app.stories import sync as sync_mod
@@ -611,6 +700,34 @@ def test_pull_jira_status_maps_by_ticket_id():
     assert out == {"tk1": {"status": "Done", "assignee": "Ada", "url": "u"}}
     # The site url is resolved once and passed through (no per-issue lookups).
     assert get_issue.call_args.kwargs["site_url"] == "https://acme.atlassian.net"
+
+
+def test_tracker_assignee_ref_matches_email_case_insensitively():
+    """The real _Tracker resolves a Sprntly assignee's email to the Jira
+    accountId of the assignable user with the same email (case-insensitive),
+    from a single assignable-users lookup. No email / no match → None."""
+    from app.stories import sync as sync_mod
+
+    users = [
+        {"accountId": "acct-sam", "email": "Sam@Acme.com"},
+        {"accountId": "acct-noemail", "email": None},   # email not public
+    ]
+    with patch.object(sync_mod, "_jira_creds", return_value=("tok", "cloud")), \
+         patch.object(
+             sync_mod.jira_oauth, "_site_url_for_cloud", return_value=None,
+         ), patch(
+             "app.db.tracker_meta.get_cached_meta", return_value=None,
+         ), patch.object(
+             sync_mod.jira_oauth, "list_assignable_users", return_value=users,
+         ) as lau:
+        tracker = sync_mod._Tracker("jira", CID, "SPR")
+        assert tracker.assignee_ref({"email": "sam@acme.com"}) == "acct-sam"
+        assert tracker.assignee_ref({"email": "nobody@acme.com"}) is None
+        assert tracker.assignee_ref({"display_name": "No Email"}) is None
+        assert tracker.assignee_ref(None) is None
+
+    # The assignable-users list is fetched once and cached for the whole pass.
+    assert lau.call_count == 1
 
 
 # ── Routes: GET state / POST trigger ─────────────────────────────────────────

@@ -152,7 +152,7 @@ export function RoadmapDocScreen() {
           {state.kind === "empty" && (
             <EmptyPane
               title="No roadmap uploaded yet"
-              hint="Upload your roadmap in onboarding (Strategy step) or Settings — Sprntly loads it in and pressure-tests it against your data."
+              hint="Upload your roadmap in onboarding (Workspace step) or Settings — Sprntly loads it in and pressure-tests it against your data."
               placeholders={0}
             />
           )}

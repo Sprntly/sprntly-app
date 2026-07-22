@@ -20,12 +20,14 @@ function renderStep1(override: Partial<SignUpStep1ViewProps> = {}): string {
   const defaults: SignUpStep1ViewProps = {
     email: "",
     password: "",
+    confirmPassword: "",
     showPassword: false,
     error: null,
     termsHref: "/terms",
     privacyHref: "/privacy",
     onEmailChange: noop,
     onPasswordChange: noop,
+    onConfirmPasswordChange: noop,
     onToggleShowPassword: noop,
     onSubmit: noop,
     onGoogle: noop,
@@ -39,13 +41,11 @@ function renderStep2(override: Partial<SignUpStep2ViewProps> = {}): string {
     firstName: "",
     lastName: "",
     role: "Product Manager",
-    priorities: "",
     submitting: false,
     error: null,
     onFirstNameChange: noop,
     onLastNameChange: noop,
     onRoleChange: noop,
-    onPrioritiesChange: noop,
     onSubmit: noop,
     onBack: noop,
   }
@@ -124,10 +124,13 @@ describe("SignUpStep2View (v4 page 03 — about you)", () => {
     expect(renderStep2()).toContain("<em>you?</em>")
   })
 
-  it("renders the optional priorities textarea (v6)", () => {
-    const html = renderStep2({ priorities: "grow MAU" })
-    expect(html).toContain('id="priorities"')
-    expect(html).toContain("Your priorities")
-    expect(html).toContain("grow MAU")
+  it("no longer renders a priorities textarea (v7 — about-you is name + role only)", () => {
+    const html = renderStep2()
+    expect(html).not.toContain('id="priorities"')
+    expect(html).not.toContain("Your priorities")
+    // The three fields the step DOES own are still there.
+    expect(html).toContain('id="firstName"')
+    expect(html).toContain('id="lastName"')
+    expect(html).toContain('id="role"')
   })
 })

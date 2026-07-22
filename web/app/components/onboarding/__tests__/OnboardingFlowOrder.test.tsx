@@ -30,11 +30,11 @@ vi.mock("../../screens/onboarding", () => ({
   MetricsStep: () => React.createElement("div", { "data-screen": "metrics" }),
   ApiKey: () => React.createElement("div", { "data-screen": "api-key" }),
   Connectors: () => React.createElement("div", { "data-screen": "connectors" }),
-  TeamStep: () => React.createElement("div", { "data-screen": "team" }),
-  Strategy: () => React.createElement("div", { "data-screen": "strategy" }),
-  DecisionsStep: () => React.createElement("div", { "data-screen": "decisions" }),
+  WorkspaceStep: () => React.createElement("div", { "data-screen": "workspace" }),
   InviteStep: () => React.createElement("div", { "data-screen": "invite" }),
   ReviewStep: () => React.createElement("div", { "data-screen": "review" }),
+  PersonalizeStep: () =>
+    React.createElement("div", { "data-screen": "personalize" }),
 }))
 
 import { OnboardingStep } from "../../../(app)/onboarding/[slug]/OnboardingStep"
@@ -58,25 +58,24 @@ const EXPECTED_ORDER = [
   "metrics",
   "api-key",
   "connectors",
-  "team",
-  "strategy",
-  "decisions",
+  "workspace",
   "invite",
   "review",
+  "personalize",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 10 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(10)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 9 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(9)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
-  it("renders the closing review page at the 'review' slug (the last step)", () => {
+  it("renders the closing personalize page at the 'personalize' slug (the last step)", () => {
     const { container } = render(
-      React.createElement(OnboardingStep, { slug: "review" }),
+      React.createElement(OnboardingStep, { slug: "personalize" }),
     )
-    expect(container.querySelector('[data-screen="review"]')).not.toBeNull()
-    expect(ONBOARDING_STEP_SLUGS[ONBOARDING_STEP_COUNT - 1]).toBe("review")
+    expect(container.querySelector('[data-screen="personalize"]')).not.toBeNull()
+    expect(ONBOARDING_STEP_SLUGS[ONBOARDING_STEP_COUNT - 1]).toBe("personalize")
   })
 
   it("maps every numbered slug to the expected screen, in order, with no gaps", () => {
@@ -103,13 +102,16 @@ describe("onboarding flow order — slug → screen", () => {
     )
   })
 
-  it("does not expose the dropped workspace/business-info/first-brief/coworkers pages as steps", () => {
-    // api-key is a numbered step again (restored 2026-07-19). The
-    // workspace-naming closer stays retired; business-info split into
-    // company/product/metrics; the business-context review became the numbered
-    // review step; first-brief/coworkers stay retired.
+  it("does not expose the dropped/folded pages as steps", () => {
+    // api-key is a numbered step. `workspace` IS a step now, but it is the
+    // merged team/strategy/decisions card — the three slugs it replaced must
+    // not resolve. business-info split into company/product/metrics; the
+    // business-context review became the numbered review step;
+    // first-brief/coworkers stay retired.
     for (const slug of [
-      "workspace",
+      "team",
+      "strategy",
+      "decisions",
       "business-info",
       "strategic-context",
       "first-brief",

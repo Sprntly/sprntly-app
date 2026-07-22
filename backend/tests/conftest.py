@@ -960,7 +960,7 @@ CREATE TABLE company_document (
                      CHECK (doc_type IN (
                        'ceo_memo', 'team_priorities', 'research', 'company_strategy',
                        'team_strategy', 'team_roadmap', 'decision_process',
-                       'additional_context'
+                       'additional_context', 'sizing_doc'
                      )),
     filename       TEXT NOT NULL,
     content_type   TEXT,

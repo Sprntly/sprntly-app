@@ -40,11 +40,13 @@ def test_doc_types_are_the_onbstrat_cards():
         "team_priorities",
         "research",
         "company_strategy",
-        # v6 steps-6/7 upload-or-type blocks
+        # upload-or-type blocks now merged into the v7 workspace step
         "team_strategy",
         "team_roadmap",
         "decision_process",
         "additional_context",
+        # the v7 workspace step's "attach a previous sizing doc" affordance
+        "sizing_doc",
     }
     assert is_valid_doc_type("ceo_memo")
     assert not is_valid_doc_type("not_a_type")
@@ -189,7 +191,7 @@ def test_post_list_roundtrip_per_doc_type(isolated_settings):
     assert [m["filename"] for m in memos] == ["memo.md"]
 
 
-def test_post_accepts_v6_upload_or_type_doc_types(isolated_settings):
+def test_post_accepts_workspace_step_doc_types(isolated_settings):
     """The v6 steps-6/7 upload-or-type blocks (+ step 1's strategy upload)
     upload under the four NEW doc_types — the route + storage constraint must
     accept every one of them end-to-end."""
@@ -197,6 +199,7 @@ def test_post_accepts_v6_upload_or_type_doc_types(isolated_settings):
     try:
         for doc_type in (
             "team_strategy", "team_roadmap", "decision_process", "additional_context",
+            "sizing_doc",
         ):
             r = client.post(
                 "/v1/company/documents",
@@ -208,7 +211,7 @@ def test_post_accepts_v6_upload_or_type_doc_types(isolated_settings):
         listed = client.get("/v1/company/documents")
     finally:
         _clear(route)
-    assert len(listed.json()["documents"]) == 4
+    assert len(listed.json()["documents"]) == 5
 
 
 def test_post_rejects_invalid_doc_type(isolated_settings):

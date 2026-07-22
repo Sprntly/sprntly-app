@@ -188,6 +188,67 @@ export function hourLabel(h: number): string {
   return `${display}:00 ${period}`
 }
 
+/* ── Form option vocabularies ───────────────────────────────────────
+   Shared by Settings → Comms & Brief and the onboarding personalize step, so
+   the two surfaces can never drift on what a valid day/hour/zone is. */
+
+/**
+ * Weekdays only — the brief is a work artefact, so a weekend send has no
+ * audience. Legacy weekend values coerce to Monday on load (see coerceWeekday),
+ * which is also what the backend resolver does.
+ */
+export const BRIEF_DAYS: { value: number; label: string }[] = [
+  { value: 0, label: "Monday" },
+  { value: 1, label: "Tuesday" },
+  { value: 2, label: "Wednesday" },
+  { value: 3, label: "Thursday" },
+  { value: 4, label: "Friday" },
+]
+
+/** Hour granularity only; minute is pinned to 0 on save. */
+export const BRIEF_HOURS: { value: number; label: string }[] = Array.from(
+  { length: 24 },
+  (_, h) => ({ value: h, label: hourLabel(h) }),
+)
+
+/** Full IANA list where supported; small sensible fallback otherwise. */
+export function timezones(): string[] {
+  try {
+    const fn = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] })
+      .supportedValuesOf
+    if (fn) return fn("timeZone")
+  } catch {
+    /* fall through */
+  }
+  return [
+    "UTC",
+    "America/Los_Angeles",
+    "America/Denver",
+    "America/Chicago",
+    "America/New_York",
+    "Europe/London",
+    "Europe/Berlin",
+    "Asia/Kolkata",
+    "Asia/Singapore",
+    "Australia/Sydney",
+  ]
+}
+
+export function browserTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  } catch {
+    return "UTC"
+  }
+}
+
+/** "America/Los_Angeles" → "America/Los Angeles (PT)". */
+export function tzOptionLabel(tz: string): string {
+  const short = tzShort(tz)
+  const pretty = tz.replace(/_/g, " ")
+  return short ? `${pretty} (${short})` : pretty
+}
+
 // Runtimes disagree about UTC's short generic name: measured on Linux, Node
 // 20/22/24 all render "GMT+0", while Node 24 on Windows renders "GMT" — same
 // ICU major, different answer, so it tracks the platform's ICU build rather

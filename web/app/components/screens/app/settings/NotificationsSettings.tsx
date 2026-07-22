@@ -9,69 +9,24 @@ import {
   type ConnectionSummary,
 } from "../../../../lib/api"
 import {
+  BRIEF_DAYS as DAYS,
   BRIEF_FREQUENCIES,
+  BRIEF_HOURS as HOURS,
   type BriefFrequency,
   anchorForSave,
+  browserTimezone,
   coerceWeekday,
   dayOptionLabel,
   frequencyUsesDay,
-  hourLabel,
   nextBriefLabel,
   resolveFrequency,
-  tzShort,
+  timezones,
+  tzOptionLabel,
 } from "../../../../lib/briefSchedule"
 import { updateWorkspace } from "../../../../lib/onboarding/store"
 import { SlackChannelPicker } from "../../../connectors/SlackChannelPicker"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
-// Weekdays only — the brief is a work artefact, so a weekend send has no
-// audience. Legacy weekend values are coerced to Monday on load (see
-// coerceWeekday), which is also what the backend resolver does.
-const DAYS = [
-  { value: 0, label: "Monday" },
-  { value: 1, label: "Tuesday" },
-  { value: 2, label: "Wednesday" },
-  { value: 3, label: "Thursday" },
-  { value: 4, label: "Friday" },
-]
-const HOURS = Array.from({ length: 24 }, (_, h) => ({ value: h, label: hourLabel(h) }))
-
-function timezones(): string[] {
-  // Full IANA list where supported; small sensible fallback otherwise.
-  try {
-    const fn = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] })
-      .supportedValuesOf
-    if (fn) return fn("timeZone")
-  } catch {
-    /* fall through */
-  }
-  return [
-    "UTC",
-    "America/Los_Angeles",
-    "America/Denver",
-    "America/Chicago",
-    "America/New_York",
-    "Europe/London",
-    "Europe/Berlin",
-    "Asia/Kolkata",
-    "Asia/Singapore",
-    "Australia/Sydney",
-  ]
-}
-
-function browserTimezone(): string {
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
-  } catch {
-    return "UTC"
-  }
-}
-
-function tzOptionLabel(tz: string): string {
-  const short = tzShort(tz)
-  const pretty = tz.replace(/_/g, " ")
-  return short ? `${pretty} (${short})` : pretty
-}
 
 type ScheduleFields = {
   emailDigest: boolean
@@ -258,7 +213,7 @@ export function NotificationsSettings() {
         <div className="pset-body">
           <SettingsSection title="Comms & Brief" sub="Complete onboarding first.">
             <p className="settings-placeholder">
-              <a href="/onboarding/strategy">Finish onboarding →</a>
+              <a href="/onboarding/workspace">Finish onboarding →</a>
             </p>
           </SettingsSection>
         </div>
