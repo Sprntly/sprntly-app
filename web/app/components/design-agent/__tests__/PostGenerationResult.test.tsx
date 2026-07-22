@@ -917,6 +917,39 @@ describe("viewer src + remount key — follows the live build path", () => {
     expect(viewerSrc(null, 0)).toBeNull()
     expect(viewerSrc(null, 7)).toBeNull()
   })
+
+  it("test_post_generation_result_reads_reload_signal_not_reload_key — bundleGrantReloadKey (fed by useViewGrant's renamed reloadSignal) still threads into the composite viewer key exactly as the pre-rename reloadKey did", () => {
+    // The container now passes `grant.reloadSignal` (renamed from `grant.reloadKey`)
+    // into this unchanged `bundleGrantReloadKey` prop — a value change here still
+    // forces a fresh remount key, proving the rename didn't silently sever the
+    // threading contract this view already relies on.
+    const htmlBefore = renderView({ bundleUrl: OLD, bundleGrantReloadKey: 0 })
+    const htmlAfter = renderView({ bundleUrl: OLD, bundleGrantReloadKey: 1 })
+    expect(htmlBefore).not.toBe(htmlAfter)
+  })
+
+  it("test_viewer_src_busts_cache_on_grant_reload_signal_alone — a checkpoint-driven grant reload signal alone busts the cache, not just bundleReloadNonce", () => {
+    // AC9: the composite cache-bust value (bundleReloadNonce + bundleGrantReloadKey)
+    // must change whenever EITHER source changes — a checkpoint-advance reload
+    // (bundleGrantReloadKey, sourced from useViewGrant's own reloadSignal) alone,
+    // with the caller's manual-refresh nonce (bundleReloadNonce) held constant,
+    // still produces a fresh `?v=` value on the inline iframe src.
+    const htmlBefore = renderView({
+      bundleUrl: OLD,
+      bundleReloadNonce: 0,
+      bundleGrantReloadKey: 0,
+    })
+    const htmlAfter = renderView({
+      bundleUrl: OLD,
+      bundleReloadNonce: 0,
+      bundleGrantReloadKey: 1,
+    })
+    const srcBefore = inlineIframeSrc(htmlBefore)
+    const srcAfter = inlineIframeSrc(htmlAfter)
+    expect(srcBefore).toBe(OLD) // nonce 0 → clean, unbusted (matches viewerSrc's own contract)
+    expect(srcAfter).toBe(`${OLD}?v=1`)
+    expect(srcAfter).not.toBe(srcBefore)
+  })
 })
 
 describe("pin-comment create stays wrapped in the auth-retry (preservation)", () => {

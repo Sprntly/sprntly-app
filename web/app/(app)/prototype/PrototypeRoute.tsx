@@ -383,14 +383,16 @@ function InTabCanvas({
   // reload nonce so the iframe reloads.
   const iterateRun = useIterateRun({
     prototypeId: proto.id,
-    onComplete: (fresh, opts) => {
+    onComplete: (fresh) => {
       onProtoChange(fresh)
-      // Only bump the reload nonce (force a fresh iframe load) when the run
-      // actually advanced the bundle. A clarifying-question pause passes
-      // `reloadBundle: false` — keep the current preview, don't re-fetch a bundle
-      // that didn't change (avoids a transient 404 window). Any caller that omits
-      // opts still reloads, preserving the prior behaviour.
-      if (opts?.reloadBundle !== false) setBundleReloadNonce((n) => n + 1)
+      // No longer force a reload here. useViewGrant's own checkpoint-advance
+      // detection (inside PostGenerationResult's `grant`, driven by the fresh
+      // current_checkpoint_id this onProtoChange call just threaded through) now
+      // owns deciding WHEN a checkpoint-driven reload is safe — it bumps its own
+      // consolidated reloadSignal only once a mint for the NEW checkpoint is
+      // CONFIRMED successful. This removes the independent, synchronous bump that
+      // used to fire in the SAME commit as this onProtoChange call, before the
+      // grant hook's own checkpoint effect had even started its mint.
     },
   })
 
