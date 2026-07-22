@@ -572,6 +572,105 @@ def test_post_iterate_not_ready_returns_409(env, client):
     assert resp.status_code == 409
 
 
+def test_post_iterate_accepts_failed_prototype_with_bundle(env, client, monkeypatch):
+    # AC9: a 'failed' row that still has a bundle (a LATER iterate/manual-edit
+    # failed, not the first generation) is recoverable — the ordinary composer's
+    # resubmit must enqueue normally (200), not 409, mirroring get_active_by_prd's
+    # reveal condition.
+    _stub_iterate(monkeypatch, env.routes)
+    pid = _seed_ready(env)
+    env.proto.fail_prototype(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        error="iterate agent_loop ended with status=error iters=1 | error_class=PROVIDER_BILLING",
+    )
+    resp = client.post(f"/v1/design-agent/{pid}/iterate", json={"prompt": "try again"})
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["prototype_id"] == pid
+    assert body["status"] == "generating"
+
+
+def test_post_iterate_still_rejects_failed_prototype_without_bundle(env, client):
+    # AC10: a 'failed' row that never succeeded at all (no bundle_url) is NOT
+    # recoverable — still 409s, unchanged from today.
+    pid = env.proto.start_prototype(prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1)
+    env.proto.fail_prototype(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        error="build agent_loop ended with status=error iters=1 | error_class=ViteBuildError",
+    )
+    resp = client.post(f"/v1/design-agent/{pid}/iterate", json={"prompt": "x"})
+    assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_recovery_iterate_success_resets_status_to_ready(env, monkeypatch):
+    # AC11: a recovery iterate (started from a 'failed'-with-bundle row) that
+    # SUCCEEDS must flip status back to 'ready' — the row fully exits the
+    # "revealed via the broadened active-lookup" branch and becomes a normal
+    # ready row again, not stuck at 'failed' forever despite succeeding.
+    async def fake_vite(vfs):
+        return {"index.html": "<html></html>"}
+
+    async def fake_stage(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        return "https://bundle/recovered"
+
+    monkeypatch.setattr(env.routes, "vite_build", fake_vite)
+    monkeypatch.setattr(env.routes, "stage_bundle", fake_stage)
+    monkeypatch.setattr(env.routes, "create_checkpoint", lambda **k: 777)
+
+    pid = _seed_ready(env)
+    env.proto.fail_prototype(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        error="iterate agent_loop ended with status=error iters=1 | error_class=PROVIDER_BILLING",
+    )
+    assert env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)["status"] == "failed"
+
+    await env.routes._stage_iterate_run(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        virtual_fs={"a.tsx": "x"}, iterate_prompt="try again",
+        recovering_from_failure=True,
+    )
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "ready"
+    assert row["current_checkpoint_id"] == 777
+
+
+@pytest.mark.asyncio
+async def test_ordinary_iterate_success_does_not_rewrite_status(env, monkeypatch):
+    # AC12: an ORDINARY iterate (started from an already-'ready' row,
+    # recovering_from_failure left at its default False) must NOT redundantly
+    # rewrite status — pinned so this fix cannot regress the overwhelmingly
+    # common case. Spies on advance_current_checkpoint's own kwargs to prove
+    # recovered_from_failure=False travelled all the way from the default.
+    async def fake_vite(vfs):
+        return {"index.html": "<html></html>"}
+
+    async def fake_stage(*, prototype_id, checkpoint_id, files, sub_prefix=None):
+        return "https://bundle/iterated"
+
+    advance_calls: list = []
+    real_advance = env.proto.advance_current_checkpoint
+
+    def spy_advance(**kwargs):
+        advance_calls.append(kwargs)
+        return real_advance(**kwargs)
+
+    monkeypatch.setattr(env.routes, "vite_build", fake_vite)
+    monkeypatch.setattr(env.routes, "stage_bundle", fake_stage)
+    monkeypatch.setattr(env.routes, "create_checkpoint", lambda **k: 888)
+    monkeypatch.setattr(env.routes, "advance_current_checkpoint", spy_advance)
+
+    pid = _seed_ready(env)
+
+    await env.routes._stage_iterate_run(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
+        virtual_fs={"a.tsx": "x"}, iterate_prompt="make it blue",
+    )
+    assert advance_calls[0]["recovered_from_failure"] is False
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["status"] == "ready"
+
+
 def test_post_iterate_wrong_workspace_returns_404(env, client):
     # AC8: a prototype in a foreign workspace is invisible (404, not 403).
     pid = _seed_ready(env, workspace_id="demo")

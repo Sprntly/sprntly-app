@@ -906,6 +906,7 @@ def advance_current_checkpoint(
     workspace_id: str,                 # explicit workspace filter (Rule #22)
     checkpoint_id: int,
     bundle_url: str | None,
+    recovered_from_failure: bool = False,
 ) -> dict[str, Any] | None:
     """Point the prototype at the LATEST checkpoint (F7: stable URL, latest
     content). Updates `current_checkpoint_id` + `bundle_url`, workspace-filtered.
@@ -913,13 +914,21 @@ def advance_current_checkpoint(
     Does NOT touch `share_token` / `share_mode` (F7: the URL is reused across
     regenerations — the token is unchanged) and does NOT re-stamp `completed_at`
     / `status` (the iterate-correct counterpart to `complete_prototype` —
-    B2/AC6a). Returns the updated row, or None when no row matched the
+    B2/AC6a) UNLESS `recovered_from_failure=True`, in which case `status` is
+    also set back to `'ready'` — the row's failed-latest-iterate flip
+    (`fail_prototype`) is undone now that a subsequent iterate on it has
+    succeeded. Default `False` preserves today's exact behavior byte-for-byte
+    for the overwhelmingly common case (the row was already `'ready'`).
+    Returns the updated row, or None when no row matched the
     (prototype_id, workspace_id) pair (a cross-workspace call is a no-op).
     """
     c = require_client()
+    patch: dict[str, Any] = {"current_checkpoint_id": checkpoint_id, "bundle_url": bundle_url}
+    if recovered_from_failure:
+        patch["status"] = "ready"
     (
         c.table(_TABLE)
-        .update({"current_checkpoint_id": checkpoint_id, "bundle_url": bundle_url})
+        .update(patch)
         .eq("id", prototype_id)
         .eq("workspace_id", workspace_id)  # explicit workspace filter (Rule #22)
         .execute()
