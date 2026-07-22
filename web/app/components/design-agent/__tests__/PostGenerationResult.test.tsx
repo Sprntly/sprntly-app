@@ -919,8 +919,9 @@ describe("viewer src + remount key — follows the live build path", () => {
   })
 
   it("test_post_generation_result_reads_reload_signal_not_reload_key — bundleGrantReloadKey (fed by useViewGrant's renamed reloadSignal) still threads into the composite viewer key exactly as the pre-rename reloadKey did", () => {
-    // The container now passes `grant.reloadSignal` (renamed from `grant.reloadKey`)
-    // into this unchanged `bundleGrantReloadKey` prop — a value change here still
+    // The container now passes the hook's renamed `reloadSignal` field (formerly
+    // a differently-named field on the same shape) into this unchanged
+    // `bundleGrantReloadKey` prop — a value change here still
     // forces a fresh remount key, proving the rename didn't silently sever the
     // threading contract this view already relies on.
     const htmlBefore = renderView({ bundleUrl: OLD, bundleGrantReloadKey: 0 })

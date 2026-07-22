@@ -198,8 +198,8 @@ describe("PostGenerationResult — checkpoint id threads into useViewGrant (DOM)
   // isolation, no container) nor PostGenerationResult.test.tsx (node-env,
   // renderToStaticMarkup, can't drive the async effect) can prove this
   // sequencing invariant through the real wiring — this is the one seam that
-  // can. FAIL-WITHOUT-FIX: on today's unfixed hook, grant.reloadKey never
-  // bumps on a checkpoint-only change (no checkpoint→reload wiring at all),
+  // can. FAIL-WITHOUT-FIX: on today's unfixed hook, the grant's reload signal
+  // never bumps on a checkpoint-only change (no checkpoint→reload wiring at all),
   // so the "remounts to a NEW iframe node" assertion below never becomes true
   // and this test times out red.
   it("test_post_generation_result_defers_iframe_reload_until_checkpoint_advance_mint_resolves", async () => {
