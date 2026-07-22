@@ -41,12 +41,12 @@ export const POST_ONBOARDING_PATH = "/?new=1"
  *
  * The brief is generated ONLY when a real data source is connected
  * (`hasDataSource` — analytics, customer support/calls/feedback, CRM, revenue,
- * monitoring, or docs). Without one, we deliberately do NOT seed the onboarding
+ * or monitoring). Without one, we deliberately do NOT seed the onboarding
  * context file or start generation: onboarding info alone must not produce a
  * brief. Those users land on the new-chat tab, and their brief appears once
  * they connect a data source (Settings → Connectors → Regenerate brief).
- * Slack/Teams/Email, Jira & other PM tools, GitHub, and Figma do not count as
- * data sources.
+ * Slack/Teams/Email, Jira & other PM tools, GitHub, Figma, and docs tools
+ * (Notion / Google Docs) do not count as data sources.
  *
  * Resolves once onboarding is actually marked complete — the caller should
  * then route into the app. Throws if completion fails, so the caller can keep

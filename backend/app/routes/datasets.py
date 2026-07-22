@@ -300,6 +300,11 @@ async def generate(
     from app import db
     if not db.dataset_exists(slug):
         raise HTTPException(404, f"Dataset {slug!r} does not exist")
+    # Data-source gate (defense in depth behind onboarding's own frontend
+    # check): only non-evidence connectors + no uploads → refuse to generate.
+    from app.brief_gate import NO_DATA_SOURCE_MESSAGE, has_brief_data_source
+    if not has_brief_data_source(company.company_id, slug):
+        raise HTTPException(409, NO_DATA_SOURCE_MESSAGE)
     # Reuse the brief route's synthesis background body (run_synthesis +
     # warm-drilldowns, error-isolated) so both write paths stay identical.
     from app.routes.brief import _synthesis_generate_bg

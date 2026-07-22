@@ -138,8 +138,11 @@ def test_upload_to_unowned_dataset_404(tenant_client):
 def test_generate_kicks_off_async(tenant_client):
     t = tenant_client.make(slug="acme")
     t.client.post("/v1/datasets", json={"slug": "acme", "display_name": "Acme"})
-    from app.datasets import dataset_path
+    from app.datasets import dataset_path, raw_path
     (dataset_path("acme") / "ctx.md").write_text("hi")
+    # A user-uploaded raw file satisfies the data-source gate.
+    raw_path("acme").mkdir(parents=True, exist_ok=True)
+    (raw_path("acme") / "voice-notes.txt").write_text("hi")
     r = t.client.post("/v1/datasets/acme/generate")
     assert r.status_code == 200
     assert r.json()["started"] is True

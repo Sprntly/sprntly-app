@@ -79,6 +79,47 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
 }
 
 
+# ── Evidence-bearing providers (the brief data-source rule) ──────────────────
+#
+# The weekly brief is synthesized from connectors that BRING IN evidence about
+# the product and its customers. Five kinds of tool don't do that, so they can
+# never satisfy brief generation on their own (mirrors NON_EVIDENCE_CATEGORIES
+# in web/app/lib/connectorsCatalog.ts — the two lists must agree):
+#
+#   task-management  Jira / ClickUp / Asana — where work is TRACKED once
+#                    decided; the brief's output flows to them, not from them.
+#   code             GitHub — what was BUILT, not what users need.
+#   design           Figma / Framer — design surfaces, not customer signal.
+#   communication    Slack / Teams — DELIVERY targets for the brief.
+#   documents        Notion / Google Docs — internal documentation; context
+#                    that shapes a brief, not customer/product evidence.
+#
+# Everything else (analytics, customer-voice, meetings, crm, revenue,
+# monitoring) is evidence and can drive a brief.
+NON_EVIDENCE_TYPES: frozenset[str] = frozenset(
+    {TASK_MANAGEMENT, CODE, DESIGN, COMMUNICATION, DOCUMENTS}
+)
+
+#: Providers whose TYPE is non-evidence but which still count as a data
+#: source. Intercom's type is `communication`, but as a customer-support inbox
+#: it carries voice-of-customer evidence (the web catalog files it under the
+#: `voice` category for the same reason).
+_EVIDENCE_PROVIDER_EXCEPTIONS: frozenset[str] = frozenset({"intercom"})
+
+
+def is_evidence_provider(provider: str | None) -> bool:
+    """True iff `provider` can feed the brief with evidence.
+
+    Unknown providers return False — a tool we can't classify can't be shown
+    to gather anything (matches web isEvidenceConnector).
+    """
+    key = (provider or "").strip().lower()
+    if key in _EVIDENCE_PROVIDER_EXCEPTIONS:
+        return True
+    ts = types_for(key)
+    return bool(ts) and any(t not in NON_EVIDENCE_TYPES for t in ts)
+
+
 def types_for(provider: str | None) -> list[str]:
     """The provider's types ([] for unknown providers — never raises)."""
     return list(CONNECTOR_TYPES.get((provider or "").strip().lower(), []))

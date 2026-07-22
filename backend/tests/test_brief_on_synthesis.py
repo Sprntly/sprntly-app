@@ -118,8 +118,10 @@ def test_regenerate_synthesis_path_starts_synthesis_bg(app_client, isolated_sett
     async def _fake_bg(dataset):
         seen.append(dataset)
 
-    # /regenerate always routes to the synthesis bg runner.
-    with patch.object(brief_routes, "_synthesis_generate_bg", side_effect=_fake_bg):
+    # /regenerate always routes to the synthesis bg runner. (Data-source gate
+    # satisfied explicitly — the empty fixture company has no connections.)
+    with patch.object(brief_routes, "_synthesis_generate_bg", side_effect=_fake_bg), \
+         patch.object(brief_routes, "has_brief_data_source", return_value=True):
         r = app_client.post("/v1/brief/regenerate?dataset=acme")
 
     assert r.status_code == 200
@@ -636,6 +638,10 @@ def test_generate_all_synthesis_briefs_isolates_failure(isolated_settings, monke
 def test_dataset_generate_routes_to_synthesis_bg(app_client, isolated_settings, monkeypatch):
     db = isolated_settings["db"]
     db.insert_dataset(slug="acme", display_name="Acme")
+    # Satisfy the data-source gate — this test is about bg-runner routing only.
+    monkeypatch.setattr(db, "list_connections", lambda _cid: [
+        {"provider": "hubspot", "status": "active"},
+    ])
 
     seen: list[str] = []
 
