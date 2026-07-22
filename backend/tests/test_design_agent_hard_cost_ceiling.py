@@ -413,6 +413,25 @@ def test_cost_summary_still_emitted_on_abort(monkeypatch, caplog):
     assert "jane.doe@example.com" not in abort_msg
 
 
+# ─── publish_step visibility on cost-guard abort ────────────────────────────
+
+
+def test_publish_step_emits_cost_guard_message_before_abort_finish(monkeypatch):
+    order: list[str] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: order.append(f"publish_step:{ev.get('text')}"))
+    monkeypatch.setattr(runner, "_sse_close", lambda *a, **kw: order.append("_sse_close"))
+    _install_client(monkeypatch, [
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})], usage=_usage(out=_ABORT_OUT)),
+    ])
+    _stub_dispatch(monkeypatch)
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "aborted"
+    cost_guard_entries = [e for e in order if e == "publish_step:Generation stopped early to control cost"]
+    assert len(cost_guard_entries) == 1
+    assert order[-1] == "_sse_close"
+    assert order[-2] == "publish_step:Generation stopped early to control cost"
+
+
 # ─── Config / env knob ───────────────────────────────────────────────────────
 
 
