@@ -26,8 +26,12 @@ _fallback_warned = False
 @lru_cache(maxsize=16)
 def _client_for_key(api_key: str) -> Anthropic:
     """Cached Design Agent client keyed by the API key (no explicit timeout —
-    long tool loops rely on the SDK's default)."""
-    return Anthropic(api_key=api_key)
+    long tool loops rely on the SDK's default). `max_retries=0`: mirrors
+    `app.llm._client_for_key`'s identical precedent — `agent_loop`'s own
+    retry loop (runner.py) is the single source of truth for retry-on-
+    transient-failure, so the SDK's opaque default (`max_retries=2`, no
+    callback hook) must not silently double-retry underneath it."""
+    return Anthropic(api_key=api_key, max_retries=0)
 
 
 def _platform_key() -> str | None:

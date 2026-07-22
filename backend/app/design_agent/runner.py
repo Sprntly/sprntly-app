@@ -80,6 +80,7 @@ from app.design_agent.tools import (
     normalize_choices,
     tool_definitions_for_mode,
 )
+from app.llm import MAX_ATTEMPTS, _attempt_delay, _is_retryable
 from app.llm_telemetry import (
     MODEL_PRICING,
     RunUsage,
@@ -941,27 +942,64 @@ async def agent_loop(
             _last_step: list[str] = [""]  # mutable container for dedup
 
             def _stream() -> object:
-                with client.messages.stream(
-                    model=active_model,
-                    max_tokens=max_tokens,
-                    system=system_blocks,
-                    tools=tools_payload,
-                    messages=messages,
-                ) as stream:
-                    for event in stream:
-                        etype = type(event).__name__
-                        if etype == "RawContentBlockStartEvent":
-                            block = getattr(event, "content_block", None)
-                            if block and getattr(block, "type", None) == "tool_use":
-                                label = progress_label or friendly_step(getattr(block, "name", ""), None)
-                                if label != _last_step[0]:
-                                    _last_step[0] = label
-                                    loop.call_soon_threadsafe(
-                                        publish_step,
-                                        ctx.prototype_id,
-                                        {"kind": "step", "text": label, "state": "active"},
-                                    )
-                    return stream.get_final_message()
+                # Bounded, observable retry-with-backoff around this module's ONE
+                # LLM call site. Reuses app.llm's exact classification + backoff
+                # primitives (_is_retryable / _attempt_delay / MAX_ATTEMPTS) so this
+                # gets the SAME retry budget every other call site in the repo has —
+                # NOT a new, invented policy. Mirrors _create_with_retries's own
+                # shape (llm.py:212-284): retryable + not-last-attempt -> log,
+                # publish a calming step, sleep, retry; not-retryable OR last
+                # attempt -> raise immediately (no sleep, no publish) so the
+                # existing outer `except Exception` classification below is
+                # reached exactly as it is today.
+                for attempt in range(MAX_ATTEMPTS):
+                    try:
+                        with client.messages.stream(
+                            model=active_model,
+                            max_tokens=max_tokens,
+                            system=system_blocks,
+                            tools=tools_payload,
+                            messages=messages,
+                        ) as stream:
+                            for event in stream:
+                                etype = type(event).__name__
+                                if etype == "RawContentBlockStartEvent":
+                                    block = getattr(event, "content_block", None)
+                                    if block and getattr(block, "type", None) == "tool_use":
+                                        label = progress_label or friendly_step(getattr(block, "name", ""), None)
+                                        if label != _last_step[0]:
+                                            _last_step[0] = label
+                                            loop.call_soon_threadsafe(
+                                                publish_step,
+                                                ctx.prototype_id,
+                                                {"kind": "step", "text": label, "state": "active"},
+                                            )
+                            return stream.get_final_message()
+                    except Exception as exc:  # noqa: BLE001 — classified below
+                        if not _is_retryable(exc) or attempt == MAX_ATTEMPTS - 1:
+                            raise
+                        delay = _attempt_delay(attempt)
+                        logger.warning(
+                            "design_agent.llm_call.transient_failure prototype_id=%s "
+                            "attempt=%d/%d retrying_in=%.1fs error=%s",
+                            ctx.prototype_id, attempt + 1, MAX_ATTEMPTS, delay, exc,
+                        )
+                        # A retried attempt restarts THIS iteration's stream from
+                        # scratch, so re-arm the tool-step dedup — otherwise a tool
+                        # call that legitimately repeats on the retried attempt
+                        # would be silently suppressed as "already emitted."
+                        _last_step[0] = ""
+                        loop.call_soon_threadsafe(
+                            publish_step,
+                            ctx.prototype_id,
+                            {
+                                "kind": "step",
+                                "text": "Reconnecting to the model — retrying automatically",
+                                "state": "active",
+                            },
+                        )
+                        time.sleep(delay)
+                raise AssertionError("unreachable")  # pragma: no cover
 
             resp = await asyncio.to_thread(_stream)
             usage.add(resp.usage)
@@ -1006,6 +1044,14 @@ async def agent_loop(
                     "est_cost_usd=%.4f hard_cap=%.2f soft_cap=%.2f iters=%d",
                     ctx.prototype_id, mode, usage.est_cost_usd(MODEL),
                     HARD_CAP_USD, SOFT_CAP_USD, iters,
+                )
+                # MUST fire BEFORE _finish (below) — _finish's own _sse_close pops
+                # and clears every subscriber queue for this prototype_id
+                # (event_stream.py's close()); a publish_step issued AFTER _finish
+                # returns would silently no-op (no subscribers left to reach).
+                publish_step(
+                    ctx.prototype_id,
+                    {"kind": "step", "text": "Generation stopped early to control cost", "state": "active"},
                 )
                 return _finish(usage, "aborted", iters, start, last_assistant_content, ctx.prototype_id, model_escalated=model_escalated)
 
@@ -1205,13 +1251,24 @@ async def agent_loop(
             safe_error_message,
         )
 
-        result = _finish(usage, "error", iters, start, [], ctx.prototype_id, model_escalated=model_escalated)
-        cls = classify_provider_error(exc)
         # Record ONLY the safe class + a fixed generic message on the result —
         # both fields are client-visible downstream (they flow into the failed
         # prototype row / job record). The raw text goes to the log ONLY.
+        cls = classify_provider_error(exc)
+        error_message = safe_error_message(cls)
+        # Reuses the SAME curated, class-specific copy the eventual polled
+        # GenerationErrorBanner/reasonCopy() will show — single source of
+        # truth, not a second message table — but surfaces it on the LIVE
+        # activity stream immediately, before _finish's _sse_close pops every
+        # subscriber for this prototype_id (see the abort branch above for
+        # why the ordering is load-bearing).
+        publish_step(
+            ctx.prototype_id,
+            {"kind": "step", "text": error_message, "state": "active"},
+        )
+        result = _finish(usage, "error", iters, start, [], ctx.prototype_id, model_escalated=model_escalated)
         result.error_class = cls.value
-        result.error_message = safe_error_message(cls)
+        result.error_message = error_message
         logger.warning(
             "design_agent.run.failed prototype_id=%s error_class=%s raw=%s",
             ctx.prototype_id, cls.value, str(exc),

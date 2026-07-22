@@ -19,6 +19,7 @@ import sys
 import time
 import types
 
+import anthropic
 import pytest
 
 from app.design_agent import runner
@@ -590,6 +591,122 @@ def test_dispatch_exception_returns_is_error_tool_result(monkeypatch):
     assert tr["type"] == "tool_result"
     assert tr["is_error"] is True
     assert "error" in tr["content"]  # carries the exception class + message
+
+
+# ─── Observable retry around the one LLM call site ──────────────────────────
+
+
+def test_retryable_transient_failures_recover_and_generation_completes(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    calls: list[tuple] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: calls.append((pid, ev)))
+    client = _install_client(monkeypatch, [
+        anthropic.APITimeoutError(request=None),
+        anthropic.APITimeoutError(request=None),
+        _msg("end_turn", [_text("done")], usage=_usage(out=10)),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "complete"
+    assert len(client.calls) == 3
+    reconnect_calls = [ev for _pid, ev in calls if ev.get("text") == "Reconnecting to the model — retrying automatically"]
+    assert len(reconnect_calls) == 2
+
+
+def test_retries_exhausted_after_max_attempts_classifies_as_before(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    client = _install_client(monkeypatch, [anthropic.APITimeoutError(request=None)] * 4)
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "error"
+    assert result.error_class == "PROVIDER_UNAVAILABLE"
+    assert result.error_message == "The prototype service is temporarily unavailable."
+    assert len(client.calls) == 4
+
+
+def test_usage_added_exactly_once_per_iteration_despite_retries(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    _install_client(monkeypatch, [
+        anthropic.APITimeoutError(request=None),
+        anthropic.APITimeoutError(request=None),
+        _msg("end_turn", [_text("done")], usage=_usage(out=10)),
+    ])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "complete"
+    assert result.usage.output_tokens == 10
+
+
+def test_non_retryable_exception_fails_immediately_no_retry(monkeypatch):
+    calls: list[tuple] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: calls.append((pid, ev)))
+    client = _install_client(monkeypatch, [RuntimeError("boom")])
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert len(client.calls) == 1
+    assert result.status == "error"
+    texts = [ev.get("text") for _pid, ev in calls]
+    assert "Reconnecting to the model — retrying automatically" not in texts
+    assert "Something went wrong." in texts
+
+
+def test_publish_step_order_terminal_message_before_finish_on_retry_exhaustion(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    order: list[str] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: order.append(f"publish_step:{ev.get('text')}"))
+    monkeypatch.setattr(runner, "_sse_close", lambda *a, **kw: order.append("_sse_close"))
+    _install_client(monkeypatch, [anthropic.APITimeoutError(request=None)] * 4)
+    result = _run(agent_loop(_system(), _user(), _ctx()))
+    assert result.status == "error"
+    assert order[-1] == "_sse_close"
+    assert order[-2] == "publish_step:The prototype service is temporarily unavailable."
+
+
+def test_publish_step_reconnecting_text_is_exact(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    calls: list[dict] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: calls.append(ev))
+    _install_client(monkeypatch, [
+        anthropic.APITimeoutError(request=None),
+        anthropic.APITimeoutError(request=None),
+        _msg("end_turn", [_text("done")], usage=_usage(out=10)),
+    ])
+    _run(agent_loop(_system(), _user(), _ctx()))
+    reconnect = [ev for ev in calls if ev.get("kind") == "step" and "Reconnecting" in ev.get("text", "")]
+    assert len(reconnect) == 2
+    for ev in reconnect:
+        assert ev["text"] == "Reconnecting to the model — retrying automatically"
+        assert ev["state"] == "active"
+
+
+def test_retry_re_arms_tool_step_dedup(monkeypatch):
+    from app import llm
+
+    monkeypatch.setattr(llm, "_BACKOFF_BASE_S", 0.001)
+    calls: list[dict] = []
+    monkeypatch.setattr(runner, "publish_step", lambda pid, ev: calls.append(ev))
+    client = _install_client(monkeypatch, [
+        anthropic.APITimeoutError(request=None),
+        _msg("tool_use", [_tool_use("t1", "view", {"path": "x"})]),
+        _msg("end_turn", [_text("done")]),
+    ])
+    ctx = _ctx(virtual_fs={"x": "content"})
+    result = _run(agent_loop(_system(), _user(), ctx))
+    assert result.status == "complete"
+    # The retried attempt's own tool-step label must still appear — proving the
+    # recovered attempt's dispatch-time step announcement fires normally after
+    # a mid-iteration retry (the per-tool label the dedup-guard reset in
+    # _stream() protects, even though this fake stream's no-op __iter__ can't
+    # directly exercise the in-stream dedup path itself).
+    expected_label = runner._tool_step_label("view", {"path": "x"})
+    tool_step_texts = [ev.get("text") for ev in calls]
+    assert expected_label in tool_step_texts
 
 
 # ─── _hash_tool_call ─────────────────────────────────────────────────────────

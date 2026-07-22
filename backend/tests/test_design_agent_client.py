@@ -65,6 +65,18 @@ def test_caches_client_across_calls(monkeypatch):
     assert a is b
 
 
+def test_client_disables_sdk_own_retry_layer(monkeypatch):
+    """The SDK's own opaque retry (max_retries=2 default, no callback hook)
+    must be disabled — agent_loop's own retry loop (runner.py) is the single
+    source of truth for retry-on-transient-failure, mirroring app.llm's
+    identical _client_for_key precedent."""
+    monkeypatch.setattr(
+        client_mod.settings, "design_agent_anthropic_api_key", "sk-test"
+    )
+    c = client_mod.get_design_agent_client()
+    assert c.max_retries == 0
+
+
 # ---- fallback handling ------------------------------------------------------
 
 def test_falls_back_to_anthropic_key_with_warning(monkeypatch, caplog):
