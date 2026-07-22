@@ -452,6 +452,10 @@ export function GenerateModal({
   // Optional explanatory note (a lower-confidence proceed note), shown as
   // subtext beneath the matched line.
   const [proceedNote, setProceedNote] = useState<string | null>(_testProceedNote ?? null)
+  // The label shown during the "locating"/"generating" loading phases. undefined
+  // preserves GenerateLoadingState's own codebase-flavored default; explicitly
+  // set to a generic label for non-codebase generations (figma/website/screenshot).
+  const [loadingLabel, setLoadingLabel] = useState<string | undefined>(undefined)
 
   // Re-entry guard. Each resolve call is an independent model sample, so
   // re-firing it can flip a genuinely sub-threshold (ambiguous) match into an
@@ -932,6 +936,7 @@ export function GenerateModal({
   ) {
     if (prdId == null) return
     const codebaseGenerate = forCodebase || (designSource === "github" && githubActive)
+    setLoadingLabel(codebaseGenerate ? undefined : "Generating your prototype…")
     const effectiveRepo = repoOverride ?? repoSel
     // When the codebase path forces generation on (auto-skip / picker pick), the
     // live designSource may not have re-rendered from setDesignSource("github")
@@ -1377,6 +1382,7 @@ export function GenerateModal({
     setLocateResult(null)
     setMatchedRoute(null)
     setProceedNote(null)
+    setLoadingLabel(undefined)
     setFlowPhase("locating")
 
     // Remember how to re-run THIS flow from scratch so the error phase's Retry
@@ -1941,6 +1947,7 @@ export function GenerateModal({
             <GenerateLoadingState
               matchedRoute={matchedRoute}
               note={proceedNote}
+              label={loadingLabel}
             />
           )}
 

@@ -251,6 +251,58 @@ describe("loading UI is immediate (decoupled from the resolve call)", () => {
       expect.objectContaining({ chosenScreenRoute: "/team" }),
     )
   })
+
+  it("generate loading label is generic for a non-codebase source", async () => {
+    // designSource "website" (not github) → codebaseMode is false regardless
+    // of any connection state, so runGenerateForRoute fires immediately.
+    const { container } = render(
+      React.createElement(GenerateModal, manualProps({ _testInitSource: "website" })),
+    )
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="generate-loading-label"]'),
+      ).toBeTruthy(),
+    )
+    const label = container.querySelector(
+      '[data-testid="generate-loading-label"]',
+    )?.textContent
+    expect(label).toBe("Generating your prototype…")
+    expect(label).not.toContain("codebase")
+  })
+
+  it("generate loading label stays codebase-specific during the locating phase", async () => {
+    // Locate poll left unresolved — same pattern as the first test in this
+    // block — pins the UNCHANGED codebase-default label during "locating".
+    let resolveLater: (s: { status: "done"; result: LocateResponse }) => void =
+      () => {}
+    vi.spyOn(designAgentApi, "locate").mockResolvedValue({
+      job_id: "job-1",
+      status: "running",
+    })
+    vi.spyOn(designAgentApi, "locateJob").mockReturnValue(
+      new Promise((res) => {
+        resolveLater = res
+      }),
+    )
+
+    const { container } = render(React.createElement(GenerateModal, manualProps()))
+    clickGenerate(container)
+
+    await waitFor(() =>
+      expect(
+        container.querySelector('[data-testid="generate-loading-label"]'),
+      ).toBeTruthy(),
+    )
+    expect(
+      container.querySelector('[data-testid="generate-loading-label"]')
+        ?.textContent,
+    ).toBe("Looking through your codebase…")
+
+    // Clean up the dangling promise.
+    act(() => resolveLater({ status: "done", result: autoProceed() }))
+  })
 })
 
 // ─── ambiguous → inline picker ────────────────────────────────────────────────
