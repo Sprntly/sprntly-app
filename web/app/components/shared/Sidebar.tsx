@@ -7,9 +7,10 @@ import { useAuth } from "../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBook2 } from "@tabler/icons-react"
 import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
+import { publicPath } from "../../lib/public-path"
 
 interface SidebarProps {
   activeCompany?: string
@@ -224,8 +225,24 @@ export function Sidebar(_props: SidebarProps = {}) {
 
       <div className="sb-rail-spacer" />
 
-      {/* Bottom icons — Settings + Feedback only (Sign out lives in Settings → Account). */}
+      {/* Bottom icons — Guide + Settings + Feedback (Sign out lives in Settings → Account). */}
       <div className="sb-rail-bottom">
+        {/* Guide links out to the public docs site (/docs), which lives outside
+            the authenticated SPA — so it's a real anchor, not a goTo() screen.
+            Opens in a new tab to preserve the user's in-app session. */}
+        <a
+          href={publicPath("/docs")}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="sb-rail-item"
+          title="Guide"
+          aria-label="Guide"
+          data-testid="sidebar-guide-link"
+        >
+          <IconBook2 size={18} />
+          <span className="sb-rail-label">Guide</span>
+          <span className="nav-tooltip">Guide</span>
+        </a>
         <RailItem screen="settings" icon={<IconSettings size={18} />} label="Settings" />
         <button
           type="button"
