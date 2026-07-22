@@ -12,9 +12,9 @@
  *   - error         → an error line.
  *
  * EVERY turn shows an author + a relative timestamp via the shared
- * `.da-activity-agent-label` styling: agent turns label "Design Agent · {ago}",
+ * `.da-activity-agent-label` styling: agent turns label "Sprntly · {ago}",
  * user turns "{userName ?? 'You'} · {ago}". The author is derived from `kind`
- * ("user" → the user, everything else → the Design Agent). The relative time is
+ * ("user" → the user, everything else → "Sprntly"). The relative time is
  * computed at render from each turn's client-captured `createdAt` (ms) and
  * refreshed by a light 30s ticker so "2m ago" stays current.
  *
@@ -45,7 +45,7 @@ export function turnLabel(
   userName: string | null | undefined,
   now: number,
 ): string {
-  const author = kind === "user" ? (userName?.trim() || "You") : "Design Agent"
+  const author = kind === "user" ? (userName?.trim() || "You") : "Sprntly"
   // Guard a missing/invalid timestamp (older callers, malformed events): omit the
   // relative-time suffix rather than throwing on `new Date(undefined)`.
   const rel =
@@ -75,7 +75,7 @@ export function IterateActivityStream({
   }, [])
 
   // Empty thread → a quiet empty-state instead of a blank region, so the panel
-  // always reads as the Design Agent conversation even before the first change.
+  // always reads as the Sprntly conversation even before the first change.
   if (activity.length === 0) {
     return (
       <div className="da-activity-empty" data-testid="da-activity-empty">
@@ -118,7 +118,7 @@ export function IterateActivityStream({
       data-testid="da-activity"
       role="log"
       aria-live="polite"
-      aria-label="Design Agent activity"
+      aria-label="Sprntly activity"
     >
       {userEvent && (
         <div

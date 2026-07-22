@@ -702,3 +702,44 @@ describe("iterate cost-confirm skip — skipCostConfirm bypasses the estimate ga
     }
   })
 })
+
+// ---- branding: internal persona name never reaches the placeholder ---------
+
+describe("branding — placeholder says Sprntly, not the internal persona name", () => {
+  it("test_reprompt_placeholder_says_sprntly_not_design_agent", () => {
+    const html = renderView({
+      prompt: "",
+      isComplete: false,
+      mode: "reprompt",
+      showModal: false,
+    })
+    expect(html).toContain("Describe a change for Sprntly to make…")
+    expect(html).not.toContain("Design Agent")
+  })
+
+  it("test_apply_placeholder_says_sprntly_not_design_agent", () => {
+    const html = renderView({
+      prompt: "",
+      isComplete: false,
+      mode: "apply",
+      showModal: false,
+    })
+    expect(html).toContain("Edit this task for Sprntly…")
+    expect(html).not.toContain("Design Agent")
+  })
+
+  it("test_iterate_composer_source_has_no_design_agent_string_outside_locked_spec_quote", () => {
+    const src = readFileSync(
+      join(process.cwd(), "app", "components", "design-agent", "IterateComposer.tsx"),
+      "utf8",
+    )
+    // The single deliberately-untouched line is a direct quotation of the
+    // locked spec's own wording (not this file's author's own prose) — strip
+    // it before asserting the rest of the source is clean.
+    const remainder = src
+      .split("\n")
+      .filter((l) => !l.includes('Per spec the pre-fill is "a task handed to the Design Agent"'))
+      .join("\n")
+    expect(remainder).not.toContain("Design Agent")
+  })
+})

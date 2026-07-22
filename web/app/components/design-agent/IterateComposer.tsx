@@ -239,8 +239,8 @@ export function IterateComposerView({
           value={prompt}
           placeholder={
             mode === "apply"
-              ? "Edit this task for the Design Agent…"
-              : "Describe a change for the Design Agent to make…"
+              ? "Edit this task for Sprntly…"
+              : "Describe a change for Sprntly to make…"
           }
           onChange={(e) => onPromptChange?.(e.target.value)}
         />

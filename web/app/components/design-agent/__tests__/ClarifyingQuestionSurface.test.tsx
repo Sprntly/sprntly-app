@@ -379,6 +379,38 @@ describe("AC7 — an awaiting_clarification prototype is never UI-dead-ended", (
   })
 })
 
+// ---- branding: internal persona name never reaches the user ----------------
+
+describe("branding — Sprntly, not the internal persona name", () => {
+  it("test_region_aria_label_says_sprntly_not_design_agent", () => {
+    const html = renderView({
+      question: "List or grid?",
+      choices: null,
+      answer: "",
+    })
+    expect(html).toContain('aria-label="Sprntly has a question"')
+    expect(html).not.toContain("Design Agent")
+  })
+
+  it("test_free_text_placeholder_says_sprntly_not_design_agent", () => {
+    const html = renderView({
+      question: "What tone should the copy take?",
+      choices: null,
+      answer: "",
+    })
+    expect(html).toContain('placeholder="Answer Sprntly…"')
+    expect(html).not.toContain("Design Agent")
+  })
+
+  it("test_clarifying_question_surface_source_has_no_design_agent_string", () => {
+    const src = readFileSync(
+      join(process.cwd(), "app", "components", "design-agent", "ClarifyingQuestionSurface.tsx"),
+      "utf8",
+    )
+    expect(src).not.toContain("Design Agent")
+  })
+})
+
 // ---- error handling ---------------------------------------------------------
 
 describe("error handling", () => {
