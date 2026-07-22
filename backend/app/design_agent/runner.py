@@ -1010,7 +1010,7 @@ async def agent_loop(
             # nudge above — count vs spend are separate convergence signals. The
             # trailing message here is still the user turn (the assistant turn is
             # appended below), so the nudge lands alternation-safe.
-            if not cost_guard_nudged and should_wrap_up(usage, MODEL, SOFT_CAP_USD):
+            if not cost_guard_nudged and should_wrap_up(usage, MODEL, SOFT_CAP_USD, iters):
                 _append_text_block(messages[-1], _wrap_up_nudge(0))  # hard-stop wording
                 cost_guard_nudged = True
                 logger.info(
@@ -1038,7 +1038,7 @@ async def agent_loop(
             # last_assistant_content above), exactly as the max_iters exit does.
             # Placed AFTER the assignment so the salvaged content is this turn's,
             # not the prior iteration's (or the initial [] on iteration 1).
-            if should_abort(usage, MODEL, HARD_CAP_USD):
+            if should_abort(usage, MODEL, HARD_CAP_USD, iters):
                 logger.warning(
                     "cost_guard.aborted prototype_id=%s mode=%s reason=hard_cap_projection "
                     "est_cost_usd=%.4f hard_cap=%.2f soft_cap=%.2f iters=%d",

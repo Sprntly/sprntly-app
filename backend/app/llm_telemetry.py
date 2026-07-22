@@ -95,26 +95,30 @@ class RunUsage:
         )
 
 
-def project_next_iter_cost(usage: RunUsage, model: str) -> float:
+def project_next_iter_cost(usage: RunUsage, model: str, iters: int) -> float:
     """Projected cumulative cost (USD) IF one more average iteration runs.
 
-    Heuristic (AD15 soft cap — a trust signal, not a billing figure): current
-    spend + one more iteration's worth at the run's own average rate so far ≈
-    ``2 × current spend`` once at least one iteration has billed. The simplest
-    defensible projection; a marginal-delta model isn't worth the complexity for
-    a SOFT cap. Returns ``0.0`` on empty usage (nothing has billed yet, so there
-    is nothing to project from).
+    current spend + one more iteration's worth at the run's OWN observed
+    average rate so far: current × (1 + 1/iters). Requires the caller's
+    actual iteration count — a prior version approximated this as a flat
+    "current × 2", which is only correct at iters == 1 and silently
+    overshoots at every iteration count above that (the more iterations
+    already run, the smaller one more SHOULD look relative to the total,
+    not larger — see the incident this ticket fixes). Returns 0.0 when
+    nothing has billed yet or iters <= 0 (nothing to average against).
 
     Pure and deterministic — no network, no SDK token-counter. Reuses
     ``MODEL_PRICING`` via ``RunUsage.est_cost_usd``; raises ``UnknownModelError``
-    on an unpriced model (fails closed). The soft cap is the caller's to pass —
-    this helper is cap-agnostic so any future agent can supply its own.
+    on an unpriced model (fails closed). The soft/hard cap is the caller's to
+    pass — this helper is cap-agnostic so any future agent can supply its own.
     """
     current = usage.est_cost_usd(model)  # raises UnknownModelError — fails closed
-    return current * 2 if current > 0 else 0.0
+    if current <= 0 or iters <= 0:
+        return 0.0
+    return current * (1 + 1 / iters)
 
 
-def should_wrap_up(usage: RunUsage, model: str, soft_cap: float) -> bool:
+def should_wrap_up(usage: RunUsage, model: str, soft_cap: float, iters: int) -> bool:
     """True iff the projected next-iteration cost would reach/exceed the soft cap.
 
     Pure decision primitive — the CALLER (e.g. ``agent_loop``) decides what to do
@@ -122,12 +126,14 @@ def should_wrap_up(usage: RunUsage, model: str, soft_cap: float) -> bool:
     inclusive: a projection exactly equal to ``soft_cap`` returns True. Opt-in by
     import for any future Sprntly agent (PRD/Evidence runner) — one import, one
     call. Raises ``UnknownModelError`` on an unpriced model (via
-    ``project_next_iter_cost``).
+    ``project_next_iter_cost``). ``iters`` is the caller's current 1-based
+    iteration count — required, not defaulted, so no future caller can silently
+    reproduce the flat-doubling bug by omission (see project_next_iter_cost).
     """
-    return project_next_iter_cost(usage, model) >= soft_cap
+    return project_next_iter_cost(usage, model, iters) >= soft_cap
 
 
-def should_abort(usage: RunUsage, model: str, hard_cap: float) -> bool:
+def should_abort(usage: RunUsage, model: str, hard_cap: float, iters: int) -> bool:
     """True iff the projected next-iteration spend would reach/exceed the HARD cap.
 
     The fail-closed BACKSTOP above AD15's soft cap: when the soft-cap nudge
@@ -138,9 +144,10 @@ def should_abort(usage: RunUsage, model: str, hard_cap: float) -> bool:
     are measured consistently); boundary inclusive (projection == hard_cap →
     True). Pure / deterministic; raises ``UnknownModelError`` on an unpriced
     model. The hard cap is the caller's to pass — cap-agnostic for cross-agent
-    reuse.
+    reuse. ``iters`` is required the same way as ``should_wrap_up`` — see
+    project_next_iter_cost.
     """
-    return project_next_iter_cost(usage, model) >= hard_cap
+    return project_next_iter_cost(usage, model, iters) >= hard_cap
 
 
 def log_llm_run(
