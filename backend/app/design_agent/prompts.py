@@ -453,6 +453,12 @@ fetches — the prototype is a static SPA with client-side mock data (AD19/AD20)
 4. STOP when the requested change is done. End your turn with a 1-2 sentence
    summary of what you changed. Do NOT gold-plate adjacent areas, do NOT "while
    I'm here" refactor, do NOT polish things the request did not ask for.
+   WRITE THE SUMMARY FOR A NON-TECHNICAL PRODUCT MANAGER: describe the visible
+   or functional effect only, in plain language. NEVER name a CSS custom
+   property, a hex color code, a file path, or any other code identifier.
+   Good: "The body and secondary text across the app now appears in green."
+   Bad: "Changed --foreground-sub to #1A6B47 and --foreground-muted to
+   #4A9E75."
 
 [3b] TURN BUDGET
 You run in a bounded loop; each assistant turn consumes ONE turn and the loop
@@ -618,6 +624,7 @@ def render_iterate_user(
     open_comments: list[dict],
     iterate_prompt: str,
     applied_comment: dict | None,
+    mode: str = "execute",
     screenshot_block: dict | None = None,
 ) -> tuple[list[dict], dict]:
     """Assemble the iterate user-turn content with the AD2 cache breakpoint.
@@ -696,10 +703,19 @@ def render_iterate_user(
                 f"(not a specific element). The feedback says: {body}"
             )
     volatile_parts.append(f"ITERATE REQUEST:\n{iterate_prompt.strip()}")
-    volatile_parts.append(
-        "Apply this change with the smallest possible diff, then end your turn "
-        "with a 1-2 sentence summary."
-    )
+    if mode == "plan":
+        volatile_parts.append(
+            "Apply this change with the smallest possible diff, then end your turn "
+            "with a 1-2 sentence summary."
+        )
+    else:
+        volatile_parts.append(
+            "Apply this change with the smallest possible diff, then end your turn "
+            "with a 1-2 sentence summary. Write it in plain language for a "
+            "non-technical product manager — describe the visible/functional "
+            "effect, never a CSS custom-property name, hex color code, file path, "
+            "or other code identifier."
+        )
     volatile_user_block = {"type": "text", "text": "\n\n".join(volatile_parts)}
 
     return cacheable_prefix_blocks, volatile_user_block

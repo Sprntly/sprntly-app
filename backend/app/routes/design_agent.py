@@ -3764,6 +3764,7 @@ async def _run_iterate_bg(
             open_comments=open_comments,
             iterate_prompt=body.prompt,
             applied_comment=applied_comment,
+            mode=body.mode,
             screenshot_block=screenshot_block,
         )
         # System block(s) cached at the END of the stable prefix, mirroring
