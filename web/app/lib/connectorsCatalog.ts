@@ -231,7 +231,7 @@ export function connectableCatalog(
 // ── Information-gathering connectors ─────────────────────────────────────────
 //
 // The Top Insights brief is synthesized from connectors that BRING IN evidence
-// about the product and its customers — the "data sources". Four categories
+// about the product and its customers — the "data sources". Five categories
 // don't do that, so they can't satisfy the brief on their own and don't count
 // as a data source:
 //
@@ -242,9 +242,11 @@ export function connectableCatalog(
 //                           brief's output flows to them, not from them.
 //   code   GitHub         — what was BUILT, not what users need.
 //   design Figma / Framer — design surfaces, not customer/product signal.
+//   docs   Notion / Google Docs — internal documentation; context that shapes
+//                           a brief, not customer/product evidence on its own.
 //
 // Everything else (analytics, voice = support/calls/feedback, crm, monitoring,
-// docs, revenue) is a data source and feeds the brief. Defined as a deny-list
+// revenue) is a data source and feeds the brief. Defined as a deny-list
 // of category keys rather than an allow-list so a new evidence category added
 // to CONNECTOR_CATALOG counts automatically. Note this is CATEGORY-based, so
 // Intercom (category `voice`, though its type is `communication`) correctly
@@ -254,6 +256,7 @@ export const NON_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set([
   "pm",
   "code",
   "design",
+  "docs",
 ])
 
 /** Provider ids in the evidence-bearing categories (see NON_EVIDENCE_CATEGORIES). */
@@ -283,9 +286,10 @@ export function hasEvidenceConnector(connectedIds: readonly string[]): boolean {
  * True iff the workspace has at least one ACTIVE "data source" connection — an
  * evidence-bearing connector (see NON_EVIDENCE_CATEGORIES). This is the gate for
  * whether onboarding kicks the first brief: a real data source (analytics,
- * customer support/calls/feedback, CRM, revenue, monitoring, docs) must be
- * connected before we generate. Slack/Teams/Email, Jira & PM tools, GitHub, and
- * Figma do NOT count. Onboarding info alone never produces a brief.
+ * customer support/calls/feedback, CRM, revenue, monitoring) must be
+ * connected before we generate. Slack/Teams/Email, Jira & PM tools, GitHub,
+ * Figma, and docs tools (Notion / Google Docs) do NOT count. Onboarding info
+ * alone never produces a brief.
  */
 export function hasDataSourceConnection(
   connections: readonly { provider: string; status: string }[],

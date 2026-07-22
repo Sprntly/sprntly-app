@@ -181,6 +181,8 @@ def test_brief_regenerate_allowed_when_flag_missing(
         return None
 
     monkeypatch.setattr(brief_route, "_synthesis_generate_bg", _noop)
+    # Satisfy the data-source gate — this test is about the module flag only.
+    monkeypatch.setattr(brief_route, "has_brief_data_source", lambda *_a: True)
     t = tenant_client.make(slug="acme")
     _set_flags(t.company_id, {"agents": False})
     resp = t.client.post("/v1/brief/regenerate", params={"dataset": "acme"})

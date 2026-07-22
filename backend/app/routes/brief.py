@@ -5,6 +5,7 @@ from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
+from app.brief_gate import NO_DATA_SOURCE_MESSAGE, has_brief_data_source
 from app.entitlements import require_weekly_brief_module
 from app.brief_runner import get_status, set_status, warm_synthesis_drilldowns
 from app.db import (
@@ -275,6 +276,11 @@ async def regenerate(
     Runs the KG seed-if-empty → run_synthesis path in the background.
     """
     require_owned_dataset(dataset, company.company_id, company.workspace_id)
+    # Data-source gate: refuse up front when nothing can feed a brief (only
+    # non-evidence connectors and no uploads) — same rule as onboarding's
+    # first-brief kick, so every generation surface behaves identically.
+    if not has_brief_data_source(company.company_id, dataset):
+        raise HTTPException(409, NO_DATA_SOURCE_MESSAGE)
     _track(asyncio.create_task(_synthesis_generate_bg(dataset)))
     return {"started": True, "dataset": dataset}
 
@@ -299,6 +305,10 @@ async def regenerate_all(
     after the brief flips to `ready`.
     """
     require_owned_dataset(dataset, company.company_id, company.workspace_id)
+    # Data-source gate — same rule as /regenerate and onboarding's first-brief
+    # kick. The Connectors settings page surfaces the 409 detail inline.
+    if not has_brief_data_source(company.company_id, dataset):
+        raise HTTPException(409, NO_DATA_SOURCE_MESSAGE)
     _track(asyncio.create_task(_full_pipeline_bg(dataset)))
     return {"started": True, "dataset": dataset}
 

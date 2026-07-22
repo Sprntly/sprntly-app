@@ -2,9 +2,10 @@
 //
 // "Data source" definition (boss's rule, 2026-07): a connector counts as a data
 // source — and can drive the brief — iff its CATEGORY is evidence-bearing, i.e.
-// NOT one of {comms, pm, code, design}. So analytics, customer voice
-// (support/calls/feedback), CRM, revenue, monitoring, and docs count;
-// Slack/Teams/Email, Jira & other PM tools, GitHub, and Figma do NOT.
+// NOT one of {comms, pm, code, design, docs}. So analytics, customer voice
+// (support/calls/feedback), CRM, revenue, and monitoring count;
+// Slack/Teams/Email, Jira & other PM tools, GitHub, Figma, and docs tools
+// (Notion / Google Docs) do NOT.
 import { describe, it, expect } from "vitest"
 import {
   isEvidenceConnector,
@@ -14,18 +15,19 @@ import {
 } from "../connectorsCatalog"
 
 describe("NON_EVIDENCE_CATEGORIES (not data sources)", () => {
-  it("excludes comms, pm, code, and design", () => {
+  it("excludes comms, pm, code, design, and docs", () => {
     expect([...NON_EVIDENCE_CATEGORIES].sort()).toEqual([
       "code",
       "comms",
       "design",
+      "docs",
       "pm",
     ])
   })
 })
 
 describe("isEvidenceConnector — data sources", () => {
-  it("counts analytics, customer voice/support/calls/feedback, crm, revenue, monitoring, docs", () => {
+  it("counts analytics, customer voice/support/calls/feedback, crm, revenue, monitoring", () => {
     for (const id of [
       "mixpanel", // analytics
       "amplitude",
@@ -40,14 +42,12 @@ describe("isEvidenceConnector — data sources", () => {
       "stripe", // revenue
       "sentry", // monitoring
       "datadog",
-      "notion", // docs
-      "google_drive",
     ]) {
       expect(isEvidenceConnector(id), `${id} should be a data source`).toBe(true)
     }
   })
 
-  it("does NOT count Slack/Teams, PM tools, code, or design", () => {
+  it("does NOT count Slack/Teams, PM tools, code, design, or docs", () => {
     for (const id of [
       "slack", // comms (delivery target)
       "msteams",
@@ -59,6 +59,8 @@ describe("isEvidenceConnector — data sources", () => {
       "gitlab",
       "figma", // design — newly excluded per the boss's rule
       "framer",
+      "notion", // docs — excluded per the boss's rule, 2026-07-22
+      "google_drive",
     ]) {
       expect(isEvidenceConnector(id), `${id} should NOT be a data source`).toBe(false)
     }
@@ -84,6 +86,12 @@ describe("hasDataSourceConnection — the onboarding brief gate", () => {
         active("github"),
         active("figma"),
       ]),
+    ).toBe(false)
+  })
+
+  it("is false when only docs tools are connected (Notion + Google Docs)", () => {
+    expect(
+      hasDataSourceConnection([active("notion"), active("google_drive")]),
     ).toBe(false)
   })
 
