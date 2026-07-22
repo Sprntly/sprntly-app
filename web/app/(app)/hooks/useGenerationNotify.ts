@@ -6,6 +6,7 @@ import type { PrototypeRecord } from "../../lib/api"
 import { prototypePath } from "../../lib/routes"
 import { useNavigation } from "../../context/NavigationContext"
 import { reasonCopy } from "../../components/design-agent/GenerationErrorBanner"
+import { markPending } from "../../components/design-agent/notificationStore"
 
 const TICK_MS = 4000
 const MAX_MS = 6 * 60 * 1000
@@ -68,7 +69,12 @@ export function useGenerationNotify(deps: GenerationNotifyDeps = {}) {
           }
           await sleep(TICK_MS)
         }
-        // Timed out — clean exit, no user-facing throw
+        // Deadline expired. The run may well still be going (the backend
+        // routinely outlives this window). The user explicitly asked to be
+        // notified, so hand off rather than dropping: re-arm the
+        // sessionStorage recovery path, which resumePendingNotifications
+        // retries on the next navigation/reload.
+        markPending(prototypeId, prdId)
       } finally {
         pollingIds.current.delete(prototypeId)
       }
