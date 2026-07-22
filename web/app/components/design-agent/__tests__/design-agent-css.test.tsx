@@ -418,3 +418,39 @@ describe("bundle-loading cover has no fade-in (residual-exposure closure)", () =
     expect(CSS).not.toContain("@keyframes da-bundle-fade")
   })
 })
+
+// ── Done-turn response body colour (branding: ink, not accent) ────────────
+describe("done-turn response body colour", () => {
+  it("test_da_activity_done_body_color_is_ink_not_accent — .da-activity-done-body renders in the plain ink colour, not accent-ink", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-done-body\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("color: var(--ink);")
+    expect(rule).not.toContain("var(--accent-ink)")
+  })
+
+  it("test_da_activity_agent_label_color_unchanged — .da-activity-agent-label keeps its accent colour (regression pin, label unaffected)", () => {
+    const match = CSS.match(
+      /\.design-agent-surface\s+\.da-activity-agent-label\s*\{([^}]*)\}/,
+    )
+    expect(match).not.toBeNull()
+    const rule = match![1]
+    expect(rule).toContain("color: var(--accent);")
+  })
+
+  it("test_da_activity_done_rule_byte_unchanged — the sibling .da-activity-done rule (confirmed dead) is untouched, still accent-ink", () => {
+    const block = [
+      ".design-agent-surface .da-activity-done {",
+      "  display: flex;",
+      "  align-items: center;",
+      "  gap: 8px;",
+      "  font-size: 12.5px;",
+      "  font-weight: 600;",
+      "  color: var(--accent-ink);",
+      "}",
+    ].join("\n")
+    expect(CSS).toContain(block)
+  })
+})

@@ -3012,7 +3012,7 @@
   align-items: center;
   gap: 8px;
   font-weight: 600;
-  color: var(--accent-ink);
+  color: var(--ink);
 }
 .design-agent-surface .da-activity-done-icon {
   flex-shrink: 0;
