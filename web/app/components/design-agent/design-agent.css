@@ -3144,6 +3144,15 @@
   align-items: center;
   gap: 8px;
 }
+/* done: the label and the response body are two stacked block children (not
+   a single icon+text row like skipped/error), so override the shared
+   flex-row into a column stack — full-width label above the response,
+   never squeezed into a side column. `stretch` (not the inherited `center`)
+   keeps both children spanning the full available width. */
+.design-agent-surface .da-activity-terminal--done {
+  flex-direction: column;
+  align-items: stretch;
+}
 /* skipped: neutral/grey ✕ in a circle + muted text. */
 .design-agent-surface .da-activity-terminal--skipped .da-activity-terminal-icon {
   flex-shrink: 0;
