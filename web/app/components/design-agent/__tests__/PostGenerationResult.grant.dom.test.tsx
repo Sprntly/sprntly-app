@@ -169,6 +169,28 @@ describe("PostGenerationResult — authed view-grant gates the iframe (DOM)", ()
   })
 })
 
+// Proves the container actually THREADS current_checkpoint_id into the hook
+// call, not just that the hook accepts a third parameter in isolation.
+describe("PostGenerationResult — checkpoint id threads into useViewGrant (DOM)", () => {
+  it("test_post_generation_result_threads_checkpoint_id_into_use_view_grant", async () => {
+    const { rerender } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE, current_checkpoint_id: 1 }),
+      }),
+    )
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(1))
+
+    // Same bundle_url, only current_checkpoint_id advances — a second mint
+    // must fire.
+    rerender(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE, current_checkpoint_id: 2 }),
+      }),
+    )
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+  })
+})
+
 describe("PostGenerationResult — private share link wiring", () => {
   it("uses the prototype record prd id for the private internal link", () => {
     render(

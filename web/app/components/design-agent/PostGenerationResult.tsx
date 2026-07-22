@@ -1533,7 +1533,7 @@ export function PostGenerationResult({
   // until the grant exists, so the iframe `src` is never set without a credential
   // the asset GETs can carry. `notifyAssetError` re-mints ONCE on an asset 401
   // (bounded — see useViewGrant). The bundle url is opaque here; we never parse it.
-  const grant = useViewGrant(prototype.id, prototype.bundle_url)
+  const grant = useViewGrant(prototype.id, prototype.bundle_url, prototype.current_checkpoint_id ?? null)
 
   // P6-16 (UX-6): client-only open state for the full-screen overlay. Owned here
   // (the stateful container) and threaded into the SSR-renderable pure view,

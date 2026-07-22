@@ -180,6 +180,7 @@ export async function preflightBundle(
 export function useViewGrant(
   prototypeId: number,
   bundleUrl: string | null,
+  checkpointId: number | null = null,
 ): ViewGrantState {
   const [grantedBundleUrl, setGrantedBundleUrl] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -244,8 +245,12 @@ export function useViewGrant(
     [prototypeId],
   )
 
-  // Initial mint (and re-mint when a fresh bundle url arrives). A new bundle url
-  // means a new build/checkpoint, so reset the re-mint budget and mint fresh.
+  // Initial mint (and re-mint when a fresh bundle url OR a new checkpoint
+  // arrives). A checkpoint advance means the bundle CONTENT changed even when
+  // the url string didn't (the common in-place-overwrite iterate case) — the
+  // grant bound to the OLD checkpoint is already semantically stale even
+  // though it's still within its TTL, so treat a checkpoint change exactly
+  // like a bundle url change: reset the re-mint budget and mint fresh.
   useEffect(() => {
     if (!bundleUrl) {
       // No bundle yet (still generating) — nothing to grant; clear any stale grant.
@@ -256,7 +261,7 @@ export function useViewGrant(
     }
     remintAttemptsRef.current = 0
     void mint(bundleUrl, false)
-  }, [bundleUrl, mint])
+  }, [bundleUrl, checkpointId, mint])
 
   const notifyAssetError = useCallback(() => {
     if (!bundleUrl) return
@@ -311,7 +316,11 @@ export function useViewGrant(
       const action = readinessAction(status)
       if (action === "remint") {
         clearReadyRetry()
-        setNotReady(false)
+        // Mask the iframe for the duration of the 401 recovery — the same
+        // treatment the "notready" branch below already gives a briefly-404ing
+        // bundle. Withholding the mask here (the pre-fix `setNotReady(false)`)
+        // let the raw 401 body flash visible during the recovery window.
+        setNotReady(true)
         notifyAssetError()
         return
       }
