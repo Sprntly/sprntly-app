@@ -391,3 +391,45 @@ describe("ChatScreen — PRD-tab asks are grounded on the open PRD", () => {
     expect(opts?.prd_id).toBeUndefined()
   })
 })
+
+// A HEADER open (brief insight / ideation / backlog) has NO in-chat command turn:
+// the insight card IS the tab's opening agent message and must stay at the TOP,
+// even after the user starts chatting on it. (Contrast the in-chat command flow,
+// where the card renders inline BELOW the command turn — covered in
+// ChatScreen.import-command.dom.test.tsx.)
+describe("ChatScreen — a brief-insight-opened PRD keeps its card at the top", () => {
+  async function sendInThread(text: string) {
+    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => { fireEvent.change(textarea, { target: { value: text } }) })
+    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => { fireEvent.click(sendBtn) })
+  }
+
+  it("renders the insight card ABOVE the user's first message (no prdInFlow)", async () => {
+    renderWith({
+      title: "PRD · Retention",
+      source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
+      insightBody: "Users churn early. Fix onboarding.",
+    })
+    await clickOpenPrd()
+    // Header open: the insight card is the opening message (no command turn).
+    const card = await screen.findByTestId("chat-insight-msg")
+
+    // The user chats on the PRD — a real turn is appended to the thread.
+    await sendInThread("Can you tighten the goals section?")
+    const bubble = await waitFor(() => {
+      const el = Array.from(document.querySelectorAll(".bc-user-bubble"))
+        .find((n) => n.textContent?.includes("Can you tighten the goals section?"))
+      expect(el).toBeTruthy()
+      return el as Element
+    })
+
+    // The insight card stays PINNED ABOVE the user's message (header behaviour is
+    // unchanged): card precedes bubble in document order.
+    expect(card.compareDocumentPosition(bubble) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // And it's still the FIRST .bc-turn in the thread.
+    const firstTurn = document.querySelector(".bc-thread .bc-turn")
+    expect(firstTurn?.getAttribute("data-testid")).toBe("chat-insight-msg")
+  })
+})

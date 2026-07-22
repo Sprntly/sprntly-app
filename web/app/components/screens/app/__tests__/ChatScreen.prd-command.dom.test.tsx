@@ -163,6 +163,31 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     expect(generateFromTask).not.toHaveBeenCalled()
   })
 
+  it("seeds the command turn + generating card BEFORE generateFromTask resolves (optimistic-first)", async () => {
+    // The latency bug: the previous flow awaited generateFromTask BEFORE opening
+    // the tab, so the composer cleared and the chat sat empty for the multi-second
+    // call. Hold the POST unresolved and assert the optimistic UI is already up.
+    let resolveGen!: (v: unknown) => void
+    generateFromTask.mockImplementationOnce(() => new Promise((res) => { resolveGen = res as (v: unknown) => void }))
+
+    renderChat()
+    await typeAndSend("generate a PRD for dark mode on mobile")
+
+    // The generate POST is in flight (called with the parsed task) but NOT
+    // resolved…
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile")
+    // …yet the user's command, the acknowledgment, and the generating PRD card
+    // are already on screen.
+    expect(document.body.textContent).toContain("generate a PRD for dark mode on mobile")
+    expect(document.body.textContent).toContain("Generating a PRD for that")
+    expect(document.body.textContent).toContain("Generating PRD…")
+    expect(document.querySelector('[data-testid="chat-insight-msg"]')).toBeTruthy()
+    expect(runAskGeneration).not.toHaveBeenCalled()
+
+    // Resolve the generate → the tab drives the result in via the resume machinery.
+    await act(async () => { resolveGen({ prd_id: 501, title: "Dark mode on mobile", status: "generating" }) })
+  })
+
   it("a GENERIC command MID-conversation seeds the PRD from the conversation", async () => {
     renderChat()
     // First a real message → the tab now carries a conversation turn.

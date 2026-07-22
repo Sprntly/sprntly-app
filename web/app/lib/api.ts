@@ -682,10 +682,19 @@ export const onboardingApi = {
    * binds the company dataset). No longer an onboarding step since v6; kept
    * for Settings-side callers.
    */
-  createWorkspace: (name: string) =>
+  createWorkspace: (
+    name: string,
+    fields: {
+      team_scope?: string | null
+      team_strategy?: string | null
+      team_roadmap?: string | null
+      sizing_methodology?: string | null
+      additional_context?: string | null
+    } = {},
+  ) =>
     api.post<{ id: string; name: string; slug: string; is_default: boolean }>(
       "/v1/onboarding/workspace",
-      { name },
+      { name, ...fields },
     ),
   /**
    * Step 9 "Here's what we learned": draft the business-context prose from
@@ -734,6 +743,24 @@ export type WorkspaceSummary = {
   product_id: string | null
   dataset: string | null
   role: "admin" | "member" | "viewer"
+  // Workspace-owned "Your workspace" fields (2026-07-22 — moved off the
+  // companies row). Present on the default workspace; optional on the summary.
+  team_scope?: string | null
+  team_strategy?: string | null
+  team_roadmap?: string | null
+  sizing_methodology?: string | null
+  additional_context?: string | null
+}
+
+/** Partial update for PATCH /v1/workspaces/{id} — any subset of the name +
+ *  the five workspace-owned fields. */
+export type WorkspacePatch = {
+  name?: string
+  team_scope?: string | null
+  team_strategy?: string | null
+  team_roadmap?: string | null
+  sizing_methodology?: string | null
+  additional_context?: string | null
 }
 
 export type WorkspaceMemberRecord = {
@@ -756,11 +783,14 @@ export const workspacesApi = {
     ),
   create: (name: string) =>
     api.post<WorkspaceSummary>("/v1/workspaces", { name }),
-  rename: (id: string, name: string) =>
+  /** PATCH any subset of the name + the five workspace-owned fields. */
+  update: (id: string, patch: WorkspacePatch) =>
     api.patch<WorkspaceSummary>(
       `/v1/workspaces/${encodeURIComponent(id)}`,
-      { name },
+      patch,
     ),
+  rename: (id: string, name: string) =>
+    workspacesApi.update(id, { name }),
   remove: (id: string) =>
     api.delete<void>(`/v1/workspaces/${encodeURIComponent(id)}`),
   members: (id: string) =>

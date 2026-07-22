@@ -44,10 +44,41 @@ function rowToProduct(row: Record<string, unknown>): WorkspaceProduct {
   }
 }
 
+/**
+ * Pick the company's DEFAULT workspace row out of an embedded `workspaces(*)`
+ * array (falls back to the first row when none is flagged default). The six
+ * "Your workspace" fields are sourced from this row (2026-07-22 — moved off the
+ * companies row); `null` when the company has no workspace yet.
+ */
+function pickDefaultWorkspace(
+  workspaces: unknown,
+): Record<string, unknown> | null {
+  if (!Array.isArray(workspaces) || workspaces.length === 0) return null
+  const rows = workspaces as Record<string, unknown>[]
+  return rows.find((w) => w.is_default === true) ?? rows[0] ?? null
+}
+
 function rowToCompany(
   row: Record<string, unknown>,
   product: WorkspaceProduct | null = null,
+  /**
+   * The company's default `workspaces` row. The six workspace-owned fields
+   * (name → team_name, team_scope, team_strategy, team_roadmap,
+   * sizing_methodology, additional_context) are read from HERE, not from the
+   * companies row — a single source of truth shared by onboarding + Settings.
+   */
+  workspaceRow: Record<string, unknown> | null = null,
 ): WorkspaceCompany {
+  const ws = workspaceRow ?? {}
+  // A never-renamed default workspace carries the literal sentinel name
+  // "Default" (slug "default"). Surface that as empty for team_name so the
+  // onboarding "Workspace name" field prompts for a real name instead of
+  // pre-filling "Default" — otherwise a user could click Next without editing
+  // and silently keep the workspace called "Default" (the very bug this move
+  // fixes). Any real rename has a non-"Default" name and flows through.
+  const wsName = (ws.name as string | null) ?? null
+  const isSentinelDefault =
+    ws.is_default === true && ws.slug === "default" && wsName === "Default"
   return {
     id: String(row.id),
     slug: String(row.slug),
@@ -71,14 +102,18 @@ function rowToCompany(
     icp: parseCompanyIcp(row.icp),
     tone_voice: parseCompanyToneVoice(row.tone_voice),
     planning_cycle: (row.planning_cycle as string | null) ?? null,
-    team_name: (row.team_name as string | null) ?? null,
-    team_scope: (row.team_scope as string | null) ?? null,
+    // The six workspace-owned fields (2026-07-22) come from the default
+    // workspace row: team_name is the workspace `name`, the rest are its new
+    // columns. workspace.id itself stays the COMPANY id (see `id` above) — the
+    // frontend WorkspaceCompany is still a companies row for every other field.
+    team_name: isSentinelDefault ? null : wsName,
+    team_scope: (ws.team_scope as string | null) ?? null,
     prioritization_framework: (row.prioritization_framework as string | null) ?? null,
-    sizing_methodology: (row.sizing_methodology as string | null) ?? null,
-    team_strategy: (row.team_strategy as string | null) ?? null,
-    team_roadmap: (row.team_roadmap as string | null) ?? null,
+    sizing_methodology: (ws.sizing_methodology as string | null) ?? null,
+    team_strategy: (ws.team_strategy as string | null) ?? null,
+    team_roadmap: (ws.team_roadmap as string | null) ?? null,
     decision_process: (row.decision_process as string | null) ?? null,
-    additional_context: (row.additional_context as string | null) ?? null,
+    additional_context: (ws.additional_context as string | null) ?? null,
     business_context_summary:
       (row.business_context_summary as string | null) ?? null,
     business_context_accepted_at:
@@ -282,8 +317,31 @@ async function fetchWorkspaceForUserSequential(
     .maybeSingle()
   if (error || !data) return null
   const companyId = String(data.id)
-  const product = await fetchPrimaryProduct(companyId)
-  return rowToCompany(data as Record<string, unknown>, product)
+  const [product, workspaceRow] = await Promise.all([
+    fetchPrimaryProduct(companyId),
+    fetchDefaultWorkspaceRow(companyId),
+  ])
+  return rowToCompany(data as Record<string, unknown>, product, workspaceRow)
+}
+
+/**
+ * The company's DEFAULT `workspaces` row (source of the six workspace-owned
+ * fields since 2026-07-22). Best-effort — a null just leaves those fields empty,
+ * never breaks workspace resolution.
+ */
+async function fetchDefaultWorkspaceRow(
+  companyId: string,
+): Promise<Record<string, unknown> | null> {
+  const supabase = getSupabase()
+  const { data, error } = await supabase
+    .from("workspaces")
+    .select("*")
+    .eq("company_id", companyId)
+    .eq("is_default", true)
+    .limit(1)
+    .maybeSingle()
+  if (error || !data) return null
+  return data as Record<string, unknown>
 }
 
 export async function fetchWorkspaceForUser(
@@ -299,7 +357,7 @@ export async function fetchWorkspaceForUser(
   try {
     const { data, error } = await supabase
       .from("company_members")
-      .select("company_id, companies(*, products(*))")
+      .select("company_id, companies(*, products(*), workspaces(*))")
       .eq("user_id", userId)
       .limit(1)
       .maybeSingle()
@@ -321,7 +379,10 @@ export async function fetchWorkspaceForUser(
     // exactly one primary row → that product; zero OR multiple → null.
     const primaries = productRows.filter((p) => p.is_primary === true)
     const product = primaries.length === 1 ? rowToProduct(primaries[0]) : null
-    return rowToCompany(companyRow as Record<string, unknown>, product)
+    const workspaceRow = pickDefaultWorkspace(
+      (companyRow as Record<string, unknown>).workspaces,
+    )
+    return rowToCompany(companyRow as Record<string, unknown>, product, workspaceRow)
   } catch {
     return fetchWorkspaceForUserSequential(userId)
   }
@@ -424,8 +485,14 @@ export async function updateWorkspace(
     .select("*")
     .single()
   if (error || !data) throw error ?? new Error("Update failed")
-  const product = await fetchPrimaryProduct(companyId)
-  return rowToCompany(data as Record<string, unknown>, product)
+  // Re-read the default workspace row too so the six workspace-owned fields on
+  // the returned object stay correct (they live on that row since 2026-07-22,
+  // not on the companies row this update touched).
+  const [product, workspaceRow] = await Promise.all([
+    fetchPrimaryProduct(companyId),
+    fetchDefaultWorkspaceRow(companyId),
+  ])
+  return rowToCompany(data as Record<string, unknown>, product, workspaceRow)
 }
 
 /**

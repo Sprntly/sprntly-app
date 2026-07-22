@@ -23,12 +23,13 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { briefCurrent, importDoc, extractFile, storiesGenerate, generateFromTask } = vi.hoisted(() => ({
+const { briefCurrent, importDoc, extractFile, storiesGenerate, generateFromTask, listInputQuestions } = vi.hoisted(() => ({
   briefCurrent: vi.fn(),
   importDoc: vi.fn(),
   extractFile: vi.fn(),
   storiesGenerate: vi.fn(),
   generateFromTask: vi.fn(),
+  listInputQuestions: vi.fn(),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -46,7 +47,7 @@ vi.mock("../../../../lib/api", () => {
     prdApi: {
       importDoc: (...a: unknown[]) => importDoc(...a),
       generateFromTask: (...a: unknown[]) => generateFromTask(...a),
-      listInputQuestions: vi.fn().mockResolvedValue([]),
+      listInputQuestions: (...a: unknown[]) => listInputQuestions(...a),
       answerInputQuestion: vi.fn(),
     },
     storiesApi: {
@@ -181,6 +182,8 @@ beforeEach(() => {
   briefCurrent.mockResolvedValue({ id: 7, insights: [{ title: "Enterprise expansion is stalled" }] })
   generateFromTask.mockReset()
   generateFromTask.mockResolvedValue({ prd_id: 55, status: "generating", title: "Dark mode" })
+  listInputQuestions.mockReset()
+  listInputQuestions.mockResolvedValue([]) // no clarifying questions by default
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
@@ -393,6 +396,132 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     expect(runAskGeneration).not.toHaveBeenCalled()
     // …and the attachment chip is still there for a retry (not silently lost).
     await waitFor(() => expect(document.body.textContent).toContain("Fraznet Enhancements.pptx"))
+  })
+})
+
+// ── Optimistic render BEFORE the network call (the reported latency bug) ─────
+// The bug: submitAsk cleared the composer and the message "left", but nothing
+// appeared in the chat thread until a multi-second backend call resolved —
+// reading as a frozen app. These tests hold the mocked network promise UNRESOLVED
+// and assert the user's turn + a loading/generating indicator are ALREADY in the
+// DOM, then resolve and assert the final state.
+describe("ChatScreen — optimistic render precedes the network call", () => {
+  it("doc + PRD command: seeds the command turn + generating card BEFORE importDoc resolves", async () => {
+    // Hold the import POST unresolved so we can observe the pre-network UI.
+    let resolveImport!: (v: unknown) => void
+    importDoc.mockImplementationOnce(() => new Promise((res) => { resolveImport = res as (v: unknown) => void }))
+
+    renderChat()
+    await attachDoc("Fraznet Enhancements.pptx")
+    await typeAndSend("Convert this PRD into tickets")
+
+    // The import POST is in flight (called) but NOT resolved…
+    expect(importDoc).toHaveBeenCalledTimes(1)
+    // …yet the user's command, the acknowledgment, and the generating PRD card
+    // are ALL on screen already — the whole point of the fix.
+    expect(document.body.textContent).toContain("Convert this PRD into tickets")
+    expect(document.body.textContent).toContain("Importing your document as a PRD")
+    expect(document.body.textContent).toContain("Generating PRD…")
+    expect(document.querySelector('[data-testid="chat-insight-msg"]')).toBeTruthy()
+    // The document chip rides the user's command turn.
+    expect(document.body.textContent).toContain("Fraznet Enhancements.pptx")
+    // The import hasn't landed, so the ready-only work (poll, tickets) hasn't run.
+    expect(resumePrdGeneration).not.toHaveBeenCalled()
+    expect(storiesGenerate).not.toHaveBeenCalled()
+
+    // Now let the import resolve → it polls to ready and lands the Tickets panel.
+    await act(async () => { resolveImport({ prd_id: 42, status: "generating", title: "Imported PRD" }) })
+    await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined, expect.any(Function)))
+    await waitFor(() => expect(storiesGenerate).toHaveBeenCalledWith(42))
+    await waitFor(() => expect(panelTab()).toBe("tickets"))
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("plain question + attachment: shows the message turn + thinking skeleton BEFORE extractFile resolves", async () => {
+    // Hold the extract POST unresolved so we can observe the pre-network UI.
+    let resolveExtract!: (v: unknown) => void
+    extractFile.mockImplementationOnce(() => new Promise((res) => { resolveExtract = res as (v: unknown) => void }))
+
+    renderChat()
+    await attachDoc("Fraznet Enhancements.pptx")
+    await typeAndSend("What are the riskiest requirements in this deck?")
+
+    // The extract POST is in flight (called) but NOT resolved…
+    await waitFor(() => expect(extractFile).toHaveBeenCalled())
+    // …yet the user's message, its doc chip, and a live thinking skeleton are
+    // already rendered — the send no longer vanishes into a void.
+    expect(document.body.textContent).toContain("What are the riskiest requirements in this deck?")
+    expect(document.body.textContent).toContain("Fraznet Enhancements.pptx")
+    expect(document.querySelector(".assistant-thinking")).toBeTruthy()
+    // The ask itself hasn't been sent — extraction is still pending.
+    expect(runAskGeneration).not.toHaveBeenCalled()
+
+    // Resolve extraction → the ask fires with the extracted markdown folded in.
+    await act(async () => { resolveExtract({ name: "Fraznet Enhancements.pptx", markdown: "## Slide 1\n\nFraznet MRT workflow" }) })
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    const query = runAskGeneration.mock.calls[0][0] as string
+    expect(query).toContain("Fraznet MRT workflow")
+    expect(query).not.toContain("pptx-bytes")
+  })
+
+  it("extraction failure after the optimistic render removes the ghost turn but keeps the attachment", async () => {
+    extractFile.mockRejectedValueOnce(new Error("could not parse file"))
+    renderChat()
+    await attachDoc("Fraznet Enhancements.pptx")
+    await typeAndSend("What does this deck say?")
+
+    await waitFor(() => expect(extractFile).toHaveBeenCalled())
+    // The send is aborted — nothing reaches the ask agent…
+    expect(runAskGeneration).not.toHaveBeenCalled()
+    // …the optimistic turn is rolled back (no stranded "thinking" ghost): no
+    // in-flight thinking skeleton lingers…
+    await waitFor(() => expect(document.querySelector(".assistant-thinking")).toBeNull())
+    // …and the attachment chip survives for a retry (not silently dropped).
+    expect(document.body.textContent).toContain("Fraznet Enhancements.pptx")
+  })
+})
+
+// ── Chronological order of the in-chat command flow ─────────────────────────
+// The ordering bug: the PRD card + clarifying questions were pinned ABOVE the
+// whole thread, so a "generate prd" command showed the card + questions ABOVE the
+// user's own command message. The fix renders them INLINE, as the reply BELOW the
+// command turn (thread[0]), so the conversation reads top-to-bottom.
+describe("ChatScreen — command flow renders the PRD card + questions BELOW the command turn", () => {
+  it("orders: user command turn → insight/PRD card → clarifying questions", async () => {
+    // A pending clarifying question so PrdInputQuestions renders a real node to
+    // position-check (it renders nothing when there are no questions).
+    listInputQuestions.mockResolvedValue([
+      { id: 1, prd_id: 42, ordinal: 0, tag: "need", prompt: "What is the serial-number logic?", options: [], status: "pending", answer: null },
+    ])
+    renderChat()
+    await attachDoc("spec.pptx")
+    await typeAndSend("generate a PRD from this")
+
+    // Import completes → the PRD lands on the tab, so PrdInputQuestions mounts and
+    // (with a pending question) renders.
+    await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalled())
+    await waitFor(() => expect(panelTab()).toBe("prd"))
+    const questions = await waitFor(() => {
+      const el = document.querySelector('[data-testid="prd-input-questions"]')
+      expect(el).toBeTruthy()
+      return el as Element
+    })
+    expect(document.body.textContent).toContain("What is the serial-number logic?")
+
+    const bubble = Array.from(document.querySelectorAll(".bc-user-bubble"))
+      .find((n) => n.textContent?.includes("generate a PRD from this")) as Element
+    const card = document.querySelector('[data-testid="chat-insight-msg"]') as Element
+    expect(bubble).toBeTruthy()
+    expect(card).toBeTruthy()
+
+    // Document order: the user's command turn comes BEFORE the PRD card, which
+    // comes BEFORE the clarifying questions.
+    expect(bubble.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(card.compareDocumentPosition(questions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // The FIRST turn in the thread is the command turn, NOT the insight card.
+    const firstTurn = document.querySelector(".bc-thread .bc-turn")
+    expect(firstTurn?.getAttribute("data-testid")).not.toBe("chat-insight-msg")
+    expect(firstTurn?.querySelector(".bc-user-bubble")?.textContent).toContain("generate a PRD from this")
   })
 })
 
