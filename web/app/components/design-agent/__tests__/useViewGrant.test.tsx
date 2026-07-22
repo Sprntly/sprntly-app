@@ -374,6 +374,97 @@ describe("useViewGrant — recovers a lapsed grant without a manual reload", () 
   })
 })
 
+describe("useViewGrant — manual retryAfterError recovers the terminal error state", () => {
+  it("test_retry_after_error_remints_and_recovers_from_terminal_error", async () => {
+    viewGrant.mockRejectedValueOnce(new Error("401"))
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+    expect(result.current.grantedBundleUrl).toBeNull()
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    // Restore the default (resolving) mock, then retry.
+    viewGrant.mockResolvedValue(undefined)
+    await act(async () => {
+      result.current.retryAfterError()
+    })
+
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.error).toBeNull())
+    expect(result.current.grantedBundleUrl).toBe(BUNDLE)
+    expect(result.current.reloadKey).toBe(1)
+    // The retry re-mints via the SAME derived view-grant URL as the first call.
+    expect(viewGrant.mock.calls[1][0]).toBe(viewGrant.mock.calls[0][0])
+  })
+
+  it("test_retry_after_error_is_noop_when_grant_is_healthy", async () => {
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    await waitFor(() => expect(result.current.grantedBundleUrl).toBe(BUNDLE))
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+    const errorBefore = result.current.error
+    const bundleBefore = result.current.grantedBundleUrl
+    const reloadKeyBefore = result.current.reloadKey
+
+    await act(async () => {
+      result.current.retryAfterError()
+    })
+
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+    expect(result.current.error).toBe(errorBefore)
+    expect(result.current.grantedBundleUrl).toBe(bundleBefore)
+    expect(result.current.reloadKey).toBe(reloadKeyBefore)
+  })
+
+  it("test_retry_after_error_consumes_its_own_remint_budget_so_a_later_asset_error_surfaces_immediately", async () => {
+    viewGrant.mockRejectedValueOnce(new Error("401"))
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+
+    viewGrant.mockResolvedValue(undefined)
+    await act(async () => {
+      result.current.retryAfterError()
+    })
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.error).toBeNull())
+
+    // One subsequent asset 401 — the budget the successful retry consumed is
+    // NOT reset, so this surfaces the terminal error again immediately, with
+    // no third mint call (intentional parity with recoverIfLapsed's budget
+    // bookkeeping — see Implementation Notes).
+    await act(async () => {
+      result.current.notifyAssetError()
+    })
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+    expect(viewGrant).toHaveBeenCalledTimes(2)
+  })
+
+  it("test_retry_after_error_can_be_invoked_again_after_a_second_failed_retry", async () => {
+    viewGrant.mockRejectedValueOnce(new Error("401"))
+    const { result } = renderHook(() => useViewGrant(PID, BUNDLE))
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+
+    viewGrant.mockResolvedValue(undefined)
+    await act(async () => {
+      result.current.retryAfterError()
+    })
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current.error).toBeNull())
+
+    await act(async () => {
+      result.current.notifyAssetError()
+    })
+    await waitFor(() => expect(result.current.error).not.toBeNull())
+    expect(viewGrant).toHaveBeenCalledTimes(2)
+
+    // A SECOND explicit retry click gets its own fresh attempt — no permanent
+    // lockout across repeated manual clicks.
+    await act(async () => {
+      result.current.retryAfterError()
+    })
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(3))
+    await waitFor(() => expect(result.current.error).toBeNull())
+  })
+})
+
 describe("preflightBundle — credentialed 401 detection (pure, injectable fetch)", () => {
   it("reports 'unauthorized' ONLY on a 401, 'ok' otherwise, and on a thrown fetch", async () => {
     const ok = vi.fn().mockResolvedValue(new Response("ok", { status: 200 }))

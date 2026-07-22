@@ -13,7 +13,7 @@
 //      container's center stage (container→view→leaf wiring intact).
 //   3. defaultFullscreen + a granted bundle renders the fullscreen overlay.
 import * as React from "react"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -119,6 +119,53 @@ describe("PostGenerationResult — authed view-grant gates the iframe (DOM)", ()
       expect(container.querySelector('[data-testid="da-grant-error"]')).not.toBeNull()
     })
     expect(container.querySelector("iframe.da-prototype-iframe")).toBeNull()
+  })
+
+  it("test_post_generation_result_refresh_preview_recovers_the_viewer_after_grant_error", async () => {
+    viewGrant.mockRejectedValueOnce(new Error("401"))
+    const onRefreshBundle = vi.fn()
+    const { container } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE }),
+        onRefreshBundle,
+      }),
+    )
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="da-grant-error"]')).not.toBeNull()
+    })
+    expect(container.querySelector("iframe.da-prototype-iframe")).toBeNull()
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    viewGrant.mockResolvedValue(undefined)
+    fireEvent.click(screen.getByTestId("da-refresh-preview"))
+
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+    await waitFor(() => {
+      expect(container.querySelector('[data-testid="da-grant-error"]')).toBeNull()
+    })
+    expect(container.querySelector("iframe.da-prototype-iframe")).not.toBeNull()
+  })
+
+  it("test_post_generation_result_refresh_preview_healthy_path_unchanged", async () => {
+    const onRefreshBundle = vi.fn()
+    const { container } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE }),
+        onRefreshBundle,
+      }),
+    )
+    await waitFor(() => {
+      expect(container.querySelector("iframe.da-prototype-iframe")).not.toBeNull()
+    })
+    expect(viewGrant).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByTestId("da-refresh-preview"))
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(onRefreshBundle).toHaveBeenCalledTimes(1)
+    expect(viewGrant).toHaveBeenCalledTimes(1)
   })
 })
 
