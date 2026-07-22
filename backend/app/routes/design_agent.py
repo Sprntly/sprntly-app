@@ -884,9 +884,19 @@ def get_active_by_prd(
     workspace_id = company.company_id
     row = None
     for attempt in range(_ACTIVE_LOOKUP_RETRY_ATTEMPTS):
-        row = find_prototype_by_prd(
-            prd_id=prd_id, workspace_id=workspace_id, statuses=["ready", "generating"],
+        candidate = find_prototype_by_prd(
+            prd_id=prd_id, workspace_id=workspace_id,
+            statuses=["ready", "generating", "failed"],
         )
+        # A 'failed' row only counts as active when it already has a bundle from
+        # an earlier successful stage — recovers visibility of a prototype whose
+        # LATEST iterate/manual-edit failed without destroying its working
+        # bundle (fail_prototype never touches bundle_url/current_checkpoint_id).
+        # A 'failed' row with no bundle_url never succeeded at all — treat
+        # exactly as "not found," unchanged from today.
+        if candidate is not None and candidate.get("status") == "failed" and not candidate.get("bundle_url"):
+            candidate = None
+        row = candidate
         if row is not None:
             if attempt > 0:
                 logger.info(
@@ -3466,7 +3476,14 @@ async def post_iterate(
         raise HTTPException(status_code=404, detail="Prototype not found")
     if proto.get("is_complete"):
         raise HTTPException(status_code=409, detail="Prototype is locked; Resume Iteration first")
-    if proto.get("status") != "ready":
+    # A 'failed' row with a truthy bundle_url is a recoverable prototype whose
+    # LATEST iterate/manual-edit failed without destroying its working bundle
+    # (fail_prototype never touches bundle_url) — mirrors get_active_by_prd's
+    # exact eligibility condition so the user can retry through the ordinary
+    # composer once the prototype is revealed. A 'failed' row with no bundle
+    # never succeeded at all and is still rejected, unchanged from today.
+    is_recoverable_failed = proto.get("status") == "failed" and bool(proto.get("bundle_url"))
+    if proto.get("status") != "ready" and not is_recoverable_failed:
         raise HTTPException(status_code=409, detail="Prototype not ready to iterate")
 
     # Spend control: per-prototype iterate rate limit — 6 calls/hr.
@@ -3850,6 +3867,7 @@ async def _run_iterate_bg(
                 workspace_id=workspace_id,
                 virtual_fs=virtual_fs,
                 iterate_prompt=body.prompt,
+                recovering_from_failure=(proto.get("status") == "failed"),
             )
             # Finalize the iteration ledger row. _stage_iterate_run owns the
             # prototype write (advance on success, fail on build error), so we
@@ -4017,6 +4035,7 @@ async def _stage_iterate_run(
     workspace_id: str,
     virtual_fs: dict[str, str],
     iterate_prompt: str,
+    recovering_from_failure: bool = False,
 ) -> bool:
     """Iterate-completion staging path. DELIBERATELY SEPARATE from
     `_stage_complete_run`: it does NOT call `complete_prototype`. An iterate
@@ -4109,6 +4128,7 @@ async def _stage_iterate_run(
         workspace_id=workspace_id,
         checkpoint_id=checkpoint_id,
         bundle_url=bundle_url,
+        recovered_from_failure=recovering_from_failure,
     )
     return True
 
@@ -4378,6 +4398,7 @@ async def _run_manual_edit_bg(
                 workspace_id=workspace_id,
                 virtual_fs=virtual_fs,
                 iterate_prompt="<manual edit>",
+                recovering_from_failure=(proto.get("status") == "failed"),
             )
         elif result.status == "complete":
             # Stale-anchor fail-closed: the run ended but committed NO source
