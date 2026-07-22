@@ -53,6 +53,7 @@ import { GenerateModal } from "../../components/design-agent/GenerateModal"
 import {
   acknowledge,
   markCancelled,
+  markPending,
   wasCancelled,
 } from "../../components/design-agent/notificationStore"
 import { GenerationErrorBanner, reasonCopy, isRetryableFailure } from "../../components/design-agent/GenerationErrorBanner"
@@ -827,6 +828,13 @@ export function PrototypeRoute() {
         .catch(() => {
           /* degrade — the tab stays on the generate panel for a retry */
         })
+    } else if (result && !result.ok && result.timedOut) {
+      // The local resume-poll's wait expired; the run is still going. Do NOT
+      // surface the error banner — that invites a duplicate paid regeneration of
+      // work that is about to finish. Re-arm the sessionStorage recovery path so
+      // the shell notifies honestly on completion (idempotent: markPending
+      // upserts, so re-arming an entry that already exists is a no-op write).
+      if (genProtoId != null) markPending(genProtoId, prdId)
     } else {
       // FAILURE / no result (failed / invalidated / timeout / throw, OR the
       // GenerateModal's `.catch(() => onGenDone())` no-arg path). Surface a loud,

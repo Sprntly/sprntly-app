@@ -73,26 +73,62 @@ vi.mock("../../../components/design-agent/GenerationLoadingScreen", () => ({
 //    DesignAgentGenResult the test stashed — this mimics the real modal handing
 //    the terminal poll outcome to the parent's handleGenDone chokepoint.
 let nextGenResult: unknown = undefined
+// Set by a test right before mounting when it needs `handleGenDone` to see a
+// non-null genProtoId. Mirrors the real GenerateModal's onKickoff callback,
+// which fires once the kickoff POST returns an id — independently of, and
+// before, onGenDone. Left null by default so existing tests keep their
+// original genProtoId === null behaviour unchanged.
+let kickoffId: number | null = null
 vi.mock("../../../components/design-agent/GenerateModal", () => ({
   GenerateModal: ({
     open,
     onGenDone,
+    onKickoff,
   }: {
     open: boolean
     onGenDone?: (r?: unknown) => void
+    onKickoff?: (id: number) => void
   }) =>
     open
       ? React.createElement(
-          "button",
-          {
-            type: "button",
-            "data-testid": "stub-fire-gen-done",
-            onClick: () => onGenDone?.(nextGenResult),
-          },
-          "fire gen done",
+          React.Fragment,
+          null,
+          React.createElement(
+            "button",
+            {
+              type: "button",
+              "data-testid": "stub-fire-kickoff",
+              onClick: () => {
+                if (kickoffId != null) onKickoff?.(kickoffId)
+              },
+            },
+            "fire kickoff",
+          ),
+          React.createElement(
+            "button",
+            {
+              type: "button",
+              "data-testid": "stub-fire-gen-done",
+              onClick: () => onGenDone?.(nextGenResult),
+            },
+            "fire gen done",
+          ),
         )
       : null,
 }))
+
+// ── notificationStore: spy on markPending only (the lighter option per the
+//    rig note — no sessionStorage fake needed for this file). Other exports
+//    stay real since PrototypeRoute's other branches (e.g. wasCancelled) rely
+//    on them. vi.hoisted so the spy exists before the (hoisted) vi.mock
+//    factory below references it directly (not deferred inside a closure).
+const { markPending } = vi.hoisted(() => ({ markPending: vi.fn() }))
+vi.mock("../../../components/design-agent/notificationStore", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../../components/design-agent/notificationStore")
+  >("../../../components/design-agent/notificationStore")
+  return { ...actual, markPending }
+})
 
 // ── api: getActiveByPrd resolves null (no existing/in-flight proto → generate
 //    panel), getByPrd null. Real GenerationErrorBanner / boundary are NOT mocked.
@@ -115,8 +151,10 @@ import { PrototypeRoute } from "../PrototypeRoute"
 beforeEach(() => {
   searchString = "prd=42&generate=1" // intent → generate panel opens on mount
   nextGenResult = undefined
+  kickoffId = null
   replace.mockClear()
   goTo.mockClear()
+  markPending.mockClear()
 })
 
 afterEach(() => {
@@ -126,11 +164,17 @@ afterEach(() => {
 
 /** Mount the route, wait for getActiveByPrd to settle (panel visible), then fire
  *  the stubbed terminal generation outcome through handleGenDone. */
-async function mountAndFail(result: unknown) {
+async function mountAndFail(result: unknown, opts?: { kickoffId?: number }) {
   nextGenResult = result
   render(React.createElement(PrototypeRoute))
   // getActiveByPrd resolves null → the generate panel mounts (intent seeded open).
   const fire = await screen.findByTestId("stub-fire-gen-done")
+  if (opts?.kickoffId != null) {
+    kickoffId = opts.kickoffId
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("stub-fire-kickoff"))
+    })
+  }
   await act(async () => {
     fireEvent.click(fire)
   })
@@ -160,14 +204,32 @@ describe("PrototypeRoute — generation-failure recovery", () => {
     expect(screen.queryByTestId("stub-fire-gen-done")).toBeNull()
   })
 
-  it("surfaces the error for a TIMEOUT terminal result too", async () => {
-    await mountAndFail({ ok: false, message: "Generation timed out (6 minutes)" })
-    await waitFor(() =>
-      expect(screen.getByTestId("prototype-route-gen-error")).toBeTruthy(),
+  it("re-arms the pending notification instead of surfacing an error for a TIMEOUT-terminal result (the run may still be going)", async () => {
+    await mountAndFail(
+      { ok: false, message: "Generation timed out (6 minutes)", timedOut: true },
+      { kickoffId: 501 },
     )
-    expect(screen.getByTestId("generation-error-message").textContent).toContain(
-      "timed out",
-    )
+
+    // The local resume-poll's wait expired; the run is still going — do NOT
+    // invite a duplicate paid regeneration with a false error banner.
+    expect(screen.queryByTestId("prototype-route-gen-error")).toBeNull()
+    // Instead, the sessionStorage recovery path is re-armed so the shell
+    // notifies honestly once the run genuinely completes.
+    expect(markPending).toHaveBeenCalledTimes(1)
+    expect(markPending).toHaveBeenCalledWith(501, 42)
+  })
+
+  it("does not throw when a TIMEOUT result arrives with no known prototype id yet (genProtoId still null)", async () => {
+    // No kickoffId supplied — genProtoId stays at its initial null, exactly as
+    // it would if a timeout raced ahead of the kickoff POST's id.
+    await mountAndFail({
+      ok: false,
+      message: "Generation timed out (6 minutes)",
+      timedOut: true,
+    })
+
+    expect(screen.queryByTestId("prototype-route-gen-error")).toBeNull()
+    expect(markPending).not.toHaveBeenCalled()
   })
 
   it("surfaces the error for an INVALIDATED terminal result too", async () => {

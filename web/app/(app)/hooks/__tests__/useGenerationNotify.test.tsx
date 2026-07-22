@@ -19,6 +19,15 @@ vi.mock("../../../context/NavigationContext", () => ({
   useNavigation: () => ({ showToast }),
 }))
 
+// This file's first storage-touching test: spy on markPending only (the
+// lighter option per the rig note) rather than installing a sessionStorage
+// fake, since nothing else here needs it. vi.hoisted so the spy exists before
+// the (hoisted) vi.mock factory below references it.
+const { markPending } = vi.hoisted(() => ({ markPending: vi.fn() }))
+vi.mock("../../../components/design-agent/notificationStore", () => ({
+  markPending,
+}))
+
 // Minimal host component for mounting the hook
 function Host({ deps }: { deps: GenerationNotifyDeps }) {
   useGenerationNotify(deps)
@@ -27,6 +36,7 @@ function Host({ deps }: { deps: GenerationNotifyDeps }) {
 
 beforeEach(() => {
   showToast.mockClear()
+  markPending.mockClear()
 })
 
 afterEach(() => {
@@ -84,6 +94,8 @@ describe("useGenerationNotify — ready prototype", () => {
       expect.objectContaining({ persist: true, onAction: expect.any(Function) }),
     )
     expect(doneEvents.length).toBeGreaterThan(0)
+    // The ready terminal path is unchanged: it does not re-arm the recovery path.
+    expect(markPending).not.toHaveBeenCalled()
 
     window.removeEventListener("da:generating-done", onDone)
   })
@@ -133,6 +145,8 @@ describe("useGenerationNotify — failed prototype", () => {
     const toastArgs = showToast.mock.calls[0]
     expect(toastArgs[1]).not.toContain("ViteBuildError")
     expect(doneEvents.length).toBeGreaterThan(0)
+    // The failed terminal path is unchanged: it does not re-arm the recovery path.
+    expect(markPending).not.toHaveBeenCalled()
 
     window.removeEventListener("da:generating-done", onDone)
   })
@@ -202,5 +216,68 @@ describe("useGenerationNotify — poll cap", () => {
 
     // No toast should fire — timed out cleanly
     expect(showToast).not.toHaveBeenCalled()
+    // No da:generating-done dispatch either — this is a clean, silent exit.
+    // Instead, the run is handed off to the recovery path rather than dropped.
+    expect(markPending).toHaveBeenCalledTimes(1)
+    expect(markPending).toHaveBeenCalledWith(4, 400)
+  })
+})
+
+describe("useGenerationNotify — deadline-expiry recovery hand-off", () => {
+  it("re-arms the pending notification exactly once when the deadline expires with the run still non-terminal", async () => {
+    // Today (unfixed) this path drops the run silently: no hand-off at all.
+    const getByPrd = vi.fn(async (_prdId: number): Promise<PrototypeRecord | null> => ({
+      id: 9,
+      status: "generating",
+      bundle_url: null,
+      error: null,
+    } as PrototypeRecord))
+    const sleep = vi.fn(async () => undefined)
+    let nowCalls = 0
+    const now = () => {
+      nowCalls++
+      return nowCalls === 1 ? 0 : 1000
+    }
+
+    render(React.createElement(Host, {
+      deps: { getByPrd, sleep, deadlineMs: 500, now },
+    }))
+
+    await act(async () => {
+      dispatchHandoff(9, 900)
+    })
+    await act(async () => {})
+
+    expect(markPending).toHaveBeenCalledTimes(1)
+    expect(markPending).toHaveBeenCalledWith(9, 900)
+  })
+
+  it("passes the prototype id and PRD id in the correct order — a transposition would type-check silently", async () => {
+    const getByPrd = vi.fn(async (_prdId: number): Promise<PrototypeRecord | null> => ({
+      id: 555,
+      status: "generating",
+      bundle_url: null,
+      error: null,
+    } as PrototypeRecord))
+    const sleep = vi.fn(async () => undefined)
+    let nowCalls = 0
+    const now = () => {
+      nowCalls++
+      return nowCalls === 1 ? 0 : 1000
+    }
+
+    render(React.createElement(Host, {
+      deps: { getByPrd, sleep, deadlineMs: 500, now },
+    }))
+
+    await act(async () => {
+      dispatchHandoff(555, 777)
+    })
+    await act(async () => {})
+
+    // prototypeId (555) first, prdId (777) second — a swap would fail this
+    // exact call shape and ship a wrong-keyed pending entry.
+    expect(markPending).toHaveBeenCalledWith(555, 777)
+    expect(markPending).not.toHaveBeenCalledWith(777, 555)
   })
 })
