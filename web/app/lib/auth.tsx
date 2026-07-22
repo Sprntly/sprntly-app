@@ -104,6 +104,50 @@ export function isUserEmailVerified(user: User): boolean {
   return !!user.email_confirmed_at
 }
 
+/**
+ * Wipe every session-scoped bit of client state so a DIFFERENT user never
+ * inherits the previous account's data (chat tabs, active company, conversation
+ * resume, in-memory settings caches). Used by both signOut and the account
+ * switch on /invite-conflict. Best-effort — storage may be disabled.
+ */
+export function clearSessionScopedStorage(): void {
+  try {
+    // Fixed keys
+    const SESSION_KEYS = [
+      "sprntly_active_company",
+      "sprntly_chat_tabs",
+      "sprntly_chat_active_tab",
+      "sprntly_resume_conv",
+    ]
+    for (const key of SESSION_KEYS) {
+      localStorage.removeItem(key)
+      sessionStorage.removeItem(key)
+    }
+    // Company-scoped keys (sprntly_chat_tabs_<slug>, etc.) across both stores.
+    const isTabKey = (key: string | null): key is string =>
+      !!key &&
+      (key.startsWith("sprntly_chat_tabs_") || key.startsWith("sprntly_chat_active_tab_"))
+    for (const store of [localStorage, sessionStorage]) {
+      const toRemove: string[] = []
+      for (let i = 0; i < store.length; i++) {
+        const key = store.key(i)
+        if (isTabKey(key)) toRemove.push(key)
+      }
+      for (const key of toRemove) store.removeItem(key)
+    }
+  } catch {
+    // storage may be disabled; not fatal.
+  }
+  // In-memory settings-pane caches (Connectors/MCP/Team/Admin) survive
+  // localStorage wipes — clear them too so the next user never flashes the
+  // previous account's connectors/tokens/team before revalidation.
+  try {
+    resetSettingsCaches()
+  } catch {
+    // Never let cache cleanup block the caller.
+  }
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<AuthState>({ kind: "loading" })
 
@@ -231,46 +275,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Drop the token cache immediately — the next user must never inherit a
       // still-valid bearer from the previous session.
       cachedSession = null
-      // Wipe all session-scoped storage so a different user logging in on the
-      // same browser never sees the previous user's data (chat tabs, active
-      // company, conversation resume, etc.). Chat tabs now live in
-      // sessionStorage (session-scoped by design — see ChatScreen); we clear
-      // BOTH storages: sessionStorage so a same-tab re-login starts fresh, and
-      // localStorage to sweep any stale tab entries written before that move.
-      try {
-        // Fixed keys
-        const SESSION_KEYS = [
-          "sprntly_active_company",
-          "sprntly_chat_tabs",
-          "sprntly_chat_active_tab",
-          "sprntly_resume_conv",
-        ]
-        for (const key of SESSION_KEYS) {
-          localStorage.removeItem(key)
-          sessionStorage.removeItem(key)
-        }
-        // Company-scoped keys (sprntly_chat_tabs_<slug>, etc.) across both stores.
-        const isTabKey = (key: string | null): key is string =>
-          !!key && (key.startsWith("sprntly_chat_tabs_") || key.startsWith("sprntly_chat_active_tab_"))
-        for (const store of [localStorage, sessionStorage]) {
-          const toRemove: string[] = []
-          for (let i = 0; i < store.length; i++) {
-            const key = store.key(i)
-            if (isTabKey(key)) toRemove.push(key)
-          }
-          for (const key of toRemove) store.removeItem(key)
-        }
-      } catch {
-        // storage may be disabled; not fatal.
-      }
-      // In-memory settings-pane caches (Connectors/MCP/Team/Admin) survive
-      // localStorage wipes — clear them too so the next user never flashes the
-      // previous account's connectors/tokens/team before revalidation.
-      try {
-        resetSettingsCaches()
-      } catch {
-        // Never let cache cleanup block sign-out.
-      }
+      // Wipe all session-scoped storage + in-memory caches so a different user
+      // logging in on the same browser never sees the previous user's data.
+      clearSessionScopedStorage()
       setState({ kind: "anonymous" })
     }
   }, [])

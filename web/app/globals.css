@@ -15313,6 +15313,80 @@
     cursor: default;
   }
 
+  /* Account-choice buttons on /invite-conflict (kept-session mode). Stacked,
+     full-width, left-aligned rows — a small caption over the (often long)
+     email — so addresses read cleanly and wrap instead of crowding a centered
+     single-line label. */
+  .auth-card .ic-choices {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-top: 24px;
+  }
+
+  .auth-card .ic-choice {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    width: 100%;
+    text-align: left;
+    padding: 13px 16px;
+    border-radius: 14px;
+    border: 1px solid var(--line-strong);
+    background: var(--surface-2);
+    color: var(--ink);
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
+  }
+
+  .auth-card .ic-choice:hover:not(:disabled) {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  .auth-card .ic-choice:disabled {
+    opacity: 0.6;
+    cursor: default;
+    box-shadow: none;
+  }
+
+  .auth-card .ic-choice-cap {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--ink-3);
+  }
+
+  .auth-card .ic-choice-email {
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.3;
+    color: var(--ink);
+    overflow-wrap: anywhere;
+  }
+
+  /* Primary (stay) choice — brand-filled so the default reads first. */
+  .auth-card .ic-choice.is-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .auth-card .ic-choice.is-primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+    box-shadow: none;
+  }
+
+  .auth-card .ic-choice.is-primary .ic-choice-cap {
+    color: rgba(255, 255, 255, 0.82);
+  }
+
+  .auth-card .ic-choice.is-primary .ic-choice-email {
+    color: #fff;
+  }
+
   .auth-divider {
     display: flex;
     align-items: center;
