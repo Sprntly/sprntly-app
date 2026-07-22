@@ -38,10 +38,10 @@ function SignUpForm() {
 
   const [email, setEmail] = useState(prefillEmail)
   const [password, setPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
   const [firstName, setFirstName] = useState("")
   const [lastName, setLastName] = useState("")
   const [role, setRole] = useState("Product Manager")
-  const [priorities, setPriorities] = useState("")
   const [showPassword, setShowPassword] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -64,6 +64,10 @@ function SignUpForm() {
     const pwErr = validatePassword(password)
     if (pwErr) {
       setError(pwErr)
+      return
+    }
+    if (password !== confirmPassword) {
+      setError("Passwords do not match.")
       return
     }
     // Early duplicate check so a returning user is stopped HERE, not after
@@ -112,7 +116,6 @@ function SignUpForm() {
         firstName,
         lastName,
         role,
-        priorities,
         // The company/personal split is retired (v6) — every signup is company.
         accountType: "company",
       })
@@ -153,14 +156,12 @@ function SignUpForm() {
         firstName={firstName}
         lastName={lastName}
         role={role}
-        priorities={priorities}
-        submitting={submitting}
+          submitting={submitting}
         error={error}
         onFirstNameChange={setFirstName}
         onLastNameChange={setLastName}
         onRoleChange={setRole}
-        onPrioritiesChange={setPriorities}
-        onSubmit={onCreate}
+          onSubmit={onCreate}
         onBack={() => {
           setError(null)
           setStep(1)
@@ -173,12 +174,14 @@ function SignUpForm() {
     <SignUpStep1View
       email={email}
       password={password}
+      confirmPassword={confirmPassword}
       showPassword={showPassword}
       error={error}
       termsHref={publicPath("/terms")}
       privacyHref={publicPath("/privacy")}
       onEmailChange={setEmail}
       onPasswordChange={setPassword}
+      onConfirmPasswordChange={setConfirmPassword}
       onToggleShowPassword={() => setShowPassword((v) => !v)}
       onSubmit={(e) => void onStep1(e)}
       onGoogle={onGoogle}

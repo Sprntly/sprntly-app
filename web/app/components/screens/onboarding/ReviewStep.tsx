@@ -5,19 +5,9 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { useContent } from "../../../context/ContentContext"
 import { saveBusinessContextSummary } from "../../../lib/onboarding/store"
-import {
-  prefetchBusinessContextDraft,
-  prefetchMetricDefinitions,
-} from "../../../lib/onboarding/draftPrefetch"
+import { prefetchBusinessContextDraft } from "../../../lib/onboarding/draftPrefetch"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
-import { connectorsApi } from "../../../lib/api"
-import { hasLiveAnalyticsConnection } from "../../../lib/onboarding/connectorsWizard"
-import {
-  finishOnboardingAndEnterApp,
-  POST_ONBOARDING_PATH,
-} from "../../../lib/onboarding/finishOnboarding"
 
 const DRAFT_KEY = "review-step"
 
@@ -34,19 +24,17 @@ const DRAFT_SKELETON_WIDTHS = [
 ]
 
 /**
- * Onboarding step 09 — "Here's what we learned" (v6 screenshot spec
- * 2026-07-17). The closing NUMBERED step.
+ * Onboarding step 08 — "Here's what we learned" (2026-07-21 screenshot spec).
  *
  * Shows the AI-drafted business-context prose (from everything shared plus
  * the website analysis and connected data), fully editable, with a "This
  * looks accurate" checkbox. Accepting stores it on
- * companies.business_context_summary (+ accepted stamp), then branches on
- * whether the workspace has a LIVE analytics connection:
+ * companies.business_context_summary (+ accepted stamp) and continues to the
+ * personalize step.
  *
- *   - with analytics → hands off to the define-metrics sub-flow, which maps
- *     each metric onto real analytics events and completes onboarding;
- *   - without analytics → define-metrics has nothing to detect, so this is the
- *     last screen: it runs the shared closer itself and enters the app.
+ * This step used to own the define-metrics gate. Personalize was inserted
+ * between it and the sub-flow, so the branch (and the metric-definition
+ * prefetch that warms it) moved there — see PersonalizeStep.
  *
  * Draft resolution order: an in-progress local draft → the previously saved
  * summary → a fresh backend draft (with a graceful manual-writing fallback
@@ -55,14 +43,7 @@ const DRAFT_SKELETON_WIDTHS = [
 export function ReviewStep() {
   const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
-  const { setContent } = useContent()
   const router = useRouter()
-
-  // null = not resolved yet. Gates the define-metrics hand-off: that sub-flow
-  // exists to map each metric onto real analytics events, so with no analytics
-  // connector we finish onboarding here instead of walking the PM through
-  // screens that have nothing to detect.
-  const [hasAnalytics, setHasAnalytics] = useState<boolean | null>(null)
 
   const draft = loadDraft(DRAFT_KEY)
   const [summary, setSummary] = useState((draft?.summary as string) ?? "")
@@ -106,40 +87,6 @@ export function ReviewStep() {
       .finally(() => setDrafting(false))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Resolve whether there's a live analytics connection. On failure we treat it
-  // as "none" — the define-metrics drafts would have nothing to detect from a
-  // connector we can't even confirm, and stranding the PM on a spinner at the
-  // last step is worse than finishing one screen early.
-  useEffect(() => {
-    let cancelled = false
-    connectorsApi
-      .list()
-      .then((r) => {
-        if (!cancelled) setHasAnalytics(hasLiveAnalyticsConnection(r.connections))
-      })
-      .catch(() => {
-        if (!cancelled) setHasAnalytics(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
-
-  // While the user reads/edits the prose, draft the metric definitions in the
-  // BACKGROUND so the define-metrics screens open pre-filled instead of
-  // spinning. Same memoized request DefineMetrics joins; fire-and-forget.
-  // Skipped without analytics — we're not going to show those screens.
-  useEffect(() => {
-    if (!workspace) return
-    if (!hasAnalytics) return
-    if (workspace.metric_definitions.length) return
-    const names = workspace.kpi_tree.metrics
-      .map((m) => m.name.trim())
-      .filter(Boolean)
-    if (!names.length) return
-    prefetchMetricDefinitions(workspace.id, names).catch(() => {})
-  }, [workspace, hasAnalytics])
-
   async function accept() {
     if (!workspace || auth.kind !== "authed") return
     setError(null)
@@ -156,14 +103,7 @@ export function ReviewStep() {
       )
       setWorkspace({ ...updated, product: workspace.product })
       clearDraft(DRAFT_KEY)
-      if (hasAnalytics) {
-        router.push("/onboarding/define-metrics")
-        return
-      }
-      // No analytics connector — nothing to map metrics onto, so this is the
-      // last screen. Run the same closer define-metrics would have.
-      await finishOnboardingAndEnterApp(workspace, auth.user.id, setContent)
-      router.replace(POST_ONBOARDING_PATH)
+      router.push("/onboarding/personalize")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your business context.")
       setSaving(false)
@@ -174,7 +114,7 @@ export function ReviewStep() {
 
   return (
     <OnboardingChrome
-      step={10}
+      step={8}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -185,10 +125,8 @@ export function ReviewStep() {
       footerMeta="Review business context"
       onBack={() => router.push("/onboarding/invite")}
       onContinue={() => void accept()}
-      continueLabel={
-        hasAnalytics ? "Next · define metrics" : "Looks right · enter Sprntly"
-      }
-      continueDisabled={saving || drafting || hasAnalytics === null || !summary.trim()}
+      continueLabel="Next · personalize"
+      continueDisabled={saving || drafting || !summary.trim()}
       loading={saving}
       wideCard
     >

@@ -22,12 +22,14 @@ export const V4_ROLES = [
 export type SignUpStep1ViewProps = {
   email: string
   password: string
+  confirmPassword: string
   showPassword: boolean
   error: string | null
   termsHref: string
   privacyHref: string
   onEmailChange: (v: string) => void
   onPasswordChange: (v: string) => void
+  onConfirmPasswordChange: (v: string) => void
   onToggleShowPassword: () => void
   onSubmit: (e: React.FormEvent) => void
   onGoogle: () => void
@@ -80,6 +82,41 @@ export function SignUpStep1View(props: SignUpStep1ViewProps) {
           </div>
           <PasswordStrengthBar password={props.password} />
         </div>
+        <div className="field">
+          <div className="field-l">
+            <label htmlFor="confirm-password">Confirm password</label>{" "}
+            <span className="req">*</span>
+          </div>
+          <div className="inp-pwd-wrap">
+            <input
+              id="confirm-password"
+              type={props.showPassword ? "text" : "password"}
+              className="inp"
+              value={props.confirmPassword}
+              onChange={(e) => props.onConfirmPasswordChange(e.target.value)}
+              autoComplete="new-password"
+              required
+            />
+            <button
+              type="button"
+              className="pwd-toggle"
+              aria-label={props.showPassword ? "Hide password" : "Show password"}
+              onClick={props.onToggleShowPassword}
+            >
+              {props.showPassword ? <EyeOff /> : <Eye />}
+            </button>
+          </div>
+          {/* Live match feedback, so a typo is caught here rather than on submit.
+              Stays silent until they've actually started the confirm field. */}
+          {props.confirmPassword.length > 0 &&
+            (props.password === props.confirmPassword ? (
+              <div className="pwd-hint" style={{ color: "var(--accent)" }}>
+                Passwords match
+              </div>
+            ) : (
+              <div className="pwd-hint">Passwords don&apos;t match yet</div>
+            ))}
+        </div>
         {props.error && <div className="auth-error">{props.error}</div>}
         <button type="submit" className="btn btn-brand btn-block" style={{ marginTop: 6 }}>
           Create account
@@ -114,13 +151,11 @@ export type SignUpStep2ViewProps = {
   firstName: string
   lastName: string
   role: string
-  priorities: string
   submitting: boolean
   error: string | null
   onFirstNameChange: (v: string) => void
   onLastNameChange: (v: string) => void
   onRoleChange: (v: string) => void
-  onPrioritiesChange: (v: string) => void
   onSubmit: (e: React.FormEvent) => void
   onBack: () => void
 }
@@ -186,21 +221,6 @@ export function SignUpStep2View(props: SignUpStep2ViewProps) {
                 </option>
               ))}
             </select>
-          </div>
-          <div className="field full">
-            <div className="field-l">
-              <label htmlFor="priorities">Your priorities</label>{" "}
-              <span className="opt">— what you&apos;re focused on right now</span>
-            </div>
-            <textarea
-              id="priorities"
-              className="inp"
-              rows={3}
-              value={props.priorities}
-              onChange={(e) => props.onPrioritiesChange(e.target.value)}
-              maxLength={500}
-              placeholder="e.g. grow MAU, recover the redesign dip, ship the calorie deficit before Watch 9…"
-            />
           </div>
         </div>
         {props.error && <div className="auth-error">{props.error}</div>}

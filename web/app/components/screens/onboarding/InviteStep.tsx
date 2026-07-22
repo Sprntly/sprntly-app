@@ -22,6 +22,30 @@ function emptyRow(): InviteRow {
   return { email: "", jobRole: JOB_ROLE_OPTIONS[0], permission: "member" }
 }
 
+/**
+ * Split a pasted blob into invite rows. Accepts commas, semicolons, newlines
+ * and whitespace as separators, since a paste out of Slack/email/a spreadsheet
+ * can carry any of them. Invalid and duplicate addresses are dropped silently —
+ * the point of the bulk field is speed, and the rows it produces are editable.
+ */
+export function parsePastedEmails(
+  raw: string,
+  existing: readonly InviteRow[] = [],
+): InviteRow[] {
+  const seen = new Set(
+    existing.map((r) => r.email.trim().toLowerCase()).filter(Boolean),
+  )
+  const rows: InviteRow[] = []
+  for (const token of raw.split(/[,;\s]+/)) {
+    const email = token.trim().toLowerCase()
+    if (!email || !EMAIL_RE.test(email)) continue
+    if (seen.has(email)) continue
+    seen.add(email)
+    rows.push({ email, jobRole: JOB_ROLE_OPTIONS[0], permission: "member" })
+  }
+  return rows
+}
+
 const PERMISSIONS: InviteRole[] = ["member", "admin", "viewer"]
 
 function asPermission(raw: string): InviteRole {
@@ -53,12 +77,13 @@ export function parseInvitesCsv(text: string): InviteRow[] {
 }
 
 /**
- * Onboarding step 08 — "Invite your team" (v6 screenshot spec 2026-07-17).
+ * Onboarding step 07 — "Invite your team" (v7 screenshot spec 2026-07-21).
  * Skippable.
  *
  * Rows of email + JOB role (Data Science, Engineer…) + permission
  * (member/admin/viewer), an "Add teammate" row-appender, and a CSV import
- * (email, job role, permission per line). Invites send on Continue through
+ * (email, job role, permission per line) and a bulk paste field, both behind
+ * the "Add multiple people at once" disclosure. Invites send on Continue through
  * the existing POST /v1/team/invites — best-effort, a failed invite never
  * blocks the step (re-invite from Settings → Team).
  */
@@ -76,6 +101,34 @@ export function InviteStep() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  // Bulk paste field (behind the "Add multiple people at once" disclosure).
+  const [bulk, setBulk] = useState("")
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null)
+  // The "Add multiple people at once" toggle now sits inline with "Add
+  // teammate" (its body drops below the row), so this step owns the open
+  // state locally rather than delegating it to <OptionalDisclosure>.
+  const [bulkOpen, setBulkOpen] = useState(false)
+
+  /**
+   * Turn the pasted blob into rows, appending only addresses not already
+   * listed. Replaces a blank trailing row rather than leaving a hole above the
+   * new entries.
+   */
+  function addPastedEmails() {
+    const parsed = parsePastedEmails(bulk, rows)
+    if (parsed.length === 0) {
+      setBulkNotice("No new valid email addresses in that paste.")
+      return
+    }
+    setRows((prev) => {
+      const kept = prev.filter((r) => r.email.trim())
+      return [...kept, ...parsed]
+    })
+    setBulk("")
+    setBulkNotice(
+      parsed.length === 1 ? "1 teammate added." : `${parsed.length} teammates added.`,
+    )
+  }
 
   useEffect(() => {
     const onHide = () => {
@@ -200,7 +253,7 @@ export function InviteStep() {
 
   return (
     <OnboardingChrome
-      step={9}
+      step={7}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -221,7 +274,7 @@ export function InviteStep() {
           </button>
         </>
       }
-      onBack={() => router.push("/onboarding/decisions")}
+      onBack={() => router.push("/onboarding/workspace")}
       onContinue={() => void go(ONBOARDING_STEP_COUNT, "/onboarding/review")}
       continueLabel="Next"
       continueDisabled={saving}
@@ -289,7 +342,7 @@ export function InviteStep() {
         ))}
       </div>
 
-      <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center" }}>
+      <div style={{ marginTop: 10, display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
         <button
           type="button"
           className="btn btn-secondary"
@@ -299,20 +352,72 @@ export function InviteStep() {
         </button>
         <button
           type="button"
-          className="btn btn-ghost"
-          onClick={() => csvRef.current?.click()}
+          className="onb-disclosure-toggle"
+          style={{ width: "auto" }}
+          aria-expanded={bulkOpen}
+          onClick={() => setBulkOpen((v) => !v)}
         >
-          Import CSV
+          <Plus
+            style={{
+              width: 12,
+              height: 12,
+              transform: bulkOpen ? "rotate(45deg)" : undefined,
+              transition: "transform 0.15s",
+            }}
+            aria-hidden
+          />
+          <span className="t">Add multiple people at once</span>
+          <span className="s">optional — you can finish this later in Settings</span>
         </button>
-        <input
-          ref={csvRef}
-          type="file"
-          accept=".csv,text/csv"
-          style={{ display: "none" }}
-          onChange={(e) => void onPickCsv(e.target.files?.[0] ?? null)}
-          aria-label="Import teammates CSV"
-        />
       </div>
+
+      {bulkOpen && (
+        <div className="onb-disclosure-body">
+          <div className="field full" data-field="bulkEmails">
+            <div className="field-l">
+              Paste multiple emails <span className="opt">— separate with commas</span>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <input
+                className="inp"
+                value={bulk}
+                onChange={(e) => setBulk(e.target.value)}
+                placeholder="alex@company.com, sam@company.com, jordan@company.com"
+                aria-label="Paste multiple emails"
+              />
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={addPastedEmails}
+                disabled={!bulk.trim()}
+              >
+                <Plus style={{ width: 13, height: 13 }} aria-hidden /> Add
+              </button>
+            </div>
+            {bulkNotice && (
+              <p className="onb-field-hint" role="status">
+                {bulkNotice}
+              </p>
+            )}
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-ghost"
+            onClick={() => csvRef.current?.click()}
+          >
+            Import CSV
+          </button>
+          <input
+            ref={csvRef}
+            type="file"
+            accept=".csv,text/csv"
+            style={{ display: "none" }}
+            onChange={(e) => void onPickCsv(e.target.files?.[0] ?? null)}
+            aria-label="Import teammates CSV"
+          />
+        </div>
+      )}
       <p className="onb-field-hint">
         Invites send when you continue. Manage the team any time in Settings → Team.
       </p>

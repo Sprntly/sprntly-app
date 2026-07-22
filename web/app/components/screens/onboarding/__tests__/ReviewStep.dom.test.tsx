@@ -1,16 +1,18 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 09 — "Here's what we learned" (v6
-// screenshot spec 2026-07-17, NEW closing numbered step). On mount it requests
-// an AI business-context draft (onboardingApi.draftBusinessContext) unless the
-// workspace already carries an accepted summary; the prose is fully editable.
-// Continue saves via saveBusinessContextSummary, then branches on whether a
-// LIVE analytics connection exists: with one it hands off to
-// /onboarding/define-metrics ("Next · define metrics"); without one that
-// sub-flow has nothing to detect, so this is the last screen and Continue
-// ("Looks right · enter Sprntly") runs the shared closer and enters the app.
+// Container mount test for onboarding step 08 — "Here's what we learned" (v7
+// screenshot spec 2026-07-21). On mount it requests an AI business-context
+// draft (onboardingApi.draftBusinessContext) unless the workspace already
+// carries an accepted summary; the prose is fully editable. Continue saves via
+// saveBusinessContextSummary and always routes to the personalize step.
+//
+// This step used to own the define-metrics gate. Personalize was inserted
+// between it and the sub-flow, so the analytics branch moved there — the tests
+// for it live in PersonalizeStep.dom.test.tsx, and the assertions here pin
+// that this screen no longer branches or runs the closer.
+//
 // A failed draft shows the manual-entry hint; Continue stays disabled while
-// drafting, while the connector probe is unresolved, or while empty.
+// drafting or while the summary is empty.
 //
 // Matchers: native DOM only.
 import * as React from "react"
@@ -45,7 +47,7 @@ vi.mock("../../../../lib/api", () => ({
 }))
 vi.mock("../../../../lib/onboarding/finishOnboarding", () => ({
   finishOnboardingAndEnterApp: (...a: unknown[]) => finishMock(...a),
-  POST_ONBOARDING_PATH: "/settings",
+  POST_ONBOARDING_PATH: "/?new=1",
 }))
 vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
   saveDraft: vi.fn(),
@@ -77,7 +79,7 @@ function accurateCheckbox(): HTMLInputElement {
 
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
-    /Next · define metrics|Looks right · enter Sprntly/.test(b.textContent ?? ""),
+    /Next · personalize/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
 }
 
@@ -100,7 +102,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("ReviewStep (onboarding step 09 — AI business context, review & accept)", () => {
+describe("ReviewStep (onboarding step 08 — AI business context, review & accept)", () => {
   it("requests a draft on mount, shows the skeleton loading state, then fills the editable textarea", async () => {
     let resolveDraft: (v: { draft: string }) => void = () => {}
     draftMock.mockReturnValue(
@@ -110,12 +112,12 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     )
     const { container } = mount()
 
-    // Step 9 of the dots. While drafting the card keeps its shape — a shimmer
+    // Step 8 of the dots. While drafting the card keeps its shape — a shimmer
     // standing in for the textarea plus an announced status — and Continue
     // stays disabled rather than sitting live over an empty page.
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("10")
+    ).toBe("8")
     expect(draftMock).toHaveBeenCalledTimes(1)
     const skeleton = container.querySelector(".onb-draft-skel") as HTMLElement
     expect(skeleton).not.toBeNull()
@@ -156,7 +158,7 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     expect(summaryTextarea().value).toBe("Already accepted prose.")
   })
 
-  it("Continue saves the summary (+ accuracy flag) and routes to define-metrics", async () => {
+  it("Continue saves the summary (+ accuracy flag) and routes to personalize", async () => {
     draftMock.mockResolvedValue({ draft: DRAFT_TEXT })
     saveSummaryMock.mockResolvedValue(
       makeWorkspace({
@@ -176,9 +178,13 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/define-metrics")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/personalize")
     })
     expect(saveSummaryMock).toHaveBeenCalledWith("ws-1", DRAFT_TEXT, true)
+    // The define-metrics gate lives on the personalize step now — this screen
+    // must never branch to the sub-flow or run the closer itself.
+    expect(routerMock.push).not.toHaveBeenCalledWith("/onboarding/define-metrics")
+    expect(finishMock).not.toHaveBeenCalled()
   })
 
   it("a failed draft shows the manual-entry hint and Continue stays disabled until text is typed", async () => {
@@ -197,47 +203,9 @@ describe("ReviewStep (onboarding step 09 — AI business context, review & accep
     fireEvent.change(summaryTextarea(), {
       target: { value: "We reconcile payments for SMBs." },
     })
-    // Also waits out the connector probe, which gates Continue until resolved.
     await waitFor(() => {
       expect(continueBtn().disabled).toBe(false)
     })
-  })
-
-  it("with NO analytics connector, Continue finishes onboarding instead of routing to define-metrics", async () => {
-    // Non-analytics live connection + a planned-but-not-live analytics one:
-    // neither should keep the define-metrics sub-flow alive.
-    connectorsListMock.mockResolvedValue({
-      connections: [
-        { provider: "github", status: "active", types: ["code"] },
-        { provider: "mixpanel", status: "revoked", types: ["analytics"] },
-      ],
-    })
-    draftMock.mockResolvedValue({ draft: DRAFT_TEXT })
-    saveSummaryMock.mockResolvedValue(
-      makeWorkspace({ onboarding_step: 9, business_context_summary: DRAFT_TEXT }),
-    )
-    finishMock.mockResolvedValue(undefined)
-    mount()
-
-    await waitFor(() => {
-      expect(summaryTextarea()).not.toBeNull()
-    })
-    // The closing CTA reframes: this is now the last screen.
-    await waitFor(() => {
-      expect(continueBtn().textContent).toMatch(/Looks right · enter Sprntly/)
-    })
-
-    await act(async () => {
-      continueBtn().click()
-    })
-
-    await waitFor(() => {
-      expect(routerMock.replace).toHaveBeenCalledWith("/settings")
-    })
-    expect(saveSummaryMock).toHaveBeenCalledWith("ws-1", DRAFT_TEXT, false)
-    expect(finishMock).toHaveBeenCalledTimes(1)
-    // Never detours through the metrics sub-flow.
-    expect(routerMock.push).not.toHaveBeenCalledWith("/onboarding/define-metrics")
   })
 
   it("Back routes to the invite step", async () => {

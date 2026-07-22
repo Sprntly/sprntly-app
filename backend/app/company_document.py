@@ -45,9 +45,11 @@ logger = logging.getLogger(__name__)
 
 # The typed upload cards the onboarding wizard offers. Each card uploads
 # under one of these doc_types; the migration's CHECK constraint mirrors this
-# set (base four from v5; the last four are the v6 steps-6/7 upload-or-type
-# blocks — team strategy/roadmap, decision process, additional context — plus
-# step 1's strategy upload reusing company_strategy).
+# set (base four from v5; team strategy/roadmap, decision process and
+# additional context come from the upload-or-type blocks now merged into the
+# v7 workspace step, plus step 1's strategy upload reusing company_strategy).
+# sizing_doc is that same step's "attach a previous sizing doc" affordance —
+# see migration 20260721140000_onboarding_v7.sql.
 DOC_TYPES: tuple[str, ...] = (
     "ceo_memo",
     "team_priorities",
@@ -57,6 +59,7 @@ DOC_TYPES: tuple[str, ...] = (
     "team_roadmap",
     "decision_process",
     "additional_context",
+    "sizing_doc",
 )
 
 

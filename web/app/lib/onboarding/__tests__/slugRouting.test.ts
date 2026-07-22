@@ -58,18 +58,18 @@ describe("slugForStep — resume index → slug (clamped)", () => {
     expect(slugForStep(3)).toBe("metrics")
     expect(slugForStep(4)).toBe("api-key")
     expect(slugForStep(5)).toBe("connectors")
-    expect(slugForStep(6)).toBe("team")
-    expect(slugForStep(7)).toBe("strategy")
-    expect(slugForStep(8)).toBe("decisions")
-    expect(slugForStep(9)).toBe("invite")
-    expect(slugForStep(10)).toBe("review")
+    expect(slugForStep(6)).toBe("workspace")
+    expect(slugForStep(7)).toBe("invite")
+    expect(slugForStep(8)).toBe("review")
+    expect(slugForStep(9)).toBe("personalize")
   })
 
   it("maps a stale out-of-range index to the LAST step (no crash)", () => {
-    // Indices past the end (older/longer flows) clamp to the last step
-    // (review is now the closing numbered step).
-    expect(slugForStep(11)).toBe("review")
-    expect(slugForStep(20)).toBe("review")
+    // Indices past the end (older/longer flows — including anyone mid the
+    // previous 10-step order) clamp to the last step.
+    expect(slugForStep(10)).toBe("personalize")
+    expect(slugForStep(11)).toBe("personalize")
+    expect(slugForStep(20)).toBe("personalize")
     expect(slugForStep(0)).toBe("company")
   })
 })
@@ -89,7 +89,7 @@ describe("stepForSlug — slug → 1-based index", () => {
 })
 
 describe("isOnboardingStepSlug", () => {
-  it("accepts the 10 numbered slugs (incl. the restored api-key) and rejects analyzing / removed / unknown", () => {
+  it("accepts the 9 numbered slugs (incl. the kept api-key) and rejects analyzing / removed / unknown", () => {
     for (const slug of ONBOARDING_STEP_SLUGS) {
       expect(isOnboardingStepSlug(slug)).toBe(true)
     }
@@ -101,8 +101,15 @@ describe("isOnboardingStepSlug", () => {
     expect(isOnboardingStepSlug("business-info")).toBe(false)
     expect(isOnboardingStepSlug("business-context")).toBe(false)
     expect(isOnboardingStepSlug("first-brief")).toBe(false)
-    // Still retired: workspace naming lives in Settings → Workspaces.
-    expect(isOnboardingStepSlug("workspace")).toBe(false)
+    // `workspace` is a numbered step again — it now names the merged
+    // team/strategy/decisions card, NOT the retired workspace-naming closer
+    // (renaming an actual workspace still lives in Settings → Workspaces).
+    expect(isOnboardingStepSlug("workspace")).toBe(true)
+    expect(isOnboardingStepSlug("personalize")).toBe(true)
+    // The steps folded into `workspace` are no longer routes of their own.
+    expect(isOnboardingStepSlug("team")).toBe(false)
+    expect(isOnboardingStepSlug("strategy")).toBe(false)
+    expect(isOnboardingStepSlug("decisions")).toBe(false)
     expect(isOnboardingStepSlug("does-not-exist")).toBe(false)
   })
 })

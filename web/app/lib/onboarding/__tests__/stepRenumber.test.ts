@@ -1,11 +1,11 @@
 // Slug-routing integrity for the semantic-routes onboarding flow. The flow is
-// the v6 redesign (screenshot spec 2026-07-17) with the restored optional
-// api-key step (2026-07-19): company → product → metrics → api-key →
-// connectors → team → strategy → decisions → invite → review, then the
-// UNNUMBERED define-metrics sub-flow completes onboarding. Still retired:
-// workspace naming (the default workspace stays "Default"); the old combined
-// `business-info`, the `business-context` review, the agent-naming `coworkers`
-// step and the `analyzing` loader stay removed.
+// the v7 redesign (screenshot spec 2026-07-21), keeping the optional api-key
+// step the spec omits: company → product → metrics → api-key → connectors →
+// workspace → invite → review → personalize, then the UNNUMBERED
+// define-metrics sub-flow completes onboarding. `workspace` here is the merged
+// team/strategy/decisions card, not the long-retired workspace-NAMING closer.
+// The old combined `business-info`, the `business-context` review, the
+// agent-naming `coworkers` step and the `analyzing` loader stay removed.
 // These guard the total step count and the slug↔screen mapping (no gaps,
 // dropped pages gone).
 import { describe, expect, it } from "vitest"
@@ -15,33 +15,36 @@ import { screenIdFromPathname, SCREEN_PATH } from "../../routes"
 import { ONBOARDING_SCREENS } from "../../../types"
 
 describe("onboarding slug routing", () => {
-  it("has exactly 10 numbered steps in flow order (v6 + restored api-key)", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(10)
-    expect(ONBOARDING_SCREENS).toHaveLength(10)
+  it("has exactly 9 numbered steps in flow order (v7 + kept api-key)", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(9)
+    expect(ONBOARDING_SCREENS).toHaveLength(9)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
       "company",
       "product",
       "metrics",
       "api-key",
       "connectors",
-      "team",
-      "strategy",
-      "decisions",
+      "workspace",
       "invite",
       "review",
+      "personalize",
     ])
     // The dropped/folded steps stay out of the numbered flow.
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("coworkers")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("business-info")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("business-context")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("first-brief")
-    // Still retired: the workspace-naming closer.
-    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("workspace")
+    // Folded into the merged workspace step — no longer routes of their own.
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("team")
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("strategy")
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("decisions")
     expect(ONBOARDING_SCREENS).not.toContain("ob-coworkers")
     expect(ONBOARDING_SCREENS).not.toContain("ob-business-info")
     expect(ONBOARDING_SCREENS).not.toContain("ob-business-context")
     expect(ONBOARDING_SCREENS).not.toContain("ob-first-brief")
-    expect(ONBOARDING_SCREENS).not.toContain("ob-workspace")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-team")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-strategy")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-decisions")
   })
 
   it("maps each /onboarding/<slug> to ob-<slug> with no gaps", () => {
@@ -65,9 +68,11 @@ describe("onboarding slug routing", () => {
     expect(screenIdFromPathname("/onboarding/first-brief")).toBe("chat")
     // The removed agent-naming step no longer resolves to a real screen.
     expect(screenIdFromPathname("/onboarding/coworkers")).toBe("chat")
-    // api-key is a real numbered route again (asserted positively above); only
-    // the workspace-naming step stays a non-route.
-    expect(screenIdFromPathname("/onboarding/workspace")).toBe("chat")
+    // The three steps folded into `workspace` stop resolving; anyone with a
+    // stale bookmark falls through to chat rather than a dead render.
+    expect(screenIdFromPathname("/onboarding/team")).toBe("chat")
+    expect(screenIdFromPathname("/onboarding/strategy")).toBe("chat")
+    expect(screenIdFromPathname("/onboarding/decisions")).toBe("chat")
   })
 
   it("the removed analyzing interstitial no longer resolves to a screen", () => {

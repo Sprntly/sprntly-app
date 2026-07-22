@@ -122,15 +122,19 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
     const websiteField = document.querySelector('[data-field="website"]') as HTMLElement
     expect(websiteField.querySelector(".req")).toBeNull()
     expect(websiteField.querySelector(".opt")).not.toBeNull()
-    // Mission + strategy textareas are visible (not behind a disclosure).
-    expect(
-      document.querySelector('textarea[placeholder="Why the company exists, in a sentence or two"]'),
-    ).not.toBeNull()
+    // Strategy is visible; mission now sits behind the disclosure alongside
+    // portfolio + planning cycle, so the default card is name/website/strategy.
     expect(
       document.querySelector('[data-field="strategy"] textarea'),
     ).not.toBeNull()
-    // Portfolio + planning cycle sit behind the "Add more" disclosure.
-    expect(screen.getByText(/Add more — portfolio, planning cycle/)).not.toBeNull()
+    expect(
+      document.querySelector('textarea[placeholder="Why the company exists, in a sentence or two"]'),
+    ).toBeNull()
+    expect(
+      // Match the disclosure toggle by its stable "Add more" prefix — the
+      // descriptive suffix after it is editable copy and shouldn't break this.
+      screen.getByText(/Add more/),
+    ).not.toBeNull()
   })
 
   it("Continue with an empty company name shows a field error and does NOT persist or navigate", async () => {
@@ -181,6 +185,8 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
     mount()
 
     fireEvent.change(websiteInput(), { target: { value: "acme.com" } })
+    // Mission lives behind the "Add more" disclosure — open it first.
+    fireEvent.click(screen.getByText(/Add more/))
     fireEvent.change(
       document.querySelector(
         'textarea[placeholder="Why the company exists, in a sentence or two"]',

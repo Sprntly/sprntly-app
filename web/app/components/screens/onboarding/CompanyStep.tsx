@@ -237,20 +237,6 @@ export function CompanyStep() {
             </p>
           </div>
 
-          <div className="field full">
-            <div className="field-l">
-              Company mission &amp; vision <span className="opt">optional</span>
-            </div>
-            <textarea
-              className="inp"
-              rows={3}
-              value={mission}
-              onChange={(e) => setMission(e.target.value)}
-              maxLength={500}
-              placeholder="Why the company exists, in a sentence or two"
-            />
-          </div>
-
           <div className="field full" data-field="strategy">
             <div
               className="field-l"
@@ -295,8 +281,21 @@ export function CompanyStep() {
           </div>
         </div>
 
-        <OptionalDisclosure label="Add more — portfolio, planning cycle (optional)">
+        <OptionalDisclosure label="Add more ">
           <div className="form-grid">
+            <div className="field full">
+              <div className="field-l">
+                Mission &amp; vision <span className="opt">optional</span>
+              </div>
+              <textarea
+                className="inp"
+                rows={3}
+                value={mission}
+                onChange={(e) => setMission(e.target.value)}
+                maxLength={500}
+                placeholder="Why the company exists, in a sentence or two"
+              />
+            </div>
             <div className="field full">
               <div className="field-l">
                 Portfolio <span className="opt">— products in your portfolio</span>

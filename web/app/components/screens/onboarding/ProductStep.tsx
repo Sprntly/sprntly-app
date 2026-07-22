@@ -282,7 +282,7 @@ export function ProductStep() {
           </div>
         </div>
 
-        <OptionalDisclosure label="Add competitors — who you're up against (optional)">
+        <OptionalDisclosure label="Add competitors ">
           <div className="field full" data-field="competitors">
             <div className="field-l">
               Competitors <span className="opt">— comma-separated</span>

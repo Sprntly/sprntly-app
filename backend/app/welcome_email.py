@@ -92,7 +92,8 @@ def _guide_url() -> str:
     defaults to `<app_base>/guide` so the email always carries a working link
     even before a dedicated guide URL is configured."""
     return getattr(config_mod.settings, "welcome_guide_url", "") or (
-        f"{_app_base()}/guide"
+        # f"{_app_base()}/guide"
+        f"https://public-access.s3.us-east-1.amazonaws.com/Sprntly-How-To-Guide.docx"
     )
 
 

@@ -1,19 +1,18 @@
 export type ScreenId =
-  // Numbered onboarding steps, keyed by their semantic slug (v6 screenshot
-  // spec 2026-07-17 + restored optional api-key step 2026-07-19, 10 steps), in
-  // flow order: company → product → metrics → api-key → connectors → team →
-  // strategy → decisions → invite → review (review closes via the unnumbered
-  // define-metrics sub-flow).
+  // Numbered onboarding steps, keyed by their semantic slug (2026-07-21
+  // screenshot spec, keeping the optional api-key step — 9 steps), in flow
+  // order: company → product → metrics → api-key → connectors → workspace →
+  // invite → review → personalize (personalize closes via the unnumbered
+  // define-metrics sub-flow, or directly when analytics isn't connected).
   | "ob-company"
   | "ob-product"
   | "ob-metrics"
   | "ob-api-key"
   | "ob-connectors"
-  | "ob-team"
-  | "ob-strategy"
-  | "ob-decisions"
+  | "ob-workspace"
   | "ob-invite"
   | "ob-review"
+  | "ob-personalize"
   | "chat"
   | "chats"
   // The Artifacts library — a dedicated left-nav surface listing durable outputs
@@ -48,11 +47,10 @@ export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-metrics",
   "ob-api-key",
   "ob-connectors",
-  "ob-team",
-  "ob-strategy",
-  "ob-decisions",
+  "ob-workspace",
   "ob-invite",
   "ob-review",
+  "ob-personalize",
 ]
 
 export const APP_SCREENS: ScreenId[] = [
@@ -79,16 +77,15 @@ export const APP_SCREENS: ScreenId[] = [
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-company": "Setup · Step 1 of 10",
-  "ob-product": "Setup · Step 2 of 10",
-  "ob-metrics": "Setup · Step 3 of 10",
-  "ob-api-key": "Setup · Step 4 of 10",
-  "ob-connectors": "Setup · Step 5 of 10",
-  "ob-team": "Setup · Step 6 of 10",
-  "ob-strategy": "Setup · Step 7 of 10",
-  "ob-decisions": "Setup · Step 8 of 10",
-  "ob-invite": "Setup · Step 9 of 10",
-  "ob-review": "Setup · Step 10 of 10",
+  "ob-company": "Setup · Step 1 of 9",
+  "ob-product": "Setup · Step 2 of 9",
+  "ob-metrics": "Setup · Step 3 of 9",
+  "ob-api-key": "Setup · Step 4 of 9",
+  "ob-connectors": "Setup · Step 5 of 9",
+  "ob-workspace": "Setup · Step 6 of 9",
+  "ob-invite": "Setup · Step 7 of 9",
+  "ob-review": "Setup · Step 8 of 9",
+  "ob-personalize": "Setup · Step 9 of 9",
   chat: "Home",
   chats: "History",
   artifacts: "Artifacts",

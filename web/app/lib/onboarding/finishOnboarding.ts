@@ -26,12 +26,15 @@ import type { WorkspaceCompany } from "./types"
 /**
  * Where a finished onboarding lands the user.
  *
- * Settings, not the Brief: the first brief is still generating server-side at
- * this point, and the freshly-onboarded PM's next useful move is finishing
- * their workspace setup (connectors above all). Both exits route here, so keep
- * it in one place.
+ * A fresh chat, not Settings. `/?new=1` is the home surface's one-shot
+ * "start a new chat" signal (the same one the sidebar's New-chat button
+ * uses): the chat surface consumes it on mount, opens a fresh chat tab next
+ * to the pinned Top Insights tab, then strips the param. The first brief is
+ * still generating server-side at this point, so dropping the PM straight
+ * into a chat gives them something to do immediately rather than a settings
+ * page or a still-empty brief. Both exits route here, so keep it in one place.
  */
-export const POST_ONBOARDING_PATH = "/settings"
+export const POST_ONBOARDING_PATH = "/?new=1"
 
 /**
  * Kick the first brief (fire-and-forget) and complete onboarding.
