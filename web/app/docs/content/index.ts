@@ -38,7 +38,9 @@ export function stripMarkdown(md: string): string {
     .replace(/!\[[^\]]*\]\([^)]*\)/g, " ") // images
     .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1") // links -> text
     .replace(/^\s*\|.*\|\s*$/gm, (row) => row.replace(/\|/g, " ")) // table pipes
-    .replace(/[#>*_~`]/g, " ") // md punctuation
+    // Strip md punctuation but NOT underscores — identifiers like `list_tickets`
+    // / `get_prd` must stay intact so they remain searchable.
+    .replace(/[#>*~`]/g, " ") // md punctuation
     .replace(/\s+/g, " ")
     .trim()
 }

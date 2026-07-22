@@ -89,11 +89,12 @@ def _app_base() -> str:
 
 def _guide_url() -> str:
     """The one-page onboarding guide link. Overridable via WELCOME_GUIDE_URL;
-    defaults to `<app_base>/guide` so the email always carries a working link
-    even before a dedicated guide URL is configured."""
+    defaults to `<app_base>/docs/sprntly-how-to-guide` (the public docs page) so
+    the email always carries a working link even before a dedicated guide URL is
+    configured."""
     return getattr(config_mod.settings, "welcome_guide_url", "") or (
-        # f"{_app_base()}/guide"
-        f"https://public-access.s3.us-east-1.amazonaws.com/Sprntly-How-To-Guide.docx"
+        f"{_app_base()}/docs/sprntly-how-to-guide"
+        # f"https://public-access.s3.us-east-1.amazonaws.com/Sprntly-How-To-Guide.docx"
     )
 
 
