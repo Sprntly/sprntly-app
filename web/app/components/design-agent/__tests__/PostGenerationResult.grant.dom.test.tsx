@@ -189,6 +189,69 @@ describe("PostGenerationResult — checkpoint id threads into useViewGrant (DOM)
     )
     await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
   })
+
+  // THE end-to-end sequencing proof: drives a real checkpoint advance through
+  // the REAL, unstubbed PostGenerationResult + useViewGrant composition (only
+  // designAgentApi.viewGrant is mocked) and asserts the iframe does NOT reload
+  // while the checkpoint-advance mint is still pending, then DOES reload
+  // exactly once after it resolves. Neither useViewGrant.test.tsx (hook in
+  // isolation, no container) nor PostGenerationResult.test.tsx (node-env,
+  // renderToStaticMarkup, can't drive the async effect) can prove this
+  // sequencing invariant through the real wiring — this is the one seam that
+  // can. FAIL-WITHOUT-FIX: on today's unfixed hook, the grant's reload signal
+  // never bumps on a checkpoint-only change (no checkpoint→reload wiring at all),
+  // so the "remounts to a NEW iframe node" assertion below never becomes true
+  // and this test times out red.
+  it("test_post_generation_result_defers_iframe_reload_until_checkpoint_advance_mint_resolves", async () => {
+    const { container, rerender } = render(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE, current_checkpoint_id: 1 }),
+      }),
+    )
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(1))
+    await waitFor(() => {
+      expect(container.querySelector("iframe.da-prototype-iframe")).not.toBeNull()
+    })
+    const iframeBeforeAdvance = container.querySelector("iframe.da-prototype-iframe")
+
+    // Hold the checkpoint-advance mint pending so the pre-resolve state is
+    // observable (same pending-promise idiom as the file's first test above).
+    let resolveMint: (() => void) | null = null
+    viewGrant.mockImplementation(
+      () => new Promise<void>((res) => { resolveMint = () => res() }),
+    )
+
+    rerender(
+      React.createElement(PostGenerationResult, {
+        prototype: proto({ bundle_url: BUNDLE, current_checkpoint_id: 2 }),
+      }),
+    )
+    await waitFor(() => expect(viewGrant).toHaveBeenCalledTimes(2))
+
+    // The triggering mint is confirmed IN FLIGHT (viewGrant already called a
+    // second time for checkpoint 2) but NOT YET resolved — the iframe must
+    // still be the SAME DOM node as before the advance: no remount/reload has
+    // happened.
+    expect(container.querySelector("iframe.da-prototype-iframe")).toBe(iframeBeforeAdvance)
+
+    // Resolve the checkpoint-advance mint.
+    resolveMint?.()
+
+    // Exactly one fresh reload happens, and only AFTER the mint resolves: the
+    // container remounts a NEW iframe DOM node.
+    await waitFor(() => {
+      const iframeAfterAdvance = container.querySelector("iframe.da-prototype-iframe")
+      expect(iframeAfterAdvance).not.toBeNull()
+      expect(iframeAfterAdvance).not.toBe(iframeBeforeAdvance)
+    })
+
+    // Settles: no further remount happens after the one triggered by this advance.
+    const iframeAfterAdvance = container.querySelector("iframe.da-prototype-iframe")
+    await act(async () => {
+      await Promise.resolve()
+    })
+    expect(container.querySelector("iframe.da-prototype-iframe")).toBe(iframeAfterAdvance)
+  })
 })
 
 describe("PostGenerationResult — private share link wiring", () => {
