@@ -43,10 +43,12 @@ vi.mock("../../../lib/onboarding/store", () => ({
 
 const getByPrd = vi.fn()
 const deleteProto = vi.fn(async (..._args: unknown[]) => {})
+const getProto = vi.fn()
 vi.mock("../../../lib/api", () => ({
   designAgentApi: {
     getByPrd: (...args: [number]) => getByPrd(...args),
     delete: (...args: unknown[]) => deleteProto(...args),
+    get: (...args: [number]) => getProto(...args),
   },
 }))
 
@@ -81,6 +83,7 @@ function Host({
 beforeEach(() => {
   getByPrd.mockReset()
   deleteProto.mockClear()
+  getProto.mockReset()
   push.mockClear()
   showToast.mockClear()
   updateWorkspace.mockClear()
@@ -945,5 +948,191 @@ describe("useGeneratePrototype — platform hint threading", () => {
     )
     await act(async () => {})
     expect(latest.generateModalProps.platformHint).toBeNull()
+  })
+})
+
+describe("useGeneratePrototype — loadingScreenProps.onLiveTerminal (late SSE terminal event)", () => {
+  it("test_use_generate_prototype_live_terminal_noop_before_timed_out — AC6: called before the poll has given up is a no-op (no toast, no dispatch, no GET)", async () => {
+    const doneEvents: Event[] = []
+    const onDone = (e: Event) => doneEvents.push(e)
+    window.addEventListener("da:generating-done", onDone)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={40}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(700)
+    })
+    showToast.mockClear()
+
+    // timedOutRef is still false here — the poll hasn't given up yet.
+    await act(async () => {
+      latest.loadingScreenProps.onLiveTerminal?.("done")
+    })
+
+    expect(showToast).not.toHaveBeenCalled()
+    expect(doneEvents.length).toBe(0)
+    expect(getProto).not.toHaveBeenCalled()
+    window.removeEventListener("da:generating-done", onDone)
+  })
+
+  it("test_use_generate_prototype_live_terminal_notifies_after_timed_out — AC7: called after the poll gave up via timeout and a re-fetch reports ready fires the toast + dispatch exactly once", async () => {
+    const doneEvents: Event[] = []
+    const onDone = (e: Event) => doneEvents.push(e)
+    window.addEventListener("da:generating-done", onDone)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={41}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(701)
+    })
+    await act(async () => {
+      latest.generateModalProps.onGenDone({
+        ok: false,
+        timedOut: true,
+        message: "Generation timed out (6 minutes)",
+      })
+    })
+    showToast.mockClear()
+
+    getProto.mockResolvedValue(readyRow(701))
+    await act(async () => {
+      await latest.loadingScreenProps.onLiveTerminal?.("done")
+    })
+
+    expect(getProto).toHaveBeenCalledWith(701)
+    expect(showToast).toHaveBeenCalledTimes(1)
+    const [title, sub, action, opts] = showToast.mock.calls[0]
+    expect(title).toBe("Prototype ready")
+    expect(sub).toBe("Your prototype finished generating.")
+    expect(action).toBe("Open")
+    expect(opts).toMatchObject({ persist: true })
+    expect(doneEvents.length).toBe(1)
+    window.removeEventListener("da:generating-done", onDone)
+  })
+
+  it("does not fire when the re-fetched prototype is not yet ready (still generating)", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={42}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(702)
+    })
+    await act(async () => {
+      latest.generateModalProps.onGenDone({
+        ok: false,
+        timedOut: true,
+        message: "Generation timed out (6 minutes)",
+      })
+    })
+    showToast.mockClear()
+
+    getProto.mockResolvedValue({
+      id: 702,
+      status: "generating",
+      bundle_url: null,
+      error: null,
+    })
+    await act(async () => {
+      await latest.loadingScreenProps.onLiveTerminal?.("done")
+    })
+
+    expect(showToast).not.toHaveBeenCalled()
+  })
+
+  it("test_use_generate_prototype_live_terminal_noop_after_genuine_success — AC8 regression: a late SSE done event arriving after a GENUINE success (not a timeout) must NOT fire a second toast or dispatch", async () => {
+    const doneEvents: Event[] = []
+    const onDone = (e: Event) => doneEvents.push(e)
+    window.addEventListener("da:generating-done", onDone)
+
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={43}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      latest.generateModalProps.onKickoff(703)
+    })
+    // Genuine success — resolvedRef flips true, timedOutRef stays false.
+    await act(async () => {
+      latest.generateModalProps.onGenDone({ ok: true, prototype: readyRow(703) })
+    })
+    showToast.mockClear()
+
+    await act(async () => {
+      await latest.loadingScreenProps.onLiveTerminal?.("done")
+    })
+
+    // Fails if gated on the broader resolvedRef (which is also true here) —
+    // must stay a no-op because timedOutRef, the narrower flag, is false.
+    expect(showToast).not.toHaveBeenCalled()
+    expect(doneEvents.length).toBe(0)
+    expect(getProto).not.toHaveBeenCalled()
+    window.removeEventListener("da:generating-done", onDone)
+  })
+
+  it("test_use_generate_prototype_live_terminal_missing_proto_id_is_safe — called with genProtoId still null is a safe no-op, not a crash", async () => {
+    let latest!: UseGeneratePrototypeResult
+    render(
+      <Host
+        prdId={44}
+        options={{ skipExistenceCheck: true }}
+        onResult={(r) => (latest = r)}
+      />,
+    )
+    await act(async () => {})
+
+    await act(async () => {
+      latest.generateModalProps.onGenStart()
+      // Deliberately no onKickoff — genProtoId stays null.
+    })
+    await act(async () => {
+      latest.generateModalProps.onGenDone({
+        ok: false,
+        timedOut: true,
+        message: "Generation timed out (6 minutes)",
+      })
+    })
+    showToast.mockClear()
+
+    await expect(
+      act(async () => {
+        await latest.loadingScreenProps.onLiveTerminal?.("done")
+      }),
+    ).resolves.not.toThrow()
+
+    expect(showToast).not.toHaveBeenCalled()
+    expect(getProto).not.toHaveBeenCalled()
   })
 })
