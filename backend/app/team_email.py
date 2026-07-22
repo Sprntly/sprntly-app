@@ -2,12 +2,18 @@
 
 Two paths by whether the email already has a Supabase auth account:
 
-  - NEW user → Supabase `auth/v1/admin/invite_user_by_email`: creates the
-    `auth.users` row (status: invited) and sends the invite email. Clicking it
-    lands on `<FRONTEND_URL>/auth/callback` with `type=invite`; the callback
-    routes them to `/set-password` so they MUST create a password before
-    entering, then `postLoginPath`'s `tryAutoAcceptInvite` hook converts the
-    pending workspace_invites row into a company_members row.
+  - NEW user → `generate_link(type=invite)` creates the `auth.users` row
+    (status: invited) and returns the link WITHOUT Supabase sending an email;
+    we email the invitee ourselves. The emailed URL is `<FRONTEND_URL>
+    /auth/confirm?token_hash=…&type=invite` — our own page, which consumes the
+    token via `verifyOtp` only on an explicit button click. Corporate mail
+    scanners (SafeLinks etc.) prefetch every link in an email with a GET; the
+    raw Supabase `/auth/v1/verify` action link is consumed by that GET, so it
+    must never appear in an email (2026-07-22 Freezing Point incident — all
+    their invite links were dead before a human ever clicked). After verifyOtp
+    the confirm page routes to `/set-password` so the invitee MUST create a
+    password before entering, then `postLoginPath`'s `tryAutoAcceptInvite`
+    hook converts the pending workspace_invites row into a company_members row.
 
   - EXISTING user → a plain notification email (Resend, same sender as the
     weekly brief) linking to `<FRONTEND_URL>/sign-in`. Deliberately NOT a
@@ -25,6 +31,7 @@ from __future__ import annotations
 
 import html
 import logging
+from urllib.parse import quote
 
 import httpx
 
@@ -239,34 +246,61 @@ def _notify_existing_user(
     return FAILED
 
 
-def _extract_action_link(resp) -> str | None:
-    """Pull the magic-link URL out of a generate_link response, tolerant of the
-    supabase-py object shape (resp.properties.action_link) and dict shapes."""
+def _extract_link_property(resp, name: str) -> str | None:
+    """Pull a property (`action_link`, `hashed_token`, …) out of a
+    generate_link response, tolerant of the supabase-py object shape
+    (resp.properties.<name>) and dict shapes."""
     props = getattr(resp, "properties", None)
     if props is not None:
-        link = getattr(props, "action_link", None)
-        if isinstance(link, str) and link:
-            return link
-        if isinstance(props, dict) and isinstance(props.get("action_link"), str):
-            return props["action_link"]
+        value = getattr(props, name, None)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(props, dict) and isinstance(props.get(name), str) and props[name]:
+            return props[name]
     if isinstance(resp, dict):
         p = resp.get("properties")
-        if isinstance(p, dict) and isinstance(p.get("action_link"), str):
-            return p["action_link"]
+        if isinstance(p, dict) and isinstance(p.get(name), str) and p[name]:
+            return p[name]
     return None
 
 
+def _extract_action_link(resp) -> str | None:
+    return _extract_link_property(resp, "action_link")
+
+
+def _confirm_page_link(hashed_token: str) -> str:
+    """Scanner-proof accept URL: our own /auth/confirm page carrying the
+    token_hash. A mail scanner's GET just loads the page; the token is only
+    consumed by `verifyOtp` when the invitee clicks the accept button."""
+    base = (config_mod.settings.frontend_url or "").rstrip("/")
+    if not base:
+        base = "http://localhost:3000"
+    return f"{base}/auth/confirm?token_hash={quote(hashed_token, safe='')}&type=invite"
+
+
 def _generate_invite_link(client, email: str, redirect: str, invite_data: dict) -> str | None:
-    """Create the invited auth user AND return their accept (magic) link WITHOUT
+    """Create the invited auth user AND return their accept link WITHOUT
     Supabase sending any email — so our own branded Day-0 email is the only one
-    that goes out. Returns the action_link, or None if it couldn't be read.
-    Raises the underlying error (the caller handles already-registered)."""
+    that goes out. Prefers the scanner-proof /auth/confirm URL built from the
+    response's `hashed_token`; falls back to the raw action_link only when the
+    response carries no hashed_token (old GoTrue shapes) — that link dies to
+    mail-scanner prefetch, but a maybe-working link beats none. Returns None if
+    neither could be read. Raises the underlying error (the caller handles
+    already-registered)."""
     resp = client.auth.admin.generate_link(
         {
             "type": "invite",
             "email": email,
             "options": {"redirect_to": redirect, "data": invite_data},
         }
+    )
+    hashed_token = _extract_link_property(resp, "hashed_token")
+    if hashed_token:
+        return _confirm_page_link(hashed_token)
+    logger.warning(
+        "generate_link for %s returned no hashed_token — emailing the raw "
+        "action link (vulnerable to mail-scanner prefetch).",
+        email,
     )
     return _extract_action_link(resp)
 
