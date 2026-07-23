@@ -22,6 +22,11 @@ from app.skills.catalog import routable_manifest
 # (question, expected skill id). Mix of regex-covered and LLM-only skills.
 EVALS: list[tuple[str, str]] = [
     ("Write a PRD for in-app onboarding checklists", "prd-author"),
+    # Broadened PRD phrasings — "Give me a prd for …" was a real user miss
+    # under the old generate/create/write/draft-only verb list.
+    ("Give me a prd for the Machine Purchase Order project", "prd-author"),
+    ("We need a PRD for offline exports", "prd-author"),
+    ("Put together a quick prd for usage-based pricing", "prd-author"),
     ("Generate user stories for the checkout flow", "user-stories"),
     ("Prioritize these features with RICE: SSO, export, dark mode", "prioritize"),
     ("Re-rank our backlog by WSJF", "prioritize"),
@@ -57,6 +62,21 @@ def test_expected_skills_are_routable():
     routable = {s["id"] for s in routable_manifest()}
     bad = sorted({exp for _, exp in EVALS} - routable)
     assert bad == [], f"eval labels not routable/installed: {bad}"
+
+
+@pytest.mark.parametrize("question", [
+    "Give me a prd for the Machine Purchase Order project",
+    "We need a PRD for offline exports",
+    "Put together a quick prd for usage-based pricing",
+    "can you build a prd for the referral program",
+])
+def test_regex_catches_broadened_prd_phrasings(question):
+    """These must HIT the regex tier (not merely defer to the LLM router) —
+    the fast-path is what guarantees the phrasing routes even when the LLM
+    router is down or times out."""
+    m = detect_intent(question)
+    assert m is not None and m.skill_id == "prd-author"
+    assert m.confidence >= 0.75
 
 
 @pytest.mark.parametrize("question,expected", EVALS)

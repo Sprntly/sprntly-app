@@ -134,10 +134,13 @@ def _refresh_all_company_connectors() -> None:
             if conn.get("status") != "active":
                 continue
             provider = (conn.get("provider") or "").strip()
-            # Only fire for providers with a registered KG puller. Others
-            # (figma / slack / google_drive) have their own corpus paths,
-            # are per-user, or aren't wired for periodic refresh.
-            if not provider or provider not in PULLERS:
+            # Fire for providers with a registered KG puller, plus google_drive
+            # (connection-config sync — kickoff_sync special-cases it, so
+            # picked Drive files that change get re-pulled into corpus + KG).
+            # Others (figma / slack) have their own corpus paths, are
+            # per-user, or aren't wired for periodic refresh.
+            if not provider or (provider not in PULLERS
+                                and provider != "google_drive"):
                 continue
             try:
                 kickoff_sync(company_id, provider)

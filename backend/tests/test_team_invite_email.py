@@ -32,17 +32,29 @@ _ACTION_LINK = (
     "https://proj.supabase.co/auth/v1/verify?token=abc123&type=invite"
     "&redirect_to=http://localhost:3000/auth/callback"
 )
+# The PKCE token hash generate_link returns alongside it — the emailed link is
+# built from THIS (our own /auth/confirm page), never from the raw action_link:
+# a mail scanner's GET on the action_link consumes the single-use token.
+_HASHED_TOKEN = "pkce_hash_abc123"
 
 
-def _install_fake_admin(monkeypatch, *, action_link: str = _ACTION_LINK):
+def _install_fake_admin(
+    monkeypatch,
+    *,
+    action_link: str = _ACTION_LINK,
+    hashed_token: str | None = _HASHED_TOKEN,
+):
     """Point `supabase_client().auth.admin` at mocks for BOTH generate_link
-    (default: returns `action_link`) and invite_user_by_email (fallback path),
-    plus a sign_in_with_otp mock we assert is never used. Returns the admin
-    mock for per-test assertions/side-effects."""
+    (default: returns `action_link` + `hashed_token`) and invite_user_by_email
+    (fallback path), plus a sign_in_with_otp mock we assert is never used.
+    Returns the admin mock for per-test assertions/side-effects."""
     admin_mock = MagicMock()
+    props = SimpleNamespace(action_link=action_link)
+    if hashed_token is not None:
+        props.hashed_token = hashed_token
     admin_mock.generate_link = MagicMock(
         return_value=SimpleNamespace(
-            properties=SimpleNamespace(action_link=action_link),
+            properties=props,
             user=SimpleNamespace(id="auth-user-id"),
         )
     )
@@ -105,12 +117,36 @@ def test_new_user_uses_generate_link_and_our_email(isolated_settings, monkeypatc
     assert params["email"] == "fresh@co.com"
     assert params["options"]["redirect_to"].startswith("http")
 
-    # Our Resend email carries the Day-0 copy + the generated accept link.
+    # Our Resend email carries the Day-0 copy + the SCANNER-PROOF accept link:
+    # our /auth/confirm page keyed by token_hash. The raw Supabase verify URL
+    # must never appear — a mail scanner's GET would consume it.
     post_mock.assert_called_once()
     payload = post_mock.call_args.kwargs["json"]
     assert payload["to"] == ["fresh@co.com"]
     assert "has invited you to Sprntly to collaborate" in payload["subject"]
-    assert _ACTION_LINK in payload["text"]
+    confirm_link = f"/auth/confirm?token_hash={_HASHED_TOKEN}&type=invite"
+    assert confirm_link in payload["text"]
+    # The HTML body html-escapes the href, so & appears as &amp;.
+    assert confirm_link.replace("&", "&amp;") in payload["html"]
+    assert _ACTION_LINK not in payload["text"]
+    assert "/auth/v1/verify" not in payload["html"]
+
+
+def test_new_user_falls_back_to_action_link_without_hashed_token(
+    isolated_settings, monkeypatch
+):
+    """Old GoTrue response shapes may omit hashed_token — the raw action link
+    still goes out (a maybe-working link beats none)."""
+    ctx = company_client(monkeypatch)
+    _install_fake_admin(monkeypatch, hashed_token=None)
+    post_mock = _set_resend(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/team/invites", json={"email": "legacy@co.com", "role": "member"}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json().get("email_sent") is True
+    assert _ACTION_LINK in post_mock.call_args.kwargs["json"]["text"]
 
 
 def test_new_user_falls_back_to_supabase_when_no_resend(isolated_settings, monkeypatch):
@@ -168,6 +204,26 @@ def test_redirect_to_uses_frontend_url(isolated_settings, monkeypatch):
     )
     params = admin_mock.generate_link.call_args.args[0]
     assert params["options"]["redirect_to"].startswith("https://app.example")
+
+
+def test_confirm_link_uses_frontend_url(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    import app.config as config_mod
+
+    monkeypatch.setattr(
+        config_mod.settings, "frontend_url", "https://app.example", raising=False
+    )
+    _install_fake_admin(monkeypatch)
+    post_mock = _set_resend(monkeypatch)
+
+    ctx.client.post(
+        "/v1/team/invites", json={"email": "cl@co.com", "role": "member"}
+    )
+    text = post_mock.call_args.kwargs["json"]["text"]
+    assert (
+        f"https://app.example/auth/confirm?token_hash={_HASHED_TOKEN}&type=invite"
+        in text
+    )
 
 
 # ─────────────────────── resend triggers a re-send ───────────────────────

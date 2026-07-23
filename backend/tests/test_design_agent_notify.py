@@ -71,6 +71,14 @@ CREATE TABLE prototype_checkpoints (
     comment_state     TEXT NOT NULL DEFAULT '[]',
     created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE prototype_screenshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id  INTEGER NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    storage_key   TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 _MIGRATION_PATH = (

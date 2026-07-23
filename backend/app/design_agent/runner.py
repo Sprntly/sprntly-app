@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 from app.config import settings
 from app.db.prototype_comments import list_comments, mark_comments_orphaned
+from app.db.prototype_screenshots import resolve_screenshot_keys
 from app.db.prototype_pending_iterations import (
     dequeue_next,
     mark_iteration_done,
@@ -2060,8 +2061,8 @@ async def estimate_iterate_cost(
     nothing (the iterate route is only hit on Continue).
 
     Counts the CACHEABLE prefix (iterate system prompt + the current bundle source +
-    the open comment threads, plus a flat `_SCREENSHOT_EST_INPUT_TOKENS` when the
-    prototype carries a reference screenshot — the image rides that prefix) and
+    the open comment threads, plus `_SCREENSHOT_EST_INPUT_TOKENS` per attached
+    reference screenshot — the images ride that prefix) and
     the VOLATILE suffix (the user's iterate prompt),
     converts chars→tokens via the chars/4 heuristic (`_CHARS_PER_TOKEN`), then prices
     via `llm_telemetry.MODEL_PRICING[MODEL]` — the SAME constants `RunUsage.est_cost_usd`
@@ -2099,11 +2100,17 @@ async def estimate_iterate_cost(
     cacheable_chars = len(DESIGN_AGENT_ITERATE_SYSTEM) + _chars(source) + _chars_comments(open_comments)
     volatile_chars = len(prompt)
     cached_input_tokens = cacheable_chars // _CHARS_PER_TOKEN
-    if proto and proto.get("screenshot_key"):
-        # The stored reference screenshot re-enters every iterate turn inside
-        # the cacheable prefix; count it as a flat vision-input constant (see
-        # _SCREENSHOT_EST_INPUT_TOKENS — the image is never decoded here).
-        cached_input_tokens += _SCREENSHOT_EST_INPUT_TOKENS
+    # The stored reference screenshot(s) re-enter every iterate turn inside the
+    # cacheable prefix; count each as a flat vision-input constant (see
+    # _SCREENSHOT_EST_INPUT_TOKENS — the images are never decoded here).
+    # join-table-first, legacy-column-fallback-second (resolve_screenshot_keys)
+    # so a pre-ticket prototype (single legacy screenshot_key, zero join-table
+    # rows) estimates identically to a post-ticket single-screenshot row.
+    screenshot_keys = resolve_screenshot_keys(
+        prototype_id=prototype_id, workspace_id=workspace_id,
+        legacy_screenshot_key=(proto or {}).get("screenshot_key"),
+    )
+    cached_input_tokens += _SCREENSHOT_EST_INPUT_TOKENS * len(screenshot_keys)
     new_input_tokens = volatile_chars // _CHARS_PER_TOKEN
 
     p = MODEL_PRICING[MODEL]

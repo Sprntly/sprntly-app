@@ -55,6 +55,7 @@ from app.db.prds import (
     update_prd_content,
 )
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
+from app.prd_command import classify_prd_command
 from app.prd_runner import (
     PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
     generate_prd_and_warm,
@@ -288,9 +289,29 @@ def _chat_task_title(task: str) -> str:
     return (title[:1].upper() + title[1:]) if title else "Chat PRD"
 
 
+class TaskSourceDoc(BaseModel):
+    """A document the user attached earlier in the chat thread — extracted
+    text, forwarded so the PRD grounds on it (the reported bug: a doc attached
+    two messages before "generate a PRD" was silently forgotten)."""
+    name: str = Field(..., min_length=1, max_length=300)
+    content: str = Field(..., min_length=1, max_length=60_000)
+
+
+# Total budget across all attached docs — mirrors the ask path's 100k clamp.
+_TASK_SOURCE_DOCS_TOTAL_MAX = 150_000
+
+
 class TaskGenerateIn(BaseModel):
     task: str = Field(..., min_length=3, max_length=4000)
     force: bool = False
+    source_docs: list[TaskSourceDoc] | None = Field(default=None, max_length=8)
+
+
+def _render_source_docs(docs: list[TaskSourceDoc]) -> str:
+    """Join attached docs into one markdown block (newest-last order preserved),
+    clamped to the total budget so a pile of large docs can't blow the prompt."""
+    joined = "\n\n".join(f"--- {d.name} ---\n{d.content.strip()}" for d in docs)
+    return joined[:_TASK_SOURCE_DOCS_TOTAL_MAX]
 
 
 @router.post("/generate-from-task")
@@ -359,12 +380,18 @@ async def generate_from_task(
     )
     # No _record_prd_action: there is no real theme to advance in the lifecycle.
 
+    # Documents attached earlier in the chat thread ride along as authoritative
+    # source material (extra_source_md) — layered on top of the normal KG/task
+    # grounding, unlike the import path which replaces grounding entirely.
+    extra_source_md = _render_source_docs(body.source_docs) if body.source_docs else None
+
     task = asyncio.create_task(
         generate_prd_and_warm(
             prd_id, brief_id, _CHAT_TASK_INSIGHT_INDEX, insight_override=insight,
             author=company.user_name,
             company_id=company.company_id, user_id=company.user_id,
             prd_title=title,
+            extra_source_md=extra_source_md,
         )
     )
     _inflight_tasks.add(task)
@@ -387,6 +414,25 @@ async def generate_from_task(
         "title": title,
         "variant": PRD_VARIANT,
     }
+
+
+class ClassifyCommandIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=8000)
+
+
+@router.post("/classify-command")
+def classify_command(
+    body: ClassifyCommandIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """LLM fallback for the chat command decision (tier 2 of the client's
+    slash→regex→LLM ladder): does this message ask us to CREATE a PRD, and for
+    what task? Called by ChatScreen only when the message names a PRD but the
+    regex tier (BriefChat.isPrdCommand) didn't match — novel phrasings.
+    Fail-open: any classifier error returns not-a-command, and the client
+    falls through to the ask agent exactly as before this endpoint existed."""
+    # enterprise_id == company_id (same identity the generate routes bind).
+    return classify_prd_command(company.company_id, body.text)
 
 
 @router.get("/{prd_id}/evidence")

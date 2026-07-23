@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react"
 import { profileDisplayName, useWorkspace } from "../../../../context/WorkspaceContext"
 import { updateWorkspace } from "../../../../lib/onboarding/store"
+import { workspacesApi } from "../../../../lib/api"
 import {
   PLANNING_CYCLES,
   PRIORITIZATION_FRAMEWORKS,
@@ -45,7 +46,7 @@ function splitSizing(stored: string): { sizing: string; sizingOther: string } {
 }
 
 export function ProcessSettings() {
-  const { workspace, profile, loading, refresh } = useWorkspace()
+  const { workspace, workspaces, profile, loading, refresh } = useWorkspace()
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -122,17 +123,32 @@ export function ProcessSettings() {
     try {
       const resolvedSizing =
         sizing === "Other" ? sizingOther.trim() : sizing.trim()
-      await updateWorkspace(workspace.id, {
-        team_name: teamName.trim() || null,
-        team_scope: teamScope.trim() || null,
-        prioritization_framework: framework || null,
-        planning_cycle: planningCycle || null,
-        sizing_methodology: resolvedSizing || null,
-        team_strategy: teamStrategy.trim() || null,
-        team_roadmap: teamRoadmap.trim() || null,
-        decision_process: decisionProcess.trim() || null,
-        additional_context: additionalContext.trim() || null,
-      })
+      // The six "Your workspace" fields live on the DEFAULT workspace row
+      // (2026-07-22 — moved off companies), a single source of truth shared with
+      // onboarding. name → the workspaces.name the switcher shows.
+      const defaultWorkspaceId = workspaces.find((w) => w.is_default)?.id ?? null
+      if (!defaultWorkspaceId) {
+        throw new Error(
+          "Your workspace isn't ready yet — reload and try again.",
+        )
+      }
+      // Split the write: workspace-owned fields → the workspace row; the rest
+      // (prioritization framework, planning cycle, decision process) → companies.
+      await Promise.all([
+        workspacesApi.update(defaultWorkspaceId, {
+          name: teamName.trim() || undefined,
+          team_scope: teamScope.trim() || null,
+          sizing_methodology: resolvedSizing || null,
+          team_strategy: teamStrategy.trim() || null,
+          team_roadmap: teamRoadmap.trim() || null,
+          additional_context: additionalContext.trim() || null,
+        }),
+        updateWorkspace(workspace.id, {
+          prioritization_framework: framework || null,
+          planning_cycle: planningCycle || null,
+          decision_process: decisionProcess.trim() || null,
+        }),
+      ])
       setSnapshot(current)
       setSaved(true)
       await refresh()

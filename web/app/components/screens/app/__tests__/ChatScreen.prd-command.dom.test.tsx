@@ -22,8 +22,11 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand } = vi.hoisted(() => ({
   generateFromTask: vi.fn().mockResolvedValue({ prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3" }),
+  // Tier-2 LLM fallback (POST /v1/prd/classify-command). Default: not a command
+  // — individual tests override per-case.
+  classifyCommand: vi.fn().mockResolvedValue({ is_prd_command: false, task: null, confidence: 0.9 }),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -34,7 +37,7 @@ vi.mock("../../../../lib/api", () => {
     ApiError,
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 7, insights: [{ title: "x" }] }) },
-    prdApi: { generateFromTask },
+    prdApi: { generateFromTask, classifyCommand },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
@@ -124,6 +127,7 @@ beforeEach(() => {
   runAskGeneration.mockClear()
   runPrdGeneration.mockClear()
   generateFromTask.mockClear()
+  classifyCommand.mockClear()
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
@@ -148,19 +152,88 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile")
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
     // Not the brief-insight path, and not the ask agent.
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
-  it("routes a normal question to the ask agent unchanged", async () => {
+  it("routes a normal question to the ask agent unchanged (no classifier call)", async () => {
     renderChat()
     await typeAndSend("Why did enterprise churn spike last month?")
 
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(generateFromTask).not.toHaveBeenCalled()
+    // No PRD mention → the LLM fallback tier must not even be consulted.
+    expect(classifyCommand).not.toHaveBeenCalled()
+  })
+
+  it("LLM fallback: a novel command phrasing the regex can't parse still generates", async () => {
+    // No verb from the tier-1 list, not noun-first — regex says "not a command".
+    // The message names a PRD, so tier 2 asks the classifier, which says yes.
+    classifyCommand.mockResolvedValueOnce({ is_prd_command: true, task: "checkout revamp", confidence: 0.92 })
+    renderChat()
+    await typeAndSend("let's get a PRD going for the checkout revamp")
+
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    expect(classifyCommand).toHaveBeenCalledWith("let's get a PRD going for the checkout revamp")
+    // The classifier-extracted task drives generation (the regex extractor
+    // can't parse this phrasing by definition).
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined)
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("LLM fallback: a PRD mention that is NOT a command falls through to the ask agent", async () => {
+    renderChat() // default classifyCommand mock: not a command
+    await typeAndSend("the requirements doc needs another pass from legal")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    expect(classifyCommand).toHaveBeenCalledTimes(1)
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("LLM fallback: low confidence is not enough to hijack the message", async () => {
+    classifyCommand.mockResolvedValueOnce({ is_prd_command: true, task: "something", confidence: 0.4 })
+    renderChat()
+    await typeAndSend("maybe the prd angle covers this?")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("LLM fallback: a classifier error fails open to the ask agent (send never breaks)", async () => {
+    classifyCommand.mockRejectedValueOnce(new Error("gateway down"))
+    renderChat()
+    await typeAndSend("circulate a prd summary to the team")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("seeds the command turn + generating card BEFORE generateFromTask resolves (optimistic-first)", async () => {
+    // The latency bug: the previous flow awaited generateFromTask BEFORE opening
+    // the tab, so the composer cleared and the chat sat empty for the multi-second
+    // call. Hold the POST unresolved and assert the optimistic UI is already up.
+    let resolveGen!: (v: unknown) => void
+    generateFromTask.mockImplementationOnce(() => new Promise((res) => { resolveGen = res as (v: unknown) => void }))
+
+    renderChat()
+    await typeAndSend("generate a PRD for dark mode on mobile")
+
+    // The generate POST is in flight (called with the parsed task) but NOT
+    // resolved…
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
+    // …yet the user's command, the acknowledgment, and the generating PRD card
+    // are already on screen.
+    expect(document.body.textContent).toContain("generate a PRD for dark mode on mobile")
+    expect(document.body.textContent).toContain("Generating a PRD for that")
+    expect(document.body.textContent).toContain("Generating PRD…")
+    expect(document.querySelector('[data-testid="chat-insight-msg"]')).toBeTruthy()
+    expect(runAskGeneration).not.toHaveBeenCalled()
+
+    // Resolve the generate → the tab drives the result in via the resume machinery.
+    await act(async () => { resolveGen({ prd_id: 501, title: "Dark mode on mobile", status: "generating" }) })
   })
 
   it("a GENERIC command MID-conversation seeds the PRD from the conversation", async () => {
@@ -178,7 +251,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await act(async () => { fireEvent.click(sendBtn) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step")
+    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined)
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 })

@@ -80,15 +80,53 @@ function nowTime(): string {
 // letting the ask agent answer with markdown.
 export const isTicketsCommand = (q: string) =>
   /\b(create|generate|make|draft|break|convert|turn|split)\b.*\btickets?\b/i.test(q)
+// PRD noun phrasings — "prd", "product requirements doc(ument)", bare
+// "requirements doc(ument)". One source string so the command rule, the task
+// extractor, and ChatScreen's LLM-fallback gate (mentionsPrd) agree on what
+// counts as naming a PRD.
+const PRD_NOUN_SRC = "(?:prds?|product\\s+requirements?\\s+doc(?:ument)?s?|requirements?\\s+doc(?:ument)?s?)"
+const PRD_NOUN_RE = new RegExp(`\\b${PRD_NOUN_SRC}\\b`, "i")
+// Verbs that read as "produce a PRD" when they appear BEFORE the noun.
+// import/convert/upload cover the doc-import phrasings ("import this document
+// as a PRD"); give/need/want cover ask-shapes ("give me a prd for X" was a
+// real user miss under the old generate/create/write/draft-only list).
+const PRD_VERB_SRC =
+  "(?:generate|create|write|draft|make|build|prepare|produce|compose|develop|author|import|convert|upload|give|need|want|put\\s+together|come\\s+up\\s+with|spin\\s+up|whip\\s+up)"
+const PRD_COMMAND_RE = new RegExp(`\\b${PRD_VERB_SRC}\\b.*\\b${PRD_NOUN_SRC}\\b`, "i")
+// Noun-first command: the message STARTS with the artifact + a topic ("PRD for
+// checkout flow", "a PRD on dark mode"). Indefinite articles only — "THE prd
+// for dark mode…" points at an EXISTING PRD ("the PRD for dark mode is missing
+// metrics"), and mid-sentence mentions are statements, not commands. Both fall
+// to ChatScreen's LLM fallback tier instead.
+const PRD_NOUN_FIRST_RE = new RegExp(
+  `^\\s*(?:(?:a|an|new|quick|full|draft)\\s+)*${PRD_NOUN_SRC}\\b\\s*[:,–—-]*\\s*(?:for|about|on|covering|regarding)\\b`,
+  "i",
+)
+// Information questions about PRDs ("what is a PRD?", "how do I write a PRD?",
+// "should we have a PRD for this?") are questions for the ask agent, never
+// commands — even when they contain a command verb. The aux-verb alternative
+// deliberately requires a NON-"you" subject so polite commands ("can you draft
+// a PRD for checkout") still route as commands.
+const PRD_QUESTION_RE =
+  /^\s*(?:what|whats|what's|why|where|when|who|whose|how)\b|^\s*(?:do|does|did|should|shall|is|are|was|were|can|could|would|will)\s+(?:we|i|the|this|that|it|there|a|an|our|my)\b/i
+
+/** True when the message names a PRD-ish artifact at all — the gate for
+ *  ChatScreen's LLM fallback tier (novel command phrasings the regexes here
+ *  can't anticipate). Cheap and broad on purpose: matching this only means
+ *  "worth asking the classifier", never "is a command". */
+export const mentionsPrd = (q: string) => PRD_NOUN_RE.test(q)
+
 // A "generate a PRD" phrasing is a COMMAND (open the PRD tab), not a question
 // for the ask agent. Exported so ChatScreen intercepts it with the SAME rule —
 // otherwise the ask agent answers it with a raw prd-author HTML dump.
-// import/convert/upload cover the doc-import phrasings ("import this document
-// as a PRD"); a query that is a tickets command is never a PRD command, so
-// "convert this PRD into tickets" routes to tickets in every dispatcher
-// regardless of check order.
+// A query that is a tickets command is never a PRD command, so "convert this
+// PRD into tickets" routes to tickets in every dispatcher regardless of check
+// order.
 export const isPrdCommand = (q: string) =>
-  /\b(generate|create|write|draft|make|import|convert|upload)\b.*\bprd\b/i.test(q) && !isTicketsCommand(q)
+  !isTicketsCommand(q) &&
+  PRD_NOUN_RE.test(q) &&
+  !PRD_QUESTION_RE.test(q) &&
+  (PRD_COMMAND_RE.test(q) || PRD_NOUN_FIRST_RE.test(q))
 
 // Courtesy / filler tails that don't name a task ("generate a PRD please").
 const PRD_TASK_TAIL = /\b(please|now|thanks|thank you|asap|for me|for us)\b/gi
@@ -121,16 +159,25 @@ function cleanPrdTask(raw: string): string | null {
  *  top-insight behavior. Two shapes: the task AFTER "prd" ("generate a PRD for
  *  dark mode on mobile") or BETWEEN the verb and "prd" ("draft a dark-mode
  *  PRD"). Exported so ChatScreen and the brief composer split on the SAME rule. */
+const PRD_TASK_AFTER_RE = new RegExp(
+  `\\b${PRD_NOUN_SRC}\\b[\\s:,-]*(?:(?:for|about|on|around|covering|regarding|of|to)\\b[\\s:,-]*)?(.+)$`,
+  "i",
+)
+// Only authoring/ask verbs here — import/convert/upload phrasings name a
+// document, not a task ("import this document as a PRD").
+const PRD_TASK_BETWEEN_RE = new RegExp(
+  `\\b(?:generate|create|write|draft|make|build|prepare|produce|compose|develop|author|give|need|want|put\\s+together|come\\s+up\\s+with|spin\\s+up|whip\\s+up)\\b\\s+(.*?)\\s*\\b${PRD_NOUN_SRC}\\b`,
+  "i",
+)
+
 export function prdCommandTask(q: string): string | null {
   if (!isPrdCommand(q)) return null
-  const after = /\bprd\b[\s:,-]*(?:(?:for|about|on|around|covering|regarding|of|to)\b[\s:,-]*)?(.+)$/i.exec(q)
+  const after = PRD_TASK_AFTER_RE.exec(q)
   if (after) {
     const task = cleanPrdTask(after[1])
     if (task) return task
   }
-  // Only authoring verbs here — import/convert/upload phrasings name a document,
-  // not a task ("import this document as a PRD").
-  const between = /\b(?:generate|create|write|draft|make)\b\s+(.*?)\s*\bprd\b/i.exec(q)
+  const between = PRD_TASK_BETWEEN_RE.exec(q)
   if (between) {
     const task = cleanPrdTask(between[1])
     if (task) return task

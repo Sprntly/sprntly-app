@@ -100,10 +100,12 @@ DEFAULT_CADENCE: tuple[DripStep, ...] = (
 
 def _from_address() -> str:
     """The From: header for drip emails. Overridable via DRIP_FROM_EMAIL;
-    defaults to a sane onboarding sender. Resolved at call time so test
-    config reloads apply."""
+    defaults to the onboarding sender on the Resend-verified mail.sprntly.ai
+    domain — the API key is scoped to that domain, so a bare-sprntly.ai
+    sender is rejected with a 403. Resolved at call time so test config
+    reloads apply."""
     return getattr(config_mod.settings, "drip_from_email", "") or (
-        "Sprntly <onboarding@sprntly.ai>"
+        "Sprntly <onboarding@mail.sprntly.ai>"
     )
 
 

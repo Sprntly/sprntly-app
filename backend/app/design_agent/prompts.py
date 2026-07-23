@@ -618,7 +618,7 @@ def render_iterate_user(
     open_comments: list[dict],
     iterate_prompt: str,
     applied_comment: dict | None,
-    screenshot_block: dict | None = None,
+    screenshot_blocks: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
     """Assemble the iterate user-turn content with the AD2 cache breakpoint.
 
@@ -626,22 +626,25 @@ def render_iterate_user(
 
     - ``cacheable_prefix_blocks`` — the STABLE prefix that changes only when the
       bundle or the open comments change: the current source files + the open
-      comment threads (+ the reference-screenshot image block when the prototype
-      carries one — the image is immutable per prototype, so it is
-      prefix-stable). The LAST block carries
+      comment threads (+ the reference-screenshot image block(s) when the
+      prototype carries any — the images are immutable per prototype, so they
+      are prefix-stable). The LAST block carries
       ``cache_control: {type: "ephemeral", ttl: "1h"}`` so this whole prefix
       (and the system blocks above it) is cached across the run's iterations.
     - ``volatile_user_block`` — the per-call suffix: the user's iterate prompt
       (plus the applied-comment anchor/body when F10 pre-filled it). It carries
       NO ``cache_control`` because it changes every call.
 
-    ``screenshot_block`` is a ready-made Anthropic image content block (built by
-    the route from the stored upload) or None. When present it is appended as
-    the LAST stable block and the cache breakpoint MOVES onto it — the
-    breakpoint marks the END of the stable prefix, so leaving it on the text
-    block would strand the image below the breakpoint and silently re-bill it
-    on every turn. The caller's dict is not mutated. When None, the single text
-    block keeps the breakpoint, byte-identical to the pre-screenshot shape.
+    ``screenshot_blocks`` is a ready-made list of Anthropic content blocks
+    (built by the route from the stored upload(s) — image blocks, each
+    optionally preceded by its own "Image N:" text label) or None/[]. When
+    non-empty they are appended, IN ORDER, as the LAST stable blocks and the
+    cache breakpoint MOVES onto the very last one — the breakpoint marks the
+    END of the stable prefix, so leaving it on the text block would strand the
+    image(s) below the breakpoint and silently re-bill them on every turn.
+    None of the caller's dicts are mutated (each is shallow-copied before the
+    breakpoint is attached). When None/[], the single text block keeps the
+    breakpoint, byte-identical to the pre-screenshot shape.
 
     The CALLER assembles the user message as
     ``{"role": "user", "content": [*cacheable_prefix_blocks, volatile_user_block]}``
@@ -656,13 +659,14 @@ def render_iterate_user(
         "of truth — `view` files before editing.\n\n"
         f"{source_text}\n\n{comments_text}"
     )
-    if screenshot_block is not None:
+    if screenshot_blocks:
         cacheable_prefix_blocks = [
             {"type": "text", "text": cacheable_text},
+            # Shallow-copy every block; never mutate the caller's list/dicts.
+            *[{**b} for b in screenshot_blocks[:-1]],
             {
-                # Shallow copy: never mutate the caller's block.
-                **screenshot_block,
-                # Breakpoint at the END of the stable prefix — now the image.
+                **screenshot_blocks[-1],
+                # Breakpoint at the END of the stable prefix — now the last image.
                 "cache_control": {"type": "ephemeral", "ttl": "1h"},
             },
         ]

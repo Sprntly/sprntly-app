@@ -161,15 +161,57 @@ def _run_sync(company_id: str, provider: str) -> None:
                            company_id, provider, exc_info=True)
 
 
+def _run_drive_sync(company_id: str) -> None:
+    """Blocking Google Drive sync body — runs inside the daemon thread.
+    Fully isolated: sync_google_drive stamps its own per-file errors; config
+    errors (not connected / no dataset yet) raised before stamping are caught
+    and stamped here best-effort."""
+    try:
+        from app.connectors.google_drive_sync import sync_google_drive
+
+        result = sync_google_drive(company_id=company_id)
+        logger.info(
+            "auto-sync done: %s/google_drive synced=%s kg_queued=%s",
+            company_id, len(result.synced), len(result.kg_queued),
+        )
+    except Exception as e:  # noqa: BLE001 — fully isolated
+        logger.warning("auto-sync: google_drive sync failed for %s: %s",
+                       company_id, e)
+        try:
+            db.update_connection_sync(
+                company_id, "google_drive", last_sync_at=utc_now(),
+                last_sync_error=str(e)[:500],
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("auto-sync: could not stamp error for %s/google_drive",
+                           company_id, exc_info=True)
+
+
 def kickoff_sync(company_id: str, provider: str) -> bool:
     """Fire-and-forget: start a background ingest for a just-connected provider.
 
     Returns True if a sync thread was started, False if the provider has no
     ingest puller (nothing to sync). Never blocks; never raises into the
     caller's connect flow."""
+    if provider == "google_drive":
+        # Drive has no token puller — its records come from the connection's
+        # picked-file config. Run the full corpus+KG sync in the background
+        # (downloads changed files, refreshes the corpus copy, and hands
+        # changed docs to kg_ingest.drive_extract as connector-origin signals).
+        try:
+            t = threading.Thread(
+                target=_run_drive_sync, args=(company_id,),
+                name="auto-sync-google-drive", daemon=True,
+            )
+            t.start()
+            return True
+        except Exception:  # noqa: BLE001 — never let a thread-spawn failure break connect
+            logger.exception("auto-sync: failed to start thread for %s/google_drive",
+                             company_id)
+            return False
     if provider not in PULLERS:
-        # Providers like figma / slack / google-drive have their own corpus
-        # sync paths, not a kg_ingest puller — kick a corpus seed instead (see
+        # Providers like figma / slack have their own corpus sync paths, not a
+        # kg_ingest puller — kick a corpus seed instead (see
         # kickoff_corpus_seed, wired into those providers' sync-to-corpus routes).
         return False
     try:

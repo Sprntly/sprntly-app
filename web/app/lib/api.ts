@@ -694,10 +694,19 @@ export const onboardingApi = {
    * binds the company dataset). No longer an onboarding step since v6; kept
    * for Settings-side callers.
    */
-  createWorkspace: (name: string) =>
+  createWorkspace: (
+    name: string,
+    fields: {
+      team_scope?: string | null
+      team_strategy?: string | null
+      team_roadmap?: string | null
+      sizing_methodology?: string | null
+      additional_context?: string | null
+    } = {},
+  ) =>
     api.post<{ id: string; name: string; slug: string; is_default: boolean }>(
       "/v1/onboarding/workspace",
-      { name },
+      { name, ...fields },
     ),
   /**
    * Step 9 "Here's what we learned": draft the business-context prose from
@@ -746,6 +755,24 @@ export type WorkspaceSummary = {
   product_id: string | null
   dataset: string | null
   role: "admin" | "member" | "viewer"
+  // Workspace-owned "Your workspace" fields (2026-07-22 — moved off the
+  // companies row). Present on the default workspace; optional on the summary.
+  team_scope?: string | null
+  team_strategy?: string | null
+  team_roadmap?: string | null
+  sizing_methodology?: string | null
+  additional_context?: string | null
+}
+
+/** Partial update for PATCH /v1/workspaces/{id} — any subset of the name +
+ *  the five workspace-owned fields. */
+export type WorkspacePatch = {
+  name?: string
+  team_scope?: string | null
+  team_strategy?: string | null
+  team_roadmap?: string | null
+  sizing_methodology?: string | null
+  additional_context?: string | null
 }
 
 export type WorkspaceMemberRecord = {
@@ -768,11 +795,14 @@ export const workspacesApi = {
     ),
   create: (name: string) =>
     api.post<WorkspaceSummary>("/v1/workspaces", { name }),
-  rename: (id: string, name: string) =>
+  /** PATCH any subset of the name + the five workspace-owned fields. */
+  update: (id: string, patch: WorkspacePatch) =>
     api.patch<WorkspaceSummary>(
       `/v1/workspaces/${encodeURIComponent(id)}`,
-      { name },
+      patch,
     ),
+  rename: (id: string, name: string) =>
+    workspacesApi.update(id, { name }),
   remove: (id: string) =>
     api.delete<void>(`/v1/workspaces/${encodeURIComponent(id)}`),
   members: (id: string) =>
@@ -1277,6 +1307,10 @@ export type GoogleDriveSyncResult = {
   synced: { filename: string; md_path: string; md_chars: number }[]
   skipped: { name: string; reason: string }[]
   errors: { name: string; error: string }[]
+  /** Files handed to the knowledge-graph extractor this run (doc names).
+   *  Extraction runs in the background — presence here means "queued". */
+  kg_queued?: string[]
+  kg_signals?: number
 }
 
 /** A file the user picked via the Google Picker (drive.file scope). */
@@ -1678,8 +1712,24 @@ export const prdApi = {
    *  the task text (find-or-create keyed on it) and grounds on the company's
    *  data. Same fire-and-forget contract as `generate`: returns a prd_id to
    *  poll via prdApi.get(id) until status === 'ready'. */
-  generateFromTask: (task: string, force = false) =>
-    api.post<PrdStartResponse>("/v1/prd/generate-from-task", { task, force }),
+  generateFromTask: (task: string, force = false, sourceDocs?: TurnAttachment[]) =>
+    api.post<PrdStartResponse>("/v1/prd/generate-from-task", {
+      task,
+      force,
+      // Documents attached earlier in the chat thread — the backend grounds the
+      // PRD on them (they used to be silently forgotten by this command).
+      ...(sourceDocs && sourceDocs.length ? { source_docs: sourceDocs } : {}),
+    }),
+  /** LLM fallback for the chat command decision (tier 2): does this message ask
+   *  us to CREATE a PRD? Called only when the message names a PRD but the regex
+   *  tier (isPrdCommand) didn't match — novel phrasings. `task` echoes the
+   *  user's topic + requirement details verbatim (null → caller falls back to
+   *  the raw message). Backend fails open to not-a-command. */
+  classifyCommand: (text: string) =>
+    api.post<{ is_prd_command: boolean; task: string | null; confidence: number }>(
+      "/v1/prd/classify-command",
+      { text },
+    ),
   /** The Evidence artifact behind a chat-task PRD (generated in parallel with
    *  the PRD from semantic KG retrieval over the task). Resolves null when the
    *  PRD isn't chat-sourced OR retrieval found no backing signals and the doc
@@ -3211,12 +3261,17 @@ export type ConversationRecord = {
   updated_at: string
 }
 
+/** Extracted text of a file attached to a chat turn — persisted with the turn
+ *  so reloaded threads (and the chat→PRD flow) still see earlier documents. */
+export type TurnAttachment = { name: string; content: string }
+
 export type ConversationTurn = {
   id: number
   conversation_id: number
   role: "user" | "assistant"
   content: string
   created_at: string
+  attachments?: TurnAttachment[] | null
 }
 
 export const conversationsApi = {
@@ -3235,9 +3290,20 @@ export const conversationsApi = {
   /** List all turns (messages) in a conversation, oldest first. */
   listTurns: (conversationId: number) =>
     api.get<{ turns: ConversationTurn[] }>(`/v1/conversations/${conversationId}/turns`),
-  /** Add a turn to a conversation. */
-  addTurn: (conversationId: number, role: "user" | "assistant", content: string) =>
-    api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, { role, content }),
+  /** Add a turn to a conversation. `attachments` carries the extracted text of
+   *  files attached to this turn (persisted so a reloaded thread and the
+   *  chat→PRD flow can still ground on documents attached earlier). */
+  addTurn: (
+    conversationId: number,
+    role: "user" | "assistant",
+    content: string,
+    attachments?: TurnAttachment[],
+  ) =>
+    api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, {
+      role,
+      content,
+      ...(attachments && attachments.length ? { attachments } : {}),
+    }),
 }
 
 // ---- transient-auth resilience (shared primitive) ---------------------------

@@ -96,16 +96,15 @@ def test_refresh_no_companies_is_a_clean_no_op():
 
 
 def test_refresh_skips_providers_without_kg_pullers():
-    """figma / slack / google_drive have their own corpus-sync routes
-    (or are per-user) — never fire kickoff_sync for them even if they're
-    the company's only active connection."""
+    """figma / slack have their own corpus-sync routes (or are per-user) —
+    never fire kickoff_sync for them even if they're the company's only
+    active connection."""
     from app.scheduler import _refresh_all_company_connectors
 
     companies = [{"id": "co-a", "slug": "acme"}]
     conns = [
-        {"provider": "figma",        "status": "active"},
-        {"provider": "slack",        "status": "active"},
-        {"provider": "google_drive", "status": "active"},
+        {"provider": "figma", "status": "active"},
+        {"provider": "slack", "status": "active"},
     ]
 
     with patch("app.scheduler.list_companies", return_value=companies), \
@@ -114,6 +113,28 @@ def test_refresh_skips_providers_without_kg_pullers():
         _refresh_all_company_connectors()
 
     mock_kickoff.assert_not_called()
+
+
+def test_refresh_includes_google_drive():
+    """google_drive has no token puller but IS wired for periodic refresh —
+    kickoff_sync special-cases it (picked Drive files that change get
+    re-pulled into corpus + KG)."""
+    from app.scheduler import _refresh_all_company_connectors
+
+    companies = [{"id": "co-a", "slug": "acme"}]
+    conns = [
+        {"provider": "google_drive", "status": "active"},
+        {"provider": "figma",        "status": "active"},  # still skipped
+    ]
+
+    with patch("app.scheduler.list_companies", return_value=companies), \
+         patch("app.scheduler.db.list_connections", return_value=conns), \
+         patch("app.scheduler.kickoff_sync") as mock_kickoff:
+        _refresh_all_company_connectors()
+
+    assert [(c.args[0], c.args[1]) for c in mock_kickoff.call_args_list] == [
+        ("co-a", "google_drive")
+    ]
 
 
 def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):

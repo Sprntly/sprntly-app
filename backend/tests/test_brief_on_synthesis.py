@@ -260,6 +260,66 @@ def test_seed_corpus_reextracts_when_content_changes(isolated_settings):
     assert out["docs"] == 1
 
 
+def test_mark_corpus_doc_ingested_makes_seed_skip(isolated_settings):
+    """A doc ledger-marked by the Drive sync (whose content reaches the KG
+    via its own connector-origin extraction) is skipped by the corpus seed —
+    no duplicate origin="upload" extraction of the same bytes."""
+    from app.graph.facade import GraphFacade
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    facade = GraphFacade()
+
+    class _Doc:
+        def __init__(self, name, text):
+            self.name, self.text = name, text
+
+    drive_doc = _Doc("roadmap", "synced from google drive")
+
+    class _Corpus:
+        docs = [drive_doc]
+
+    sb.mark_corpus_doc_ingested(facade, "co-1", drive_doc.name, drive_doc.text)
+
+    extracted: list[str] = []
+    with patch.object(sb, "load_corpus", return_value=_Corpus()), \
+         patch.object(sb, "extract_document",
+                      side_effect=lambda *a, **k: extracted.append(k["doc_name"]) or
+                      {"signals": 1, "themes": 0, "skipped": 0}):
+        out = sb._seed_from_corpus(facade, "co-1", "acme")
+
+    assert extracted == []
+    assert out["unchanged"] == 1
+    srcs = facade.list_sources("co-1", source_type="corpus_doc")
+    assert srcs and srcs[0].config.get("via") == "google_drive"
+
+
+def test_seed_from_connectors_pulls_google_drive_inline(isolated_settings):
+    """The first-time (empty-KG) connector seed runs Drive's sync with
+    kg_inline=True so signals land before synthesis reads the graph."""
+    import app.connectors.google_drive_sync as gds
+    from app import db as app_db
+
+    calls = {}
+
+    def fake_drive_sync(*, company_id, kg_inline=False):
+        calls["company_id"] = company_id
+        calls["kg_inline"] = kg_inline
+
+        class R:
+            kg_signals = 7
+
+        return R()
+
+    conns = [{"provider": "google_drive", "token_json_encrypted": "enc"}]
+    with patch.object(app_db, "list_connections", return_value=conns), \
+         patch.object(gds, "sync_google_drive", fake_drive_sync):
+        totals = sb._seed_from_connectors(object(), "co-1")
+
+    assert calls == {"company_id": "co-1", "kg_inline": True}
+    assert totals["providers"] == 1
+    assert totals["signals"] == 7
+
+
 def test_generate_brief_for_seeds_then_runs_synthesis(isolated_settings):
     _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
     with patch.object(sb, "seed_incremental", return_value={"corpus": {}}) as seed, \

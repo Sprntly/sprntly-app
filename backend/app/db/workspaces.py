@@ -33,7 +33,23 @@ from app.db.client import require_client, retry_on_disconnect
 
 logger = logging.getLogger(__name__)
 
-_WORKSPACE_COLUMNS = "id, company_id, product_id, name, slug, is_default, created_at"
+_WORKSPACE_COLUMNS = (
+    "id, company_id, product_id, name, slug, is_default, created_at, "
+    "team_scope, team_strategy, team_roadmap, sizing_methodology, "
+    "additional_context"
+)
+
+# The optional workspace-owned fields update_workspace can patch (2026-07-22:
+# moved off the companies row). A sentinel distinguishes "not provided" from an
+# explicit None (which clears the column).
+_UNSET = object()
+_WORKSPACE_PATCH_FIELDS = (
+    "team_scope",
+    "team_strategy",
+    "team_roadmap",
+    "sizing_methodology",
+    "additional_context",
+)
 
 # Cached "no workspace_members row" marker. A sentinel object (never a string
 # or dict — real rows are dicts) so it can't collide with row data. Caching
@@ -181,14 +197,44 @@ def create_workspace(
     }
 
 
-def update_workspace(workspace_id: str, *, name: str) -> dict | None:
-    """Rename a workspace (cosmetic — slug and dataset binding unchanged, so
-    a rename never churns corpus paths or dataset-keyed rows)."""
-    require_client().table("workspaces").update({"name": name.strip()}).eq(
+def update_workspace(
+    workspace_id: str,
+    *,
+    name: str | None = None,
+    team_scope: object = _UNSET,
+    team_strategy: object = _UNSET,
+    team_roadmap: object = _UNSET,
+    sizing_methodology: object = _UNSET,
+    additional_context: object = _UNSET,
+) -> dict | None:
+    """Partial-update a workspace. `name` is the cosmetic rename (slug and
+    dataset binding unchanged, so it never churns corpus paths or dataset-keyed
+    rows); the five workspace-owned fields (2026-07-22, moved off the companies
+    row) are each optional — pass a value to set it, None to clear it, or omit
+    to leave it untouched. Only the provided keys are written."""
+    patch: dict = {}
+    if name is not None:
+        # Respect the DB workspaces_name_nonempty check — a blank rename is a
+        # no-op on the name (callers upstream validate/require it).
+        cleaned = name.strip()
+        if cleaned:
+            patch["name"] = cleaned
+    for field, value in (
+        ("team_scope", team_scope),
+        ("team_strategy", team_strategy),
+        ("team_roadmap", team_roadmap),
+        ("sizing_methodology", sizing_methodology),
+        ("additional_context", additional_context),
+    ):
+        if value is not _UNSET:
+            patch[field] = value
+    if not patch:
+        return get_workspace(workspace_id)
+    require_client().table("workspaces").update(patch).eq(
         "id", workspace_id
     ).execute()
-    # Drop the cached pre-rename row so the re-read below (and the route's
-    # response) reflects the new name; the route's coarse invalidation runs
+    # Drop the cached pre-update row so the re-read below (and the route's
+    # response) reflects the new values; the route's coarse invalidation runs
     # only after this returns.
     workspace_cache.invalidate(workspace_id)
     return get_workspace(workspace_id)

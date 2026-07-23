@@ -123,15 +123,20 @@ def start_prototype(
     figma_file_key: str | None = None,
     website_url: str | None = None,
     github_installation_id: int | None = None,
-    screenshot_key: str | None = None,
     created_by_user_id: str | None = None,
 ) -> int:
     """Insert a generating row, return its id. State transition: prototype_created.
 
-    Scenario inputs (figma_file_key, website_url, github_installation_id,
-    screenshot_key) are stored as snapshots of what was available at generate
-    time. Scenario LABELS (A/B/C/0) are computed at read time via
-    infer_scenario(...); never persisted.
+    Scenario inputs (figma_file_key, website_url, github_installation_id) are
+    stored as snapshots of what was available at generate time. Scenario
+    LABELS (A/B/C/0) are computed at read time via infer_scenario(...); never
+    persisted.
+
+    Does NOT accept a screenshot key: the legacy `prototypes.screenshot_key`
+    column stays untouched by any new row (multi-screenshot design source
+    ticket) — the caller persists N staged upload keys via
+    `db.prototype_screenshots.insert_screenshots` right after this call
+    returns, when the request carried any.
 
     Keyword-only args (the `*`) prevent positional confusion between `prd_id`,
     `workspace_id`, and `template_version` — cheap discipline given that a
@@ -155,12 +160,6 @@ def start_prototype(
         # rotating this token, giving one permanent /p/<slug>/<token> URL.
         "share_token": str(uuid.uuid4()),
     }
-    # Write screenshot_key only when supplied — the optional-column convention
-    # (mirrors db/prototype_comments.insert_comment): a keyless insert's payload
-    # carries exactly the prior column set, so environments whose schema predates
-    # the column keep working and the null stays an honest "no screenshot" signal.
-    if screenshot_key is not None:
-        payload["screenshot_key"] = screenshot_key
     # created_by_user_id (the generating user, for the prototype-ready
     # notification) follows the same optional-column convention: written only
     # when the caller supplied an identity, so schemas that predate the column

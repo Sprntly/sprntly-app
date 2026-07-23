@@ -40,6 +40,64 @@ def test_kickoff_starts_thread_for_ingestable_provider(monkeypatch):
     assert started["daemon"] is True
 
 
+def test_kickoff_google_drive_starts_drive_thread(monkeypatch):
+    """google_drive has no token puller but kickoff_sync special-cases it —
+    the thread targets the connection-config drive sync, not _run_sync."""
+    started = {}
+
+    class FakeThread:
+        def __init__(self, target=None, args=(), name=None, daemon=None):
+            started["target"] = target
+            started["args"] = args
+            started["daemon"] = daemon
+
+        def start(self):
+            started["started"] = True
+
+    monkeypatch.setattr(auto_sync.threading, "Thread", FakeThread)
+    assert auto_sync.kickoff_sync("co-9", "google_drive") is True
+    assert started["started"] is True
+    assert started["target"] is auto_sync._run_drive_sync
+    assert started["args"] == ("co-9",)
+    assert started["daemon"] is True
+
+
+def test_run_drive_sync_calls_full_sync(monkeypatch):
+    calls = {}
+
+    def fake_sync(*, company_id):
+        calls["company_id"] = company_id
+
+        class R:
+            synced = ["a"]
+            kg_queued = ["a"]
+
+        return R()
+
+    import app.connectors.google_drive_sync as gds
+
+    monkeypatch.setattr(gds, "sync_google_drive", fake_sync)
+    auto_sync._run_drive_sync("co-9")
+    assert calls["company_id"] == "co-9"
+
+
+def test_run_drive_sync_stamps_error_on_failure(monkeypatch):
+    import app.connectors.google_drive_sync as gds
+
+    monkeypatch.setattr(
+        gds, "sync_google_drive",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("drive down")),
+    )
+    stamped = {}
+    monkeypatch.setattr(
+        auto_sync.db, "update_connection_sync",
+        lambda cid, prov, **kw: stamped.update({"provider": prov, **kw}),
+    )
+    auto_sync._run_drive_sync("co-9")  # must not raise
+    assert stamped["provider"] == "google_drive"
+    assert "drive down" in stamped["last_sync_error"]
+
+
 def test_run_sync_stamps_success(monkeypatch):
     monkeypatch.setattr(auto_sync.db, "get_connection",
                         lambda cid, prov: {"token_json_encrypted": "enc"})

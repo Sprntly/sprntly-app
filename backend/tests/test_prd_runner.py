@@ -892,3 +892,57 @@ def test_import_mode_feeds_doc_as_source_and_skips_grounding(
     row = db_mod.get_prd(prd_id)
     assert row["status"] == "ready"
     assert row["title"] == "Imported"
+
+
+# ── Chat-attached documents: extra_source_md layers on top of grounding ──────
+
+def test_chat_docs_layer_on_top_of_grounding(isolated_settings, monkeypatch):
+    """`extra_source_md` (documents the user attached in chat) rides the
+    evidence block under its own framing WITHOUT displacing normal grounding —
+    unlike import_source_md, which replaces grounding entirely."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id, title="Chat task")
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+
+    doc = "--- requirements.pdf ---\nMUST prefill cart from deal. Doc-marker-ABC."
+    insight = {"title": "Chat task", "summary": "from chat", "query": "cart prefill"}
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            prd_runner.generate_prd(
+                prd_id, brief_id, 0,
+                insight_override=insight, extra_source_md=doc,
+            )
+        )
+    finally:
+        loop.close()
+
+    assert len(captured) == 1
+    user_input = captured[0]["input"]
+    # The attached doc + its source-material framing are in the prompt…
+    assert "Doc-marker-ABC" in user_input
+    assert "DOCUMENTS ATTACHED BY THE USER" in user_input
+    # …and normal grounding is STILL present (not the import path).
+    assert "corpus body" in user_input
+    assert "FAITHFUL RE-LAYOUT" not in user_input
+
+    assert db_mod.get_prd(prd_id)["status"] == "ready"
+
+
+def test_no_chat_docs_leaves_prompt_unchanged(isolated_settings, monkeypatch):
+    """extra_source_md=None (every pre-existing caller) must not inject the
+    user-docs framing."""
+    _seed_corpus(isolated_settings["data_dir"])
+    db_mod = isolated_settings["db"]
+    brief_id = _seed_brief(db_mod)
+    prd_id = _start_prd(db_mod, brief_id, title="t")
+
+    call, captured = _part_a_mock()
+    monkeypatch.setattr(prd_runner, "llm_call", call)
+    prd_runner._run_sync(prd_id, brief_id, 0)
+
+    assert "DOCUMENTS ATTACHED BY THE USER" not in captured[0]["input"]

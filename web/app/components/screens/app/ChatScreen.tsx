@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../../context/NavigationContext"
@@ -11,7 +11,7 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, isTicketsCommand, prdCommandTask } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
@@ -77,6 +77,15 @@ type ChatTab = {
   evidence: PrdContent | null
   prdGenerating: boolean
   evidenceGenerating: boolean
+  /** This PRD tab was opened by an IN-CHAT COMMAND (import a doc + "generate prd",
+   *  "generate a PRD for X", "create tickets from this doc") — its first thread
+   *  turn IS the user's command. When true, the insight/PRD card + clarifying
+   *  questions render INLINE as the reply BELOW that command turn (chronological
+   *  order), not pinned above the whole thread. Falsy for header opens (brief
+   *  insight / ideation / backlog-load), where the insight card IS the tab's
+   *  opening message and stays at the top. PERSISTED (in the slim tab payload) so
+   *  the ordering survives reload — must NOT be stripped like `prd`/`prdGenerating`. */
+  prdInFlow?: boolean
   /** True while a resumed conversation's turns are being fetched in the
    *  background (row click in All chats navigates instantly; the tab shows a
    *  loading state until the history lands). Transient — never persisted. */
@@ -114,15 +123,56 @@ function conversationToPrdTask(thread: ThreadTurn[]): string {
   return joined.length > CHAT_PRD_TASK_MAX ? `${joined.slice(0, CHAT_PRD_TASK_MAX)}…` : joined
 }
 
+// Documents attached EARLIER in this tab's conversation — extracted text lives
+// on each turn (stamped after extraction on live sends, rehydrated from
+// conversation_turns.attachments on reloaded threads). A "generate a PRD"
+// command grounds on these: the reported bug was a document attached two
+// messages before the command being silently forgotten. Caps mirror the
+// backend's TaskSourceDoc limits; when over the doc cap, the MOST RECENT
+// attachments win (they're most likely what the user means).
+const PRD_DOC_MAX_CHARS = 60000
+const PRD_DOCS_MAX = 8
+export function conversationPrdDocs(
+  thread: ThreadTurn[],
+): { name: string; content: string }[] {
+  const docs: { name: string; content: string }[] = []
+  for (const t of thread) {
+    for (const a of t.attachments ?? []) {
+      if (a.content?.trim()) docs.push({ name: a.name, content: a.content.slice(0, PRD_DOC_MAX_CHARS) })
+    }
+  }
+  return docs.slice(-PRD_DOCS_MAX)
+}
+
+// ── ChatScreen-local PRD tab sources ────────────────────────────────────────
+// The in-chat command flows ("convert this doc to a PRD", "generate a PRD for
+// X") must render the tab's seed turn + generating skeleton on the CURRENT
+// commit and only THEN hit the network — otherwise the composer clears, the
+// message "leaves", and nothing shows for the multi-second import/generate,
+// which reads as a frozen app. So instead of the caller awaiting
+// importDoc/generateFromTask and passing a ready `resume` prd_id, these two
+// kinds hand the *unstarted* work to openPrdInTab, which renders first and kicks
+// the backend call INSIDE its async block (network AFTER the optimistic render).
+type LocalPrdSource =
+  // "convert this document to a PRD" — POST /v1/prd/import happens in-panel.
+  | { kind: "importDoc"; file: File; company: string; openTickets?: boolean }
+  // "generate a PRD for <task>" — POST /v1/prd/generate happens in-panel.
+  // `sourceDocs` = documents attached earlier in the thread (extracted text);
+  // the backend grounds the PRD on them alongside the task/KG evidence.
+  | { kind: "generateTask"; task: string; sourceDocs?: { name: string; content: string }[] }
+type LocalPrdTabRequest = Omit<PrdTabRequest, "source"> & {
+  source: PrdTabRequest["source"] | LocalPrdSource
+}
+
 // The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
 // request). Shown as the reply to the user's seeded command turn, so the chat
 // explains what the spinning panel on the right is doing and how to get back to
 // it (the PRD card above the thread hosts the View PRD button).
-function commandAckReply(req: PrdTabRequest): AskResponse {
+function commandAckReply(req: LocalPrdTabRequest): AskResponse {
   const source = req.source
-  const importing = source.kind === "resume" && source.origin !== "task"
-  const fromTask = source.kind === "resume" && source.origin === "task"
-  const withTickets = source.kind === "resume" && !!source.openTickets
+  const importing = (source.kind === "resume" && source.origin !== "task") || source.kind === "importDoc"
+  const fromTask = (source.kind === "resume" && source.origin === "task") || source.kind === "generateTask"
+  const withTickets = (source.kind === "resume" || source.kind === "importDoc") && !!source.openTickets
   // An Ideation idea is NOT this week's top insight — it's one of the items the
   // brief did not prioritize — so it needs its own wording.
   const fromIdeation = source.kind === "generateIdeation"
@@ -451,6 +501,8 @@ export function ChatScreen() {
         evidence: null,
         prdGenerating: false,
         evidenceGenerating: false,
+        // Persisted: preserves the inline-vs-header card ordering across reload.
+        prdInFlow: t.prdInFlow ?? false,
       }))
     } catch { return [] }
   })
@@ -504,6 +556,7 @@ export function ChatScreen() {
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
           insightBody: t.insightBody ?? null, prdId: t.prdId ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+          prdInFlow: t.prdInFlow ?? false,
         })))
       } else {
         setTabs([])
@@ -808,9 +861,10 @@ export function ChatScreen() {
   // The PRD/Evidence/Tickets all render in that panel — the tab itself is a
   // normal chat the user can keep talking in. Returns the target tab's id so
   // the consumer can persist a seeded command turn against it.
-  const openPrdInTab = useCallback((req: PrdTabRequest): string => {
+  const openPrdInTab = useCallback((req: LocalPrdTabRequest): string => {
     const { title, source } = req
-    const meta = source.kind === "generateIdeation" ? null : source.meta
+    const meta = source.kind === "generateIdeation" || source.kind === "importDoc" || source.kind === "generateTask"
+      ? null : source.meta
     const existing = tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",
@@ -818,8 +872,27 @@ export function ChatScreen() {
     // acknowledgment, so the chat shows WHY a generation is running instead of
     // sitting empty next to the spinning panel.
     const seedTurn: ThreadTurn | null = req.seedQuery
-      ? { id: `seed-${Date.now()}`, query: req.seedQuery, reply: commandAckReply(req) }
+      ? {
+          id: `seed-${Date.now()}`,
+          query: req.seedQuery,
+          reply: commandAckReply(req),
+          // "convert this document into a PRD": the attached file IS the subject
+          // of the command, so show it as a chip on the user's turn (matching a
+          // plain attachment send) rather than only inside the panel.
+          ...(source.kind === "importDoc" ? { attachments: [{ name: source.file.name }] } : {}),
+        }
       : null
+    // Was this tab opened by an IN-CHAT COMMAND (its first turn is the user's
+    // command) rather than as a header from a brief insight / ideation idea /
+    // backlog load? Only the fix-#1 command kinds — doc import, "generate a PRD
+    // for X" (generateTask, or BriefChat's resume+seedQuery command) — flow the
+    // insight card + questions INLINE below the command turn. generateIdeation
+    // carries a seedQuery too but is a HEADER open (its framing card stays on
+    // top), so it's deliberately excluded here. See the render block below.
+    const prdInFlow =
+      source.kind === "importDoc" ||
+      source.kind === "generateTask" ||
+      (source.kind === "resume" && !!req.seedQuery)
     if (existing) {
       setActiveTabId(existing.id)
       // Backfill the insight body onto an already-open tab that lacks one (e.g. a
@@ -831,6 +904,9 @@ export function ChatScreen() {
           ...t,
           insightBody: t.insightBody ?? req.insightBody ?? null,
           thread: seedTurn ? [...t.thread, seedTurn] : t.thread,
+          // Never downgrade a header tab to in-flow, but a command re-issued on a
+          // command tab keeps it in-flow.
+          prdInFlow: t.prdInFlow || prdInFlow,
         } : t))
       }
     } else {
@@ -838,6 +914,7 @@ export function ChatScreen() {
         id: tabId, title, thread: seedTurn ? [seedTurn] : [], dbConvId: null, briefMeta: meta,
         insightBody: req.insightBody ?? null, prdId: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+        prdInFlow,
       }])
       setActiveTabId(tabId)
     }
@@ -852,6 +929,9 @@ export function ChatScreen() {
       : source.kind === "resume" ? source.prdId
       : null
     if (knownPrdId != null) void hydratePrdThread(tabId, knownPrdId)
+    // "convert this PRD into tickets" — the resume/importDoc paths land the panel
+    // on the Tickets tab (and kick user-stories generation) once the PRD is ready.
+    const wantsTickets = (source.kind === "resume" || source.kind === "importDoc") && !!source.openTickets
 
     // Reuse a PRD already cached on this tab (unless the caller handed us a fresh
     // one) — don't regenerate/re-fetch an already-open PRD.
@@ -886,6 +966,34 @@ export function ChatScreen() {
           source.kind === "generate" ? await runPrdGeneration(source.meta, onPartial)
           : source.kind === "generateIdeation" ? await runPrdGenerationFromIdeation(source.ideationItemId, onPartial)
           : source.kind === "resume" ? await resumePrdGeneration(source.prdId, source.meta ?? undefined, onPartial)
+          // importDoc | generateTask: the seed turn + generating skeleton are
+          // ALREADY on screen (rendered synchronously above). Only NOW do we hit
+          // the network — this ordering is the entire reason these command flows
+          // route through openPrdInTab instead of the caller awaiting
+          // importDoc/generateFromTask first (which cleared the composer and left
+          // the chat empty for the multi-second call, reading as a frozen app).
+          // The POST returns a generating prd_id we poll to ready via the SAME
+          // resume machinery used everywhere else.
+          : source.kind === "importDoc" || source.kind === "generateTask"
+          ? await (async () => {
+              const { prdApi } = await import("../../../lib/api")
+              const start = source.kind === "importDoc"
+                ? await prdApi.importDoc(source.file, source.company)
+                : await prdApi.generateFromTask(source.task, false, source.sourceDocs)
+              // Stamp the now-known prd_id immediately (as the resume path does
+              // upfront) so a reload past this point can find + resume the run,
+              // and adopt the backend's cleaner title over the placeholder.
+              setTabs((prev) => prev.map((t) => t.id === tabId
+                ? {
+                    ...t,
+                    prdId: start.prd_id,
+                    title: start.title
+                      ? (source.kind === "generateTask" ? `PRD · ${start.title}` : start.title)
+                      : t.title,
+                  }
+                : t))
+              return resumePrdGeneration(start.prd_id, undefined, onPartial)
+            })()
           : await loadPrdById(source.prdId)
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false } : t))
@@ -895,12 +1003,12 @@ export function ChatScreen() {
           // (fire-and-forget; the backend dedups in-flight jobs) so work starts
           // before the Tickets tab even mounts and does its cache-read→generate
           // round-trip. The tab's own poll picks the job up.
-          if (source.kind === "resume" && source.openTickets) {
+          if (wantsTickets) {
             void storiesApi.generate(result.prd.prd_id).catch(() => {})
           }
           // …then switch the panel to the Tickets tab. Only while this tab is
           // still active — never yank the panel out from under another tab.
-          if (source.kind === "resume" && source.openTickets && activeTabIdRef.current === tabId) {
+          if (wantsTickets && activeTabIdRef.current === tabId) {
             openContentPanel("tickets")
           }
           // The prd_id was UNKNOWN upfront (generate | generateIdeation — including
@@ -1316,7 +1424,7 @@ export function ChatScreen() {
         fallbackTurns?: { role: string; content: string }[]
       }
       const buildRestored = (
-        turns: { role: string; content: string }[],
+        turns: { role: string; content: string; attachments?: { name: string; content: string }[] | null }[],
         keyPrefix: string,
       ): ThreadTurn[] => {
         const restored: ThreadTurn[] = []
@@ -1325,7 +1433,15 @@ export function ChatScreen() {
           if (t.role === "user") {
             const next = turns[i + 1]
             const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
-            restored.push({ id: `${keyPrefix}-${i}`, query: t.content, reply })
+            restored.push({
+              id: `${keyPrefix}-${i}`,
+              query: t.content,
+              reply,
+              // Rehydrate persisted attachment texts so the card viewer AND a
+              // later "generate a PRD" (conversationPrdDocs) see them after a
+              // reload — the second half of the forgotten-document bug.
+              ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+            })
             if (reply) i++
           }
         }
@@ -1412,7 +1528,12 @@ export function ChatScreen() {
   }, [currentScreen])
 
   const pushPendingConversation = useCallback(
-    (turnId: string, query: string, targetTabId: string) => {
+    (
+      turnId: string,
+      query: string,
+      targetTabId: string,
+      turnAttachments?: { name: string; content: string }[],
+    ) => {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toISOString()
@@ -1461,7 +1582,7 @@ export function ChatScreen() {
       }
       // Persist to Supabase against THIS tab's conversation (create-once per tab).
       // Fire-and-forget — failures are swallowed inside the helper.
-      void persistence.pushUserTurn(targetTabId, { turnId, title, query })
+      void persistence.pushUserTurn(targetTabId, { turnId, title, query, attachments: turnAttachments })
     },
     [setContent, persistence],
   )
@@ -1496,48 +1617,72 @@ export function ChatScreen() {
     [setContent, persistence],
   )
 
+  // Persist a command-seeded turn (the user's command + the agent's ack) to the
+  // conversations rail + Supabase, mirroring the pendingPrdTab effect below — the
+  // in-chat command flows open the PRD tab DIRECTLY through openPrdInTab (so the
+  // render is immediate, not a route-hop away), so they own this persistence that
+  // the pendingPrdTab effect does for cross-surface opens. No-op without a seed.
+  const seedCommandTurn = useCallback((req: LocalPrdTabRequest, tabId: string) => {
+    if (!req.seedQuery) return
+    const turnId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    pushPendingConversation(turnId, req.seedQuery, tabId)
+    finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
+  }, [pushPendingConversation, finalizeConversationTurn])
+
   // "Generate a PRD …" is a COMMAND, not a conversation: it opens the PRD as its
   // OWN chat tab (with the Evidence/PRD/Tickets panel), never as a chat message.
   // Without this the ask agent routes it to the prd-author skill and answers with
-  // a raw HTML document dumped into the chat bubble. Mirror BriefChat's prdFlow:
-  // resolve the current brief's top insight (index 0) and hand off via openPrdTab.
-  // openPrdTab's generate path is find-or-create (POST /v1/prd/generate reuses an
-  // existing DB PRD when one exists), so an already-generated PRD is served from
-  // the DB rather than regenerated.
-  const prdCommandFlow = useCallback(async (seedQuery?: string) => {
-    try {
-      // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
-      // the PRD from the user's own words: the backend synthesizes the insight
-      // (find-or-create keyed on the task text) and returns a generating prd_id
-      // that opens in the standard PRD tab via the resume path.
-      //
-      // A GENERIC "generate a PRD" (no topic) is seeded from THIS conversation —
-      // the user's turns in the active tab — so the PRD is about what was actually
-      // discussed. (Previously a bare command defaulted to the brief's top insight,
-      // which served an unrelated PRD.) With no conversation to seed from, we ask
-      // for a topic rather than opening something irrelevant.
-      const task = seedQuery ? prdCommandTask(seedQuery) : null
-      const activeTabNow = tabsRef.current.find((t) => t.id === activeTabIdRef.current)
-      const effectiveTask = task || conversationToPrdTask(activeTabNow?.thread ?? [])
-      if (effectiveTask) {
-        const { prdApi } = await import("../../../lib/api")
-        const start = await prdApi.generateFromTask(effectiveTask)
-        openPrdTab({
-          title: `PRD · ${start.title}`,
-          seedQuery,
-          source: { kind: "resume", prdId: start.prd_id, meta: null, origin: "task" },
-        })
-        return
-      }
+  // a raw HTML document dumped into the chat bubble.
+  //
+  // OPTIMISTIC-FIRST (the latency bug): the previous version awaited
+  // prdApi.generateFromTask BEFORE opening the tab, so the composer cleared and
+  // the chat sat empty for the multi-second generate call — reading as a frozen
+  // app. We now hand the UNSTARTED task to openPrdInTab, which seeds the chat
+  // turn + shows the panel spinner on THIS commit and runs generateFromTask
+  // inside its own async block (network AFTER the render). The find-or-create
+  // backend still serves an already-generated PRD from the DB rather than
+  // regenerating it.
+  const prdCommandFlow = useCallback((seedQuery?: string, taskOverride?: string | null) => {
+    // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
+    // the PRD from the user's own words. A GENERIC "generate a PRD" (no topic) is
+    // seeded from THIS conversation — the user's turns in the active tab — so the
+    // PRD is about what was actually discussed. (Previously a bare command
+    // defaulted to the brief's top insight, which served an unrelated PRD.) With
+    // no conversation to seed from, we ask for a topic rather than open junk.
+    // `taskOverride` carries the classifier-extracted task on the LLM-fallback
+    // path, where the regex extractor (prdCommandTask) by definition can't parse
+    // the phrasing.
+    const task = taskOverride ?? (seedQuery ? prdCommandTask(seedQuery) : null)
+    const activeTabNow = tabsRef.current.find((t) => t.id === activeTabIdRef.current)
+    const effectiveTask = task || conversationToPrdTask(activeTabNow?.thread ?? [])
+    // Documents attached earlier in this conversation ground the PRD — with or
+    // without an explicit topic. (The doc-on-the-SAME-message case routes to
+    // importPrdCommandFlow before this flow is ever called.)
+    const sourceDocs = conversationPrdDocs(activeTabNow?.thread ?? [])
+    if (!effectiveTask) {
       // No explicit topic and no conversation to ground it — ask for a topic.
+      // This branch stays synchronous (no network), so it never has the gap.
       showToast(
         "What should the PRD cover?",
         "Tell me the topic — e.g. \"generate a PRD for magic-link sign-in\" — or describe the problem first and I'll build one from our chat.",
       )
-    } catch (e) {
-      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+      return
     }
-  }, [openPrdTab, showToast])
+    // The title is a placeholder derived from the task until the backend's real
+    // title lands (openPrdInTab renames the tab once generateFromTask resolves).
+    const placeholder = effectiveTask.length > 37 ? `${effectiveTask.slice(0, 37)}…` : effectiveTask
+    const req: LocalPrdTabRequest = {
+      title: `PRD · ${placeholder}`,
+      seedQuery,
+      source: {
+        kind: "generateTask",
+        task: effectiveTask,
+        ...(sourceDocs.length ? { sourceDocs } : {}),
+      },
+    }
+    const tabId = openPrdInTab(req)
+    seedCommandTurn(req, tabId)
+  }, [openPrdInTab, seedCommandTurn, showToast])
 
   // A command phrasing over an ATTACHED DOCUMENT is the chat entry to the
   // PRD-import flow: upload the doc to POST /v1/prd/import — the same conversion
@@ -1545,19 +1690,23 @@ export function ChatScreen() {
   // into the chat-PRD format) — then open the imported PRD as its own chat tab.
   // With `openTickets` ("convert this PRD into tickets") the panel lands on the
   // Tickets tab once the PRD is ready, which generates user stories for it.
-  const importPrdCommandFlow = useCallback(async (file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
-    try {
-      const { prdApi } = await import("../../../lib/api")
-      const start = await prdApi.importDoc(file, activeCompany)
-      openPrdTab({
-        title: start.title || file.name,
-        seedQuery: opts.seedQuery,
-        source: { kind: "resume", prdId: start.prd_id, meta: null, openTickets: opts.openTickets },
-      })
-    } catch (e) {
-      showToast("PRD import failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+  //
+  // OPTIMISTIC-FIRST (the reported latency bug): the previous version awaited
+  // prdApi.importDoc BEFORE opening the tab, so a "generate PRD" over a big deck
+  // cleared the composer and showed NOTHING for several seconds. We now hand the
+  // UNSTARTED import to openPrdInTab, which seeds the chat turn + shows the panel
+  // spinner on THIS commit and runs importDoc inside its async block (network
+  // AFTER the render). The placeholder title is the file name until the backend's
+  // real title lands.
+  const importPrdCommandFlow = useCallback((file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
+    const req: LocalPrdTabRequest = {
+      title: file.name,
+      seedQuery: opts.seedQuery,
+      source: { kind: "importDoc", file, company: activeCompany, openTickets: opts.openTickets },
     }
-  }, [activeCompany, openPrdTab, showToast])
+    const tabId = openPrdInTab(req)
+    seedCommandTurn(req, tabId)
+  }, [activeCompany, openPrdInTab, seedCommandTurn])
 
   const submitAsk = useCallback(
     async (rawQuery: string) => {
@@ -1582,7 +1731,7 @@ export function ChatScreen() {
       if (isTicketsCommand(trimmed) && !(!docFile && deicticTicket && isPrdTab)) {
         if (docFile) {
           setAttachments([])
-          void importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+          importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
           return
         }
         // No document: mirror the reply-footer "Create tickets" action when this
@@ -1596,61 +1745,52 @@ export function ChatScreen() {
       } else if (isPrdCommand(trimmed) && !(!docFile && deicticPrd && isPrdTab)) {
         if (docFile) {
           setAttachments([])
-          void importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+          importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
           return
         }
         // No document — open the PRD tab from the brief's top insight instead of
         // sending it to the ask agent (which would answer with a raw prd-author
         // HTML dump).
-        void prdCommandFlow(trimmed)
+        prdCommandFlow(trimmed)
         return
+      } else if (mentionsPrd(trimmed) && !(isPrdTab && !docFile)) {
+        // LLM fallback tier: the message NAMES a PRD but the regex tier didn't
+        // recognize a command — "various words a person might use" ("let's get
+        // a PRD going for checkout") can't all be regexed. Ask haiku before
+        // letting it fall through to the ask agent. Skipped on a PRD tab with
+        // no attachment: there, a PRD mention is near-always about the OPEN
+        // artifact and belongs to the grounded ask path (same reasoning as the
+        // deictic guard above). Fail-open: classifier error/low confidence →
+        // the message proceeds to the ask path exactly as before this tier.
+        const verdict = await import("../../../lib/api")
+          .then(({ prdApi }) => prdApi.classifyCommand(trimmed))
+          .catch(() => null)
+        if (verdict?.is_prd_command && verdict.confidence >= 0.7) {
+          if (docFile) {
+            setAttachments([])
+            importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+            return
+          }
+          prdCommandFlow(trimmed, verdict.task)
+          return
+        }
       }
-      // Append attached file content as context. Text attachments inline
-      // directly; document attachments (.pdf/.pptx/.docx/.doc) are parsed to
-      // markdown server-side (POST /v1/ask/extract-file) so a deck attached to
-      // a plain question reaches the agent too — they used to be silently
-      // dropped here, which read as "no document was attached" replies.
+      // Attached file content is folded into the ask as context. Text
+      // attachments inline directly; document attachments (.pdf/.pptx/.docx/.doc)
+      // are parsed to markdown server-side (POST /v1/ask/extract-file) so a deck
+      // attached to a plain question reaches the agent too — they used to be
+      // silently dropped here, which read as "no document was attached" replies.
       // `displayQuery` is what the thread shows (the user's ask, plus a chip per
       // attachment — never the raw document dump). `sendQuery` is what the ask
       // agent receives: the same text with the parsed attachment content folded
-      // in, exactly as before. Keeping them separate means the backend is
-      // unaffected while the UI stays clean, the way Claude's chat renders it.
+      // in. Keeping them separate means the backend is unaffected while the UI
+      // stays clean, the way Claude's chat renders it.
       const displayQuery = trimmed
-      let turnAttachments: { name: string; content?: string }[] = []
-      let sendQuery = trimmed
-      if (attachments.length > 0) {
-        let ctx: string
-        try {
-          // Extract each attachment's text ONCE: plain-text attachments inline
-          // their content; documents (.pdf/.pptx/.docx/.doc) are parsed to
-          // markdown server-side. Order is preserved via the resolved array so
-          // the same text feeds BOTH the backend query and the clickable card's
-          // viewer — the document is never re-fetched to display it.
-          const extracted = await Promise.all(
-            attachments.map(async (a) => {
-              const text = a.file
-                ? (await askApi.extractFile(a.file)).markdown.slice(0, 50000)
-                : a.content
-              return { name: a.name, content: text }
-            }),
-          )
-          // Clamp the TOTAL context so question + attachments stay under the
-          // ask endpoint's 120k question cap even with several attachments.
-          ctx = extracted
-            .map((e) => `--- ${e.name} ---\n${e.content}`)
-            .join("\n\n")
-            .slice(0, 100000)
-          turnAttachments = extracted.map((e) => ({ name: e.name, content: e.content }))
-        } catch (e) {
-          // Keep the attachments so the user can retry or remove the bad one —
-          // a silent drop is exactly the failure mode this path exists to fix.
-          showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-          return
-        }
-        sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
-        setAttachments([]) // clear after successful extraction only
-      }
-      if (sendQuery.length < 1) return
+      // A doc-only send (empty ask + attachment) is allowed; a truly empty send
+      // is a no-op. (Previously this was checked post-extraction as
+      // `sendQuery.length < 1`; the equivalent pre-extraction check lets us abort
+      // before rendering anything.)
+      if (displayQuery.length < 1 && attachments.length === 0) return
       // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
       // before doing any work. (Authoritative per-tab guard happens once
       // targetTabId is resolved below — needed for the no-active-tab case where
@@ -1661,21 +1801,35 @@ export function ChatScreen() {
       // Capture the target tab ID up-front so async callbacks always write to
       // the right tab, even if the user switches tabs while the request is in-flight.
       let targetTabId: string
-      // The thread turn shows the ASK (displayQuery) + a chip per attachment,
-      // never the folded-in document content that rides sendQuery to the backend.
+      const hasAttachments = attachments.length > 0
+      // OPTIMISTIC RENDER FIRST (the reported latency bug): the thread turn — the
+      // user's message + a chip per attachment — must appear on THIS commit,
+      // BEFORE the extractFile network call, so the composer never clears into a
+      // void. The chips render from NAMES here; each attachment's extracted
+      // content is folded onto the turn AFTER extraction resolves (below). The
+      // folded-in document text still rides `sendQuery` to the backend, never the
+      // thread bubble.
       const newTurn: ThreadTurn = {
         id,
         query: displayQuery,
-        ...(turnAttachments.length ? { attachments: turnAttachments } : {}),
+        ...(hasAttachments ? { attachments: attachments.map((a) => ({ name: a.name })) } : {}),
       }
       // The tab title/handle falls back to the first attachment's name when the
       // ask itself is empty, so a doc-only send still reads sensibly in the tab.
-      const handle = displayQuery || turnAttachments[0]?.name || "New chat"
+      const handle = displayQuery || attachments[0]?.name || "New chat"
+      // Remember where we started so an extraction failure can roll the optimistic
+      // turn back cleanly: remove a freshly-spawned tab (restoring the prior
+      // surface) or drop just this turn + undo a New-chat rename on an existing one.
+      const prevActiveTabId = activeTabId
+      const spawnedNewTab = !activeTabId || activeTabId === BRIEF_TAB_ID
+      const prevTitle = spawnedNewTab
+        ? null
+        : tabsRef.current.find((t) => t.id === activeTabId)?.title ?? null
       // No active tab, OR the active "tab" is the synthetic, thread-less brief
       // tab → spawn a FRESH chat tab seeded with the query. A chat started from
       // the weekly brief must never thread inline into it (the brief tab carries
       // no `tabs` entry, so appending would silently no-op anyway).
-      if (!activeTabId || activeTabId === BRIEF_TAB_ID) {
+      if (spawnedNewTab) {
         const title = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
         targetTabId = openTab(title, [newTurn])
       } else {
@@ -1689,11 +1843,76 @@ export function ChatScreen() {
           return { ...t, title, thread: [...t.thread, newTurn] }
         }))
       }
-      pushPendingConversation(id, displayQuery, targetTabId)
-      setActiveConv(0)
       // A fresh ask on this tab clears any leftover Stop flag from a prior ask so
       // the new one is never treated as pre-stopped.
       stoppedTabsRef.current.delete(targetTabId)
+
+      // Now — AFTER the turn is on screen — parse the attachments. Mark the tab
+      // busy FIRST so the just-rendered turn shows the thinking skeleton (not the
+      // terminal "no response" fallback, which needs live busy state) while the
+      // extract runs. runTabAsk re-adds this (addToSet is idempotent) and owns the
+      // eventual clear on the ask's completion.
+      let sendQuery = displayQuery
+      // Extracted attachment texts, persisted with the turn (survives reload;
+      // read back by conversationPrdDocs for a later "generate a PRD").
+      let persistedAttachments: { name: string; content: string }[] | undefined
+      if (hasAttachments) {
+        setBusyTabs((prev) => addToSet(prev, targetTabId))
+        const pending = attachments
+        let ctx: string
+        try {
+          // Extract each attachment's text ONCE: plain-text attachments inline
+          // their content; documents (.pdf/.pptx/.docx/.doc) are parsed to
+          // markdown server-side. Order is preserved via the resolved array so
+          // the same text feeds BOTH the backend query and the clickable card's
+          // viewer — the document is never re-fetched to display it.
+          const extracted = await Promise.all(
+            pending.map(async (a) => {
+              const text = a.file
+                ? (await askApi.extractFile(a.file)).markdown.slice(0, 50000)
+                : a.content
+              return { name: a.name, content: text }
+            }),
+          )
+          // Clamp the TOTAL context so question + attachments stay under the
+          // ask endpoint's 120k question cap even with several attachments.
+          ctx = extracted
+            .map((e) => `--- ${e.name} ---\n${e.content}`)
+            .join("\n\n")
+            .slice(0, 100000)
+          // Backfill the extracted content onto the optimistic turn so its card
+          // opens a viewer — the SAME text folded into the query, never re-fetched.
+          const withContent = extracted.map((e) => ({ name: e.name, content: e.content }))
+          persistedAttachments = withContent
+          setTabs((prev) => prev.map((t) => t.id === targetTabId
+            ? { ...t, thread: t.thread.map((tn) => tn.id === id ? { ...tn, attachments: withContent } : tn) }
+            : t))
+          sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
+          setAttachments([]) // clear after successful extraction only
+        } catch (e) {
+          // Extraction failed: roll the optimistic turn back so no ghost
+          // "thinking" bubble is stranded, but KEEP the attachments so the user
+          // can retry or remove the bad one — a silent drop is exactly the failure
+          // mode this path exists to fix.
+          setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+          if (spawnedNewTab) {
+            // This tab existed only for the failed send — remove it and restore
+            // the prior surface rather than leaving an empty stray tab behind.
+            setTabs((prev) => prev.filter((t) => t.id !== targetTabId))
+            setActiveTabId(prevActiveTabId)
+          } else {
+            // Appended to an existing tab — drop just this turn and undo any
+            // New-chat rename so the tab looks exactly as it did before the send.
+            setTabs((prev) => prev.map((t) => t.id === targetTabId
+              ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
+              : t))
+          }
+          showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+          return
+        }
+      }
+      pushPendingConversation(id, displayQuery, targetTabId, persistedAttachments)
+      setActiveConv(0)
       // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
       // It returns false (running nothing) if this tab already has an ask in
       // flight; otherwise it runs askApi.ask CONCURRENTLY with other tabs' asks
@@ -2292,6 +2511,68 @@ export function ChatScreen() {
   const showChipRow = !hasThread
   const showEmptyStarters = false
 
+  // ── Insight/PRD card + clarifying questions, as reusable nodes ──────────────
+  // Same markup, two placements: a HEADER open (brief insight / ideation /
+  // backlog load) renders them at the TOP of the thread — the card IS the tab's
+  // opening agent message. An IN-CHAT COMMAND open (`prdInFlow`: import a doc,
+  // "generate a PRD for X") renders them INLINE, right after the command turn
+  // (thread[0]), so the conversation reads in chronological order instead of the
+  // PRD card + questions being pinned ABOVE the user's own command message.
+  // We anchor to the FIRST turn by INDEX, not a stored id: hydratePrdThread
+  // rebuilds the thread from Supabase with fresh turn ids on reload, but thread[0]
+  // is still the command turn, so index-anchoring survives rehydrate.
+  const insightCardNode = showInsightMsg ? (
+    <div className="bc-turn bc-turn--insight" data-testid="chat-insight-msg">
+      <div className="bc-agent-head">
+        <span className="bc-agent-mark">
+          <IconSparkle size={14} />
+        </span>
+        <span className="bc-agent-name">{AGENT_NAME}</span>
+        <span className="bc-agent-badge">
+          <IconSparkle size={10} />
+          Product Coworker
+        </span>
+      </div>
+      <div className="bc-agent-body">
+        <div className="bc-insight-msg">
+          <span className="bc-insight-msg-kind">PRD</span>
+          <span className="bc-insight-msg-text">{insightText}</span>
+        </div>
+        {/* Insight body — the finding's content under the heading.
+            Rendered as markdown so LLM-supplied **bold** shows. */}
+        {insightBody ? (
+          <div className="bc-insight-msg-body fc-body--md">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{insightBody}</ReactMarkdown>
+          </div>
+        ) : null}
+      </div>
+      <ChatArtifactActions
+        evidenceExists={chatEvidenceExists}
+        prdExists={chatPrdExists}
+        prdWaiting={chatPrdCtaWaiting}
+        prdGenerating={!!activeTab?.prdGenerating}
+        onViewEvidence={handleOpenEvidence}
+        onOpenPrd={handleOpenPrd}
+        prototypePrdId={chatProtoPrdId}
+        prototypeReady={chatPrototypeReady}
+        onViewPrototype={handleViewPrototype}
+      />
+    </div>
+  ) : null
+  // "User input needed" items from the PRD, surfaced as chat messages with answer
+  // buttons. Answering patches only the affected PRD sections and refreshes the
+  // panel live.
+  const prdQuestionsNode = activeTab?.prd ? (
+    <PrdInputQuestions
+      prdId={activeTab.prd.prd_id}
+      onPrdUpdated={handleInputPrdUpdated}
+    />
+  ) : null
+  // Command-opened PRD tab with at least one turn → render the card + questions
+  // INLINE after thread[0]; otherwise (header open, or an empty thread) keep them
+  // at the TOP as before.
+  const inlinePrdCards = !!activeTab?.prdInFlow && thread.length > 0
+
   return (
     <AppLayout
       mainClassName="main--home-chat"
@@ -2513,59 +2794,14 @@ export function ChatScreen() {
               ) : (
                 <div className="bc-scroll">
                   <div className="bc-thread" ref={setThreadContentEl}>
-                    {/* Insight message — the chat opens with its insight as the
-                        agent's first message (in the flow, not a pinned heading).
-                        Hosts the Generate/View PRD + Generate/View Prototype
-                        actions, which relabel to "View …" once the artifact is
-                        saved (PRD: loaded on the tab; prototype: ready in the DB
-                        via the brief-prototype map). */}
-                    {showInsightMsg ? (
-                      <div className="bc-turn bc-turn--insight" data-testid="chat-insight-msg">
-                        <div className="bc-agent-head">
-                          <span className="bc-agent-mark">
-                            <IconSparkle size={14} />
-                          </span>
-                          <span className="bc-agent-name">{AGENT_NAME}</span>
-                          <span className="bc-agent-badge">
-                            <IconSparkle size={10} />
-                            Product Coworker
-                          </span>
-                        </div>
-                        <div className="bc-agent-body">
-                          <div className="bc-insight-msg">
-                            <span className="bc-insight-msg-kind">PRD</span>
-                            <span className="bc-insight-msg-text">{insightText}</span>
-                          </div>
-                          {/* Insight body — the finding's content under the heading.
-                              Rendered as markdown so LLM-supplied **bold** shows. */}
-                          {insightBody ? (
-                            <div className="bc-insight-msg-body fc-body--md">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>{insightBody}</ReactMarkdown>
-                            </div>
-                          ) : null}
-                        </div>
-                        <ChatArtifactActions
-                          evidenceExists={chatEvidenceExists}
-                          prdExists={chatPrdExists}
-                          prdWaiting={chatPrdCtaWaiting}
-                          prdGenerating={!!activeTab?.prdGenerating}
-                          onViewEvidence={handleOpenEvidence}
-                          onOpenPrd={handleOpenPrd}
-                          prototypePrdId={chatProtoPrdId}
-                          prototypeReady={chatPrototypeReady}
-                          onViewPrototype={handleViewPrototype}
-                        />
-                      </div>
-                    ) : null}
-                    {/* "User input needed" items from the PRD, surfaced as chat
-                        messages with answer buttons. Answering patches only the
-                        affected PRD sections and refreshes the panel live. */}
-                    {activeTab?.prd ? (
-                      <PrdInputQuestions
-                        prdId={activeTab.prd.prd_id}
-                        onPrdUpdated={handleInputPrdUpdated}
-                      />
-                    ) : null}
+                    {/* Insight message — for a HEADER open, the chat opens with its
+                        insight as the agent's first message (a pinned heading at the
+                        top). For an IN-CHAT COMMAND open (`inlinePrdCards`) the card
+                        + questions instead render inside `thread.map`, right after
+                        the command turn — see that block below. Hosts the
+                        Generate/View PRD + Generate/View Prototype actions. */}
+                    {!inlinePrdCards ? insightCardNode : null}
+                    {!inlinePrdCards ? prdQuestionsNode : null}
                     {/* Resumed-conversation loading state: the tab opened
                         instantly on row click; its history is still in flight. */}
                     {activeTab?.hydrating && thread.length === 0 ? (
@@ -2595,7 +2831,8 @@ export function ChatScreen() {
                       const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
                       if (hasFreshReply) animatedTurnIds.current.add(turn.id)
                       return (
-                        <div key={turn.id} className="bc-turn">
+                        <Fragment key={turn.id}>
+                        <div className="bc-turn">
                           <div className="bc-user-head">
                             <span className="bc-avatar">{userInitials}</span>
                             <span className="bc-user-name">{name}</span>
@@ -2667,6 +2904,20 @@ export function ChatScreen() {
                             />
                           ) : null}
                         </div>
+                        {/* IN-CHAT COMMAND open: the insight/PRD card + clarifying
+                            questions render as the reply BELOW the command turn
+                            (thread[0]) — anchored by INDEX so it survives a reload
+                            that rehydrates the thread with fresh turn ids — instead
+                            of being pinned above the whole conversation (the
+                            out-of-order bug). Header opens render them at the top
+                            (see the block above) and skip this. */}
+                        {inlinePrdCards && idx === 0 ? (
+                          <>
+                            {insightCardNode}
+                            {prdQuestionsNode}
+                          </>
+                        ) : null}
+                        </Fragment>
                       )
                     })}
                   </div>

@@ -350,11 +350,38 @@ def _render_import_source(md: str) -> str:
     return _IMPORT_SOURCE_FRAMING.format(source=md.strip())
 
 
+# Chat-task PRDs: documents the user attached EARLIER in the conversation
+# ("here's the requirements doc" … then later "generate a PRD"). Unlike
+# `import_source_md` (an existing PRD, faithfully re-laid-out, KG grounding
+# skipped), these are SOURCE MATERIAL layered on top of the normal task/KG
+# grounding: requirements must trace to them, but the document is input, not
+# the finished artifact.
+_USER_DOCS_FRAMING = """\
+DOCUMENTS ATTACHED BY THE USER IN THIS CONVERSATION
+
+The block below is the text of document(s) the user attached in chat while \
+discussing this task. They are authoritative source material for this PRD:
+
+- Ground requirements, scope, constraints, and terminology in these documents \
+wherever they speak — the user attached them precisely so the PRD reflects them.
+- Do NOT fabricate content beyond the documents and the other evidence provided.
+- Where a document conflicts with other evidence, prefer the document — it is \
+the user's own, more specific context.
+
+{docs}"""
+
+
+def _render_user_docs(md: str) -> str:
+    """Wrap chat-attached document text in its source-material framing."""
+    return _USER_DOCS_FRAMING.format(docs=md.strip())
+
+
 def _build_context(
     brief_id: int,
     insight_index: int,
     insight_override: dict | None = None,
     import_source_md: str | None = None,
+    extra_source_md: str | None = None,
 ) -> dict:
     """Resolve everything a generation call needs, exactly once.
 
@@ -408,6 +435,13 @@ def _build_context(
         evidence, trail = _resolve_grounding(dataset, brief, insight_index, insight)
     else:
         evidence, trail = _resolve_grounding(dataset, brief, insight_index)
+    # `extra_source_md` — documents the user attached in chat (the chat-task
+    # path). Layered ON TOP of the normal grounding, not replacing it: the KG
+    # trail/decision log stay intact, and the docs ride in the evidence block
+    # under their own authoritative-source framing.
+    if extra_source_md and extra_source_md.strip():
+        docs_block = _render_user_docs(extra_source_md)
+        evidence = f"{evidence}\n\n{docs_block}" if (evidence or "").strip() else docs_block
     # Part A is generated as a self-contained HTML page in the prd-author visual
     # system. The template is the skill's own HTML skeleton (with {{placeholders}}
     # + an EMPTY `<style>` marker) — injected verbatim so the model fills the exact
@@ -573,6 +607,7 @@ async def _generate_human_prd(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
     insight_override: dict | None = None, author: str | None = None,
     import_source_md: str | None = None, on_delta=None,
+    extra_source_md: str | None = None,
 ) -> dict:
     """Build context, generate the human PRD (Part A only), persist + log.
 
@@ -589,7 +624,8 @@ async def _generate_human_prd(
     exact context Part A used, including the ideation `insight_override` case.
     """
     ctx = await asyncio.to_thread(
-        _build_context, brief_id, insight_index, insight_override, import_source_md
+        _build_context, brief_id, insight_index, insight_override, import_source_md,
+        extra_source_md,
     )
     result_a = await asyncio.to_thread(
         _call_part_a, ctx, author, background, on_delta=on_delta
@@ -675,6 +711,7 @@ async def generate_prd_and_warm(
     import_source_md: str | None = None,
     company_id: str | None = None, user_id: str | None = None,
     prd_title: str | None = None,
+    extra_source_md: str | None = None,
 ) -> None:
     """Generate the human PRD, extract its input questions, THEN pre-warm the
     Implementation Spec (Part B).
@@ -711,7 +748,7 @@ async def generate_prd_and_warm(
     try:
         ctx = await generate_prd(
             prd_id, brief_id, insight_index, background, insight_override, author,
-            import_source_md, on_delta=sink,
+            import_source_md, on_delta=sink, extra_source_md=extra_source_md,
         )
     finally:
         token_stream.close(channel, kind="done" if ctx is not None else "error")
@@ -740,6 +777,7 @@ async def generate_prd(
     prd_id: int, brief_id: int, insight_index: int, background: bool = False,
     insight_override: dict | None = None, author: str | None = None,
     import_source_md: str | None = None, on_delta=None,
+    extra_source_md: str | None = None,
 ) -> dict | None:
     """Run the human-PRD generation; update DB with result.
 
@@ -769,7 +807,7 @@ async def generate_prd(
     try:
         ctx = await _generate_human_prd(
             prd_id, brief_id, insight_index, background, insight_override, author,
-            import_source_md, on_delta=on_delta,
+            import_source_md, on_delta=on_delta, extra_source_md=extra_source_md,
         )
         logger.info("PRD generation succeeded prd_id=%s", prd_id)
         return ctx

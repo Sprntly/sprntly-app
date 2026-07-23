@@ -104,6 +104,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "prd_ticket_sync":   {"statuses"},
     "tracker_meta":      {"meta"},
     "prd_input_questions": {"options"},
+    "conversation_turns":  {"attachments"},
     "design_agent_map_cache": {"payload"},
     "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
 }

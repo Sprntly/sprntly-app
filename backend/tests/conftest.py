@@ -524,6 +524,13 @@ CREATE TABLE workspaces (
     name        TEXT NOT NULL,
     slug        TEXT NOT NULL,
     is_default  INTEGER NOT NULL DEFAULT 0,
+    -- Workspace-owned "Your workspace" fields (mirrors
+    -- 20260722120000_workspace_owned_fields.sql — moved off companies).
+    team_scope          TEXT,
+    team_strategy       TEXT,
+    team_roadmap        TEXT,
+    sizing_methodology  TEXT,
+    additional_context  TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (company_id, slug)
@@ -1107,6 +1114,9 @@ CREATE TABLE conversation_turns (
     conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
     role            TEXT NOT NULL DEFAULT 'user',
     content         TEXT NOT NULL DEFAULT '',
+    -- Extracted attachment texts [{name, content}] persisted with the turn
+    -- (20260723170000_conversation_turn_attachments.sql).
+    attachments     TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
