@@ -73,6 +73,14 @@ CREATE TABLE prototype_checkpoints (
     comment_state     TEXT NOT NULL DEFAULT '[]',
     created_at        TEXT NOT NULL DEFAULT (datetime('now'))
 );
+CREATE TABLE prototype_screenshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id  INTEGER NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    storage_key   TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 # Minimal valid byte signatures (the sniffer reads a 12-byte prefix; the tail is
@@ -113,13 +121,18 @@ def env(isolated_settings, monkeypatch):
 
     import app.db.prototypes as proto_mod
     importlib.reload(proto_mod)
+    import app.db.prototype_screenshots as screenshots_mod
+    importlib.reload(screenshots_mod)
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)
     import app.main as main_mod
     importlib.reload(main_mod)
 
     import app.db as db_mod
-    return SimpleNamespace(proto=proto_mod, routes=routes_mod, main=main_mod, db=db_mod)
+    return SimpleNamespace(
+        proto=proto_mod, screenshots=screenshots_mod, routes=routes_mod,
+        main=main_mod, db=db_mod,
+    )
 
 
 @pytest.fixture
@@ -326,13 +339,15 @@ def test_upload_route_reachable_alongside_catchall(env, client, fs_storage):
 
 
 def test_generate_403_on_foreign_screenshot_key(env, client, fs_storage, monkeypatch):
+    # Same AC3 ownership-check contract as before this ticket, plural wire
+    # shape: each value is wrapped as a 1-item screenshot_keys list.
     _stub_generate(monkeypatch, env.routes)
     prd_id = _seed_prd(env.db)
 
     # Foreign workspace prefix → 403 with the ownership error, no row inserted.
     resp = client.post(
         "/v1/design-agent/generate",
-        json={"prd_id": prd_id, "screenshot_key": "uploads/other-ws/abc.png"},
+        json={"prd_id": prd_id, "screenshot_keys": ["uploads/other-ws/abc.png"]},
     )
     assert resp.status_code == 403, resp.text
     assert resp.json()["detail"] == {"error": "screenshot_key_forbidden"}
@@ -340,11 +355,127 @@ def test_generate_403_on_foreign_screenshot_key(env, client, fs_storage, monkeyp
     # A non-upload key (path shape games) is refused the same way.
     resp = client.post(
         "/v1/design-agent/generate",
-        json={"prd_id": prd_id, "screenshot_key": "prototypes/1/1/index.html"},
+        json={"prd_id": prd_id, "screenshot_keys": ["prototypes/1/1/index.html"]},
     )
     assert resp.status_code == 403, resp.text
 
-    # A valid same-workspace key generates and persists on the row.
+    # A valid same-workspace key generates and persists into the join table.
+    key = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": prd_id, "screenshot_keys": [key]},
+    )
+    assert resp.status_code == 200, resp.text
+    pid = resp.json()["prototype_id"]
+    keys = env.screenshots.list_screenshot_keys(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert keys == [key]
+
+
+def test_generate_accepts_screenshot_keys_list(env, client, monkeypatch):
+    # AC1, AC4 — a valid 3-key list persists 3 prototype_screenshots rows with
+    # matching storage_key/position.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    keys = [f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png" for _ in range(3)]
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": prd_id, "screenshot_keys": keys},
+    )
+    assert resp.status_code == 200, resp.text
+    pid = resp.json()["prototype_id"]
+    persisted = env.screenshots.list_screenshot_keys(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert persisted == keys
+
+
+def test_generate_rejects_more_than_ten_screenshot_keys(env, client, monkeypatch):
+    # AC2 — an 11-key list gets 422 {"error": "too_many_screenshots", "max": 10},
+    # zero DB writes.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    keys = [f"uploads/{_TEST_COMPANY_ID}/{i}.png" for i in range(11)]
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": prd_id, "screenshot_keys": keys},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"] == {"error": "too_many_screenshots", "max": 10}
+    assert env.proto.find_existing_prototype(
+        prd_id=prd_id, workspace_id=_TEST_COMPANY_ID,
+        template_version=env.routes.DESIGN_AGENT_TEMPLATE_VERSION, variant="v1",
+    ) is None
+
+
+def test_generate_rejects_screenshot_key_outside_workspace_prefix(env, client, monkeypatch):
+    # AC3 (regression-pin, extended to plural) — a key not starting with
+    # uploads/{workspace_id}/ in a 3-key list gets 403 screenshot_key_forbidden,
+    # zero DB writes even for the other 2 valid keys.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    valid_a = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
+    valid_b = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": prd_id, "screenshot_keys": [valid_a, "uploads/other-ws/abc.png", valid_b]},
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == {"error": "screenshot_key_forbidden"}
+    assert env.proto.find_existing_prototype(
+        prd_id=prd_id, workspace_id=_TEST_COMPANY_ID,
+        template_version=env.routes.DESIGN_AGENT_TEMPLATE_VERSION, variant="v1",
+    ) is None
+
+
+def test_generate_rejects_traversal_segment_in_any_key(env, client, monkeypatch):
+    # AC3 — a `..`-containing key ANYWHERE in the list (not just first) gets
+    # the same 403.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    valid = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
+    hostile = f"uploads/{_TEST_COMPANY_ID}/../other-ws/evil.png"
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": prd_id, "screenshot_keys": [valid, hostile]},
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"] == {"error": "screenshot_key_forbidden"}
+
+
+def test_generate_no_screenshot_keys_writes_zero_rows(env, client, monkeypatch):
+    # AC6 — screenshot_keys omitted -> 0 prototype_screenshots rows,
+    # prototypes.screenshot_key still null.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    resp = client.post("/v1/design-agent/generate", json={"prd_id": prd_id})
+    assert resp.status_code == 200, resp.text
+    pid = resp.json()["prototype_id"]
+    assert env.screenshots.list_screenshot_keys(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == []
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["screenshot_key"] is None
+
+
+def test_generate_never_writes_legacy_screenshot_key_column(env, client, monkeypatch):
+    # AC5 — even a 1-key list leaves prototypes.screenshot_key null on the
+    # persisted row.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    key = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={"prd_id": prd_id, "screenshot_keys": [key]},
+    )
+    assert resp.status_code == 200, resp.text
+    pid = resp.json()["prototype_id"]
+    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert row["screenshot_key"] is None
+
+
+def test_generate_accepts_legacy_bare_screenshot_key_shape(env, client, monkeypatch):
+    # AC21 (BLOCKER-2 backward compat) — POST with ONLY the old bare
+    # {"screenshot_key": ...} body (no screenshot_keys at all) is accepted,
+    # coerced into a 1-item screenshot_keys list, and attaches identically to
+    # a request that sent screenshot_keys: [key] directly.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
     key = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
     resp = client.post(
         "/v1/design-agent/generate",
@@ -352,8 +483,53 @@ def test_generate_403_on_foreign_screenshot_key(env, client, fs_storage, monkeyp
     )
     assert resp.status_code == 200, resp.text
     pid = resp.json()["prototype_id"]
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
-    assert row["screenshot_key"] == key
+    assert env.screenshots.list_screenshot_keys(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == [key]
+
+
+def test_generate_legacy_field_ignored_when_plural_present(env, client, monkeypatch):
+    # AC22 (BLOCKER-2 precedence) — POST with both screenshot_key (old,
+    # foreign-workspace value that would 403 if consulted) AND screenshot_keys
+    # (new, valid 2-item list) succeeds and persists exactly the 2 keys from
+    # screenshot_keys — the foreign-workspace screenshot_key value never
+    # triggers a 403 and is never persisted.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    keys = [f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png" for _ in range(2)]
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={
+            "prd_id": prd_id,
+            "screenshot_key": "uploads/other-ws/evil.png",
+            "screenshot_keys": keys,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    pid = resp.json()["prototype_id"]
+    persisted = env.screenshots.list_screenshot_keys(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
+    assert persisted == keys
+
+
+def test_generate_explicit_empty_screenshot_keys_list_not_overridden_by_legacy_field(
+    env, client, monkeypatch
+):
+    # AC23 (BLOCKER-2 explicit-empty precedence) — POST with BOTH an explicit
+    # screenshot_keys: [] AND a non-empty bare screenshot_key persists ZERO
+    # prototype_screenshots rows — the explicit empty list is authoritative
+    # because the coercion only fires when screenshot_keys is absent from the
+    # request body entirely, not merely falsy.
+    _stub_generate(monkeypatch, env.routes)
+    prd_id = _seed_prd(env.db)
+    resp = client.post(
+        "/v1/design-agent/generate",
+        json={
+            "prd_id": prd_id,
+            "screenshot_keys": [],
+            "screenshot_key": f"uploads/{_TEST_COMPANY_ID}/x.png",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    pid = resp.json()["prototype_id"]
+    assert env.screenshots.list_screenshot_keys(prototype_id=pid, workspace_id=_TEST_COMPANY_ID) == []
 
 
 def test_generate_without_screenshot_key_unchanged(env, client, monkeypatch):
@@ -372,9 +548,14 @@ def test_generate_without_screenshot_key_unchanged(env, client, monkeypatch):
 
 
 def test_generate_403_on_traversal_screenshot_key(env, client, fs_storage, monkeypatch):
-    # A `..` segment can satisfy the literal workspace prefix yet resolve into
-    # another workspace's directory on the filesystem backend — refused at the
-    # ROUTE (same 403 shape as a foreign key), not just at read time.
+    # NO FUNCTIONAL CHANGE NEEDED (this test only POSTs the bare legacy shape
+    # and never reads back a persisted row; the BLOCKER-2 shim coerces it into
+    # a 1-item screenshot_keys list before the ownership-check loop runs, and
+    # the loop's traversal check rejects each hostile value with the SAME
+    # error shape). A `..` segment can satisfy the literal workspace prefix
+    # yet resolve into another workspace's directory on the filesystem backend
+    # — refused at the ROUTE (same 403 shape as a foreign key), not just at
+    # read time.
     _stub_generate(monkeypatch, env.routes)
     prd_id = _seed_prd(env.db)
     for hostile in (
@@ -402,7 +583,9 @@ async def test_generate_user_message_prepends_image_block(env, monkeypatch):
     key = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
     pid = env.proto.start_prototype(
         prd_id=prd_id, workspace_id=_TEST_COMPANY_ID, template_version=1,
-        screenshot_key=key,
+    )
+    env.screenshots.insert_screenshots(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, storage_keys=[key],
     )
 
     async def _fake_read(*, key, workspace_id):
@@ -413,7 +596,7 @@ async def test_generate_user_message_prepends_image_block(env, monkeypatch):
     await env.routes._run_generation_bg(
         prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prd_id=prd_id,
         target_platform="both", instructions="", figma_file_key=None,
-        design_source="screenshot", screenshot_key=key,
+        design_source="screenshot", screenshot_keys=[key],
     )
     content = calls[0]["user_message"]["content"]
     assert len(content) == 2
@@ -466,7 +649,9 @@ async def test_generate_proceeds_without_missing_screenshot(env, monkeypatch, ca
     key = f"uploads/{_TEST_COMPANY_ID}/gone.png"
     pid = env.proto.start_prototype(
         prd_id=prd_id, workspace_id=_TEST_COMPANY_ID, template_version=1,
-        screenshot_key=key,
+    )
+    env.screenshots.insert_screenshots(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, storage_keys=[key],
     )
 
     async def _boom(*, key, workspace_id):
@@ -478,7 +663,7 @@ async def test_generate_proceeds_without_missing_screenshot(env, monkeypatch, ca
         await env.routes._run_generation_bg(
             prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prd_id=prd_id,
             target_platform="both", instructions="", figma_file_key=None,
-            design_source="screenshot", screenshot_key=key,
+            design_source="screenshot", screenshot_keys=[key],
         )
     content = calls[0]["user_message"]["content"]
     assert [b["type"] for b in content] == ["text"]
@@ -491,6 +676,171 @@ async def test_generate_proceeds_without_missing_screenshot(env, monkeypatch, ca
     assert len(warnings) == 1
     assert "gone.png" in warnings[0].getMessage()          # key suffix only
     assert _TEST_COMPANY_ID not in warnings[0].getMessage()  # never the prefix
+
+
+# ─── _screenshot_reference_blocks: N-image LLM context builder ──────────────
+
+
+async def test_screenshot_reference_blocks_empty_list_returns_empty(env):
+    # AC7
+    assert await env.routes._screenshot_reference_blocks(
+        [], prototype_id=1, workspace_id=_TEST_COMPANY_ID
+    ) == []
+
+
+async def test_screenshot_reference_blocks_none_returns_empty(env):
+    # AC7
+    assert await env.routes._screenshot_reference_blocks(
+        None, prototype_id=1, workspace_id=_TEST_COMPANY_ID
+    ) == []
+
+
+async def test_screenshot_reference_blocks_single_key_no_label(env, monkeypatch):
+    # AC8 — exactly ONE {"type": "image", ...} block, NO preceding "Image 1:"
+    # label block — byte-identical in shape to the pre-ticket single-image
+    # behaviour.
+    async def _fake_read(*, key, workspace_id):
+        return b"one-shot-bytes", "image/png"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _fake_read)
+    blocks = await env.routes._screenshot_reference_blocks(
+        [f"uploads/{_TEST_COMPANY_ID}/a.png"], prototype_id=1, workspace_id=_TEST_COMPANY_ID
+    )
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "image"
+    assert blocks[0]["source"]["data"] == base64.b64encode(b"one-shot-bytes").decode("ascii")
+
+
+async def test_screenshot_reference_blocks_multi_key_labels_each_image(env, monkeypatch):
+    # AC9 — 3 keys -> 2N=6 blocks, alternating "Image 1:"/image/"Image 2:"/
+    # image/"Image 3:"/image, in submitted order.
+    async def _fake_read(*, key, workspace_id):
+        return key.encode(), "image/png"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _fake_read)
+    keys = [f"uploads/{_TEST_COMPANY_ID}/{n}.png" for n in ("a", "b", "c")]
+    blocks = await env.routes._screenshot_reference_blocks(
+        keys, prototype_id=1, workspace_id=_TEST_COMPANY_ID
+    )
+    assert len(blocks) == 6
+    assert [b["type"] for b in blocks] == ["text", "image", "text", "image", "text", "image"]
+    assert [b["text"] for b in blocks if b["type"] == "text"] == ["Image 1:", "Image 2:", "Image 3:"]
+    assert [b["source"]["data"] for b in blocks if b["type"] == "image"] == [
+        base64.b64encode(k.encode()).decode("ascii") for k in keys
+    ]
+
+
+async def test_screenshot_reference_blocks_skips_unreadable_key_fail_open(env, monkeypatch, caplog):
+    # AC10 (regression-style: proves the pre-ticket fail-open guarantee
+    # generalizes to N) — one of 3 keys raises inside read_screenshot, the
+    # other 2 still produce blocks, one WARNING logged with the failing key's
+    # suffix only.
+    keys = [
+        f"uploads/{_TEST_COMPANY_ID}/good1.png",
+        f"uploads/{_TEST_COMPANY_ID}/bad.png",
+        f"uploads/{_TEST_COMPANY_ID}/good2.png",
+    ]
+
+    async def _flaky_read(*, key, workspace_id):
+        if "bad.png" in key:
+            raise FileNotFoundError(key)
+        return b"ok-bytes", "image/png"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _flaky_read)
+    with caplog.at_level(logging.WARNING):
+        blocks = await env.routes._screenshot_reference_blocks(
+            keys, prototype_id=1, workspace_id=_TEST_COMPANY_ID
+        )
+    images = [b for b in blocks if b["type"] == "image"]
+    assert len(images) == 2
+    warnings = [r for r in caplog.records if "screenshot_context_unavailable" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "bad.png" in warnings[0].getMessage()
+    assert _TEST_COMPANY_ID not in warnings[0].getMessage()
+
+
+async def test_screenshot_reference_blocks_enforces_aggregate_budget(env, monkeypatch, caplog):
+    # AC11 — 4 keys of 40 bytes each, budget=100: key a (total 40) and key b
+    # (total 80) fit; key c's read pushes the running total to 120 > 100, so
+    # its bytes are excluded from the returned blocks and the loop breaks —
+    # key d (after the break) is skipped WITHOUT ever being read. The
+    # trip-causing key (c) IS read (its size has to be known to detect the
+    # trip) but does not produce a block; skipped_budget counts BOTH c and d
+    # (the "remaining keys after the break", per the documented contract).
+    monkeypatch.setattr(env.routes, "_MAX_TOTAL_SCREENSHOT_BYTES", 100)
+    keys = [f"uploads/{_TEST_COMPANY_ID}/{n}.png" for n in ("a", "b", "c", "d")]
+    read_calls: list[str] = []
+
+    async def _fake_read(*, key, workspace_id):
+        read_calls.append(key)
+        return b"x" * 40, "image/png"
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _fake_read)
+    with caplog.at_level(logging.WARNING):
+        blocks = await env.routes._screenshot_reference_blocks(
+            keys, prototype_id=1, workspace_id=_TEST_COMPANY_ID
+        )
+    images = [b for b in blocks if b["type"] == "image"]
+    assert len(images) == 2
+    # Key d (after the break) is never read at all.
+    assert read_calls == keys[:3]
+    warnings = [
+        r for r in caplog.records if "screenshot_context_budget_exceeded" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert "skipped_budget=2" in warnings[0].getMessage()
+    assert "attached=2" in warnings[0].getMessage()
+
+
+async def test_screenshot_reference_blocks_budget_and_unreadable_both_present(env, monkeypatch, caplog):
+    # Edge case — one unreadable key + a later budget trip in the same call
+    # produces correct, non-double-counted skipped_unreadable/skipped_budget
+    # values.
+    monkeypatch.setattr(env.routes, "_MAX_TOTAL_SCREENSHOT_BYTES", 100)
+    keys = [
+        f"uploads/{_TEST_COMPANY_ID}/bad.png",
+        f"uploads/{_TEST_COMPANY_ID}/big1.png",
+        f"uploads/{_TEST_COMPANY_ID}/big2.png",
+    ]
+
+    async def _fake_read(*, key, workspace_id):
+        if "bad.png" in key:
+            raise FileNotFoundError(key)
+        return b"x" * 60, "image/png"  # 2 * 60 = 120 > 100; the 2nd valid key trips it
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _fake_read)
+    with caplog.at_level(logging.WARNING):
+        blocks = await env.routes._screenshot_reference_blocks(
+            keys, prototype_id=1, workspace_id=_TEST_COMPANY_ID
+        )
+    images = [b for b in blocks if b["type"] == "image"]
+    assert len(images) == 1  # only big1.png fit under budget
+    budget_warnings = [
+        r for r in caplog.records if "screenshot_context_budget_exceeded" in r.getMessage()
+    ]
+    assert len(budget_warnings) == 1
+    assert "skipped_budget=1" in budget_warnings[0].getMessage()
+    assert "attached=1" in budget_warnings[0].getMessage()
+
+
+async def test_screenshot_reference_blocks_never_logs_full_storage_key(env, monkeypatch, caplog):
+    # AC20 — assert the captured WARNING text contains only the trailing
+    # suffix, never the full uploads/{workspace_id}/... key.
+    key = f"uploads/{_TEST_COMPANY_ID}/secretname.png"
+
+    async def _boom(*, key, workspace_id):
+        raise FileNotFoundError(key)
+
+    monkeypatch.setattr(env.routes, "read_screenshot", _boom)
+    with caplog.at_level(logging.WARNING):
+        await env.routes._screenshot_reference_blocks(
+            [key], prototype_id=1, workspace_id=_TEST_COMPANY_ID
+        )
+    warnings = [r for r in caplog.records if "screenshot_context_unavailable" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "secretname.png" in warnings[0].getMessage()
+    assert key not in warnings[0].getMessage()
+    assert _TEST_COMPANY_ID not in warnings[0].getMessage()
 
 
 # ─── source selection: the screenshot arm ────────────────────────────────────
@@ -524,7 +874,9 @@ async def test_generate_screenshot_source_skips_website_extractor(env, monkeypat
     key = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
     pid = env.proto.start_prototype(
         prd_id=prd_id, workspace_id=_TEST_COMPANY_ID, template_version=1,
-        screenshot_key=key,
+    )
+    env.screenshots.insert_screenshots(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, storage_keys=[key],
     )
 
     async def _fake_read(*, key, workspace_id):
@@ -544,7 +896,7 @@ async def test_generate_screenshot_source_skips_website_extractor(env, monkeypat
         prototype_id=pid, workspace_id=_TEST_COMPANY_ID, prd_id=prd_id,
         target_platform="both", instructions="", figma_file_key=None,
         website_url="https://brand.example",
-        design_source="screenshot", screenshot_key=key,
+        design_source="screenshot", screenshot_keys=[key],
     )
     assert extractor_calls == []
     assert calls[0]["design_source"] == "screenshot"
@@ -583,73 +935,19 @@ def test_template_version_bumped_and_dedupe_keys_on_it(env, client, monkeypatch)
     ) is None
 
 
-# ─── start_prototype threading (AC4, conditional-write pin) ──────────────────
-
-
-def test_start_prototype_persists_screenshot_key(env):
-    key = f"uploads/{_TEST_COMPANY_ID}/{uuid.uuid4()}.png"
-    pid = env.proto.start_prototype(
-        prd_id=1,
-        workspace_id=_TEST_COMPANY_ID,
-        template_version=1,
-        screenshot_key=key,
-    )
-    row = env.proto.get_prototype(prototype_id=pid, workspace_id=_TEST_COMPANY_ID)
-    assert row["screenshot_key"] == key
-
-    # Default (arg omitted) stays honest-NULL.
-    pid2 = env.proto.start_prototype(
-        prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1
-    )
-    row2 = env.proto.get_prototype(prototype_id=pid2, workspace_id=_TEST_COMPANY_ID)
-    assert row2["screenshot_key"] is None
-
-
-def test_start_prototype_payload_omits_null_screenshot_key(env, monkeypatch):
-    # Conditional-write pin: a keyless insert's payload carries NO screenshot_key
-    # key at all (optional-column convention — environments whose prototypes
-    # schema predates the column must keep inserting cleanly).
-    captured: list[dict] = []
-    real_require_client = env.proto.require_client
-
-    class _TableSpy:
-        def __init__(self, table):
-            self._table = table
-
-        def insert(self, payload):
-            captured.append(payload)
-            return self._table.insert(payload)
-
-        def __getattr__(self, name):
-            return getattr(self._table, name)
-
-    class _ClientSpy:
-        def __init__(self, inner):
-            self._inner = inner
-
-        def table(self, name):
-            t = self._inner.table(name)
-            return _TableSpy(t) if name == "prototypes" else t
-
-        def __getattr__(self, name):
-            return getattr(self._inner, name)
-
-    monkeypatch.setattr(
-        env.proto, "require_client", lambda: _ClientSpy(real_require_client())
-    )
-
-    env.proto.start_prototype(
-        prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1
-    )
-    assert captured and "screenshot_key" not in captured[-1]
-
-    env.proto.start_prototype(
-        prd_id=1,
-        workspace_id=_TEST_COMPANY_ID,
-        template_version=1,
-        screenshot_key=f"uploads/{_TEST_COMPANY_ID}/x.png",
-    )
-    assert captured[-1].get("screenshot_key") == f"uploads/{_TEST_COMPANY_ID}/x.png"
+# ─── start_prototype threading ────────────────────────────────────────────────
+#
+# The two tests formerly here (`test_start_prototype_persists_screenshot_key`,
+# `test_start_prototype_payload_omits_null_screenshot_key`) asserted
+# `start_prototype`'s OLD conditional `screenshot_key` payload-write —
+# behavior this ticket's own Deliverables explicitly remove (the parameter no
+# longer exists at all). Deleted rather than migrated: keeping them would mean
+# testing deleted code. Replacement coverage: AC5 ("prototypes.screenshot_key
+# is never written by a new /generate call") is covered by
+# `test_generate_never_writes_legacy_screenshot_key_column` above (route-level);
+# `start_prototype`'s base no-screenshot insert path remains covered by the
+# many pre-existing non-screenshot callers across test_db_prototypes.py and
+# 15+ other test files (confirmed via `git grep -n "start_prototype(" backend/tests/`).
 
 
 # ─── migration (AC5) ─────────────────────────────────────────────────────────
