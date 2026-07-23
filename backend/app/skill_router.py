@@ -28,14 +28,21 @@ class SkillMatch:
 # Keyword patterns → skill mapping. Order matters: first match wins.
 # Each entry: (compiled regex, skill_id, action_label, base_confidence)
 _RULES: list[tuple[re.Pattern, str, str, float]] = [
-    # PRD generation. Verb list mirrors the web command rule
+    # PRD generation. Verb + noun lists mirror the web command rule
     # (BriefChat.isPrdCommand) — "give me a prd for X" was a real user miss
-    # under the old generate/create/write/draft-only list. Gap widened to 40
-    # chars for multi-word fillers ("put together a quick one-page prd").
+    # under the old generate/create/write/draft-only list, and users also say
+    # "product brief" / "product spec(ification)" / "product requirements
+    # document" for the same artifact. Gap widened to 40 chars for multi-word
+    # fillers ("put together a quick one-page prd").
     (re.compile(
         r"\b(generate|create|write|draft|make|build|prepare|produce|compose"
-        r"|develop|author|give|need|want|put\s+together)\b.{0,40}\bprd\b", re.I),
+        r"|develop|author|give|need|want|put\s+together)\b.{0,40}"
+        r"\b(prd|product\s+requirements?\s+doc(?:ument)?|product\s+brief"
+        r"|product\s+spec(?:ification)?)s?\b", re.I),
      "prd-author", "Generate PRD", 0.95),
+    # "spec this/it out (for X)" — same command, no artifact noun.
+    (re.compile(r"\bspec\s+(this|that|it)\s+out\b", re.I),
+     "prd-author", "Generate PRD", 0.90),
     (re.compile(r"\bprd\b.{0,20}\b(for|about|from)\b", re.I),
      "prd-author", "Generate PRD", 0.90),
 

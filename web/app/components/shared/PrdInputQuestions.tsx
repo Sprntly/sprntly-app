@@ -37,7 +37,7 @@ import { IconSparkle } from "./app-icons"
 // The PRD's local edit drafts are keyed by prd_id in PrdPanelContent /
 // PrdHtmlView. After a scoped edit we clear them so the panel shows the new
 // server document rather than a stale in-progress draft.
-function clearPrdDrafts(prdId: number) {
+export function clearPrdDrafts(prdId: number) {
   try {
     localStorage.removeItem(`sprntly_prd_html_draft_${prdId}`)
     localStorage.removeItem(`sprntly_prd_draft_${prdId}`)

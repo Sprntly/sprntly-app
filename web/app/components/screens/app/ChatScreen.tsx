@@ -11,11 +11,11 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isPrdEditCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
-import { PrdInputQuestions } from "../../shared/PrdInputQuestions"
+import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
 import { ApiError, askApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
@@ -1642,6 +1642,54 @@ export function ChatScreen() {
   // inside its own async block (network AFTER the render). The find-or-create
   // backend still serves an already-generated PRD from the DB rather than
   // regenerating it.
+  // An edit-phrased message on a PRD tab ("make this PRD shorter", "add a
+  // rollout section to the PRD") routes to the scoped chat-edit endpoint: the
+  // document actually changes (issue b — before this, the ask agent answered in
+  // text and the PRD stayed untouched). Renders the user turn + thinking
+  // skeleton optimistically, then confirms which sections changed and refreshes
+  // the panel with the server's updated document — the same refresh contract
+  // the input-question answer flow uses.
+  const prdChatEditFlow = useCallback(async (instruction: string, targetTabId: string, prdId: number) => {
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    setTabs((prev) => prev.map((t) =>
+      t.id === targetTabId ? { ...t, thread: [...t.thread, { id, query: instruction }] } : t))
+    setBusyTabs((prev) => addToSet(prev, targetTabId))
+    pushPendingConversation(id, instruction, targetTabId)
+    const finalize = (reply: AskResponse) => {
+      setTabs((prev) => prev.map((t) =>
+        t.id === targetTabId
+          ? { ...t, thread: t.thread.map((tn) => (tn.id === id ? { ...tn, reply } : tn)) }
+          : t))
+      finalizeConversationTurn(id, { reply }, targetTabId)
+    }
+    try {
+      const { prdApi } = await import("../../../lib/api")
+      const res = await prdApi.chatEdit(prdId, instruction)
+      if (res.sections_changed.length) {
+        // The scoped edit produced a fresh document — drop stale local drafts so
+        // the panel shows the server copy, then push it into the tab + panel.
+        clearPrdDrafts(prdId)
+        const prd = prdStateFromRecord(res.prd)
+        setTabs((prev) => prev.map((t) => (t.id === targetTabId ? { ...t, prd } : t)))
+        if (targetTabId === activeTabIdRef.current) setContent({ prd })
+      }
+      const answer = res.sections_changed.length
+        ? `Updated ${res.sections_changed.join(", ")}${res.summary ? ` — ${res.summary}` : "."}`
+        : res.summary ||
+          "That didn't read as a change to the document, so I left the PRD as is — tell me what to update and I'll apply it."
+      finalize({ answer, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse)
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      finalize({
+        answer: `I couldn't update the PRD — ${msg}. The document is unchanged; try rephrasing the edit.`,
+        sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+      } as AskResponse)
+    } finally {
+      setBusyTabs((prev) => removeFromSet(prev, targetTabId))
+    }
+  }, [finalizeConversationTurn, pushPendingConversation, setContent])
+
   const prdCommandFlow = useCallback((seedQuery?: string, taskOverride?: string | null) => {
     // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
     // the PRD from the user's own words. A GENERIC "generate a PRD" (no topic) is
@@ -1742,6 +1790,18 @@ export function ChatScreen() {
           openContentPanel("tickets")
           return
         }
+      } else if (
+        !docFile && isPrdTab && isPrdEditCommand(trimmed) &&
+        (activeTab?.prd?.prd_id ?? activeTab?.prdId) != null
+      ) {
+        // Edit-phrased message beside an open, READY PRD → the scoped chat-edit
+        // flow: the document actually changes (issue b). This branch runs BEFORE
+        // the command branch below so a non-deictic edit ("add SSO to the PRD")
+        // can't fall into isPrdCommand and spawn an unrelated NEW PRD — the
+        // second failure mode of the old deictic guard. A still-generating tab
+        // (no prd id yet) skips this branch and gets a grounded text answer.
+        void prdChatEditFlow(trimmed, activeTab!.id, (activeTab!.prd?.prd_id ?? activeTab!.prdId)!)
+        return
       } else if (isPrdCommand(trimmed) && !(!docFile && deicticPrd && isPrdTab)) {
         if (docFile) {
           setAttachments([])
@@ -1989,7 +2049,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdCommandFlow, pushPendingConversation, setContent, showToast],
+    [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────

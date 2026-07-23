@@ -23,13 +23,14 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { briefCurrent, importDoc, extractFile, storiesGenerate, generateFromTask, listInputQuestions } = vi.hoisted(() => ({
+const { briefCurrent, importDoc, extractFile, storiesGenerate, generateFromTask, listInputQuestions, chatEdit } = vi.hoisted(() => ({
   briefCurrent: vi.fn(),
   importDoc: vi.fn(),
   extractFile: vi.fn(),
   storiesGenerate: vi.fn(),
   generateFromTask: vi.fn(),
   listInputQuestions: vi.fn(),
+  chatEdit: vi.fn(),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -49,6 +50,7 @@ vi.mock("../../../../lib/api", () => {
       generateFromTask: (...a: unknown[]) => generateFromTask(...a),
       listInputQuestions: (...a: unknown[]) => listInputQuestions(...a),
       answerInputQuestion: vi.fn(),
+      chatEdit: (...a: unknown[]) => chatEdit(...a),
     },
     storiesApi: {
       getForPrd: vi.fn().mockResolvedValue({ status: "none", fresh: false, stories: [] }),
@@ -184,6 +186,12 @@ beforeEach(() => {
   generateFromTask.mockResolvedValue({ prd_id: 55, status: "generating", title: "Dark mode" })
   listInputQuestions.mockReset()
   listInputQuestions.mockResolvedValue([]) // no clarifying questions by default
+  chatEdit.mockReset()
+  chatEdit.mockResolvedValue({
+    prd: { id: 42, payload_md: "<html><body><h1>Updated</h1></body></html>", llm_part: null, brief_id: 1, insight_index: 0, source: "upload" },
+    sections_changed: ["Requirements"],
+    summary: "Tightened the requirements.",
+  })
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
@@ -560,19 +568,74 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
     "make this PRD shorter",
     "make that PRD more concise",
     "make the current PRD two pages",
-  ])("'%s' with no attachment goes to the ask agent, not a new PRD", async (phrase) => {
+  ])("'%s' with no attachment EDITS the open PRD via the scoped chat-edit flow", async (phrase) => {
+    // Issue b: these used to fall through to the ask agent, which answered in
+    // text while the document never changed. Now they hit the chat-edit
+    // endpoint and the PRD actually updates.
     renderChat()
     await openPrdTabViaImport()
 
     await typeAndSendInTab(phrase)
 
-    // Answered by the (PRD-grounded) ask agent…
-    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
-    expect(runAskGeneration.mock.calls[0][0]).toContain(phrase)
-    // …never a brand-new PRD via either command flow.
+    await waitFor(() => expect(chatEdit).toHaveBeenCalledWith(42, phrase))
+    // The chat confirms which sections changed…
+    await waitFor(() => expect(document.body.textContent).toContain("Updated Requirements"))
+    // …and neither the ask agent nor any new-PRD flow ran.
+    expect(runAskGeneration).not.toHaveBeenCalled()
     expect(generateFromTask).not.toHaveBeenCalled()
     expect(briefCurrent).not.toHaveBeenCalled()
     expect(importDoc).toHaveBeenCalledTimes(1) // only the setup import
+  })
+
+  it("a NON-deictic edit ('add … to the PRD') edits too — it must NOT spawn a new PRD", async () => {
+    // The second failure mode of the old guard: "the PRD" escaped the deictic
+    // check, fell into the command branch, and opened an unrelated new PRD.
+    renderChat()
+    await openPrdTabViaImport()
+
+    await typeAndSendInTab("add SSO requirements to the PRD")
+
+    await waitFor(() => expect(chatEdit).toHaveBeenCalledWith(42, "add SSO requirements to the PRD"))
+    expect(generateFromTask).not.toHaveBeenCalled()
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("a QUESTION about the open PRD still goes to the grounded ask agent, never the editor", async () => {
+    renderChat()
+    await openPrdTabViaImport()
+
+    await typeAndSendInTab("does this PRD cover mobile?")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    expect(chatEdit).not.toHaveBeenCalled()
+  })
+
+  it("a no-op editor verdict tells the user the PRD was left unchanged", async () => {
+    chatEdit.mockResolvedValueOnce({
+      prd: { id: 42, payload_md: "<html><body><h1>Doc</h1></body></html>", llm_part: null, brief_id: 1, insight_index: 0, source: "upload" },
+      sections_changed: [],
+      summary: "",
+    })
+    renderChat()
+    await openPrdTabViaImport()
+
+    await typeAndSendInTab("update the PRD maybe")
+
+    await waitFor(() => expect(chatEdit).toHaveBeenCalled())
+    await waitFor(() => expect(document.body.textContent).toContain("left the PRD as is"))
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("an editor failure reports the error and leaves the flow intact", async () => {
+    chatEdit.mockRejectedValueOnce(new Error("gateway down"))
+    renderChat()
+    await openPrdTabViaImport()
+
+    await typeAndSendInTab("shorten the PRD")
+
+    await waitFor(() => expect(chatEdit).toHaveBeenCalled())
+    await waitFor(() => expect(document.body.textContent).toContain("couldn't update the PRD"))
+    expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
   it("attachment + deictic phrasing in a PRD tab STILL imports (the file is 'this PRD')", async () => {

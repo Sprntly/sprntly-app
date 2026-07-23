@@ -47,7 +47,10 @@ feedback on a document, a tickets request).
 is_prd_command = true ONLY when the message requests that a PRD/requirements
 document be created, written, or put together for some topic. Polite or
 indirect phrasings still count ("could we get a PRD going for checkout?",
-"let's have a requirements doc for the billing revamp").
+"let's have a requirements doc for the billing revamp"). Users may call the
+artifact a "PRD", "product requirements document", "product brief", "product
+spec", "product specification", or say "spec this out" — all are the same
+request.
 
 is_prd_command = false for:
 - questions about PRDs in general ("what makes a good PRD?")

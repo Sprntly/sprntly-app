@@ -1712,6 +1712,16 @@ export const prdApi = {
       `/v1/prd/${prdId}/input-questions/${questionId}/answer`,
       { answer },
     ),
+  /** Apply a free-form chat edit instruction to the PRD ("make this PRD
+   *  shorter"). Same scoped-editor contract as answerInputQuestion — only the
+   *  affected sections change, saved as an undoable version — driven by the
+   *  user's own instruction. Empty `sections_changed` means the editor judged
+   *  the message wasn't an edit and left the document untouched. */
+  chatEdit: (prdId: number, instruction: string) =>
+    api.post<{ prd: PrdRecord; sections_changed: string[]; summary: string }>(
+      `/v1/prd/${prdId}/chat-edit`,
+      { instruction },
+    ),
 }
 
 /** One structured "User input needed" item lifted out of the PRD document.

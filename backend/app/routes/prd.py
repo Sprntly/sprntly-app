@@ -832,3 +832,64 @@ def answer_input_question(
         "sections_changed": edit["sections_changed"],
         "summary": edit["summary"],
     }
+
+
+class ChatEditIn(BaseModel):
+    instruction: str = Field(..., min_length=3, max_length=4000)
+
+
+@router.post("/{prd_id}/chat-edit")
+def chat_edit(
+    prd_id: int,
+    body: ChatEditIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Apply a free-form chat edit instruction to the PRD ("make this PRD
+    shorter", "add a rollout section").
+
+    The chat-driven counterpart of answer_input_question: the SAME scoped
+    editor discipline (app.prd_questions.apply_chat_edit — targeted rewrite of
+    only the affected sections, never a full prd-author re-run), the SAME
+    undoable version-snapshot persistence, and the same response shape minus
+    the question — so the chat can confirm which sections changed and the
+    panel can refresh live. Before this endpoint, an edit-phrased chat message
+    on a PRD tab was answered in text only and the document never changed
+    (issue b of the chat→PRD bug set).
+    """
+    from app.prd_questions import apply_chat_edit
+
+    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
+
+    # Edit the RAW payload_md (the pure PRD HTML) — same discipline as the
+    # input-answer editor: design-agent 'applied' patches are folded on read by
+    # get_prd_rendered, so editing the raw doc keeps them folding once.
+    prd_html = (row.get("payload_md") or "").strip()
+    if not prd_html:
+        raise HTTPException(409, "PRD has no content to edit yet")
+
+    try:
+        edit = apply_chat_edit(
+            prd_html, body.instruction, enterprise_id=company.company_id
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Could not apply the edit: {exc}")
+
+    if edit["sections_changed"]:
+        # Snapshot the pre-edit content so the change is undoable (mirrors
+        # PUT /{id} and the input-answer path).
+        try:
+            save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by="auto")
+        except Exception:
+            logger.warning(
+                "auto-version snapshot failed for prd_id=%s before chat edit "
+                "(undo point not captured)", prd_id, exc_info=True,
+            )
+        update_prd_content(prd_id, row.get("title", ""), edit["html"])
+    # No sections changed → the editor judged the instruction wasn't an edit;
+    # leave the stored document untouched (no snapshot, no write).
+
+    return {
+        "prd": get_prd_rendered(prd_id),
+        "sections_changed": edit["sections_changed"],
+        "summary": edit["summary"],
+    }
