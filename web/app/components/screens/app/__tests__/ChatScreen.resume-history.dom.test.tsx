@@ -165,3 +165,34 @@ describe("ChatScreen — resume a chat from history", () => {
     })
   })
 })
+
+describe("ChatScreen — resumed threads keep their persisted attachments", () => {
+  it("rehydrates turn attachments from listTurns so the documents survive reload", async () => {
+    // The persisted thread carries an extracted document on its first turn
+    // (conversation_turns.attachments) — the reopened tab must restore it onto
+    // the ThreadTurn so the card renders AND a later "generate a PRD" can
+    // ground on it (conversationPrdDocs reads turn.attachments).
+    listTurns.mockResolvedValue({
+      turns: [
+        {
+          id: 1, role: "user", content: "here's the requirements deck",
+          attachments: [{ name: "requirements.pdf", content: "MUST prefill cart from deal" }],
+        },
+        { id: 2, role: "assistant", content: "Got it — summarizing." },
+      ],
+    })
+    localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+      dbId: 42,
+      title: "here's the requirements deck",
+      fallbackTurns: [{ role: "user", content: "here's the requirements deck" }],
+    }))
+
+    await act(async () => { renderScreen() })
+
+    await waitFor(() => expect(listTurns).toHaveBeenCalledWith(42))
+    await waitFor(() => {
+      const cards = document.querySelector(".bc-user-attachments")
+      expect(cards?.textContent).toContain("requirements.pdf")
+    })
+  })
+})

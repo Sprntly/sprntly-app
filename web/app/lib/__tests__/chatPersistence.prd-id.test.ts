@@ -34,3 +34,22 @@ describe("chatPersistence — prd_id stamping", () => {
     expect(create.mock.calls[0][0]).not.toHaveProperty("prd_id")
   })
 })
+
+describe("chatPersistence — turn attachments", () => {
+  it("forwards attachments to addTurn so they persist with the turn", async () => {
+    const { deps, addTurn } = makeDeps(null)
+    const p = createChatPersistence(deps)
+    const attachments = [{ name: "requirements.pdf", content: "MUST prefill cart" }]
+    await p.pushUserTurn("tab-1", {
+      turnId: "t1", title: "Chat", query: "here's the deck", attachments,
+    })
+    expect(addTurn).toHaveBeenCalledWith(100, "user", "here's the deck", attachments)
+  })
+
+  it("passes undefined attachments for plain sends (legacy shape unchanged)", async () => {
+    const { deps, addTurn } = makeDeps(null)
+    const p = createChatPersistence(deps)
+    await p.pushUserTurn("tab-1", { turnId: "t1", title: "Chat", query: "hi" })
+    expect(addTurn).toHaveBeenCalledWith(100, "user", "hi", undefined)
+  })
+})

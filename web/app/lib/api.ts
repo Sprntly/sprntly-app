@@ -1621,8 +1621,14 @@ export const prdApi = {
    *  the task text (find-or-create keyed on it) and grounds on the company's
    *  data. Same fire-and-forget contract as `generate`: returns a prd_id to
    *  poll via prdApi.get(id) until status === 'ready'. */
-  generateFromTask: (task: string, force = false) =>
-    api.post<PrdStartResponse>("/v1/prd/generate-from-task", { task, force }),
+  generateFromTask: (task: string, force = false, sourceDocs?: TurnAttachment[]) =>
+    api.post<PrdStartResponse>("/v1/prd/generate-from-task", {
+      task,
+      force,
+      // Documents attached earlier in the chat thread — the backend grounds the
+      // PRD on them (they used to be silently forgotten by this command).
+      ...(sourceDocs && sourceDocs.length ? { source_docs: sourceDocs } : {}),
+    }),
   /** LLM fallback for the chat command decision (tier 2): does this message ask
    *  us to CREATE a PRD? Called only when the message names a PRD but the regex
    *  tier (isPrdCommand) didn't match — novel phrasings. `task` echoes the
@@ -3164,12 +3170,17 @@ export type ConversationRecord = {
   updated_at: string
 }
 
+/** Extracted text of a file attached to a chat turn — persisted with the turn
+ *  so reloaded threads (and the chat→PRD flow) still see earlier documents. */
+export type TurnAttachment = { name: string; content: string }
+
 export type ConversationTurn = {
   id: number
   conversation_id: number
   role: "user" | "assistant"
   content: string
   created_at: string
+  attachments?: TurnAttachment[] | null
 }
 
 export const conversationsApi = {
@@ -3188,9 +3199,20 @@ export const conversationsApi = {
   /** List all turns (messages) in a conversation, oldest first. */
   listTurns: (conversationId: number) =>
     api.get<{ turns: ConversationTurn[] }>(`/v1/conversations/${conversationId}/turns`),
-  /** Add a turn to a conversation. */
-  addTurn: (conversationId: number, role: "user" | "assistant", content: string) =>
-    api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, { role, content }),
+  /** Add a turn to a conversation. `attachments` carries the extracted text of
+   *  files attached to this turn (persisted so a reloaded thread and the
+   *  chat→PRD flow can still ground on documents attached earlier). */
+  addTurn: (
+    conversationId: number,
+    role: "user" | "assistant",
+    content: string,
+    attachments?: TurnAttachment[],
+  ) =>
+    api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, {
+      role,
+      content,
+      ...(attachments && attachments.length ? { attachments } : {}),
+    }),
 }
 
 // ---- transient-auth resilience (shared primitive) ---------------------------

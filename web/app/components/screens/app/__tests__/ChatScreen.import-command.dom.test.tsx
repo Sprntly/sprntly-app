@@ -601,7 +601,7 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
 
     await typeAndSendInTab("generate a PRD for dark mode on mobile")
 
-    await waitFor(() => expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile"))
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
@@ -644,5 +644,46 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
 
     await waitFor(() => expect(panelTab()).toBe("tickets"))
     expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+})
+
+describe("ChatScreen — documents attached EARLIER in the thread ground a later PRD", () => {
+  it("passes the extracted doc as sourceDocs when 'generate a PRD' comes later", async () => {
+    renderChat()
+    // Message 1: a doc + a PLAIN question — not a command, so it goes to the
+    // ask agent and the extracted text is stamped onto the turn.
+    await attachDoc()
+    await typeAndSend("please review this deck")
+    await waitFor(() => expect(extractFile).toHaveBeenCalled())
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+
+    // Message 2, same thread, NO new attachment: the command must still see
+    // the earlier document (the reported bug: it was silently forgotten).
+    await typeAndSendInTab("generate a PRD")
+
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    expect(generateFromTask).toHaveBeenCalledWith(
+      "please review this deck",
+      false,
+      [{ name: "Fraznet Enhancements.pptx", content: "## Slide 1\n\nFraznet MRT workflow" }],
+    )
+    // The doc grounds a chat-task PRD — it is NOT re-routed to the import flow
+    // (that stays same-message-attachment only).
+    expect(importDoc).not.toHaveBeenCalled()
+  })
+
+  it("a command with NO thread documents sends no sourceDocs", async () => {
+    renderChat()
+    await typeAndSend("our checkout drops users at the payment step")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+
+    await typeAndSendInTab("generate a PRD")
+
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    expect(generateFromTask).toHaveBeenCalledWith(
+      "our checkout drops users at the payment step",
+      false,
+      undefined,
+    )
   })
 })

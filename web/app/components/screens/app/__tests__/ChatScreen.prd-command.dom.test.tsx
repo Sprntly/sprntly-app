@@ -152,7 +152,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile")
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
     // Not the brief-insight path, and not the ask agent.
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
@@ -180,7 +180,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     expect(classifyCommand).toHaveBeenCalledWith("let's get a PRD going for the checkout revamp")
     // The classifier-extracted task drives generation (the regex extractor
     // can't parse this phrasing by definition).
-    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp")
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined)
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
@@ -223,7 +223,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
 
     // The generate POST is in flight (called with the parsed task) but NOT
     // resolved…
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile")
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
     // …yet the user's command, the acknowledgment, and the generating PRD card
     // are already on screen.
     expect(document.body.textContent).toContain("generate a PRD for dark mode on mobile")
@@ -251,7 +251,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await act(async () => { fireEvent.click(sendBtn) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step")
+    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined)
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 })

@@ -105,7 +105,14 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
    */
   async function pushUserTurn(
     tabId: string,
-    args: { turnId: string; title: string; query: string },
+    args: {
+      turnId: string
+      title: string
+      query: string
+      /** Extracted text of files attached to this turn — persisted with it so a
+       *  reloaded thread (and the chat→PRD flow) still sees the documents. */
+      attachments?: { name: string; content: string }[]
+    },
   ): Promise<void> {
     try {
       const convId = await resolveConvId(tabId, {
@@ -115,7 +122,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
       })
       if (convId == null) return
       const api = await deps.getApi()
-      await api.addTurn(convId, "user", args.query)
+      await api.addTurn(convId, "user", args.query, args.attachments)
     } catch {
       /* fire-and-forget: never break the UI on a persistence failure */
     }

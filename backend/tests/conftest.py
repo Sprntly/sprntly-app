@@ -1097,6 +1097,9 @@ CREATE TABLE conversation_turns (
     conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
     role            TEXT NOT NULL DEFAULT 'user',
     content         TEXT NOT NULL DEFAULT '',
+    -- Extracted attachment texts [{name, content}] persisted with the turn
+    -- (20260723170000_conversation_turn_attachments.sql).
+    attachments     TEXT,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
