@@ -175,12 +175,30 @@ def test_send_drip_email_success(isolated_settings, monkeypatch):
         to_email="a@b.com", subject="Hello", body_text="Body"
     ) is True
     assert captured["url"] == drip.RESEND_API_URL
+    # Must send from the Resend-verified mail.sprntly.ai domain — the API
+    # key is domain-scoped and 403s any bare-sprntly.ai sender.
+    assert captured["json"]["from"] == "Sprntly <onboarding@mail.sprntly.ai>"
     assert captured["json"]["to"] == ["a@b.com"]
     assert captured["json"]["subject"] == "Hello"
     # Both parts ship: branded HTML + the plain-text fallback.
     assert captured["json"]["text"] == "Body"
     assert "Open Sprntly" in captured["json"]["html"]
     assert "Bearer re_test" in captured["headers"]["Authorization"]
+
+
+def test_from_address_default_and_override(isolated_settings, monkeypatch):
+    monkeypatch.delenv("DRIP_FROM_EMAIL", raising=False)
+    import app.config as config_mod
+    importlib.reload(config_mod)
+    drip = importlib.import_module("app.drip_email")
+    importlib.reload(drip)
+    assert drip._from_address() == "Sprntly <onboarding@mail.sprntly.ai>"
+    assert drip._from_address().split("@")[-1].rstrip(">") == "mail.sprntly.ai"
+
+    monkeypatch.setenv("DRIP_FROM_EMAIL", "Sprntly <hello@mail.sprntly.ai>")
+    importlib.reload(config_mod)
+    importlib.reload(drip)
+    assert drip._from_address() == "Sprntly <hello@mail.sprntly.ai>"
 
 
 def test_send_drip_email_non_2xx_returns_false(isolated_settings, monkeypatch):

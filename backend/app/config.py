@@ -352,7 +352,8 @@ class Settings(BaseSettings):
     # historical steps.
     drip_emails_enabled: bool = False
     resend_api_key: str = ""
-    # From: header for drip emails. Empty → "Sprntly <onboarding@sprntly.ai>".
+    # From: header for drip emails. Empty → "Sprntly
+    # <onboarding@mail.sprntly.ai>" (verified sending domain).
     drip_from_email: str = ""
     # Comma-separated day offsets, e.g. "1,3,7". Empty → DEFAULT_CADENCE.
     # Per-company overrides in companies.notification_settings["drip"] win over
