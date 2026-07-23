@@ -4,7 +4,7 @@
 // the old generate/create/write/draft-only verb list to a plain text answer.
 import { describe, expect, it } from "vitest"
 
-import { isPrdCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../BriefChat"
+import { isPrdCommand, isPrdEditCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../BriefChat"
 
 // The exact prompt from the user report (issue c): rich requirements, "Give
 // me a prd for …" phrasing, no verb from the old list.
@@ -60,6 +60,58 @@ describe("isPrdCommand — broadened command phrasings", () => {
   })
 })
 
+// Apurva's canonical command list (2026-07-23): every one of these MUST route
+// as a PRD command AND extract the topic that follows, on both frontend and
+// backend (see backend/tests/test_qa_router_evals.py for the router half).
+const CANONICAL_PRD_COMMANDS = [
+  "generate a PRD for",
+  "make a PRD for",
+  "make me a PRD for",
+  "create a PRD for",
+  "write a PRD for",
+  "draft a PRD for",
+  "build a PRD for",
+  "put together a PRD for",
+  "have it make a PRD for",
+  "generate a product requirements document for",
+  "create a product requirements document for",
+  "write a product requirements document for",
+  "draft a product requirements document for",
+  "make a product requirements document for",
+  "write a product brief for",
+  "create a product brief for",
+  "generate a product brief for",
+  "draft a product brief for",
+  "make a product brief for",
+  "generate a product brief based on",
+  "write a product spec for",
+  "create a product spec for",
+  "generate a product spec for",
+  "draft a product spec for",
+  "make a product spec for",
+  "write a product specification for",
+  "create a product specification for",
+  "generate a product specification for",
+  "spec this out for",
+  "spec it out for",
+]
+
+describe("isPrdCommand + prdCommandTask — the canonical command list", () => {
+  it.each(CANONICAL_PRD_COMMANDS)(
+    "'%s the checkout revamp' is a command and extracts the topic",
+    (prefix) => {
+      const q = `${prefix} the checkout revamp`
+      expect(isPrdCommand(q)).toBe(true)
+      expect(prdCommandTask(q)).toBe("checkout revamp")
+    },
+  )
+
+  it("bare 'spec this out' is a generic command (topic comes from the conversation)", () => {
+    expect(isPrdCommand("spec this out")).toBe(true)
+    expect(prdCommandTask("spec this out")).toBeNull()
+  })
+})
+
 describe("mentionsPrd — the LLM-fallback gate", () => {
   it("is broader than isPrdCommand: any PRD-ish noun qualifies", () => {
     expect(mentionsPrd("let's get a PRD going for the checkout revamp")).toBe(true)
@@ -98,5 +150,42 @@ describe("prdCommandTask — task extraction over the broadened phrasings", () =
   it("returns null for deictic topics that point at the brief, not a task", () => {
     expect(prdCommandTask("generate a PRD for the top insight")).toBeNull()
     expect(prdCommandTask("generate a PRD for this")).toBeNull()
+  })
+})
+
+describe("isPrdEditCommand — edit phrasings aimed at an existing PRD", () => {
+  it.each([
+    "make this PRD shorter",
+    "make that PRD more concise",
+    "make the current PRD two pages",
+    "add SSO requirements to the PRD",
+    "add a rollout section to the prd",
+    "update the PRD to include usage metrics",
+    "shorten the product spec",
+    "rewrite the prd's goal section",
+    "remove the appendix from the PRD",
+    "can you tighten the PRD",
+  ])("treats %j as an edit", (q) => {
+    expect(isPrdEditCommand(q)).toBe(true)
+  })
+
+  it.each([
+    "make a PRD for dark mode", // indefinite article = CREATE, not edit
+    "make me a new prd for checkout",
+    "generate a PRD for dark mode",
+    "does this PRD cover mobile?", // question, not an edit
+    "what should we change in the PRD?",
+    "make this ticket shorter", // no PRD noun — ticket deictic stays an ask
+    "create tickets from this PRD", // tickets phrasing wins
+    "shorten it", // no PRD noun — precision over recall
+  ])("does NOT treat %j as an edit", (q) => {
+    expect(isPrdEditCommand(q)).toBe(false)
+  })
+
+  it("creation phrasings stay commands even when they'd also verb-match edit", () => {
+    // The ChatScreen dispatcher checks edit BEFORE command on a PRD tab; these
+    // must fall through to the command branch (isPrdCommand) untouched.
+    expect(isPrdEditCommand("make a PRD for dark mode")).toBe(false)
+    expect(isPrdCommand("make a PRD for dark mode")).toBe(true)
   })
 })
