@@ -123,7 +123,7 @@ export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
   {
     id: "home-goto-brief",
     icon: "sparkle",
-    title: "Give me this week's brief",
+    title: "Show me this week's top insights",
     desc: "Ranked findings, impact, and signals in one view.",
     target: "brief",
   },
