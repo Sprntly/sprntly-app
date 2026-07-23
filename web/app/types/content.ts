@@ -292,8 +292,11 @@ export interface ConnectorItemRow {
    * is a user-issued API key pasted into a modal — no OAuth redirect.
    * Use "credentials" for self-hosted tools (e.g. Superset) connected
    * with an instance URL + username + password form.
+   * Use "upload" for the one connector with no third party behind it
+   * (`uploads` — the user's own documents): the connect gesture is naming
+   * a source and uploading files, so Connect opens the upload modal.
    */
-  authType?: "oauth" | "apikey" | "credentials"
+  authType?: "oauth" | "apikey" | "credentials" | "upload"
 }
 
 export interface ConnectorCategoryRow {

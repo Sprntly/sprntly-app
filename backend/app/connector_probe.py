@@ -36,6 +36,7 @@ from app.connectors import (
     slack_oauth,
     sprinklr_oauth,
     superset_auth,
+    uploads,
 )
 from app.connectors.tokens import (
     TokenEncryptionError,
@@ -266,6 +267,22 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
             )
         except superset_auth.SupersetAuthError:
             user_obj = {}  # soft rejection → "reconnect required" below
+    elif provider == uploads.UPLOADS_PROVIDER:
+        # Nothing to validate against a third party — the "credential" is the
+        # company's own document corpus. Healthy exactly while at least one
+        # named source still exists; deleting the last one reads as
+        # "disconnected", which is the truthful state for this connector.
+        from app.document_sources import list_document_sources
+
+        company_id = token_json.get(uploads.CREDENTIAL_KEY) or row.get("company_id") or ""
+        sources = list_document_sources(company_id)
+        if sources:
+            files = sum(s.file_count for s in sources)
+            user_obj = {
+                "name": f"{len(sources)} source"
+                        f"{'' if len(sources) == 1 else 's'} · "
+                        f"{files} file{'' if files == 1 else 's'}",
+            }
     else:
         raise ProbeError(
             f"Probe not supported for provider {provider!r}", reason="unsupported"

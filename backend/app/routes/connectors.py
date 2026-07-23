@@ -42,14 +42,28 @@ from urllib.parse import urlencode
 
 import requests
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.responses import RedirectResponse
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from pydantic import BaseModel, Field
 
 from app import db
 from app import datasets as datasets_service
-from app.auth import CompanyContext, require_company
+from app.auth import (  # noqa: F401 — require_workspace re-exported for tests' dependency_overrides
+    CompanyContext,
+    WorkspaceContext,
+    require_company,
+    require_workspace,
+)
 from app.config import settings
 from app.connectors import (
     asana_oauth,
@@ -63,6 +77,7 @@ from app.connectors import (
     slack_oauth,
     sprinklr_oauth,
     superset_auth,
+    uploads,
 )
 from app.connectors.google_drive_sync import (
     SyncConfigError,
@@ -2521,6 +2536,256 @@ def superset_disconnect(
         raise HTTPException(404, "Superset is not connected")
     db.delete_connection(company.company_id, superset_auth.SUPERSET_PROVIDER)
     return {"deleted": True, "provider": superset_auth.SUPERSET_PROVIDER}
+
+
+# ─────────────────── Uploaded documents (no third party) ─────────────────────
+#
+# The user's own business documents as a first-class connector. There is no
+# OAuth and no API key: the "credential" is the corpus they uploaded, so the
+# connect gesture IS the first upload. A source has a NAME, an OPTIONAL
+# description of what the documents are, and any number of files of any type.
+#
+#   GET    /v1/connectors/uploads/sources                  -> list sources
+#   POST   /v1/connectors/uploads/sources                  -> create + upload
+#   POST   /v1/connectors/uploads/sources/{id}/files       -> add more files
+#   DELETE /v1/connectors/uploads/sources/{id}             -> remove a source
+#   DELETE /v1/connectors/uploads                          -> disconnect
+#
+# Every write ends in kickoff_sync, the same fire-and-forget ingest every other
+# connector runs on connect — so uploaded documents reach the KG immediately
+# instead of waiting for the weekly scheduler.
+
+#: 20 MB per file, mirroring the dataset / roadmap / company-document caps.
+UPLOAD_MAX_FILE_BYTES = 20 * 1024 * 1024
+
+#: A single source can't be an unbounded dumping ground; the cap keeps one
+#: upload gesture (and its background extraction) bounded.
+UPLOAD_MAX_FILES_PER_REQUEST = 50
+
+
+def _ensure_uploads_connection(company_id: str) -> None:
+    """Create/refresh the `uploads` connection row so the connector shows
+    Active in Settings and is picked up by the scheduler + brief data-source
+    gate. Idempotent — re-uploading just re-stamps the row."""
+    db.upsert_connection(
+        company_id=company_id,
+        provider=uploads.UPLOADS_PROVIDER,
+        token_encrypted=encrypt_token_json(uploads.credential_to_store(company_id)),
+        scopes="",
+        account_label=uploads.ACCOUNT_LABEL,
+        config_json="{}",
+    )
+
+
+async def _store_uploaded_files(
+    company_id: str,
+    source_id: str,
+    files: list[UploadFile],
+) -> tuple[list[dict], list[dict]]:
+    """Read + convert + persist each upload. Partial success is fine: an
+    oversized or unreadable file is reported per-file so the frontend can show
+    ✓/✗ on each, exactly like the dataset upload route."""
+    from app.document_sources import add_document_file
+
+    stored: list[dict] = []
+    errors: list[dict] = []
+    for upload in files[:UPLOAD_MAX_FILES_PER_REQUEST]:
+        filename = upload.filename or "untitled"
+        data = await upload.read()
+        if not data:
+            errors.append({"filename": filename, "error": "Empty file"})
+            continue
+        if len(data) > UPLOAD_MAX_FILE_BYTES:
+            errors.append({
+                "filename": filename,
+                "error": f"File exceeds {UPLOAD_MAX_FILE_BYTES // (1024 * 1024)}MB limit",
+            })
+            continue
+        try:
+            saved = add_document_file(
+                company_id, source_id,
+                filename=filename, data=data, content_type=upload.content_type,
+            )
+        except Exception as e:  # noqa: BLE001 — one bad file must not fail the batch
+            logger.exception("uploads: could not store %s", filename)
+            errors.append({"filename": filename, "error": f"Could not store: {e}"})
+            continue
+        stored.append({
+            "id": saved.id,
+            "filename": saved.filename,
+            "content_type": saved.content_type,
+            "size_bytes": saved.size_bytes,
+            # Never the text itself — the list surfaces how much we extracted,
+            # the same shape the company-document list uses.
+            "extracted_chars": len(saved.extracted_text or ""),
+            "uploaded_at": saved.uploaded_at,
+        })
+    if len(files) > UPLOAD_MAX_FILES_PER_REQUEST:
+        errors.append({
+            "filename": "",
+            "error": f"Only the first {UPLOAD_MAX_FILES_PER_REQUEST} files were "
+                     "accepted — upload the rest in another batch.",
+        })
+    return stored, errors
+
+
+def _public_source(src, files: list) -> dict:
+    return {
+        "id": src.id,
+        "name": src.name,
+        "description": src.description,
+        "created_at": src.created_at,
+        "file_count": len(files),
+        "files": [
+            {
+                "id": f.id,
+                "filename": f.filename,
+                "content_type": f.content_type,
+                "size_bytes": f.size_bytes,
+                "extracted_chars": len(f.extracted_text or ""),
+                "uploaded_at": f.uploaded_at,
+            }
+            for f in files
+        ],
+    }
+
+
+@router.get("/uploads/sources")
+def uploads_list_sources(
+    company: CompanyContext = Depends(require_company),
+):
+    """Every named document source for the company, newest first, with files.
+    Readable by any member (mutations below are admin-only, like every other
+    org-wide connector)."""
+    from app.document_sources import list_document_sources, list_source_files
+
+    out = [
+        _public_source(src, list_source_files(company.company_id, src.id))
+        for src in list_document_sources(company.company_id)
+    ]
+    return {"sources": out}
+
+
+@router.post("/uploads/sources")
+async def uploads_create_source(
+    files: Annotated[list[UploadFile], File(description="Documents of any type")],
+    name: Annotated[str, Form(description="What to call this source")],
+    description: Annotated[str, Form()] = "",
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Create a named document source from one or more uploaded files.
+
+    `name` is required, `description` is the optional "what are these documents
+    and why do they matter" step — both are carried into every KG record the
+    uploads puller emits, so the agents read the user's own framing of the
+    corpus, not just filenames.
+
+    Any file type is accepted: the shared ingest converter extracts pdf / docx /
+    xlsx / csv / txt / md / pptx richly, passes other textual formats through,
+    and stores a stub for binary content rather than failing the upload.
+    """
+    _require_admin_for_org_connector(company, uploads.UPLOADS_PROVIDER)
+    label = (name or "").strip()
+    if not label:
+        raise HTTPException(422, "name is required")
+    if len(label) > 200:
+        raise HTTPException(422, "name must be 200 characters or fewer")
+    if not files:
+        raise HTTPException(400, "No files uploaded")
+
+    from app.document_sources import create_document_source, list_source_files
+
+    src = create_document_source(
+        company.company_id,
+        name=label,
+        description=(description or "").strip(),
+        workspace_id=company.workspace_id,
+    )
+    stored, errors = await _store_uploaded_files(company.company_id, src.id, files)
+    if not stored:
+        # Nothing landed — don't leave an empty source (or claim a connection).
+        from app.document_sources import delete_document_source
+
+        delete_document_source(company.company_id, src.id)
+        raise HTTPException(
+            400,
+            "; ".join(f"{e['filename']}: {e['error']}" for e in errors)
+            or "No files could be stored",
+        )
+
+    _ensure_uploads_connection(company.company_id)
+    # Same fire-and-forget ingest every other connector runs on connect.
+    kickoff_sync(company.company_id, uploads.UPLOADS_PROVIDER)
+
+    return {
+        "ok": True,
+        "provider": uploads.UPLOADS_PROVIDER,
+        "source": _public_source(src, list_source_files(company.company_id, src.id)),
+        "errors": errors,
+    }
+
+
+@router.post("/uploads/sources/{source_id}/files")
+async def uploads_add_files(
+    source_id: str,
+    files: Annotated[list[UploadFile], File(description="Documents of any type")],
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Add more documents to an existing source."""
+    _require_admin_for_org_connector(company, uploads.UPLOADS_PROVIDER)
+    from app.document_sources import get_document_source, list_source_files
+
+    src = get_document_source(company.company_id, source_id)
+    if src is None:
+        raise HTTPException(404, "Document source not found")
+    if not files:
+        raise HTTPException(400, "No files uploaded")
+
+    stored, errors = await _store_uploaded_files(company.company_id, source_id, files)
+    if stored:
+        _ensure_uploads_connection(company.company_id)
+        kickoff_sync(company.company_id, uploads.UPLOADS_PROVIDER)
+
+    return {
+        "ok": bool(stored),
+        "source": _public_source(src, list_source_files(company.company_id, source_id)),
+        "errors": errors,
+    }
+
+
+@router.delete("/uploads/sources/{source_id}")
+def uploads_delete_source(
+    source_id: str,
+    company: CompanyContext = Depends(require_company),
+):
+    """Remove a source and its documents. Signals already extracted into the KG
+    stay (same soft-delete semantics as disconnecting any other connector)."""
+    _require_admin_for_org_connector(company, uploads.UPLOADS_PROVIDER)
+    from app.document_sources import delete_document_source, list_document_sources
+
+    if not delete_document_source(company.company_id, source_id):
+        raise HTTPException(404, "Document source not found")
+    # Last source gone → the connector has nothing behind it; drop the row so
+    # Settings shows "Off" rather than an Active connector with no data.
+    if not list_document_sources(company.company_id):
+        db.delete_connection(company.company_id, uploads.UPLOADS_PROVIDER)
+    return {"deleted": True, "id": source_id}
+
+
+@router.delete("/uploads")
+def uploads_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    """Disconnect the connector. Like every other disconnect this drops the
+    connection row only — the uploaded documents (and anything already
+    extracted into the KG) are left in place, so reconnecting is a re-upload
+    of nothing."""
+    _require_admin_for_org_connector(company, uploads.UPLOADS_PROVIDER)
+    row = db.get_connection(company.company_id, uploads.UPLOADS_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Uploaded documents is not connected")
+    db.delete_connection(company.company_id, uploads.UPLOADS_PROVIDER)
+    return {"deleted": True, "provider": uploads.UPLOADS_PROVIDER}
 
 
 # ─────────────────────── GitHub webhook ───────────────────────

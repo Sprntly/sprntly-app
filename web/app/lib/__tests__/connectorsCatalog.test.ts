@@ -12,6 +12,9 @@ import {
 } from "../connectorsCatalog"
 
 const EXPECTED_CATEGORIES = [
+  // "Your documents" leads: the user's own uploaded documents as a connector
+  // (see the `uploads` category in connectorsCatalog.ts).
+  "Your documents",
   "Analytics",
   "Voice of Customer & Support",
   "Customer Relationship (CRM)",
@@ -25,13 +28,13 @@ const EXPECTED_CATEGORIES = [
 ] as const
 
 describe("CONNECTOR_CATALOG — design-3 shape", () => {
-  it("has exactly the 10 categories, in v6 order (CRM added; docs + revenue appended)", () => {
+  it("has exactly the 11 categories, in v6 order (Your documents leads; CRM added; docs + revenue appended)", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 40 connector rows across all categories (v6: + Segment, App/Play Store, CRM roster)", () => {
+  it("totals 41 connector rows across all categories (v6 roster + Uploaded documents)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(40)
+    expect(total).toBe(41)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -72,9 +75,17 @@ describe("CONNECTOR_CATALOG — category sub-labels", () => {
     expect(monitoring.subLabel).toBe("powers On-Call Agent")
   })
 
+  it("Your documents is labelled 'upload your own'", () => {
+    const uploads = CONNECTOR_CATALOG.find((c) => c.title === "Your documents")!
+    expect(uploads.subLabel).toBe("upload your own")
+  })
+
   it("other categories have no sub-label", () => {
     const others = CONNECTOR_CATALOG.filter(
-      (c) => c.title !== "Analytics" && c.title !== "Monitoring & Reliability",
+      (c) =>
+        c.title !== "Analytics"
+        && c.title !== "Monitoring & Reliability"
+        && c.title !== "Your documents",
     )
     for (const c of others) {
       expect(c.subLabel).toBeUndefined()
@@ -168,7 +179,7 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
 })
 
 describe("CONNECTOR_IDS_CONNECTABLE", () => {
-  it("contains all OAuth providers PLUS API-key (Fireflies) and credentials (Superset) ones", () => {
+  it("contains all OAuth providers PLUS API-key (Fireflies), credentials (Superset) and upload (Uploaded documents) ones", () => {
     expect([...CONNECTOR_IDS_CONNECTABLE].sort()).toEqual(
       [
         "asana",
@@ -182,6 +193,7 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
         "slack",
         "sprinklr",
         "superset",
+        "uploads",
       ].sort(),
     )
   })
@@ -210,6 +222,7 @@ describe("Business documentation category", () => {
 describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
   it("keeps only the categories that still have a wired connector, in order", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
+      "Your documents",
       "Analytics",
       "Voice of Customer & Support",
       "Customer Relationship (CRM)",
@@ -221,7 +234,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     ])
   })
 
-  it("shows only the 11 wired connectors (OAuth + API key + credentials) and nothing else", () => {
+  it("shows only the 12 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
     const ids = connectableCatalog()
       .flatMap((c) => c.items)
       .map((i) => i.id)
@@ -239,6 +252,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
         "slack",
         "sprinklr",
         "superset",
+        "uploads",
       ].sort(),
     )
   })
@@ -256,6 +270,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Business documentation")).toEqual(["google_drive"])
     expect(byTitle("Codebase")).toEqual(["github"])
     expect(byTitle("Communications")).toEqual(["slack"])
+    expect(byTitle("Your documents")).toEqual(["uploads"])
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {

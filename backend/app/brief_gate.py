@@ -12,6 +12,9 @@ needs-more-data state instead of burning a synthesis run to reach it.
 A company HAS a data source when either:
   - an ACTIVE connection exists for an evidence-bearing provider
     (see app.connectors.catalog.is_evidence_provider), or
+    — the `uploads` connector (the user's own named document sources) is one
+    of these, so it satisfies the gate through the ORDINARY connection path
+    with no special case here, or
   - the user has uploaded source files (the corpus `raw/` dir), which have
     always been able to drive a brief on their own. The workspace-context file
     onboarding seeds automatically is excluded — onboarding info alone must

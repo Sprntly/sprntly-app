@@ -214,10 +214,10 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders 40 connector rows total (v6 catalog: + Segment, App/Play Store, CRM roster)", () => {
+  it("renders 41 connector rows total (v6 catalog + Uploaded documents)", () => {
     const html = render()
     const matches = html.match(/class="set-conn-row"/g) ?? []
-    expect(matches.length).toBe(40)
+    expect(matches.length).toBe(41)
   })
 
   it("Asana row is wired for OAuth connect (no sync-engine support yet)", () => {
@@ -380,9 +380,9 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
   it("groups the wired connectors into their categories (empty categories dropped)", () => {
     const html = render({ categories: connectableCatalog() })
     const keptCategories = connectableCatalog()
-    // 11 wired connector rows across the surviving categories, one upload
+    // 12 wired connector rows across the surviving categories, one upload
     // strip per surviving category that allows manual upload.
-    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(11)
+    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(12)
     expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
       keptCategories.length,
     )
@@ -465,5 +465,59 @@ describe("ConnectorsSettings — admin-gate connect error mapping", () => {
     expect(html).not.toContain("Could not start google_drive connect")
     // It surfaces in the alert region for accessibility.
     expect(html).toContain('role="alert"')
+  })
+})
+
+describe("ConnectorsSettingsView — uploaded document sources", () => {
+  const source = {
+    id: "s-1",
+    name: "Q3 churn interviews",
+    description: "12 enterprise accounts — why they left.",
+    created_at: "2026-07-20T00:00:00Z",
+    file_count: 3,
+    files: [],
+  }
+
+  it("offers an add-a-source affordance on the uploads category", () => {
+    const html = render()
+    expect(html).toContain('data-testid="add-upload-source"')
+    expect(html).toContain("Add a document source")
+    expect(html).toContain("Name it, describe it, attach any files")
+  })
+
+  it("does not render the generic upload strip on the uploads category", () => {
+    // Files are attached inside the named-source flow instead.
+    expect(render()).not.toContain("Upload your documents export")
+  })
+
+  it("lists each source with its name, doc count and description", () => {
+    const html = render({ uploadSources: [source] })
+    expect(html).toContain('data-testid="upload-sources"')
+    expect(html).toContain("Q3 churn interviews")
+    expect(html).toContain("3 docs")
+    expect(html).toContain("12 enterprise accounts")
+  })
+
+  it("singularizes a one-document source", () => {
+    const html = render({ uploadSources: [{ ...source, file_count: 1 }] })
+    expect(html).toContain("1 doc<")
+  })
+
+  it("offers add-files and remove per source", () => {
+    const html = render({ uploadSources: [source] })
+    expect(html).toContain("Add files")
+    expect(html).toContain("Remove")
+  })
+
+  it("renders no source list when there are none", () => {
+    expect(render()).not.toContain('data-testid="upload-sources"')
+  })
+
+  it("shows the uploads connector as Connect when off and Configure when active", () => {
+    expect(render()).toContain("Uploaded documents")
+    const active = render({
+      connectionByProvider: new Map([["uploads", activeConn("uploads", "Your uploaded documents")]]),
+    })
+    expect(active).toContain("Your uploaded documents")
   })
 })

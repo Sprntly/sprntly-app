@@ -972,6 +972,35 @@ CREATE INDEX company_document_company_idx ON company_document (company_id);
 CREATE INDEX company_document_company_type_idx
     ON company_document (company_id, doc_type);
 
+-- Uploaded document sources (mirrors 20260723120000_document_sources.sql,
+-- SQLite-ized). A NAMED bundle of user-uploaded files (+ an optional
+-- description of what they are) surfaced as the `uploads` connector; the
+-- uploads puller reads these rows and yields RawRecords into the KG. uuid /
+-- timestamptz are TEXT here, matching the other seeded tables.
+CREATE TABLE document_source (
+    id           TEXT PRIMARY KEY,
+    company_id   TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    workspace_id TEXT,
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX document_source_company_idx ON document_source (company_id);
+
+CREATE TABLE document_source_file (
+    id             TEXT PRIMARY KEY,
+    source_id      TEXT NOT NULL REFERENCES document_source (id) ON DELETE CASCADE,
+    company_id     TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    filename       TEXT NOT NULL,
+    content_type   TEXT,
+    size_bytes     INTEGER NOT NULL DEFAULT 0,
+    extracted_text TEXT NOT NULL DEFAULT '',
+    raw_b64        TEXT,
+    uploaded_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX document_source_file_source_idx ON document_source_file (source_id);
+CREATE INDEX document_source_file_company_idx ON document_source_file (company_id);
+
 -- Onboarding drip / nudge email tracking (mirrors
 -- 20260614100000_drip_email_sends.sql). One row per delivered (company ×
 -- member × step); UNIQUE is the de-dup guard so steps never double-send.
