@@ -1254,13 +1254,17 @@ describe("useIterateRun — iterate keeps status 'ready'; done summary + fresh b
       useIterateRun({ prototypeId: PROTOTYPE_ID, onComplete, api }),
     )
 
+    let resolved: boolean | undefined
     await act(async () => {
       const run = result.current.runIterate("make it pop")
       await vi.runAllTimersAsync()
-      await run
+      resolved = await run
     })
 
     expect(result.current.error).toBe("Iteration timed out")
     expect(onComplete).not.toHaveBeenCalled()
+    // The run STARTED (it timed out after starting, not rejected before
+    // starting) — same catch-block return as the hard-failure path.
+    expect(resolved).toBe(true)
   })
 })
