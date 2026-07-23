@@ -15,12 +15,34 @@ preserved for the Drive UI.
 ## Google Drive
 
 Already documented in the Drive sync code itself. Uses Google's standard
-OAuth2 flow — service account is **not** used. Scopes:
-`https://www.googleapis.com/auth/drive.readonly`. Token refresh handled
-by the `google-auth` library; revocation happens on disconnect.
+OAuth2 flow — service account is **not** used. Scopes: the narrow
+`https://www.googleapis.com/auth/drive.file` (the app can only read files
+the user explicitly picks via the Google Picker — no Drive-wide listing).
+Token refresh handled by the `google-auth` library; revocation happens on
+disconnect.
 
 Env vars: `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
 `GOOGLE_OAUTH_REDIRECT_URI`.
+
+### Ingestion
+
+Picked files sync on two ledgers kept in the connection config
+(`app/connectors/google_drive_sync.py`):
+
+- **Corpus copy** (`file_mtime`) — each changed file is downloaded/exported
+  and ingested into the dataset corpus, then ledger-marked as a `corpus_doc`
+  kg_source so the brief's corpus seed doesn't re-extract it as an upload.
+- **Knowledge graph** (`kg_file_mtime`) — changed files are handed to
+  `app/kg_ingest/drive_extract.py`, which chunk-extracts each file as its
+  own document with `origin="connector"` and writes a per-file
+  `kg_source(source_type="google_drive")` provenance row (Drive file id,
+  modifiedTime, webViewLink). `kg_file_mtime` advances only after a file
+  fully extracts, so lost background threads retry on the next sync.
+
+Sync triggers: Picker save, the Settings "Sync" button, the scheduler's
+6-hourly `refresh_connectors` job (via `kickoff_sync`, which special-cases
+`google_drive` — it has no token puller in `PULLERS`), and the brief's
+first-time empty-KG seed (inline).
 
 ---
 

@@ -27,7 +27,7 @@ from app import datasets, db
 from app.connectors import google_oauth
 from app.connectors.google_oauth import credentials_from_token_json
 from app.connectors.tokens import decrypt_token_json, encrypt_token_json
-from app.ingest import SUPPORTED_SUFFIXES, UnsupportedFileType
+from app.ingest import SUPPORTED_SUFFIXES, UnsupportedFileType, convert
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,10 @@ class SyncResult:
     synced: list[dict] = field(default_factory=list)
     skipped: list[dict] = field(default_factory=list)
     errors: list[dict] = field(default_factory=list)
+    # Files handed to the KG extractor this run (names). Extraction itself is
+    # async unless kg_inline — kg_signals is only populated on the inline path.
+    kg_queued: list[str] = field(default_factory=list)
+    kg_signals: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -64,6 +68,8 @@ class SyncResult:
             "synced": self.synced,
             "skipped": self.skipped,
             "errors": self.errors,
+            "kg_queued": self.kg_queued,
+            "kg_signals": self.kg_signals,
         }
 
 
@@ -172,7 +178,8 @@ def get_file_metadata(service: Resource, file_id: str) -> dict:
     granted this app access to."""
     return (
         service.files()
-        .get(fileId=file_id, fields="id, name, mimeType, modifiedTime, size")
+        .get(fileId=file_id,
+             fields="id, name, mimeType, modifiedTime, size, webViewLink")
         .execute()
     )
 
@@ -212,17 +219,42 @@ def download_file_content(service: Resource, meta: dict) -> tuple[str, bytes] | 
     return name, data
 
 
+def _mark_corpus_doc(company_id: str, doc_name: str, md_text: str) -> None:
+    """Best-effort corpus-doc ledger mark (see
+    ``synthesis_brief.mark_corpus_doc_ingested``). A failed mark only risks
+    the corpus seed double-extracting this doc as origin="upload" — extraction
+    is content-keyed idempotent, so that costs an LLM call, not correctness."""
+    try:
+        from app.graph.facade import GraphFacade
+        from app.synthesis_brief import mark_corpus_doc_ingested
+
+        mark_corpus_doc_ingested(GraphFacade(), company_id, doc_name, md_text)
+    except Exception:  # noqa: BLE001
+        logger.warning("drive sync: corpus-doc ledger mark failed for %r",
+                       doc_name, exc_info=True)
+
+
 def sync_google_drive(
     *,
     company_id: str,
     dataset: str | None = None,
     files: list[dict] | None = None,
+    kg_inline: bool = False,
 ) -> SyncResult:
     """Download + ingest the explicitly-picked Drive files stored in the
     connection config (``config["files"]``). Pass ``files`` to overwrite the
     stored picked-file list first (used by the save-picked-files endpoint);
     otherwise the existing config is used. An empty picked-file list is a
-    graceful no-op — not an error."""
+    graceful no-op — not an error.
+
+    Two freshness ledgers per file: ``file_mtime`` (corpus copy) and
+    ``kg_file_mtime`` (KG extraction). A file changed against either gets
+    re-downloaded; the corpus copy re-ingests only when corpus-stale, and
+    KG-stale files are handed to the connector-origin extractor
+    (``kg_ingest.drive_extract``) — in a background thread by default, or
+    synchronously with ``kg_inline=True`` (the brief's first-time seed).
+    ``kg_file_mtime`` advances only after successful extraction, so a lost
+    background thread is retried on the next scheduled/manual sync."""
     row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
     if not row:
         raise SyncConfigError("Google Drive is not connected")
@@ -255,6 +287,15 @@ def sync_google_drive(
         return result
 
     mtime_map: dict[str, str] = dict(config.get("file_mtime") or {})
+    kg_mtime_map: dict[str, str] = dict(config.get("kg_file_mtime") or {})
+
+    from app.kg_ingest.drive_extract import (  # lazy — keeps graph/LLM deps off module load
+        DriveDoc,
+        kickoff_drive_extract,
+        run_drive_extract,
+    )
+
+    kg_docs: list[DriveDoc] = []
 
     try:
         service = build_drive_service(row)
@@ -282,7 +323,9 @@ def sync_google_drive(
 
         name = meta.get("name") or picked_name
         modified = meta.get("modifiedTime") or ""
-        if mtime_map.get(file_id) == modified:
+        corpus_fresh = mtime_map.get(file_id) == modified
+        kg_fresh = kg_mtime_map.get(file_id) == modified
+        if corpus_fresh and kg_fresh:
             result.skipped.append({"name": name, "reason": "unchanged"})
             continue
 
@@ -311,23 +354,57 @@ def sync_google_drive(
             )
             continue
 
-        try:
-            ingested = datasets.ingest_file(slug, filename, data)
-        except UnsupportedFileType:
-            result.skipped.append({"name": name, "reason": "unsupported after export"})
-            continue
-        except Exception as e:
-            result.errors.append({"name": name, "error": str(e)})
-            continue
+        md_text = ""
+        if not corpus_fresh:
+            try:
+                ingested = datasets.ingest_file(slug, filename, data)
+            except UnsupportedFileType:
+                result.skipped.append({"name": name, "reason": "unsupported after export"})
+                continue
+            except Exception as e:
+                result.errors.append({"name": name, "error": str(e)})
+                continue
 
-        mtime_map[file_id] = modified
-        result.synced.append(
-            {
-                "filename": ingested.original_filename,
-                "md_path": ingested.md_path,
-                "md_chars": ingested.md_chars,
-            }
-        )
+            try:
+                md_text = Path(ingested.md_path).read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                logger.warning("drive sync: could not re-read md for %r", filename,
+                               exc_info=True)
+            # Mark the corpus-doc ledger so the brief's corpus seed doesn't
+            # re-extract this same content as origin="upload" — Drive content
+            # reaches the KG through its own connector-origin path below.
+            if md_text:
+                _mark_corpus_doc(company_id, Path(ingested.md_path).stem, md_text)
+            mtime_map[file_id] = modified
+            result.synced.append(
+                {
+                    "filename": ingested.original_filename,
+                    "md_path": ingested.md_path,
+                    "md_chars": ingested.md_chars,
+                }
+            )
+        else:
+            # KG-only refresh (first pass after KG ingest shipped, or a prior
+            # extraction that never completed) — convert in memory, no
+            # duplicate corpus write.
+            try:
+                md_text = convert(filename, data)
+            except UnsupportedFileType:
+                result.skipped.append({"name": name, "reason": "unsupported after export"})
+                continue
+            except Exception as e:
+                result.errors.append({"name": name, "error": str(e)})
+                continue
+
+        if not kg_fresh and md_text.strip():
+            kg_docs.append(DriveDoc(
+                file_id=file_id,
+                name=Path(filename).stem,
+                modified=modified,
+                text=md_text,
+                mime=meta.get("mimeType") or "",
+                link=meta.get("webViewLink") or "",
+            ))
 
     merge_config(row, {"file_mtime": mtime_map, "dataset": slug})
     err = None
@@ -338,4 +415,17 @@ def sync_google_drive(
         google_oauth.GOOGLE_DRIVE_PROVIDER,
         last_sync_error=err,
     )
+
+    if kg_docs:
+        result.kg_queued = [d.name for d in kg_docs]
+        try:
+            if kg_inline:
+                extract = run_drive_extract(company_id, kg_docs)
+                result.kg_signals = extract.get("signals", 0)
+            else:
+                kickoff_drive_extract(company_id, kg_docs)
+        except Exception:  # noqa: BLE001 — extraction must never fail the sync
+            logger.exception(
+                "drive sync: KG extraction kick failed for %s", company_id
+            )
     return result

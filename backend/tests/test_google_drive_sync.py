@@ -59,6 +59,22 @@ def drive_connected(isolated_settings, monkeypatch):
     return company_id
 
 
+@pytest.fixture(autouse=True)
+def kg_kickoff(monkeypatch):
+    """Stub the async KG extraction kick so sync tests never spawn a real
+    extraction thread (LLM calls). Records the docs each call received."""
+    calls: list[list] = []
+
+    def _fake_kickoff(company_id, docs):
+        calls.append(list(docs))
+        return True
+
+    monkeypatch.setattr(
+        "app.kg_ingest.drive_extract.kickoff_drive_extract", _fake_kickoff
+    )
+    return calls
+
+
 def test_drive_http_error_access_not_configured():
     err = MagicMock()
     err.resp = MagicMock(status=403)
@@ -123,7 +139,7 @@ def test_sync_no_op_on_empty_picked_files(drive_connected):
     mock_build.assert_not_called()
 
 
-def test_sync_downloads_and_ingests_each_picked_file(drive_connected):
+def test_sync_downloads_and_ingests_each_picked_file(drive_connected, kg_kickoff):
     company_id = drive_connected
     file_meta = {
         "id": "file0001aa",
@@ -157,11 +173,35 @@ def test_sync_downloads_and_ingests_each_picked_file(drive_connected):
         assert result.dataset == "acme"
         assert len(result.synced) == 1
         assert result.synced[0]["md_chars"] > 0
+        # The changed file was handed to the KG extractor (async).
+        assert result.kg_queued == ["notes"]
+        assert len(kg_kickoff) == 1
+        assert kg_kickoff[0][0].file_id == "file0001aa"
+        assert "hello from drive" in kg_kickoff[0][0].text
 
-        # Second run: unchanged modifiedTime -> skipped.
+        # Second run: corpus copy is fresh, but extraction (stubbed) never
+        # advanced kg_file_mtime — the file is re-queued for the KG without a
+        # duplicate corpus write.
         result2 = sync_google_drive(company_id=company_id)
         assert len(result2.synced) == 0
-        assert result2.skipped[0]["reason"] == "unchanged"
+        assert result2.kg_queued == ["notes"]
+        assert len(kg_kickoff) == 2
+
+        # Simulate a completed extraction (what _record_kg_result does): with
+        # both ledgers fresh, the third run skips the file entirely.
+        import json as _json
+
+        row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+        cfg = _json.loads(row["config_json"])
+        cfg["kg_file_mtime"] = dict(cfg["file_mtime"])
+        db.patch_connection_config(
+            company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, cfg
+        )
+        result3 = sync_google_drive(company_id=company_id)
+        assert len(result3.synced) == 0
+        assert result3.kg_queued == []
+        assert result3.skipped[0]["reason"] == "unchanged"
+        assert len(kg_kickoff) == 2
     finally:
         for p in patches:
             p.stop()

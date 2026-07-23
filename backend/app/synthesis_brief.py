@@ -92,6 +92,27 @@ def _kg_is_empty(facade: GraphFacade, company_id: str) -> bool:
     return not facade.active_signals(company_id)
 
 
+def mark_corpus_doc_ingested(
+    facade: GraphFacade, company_id: str, doc_name: str, text: str
+) -> str:
+    """Record a corpus doc in the corpus_doc ledger WITHOUT extracting it.
+
+    Used by connector→corpus syncs (Google Drive) whose content reaches the KG
+    through their own connector-origin extraction path: marking the ledger here
+    keeps _seed_from_corpus from re-extracting the same bytes with
+    origin="upload". Same sha + source-id scheme as _seed_from_corpus, so
+    either side recording a doc makes the other skip it. Returns the sha."""
+    sha = hashlib.sha256(f"{company_id}|{text}".encode()).hexdigest()
+    facade.create_source(company_id, Source(
+        id=str(uuid.uuid5(_NS, f"corpus-doc|{company_id}|{sha}")),
+        enterprise_id=company_id,
+        source_type="corpus_doc",
+        label=doc_name[:200],
+        config={"content_sha": sha, "doc": doc_name, "via": "google_drive"},
+    ))
+    return sha
+
+
 def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
     """Incrementally extract the company's corpus into the KG.
 
@@ -158,7 +179,8 @@ def _seed_from_connectors(facade: GraphFacade, company_id: str) -> dict:
 
     Bounded (MAX_SEED_CONNECTORS) and fully isolated: a missing puller, a bad
     token, or a provider outage is logged and skipped — it never aborts the
-    seed. Providers without a kg_ingest puller (figma/slack/drive) are no-ops.
+    seed. Google Drive is special-cased (connection-config sync, not a token
+    puller); providers without any KG path (figma/slack) are no-ops.
     """
     totals = {"providers": 0, "signals": 0}
     try:
@@ -175,6 +197,20 @@ def _seed_from_connectors(facade: GraphFacade, company_id: str) -> dict:
 
     for row in connections[:MAX_SEED_CONNECTORS]:
         provider = row.get("provider")
+        if provider == "google_drive":
+            # Drive has no token puller — its docs come from the connection's
+            # picked-file config. Run its sync inline (kg_inline) so the
+            # extracted signals land before this first synthesis reads the KG.
+            try:
+                from app.connectors.google_drive_sync import sync_google_drive
+
+                r = sync_google_drive(company_id=company_id, kg_inline=True)
+                totals["providers"] += 1
+                totals["signals"] += r.kg_signals
+            except Exception:  # noqa: BLE001 — error-isolation per connector
+                logger.exception("seed: google_drive pull failed for %s",
+                                 company_id)
+            continue
         if provider not in PULLERS:
             continue
         try:
