@@ -343,6 +343,12 @@ def test_export_embeds_rendered_prd(rendered_env, monkeypatch):
     # P4-07: render_export_markdown now reads resolved comments (F16). Stub it out
     # here — this test asserts the PRD fold, not the new Resolved Feedback section.
     monkeypatch.setattr(export_mod, "list_resolved_comments", lambda **kw: [])
+    # Multi-screenshot design source: render_export_markdown now resolves a
+    # screenshot count via resolve_screenshot_keys. This fixture's fake DB has
+    # no prototype_screenshots table (it only seeds prds/prd_patches via the
+    # base harness) — stub it out here too, same reason as the other reads
+    # above: this test asserts the PRD fold, not screenshot handling.
+    monkeypatch.setattr(export_mod, "resolve_screenshot_keys", lambda **kw: [])
 
     md = asyncio.run(
         export_mod.render_export_markdown(1, 1, workspace_id="app")
