@@ -171,6 +171,41 @@ def test_build_corpus_respects_char_budget(monkeypatch):
     out = cd.build_corpus("co", cd.parse_window("calls", now=NOW))
     # First call always included; budget caps the rest well under 20.
     assert out.status == "ok" and out.count < 20 and out.count >= 1
+    assert out.total == 20  # the drop is recorded, not silent
+
+
+def _chatty_call(i, n_quotes=40):
+    return CallTranscript(
+        external_id=f"c{i}", title=f"Call {i}", date="2026-06-20",
+        participants=["p@x.com"], overview=f"overview {i}",
+        quotes=[{"speaker": "Cust", "text": f"call {i} quote {j} — {'x' * 60}"}
+                for j in range(n_quotes)],
+    )
+
+
+def test_build_corpus_trims_quotes_before_dropping_calls(monkeypatch):
+    # Regression: a month of chatty calls used to shrink to the newest ~5–7 —
+    # whole calls were dropped to fit the budget. The fit must instead keep
+    # EVERY call and sample fewer verbatim quotes per call.
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    calls = [_chatty_call(i) for i in range(30)]
+    full = len("\n\n".join(c.render() for c in calls))
+    monkeypatch.setattr(cd, "_CORPUS_CHAR_BUDGET", full // 3)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: calls)
+    out = cd.build_corpus("co", cd.parse_window("last 30 days calls", now=NOW))
+    assert out.status == "ok"
+    assert out.count == 30                        # every call still in
+    assert out.quote_cap is not None              # via a reduced quote cap
+    assert len(out.text) <= full // 3
+    for i in range(30):                           # all calls represented
+        assert f"Call {i}" in out.text
+
+
+def test_build_corpus_untrimmed_reports_no_quote_cap(monkeypatch):
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    out = cd.build_corpus("co", cd.parse_window("calls", now=NOW))
+    assert out.quote_cap is None and out.total == 2 and out.count == 2
 
 
 # ── answer branches ──────────────────────────────────────────────────────────
@@ -204,6 +239,26 @@ def test_answer_ok_renders_html_report_over_corpus(monkeypatch):
     # The report ran over the assembled corpus, scoped to the VoC skill.
     assert captured["model"] == cd.ANSWER_MODEL
     assert "Call 1" in captured["corpus_text"] and 'Cust: "quote 1"' in captured["corpus_text"]
+
+
+def test_answer_disclosure_when_quotes_trimmed(monkeypatch):
+    # When the fit trimmed quotes to keep every call in, the source line the
+    # report sees says so — the run line can then state real coverage.
+    import app.voc_report as vr
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    calls = [_chatty_call(i) for i in range(30)]
+    full = len("\n\n".join(c.render() for c in calls))
+    monkeypatch.setattr(cd, "_CORPUS_CHAR_BUDGET", full // 3)
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: calls)
+    captured = {}
+    monkeypatch.setattr(
+        vr, "build",
+        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>r</body></html>",
+    )
+    p = cd.answer(enterprise_id="co", question="summarize calls from the last 30 days")
+    assert p["answer"].startswith("<!DOCTYPE html>")
+    assert "30 calls" in captured["source_line"]
+    assert "quotes sampled" in captured["source_line"]
 
 
 def test_answer_autowidens_default_window_until_calls_found(monkeypatch):
