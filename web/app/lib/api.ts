@@ -1557,6 +1557,16 @@ export const prdApi = {
    *  poll via prdApi.get(id) until status === 'ready'. */
   generateFromTask: (task: string, force = false) =>
     api.post<PrdStartResponse>("/v1/prd/generate-from-task", { task, force }),
+  /** LLM fallback for the chat command decision (tier 2): does this message ask
+   *  us to CREATE a PRD? Called only when the message names a PRD but the regex
+   *  tier (isPrdCommand) didn't match — novel phrasings. `task` echoes the
+   *  user's topic + requirement details verbatim (null → caller falls back to
+   *  the raw message). Backend fails open to not-a-command. */
+  classifyCommand: (text: string) =>
+    api.post<{ is_prd_command: boolean; task: string | null; confidence: number }>(
+      "/v1/prd/classify-command",
+      { text },
+    ),
   /** The Evidence artifact behind a chat-task PRD (generated in parallel with
    *  the PRD from semantic KG retrieval over the task). Resolves null when the
    *  PRD isn't chat-sourced OR retrieval found no backing signals and the doc

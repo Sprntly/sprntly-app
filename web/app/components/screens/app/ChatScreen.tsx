@@ -11,7 +11,7 @@ import { useAuth } from "../../../lib/auth"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, type HomeChipItem } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
-import { BriefChat, isPrdCommand, isTicketsCommand, prdCommandTask } from "../../shared/BriefChat"
+import { BriefChat, isPrdCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../../shared/BriefChat"
 import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
@@ -1606,14 +1606,17 @@ export function ChatScreen() {
   // inside its own async block (network AFTER the render). The find-or-create
   // backend still serves an already-generated PRD from the DB rather than
   // regenerating it.
-  const prdCommandFlow = useCallback((seedQuery?: string) => {
+  const prdCommandFlow = useCallback((seedQuery?: string, taskOverride?: string | null) => {
     // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
     // the PRD from the user's own words. A GENERIC "generate a PRD" (no topic) is
     // seeded from THIS conversation — the user's turns in the active tab — so the
     // PRD is about what was actually discussed. (Previously a bare command
     // defaulted to the brief's top insight, which served an unrelated PRD.) With
     // no conversation to seed from, we ask for a topic rather than open junk.
-    const task = seedQuery ? prdCommandTask(seedQuery) : null
+    // `taskOverride` carries the classifier-extracted task on the LLM-fallback
+    // path, where the regex extractor (prdCommandTask) by definition can't parse
+    // the phrasing.
+    const task = taskOverride ?? (seedQuery ? prdCommandTask(seedQuery) : null)
     const activeTabNow = tabsRef.current.find((t) => t.id === activeTabIdRef.current)
     const effectiveTask = task || conversationToPrdTask(activeTabNow?.thread ?? [])
     if (!effectiveTask) {
@@ -1706,6 +1709,27 @@ export function ChatScreen() {
         // HTML dump).
         prdCommandFlow(trimmed)
         return
+      } else if (mentionsPrd(trimmed) && !(isPrdTab && !docFile)) {
+        // LLM fallback tier: the message NAMES a PRD but the regex tier didn't
+        // recognize a command — "various words a person might use" ("let's get
+        // a PRD going for checkout") can't all be regexed. Ask haiku before
+        // letting it fall through to the ask agent. Skipped on a PRD tab with
+        // no attachment: there, a PRD mention is near-always about the OPEN
+        // artifact and belongs to the grounded ask path (same reasoning as the
+        // deictic guard above). Fail-open: classifier error/low confidence →
+        // the message proceeds to the ask path exactly as before this tier.
+        const verdict = await import("../../../lib/api")
+          .then(({ prdApi }) => prdApi.classifyCommand(trimmed))
+          .catch(() => null)
+        if (verdict?.is_prd_command && verdict.confidence >= 0.7) {
+          if (docFile) {
+            setAttachments([])
+            importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+            return
+          }
+          prdCommandFlow(trimmed, verdict.task)
+          return
+        }
       }
       // Attached file content is folded into the ask as context. Text
       // attachments inline directly; document attachments (.pdf/.pptx/.docx/.doc)

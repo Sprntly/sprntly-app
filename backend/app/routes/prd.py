@@ -55,6 +55,7 @@ from app.db.prds import (
     update_prd_content,
 )
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
+from app.prd_command import classify_prd_command
 from app.prd_runner import (
     PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
     generate_prd_and_warm,
@@ -387,6 +388,25 @@ async def generate_from_task(
         "title": title,
         "variant": PRD_VARIANT,
     }
+
+
+class ClassifyCommandIn(BaseModel):
+    text: str = Field(..., min_length=1, max_length=8000)
+
+
+@router.post("/classify-command")
+def classify_command(
+    body: ClassifyCommandIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """LLM fallback for the chat command decision (tier 2 of the client's
+    slash→regex→LLM ladder): does this message ask us to CREATE a PRD, and for
+    what task? Called by ChatScreen only when the message names a PRD but the
+    regex tier (BriefChat.isPrdCommand) didn't match — novel phrasings.
+    Fail-open: any classifier error returns not-a-command, and the client
+    falls through to the ask agent exactly as before this endpoint existed."""
+    # enterprise_id == company_id (same identity the generate routes bind).
+    return classify_prd_command(company.company_id, body.text)
 
 
 @router.get("/{prd_id}/evidence")
