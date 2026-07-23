@@ -1,6 +1,8 @@
 <!--
   Supabase "confirmation" email (signup email confirmation).
-  Variables: {{ .ConfirmationURL }}, {{ .Email }}, {{ .SiteURL }}, {{ .Token }}.
+  Variables: {{ .TokenHash }}, {{ .Email }}, {{ .SiteURL }}, {{ .Token }}.
+  Links go to our /auth/confirm page (verify-on-click) — never the raw
+  Supabase verify URL, which mail scanners consume with a prefetch GET.
 
   Design: branded shell shared by all four auth templates + the drip emails
   (backend/app/drip_email.py) — paper #f6f5f1 background, white card, serif
@@ -35,7 +37,7 @@
             <table role="presentation" cellpadding="0" cellspacing="0">
               <tr>
                 <td align="center" style="border-radius:10px;background-color:#1a8a52">
-                  <a href="{{ .ConfirmationURL }}"
+                  <a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&amp;type=email"
                      style="display:inline-block;padding:13px 28px;font-family:'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px">
                     Confirm email address
                   </a>
@@ -44,7 +46,7 @@
             </table>
             <p style="margin:28px 0 0;font-family:'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:13px;line-height:1.6;color:#80838d">
               Or copy and paste this link into your browser:<br>
-              <a href="{{ .ConfirmationURL }}" style="color:#1a8a52;word-break:break-all">{{ .ConfirmationURL }}</a>
+              <a href="{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&amp;type=email" style="color:#1a8a52;word-break:break-all">{{ .SiteURL }}/auth/confirm?token_hash={{ .TokenHash }}&amp;type=email</a>
             </p>
             <hr style="border:none;border-top:1px solid #e9e8e4;margin:28px 0 20px">
             <p style="margin:0;font-family:'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12.5px;line-height:1.6;color:#80838d">
