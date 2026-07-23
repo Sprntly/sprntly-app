@@ -21,6 +21,7 @@ from typing import Any
 
 from app.db.prds import get_prd_rendered
 from app.db.prototype_comments import list_resolved_comments
+from app.db.prototype_screenshots import resolve_screenshot_keys
 from app.db.prototypes import get_prototype
 
 logger = logging.getLogger(__name__)
@@ -66,6 +67,16 @@ async def render_export_markdown(
     resolved_comments = list_resolved_comments(
         prototype_id=prototype_id, workspace_id=workspace_id
     )
+    # join-table-first, legacy-column-fallback-second — resolved ONCE here so a
+    # pre-ticket prototype (single legacy screenshot_key, zero join-table rows)
+    # exports identically to a post-ticket single-screenshot row. The raw key(s)
+    # never reach `_assemble`/`_render_design_source` — only this count does.
+    screenshot_count = len(
+        resolve_screenshot_keys(
+            prototype_id=prototype_id, workspace_id=workspace_id,
+            legacy_screenshot_key=prototype.get("screenshot_key"),
+        )
+    )
     return _assemble(
         prototype=prototype,
         checkpoint=checkpoint,
@@ -73,6 +84,7 @@ async def render_export_markdown(
         source_files=source_files,
         resolved_comments=resolved_comments,
         generated_at=datetime.now(timezone.utc).isoformat(),
+        screenshot_count=screenshot_count,
     )
 
 
@@ -84,6 +96,7 @@ def _assemble(
     source_files: dict[str, str],
     generated_at: str,
     resolved_comments: list[dict[str, Any]] | None = None,
+    screenshot_count: int = 0,
 ) -> str:
     """Pure assembly of the markdown body. Separated for testability —
     pass synthesised dicts (including a pre-loaded `source_files`) to lock
@@ -95,6 +108,13 @@ def _assemble(
     Feedback section. Both enrichment sections (Design Source, Resolved Feedback)
     are conditional and append AFTER the five core sections, so the P2-08/P3-17
     contract output is byte-identical when their data is absent.
+
+    `screenshot_count` (multi-screenshot design source) is a pre-resolved int —
+    the caller (`render_export_markdown`) computes it once via
+    `resolve_screenshot_keys`; `_assemble`/`_render_design_source` never read
+    `prototype["screenshot_key"]` themselves, so the raw storage key never
+    reaches this pure-function boundary. Defaults to 0 so every existing
+    non-screenshot call site needs no change.
     """
     title = prd.get("title") or f"Prototype {prototype['id']}"
     prd_md = prd.get("payload_md") or ""
@@ -161,7 +181,7 @@ def _assemble(
     # placeholder), so the five-section contract output stays byte-identical for the
     # common no-Figma + no-resolved-comments case.
     for section in (
-        _render_design_source(prototype),
+        _render_design_source(prototype, screenshot_count),
         _render_resolved_feedback(resolved_comments or []),
     ):
         if section:
@@ -171,10 +191,10 @@ def _assemble(
     return "\n".join(parts).rstrip() + "\n"
 
 
-def _render_design_source(prototype: dict[str, Any]) -> str:
+def _render_design_source(prototype: dict[str, Any], screenshot_count: int) -> str:
     """Render the Design Source section (F16) — names the design inputs the
-    prototype was generated from: the Figma file key and/or an uploaded
-    screenshot reference. Returns "" (omit the section entirely) when the
+    prototype was generated from: the Figma file key and/or N uploaded
+    screenshot references. Returns "" (omit the section entirely) when the
     prototype carries neither (Scenario B website / Scenario 0 no-input).
     When both are present, one section carries both lines, Figma first.
 
@@ -183,19 +203,22 @@ def _render_design_source(prototype: dict[str, Any]) -> str:
     inventing a path / node-id format would be a guess. The reader pastes the
     key into Figma's opener.
 
-    The screenshot line is a plain sentence — the `screenshot_key` storage key
-    is NEVER printed: it embeds the workspace id and a storage-internal path,
-    and this document gets pasted into third-party coding agents. Likewise no
-    link to the stored image is constructed. Provenance is the sentence, not
-    the key.
+    The screenshot line is a plain sentence — no storage key, `uploads/` path,
+    or workspace id is EVER printed: a raw key embeds the workspace id and a
+    storage-internal path, and this document gets pasted into third-party
+    coding agents. Likewise no link to any stored image is constructed.
+    Provenance is the sentence, not the key — `screenshot_count` (an
+    already-resolved int; see `render_export_markdown`) is the only
+    screenshot-related input this function ever sees.
     """
     figma_file_key = prototype.get("figma_file_key")
-    screenshot_key = prototype.get("screenshot_key")
     lines: list[str] = []
     if figma_file_key:
         lines.append(f"Generated from Figma file `{figma_file_key}`.")
-    if screenshot_key:
+    if screenshot_count == 1:
         lines.append("Generated from an uploaded screenshot reference.")
+    elif screenshot_count > 1:
+        lines.append(f"Generated from {screenshot_count} uploaded screenshot references.")
     if not lines:
         return ""
     return "## Design Source\n\n" + "\n".join(lines)

@@ -35,9 +35,16 @@ from tests.conftest import _TEST_COMPANY_ID
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def _patch_calc(monkeypatch, *, source=None, comments=None, checkpoint_id=10):
+def _patch_calc(monkeypatch, *, source=None, comments=None, checkpoint_id=10, screenshot_keys=None):
     source = source or {}
     comments = comments or []
+    # Default: zero screenshots — matches the implicit no-screenshot baseline
+    # every pre-existing test in this module already assumed before this
+    # ticket introduced `resolve_screenshot_keys` as a genuinely new DB call
+    # `estimate_iterate_cost` makes (previously it only read a flat dict key
+    # off the already-patched `get_prototype` return value). Patching this
+    # here keeps every OTHER `_patch_calc`-based test in this file unaffected.
+    resolved = list(screenshot_keys or [])
 
     async def _fake_read(prototype_id, cid):  # positional, async (S2 shape)
         return source
@@ -47,6 +54,7 @@ def _patch_calc(monkeypatch, *, source=None, comments=None, checkpoint_id=10):
     )
     monkeypatch.setattr(runner, "list_comments", lambda **_k: comments)
     monkeypatch.setattr(runner, "read_source_files_for_checkpoint", _fake_read)
+    monkeypatch.setattr(runner, "resolve_screenshot_keys", lambda **_k: resolved)
 
 
 def test_estimate_returns_expected_shape(monkeypatch):
@@ -152,6 +160,7 @@ def test_estimate_missing_checkpoint_yields_empty_bundle(monkeypatch):
     # empty bundle — no exception, defensive read skipped.
     monkeypatch.setattr(runner, "get_prototype", lambda **_k: {"current_checkpoint_id": None})
     monkeypatch.setattr(runner, "list_comments", lambda **_k: [])
+    monkeypatch.setattr(runner, "resolve_screenshot_keys", lambda **_k: [])
 
     async def _boom(*_a, **_k):  # must NOT be called when checkpoint is None
         raise AssertionError("read_source_files_for_checkpoint called with no checkpoint")
@@ -165,28 +174,66 @@ def test_estimate_missing_checkpoint_yields_empty_bundle(monkeypatch):
     assert out["model"] == "claude-sonnet-4-6"
 
 
-def test_estimate_adds_flat_image_tokens(monkeypatch):
-    # A prototype carrying a reference screenshot estimates a flat
-    # _SCREENSHOT_EST_INPUT_TOKENS more CACHED input (the image rides the
+def test_estimate_scales_tokens_by_screenshot_count(monkeypatch):
+    # AC14 — a prototype carrying N reference screenshots estimates
+    # _SCREENSHOT_EST_INPUT_TOKENS * N more CACHED input (the images ride the
     # cacheable prefix, re-entering every iterate turn); everything else is
-    # identical, so the screenshot estimate is ≥ the no-screenshot estimate by
-    # exactly the documented constant.
-    _patch_calc(monkeypatch, source={"App.tsx": "x" * 4000})
+    # identical, so 0/1/3 screenshots produce cached_input_tokens deltas of
+    # exactly 0/1600/4800 against the same no-screenshot baseline.
+    assert runner._SCREENSHOT_EST_INPUT_TOKENS == 1600
+
+    _patch_calc(monkeypatch, source={"App.tsx": "x" * 4000}, screenshot_keys=[])
     base = asyncio.run(
         runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hello")
     )
-    monkeypatch.setattr(
-        runner,
-        "get_prototype",
-        lambda **_k: {"current_checkpoint_id": 10, "screenshot_key": "uploads/ws/ref.png"},
-    )
-    shot = asyncio.run(
+
+    _patch_calc(monkeypatch, source={"App.tsx": "x" * 4000}, screenshot_keys=["uploads/ws/ref.png"])
+    one = asyncio.run(
         runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hello")
     )
-    assert runner._SCREENSHOT_EST_INPUT_TOKENS == 1600
-    assert shot["cached_input_tokens"] == base["cached_input_tokens"] + runner._SCREENSHOT_EST_INPUT_TOKENS
-    assert shot["new_input_tokens"] == base["new_input_tokens"]
-    assert shot["est_cost_usd"] >= base["est_cost_usd"]
+    assert one["cached_input_tokens"] == base["cached_input_tokens"] + 1600
+    assert one["new_input_tokens"] == base["new_input_tokens"]
+    assert one["est_cost_usd"] >= base["est_cost_usd"]
+
+    _patch_calc(
+        monkeypatch, source={"App.tsx": "x" * 4000},
+        screenshot_keys=["uploads/ws/a.png", "uploads/ws/b.png", "uploads/ws/c.png"],
+    )
+    three = asyncio.run(
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hello")
+    )
+    assert three["cached_input_tokens"] == base["cached_input_tokens"] + 4800
+
+
+def test_estimate_uses_legacy_fallback_when_join_table_empty(monkeypatch):
+    # AC15 — a monkeypatched resolve_screenshot_keys legacy-fallback path (1
+    # key) produces the identical cached_input_tokens delta as a
+    # join-table-backed 1-key prototype. The runner never distinguishes the
+    # two cases itself — resolve_screenshot_keys is the single source of
+    # truth it consults — so patching its return value directly proves the
+    # scaling logic is agnostic to WHERE the keys came from.
+    _patch_calc(monkeypatch, source={"App.tsx": "x" * 4000}, screenshot_keys=[])
+    base = asyncio.run(
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hello")
+    )
+    # legacy-fallback path: get_prototype carries a legacy screenshot_key,
+    # zero join-table rows — resolve_screenshot_keys collapses this to a
+    # 1-item list (mirrors resolve_screenshot_keys' own documented contract).
+    monkeypatch.setattr(
+        runner, "get_prototype",
+        lambda **_k: {"current_checkpoint_id": 10, "screenshot_key": "uploads/ws/legacy.png"},
+    )
+    monkeypatch.setattr(runner, "resolve_screenshot_keys", lambda **_k: ["uploads/ws/legacy.png"])
+    legacy = asyncio.run(
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hello")
+    )
+    # join-table-backed equivalent: same single key, different provenance.
+    _patch_calc(monkeypatch, source={"App.tsx": "x" * 4000}, screenshot_keys=["uploads/ws/ref.png"])
+    joined = asyncio.run(
+        runner.estimate_iterate_cost(prototype_id=1, workspace_id=_TEST_COMPANY_ID, prompt="hello")
+    )
+    assert legacy["cached_input_tokens"] == base["cached_input_tokens"] + 1600
+    assert legacy["cached_input_tokens"] == joined["cached_input_tokens"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -216,6 +263,14 @@ CREATE TABLE prototype_comments (
     status        TEXT NOT NULL DEFAULT 'open',
     created_at    TEXT NOT NULL DEFAULT (datetime('now')),
     user_id        TEXT
+);
+CREATE TABLE prototype_screenshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id  INTEGER NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    storage_key   TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 

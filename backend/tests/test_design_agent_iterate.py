@@ -146,10 +146,11 @@ def test_apply_pinned_still_element_targeted():
     assert "entire prototype" not in volatile["text"]
 
 
-def test_iterate_prefix_includes_screenshot_block_cache_stable():
-    # The reference-screenshot image block joins the CACHEABLE prefix as the
-    # LAST stable block, and the cache breakpoint MOVES onto it (a breakpoint
-    # left mid-prefix would silently re-bill the image every turn).
+def test_render_iterate_user_single_screenshot_block_byte_identical_to_pre_ticket():
+    # AC8/AC12 — a single-item screenshot_blocks list joins the CACHEABLE
+    # prefix as the LAST stable block, and the cache breakpoint MOVES onto it
+    # (a breakpoint left mid-prefix would silently re-bill the image every
+    # turn). Byte-identical to the pre-multi-screenshot single-image shape.
     shot = {
         "type": "image",
         "source": {"type": "base64", "media_type": "image/png", "data": "QUJDRA=="},
@@ -160,8 +161,8 @@ def test_iterate_prefix_includes_screenshot_block_cache_stable():
         iterate_prompt="change the title",
         applied_comment=None,
     )
-    c1, v1 = render_iterate_user(**kwargs, screenshot_block=shot)
-    c2, v2 = render_iterate_user(**kwargs, screenshot_block=shot)
+    c1, v1 = render_iterate_user(**kwargs, screenshot_blocks=[shot])
+    c2, v2 = render_iterate_user(**kwargs, screenshot_blocks=[shot])
 
     assert c1[-1]["type"] == "image"
     assert c1[-1]["source"]["media_type"] == "image/png"
@@ -175,11 +176,86 @@ def test_iterate_prefix_includes_screenshot_block_cache_stable():
     # The caller's block is never mutated.
     assert "cache_control" not in shot
 
-    # No screenshot → the single text block keeps the breakpoint, byte-identical
-    # to the pre-screenshot shape.
+
+def test_render_iterate_user_no_screenshot_blocks_none_unchanged():
+    # AC12 — screenshot_blocks=None produces the identical single-text-block
+    # shape as before this ticket.
+    kwargs = dict(
+        current_source={"src/App.tsx": "export default function App(){}"},
+        open_comments=[],
+        iterate_prompt="change the title",
+        applied_comment=None,
+    )
     c3, _v3 = render_iterate_user(**kwargs)
     assert [b["type"] for b in c3] == ["text"]
     assert c3[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+
+
+def test_render_iterate_user_no_screenshot_blocks_empty_list_unchanged():
+    # AC12 — screenshot_blocks=[] behaves identically to None.
+    kwargs = dict(
+        current_source={"src/App.tsx": "export default function App(){}"},
+        open_comments=[],
+        iterate_prompt="change the title",
+        applied_comment=None,
+    )
+    c_none, v_none = render_iterate_user(**kwargs, screenshot_blocks=None)
+    c_empty, v_empty = render_iterate_user(**kwargs, screenshot_blocks=[])
+    assert c_none == c_empty
+    assert v_none == v_empty
+
+
+def test_render_iterate_user_multi_screenshot_blocks_cache_on_last_block_only():
+    # AC13 — 3 screenshot blocks (with their own "Image N:" labels already
+    # built by the caller) -> cache_control present ONLY on the very last
+    # block in the returned cacheable-prefix list, absent from every other
+    # block including the earlier images/labels and the text block.
+    blocks = [
+        {"type": "text", "text": "Image 1:"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAA="}},
+        {"type": "text", "text": "Image 2:"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBB="}},
+        {"type": "text", "text": "Image 3:"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "CCC="}},
+    ]
+    cacheable, volatile = render_iterate_user(
+        current_source={"src/App.tsx": "export default function App(){}"},
+        open_comments=[],
+        iterate_prompt="change the title",
+        applied_comment=None,
+        screenshot_blocks=blocks,
+    )
+    assert cacheable[-1]["source"]["data"] == "CCC="
+    assert cacheable[-1]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
+    assert all("cache_control" not in b for b in cacheable[:-1])
+    assert "cache_control" not in volatile
+    # Leading source/comments text block, then label+image pairs in order.
+    assert len(cacheable) == 1 + len(blocks)
+    assert cacheable[0]["type"] == "text" and "Image 1:" not in cacheable[0]["text"]
+    assert [b.get("text") for b in cacheable[1:] if b["type"] == "text"] == [
+        "Image 1:", "Image 2:", "Image 3:",
+    ]
+    assert [b["source"]["data"] for b in cacheable[1:] if b["type"] == "image"] == [
+        "AAA=", "BBB=", "CCC=",
+    ]
+
+
+def test_render_iterate_user_never_mutates_caller_screenshot_blocks():
+    # Regression-pin (generalizes the existing single-block "caller's block is
+    # never mutated" assertion): none of the N input dicts gain a
+    # cache_control key as a side effect.
+    blocks = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAA="}},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBB="}},
+    ]
+    render_iterate_user(
+        current_source={},
+        open_comments=[],
+        iterate_prompt="tweak",
+        applied_comment=None,
+        screenshot_blocks=blocks,
+    )
+    assert all("cache_control" not in b for b in blocks)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -463,6 +539,14 @@ CREATE TABLE prototype_pending_iterations (
     started_at         TEXT,
     finished_at        TEXT
 );
+CREATE TABLE prototype_screenshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id  INTEGER NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    storage_key   TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -479,12 +563,17 @@ def env(isolated_settings, monkeypatch):
     importlib.reload(proto_mod)
     import app.db.prototype_comments as comments_mod
     importlib.reload(comments_mod)
+    import app.db.prototype_screenshots as screenshots_mod
+    importlib.reload(screenshots_mod)
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)
     import app.main as main_mod
     importlib.reload(main_mod)
 
-    return SimpleNamespace(proto=proto_mod, comments=comments_mod, routes=routes_mod, main=main_mod)
+    return SimpleNamespace(
+        proto=proto_mod, comments=comments_mod, screenshots=screenshots_mod,
+        routes=routes_mod, main=main_mod,
+    )
 
 
 @pytest.fixture
@@ -788,10 +877,13 @@ async def test_run_iterate_bg_open_comments_in_cacheable_prefix(env, monkeypatch
 
 
 def _seed_ready_with_screenshot(env, key: str) -> int:
-    """A ready prototype whose row carries a stored reference-screenshot key."""
+    """A ready prototype whose row carries a reference screenshot via the
+    new join table (mirrors what a post-ticket /generate call persists)."""
     pid = env.proto.start_prototype(
         prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1,
-        screenshot_key=key,
+    )
+    env.screenshots.insert_screenshots(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, storage_keys=[key],
     )
     env.proto.complete_prototype(
         prototype_id=pid, workspace_id=_TEST_COMPANY_ID,

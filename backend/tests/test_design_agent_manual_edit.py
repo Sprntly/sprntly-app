@@ -457,6 +457,14 @@ CREATE TABLE prototype_comments (
     resolved_at   TEXT,
     user_id        TEXT
 );
+CREATE TABLE prototype_screenshots (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    prototype_id  INTEGER NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    storage_key   TEXT NOT NULL,
+    position      INTEGER NOT NULL,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -473,6 +481,8 @@ def env(isolated_settings, monkeypatch):
     importlib.reload(proto_mod)
     import app.db.prototype_comments as comments_mod
     importlib.reload(comments_mod)
+    import app.db.prototype_screenshots as screenshots_mod
+    importlib.reload(screenshots_mod)
     import app.routes.design_agent as routes_mod
     importlib.reload(routes_mod)
     import app.routes.design_agent_comments as comment_routes_mod
@@ -481,7 +491,7 @@ def env(isolated_settings, monkeypatch):
     importlib.reload(main_mod)
 
     return SimpleNamespace(
-        proto=proto_mod, comments=comments_mod, routes=routes_mod,
+        proto=proto_mod, comments=comments_mod, screenshots=screenshots_mod, routes=routes_mod,
         comment_routes=comment_routes_mod, main=main_mod,
     )
 
@@ -876,12 +886,14 @@ def test_comment_routes_reachable_after_split(env, client, monkeypatch):
 async def test_manual_edit_never_attaches_screenshot(env, monkeypatch):
     # Boundary pin: a manual edit is a mechanical commit-back of a change the
     # user already saw — it gets NO design reference. Even when the row carries
-    # screenshot_key, the manual-edit user message stays text-only and the
-    # stored image is never read.
+    # a reference screenshot, the manual-edit user message stays text-only and
+    # the stored image is never read.
     key = f"uploads/{_TEST_COMPANY_ID}/feedface.png"
     pid = env.proto.start_prototype(
         prd_id=1, workspace_id=_TEST_COMPANY_ID, template_version=1,
-        screenshot_key=key,
+    )
+    env.screenshots.insert_screenshots(
+        prototype_id=pid, workspace_id=_TEST_COMPANY_ID, storage_keys=[key],
     )
     env.proto.complete_prototype(
         prototype_id=pid, workspace_id=_TEST_COMPANY_ID,
