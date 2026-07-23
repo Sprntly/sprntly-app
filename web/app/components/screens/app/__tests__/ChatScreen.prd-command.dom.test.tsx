@@ -22,8 +22,11 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand } = vi.hoisted(() => ({
   generateFromTask: vi.fn().mockResolvedValue({ prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3" }),
+  // Tier-2 LLM fallback (POST /v1/prd/classify-command). Default: not a command
+  // — individual tests override per-case.
+  classifyCommand: vi.fn().mockResolvedValue({ is_prd_command: false, task: null, confidence: 0.9 }),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -34,7 +37,7 @@ vi.mock("../../../../lib/api", () => {
     ApiError,
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 7, insights: [{ title: "x" }] }) },
-    prdApi: { generateFromTask },
+    prdApi: { generateFromTask, classifyCommand },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
@@ -124,6 +127,7 @@ beforeEach(() => {
   runAskGeneration.mockClear()
   runPrdGeneration.mockClear()
   generateFromTask.mockClear()
+  classifyCommand.mockClear()
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
@@ -154,12 +158,56 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
-  it("routes a normal question to the ask agent unchanged", async () => {
+  it("routes a normal question to the ask agent unchanged (no classifier call)", async () => {
     renderChat()
     await typeAndSend("Why did enterprise churn spike last month?")
 
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
     expect(runPrdGeneration).not.toHaveBeenCalled()
+    expect(generateFromTask).not.toHaveBeenCalled()
+    // No PRD mention → the LLM fallback tier must not even be consulted.
+    expect(classifyCommand).not.toHaveBeenCalled()
+  })
+
+  it("LLM fallback: a novel command phrasing the regex can't parse still generates", async () => {
+    // No verb from the tier-1 list, not noun-first — regex says "not a command".
+    // The message names a PRD, so tier 2 asks the classifier, which says yes.
+    classifyCommand.mockResolvedValueOnce({ is_prd_command: true, task: "checkout revamp", confidence: 0.92 })
+    renderChat()
+    await typeAndSend("let's get a PRD going for the checkout revamp")
+
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    expect(classifyCommand).toHaveBeenCalledWith("let's get a PRD going for the checkout revamp")
+    // The classifier-extracted task drives generation (the regex extractor
+    // can't parse this phrasing by definition).
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp")
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("LLM fallback: a PRD mention that is NOT a command falls through to the ask agent", async () => {
+    renderChat() // default classifyCommand mock: not a command
+    await typeAndSend("the requirements doc needs another pass from legal")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    expect(classifyCommand).toHaveBeenCalledTimes(1)
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("LLM fallback: low confidence is not enough to hijack the message", async () => {
+    classifyCommand.mockResolvedValueOnce({ is_prd_command: true, task: "something", confidence: 0.4 })
+    renderChat()
+    await typeAndSend("maybe the prd angle covers this?")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("LLM fallback: a classifier error fails open to the ask agent (send never breaks)", async () => {
+    classifyCommand.mockRejectedValueOnce(new Error("gateway down"))
+    renderChat()
+    await typeAndSend("circulate a prd summary to the team")
+
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
     expect(generateFromTask).not.toHaveBeenCalled()
   })
 
