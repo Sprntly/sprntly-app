@@ -22,11 +22,14 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask, classifyCommand } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand, clarifyTask } = vi.hoisted(() => ({
   generateFromTask: vi.fn().mockResolvedValue({ prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3" }),
   // Tier-2 LLM fallback (POST /v1/prd/classify-command). Default: not a command
   // — individual tests override per-case.
   classifyCommand: vi.fn().mockResolvedValue({ is_prd_command: false, task: null, confidence: 0.9 }),
+  // Clarify-first gate (POST /v1/prd/clarify-task). Default: sufficient —
+  // individual tests override to exercise the question loop.
+  clarifyTask: vi.fn().mockResolvedValue({ sufficient: true, questions: [], missing: [] }),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -37,7 +40,7 @@ vi.mock("../../../../lib/api", () => {
     ApiError,
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 7, insights: [{ title: "x" }] }) },
-    prdApi: { generateFromTask, classifyCommand },
+    prdApi: { generateFromTask, classifyCommand, clarifyTask },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
@@ -123,11 +126,17 @@ async function typeAndSend(text: string) {
 
 beforeEach(() => {
   localStorage.clear()
+  // Tabs persist to sessionStorage — without clearing, a previous test's PRD
+  // tab is restored into the next render and thread-composer selectors hit the
+  // wrong tab.
+  sessionStorage.clear()
   protoMap.clear()
   runAskGeneration.mockClear()
   runPrdGeneration.mockClear()
   generateFromTask.mockClear()
   classifyCommand.mockClear()
+  clarifyTask.mockClear()
+  clarifyTask.mockResolvedValue({ sufficient: true, questions: [], missing: [] })
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
@@ -253,5 +262,76 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined)
     expect(runPrdGeneration).not.toHaveBeenCalled()
+  })
+})
+
+async function typeAndSendInThread(text: string) {
+  const threadInput = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+  expect(threadInput).toBeTruthy()
+  await act(async () => { fireEvent.change(threadInput, { target: { value: text } }) })
+  const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+  await act(async () => { fireEvent.click(sendBtn) })
+}
+
+describe("ChatScreen — clarify-first sufficiency gate", () => {
+  const QUESTIONS = {
+    sufficient: false,
+    missing: ["Target users", "Success criteria"],
+    questions: [
+      { prompt: "Who are the target users?", options: ["Admins", "End users"] },
+      { prompt: "How will you measure success?", options: [] },
+    ],
+  }
+
+  it("an insufficient task asks questions INSTEAD of generating; the answer then generates with the details folded in", async () => {
+    clarifyTask.mockResolvedValueOnce(QUESTIONS)
+    renderChat()
+    await typeAndSend("generate a PRD for dark mode on mobile")
+
+    // The gate ran over the extracted task…
+    await waitFor(() => expect(clarifyTask).toHaveBeenCalledWith("dark mode on mobile", undefined))
+    // …questions appear in the tab's chat, and NOTHING generated yet.
+    await waitFor(() => expect(document.body.textContent).toContain("Who are the target users?"))
+    expect(document.body.textContent).toContain("generate now")
+    expect(generateFromTask).not.toHaveBeenCalled()
+
+    // The user answers in the same tab → generation runs with the combined task.
+    await typeAndSendInThread("admins only; success = 30% fewer support tickets")
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    const combined = generateFromTask.mock.calls[0][0] as string
+    expect(combined).toContain("dark mode on mobile")
+    expect(combined).toContain("Additional details from the user:")
+    expect(combined).toContain("admins only; success = 30% fewer support tickets")
+    // The answer was NOT misrouted to the ask agent or a new command.
+    expect(runAskGeneration).not.toHaveBeenCalled()
+  })
+
+  it("'generate now' skips the questions and generates from the ORIGINAL task", async () => {
+    clarifyTask.mockResolvedValueOnce(QUESTIONS)
+    renderChat()
+    await typeAndSend("generate a PRD for dark mode on mobile")
+    await waitFor(() => expect(document.body.textContent).toContain("Who are the target users?"))
+
+    await typeAndSendInThread("generate now")
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    expect(generateFromTask.mock.calls[0][0]).toBe("dark mode on mobile")
+  })
+
+  it("a sufficient task generates immediately (the gate ran, no questions)", async () => {
+    renderChat() // default clarifyTask mock: sufficient
+    await typeAndSend("generate a PRD for dark mode on mobile")
+
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    expect(clarifyTask).toHaveBeenCalledTimes(1)
+    expect(document.body.textContent).not.toContain("Who are the target users?")
+  })
+
+  it("a gate failure fails OPEN — generation proceeds as if sufficient", async () => {
+    clarifyTask.mockRejectedValueOnce(new Error("gateway down"))
+    renderChat()
+    await typeAndSend("generate a PRD for dark mode on mobile")
+
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
   })
 })

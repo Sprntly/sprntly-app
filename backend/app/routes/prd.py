@@ -416,6 +416,31 @@ async def generate_from_task(
     }
 
 
+class ClarifyTaskIn(BaseModel):
+    task: str = Field(..., min_length=3, max_length=4000)
+    source_docs: list[TaskSourceDoc] | None = Field(default=None, max_length=8)
+
+
+@router.post("/clarify-task")
+def clarify_task(
+    body: ClarifyTaskIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Sufficiency gate before chat-task PRD generation (clarify-first, issue d).
+
+    Runs on EVERY chat-PRD command — detailed-looking prompts included; length
+    is not sufficiency — over the task text + any documents attached earlier in
+    the thread. Returns either sufficient=true (the client generates
+    immediately) or 3–5 targeted questions the chat asks first, whose answers
+    the client folds into the task. Fail-open: any gate failure returns
+    sufficient=true, so this endpoint can never block generation.
+    """
+    from app.prd_clarify import clarify_prd_task
+
+    docs_md = _render_source_docs(body.source_docs) if body.source_docs else None
+    return clarify_prd_task(company.company_id, body.task.strip(), docs_md)
+
+
 class ClassifyCommandIn(BaseModel):
     text: str = Field(..., min_length=1, max_length=8000)
 
