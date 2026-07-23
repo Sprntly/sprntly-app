@@ -1220,6 +1220,10 @@ export type GoogleDriveSyncResult = {
   synced: { filename: string; md_path: string; md_chars: number }[]
   skipped: { name: string; reason: string }[]
   errors: { name: string; error: string }[]
+  /** Files handed to the knowledge-graph extractor this run (doc names).
+   *  Extraction runs in the background — presence here means "queued". */
+  kg_queued?: string[]
+  kg_signals?: number
 }
 
 /** A file the user picked via the Google Picker (drive.file scope). */
