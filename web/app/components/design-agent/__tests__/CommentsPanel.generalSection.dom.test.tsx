@@ -177,7 +177,9 @@ describe("pinned rendering + element-Apply stay unchanged with showGeneralSectio
     listComments.mockResolvedValue([pinnedComment()])
     clarifyComment.mockResolvedValue({ question: "Which style of weight — bold or a filled background?" })
     resolveComment.mockResolvedValue(pinnedComment({ status: "resolved" }))
-    const onIterateComment = vi.fn()
+    // Resolves `true` (a run actually started) — the container now awaits this
+    // return value and only resolves the comment when it resolves `true`.
+    const onIterateComment = vi.fn().mockResolvedValue(true)
 
     render(
       React.createElement(CommentsPanel, {

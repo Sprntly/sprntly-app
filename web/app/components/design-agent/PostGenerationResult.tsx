@@ -201,8 +201,10 @@ export type PostGenerationResultProps = {
   /** Apply a pin comment by running it
    *  through the canvas's SHARED iterate runner IMMEDIATELY (pin-context string +
    *  comment body as the instruction) instead of pre-filling the composer. When
-   *  supplied it takes precedence over `onPinApply`. */
-  onPinIterate?: (instruction: string, appliedCommentId?: number | null) => void
+   *  supplied it takes precedence over `onPinApply`. Resolves `true` when the
+   *  runner actually started a run, `false` when rejected (e.g. a second submit
+   *  while one is already in flight). */
+  onPinIterate?: (instruction: string, appliedCommentId?: number | null) => Promise<boolean>
   /** the live agent-flow activity for
    *  the LEFT panel — the user request, working steps, completion / clarifying
    *  question / error — driven by the shared runner (useIterateRun). */
@@ -358,8 +360,10 @@ export type PostGenerationResultViewProps = {
   iteratePendingQuestion?: import("../../lib/api").PendingQuestion | null
   onAnswerQuestion?: (answer: string) => void | Promise<void>
   onSkipQuestion?: () => void | Promise<void>
-  /** pin Apply → immediate iterate. */
-  onPinIterate?: (instruction: string, appliedCommentId?: number | null) => void
+  /** pin Apply → immediate iterate. Resolves `true` when the runner actually
+   *  started a run, `false` when rejected (e.g. a second submit while one is
+   *  already in flight). */
+  onPinIterate?: (instruction: string, appliedCommentId?: number | null) => Promise<boolean>
   /** cache-bust nonce → forces the
    *  iframe to reload the rebuilt bundle on each completed iterate. */
   bundleReloadNonce?: number
