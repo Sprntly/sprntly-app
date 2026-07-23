@@ -1,15 +1,20 @@
 export type ScreenId =
   // Numbered onboarding steps, keyed by their semantic slug (2026-07-21
-  // screenshot spec, keeping the optional api-key step — 9 steps), in flow
-  // order: company → product → metrics → api-key → connectors → workspace →
-  // invite → review → personalize (personalize closes via the unnumbered
-  // define-metrics sub-flow, or directly when analytics isn't connected).
+  // screenshot spec, keeping the optional api-key step, plus the optional
+  // import-context step added from client feedback 2026-07-22 — 10 steps), in
+  // flow order: company → import-context → connectors → api-key → workspace →
+  // product → metrics → invite → review → personalize (personalize closes
+  // via the unnumbered define-metrics sub-flow, or directly when analytics
+  // isn't connected). Reordered from the v7 spec so the two steps an import
+  // can't prefill (connectors, api-key) cover its background extraction — see
+  // ONBOARDING_STEP_SLUGS.
   | "ob-company"
+  | "ob-import-context"
+  | "ob-connectors"
+  | "ob-api-key"
+  | "ob-workspace"
   | "ob-product"
   | "ob-metrics"
-  | "ob-api-key"
-  | "ob-connectors"
-  | "ob-workspace"
   | "ob-invite"
   | "ob-review"
   | "ob-personalize"
@@ -43,11 +48,12 @@ export type ScreenId =
 // The NUMBERED onboarding screens, in flow order.
 export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-company",
+  "ob-import-context",
+  "ob-connectors",
+  "ob-api-key",
+  "ob-workspace",
   "ob-product",
   "ob-metrics",
-  "ob-api-key",
-  "ob-connectors",
-  "ob-workspace",
   "ob-invite",
   "ob-review",
   "ob-personalize",
@@ -77,15 +83,16 @@ export const APP_SCREENS: ScreenId[] = [
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-company": "Setup · Step 1 of 9",
-  "ob-product": "Setup · Step 2 of 9",
-  "ob-metrics": "Setup · Step 3 of 9",
-  "ob-api-key": "Setup · Step 4 of 9",
-  "ob-connectors": "Setup · Step 5 of 9",
-  "ob-workspace": "Setup · Step 6 of 9",
-  "ob-invite": "Setup · Step 7 of 9",
-  "ob-review": "Setup · Step 8 of 9",
-  "ob-personalize": "Setup · Step 9 of 9",
+  "ob-company": "Setup · Step 1 of 10",
+  "ob-import-context": "Setup · Step 2 of 10",
+  "ob-connectors": "Setup · Step 3 of 10",
+  "ob-api-key": "Setup · Step 4 of 10",
+  "ob-workspace": "Setup · Step 5 of 10",
+  "ob-product": "Setup · Step 6 of 10",
+  "ob-metrics": "Setup · Step 7 of 10",
+  "ob-invite": "Setup · Step 8 of 10",
+  "ob-review": "Setup · Step 9 of 10",
+  "ob-personalize": "Setup · Step 10 of 10",
   chat: "Home",
   chats: "History",
   artifacts: "Artifacts",

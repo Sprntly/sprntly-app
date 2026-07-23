@@ -3,7 +3,7 @@
 // Container mount test for the onboarding "api-key" step (step 04) — collect
 // the company's own Claude key BEFORE connectors.
 //
-// Covers: a valid key saves via the backend then advances to connectors; a
+// Covers: a valid key saves via the backend then advances to workspace; a
 // non-anthropic key is rejected inline (no save); the step is OPTIONAL for
 // EVERYONE (restored 2026-07-19) — a skip link is always shown, Continue is
 // enabled with an empty field, and an empty Continue skips without saving.
@@ -60,7 +60,7 @@ function keyInput() {
 }
 
 describe("ApiKey (onboarding step 04 — optional Claude key)", () => {
-  it("saves a valid key via the backend, then advances to connectors", async () => {
+  it("saves a valid key via the backend, then advances to workspace", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: makeWorkspace() }))
     mount()
     await act(async () => {
@@ -71,7 +71,7 @@ describe("ApiKey (onboarding step 04 — optional Claude key)", () => {
     })
     await waitFor(() => expect(setLlmKeyMock).toHaveBeenCalledWith("sk-ant-abcdef123456"))
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
   })
 
   it("rejects a non-anthropic key inline without saving", async () => {
@@ -98,7 +98,7 @@ describe("ApiKey (onboarding step 04 — optional Claude key)", () => {
     expect(cont.disabled).toBe(false)
   })
 
-  it("an empty Continue skips (marks api_key skipped, no save) and advances to connectors", async () => {
+  it("an empty Continue skips (marks api_key skipped, no save) and advances to workspace", async () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: makeWorkspace() }))
     mount()
     await act(async () => {
@@ -107,7 +107,7 @@ describe("ApiKey (onboarding step 04 — optional Claude key)", () => {
     await waitFor(() => expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["api_key"]))
     expect(setLlmKeyMock).not.toHaveBeenCalled()
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
   })
 
   it("the footer skip link advances without saving", async () => {
@@ -119,14 +119,14 @@ describe("ApiKey (onboarding step 04 — optional Claude key)", () => {
     })
     await waitFor(() => expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["api_key"]))
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 5)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
     expect(setLlmKeyMock).not.toHaveBeenCalled()
   })
 
-  it("Back returns to the metrics step", () => {
+  it("Back returns to the connectors step", () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: makeWorkspace() }))
     mount()
     fireEvent.click(screen.getByRole("button", { name: /back/i }))
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 })

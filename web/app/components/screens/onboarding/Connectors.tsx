@@ -19,6 +19,7 @@ import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedS
 import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
 import { ConnectorLogo } from "../../connectors/ConnectorLogo"
 import { CONNECTOR_IDS_CONNECTABLE } from "../../../lib/connectorsCatalog"
+import { stepForSlug } from "../../../lib/onboarding/types"
 import { Check } from "../../auth/icons"
 import {
   firstIncompleteCategory,
@@ -38,8 +39,15 @@ import {
  *
  * The FOOTER drives it: Skip / Continue complete the open category, collapse
  * it, and reveal the next. Once none are left Continue leaves the step,
- * relabelled "Continue to workspace". A progress bar + "N of M reviewed"
+ * relabelled "Continue to your key". A progress bar + "N of M reviewed"
  * counter track position within the step.
+ *
+ * WHY THIS SITS AT STEP 3, right after the context import: this step and the
+ * api-key step after it are the only two the import cannot prefill — one wires
+ * OAuth, the other takes a secret — so they are the two worth spending the
+ * background extraction's latency on. The user works through these categories
+ * while the LLM reads their uploaded file; every step from metrics onward
+ * opens pre-filled on the other side.
  *
  * Reviewed categories stay re-openable. Categories + connectors come from
  * CONNECTOR_CATALOG so this page tracks Settings automatically (the design
@@ -332,10 +340,14 @@ export function Connectors() {
     setSaving(true)
     try {
       if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
-      // Next numbered step is team (index 6 in ONBOARDING_STEP_SLUGS).
-      const updated = await advanceOnboardingStep(workspace.id, 6)
+      // Derived, not hardcoded: the flow order has been renumbered twice and a
+      // stale literal here silently resumes the user onto the wrong step.
+      const updated = await advanceOnboardingStep(
+        workspace.id,
+        stepForSlug("api-key") ?? 4,
+      )
       setWorkspace(updated)
-      router.push("/onboarding/workspace")
+      router.push("/onboarding/api-key")
     } finally {
       setSaving(false)
     }
@@ -398,7 +410,7 @@ export function Connectors() {
 
   return (
     <OnboardingChrome
-      step={5}
+      step={3}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -414,10 +426,10 @@ export function Connectors() {
           reviewed
         </>
       }
-      onBack={() => router.push("/onboarding/api-key")}
+      onBack={() => router.push("/onboarding/import-context")}
       onSkip={() => onFooterAdvance(true)}
       onContinue={() => onFooterAdvance(false)}
-      continueLabel={leavesStep ? "Continue to workspace" : "Continue"}
+      continueLabel={leavesStep ? "Continue to your key" : "Continue"}
       continueDisabled={saving}
       loading={saving}
     >

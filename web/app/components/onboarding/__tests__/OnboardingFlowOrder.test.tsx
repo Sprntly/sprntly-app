@@ -2,8 +2,8 @@
 //
 // Integrity tests for the semantic-slug onboarding flow (v6 screenshot spec
 // 2026-07-17 + the restored optional api-key step 2026-07-19, 10 steps):
-//   company → product → metrics → api-key → connectors → team → strategy →
-//   decisions → invite → review
+//   company -> import-context -> product -> metrics -> api-key ->
+//   connectors -> workspace -> invite -> review -> personalize
 // (api-key is an OPTIONAL/skippable step — also editable in Settings → Admin.
 //  Still retired: the closing workspace-naming step. The review step closes the
 //  numbered flow, then the UNNUMBERED define-metrics sub-flow completes
@@ -26,6 +26,8 @@ vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 // without dragging in their hooks/contexts.
 vi.mock("../../screens/onboarding", () => ({
   CompanyStep: () => React.createElement("div", { "data-screen": "company" }),
+  ImportContextStep: () =>
+    React.createElement("div", { "data-screen": "import-context" }),
   ProductStep: () => React.createElement("div", { "data-screen": "product" }),
   MetricsStep: () => React.createElement("div", { "data-screen": "metrics" }),
   ApiKey: () => React.createElement("div", { "data-screen": "api-key" }),
@@ -54,19 +56,26 @@ afterEach(() => {
 // renders the screen with the same data-screen marker).
 const EXPECTED_ORDER = [
   "company",
+  // Inserted 2026-07-22 (client feedback): bring your existing
+  // AI-assistant context in instead of retyping it. Optional.
+  "import-context",
+  // Reordered 2026-07-22 (client feedback): connectors + api-key are pulled up
+  // to sit directly after the import — they are the two steps an import cannot
+  // prefill, so they cover its background LLM extraction. Everything the import
+  // DOES prefill (workspace scope, product, metrics) follows behind them.
+  "connectors",
+  "api-key",
+  "workspace",
   "product",
   "metrics",
-  "api-key",
-  "connectors",
-  "workspace",
   "invite",
   "review",
   "personalize",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 9 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(9)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 10 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(10)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 

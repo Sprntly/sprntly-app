@@ -14660,6 +14660,108 @@
     background: var(--surface-2, #fff);
   }
 
+  /* ─── Connectors master/detail split ───
+     Category rail on the left, the selected category's connectors on the
+     right. Fixed rail width so the connector cards don't reflow as the user
+     moves between categories with different name lengths. */
+  .set-conn-split {
+    display: grid;
+    grid-template-columns: 192px minmax(0, 1fr);
+    gap: 24px;
+    align-items: start;
+    /* The detail column drops .set-block's own margin, so the split owns the
+       gap down to the "Uploaded files" block. */
+    margin-bottom: 18px;
+  }
+
+  .set-conn-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .set-conn-rail-item {
+    appearance: none;
+    border: 0;
+    background: transparent;
+    font-family: inherit;
+    font-size: 12.5px;
+    color: var(--ink-2);
+    text-align: left;
+    padding: 7px 11px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .set-conn-rail-item:hover:not(.is-active) {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  /* Selected category: dark filled pill, per the design mock. */
+  .set-conn-rail-item.is-active {
+    background: var(--ink);
+    color: var(--paper);
+    font-weight: 500;
+  }
+
+  .set-conn-rail-item:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  /* The detail column is a plain container, not a card — the connector rows
+     inside it carry their own borders (see `.set-conn-rows .set-conn-row`). */
+  .set-conn-detail {
+    min-width: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    padding: 0;
+    margin-bottom: 0;
+  }
+
+  .set-conn-detail .pset-card-head {
+    margin-bottom: 12px;
+  }
+
+  .set-conn-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  @media (max-width: 860px) {
+    /* Narrow: the rail collapses to a horizontally scrollable chip row above
+       the detail column. */
+    .set-conn-split {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 14px;
+    }
+
+    .set-conn-rail {
+      flex-direction: row;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+      scrollbar-width: thin;
+    }
+
+    .set-conn-rail-item {
+      flex: 0 0 auto;
+      white-space: nowrap;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 12px;
+    }
+
+    .set-conn-rail-item.is-active {
+      border-color: var(--ink);
+    }
+  }
+
   .set-conn-row {
     display: flex;
     align-items: center;
@@ -14670,6 +14772,15 @@
 
   .set-conn-row:last-of-type {
     border-bottom: none;
+  }
+
+  /* Inside the detail column each connector is its own bordered card rather
+     than a hairline-separated list row. */
+  .set-conn-rows .set-conn-row {
+    padding: 11px 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface-2);
   }
 
   .set-conn-row .logo {
@@ -14822,6 +14933,34 @@
     margin-left: auto;
     font-size: 10.5px;
     color: #aab2ac;
+  }
+
+  /* Import-from-your-AI strip (Settings → Connectors → Documents). Shares the
+     upload strip's frame but holds two buttons and a status line, so it wraps
+     rather than staying on one row, and it is not itself clickable — the
+     actions are. */
+  .set-conn-llm-context {
+    flex-wrap: wrap;
+    cursor: default;
+  }
+  .set-conn-llm-context:hover {
+    /* No hover affordance: the row isn't the click target, the buttons are. */
+    border-color: rgba(18, 32, 26, 0.18);
+    background: transparent;
+    color: #4a564f;
+  }
+
+  .set-conn-llm-actions {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
+  }
+
+  /* The status line drops onto its own full-width row beneath the actions. */
+  .set-conn-llm-context .muted[role="status"] {
+    flex-basis: 100%;
+    margin-left: 0;
+    line-height: 1.5;
   }
 
   /* Busy state while a manual upload converts + persists server-side. Gives
@@ -16131,6 +16270,257 @@
     background: rgba(193, 56, 56, 0.08);
     border-radius: var(--radius-sm);
     margin-bottom: 16px;
+  }
+
+  /* Import-context step (onboarding 02) — bring existing AI-assistant
+     context in. One option card (copy the prompt / upload the .md) plus a
+     manual-entry escape hatch beneath it. The card is a <div>, not a
+     <button>: it holds two independent actions, so it must not itself be one
+     clickable region. */
+  .onb-import-options {
+    display: grid;
+    gap: 12px;
+    margin-top: 4px;
+  }
+
+  .onb-import-card {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    width: 100%;
+    text-align: left;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+    font: inherit;
+    color: inherit;
+  }
+
+  /* The shortcut reads as the primary path without shouting: a stronger
+     border, not a filled block that would drown out the manual escape hatch
+     underneath it. */
+  .onb-import-card.is-recommended {
+    border-color: var(--ink);
+    border-width: 1.5px;
+  }
+
+  .onb-import-card-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .onb-import-card-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .onb-import-card-desc {
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--ink-2);
+  }
+  .onb-import-card-desc code {
+    font-family: var(--fm, ui-monospace, monospace);
+    font-size: 11px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--surface-2);
+  }
+
+  .onb-import-card-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .onb-badge {
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: var(--surface-3, var(--surface-2));
+    color: var(--ink-2);
+  }
+
+  /* Revealed prompt panel — "Show prompt" expands this beneath the card:
+     a labelled header, the prompt itself, and Copy in the footer. Sits as a
+     sibling of the card rather than inside it so the long monospace block
+     doesn't stretch the card's own layout. */
+  .onb-prompt-panel {
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+    overflow: hidden;
+  }
+
+  .onb-prompt-panel-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--line);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .onb-prompt-panel-head i {
+    font-size: 14px;
+    color: var(--ink-3);
+  }
+  .onb-prompt-panel-head code {
+    font-family: var(--fm, ui-monospace, monospace);
+    font-size: 11px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--surface-2);
+  }
+
+  /* An editable textarea, styled to read as a code block. Fixed height with
+     its own scroll: the prompt is long enough to push the footer off-screen on
+     a laptop, and Copy must stay reachable without scrolling the page.
+     Resizing is vertical-only — horizontal drag would break the card's
+     layout. */
+  textarea.onb-prompt-panel-body {
+    display: block;
+    width: 100%;
+    height: 260px;
+    margin: 0;
+    padding: 14px;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    resize: vertical;
+    overflow-y: auto;
+    font-family: var(--fm, ui-monospace, monospace);
+    font-size: 11.5px;
+    line-height: 1.65;
+    color: var(--ink-2);
+    white-space: pre-wrap;
+    word-break: break-word;
+    -moz-tab-size: 2;
+    tab-size: 2;
+  }
+  textarea.onb-prompt-panel-body:focus {
+    outline: 0;
+    background: var(--surface-2);
+  }
+
+  .onb-prompt-panel-foot {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 10px 14px;
+    border-top: 1px solid var(--line);
+  }
+
+  /* Pushes the buttons right and explains that edits are what get copied. */
+  .onb-prompt-panel-hint {
+    margin-right: auto;
+    font-size: 10.5px;
+    color: var(--ink-3);
+  }
+
+  /* Success readout after an import — states plainly what got pre-filled, so
+     the user knows exactly what to check on the steps that follow. */
+  .onb-import-result {
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink-2);
+    padding: 10px 12px;
+    margin-bottom: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+  }
+  .onb-import-result strong {
+    color: var(--ink);
+  }
+
+  .onb-import-manual {
+    font-size: 12px;
+    color: var(--ink-3);
+    text-align: center;
+    margin: 16px 0 0;
+  }
+
+  .onb-linkish {
+    border: 0;
+    background: none;
+    padding: 0;
+    font: inherit;
+    color: var(--ink);
+    text-decoration: underline;
+    cursor: pointer;
+  }
+
+  /* "Ran our prompt in your AI? Upload the .md" — the second-chance import on
+     the workspace step, which asks for the most typing in the flow. Boxed and
+     emphasised (per the v7 screenshot) so it reads as a shortcut past the
+     long-form fields above it, not as another field. */
+  .onb-md-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-top: 20px;
+    padding: 14px 16px;
+    border: 1.5px solid var(--ink);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+  }
+
+  .onb-md-banner-body {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  .onb-md-banner-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+  .onb-md-banner-title code {
+    font-family: var(--fm, ui-monospace, monospace);
+    font-size: 11.5px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--surface-1);
+  }
+
+  .onb-md-banner-desc {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--ink-3);
+  }
+
+  /* The banner's status line spans the full row under both columns. */
+  .onb-md-banner .onb-field-hint {
+    flex-basis: 100%;
+    margin: 0;
+  }
+
+  @media (max-width: 560px) {
+    .onb-import-card,
+    .onb-md-banner {
+      flex-direction: column;
+      align-items: stretch;
+    }
   }
 
   /* Buttons — scoped pill styling, mirrors the auth port. */

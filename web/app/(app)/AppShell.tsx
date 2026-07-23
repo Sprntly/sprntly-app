@@ -29,6 +29,7 @@ import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
 import { useAuth } from "../lib/auth"
 import { connectorsApi, teamApi, type TeamMemberRecord } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
+import { fetchInsightPrefs } from "../lib/onboarding/insightPrefs"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
 import { useGenerationNotify } from "./hooks/useGenerationNotify"
 
@@ -92,6 +93,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       })
       .catch(() => {})
   }, [setContent, workspace?.id])
+
+  // Load THIS member's saved insight-type filter (user_insight_prefs) so the
+  // Top Insights tab shows only the types they picked in onboarding / Settings →
+  // Top Insights. Empty = surface everything. Mirrored into ContentContext so
+  // BriefChat reads it without taking on workspace/auth deps of its own.
+  useEffect(() => {
+    if (!workspace?.id || auth.kind !== "authed") return
+    void fetchInsightPrefs(workspace.id, auth.user.id)
+      .then((prefs) => setContent({ insightTypeFilter: prefs.insightTypes }))
+      .catch(() => {})
+  }, [setContent, workspace?.id, auth])
 
   // Load real team members from the database so ticket reassignment and
   // other assignee pickers show actual company users instead of demo data.

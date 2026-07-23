@@ -328,11 +328,27 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  */
 export const ONBOARDING_STEP_SLUGS = [
   "company",
+  // Step 2 (client feedback, 2026-07-22): hand over the context you have
+  // already explained to your own AI assistant instead of retyping it. Sits
+  // right after `company` because everything from here on — product, users,
+  // metrics, workspace scope — is what the import prefills. It is OPTIONAL:
+  // "Fill it in manually" advances with nothing imported.
+  "import-context",
+  // Reordered from the v7 spec (client feedback, 2026-07-22). `connectors` and
+  // `api-key` are pulled up to sit directly after the import, and `product`
+  // moved to the far side of `workspace`.
+  //
+  // The reason is the import: it kicks a background LLM extraction over the
+  // uploaded file, and connectors + api-key are the two steps in the flow that
+  // extraction cannot prefill (one wires OAuth, the other takes a secret). So
+  // they are the steps worth spending its latency on. Everything the import
+  // DOES prefill — metrics, workspace scope, product — now sits behind them,
+  // and opens with the extracted fields already in place.
+  "connectors",
+  "api-key",
+  "workspace",
   "product",
   "metrics",
-  "api-key",
-  "connectors",
-  "workspace",
   "invite",
   "review",
   "personalize",

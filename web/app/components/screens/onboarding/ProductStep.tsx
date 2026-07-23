@@ -18,6 +18,7 @@ import {
 import {
   MONETIZATION_OPTIONS,
   SURFACE_OPTIONS,
+  stepForSlug,
 } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { Check } from "../../auth/icons"
@@ -40,7 +41,8 @@ export function parseCompetitors(raw: string): string[] {
 }
 
 /**
- * Onboarding step 02 — "Your product" (v6 screenshot spec 2026-07-17).
+ * Onboarding step 06 — "Your product" (v6 screenshot spec 2026-07-17,
+ * reordered 2026-07-22).
  *
  * Product name* and surfaces* are mandatory; website, monetization (single
  * dropdown), and the "tell us about your users" prose are optional, with
@@ -140,7 +142,7 @@ export function ProductStep() {
       })
       const updated = await updateWorkspace(workspace.id, {
         competitors: parseCompetitors(competitors),
-        onboarding_step: 3,
+        onboarding_step: stepForSlug("metrics") ?? 7,
       })
       setWorkspace({ ...updated, product })
       clearDraft(DRAFT_KEY)
@@ -160,7 +162,7 @@ export function ProductStep() {
 
   return (
     <OnboardingChrome
-      step={2}
+      step={6}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -169,7 +171,7 @@ export function ProductStep() {
       }
       subtitle="Name, where it lives, and how it makes money. Product position and competitors live in Settings."
       footerMeta="Product"
-      onBack={() => router.push("/onboarding/company")}
+      onBack={() => router.push("/onboarding/workspace")}
       onContinue={() => void save()}
       continueLabel="Next"
       continueDisabled={saving}

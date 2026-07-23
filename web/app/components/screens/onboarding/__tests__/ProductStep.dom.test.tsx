@@ -230,7 +230,7 @@ describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization +
     // Competitors are parsed/deduped onto the company row with the step bump.
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       competitors: ["Fitbit", "Oura"],
-      onboarding_step: 3,
+      onboarding_step: 7,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
   })

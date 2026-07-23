@@ -16,6 +16,7 @@ export type SettingsSectionId =
   // Active (rendered in SETTINGS_NAV)
   | "profile"
   | "comms-brief"
+  | "top-insights"
   | "product-category"
   | "company-profile"
   | "process"
@@ -54,6 +55,8 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     items: [
       { id: "profile", label: "Profile", available: true },
       { id: "comms-brief", label: "Comms & Brief", available: true },
+      // Per-user: which insight types this member wants as their Top Insights.
+      { id: "top-insights", label: "Top Insights", available: true },
       // Multi-workspace (2026-07): manage the real workspaces rows.
       { id: "workspaces", label: "Workspaces", available: true },
     ],

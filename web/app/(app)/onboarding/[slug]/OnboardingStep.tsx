@@ -6,6 +6,7 @@ import {
   ApiKey,
   CompanyStep,
   Connectors,
+  ImportContextStep,
   InviteStep,
   MetricsStep,
   PersonalizeStep,
@@ -23,25 +24,34 @@ import {
  * semantic slug with its screen component, in flow order (2026-07-21
  * screenshot spec):
  *
- *   1. company     → CompanyStep     (name*; website/strategy, mission +
- *                                     portfolio + planning cycle behind
- *                                     "Add more")
- *   2. product     → ProductStep     (name* + surfaces*; monetization/users/
- *                                     competitors optional)
- *   3. metrics     → MetricsStep     (pick up to 5 metrics* + framework*)
- *   4. api-key     → ApiKey          (own Claude/Anthropic key — OPTIONAL,
- *                                     skippable; also in Settings → Admin)
- *   5. connectors  → Connectors      (connect your tools — all optional)
- *   6. workspace   → WorkspaceStep   (name* + scope*; strategy/roadmap; sizing
- *                                     + extras behind "Add more". Collapses the
- *                                     former team/strategy/decisions steps.)
- *   7. invite      → InviteStep      (email + job role + permission, bulk
- *                                     paste, CSV)
- *   8. review      → ReviewStep      (accept the AI business context)
- *   9. personalize → PersonalizeStep (what to surface + brief delivery; hands
- *                                     off to /onboarding/define-metrics when
- *                                     analytics is connected, otherwise
- *                                     completes onboarding itself)
+ *   1. company        → CompanyStep       (name*; website/strategy, mission +
+ *                                        portfolio + planning cycle behind
+ *                                        "Add more")
+ *   2. import-context → ImportContextStep (bring your existing AI-assistant
+ *                                        context in — paste our prompt into
+ *                                        any assistant, upload the .md it
+ *                                        returns. OPTIONAL: skipping means
+ *                                        typing the later steps by hand)
+ *   3. connectors     → Connectors        (connect your tools — all optional)
+ *   4. api-key        → ApiKey            (own Claude/Anthropic key — OPTIONAL,
+ *                                        skippable; also in Settings → Admin)
+ *
+ *   Steps 3-4 sit here BY DESIGN: they are the two the context import cannot
+ *   prefill, so they cover its background extraction. Everything below opens
+ *   with the extracted fields already in place.
+ *
+ *   5. workspace      → WorkspaceStep     (name* + scope*; strategy/roadmap;
+ *                                        sizing + extras behind "Add more")
+ *   6. product        → ProductStep       (name* + surfaces*; monetization/
+ *                                        users/competitors optional)
+ *   7. metrics        → MetricsStep       (pick up to 5 metrics* + framework*)
+ *   8. invite         → InviteStep        (email + job role + permission, bulk
+ *                                        paste, CSV)
+ *   9. review         → ReviewStep        (accept the AI business context)
+ *  10. personalize    → PersonalizeStep   (what to surface + brief delivery;
+ *                                        hands off to /onboarding/define-metrics
+ *                                        when analytics is connected, otherwise
+ *                                        completes onboarding itself)
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
  * `onboarding_step` is the 1-based index into both).
@@ -51,11 +61,12 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   Component: React.ComponentType
 }> = [
   { slug: "company", Component: CompanyStep },
+  { slug: "import-context", Component: ImportContextStep },
+  { slug: "connectors", Component: Connectors },
+  { slug: "api-key", Component: ApiKey },
+  { slug: "workspace", Component: WorkspaceStep },
   { slug: "product", Component: ProductStep },
   { slug: "metrics", Component: MetricsStep },
-  { slug: "api-key", Component: ApiKey },
-  { slug: "connectors", Component: Connectors },
-  { slug: "workspace", Component: WorkspaceStep },
   { slug: "invite", Component: InviteStep },
   { slug: "review", Component: ReviewStep },
   { slug: "personalize", Component: PersonalizeStep },

@@ -1,11 +1,14 @@
 /**
  * Settings → Connectors pane.
  *
- * Renders connectors GROUPED BY CATEGORY — one card per catalog category
- * (Analytics · required, Project Management, …), each with its connector
- * rows and a per-category upload strip at the card's foot (suppressed for
- * categories with `allowsManualUpload: false` — see the catalog). Only connectors
- * with a working integration (OAuth / API key) are shown
+ * MASTER/DETAIL layout: a narrow vertical rail of catalog categories on the
+ * left (Analytics · required, Project Management, …) and, on the right, only
+ * the SELECTED category's connector rows — each its own bordered card — with
+ * that category's upload strip at the foot (suppressed for categories with
+ * `allowsManualUpload: false` — see the catalog). The old stacked-cards
+ * layout put every category on one very long scroll; the rail keeps the pane
+ * one screen tall no matter how many categories the catalog grows to.
+ * Only connectors with a working integration (OAuth / API key) are shown
  * (`connectableCatalog`) — "Coming soon" connectors are hidden so we don't
  * surface things the user can't use.
  * Each row shows the connector's real brand logo (a locally bundled SVG via
@@ -14,14 +17,28 @@
  * Connection state (Active vs Off) and the per-row "Configure"/"Connect"
  * action come from `connectorsApi.list()`.
  *
+ * The rail is a real tab control (role="tablist" + roving tabindex + arrow
+ * keys), and the search box above the split filters BOTH columns: the rail
+ * shows only matching categories and the detail pane falls back to the first
+ * one still visible (see resolveSelectedCategory).
+ *
  * The exported View component is pure (no hooks, no IO) and unit-tested
- * via renderToStaticMarkup per the design-agent test convention. The
+ * via renderToStaticMarkup per the design-agent test convention — which is
+ * why the selected category lives as state in the hooks wrapper below and
+ * arrives as `selectedCategoryKey` / `onSelectCategory` props. The
  * default-exported ConnectorsSettings hooks-component wires state and
  * navigation callbacks into the View.
  */
 "use client"
 
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from "react"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useContent } from "../../../../context/ContentContext"
 import { useNavigation } from "../../../../context/NavigationContext"
@@ -67,6 +84,7 @@ import {
 } from "../../../connectors/CredentialsPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
+import { LlmContextImportCard } from "../../../connectors/LlmContextImportCard"
 import { UploadSourceModal } from "../../../connectors/UploadSourceModal"
 
 /** Provider id of the "upload your own documents" connector. */
@@ -159,6 +177,23 @@ export function filterConnectorCategories(
     .filter((cat) => cat.items.length > 0)
 }
 
+/**
+ * Which category the detail column shows. The selection is a plain key held
+ * by the caller, so it can go stale two ways: the search filtered the picked
+ * category out, or the catalog changed under it. Both fall back to the first
+ * VISIBLE category rather than rendering an empty right column. `null` (the
+ * initial state) therefore means "the first category", which keeps the
+ * wrapper from having to guess a default before the catalog resolves.
+ * Pure — unit-testable.
+ */
+export function resolveSelectedCategory(
+  categories: ConnectorCategoryRow[],
+  selectedKey: string | null | undefined,
+): ConnectorCategoryRow | null {
+  if (categories.length === 0) return null
+  return categories.find((c) => c.key === selectedKey) ?? categories[0]
+}
+
 // ─────────────────────────── Pure View ───────────────────────────
 
 export type ConnectorsSettingsViewProps = {
@@ -215,6 +250,22 @@ export type ConnectorsSettingsViewProps = {
   /** Open the modal in add-files-to-existing-source mode. */
   onAddFilesToSource?: (sourceId: string) => void
   onRemoveUploadSource?: (sourceId: string) => void
+  /**
+   * Slot rendered under the uploads category's actions — the
+   * import-from-your-AI card. Passed in rather than imported so this View
+   * stays hook-free and IO-free for the renderToStaticMarkup tests; the
+   * hooks wrapper supplies the real (stateful) card.
+   */
+  uploadsExtra?: ReactNode
+  /**
+   * Key of the category selected in the left rail. `null`/unknown key =
+   * "the first visible category" (see resolveSelectedCategory), so the
+   * wrapper can start at null and search can filter freely without the
+   * detail column ever going blank. The state lives in the wrapper so this
+   * View stays hook-free for the renderToStaticMarkup tests.
+   */
+  selectedCategoryKey?: string | null
+  onSelectCategory?: (categoryKey: string) => void
 }
 
 export function ConnectorsSettingsView({
@@ -236,14 +287,51 @@ export function ConnectorsSettingsView({
   onAddUploadSource,
   onAddFilesToSource,
   onRemoveUploadSource,
+  uploadsExtra,
+  selectedCategoryKey = null,
+  onSelectCategory,
 }: ConnectorsSettingsViewProps) {
   const visibleCategories = filterConnectorCategories(categories, searchQuery)
+  const activeCategory = resolveSelectedCategory(
+    visibleCategories,
+    selectedCategoryKey,
+  )
+
+  /**
+   * Arrow/Home/End navigation for the category rail, per the WAI-ARIA tabs
+   * pattern (the rail uses a roving tabindex, so only the selected tab is in
+   * the page tab order and the arrows move between them). Selection follows
+   * focus — there's no expensive work behind a tab, just a re-render.
+   * Not a hook: it runs from the event, so the View stays pure at render.
+   */
+  function onRailKeyDown(e: KeyboardEvent<HTMLButtonElement>, index: number) {
+    const last = visibleCategories.length - 1
+    let next: number
+    if (e.key === "ArrowDown" || e.key === "ArrowRight") {
+      next = index === last ? 0 : index + 1
+    } else if (e.key === "ArrowUp" || e.key === "ArrowLeft") {
+      next = index === 0 ? last : index - 1
+    } else if (e.key === "Home") {
+      next = 0
+    } else if (e.key === "End") {
+      next = last
+    } else {
+      return
+    }
+    e.preventDefault()
+    onSelectCategory?.(visibleCategories[next].key)
+    // Move real focus with the selection so the pattern is usable by
+    // keyboard and screen readers, not just visually correct.
+    const rail = e.currentTarget.parentElement
+    rail?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
+  }
+
   return (
     <div className="set-pane sp-connectors">
       <div className="set-h">Connectors</div>
       <div className="set-sub">
-        Every source feeding your agents, grouped by category. Connect a tool
-        or upload files directly to any category.
+        Every source feeding your agents. Pick a category on the left;
+        connect or upload on the right.
       </div>
 
       {/* Search — matches a category name (shows the whole group) or a
@@ -300,11 +388,6 @@ export function ConnectorsSettingsView({
       ) : null}
       {loading ? <p className="settings-loading">Loading connectors…</p> : null}
 
-      {/* One card per category (the design's grouped layout): serif category
-          title + optional "· required" hint, the category's connector rows,
-          and a per-category upload strip at the card's foot. Uploads are still
-          stored company-wide server-side — the category key just labels the
-          gesture. */}
       {/* No matches for the active search — say so instead of a blank pane. */}
       {searchQuery.trim() !== "" && visibleCategories.length === 0 ? (
         <p className="settings-placeholder" data-testid="conn-search-empty">
@@ -312,165 +395,225 @@ export function ConnectorsSettingsView({
         </p>
       ) : null}
 
-      {visibleCategories.map((cat) => (
-        <section key={cat.key} className="set-block sp-conn-cat" data-category={cat.key}>
-          <div className="pset-card-head">
-            <h3 className="pset-card-title">{cat.title}</h3>
-            {cat.subLabel ? (
-              <span className="pset-card-hint">· {cat.subLabel}</span>
-            ) : null}
+      {/* Master/detail. LEFT: the category rail (a tablist — see
+          onRailKeyDown). RIGHT: only the selected category's connector rows
+          plus its upload strip. Uploads are still stored company-wide
+          server-side — the category key just labels the gesture. */}
+      {activeCategory ? (
+        <div className="set-conn-split">
+          <div
+            className="set-conn-rail"
+            role="tablist"
+            aria-orientation="vertical"
+            aria-label="Connector categories"
+          >
+            {visibleCategories.map((cat, index) => {
+              const selected = cat.key === activeCategory.key
+              return (
+                <button
+                  key={cat.key}
+                  type="button"
+                  role="tab"
+                  id={`conn-cat-tab-${cat.key}`}
+                  aria-controls={`conn-cat-panel-${cat.key}`}
+                  aria-selected={selected}
+                  // Roving tabindex: the rail is ONE stop in the page tab
+                  // order; arrows move between categories inside it.
+                  tabIndex={selected ? 0 : -1}
+                  className={`set-conn-rail-item${selected ? " is-active" : ""}`}
+                  data-category={cat.key}
+                  onClick={() => onSelectCategory?.(cat.key)}
+                  onKeyDown={(e) => onRailKeyDown(e, index)}
+                >
+                  {cat.title}
+                </button>
+              )
+            })}
           </div>
 
-          {cat.items.map((item) => {
-            const conn = connectionByProvider.get(item.id) ?? null
-            const state = getConnectorRowState(item, conn)
-            return (
-              <div key={item.id} className="set-conn-row">
-                <ConnectorLogo item={item} className="logo" />
-                <div className="nm">
-                  <div className="t">{item.name}</div>
-                  <div className={`s${state.disconnected ? " is-disconnected" : ""}`}>
-                    {state.statsString}
+          <section
+            className="set-block sp-conn-cat set-conn-detail"
+            role="tabpanel"
+            id={`conn-cat-panel-${activeCategory.key}`}
+            aria-labelledby={`conn-cat-tab-${activeCategory.key}`}
+            data-category={activeCategory.key}
+          >
+            <div className="pset-card-head">
+              <h3 className="pset-card-title">{activeCategory.title}</h3>
+              {activeCategory.subLabel ? (
+                <span className="pset-card-hint">· {activeCategory.subLabel}</span>
+              ) : null}
+            </div>
+
+            {/* Same row markup as the old grouped layout — the wrapper is what
+                turns each row into its own bordered card in the new design. */}
+            <div className="set-conn-rows">
+              {activeCategory.items.map((item) => {
+                const conn = connectionByProvider.get(item.id) ?? null
+                const state = getConnectorRowState(item, conn)
+                return (
+                  <div key={item.id} className="set-conn-row">
+                    <ConnectorLogo item={item} className="logo" />
+                    <div className="nm">
+                      <div className="t">{item.name}</div>
+                      <div className={`s${state.disconnected ? " is-disconnected" : ""}`}>
+                        {state.statsString}
+                      </div>
+                    </div>
+                    <span
+                      className={`st ${
+                        state.disconnected
+                          ? "down"
+                          : state.status === "active"
+                            ? "on"
+                            : "off"
+                      }`}
+                    >
+                      {state.disconnected
+                        ? "Disconnected"
+                        : state.status === "active"
+                          ? "Active"
+                          : "Off"}
+                    </span>
+                    <button
+                      type="button"
+                      className="ac"
+                      disabled={!state.canClick}
+                      title={
+                        state.canClick
+                          ? undefined
+                          : "Coming soon — no integration available yet"
+                      }
+                      onClick={() => {
+                        if (!state.canClick) return
+                        if (state.actionLabel === "Configure") onConfigure(item.id)
+                        else if (state.actionLabel === "Connect") onConnect(item.id)
+                      }}
+                    >
+                      {state.actionLabel}
+                    </button>
                   </div>
-                </div>
-                <span
-                  className={`st ${
-                    state.disconnected
-                      ? "down"
-                      : state.status === "active"
-                        ? "on"
-                        : "off"
-                  }`}
-                >
-                  {state.disconnected
-                    ? "Disconnected"
-                    : state.status === "active"
-                      ? "Active"
-                      : "Off"}
-                </span>
+                )
+              })}
+            </div>
+
+            {/* The user's own document sources live inside their connector's
+                pane: name, doc count, the description they gave, and
+                per-source add/remove. Only for the uploads category. */}
+            {activeCategory.key === "uploads" && uploadSources.length > 0 ? (
+              <ul className="src-list" data-testid="upload-sources">
+                {uploadSources.map((s) => (
+                  <li key={s.id} className="src-row src-row--source">
+                    <span className="src-row-icon" aria-hidden>
+                      {iconForKind("md")}
+                    </span>
+                    {/* Name and the user's description share one cell so a long
+                        description truncates instead of shoving the actions. */}
+                    <span className="src-row-text">
+                      <span
+                        className="src-row-name"
+                        title={s.description || s.name}
+                      >
+                        {s.name}
+                      </span>
+                      {s.description ? (
+                        <span className="src-meta">{s.description}</span>
+                      ) : null}
+                    </span>
+                    <span className="src-kind-chip">
+                      {s.file_count} doc{s.file_count === 1 ? "" : "s"}
+                    </span>
+                    <span className="src-row-actions">
+                      <button
+                        type="button"
+                        className="src-act"
+                        onClick={() => onAddFilesToSource?.(s.id)}
+                      >
+                        <i className="ti ti-plus" aria-hidden />
+                        Add files
+                      </button>
+                      <button
+                        type="button"
+                        className="src-act src-act--danger"
+                        onClick={() => onRemoveUploadSource?.(s.id)}
+                      >
+                        <i className="ti ti-trash" aria-hidden />
+                        Remove
+                      </button>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+
+            {/* Always offer a NEW named source here — the per-source rows above
+                only extend or remove existing ones, and once the connector is
+                Active its row action becomes "Configure". */}
+            {activeCategory.key === "uploads" ? (
+              <>
                 <button
                   type="button"
-                  className="ac"
-                  disabled={!state.canClick}
-                  title={
-                    state.canClick
-                      ? undefined
-                      : "Coming soon — no integration available yet"
-                  }
-                  onClick={() => {
-                    if (!state.canClick) return
-                    if (state.actionLabel === "Configure") onConfigure(item.id)
-                    else if (state.actionLabel === "Connect") onConnect(item.id)
-                  }}
+                  className="set-conn-upload set-conn-add-source"
+                  data-testid="add-upload-source"
+                  onClick={() => onAddUploadSource?.()}
                 >
-                  {state.actionLabel}
+                  <i className="ti ti-cloud-upload" aria-hidden />
+                  Add a document source
+                  <span className="muted">Name it, describe it, attach any files</span>
                 </button>
-              </div>
-            )
-          })}
+                {/* The Settings-side twin of onboarding's import step, for
+                    users who skipped it or have new context worth handing
+                    over. A slot, so this pure View never owns its state or
+                    IO — the hooks wrapper supplies the real card. */}
+                {uploadsExtra}
+              </>
+            ) : null}
 
-          {/* The user's own document sources live inside their connector's
-              card: name, doc count, the description they gave, and per-source
-              add/remove. Only rendered for the uploads category. */}
-          {cat.key === "uploads" && uploadSources.length > 0 ? (
-            <ul className="src-list" data-testid="upload-sources">
-              {uploadSources.map((s) => (
-                <li key={s.id} className="src-row src-row--source">
-                  <span className="src-row-icon" aria-hidden>
-                    {iconForKind("md")}
-                  </span>
-                  {/* Name and the user's description share one cell so a long
-                      description truncates instead of shoving the actions. */}
-                  <span className="src-row-text">
-                    <span
-                      className="src-row-name"
-                      title={s.description || s.name}
-                    >
-                      {s.name}
-                    </span>
-                    {s.description ? (
-                      <span className="src-meta">{s.description}</span>
-                    ) : null}
-                  </span>
-                  <span className="src-kind-chip">
-                    {s.file_count} doc{s.file_count === 1 ? "" : "s"}
-                  </span>
-                  <span className="src-row-actions">
-                    <button
-                      type="button"
-                      className="src-act"
-                      onClick={() => onAddFilesToSource?.(s.id)}
-                    >
-                      <i className="ti ti-plus" aria-hidden />
-                      Add files
-                    </button>
-                    <button
-                      type="button"
-                      className="src-act src-act--danger"
-                      onClick={() => onRemoveUploadSource?.(s.id)}
-                    >
-                      <i className="ti ti-trash" aria-hidden />
-                      Remove
-                    </button>
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
-
-          {/* Always offer a NEW named source here — the per-source rows above
-              only extend or remove existing ones, and once the connector is
-              Active its row action becomes "Configure". */}
-          {cat.key === "uploads" ? (
-            <button
-              type="button"
-              className="set-conn-upload set-conn-add-source"
-              data-testid="add-upload-source"
-              onClick={() => onAddUploadSource?.()}
-            >
-              <i className="ti ti-cloud-upload" aria-hidden />
-              Add a document source
-              <span className="muted">Name it, describe it, attach any files</span>
-            </button>
-          ) : null}
-
-          {/* Manual upload strip. Hidden for categories that opt out via
-              `allowsManualUpload: false` in the catalog (Communications,
-              Codebase, Project Management) — those must be populated by
-              connecting the real integration. Flip the catalog flag to
-              restore; the backend upload path is unchanged. */}
-          {cat.allowsManualUpload !== false ? (
-            <label
-              className={`set-conn-upload${uploading ? " is-uploading" : ""}`}
-              title={uploading ? "Uploading…" : `Upload ${cat.title.toLowerCase()} files`}
-              aria-busy={uploading}
-            >
-              <i
-                className={`ti ${uploading ? "ti-loader-2 ti-spin" : "ti-cloud-upload"}`}
-                aria-hidden
-              />
-              {uploading ? "Uploading…" : `Upload ${cat.title.toLowerCase()} export`}
-              <span className="muted">{cat.uploadAccept ?? UPLOAD_ACCEPT_HINT}</span>
-              <input
-                type="file"
-                multiple
-                accept={(cat.uploadExtensions ?? UPLOAD_EXTENSIONS).join(",")}
-                // Block re-selection while a previous batch is still ingesting so
-                // the user can't fire overlapping uploads mid-flight.
-                disabled={uploading}
-                style={{ display: "none" }}
-                onChange={(e) => {
-                  if (e.target.files && e.target.files.length > 0) {
-                    onUpload(cat.key, e.target.files)
-                    // Reset so the same file can be picked again after a failed run.
-                    e.target.value = ""
-                  }
-                }}
-              />
-            </label>
-          ) : null}
-        </section>
-      ))}
+            {/* Manual upload strip — a dashed full-width row at the foot of the
+                detail column. Hidden for categories that opt out via
+                `allowsManualUpload: false` in the catalog (Communications,
+                Codebase, Project Management) — those must be populated by
+                connecting the real integration. Flip the catalog flag to
+                restore; the backend upload path is unchanged. */}
+            {activeCategory.allowsManualUpload !== false ? (
+              <label
+                className={`set-conn-upload${uploading ? " is-uploading" : ""}`}
+                title={
+                  uploading
+                    ? "Uploading…"
+                    : `Upload ${activeCategory.title.toLowerCase()} files`
+                }
+                aria-busy={uploading}
+              >
+                <i
+                  className={`ti ${uploading ? "ti-loader-2 ti-spin" : "ti-cloud-upload"}`}
+                  aria-hidden
+                />
+                {uploading ? "Uploading…" : "Upload files to this category"}
+                <span className="muted">
+                  {activeCategory.uploadAccept ?? UPLOAD_ACCEPT_HINT}
+                </span>
+                <input
+                  type="file"
+                  multiple
+                  accept={(activeCategory.uploadExtensions ?? UPLOAD_EXTENSIONS).join(",")}
+                  // Block re-selection while a previous batch is still ingesting so
+                  // the user can't fire overlapping uploads mid-flight.
+                  disabled={uploading}
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files.length > 0) {
+                      onUpload(activeCategory.key, e.target.files)
+                      // Reset so the same file can be picked again after a failed run.
+                      e.target.value = ""
+                    }
+                  }}
+                />
+              </label>
+            ) : null}
+          </section>
+        </div>
+      ) : null}
 
       {files.length > 0 ? (
         <div className="set-block sp-conn-files">
@@ -543,6 +686,12 @@ export function ConnectorsSettings() {
   // files to that existing source.
   const [uploadTarget, setUploadTarget] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
+  // Which category the detail column shows. null = "the first visible one",
+  // so we don't have to wait for the catalog (or a search) to settle before
+  // picking a default — the View resolves it (resolveSelectedCategory).
+  const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | null>(
+    null,
+  )
   // Spinner ONLY on the first-ever (cold) load — a warm revisit shows cache.
   const [loading, setLoading] = useState(() => _connectionsCache === null)
   const [uploading, setUploading] = useState(false)
@@ -896,8 +1045,11 @@ export function ConnectorsSettings() {
         regenerateError={regenerateError}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
+        selectedCategoryKey={selectedCategoryKey}
+        onSelectCategory={setSelectedCategoryKey}
         uploadSources={uploadSources}
         onAddUploadSource={() => setUploadTarget("")}
+        uploadsExtra={<LlmContextImportCard />}
         onAddFilesToSource={(sourceId) => setUploadTarget(sourceId)}
         onRemoveUploadSource={(sourceId) =>
           void handleRemoveUploadSource(sourceId)

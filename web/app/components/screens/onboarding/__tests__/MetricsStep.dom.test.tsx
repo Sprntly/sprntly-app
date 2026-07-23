@@ -8,7 +8,7 @@
 // seeding priority (up to 5 pre-selected); picking a 6th metric flashes the
 // limit warning; Continue requires ≥1 metric AND a framework; a valid Continue
 // PUTs the picks to the from-selection endpoint, persists the framework via
-// updateWorkspace (onboarding_step 4) and routes to /onboarding/api-key;
+// updateWorkspace (onboarding_step 8) and routes to /onboarding/invite;
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -215,7 +215,7 @@ describe("MetricsStep (onboarding step 03 — up to 5 metrics + framework)", () 
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("a valid Continue PUTs the picks, saves the framework (step 4) and routes to api-key", async () => {
+  it("a valid Continue PUTs the picks, saves the framework and routes to invite (step 8)", async () => {
     kpiSelectionMock.mockResolvedValue({ ok: true, version: 1, north_star: "x" })
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 4 }))
     const { container } = mount()
@@ -227,7 +227,7 @@ describe("MetricsStep (onboarding step 03 — up to 5 metrics + framework)", () 
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
     })
     expect(kpiSelectionMock).toHaveBeenCalledTimes(1)
     const payload = kpiSelectionMock.mock.calls[0][0] as {
@@ -236,7 +236,7 @@ describe("MetricsStep (onboarding step 03 — up to 5 metrics + framework)", () 
     expect(payload.metrics.map((m) => m.metric)).toEqual(DEFAULT_POOL.slice(0, 3))
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       prioritization_framework: "rice",
-      onboarding_step: 4,
+      onboarding_step: 8,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
   })

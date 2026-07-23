@@ -1,7 +1,9 @@
 // Slug-routing integrity for the semantic-routes onboarding flow. The flow is
 // the v7 redesign (screenshot spec 2026-07-21), keeping the optional api-key
-// step the spec omits: company → product → metrics → api-key → connectors →
-// workspace → invite → review → personalize, then the UNNUMBERED
+// step the spec omits and adding the optional import-context step from client
+// feedback 2026-07-22, reordered so the two steps an import can't prefill cover
+// its background extraction: company → import-context → connectors → api-key →
+// workspace → product → metrics → invite → review → personalize, then the UNNUMBERED
 // define-metrics sub-flow completes onboarding. `workspace` here is the merged
 // team/strategy/decisions card, not the long-retired workspace-NAMING closer.
 // The old combined `business-info`, the `business-context` review, the
@@ -15,16 +17,17 @@ import { screenIdFromPathname, SCREEN_PATH } from "../../routes"
 import { ONBOARDING_SCREENS } from "../../../types"
 
 describe("onboarding slug routing", () => {
-  it("has exactly 9 numbered steps in flow order (v7 + kept api-key)", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(9)
-    expect(ONBOARDING_SCREENS).toHaveLength(9)
+  it("has exactly 10 numbered steps in flow order (v7 + kept api-key + import-context)", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(10)
+    expect(ONBOARDING_SCREENS).toHaveLength(10)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
       "company",
+      "import-context",
+      "connectors",
+      "api-key",
+      "workspace",
       "product",
       "metrics",
-      "api-key",
-      "connectors",
-      "workspace",
       "invite",
       "review",
       "personalize",

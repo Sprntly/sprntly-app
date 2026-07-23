@@ -85,6 +85,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "cached_asks":          {"response"},
     "ask_jobs":             {"response"},
     "website_analysis_jobs": {"result"},
+    "llm_context_jobs":     {"result"},
     "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings", "feature_flags", "icp", "tone_voice"},
     "products":             {"surfaces", "personas", "monetization"},
     "workspace_invites":    {"workspace_ids"},

@@ -10,6 +10,7 @@ import {
   INDUSTRIES,
   BUSINESS_TYPES,
   PRIORITIZATION_FRAMEWORKS,
+  stepForSlug,
 } from "../../../lib/onboarding/types"
 import { updateWorkspace } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
@@ -38,7 +39,8 @@ function canSaveMetrics(picked: SupportingMetric[]): boolean {
 }
 
 /**
- * Onboarding step 03 — "Your metrics" (v6 screenshot spec 2026-07-17).
+ * Onboarding step 07 — "Your metrics" (v6 screenshot spec 2026-07-17,
+ * reordered 2026-07-22).
  *
  * Pick up to 5 success metrics (at least one), plus "How does your team
  * prioritize?"* — the prioritization framework moved here from the old team
@@ -211,7 +213,7 @@ export function MetricsStep() {
       }
       const updated = await updateWorkspace(workspace.id, {
         prioritization_framework: framework || null,
-        onboarding_step: 4,
+        onboarding_step: stepForSlug("invite") ?? 8,
       })
       setWorkspace(updated)
       clearDraft(DRAFT_KEY)
@@ -224,16 +226,17 @@ export function MetricsStep() {
   }
 
   async function go() {
-    // Next numbered step is api-key (index 4 in ONBOARDING_STEP_SLUGS — the
-    // value persist() writes); it's optional/skippable and precedes connectors.
-    if (await persist()) router.push("/onboarding/api-key")
+    // Next numbered step is invite — persist() writes its index, derived
+    // from the slug list rather than hardcoded so a reorder can't strand a
+    // resuming user on the wrong step.
+    if (await persist()) router.push("/onboarding/invite")
   }
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
     <OnboardingChrome
-      step={3}
+      step={7}
       saveLabel="Saved · auto-saves"
       title={
         <>

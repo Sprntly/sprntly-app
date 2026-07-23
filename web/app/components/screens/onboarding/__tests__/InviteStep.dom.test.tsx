@@ -244,10 +244,10 @@ describe("InviteStep (onboarding step 07 — email + job role + permission rows)
     expect(inviteMock).not.toHaveBeenCalled()
   })
 
-  it("Back routes to the workspace step", () => {
+  it("Back routes to the metrics step", () => {
     mount()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
   })
 
   it("shows the loading shell while the workspace is loading", () => {
