@@ -1234,6 +1234,37 @@ export type GoogleDrivePickerToken = {
   expires_in: number
 }
 
+/** One document inside a named upload source (never the extracted text
+ *  itself — `extracted_chars` says how much we parsed out of it). */
+export type UploadSourceFile = {
+  id: string
+  filename: string
+  content_type: string | null
+  size_bytes: number
+  extracted_chars: number
+  uploaded_at: string | null
+}
+
+/** A named bundle of the user's own documents — the `uploads` connector's
+ *  unit of data. `description` is the optional "what are these documents"
+ *  the user supplied; it travels into the knowledge graph with the content. */
+export type UploadSource = {
+  id: string
+  name: string
+  description: string
+  created_at: string | null
+  file_count: number
+  files: UploadSourceFile[]
+}
+
+export type UploadSourceMutationResponse = {
+  ok: boolean
+  source: UploadSource
+  /** Per-file failures (oversized, empty, unreadable) — partial success is
+   *  expected, so these are reported rather than failing the whole batch. */
+  errors: { filename: string; error: string }[]
+}
+
 export type SlackChannel = {
   id: string
   name: string
@@ -1412,6 +1443,41 @@ export const connectorsApi = {
     ),
   disconnectSuperset: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/superset`),
+
+  // ---- Uploaded documents (no third party — the files ARE the credential) --
+  /** Every named document source for the workspace, newest first. */
+  listUploadSources: () =>
+    api.get<{ sources: UploadSource[] }>(`/v1/connectors/uploads/sources`),
+  /**
+   * Create a named source from one or more files of ANY type. `description`
+   * is the optional "what are these documents" step — it's carried into the
+   * knowledge graph with the content, so it's real context, not a label.
+   */
+  createUploadSource: (name: string, description: string, files: File[]) => {
+    const form = new FormData()
+    form.append("name", name)
+    form.append("description", description)
+    for (const f of files) form.append("files", f)
+    return api.post<UploadSourceMutationResponse>(
+      `/v1/connectors/uploads/sources`,
+      form,
+    )
+  },
+  /** Add more documents to an existing source. */
+  addUploadSourceFiles: (sourceId: string, files: File[]) => {
+    const form = new FormData()
+    for (const f of files) form.append("files", f)
+    return api.post<UploadSourceMutationResponse>(
+      `/v1/connectors/uploads/sources/${encodeURIComponent(sourceId)}/files`,
+      form,
+    )
+  },
+  removeUploadSource: (sourceId: string) =>
+    api.delete<{ deleted: true; id: string }>(
+      `/v1/connectors/uploads/sources/${encodeURIComponent(sourceId)}`,
+    ),
+  disconnectUploads: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/uploads`),
 
   // ---- Generic test-connection --------------------------------------------
   /**

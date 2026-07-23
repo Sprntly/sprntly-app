@@ -39,6 +39,7 @@ import {
   sourcesApi,
   type ConnectionSummary,
   type SourceFile,
+  type UploadSource,
 } from "../../../../lib/api"
 import {
   getConnectorRowState,
@@ -66,6 +67,10 @@ import {
 } from "../../../connectors/CredentialsPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
+import { UploadSourceModal } from "../../../connectors/UploadSourceModal"
+
+/** Provider id of the "upload your own documents" connector. */
+export const UPLOADS_PROVIDER_ID = "uploads"
 
 /**
  * Provider page (keyed by connector id) where the user can view and copy
@@ -199,6 +204,17 @@ export type ConnectorsSettingsViewProps = {
    * company-wide list rendered once (not filtered per category).
    */
   files: SourceFile[]
+  /**
+   * The user's own named document sources (the `uploads` connector). Rendered
+   * inside the "Your documents" category card so the connector's data is
+   * visible where the connector is, not in a separate island.
+   */
+  uploadSources?: UploadSource[]
+  /** Open the "add your documents" modal (also the row's Connect action). */
+  onAddUploadSource?: () => void
+  /** Open the modal in add-files-to-existing-source mode. */
+  onAddFilesToSource?: (sourceId: string) => void
+  onRemoveUploadSource?: (sourceId: string) => void
 }
 
 export function ConnectorsSettingsView({
@@ -216,6 +232,10 @@ export function ConnectorsSettingsView({
   regenerateError,
   searchQuery = "",
   onSearchChange,
+  uploadSources = [],
+  onAddUploadSource,
+  onAddFilesToSource,
+  onRemoveUploadSource,
 }: ConnectorsSettingsViewProps) {
   const visibleCategories = filterConnectorCategories(categories, searchQuery)
   return (
@@ -349,6 +369,71 @@ export function ConnectorsSettingsView({
             )
           })}
 
+          {/* The user's own document sources live inside their connector's
+              card: name, doc count, the description they gave, and per-source
+              add/remove. Only rendered for the uploads category. */}
+          {cat.key === "uploads" && uploadSources.length > 0 ? (
+            <ul className="src-list" data-testid="upload-sources">
+              {uploadSources.map((s) => (
+                <li key={s.id} className="src-row src-row--source">
+                  <span className="src-row-icon" aria-hidden>
+                    {iconForKind("md")}
+                  </span>
+                  {/* Name and the user's description share one cell so a long
+                      description truncates instead of shoving the actions. */}
+                  <span className="src-row-text">
+                    <span
+                      className="src-row-name"
+                      title={s.description || s.name}
+                    >
+                      {s.name}
+                    </span>
+                    {s.description ? (
+                      <span className="src-meta">{s.description}</span>
+                    ) : null}
+                  </span>
+                  <span className="src-kind-chip">
+                    {s.file_count} doc{s.file_count === 1 ? "" : "s"}
+                  </span>
+                  <span className="src-row-actions">
+                    <button
+                      type="button"
+                      className="src-act"
+                      onClick={() => onAddFilesToSource?.(s.id)}
+                    >
+                      <i className="ti ti-plus" aria-hidden />
+                      Add files
+                    </button>
+                    <button
+                      type="button"
+                      className="src-act src-act--danger"
+                      onClick={() => onRemoveUploadSource?.(s.id)}
+                    >
+                      <i className="ti ti-trash" aria-hidden />
+                      Remove
+                    </button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+
+          {/* Always offer a NEW named source here — the per-source rows above
+              only extend or remove existing ones, and once the connector is
+              Active its row action becomes "Configure". */}
+          {cat.key === "uploads" ? (
+            <button
+              type="button"
+              className="set-conn-upload set-conn-add-source"
+              data-testid="add-upload-source"
+              onClick={() => onAddUploadSource?.()}
+            >
+              <i className="ti ti-cloud-upload" aria-hidden />
+              Add a document source
+              <span className="muted">Name it, describe it, attach any files</span>
+            </button>
+          ) : null}
+
           {/* Manual upload strip. Hidden for categories that opt out via
               `allowsManualUpload: false` in the catalog (Communications,
               Codebase, Project Management) — those must be populated by
@@ -430,12 +515,14 @@ export function ConnectorsSettingsView({
 // only case that shows the spinner. Reset on sign-out via resetSettingsCaches.
 let _connectionsCache: ConnectionSummary[] | null = null
 let _connectorFilesCache: SourceFile[] | null = null
+let _uploadSourcesCache: UploadSource[] | null = null
 
 // Clear on sign-out so a different user never flashes the previous account's
 // connectors (see lib/settingsCache).
 registerSettingsCacheReset(() => {
   _connectionsCache = null
   _connectorFilesCache = null
+  _uploadSourcesCache = null
 })
 
 export function ConnectorsSettings() {
@@ -449,6 +536,12 @@ export function ConnectorsSettings() {
     () => _connectionsCache ?? [],
   )
   const [files, setFiles] = useState<SourceFile[]>(() => _connectorFilesCache ?? [])
+  const [uploadSources, setUploadSources] = useState<UploadSource[]>(
+    () => _uploadSourcesCache ?? [],
+  )
+  // null = modal closed; "" = creating a new source; a source id = adding
+  // files to that existing source.
+  const [uploadTarget, setUploadTarget] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
   // Spinner ONLY on the first-ever (cold) load — a warm revisit shows cache.
   const [loading, setLoading] = useState(() => _connectionsCache === null)
@@ -519,6 +612,22 @@ export function ConnectorsSettings() {
     void reloadFiles()
   }, [reloadFiles])
 
+  // The user's own named document sources (the `uploads` connector's data).
+  // Non-fatal on failure — the grid still works without the list.
+  const reloadUploadSources = useCallback(async () => {
+    try {
+      const r = await connectorsApi.listUploadSources()
+      _uploadSourcesCache = r.sources
+      setUploadSources(r.sources)
+    } catch {
+      setUploadSources([])
+    }
+  }, [])
+
+  useEffect(() => {
+    void reloadUploadSources()
+  }, [reloadUploadSources])
+
   // The OAuth tab signals back via BroadcastChannel / localStorage the moment
   // a connector connects (see /connectors/return), so the just-connected row
   // flips to Active immediately — no tab switch needed.
@@ -570,6 +679,12 @@ export function ConnectorsSettings() {
       if (item?.authType === "credentials") {
         // Self-hosted tool: open the URL + username + password form.
         setCredentialsConnectingItem(item)
+        return
+      }
+
+      if (item?.authType === "upload") {
+        // No third party: connecting IS naming a source and uploading files.
+        setUploadTarget("")
         return
       }
 
@@ -711,6 +826,54 @@ export function ConnectorsSettings() {
     [activeCompany, reloadFiles, showToast],
   )
 
+  // ── Uploaded documents ────────────────────────────────────────────────
+  // Creating a source also creates the connection row server-side, so we
+  // reload connections too and the row flips to Active without a refresh.
+  const handleUploadSource = useCallback(
+    async (name: string, description: string, picked: File[]) => {
+      const targetId = uploadTarget
+      const r =
+        targetId
+          ? await connectorsApi.addUploadSourceFiles(targetId, picked)
+          : await connectorsApi.createUploadSource(name, description, picked)
+      await reloadUploadSources()
+      await reload()
+      const added = r.source.file_count
+      showToast(
+        targetId ? "Documents added" : `${r.source.name} added`,
+        `${added} document${added === 1 ? "" : "s"} — digesting them into your knowledge base now.`,
+      )
+      if (r.errors.length > 0) {
+        showToast(
+          "Some files failed",
+          r.errors.map((e) => `${e.filename}: ${e.error}`).join("; "),
+        )
+      }
+    },
+    [uploadTarget, reload, reloadUploadSources, showToast],
+  )
+
+  const handleRemoveUploadSource = useCallback(
+    async (sourceId: string) => {
+      try {
+        await connectorsApi.removeUploadSource(sourceId)
+        await reloadUploadSources()
+        await reload()
+      } catch (e) {
+        showToast(
+          "Could not remove source",
+          e instanceof Error ? e.message : String(e),
+        )
+      }
+    },
+    [reload, reloadUploadSources, showToast],
+  )
+
+  const uploadTargetName =
+    uploadTarget
+      ? (uploadSources.find((s) => s.id === uploadTarget)?.name ?? "this source")
+      : null
+
   const configuringConnection =
     configuringProviderId != null
       ? (connectionByProvider.get(configuringProviderId) ?? null)
@@ -733,13 +896,28 @@ export function ConnectorsSettings() {
         regenerateError={regenerateError}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
+        uploadSources={uploadSources}
+        onAddUploadSource={() => setUploadTarget("")}
+        onAddFilesToSource={(sourceId) => setUploadTarget(sourceId)}
+        onRemoveUploadSource={(sourceId) =>
+          void handleRemoveUploadSource(sourceId)
+        }
+      />
+      <UploadSourceModal
+        open={uploadTarget != null}
+        addingToSourceName={uploadTargetName}
+        onUpload={handleUploadSource}
+        onClose={() => setUploadTarget(null)}
       />
       <ConfigureConnectorDrawer
         providerId={configuringProviderId}
         connection={configuringConnection}
         activeCompany={activeCompany}
         onClose={() => setConfiguringProviderId(null)}
-        onDisconnected={() => void reload()}
+        onDisconnected={() => {
+          void reload()
+          void reloadUploadSources()
+        }}
       />
       <ApiKeyPromptModal
         open={apiKeyConnectingItem != null}

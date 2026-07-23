@@ -386,6 +386,10 @@ async function callDisconnect(providerId: string): Promise<void> {
     await connectorsApi.disconnectAsana()
   } else if (providerId === "superset") {
     await connectorsApi.disconnectSuperset()
+  } else if (providerId === "uploads") {
+    // Drops the connection row only — the uploaded documents are kept, same
+    // as every other connector leaves its ingested data in place.
+    await connectorsApi.disconnectUploads()
   } else {
     throw new Error(`Disconnect not implemented for provider: ${providerId}`)
   }

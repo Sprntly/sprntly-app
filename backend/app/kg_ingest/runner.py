@@ -21,6 +21,7 @@ from app.kg_ingest.pullers import (
     jira,
     sprinklr,
     superset,
+    uploads,
 )
 from app.kg_ingest.types import RawRecord
 
@@ -37,6 +38,10 @@ PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
     "github":    (github.pull,    "access_token", "engineering activity (PRs + commit messages; distilled ship signals — classify feature/fix/refactor, surface what's being built)"),
     "sprinklr":  (sprinklr.pull,  "access_token", "customer_voice (CX cases: support pain/churn risk; inbound social messages/mentions: public voice-of-customer + market sentiment)"),
     "superset":  (superset.pull,  "superset_credential", "analytics (BI metadata: dashboards/charts/datasets/saved queries — the company's metrics vocabulary, what is measured and how it's organized)"),
+    # No third party behind this one: the "credential" is the owning company id
+    # and the puller reads the documents the user uploaded themselves. Each
+    # record carries the user's own source name + description (see the puller).
+    "uploads":   (uploads.pull,  "company_id",          "user-uploaded business documents (research, strategy, support exports, decks, spreadsheets — the user named and described this corpus; treat the source_name/source_description properties as authoritative context for what the text is)"),
 }
 
 

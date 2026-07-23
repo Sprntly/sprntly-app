@@ -12866,6 +12866,106 @@
     white-space: nowrap;
   }
 
+  /* ─── Uploaded document sources (the `uploads` connector's own rows) ───
+     A source row carries more than a file row does — a user-given name, a doc
+     count, an OPTIONAL description and two actions. Borrowing .src-row's
+     file-shaped grid pushed the last action into the trailing 32px trash
+     column and clipped it whenever a description was present, so these rows
+     get their own track list and stack name + description in one cell. */
+  .src-row--source {
+    grid-template-columns: 22px minmax(0, 1fr) auto auto;
+  }
+
+  .src-row-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .src-row--source .src-meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Picked-file rows in the upload modal: icon, full name, size. The name
+     WRAPS rather than truncating — a filename the user is about to commit to
+     should be readable in full, and the modal has the width to spare. */
+  .src-row--file {
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+    align-items: start;
+  }
+
+  .src-row--file .src-row-name {
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+    text-overflow: clip;
+  }
+
+  .src-row--file .src-meta {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .src-row-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    white-space: nowrap;
+  }
+
+  /* Row actions are quiet ghosts at rest — the row is a list item, not a call
+     to action — on the same 6px/11.5px rhythm as `.set-conn-row .ac`. */
+  .src-act {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink-3);
+    font-family: inherit;
+    font-size: 11.5px;
+    font-weight: 500;
+    line-height: 1;
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+
+  .src-act i {
+    font-size: 13px;
+    line-height: 1;
+  }
+
+  .src-act:hover:not(:disabled) {
+    color: var(--accent-ink);
+    background: var(--accent-muted);
+    border-color: var(--accent-alpha-14);
+  }
+
+  .src-act:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--accent-soft);
+  }
+
+  /* The destructive action stays neutral at rest and only declares itself on
+     hover — same restraint as `.src-trash`. */
+  .src-act--danger:hover:not(:disabled) {
+    color: var(--danger-ink);
+    background: var(--danger-soft);
+    border-color: var(--danger-border);
+  }
+
+  .src-act--danger:focus-visible {
+    box-shadow: 0 0 0 3px var(--danger-soft);
+  }
+
+  .src-act:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
   .src-trash {
     display: inline-flex;
     align-items: center;

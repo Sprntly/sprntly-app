@@ -46,6 +46,9 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     # Documentation
     "google_drive": [DOCUMENTS],
     "notion": [DOCUMENTS],
+    # The user's OWN documents, uploaded into a named source. A documentation
+    # tool by type, but an evidence source by intent — see the exceptions below.
+    "uploads": [DOCUMENTS],
     # Customer voice / meetings
     "zendesk": [CUSTOMER_VOICE],
     "sprinklr": [CUSTOMER_VOICE],
@@ -103,8 +106,12 @@ NON_EVIDENCE_TYPES: frozenset[str] = frozenset(
 #: Providers whose TYPE is non-evidence but which still count as a data
 #: source. Intercom's type is `communication`, but as a customer-support inbox
 #: it carries voice-of-customer evidence (the web catalog files it under the
-#: `voice` category for the same reason).
-_EVIDENCE_PROVIDER_EXCEPTIONS: frozenset[str] = frozenset({"intercom"})
+#: `voice` category for the same reason). `uploads` is typed `documents` like
+#: Notion/Drive, but it is the user DELIBERATELY handing us a named, described
+#: corpus of their own business documents — research, support exports, strategy
+#: — rather than a whole workspace of internal docs, so it does count (the web
+#: catalog gives it its own evidence-bearing `uploads` category to match).
+_EVIDENCE_PROVIDER_EXCEPTIONS: frozenset[str] = frozenset({"intercom", "uploads"})
 
 
 def is_evidence_provider(provider: str | None) -> bool:

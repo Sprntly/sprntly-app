@@ -19,6 +19,26 @@ import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 // (lib/onboarding/connectorsWizard.ts).
 export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
+    // The user's OWN documents, as a first-class connector rather than a
+    // loose per-category upload strip: they name the source, optionally say
+    // what the documents are, and attach any number of files of any type.
+    // Its own category (not `docs`) because — unlike Notion / Google Docs —
+    // a deliberately named-and-described corpus IS evidence, so it must stay
+    // OUT of NON_EVIDENCE_CATEGORIES. Mirrors the backend's
+    // _EVIDENCE_PROVIDER_EXCEPTIONS entry for `uploads`.
+    key: "uploads",
+    title: "Your documents",
+    subLabel: "upload your own",
+    uploadAccept: UPLOAD_ACCEPT_HINT,
+    uploadExtensions: UPLOAD_EXTENSIONS,
+    // Files are attached inside the named-source flow (which accepts ANY
+    // type), not via the generic per-category strip.
+    allowsManualUpload: false,
+    items: [
+      { id: "uploads", name: "Uploaded documents", logo: "D", logoText: "D", logoColor: "#4B5563", oauth: false, authType: "upload", types: ["documents"] },
+    ],
+  },
+  {
     key: "analytics",
     title: "Analytics",
     subLabel: "required",
@@ -170,6 +190,13 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   },
 ]
 
+/** Auth models that are connectable without an OAuth redirect. */
+const CONNECTOR_NON_OAUTH_AUTH_TYPES: ReadonlySet<string> = new Set([
+  "apikey",
+  "credentials",
+  "upload",
+])
+
 /**
  * Convenience set of connector IDs that have a real OAuth backend.
  * Derived from the `oauth` flag on each catalog row so the two stay in
@@ -191,18 +218,17 @@ export const CONNECTOR_IDS_WITH_OAUTH = new Set<string>(
  */
 export const CONNECTOR_IDS_CONNECTABLE = new Set<string>(
   CONNECTOR_CATALOG.flatMap((c) => c.items)
-    .filter((i) => i.oauth || i.authType === "apikey" || i.authType === "credentials")
+    .filter((i) => i.oauth || CONNECTOR_NON_OAUTH_AUTH_TYPES.has(i.authType ?? ""))
     .map((i) => i.id),
 )
 
 /** True iff this connector has a working integration the user can actually
- *  use today (OAuth, API key, or a credentials form). Everything else is
- *  "Coming soon". */
+ *  use today (OAuth, API key, a credentials form, or a document upload).
+ *  Everything else is "Coming soon". */
 export function isConnectableConnector(item: ConnectorItemRow): boolean {
   return (
     Boolean(item.oauth)
-    || item.authType === "apikey"
-    || item.authType === "credentials"
+    || CONNECTOR_NON_OAUTH_AUTH_TYPES.has(item.authType ?? "")
   )
 }
 
