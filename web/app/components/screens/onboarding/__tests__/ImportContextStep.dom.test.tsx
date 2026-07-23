@@ -88,6 +88,20 @@ beforeEach(() => {
 
 afterEach(cleanup)
 
+// The prompt is fetched asynchronously after mount; "Show prompt" is disabled
+// and the panel is gated on `prompt` until it resolves. Waiting only for the
+// fetch to be CALLED (not resolved) before clicking is a microtask race that
+// no-ops the click under CI timing — this waits for the button to be ENABLED,
+// then reveals the panel deterministically.
+async function revealPrompt() {
+  const toggle = await waitFor(() => {
+    const b = screen.getByRole("button", { name: "Show prompt" }) as HTMLButtonElement
+    expect(b.disabled).toBe(false)
+    return b
+  })
+  fireEvent.click(toggle)
+}
+
 describe("ImportContextStep (onboarding step 02 — import your context)", () => {
   it("renders on step 2 of the dots, with no connect-an-account option", async () => {
     const { container } = mount()
@@ -113,7 +127,7 @@ describe("ImportContextStep (onboarding step 02 — import your context)", () =>
     const toggle = screen.getByRole("button", { name: "Show prompt" })
     expect(toggle.getAttribute("aria-expanded")).toBe("false")
 
-    fireEvent.click(toggle)
+    await revealPrompt()
 
     // Revealed: the prompt is readable, and Copy now lives in the panel.
     const panel = container.querySelector(".onb-prompt-panel") as HTMLElement
@@ -126,9 +140,7 @@ describe("ImportContextStep (onboarding step 02 — import your context)", () =>
 
   it("copies the exact prompt the backend served, and confirms it", async () => {
     mount()
-    await waitFor(() => expect(promptMock).toHaveBeenCalled())
-
-    fireEvent.click(screen.getByRole("button", { name: "Show prompt" }))
+    await revealPrompt()
     fireEvent.click(screen.getByRole("button", { name: "Copy prompt" }))
 
     // The copied text is the server's, never a client-side duplicate that
@@ -141,8 +153,7 @@ describe("ImportContextStep (onboarding step 02 — import your context)", () =>
 
   it("copies the user's edits, not the pristine server copy", async () => {
     const { container } = mount()
-    await waitFor(() => expect(promptMock).toHaveBeenCalled())
-    fireEvent.click(screen.getByRole("button", { name: "Show prompt" }))
+    await revealPrompt()
 
     const box = container.querySelector(
       "textarea.onb-prompt-panel-body",
@@ -155,8 +166,7 @@ describe("ImportContextStep (onboarding step 02 — import your context)", () =>
 
   it("offers Reset only once edited, and restores the served prompt", async () => {
     const { container } = mount()
-    await waitFor(() => expect(promptMock).toHaveBeenCalled())
-    fireEvent.click(screen.getByRole("button", { name: "Show prompt" }))
+    await revealPrompt()
 
     // Unedited: nothing to reset.
     expect(screen.queryByRole("button", { name: "Reset" })).toBeNull()
@@ -173,9 +183,7 @@ describe("ImportContextStep (onboarding step 02 — import your context)", () =>
 
   it("collapses again on a second click", async () => {
     const { container } = mount()
-    await waitFor(() => expect(promptMock).toHaveBeenCalled())
-
-    fireEvent.click(screen.getByRole("button", { name: "Show prompt" }))
+    await revealPrompt()
     expect(container.querySelector(".onb-prompt-panel")).not.toBeNull()
     fireEvent.click(screen.getByRole("button", { name: "Hide prompt" }))
     expect(container.querySelector(".onb-prompt-panel")).toBeNull()
