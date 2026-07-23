@@ -123,6 +123,27 @@ function conversationToPrdTask(thread: ThreadTurn[]): string {
   return joined.length > CHAT_PRD_TASK_MAX ? `${joined.slice(0, CHAT_PRD_TASK_MAX)}…` : joined
 }
 
+// Documents attached EARLIER in this tab's conversation — extracted text lives
+// on each turn (stamped after extraction on live sends, rehydrated from
+// conversation_turns.attachments on reloaded threads). A "generate a PRD"
+// command grounds on these: the reported bug was a document attached two
+// messages before the command being silently forgotten. Caps mirror the
+// backend's TaskSourceDoc limits; when over the doc cap, the MOST RECENT
+// attachments win (they're most likely what the user means).
+const PRD_DOC_MAX_CHARS = 60000
+const PRD_DOCS_MAX = 8
+export function conversationPrdDocs(
+  thread: ThreadTurn[],
+): { name: string; content: string }[] {
+  const docs: { name: string; content: string }[] = []
+  for (const t of thread) {
+    for (const a of t.attachments ?? []) {
+      if (a.content?.trim()) docs.push({ name: a.name, content: a.content.slice(0, PRD_DOC_MAX_CHARS) })
+    }
+  }
+  return docs.slice(-PRD_DOCS_MAX)
+}
+
 // ── ChatScreen-local PRD tab sources ────────────────────────────────────────
 // The in-chat command flows ("convert this doc to a PRD", "generate a PRD for
 // X") must render the tab's seed turn + generating skeleton on the CURRENT
@@ -136,7 +157,9 @@ type LocalPrdSource =
   // "convert this document to a PRD" — POST /v1/prd/import happens in-panel.
   | { kind: "importDoc"; file: File; company: string; openTickets?: boolean }
   // "generate a PRD for <task>" — POST /v1/prd/generate happens in-panel.
-  | { kind: "generateTask"; task: string }
+  // `sourceDocs` = documents attached earlier in the thread (extracted text);
+  // the backend grounds the PRD on them alongside the task/KG evidence.
+  | { kind: "generateTask"; task: string; sourceDocs?: { name: string; content: string }[] }
 type LocalPrdTabRequest = Omit<PrdTabRequest, "source"> & {
   source: PrdTabRequest["source"] | LocalPrdSource
 }
@@ -956,7 +979,7 @@ export function ChatScreen() {
               const { prdApi } = await import("../../../lib/api")
               const start = source.kind === "importDoc"
                 ? await prdApi.importDoc(source.file, source.company)
-                : await prdApi.generateFromTask(source.task)
+                : await prdApi.generateFromTask(source.task, false, source.sourceDocs)
               // Stamp the now-known prd_id immediately (as the resume path does
               // upfront) so a reload past this point can find + resume the run,
               // and adopt the backend's cleaner title over the placeholder.
@@ -1401,7 +1424,7 @@ export function ChatScreen() {
         fallbackTurns?: { role: string; content: string }[]
       }
       const buildRestored = (
-        turns: { role: string; content: string }[],
+        turns: { role: string; content: string; attachments?: { name: string; content: string }[] | null }[],
         keyPrefix: string,
       ): ThreadTurn[] => {
         const restored: ThreadTurn[] = []
@@ -1410,7 +1433,15 @@ export function ChatScreen() {
           if (t.role === "user") {
             const next = turns[i + 1]
             const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
-            restored.push({ id: `${keyPrefix}-${i}`, query: t.content, reply })
+            restored.push({
+              id: `${keyPrefix}-${i}`,
+              query: t.content,
+              reply,
+              // Rehydrate persisted attachment texts so the card viewer AND a
+              // later "generate a PRD" (conversationPrdDocs) see them after a
+              // reload — the second half of the forgotten-document bug.
+              ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+            })
             if (reply) i++
           }
         }
@@ -1497,7 +1528,12 @@ export function ChatScreen() {
   }, [currentScreen])
 
   const pushPendingConversation = useCallback(
-    (turnId: string, query: string, targetTabId: string) => {
+    (
+      turnId: string,
+      query: string,
+      targetTabId: string,
+      turnAttachments?: { name: string; content: string }[],
+    ) => {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
       const timeStr = new Date().toISOString()
@@ -1546,7 +1582,7 @@ export function ChatScreen() {
       }
       // Persist to Supabase against THIS tab's conversation (create-once per tab).
       // Fire-and-forget — failures are swallowed inside the helper.
-      void persistence.pushUserTurn(targetTabId, { turnId, title, query })
+      void persistence.pushUserTurn(targetTabId, { turnId, title, query, attachments: turnAttachments })
     },
     [setContent, persistence],
   )
@@ -1619,6 +1655,10 @@ export function ChatScreen() {
     const task = taskOverride ?? (seedQuery ? prdCommandTask(seedQuery) : null)
     const activeTabNow = tabsRef.current.find((t) => t.id === activeTabIdRef.current)
     const effectiveTask = task || conversationToPrdTask(activeTabNow?.thread ?? [])
+    // Documents attached earlier in this conversation ground the PRD — with or
+    // without an explicit topic. (The doc-on-the-SAME-message case routes to
+    // importPrdCommandFlow before this flow is ever called.)
+    const sourceDocs = conversationPrdDocs(activeTabNow?.thread ?? [])
     if (!effectiveTask) {
       // No explicit topic and no conversation to ground it — ask for a topic.
       // This branch stays synchronous (no network), so it never has the gap.
@@ -1634,7 +1674,11 @@ export function ChatScreen() {
     const req: LocalPrdTabRequest = {
       title: `PRD · ${placeholder}`,
       seedQuery,
-      source: { kind: "generateTask", task: effectiveTask },
+      source: {
+        kind: "generateTask",
+        task: effectiveTask,
+        ...(sourceDocs.length ? { sourceDocs } : {}),
+      },
     }
     const tabId = openPrdInTab(req)
     seedCommandTurn(req, tabId)
@@ -1809,6 +1853,9 @@ export function ChatScreen() {
       // extract runs. runTabAsk re-adds this (addToSet is idempotent) and owns the
       // eventual clear on the ask's completion.
       let sendQuery = displayQuery
+      // Extracted attachment texts, persisted with the turn (survives reload;
+      // read back by conversationPrdDocs for a later "generate a PRD").
+      let persistedAttachments: { name: string; content: string }[] | undefined
       if (hasAttachments) {
         setBusyTabs((prev) => addToSet(prev, targetTabId))
         const pending = attachments
@@ -1836,6 +1883,7 @@ export function ChatScreen() {
           // Backfill the extracted content onto the optimistic turn so its card
           // opens a viewer — the SAME text folded into the query, never re-fetched.
           const withContent = extracted.map((e) => ({ name: e.name, content: e.content }))
+          persistedAttachments = withContent
           setTabs((prev) => prev.map((t) => t.id === targetTabId
             ? { ...t, thread: t.thread.map((tn) => tn.id === id ? { ...tn, attachments: withContent } : tn) }
             : t))
@@ -1863,7 +1911,7 @@ export function ChatScreen() {
           return
         }
       }
-      pushPendingConversation(id, displayQuery, targetTabId)
+      pushPendingConversation(id, displayQuery, targetTabId, persistedAttachments)
       setActiveConv(0)
       // runTabAsk holds the AUTHORITATIVE per-tab in-flight guard + busy marking.
       // It returns false (running nothing) if this tab already has an ask in

@@ -203,9 +203,18 @@ def delete_conversation(
 # ── Turns (messages within a conversation) ──
 
 
+class TurnAttachment(BaseModel):
+    """Extracted text of a file the user attached to this turn. Persisted so a
+    reloaded thread (and the chat→PRD flow) can still see documents attached
+    earlier in the conversation — content caps mirror the ask path's clamps."""
+    name: str = Field(..., min_length=1, max_length=300)
+    content: str = Field(..., min_length=1, max_length=60_000)
+
+
 class TurnIn(BaseModel):
     role: str = "user"  # "user" or "assistant"
     content: str = Field(..., min_length=1)
+    attachments: list[TurnAttachment] | None = Field(default=None, max_length=8)
 
 
 @router.get("/{conversation_id}/turns")
@@ -237,11 +246,14 @@ def add_turn(
     c = require_client()
     if _get_owned_conversation(c, conversation_id, company) is None:
         raise HTTPException(404, "Conversation not found")
-    resp = c.table("conversation_turns").insert({
+    row: dict[str, Any] = {
         "conversation_id": conversation_id,
         "role": body.role,
         "content": body.content,
-    }).execute()
+    }
+    if body.attachments:
+        row["attachments"] = [a.model_dump() for a in body.attachments]
+    resp = c.table("conversation_turns").insert(row).execute()
     # Update conversation preview + timestamp. Only overwrite preview on user
     # turns — assistant turns should NOT blank out the last user message shown
     # in the chat-history list (ChatsScreen).
