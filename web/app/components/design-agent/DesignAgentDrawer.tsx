@@ -118,10 +118,11 @@ type GenerateFlowDeps = {
     /** Explicit single-source selector. When set, overrides the implicit
      *  precedence in the backend. Absent (null) = old-client back-compat. */
     design_source?: "figma" | "github" | "website" | "screenshot" | null
-    /** Staged upload key from POST /uploads/screenshot. Present ONLY on the
-     *  screenshot source — every other source omits the field entirely so its
-     *  wire body is byte-identical to the pre-screenshot shape. */
-    screenshot_key?: string | null
+    /** Staged upload keys from POST /uploads/screenshot, in upload (= prompt)
+     *  order. Present ONLY on the screenshot source — every other source
+     *  omits the field entirely so its wire body is byte-identical to the
+     *  pre-screenshot shape. */
+    screenshot_keys?: string[] | null
     /** The PM-confirmed screen route from the locate gate. Sent only on the
      *  codebase generation path; the backend resolves it to a node on the
      *  pinned map snapshot and feeds the recreate pre-seed branch. */
@@ -181,7 +182,7 @@ export function buildGenerateParams({
   manualFont,
   githubRepo,
   designSource,
-  screenshotKey,
+  screenshotKeys,
 }: {
   prdId: number
   platform: TargetPlatform
@@ -200,10 +201,11 @@ export function buildGenerateParams({
    *  (undefined) means no explicit choice was made — the backend preserves the
    *  prior implicit precedence (back-compat for the drawer's own generate path). */
   designSource?: "figma" | "github" | "website" | "screenshot"
-  /** Staged upload key from POST /uploads/screenshot (screenshot source only).
-   *  Threaded into the body ONLY when set, so every other source's body stays
-   *  byte-identical to the pre-screenshot wire shape. */
-  screenshotKey?: string | null
+  /** Staged upload keys from POST /uploads/screenshot, in upload order
+   *  (screenshot source only). Threaded into the body ONLY when a non-empty
+   *  array is set, so every other source's body stays byte-identical to the
+   *  pre-screenshot wire shape. */
+  screenshotKeys?: string[] | null
 }): GenerateFlowDeps["params"] {
   return {
     prd_id: prdId,
@@ -218,7 +220,15 @@ export function buildGenerateParams({
         : null,
     github_repo: githubRepo?.trim() || null,
     design_source: designSource ?? null,
-    ...(screenshotKey ? { screenshot_key: screenshotKey } : {}),
+    // Gated on BOTH a non-empty array AND designSource === "screenshot": the
+    // caller only threads screenshotKeys for the screenshot source, but the
+    // builder itself must not leak the field for any other source either,
+    // even if a caller passed it defensively/by mistake.
+    ...(designSource === "screenshot" &&
+    screenshotKeys &&
+    screenshotKeys.length > 0
+      ? { screenshot_keys: screenshotKeys }
+      : {}),
   }
 }
 
