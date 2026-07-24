@@ -55,6 +55,7 @@ import { GenerateLoadingState } from "./GenerateLoadingState"
 import { GenerationCancelButton } from "./GenerationCancelButton"
 import locateErrorStyles from "./GenerateModalLocateError.module.css"
 import type { LocatePhaseState } from "./GenerationLoadingScreen"
+import { ScreenshotStrip } from "./ScreenshotStrip"
 
 const PLATFORM_OPTIONS: { value: TargetPlatform; label: string }[] = [
   { value: "desktop", label: "Desktop" },
@@ -472,31 +473,30 @@ export function GenerateModal({
   const steerImageInputRef = useRef<HTMLInputElement | null>(null)
 
   // Screenshot-as-context (the fourth design source). Per-run only — nothing
-  // here is ever written to DesignSourcePreference.
-  //   - screenshotKey: staged storage key from POST /uploads/screenshot; null
-  //     until an upload has SUCCEEDED. This is the Generate gate in screenshot
-  //     mode (and a fresh pick nulls it immediately, so the gate holds while a
-  //     replacement uploads).
-  //   - screenshotPreview: the downscaled data URL shown as the thumbnail.
-  //   - screenshotName: the picked filename, for the inline label.
-  //   - screenshotUploading: in-flight flag (disables the picker).
-  //   - screenshotError: client-side reject or server 4xx message (verbatim).
-  const [screenshotKey, setScreenshotKey] = useState<string | null>(null)
-  const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null)
-  const [screenshotName, setScreenshotName] = useState<string | null>(null)
+  // here is ever written to DesignSourcePreference. Holds every attached
+  // screenshot in upload order (also the prompt order sent to the backend) as
+  // a sequential strip of up to 10 slots (Option B) — an ordered array
+  // replaces the old single-key/-preview/-name triple that could only ever
+  // hold one file.
+  //   - screenshots: ordered {key, preview, name}[]. The Generate gate in
+  //     screenshot mode is screenshots.length === 0.
+  //   - screenshotUploading/screenshotError stay singular: only one upload is
+  //     ever in flight at a time (the strip's "+" control is disabled/hidden
+  //     while uploading), so there is never a need for a per-slot array.
+  const [screenshots, setScreenshots] = useState<
+    { key: string; preview: string; name: string }[]
+  >([])
   const [screenshotUploading, setScreenshotUploading] = useState(false)
   const [screenshotError, setScreenshotError] = useState<string | null>(null)
   // Hidden file input for the screenshot-source picker.
   const screenshotInputRef = useRef<HTMLInputElement | null>(null)
 
-  // Closing the modal discards any staged screenshot: the key is per-run
-  // context, not a preference — the next open starts clean. (The now-orphaned
-  // server-side upload is the parked-cleanup class; nothing to do here.)
+  // Closing the modal discards every staged screenshot: the array is per-run
+  // context, not a preference — the next open starts clean. (Any now-orphaned
+  // server-side uploads are the parked-cleanup class; nothing to do here.)
   useEffect(() => {
     if (!open) {
-      setScreenshotKey(null)
-      setScreenshotPreview(null)
-      setScreenshotName(null)
+      setScreenshots([])
       setScreenshotUploading(false)
       setScreenshotError(null)
     }
@@ -972,10 +972,14 @@ export function GenerateModal({
       manualFont: "",
       githubRepo: codebaseGenerate ? effectiveRepo : "",
       designSource: effectiveSource,
-      // The staged upload key rides ONLY the screenshot source; every other
-      // source omits the field entirely (buildGenerateParams drops a null —
-      // wire back-compat, byte-identical to today).
-      screenshotKey: effectiveSource === "screenshot" ? screenshotKey : null,
+      // The staged upload keys ride ONLY the screenshot source, in upload
+      // (= prompt) order; every other source omits the field entirely
+      // (buildGenerateParams drops an empty/null array — wire back-compat,
+      // byte-identical to today).
+      screenshotKeys:
+        effectiveSource === "screenshot"
+          ? screenshots.map((s) => s.key)
+          : null,
     })
     // Fire the recreate wiring when EITHER a route or a stable id was chosen —
     // a non-route host (the app shell, an in-page section) has an empty route,
@@ -1106,11 +1110,11 @@ export function GenerateModal({
 
   // Screenshot-as-context picker. Validates client-side (same bounds as the
   // steer flow), downscales via the SAME seam (`_testDownscale` under jsdom),
-  // uploads the DOWNSCALED bytes via POST /uploads/screenshot, and holds the
-  // returned key for the generate body. Re-picking replaces the pending key
-  // client-side; any failure returns the picker to a re-pickable, pre-upload
-  // state — a server 4xx (413 oversize / 422 type) surfaces its user-readable
-  // message verbatim.
+  // uploads the DOWNSCALED bytes via POST /uploads/screenshot, and APPENDS the
+  // returned key to the strip on success — a fresh pick never replaces an
+  // existing entry (Option B: the "+" control always fills the NEXT slot,
+  // never the current one). A failed pick (client-side reject or server 4xx)
+  // leaves the strip untouched and surfaces the message inline verbatim.
   async function handleScreenshotSelected(file: File) {
     setScreenshotError(null)
     if (
@@ -1127,22 +1131,18 @@ export function GenerateModal({
       setScreenshotError("That screenshot is over 5 MB — attach a smaller one.")
       return
     }
-    // A fresh pick invalidates any previously staged key IMMEDIATELY, so the
-    // Generate gate holds while the replacement uploads (the orphaned prior
-    // upload is the server-side parked-cleanup class — nothing to do here).
-    setScreenshotKey(null)
     setScreenshotUploading(true)
     try {
       const dataUrl = await (_testDownscale ?? downscaleImageToDataUrl)(file)
-      setScreenshotPreview(dataUrl)
-      setScreenshotName(file.name)
       const res = await designAgentApi.uploadScreenshot(dataUrlToBlob(dataUrl))
-      setScreenshotKey(res.screenshot_key)
+      setScreenshots((prev) => [
+        ...prev,
+        { key: res.screenshot_key, preview: dataUrl, name: file.name },
+      ])
     } catch (err) {
-      // Reset to the pre-upload state (re-pickable) on ANY failure.
-      setScreenshotKey(null)
-      setScreenshotPreview(null)
-      setScreenshotName(null)
+      // On failure, NOTHING is appended — the strip is unchanged, and the
+      // picker stays immediately re-pickable (matches today's pre-upload
+      // re-pickable-state contract).
       setScreenshotError(
         err instanceof ApiError
           ? err.message
@@ -1151,6 +1151,14 @@ export function GenerateModal({
     } finally {
       setScreenshotUploading(false)
     }
+  }
+
+  // Removes exactly one entry (by index) from the strip. Drops it from the
+  // array only — no storage-delete call fires (a removed screenshot is
+  // dropped from the request only, per spec). Every subsequent tile's
+  // displayed number / aria-label re-derives from its new array position.
+  function handleRemoveScreenshot(index: number) {
+    setScreenshots((prev) => prev.filter((_, i) => i !== index))
   }
 
   function handleLocateResult(
@@ -1829,10 +1837,10 @@ export function GenerateModal({
             )}
 
             {/* Screenshot source — per-run upload; no connector, always
-                selectable. The hidden input + visible button mirror the
-                image-as-steer control's vocabulary; the picked file is
-                client-downscaled and uploaded on choice, and Generate stays
-                disabled until the upload has succeeded. */}
+                selectable. Up to 10 screenshots fill a fixed-height
+                horizontal strip one at a time via the SAME hidden input the
+                single-screenshot flow it replaced already owned; Generate
+                stays disabled until at least one upload has succeeded. */}
             {designSource === "screenshot" && (
               <>
                 <input
@@ -1848,75 +1856,13 @@ export function GenerateModal({
                     e.target.value = ""
                   }}
                 />
-                <div className="src-row-compact">
-                  <span className="src-bullet" aria-hidden="true" />
-                  <span className="src-name">Screenshot</span>
-                  <button
-                    type="button"
-                    className="btn locate-image-attach"
-                    data-testid="screenshot-pick"
-                    disabled={screenshotUploading}
-                    onClick={() => screenshotInputRef.current?.click()}
-                  >
-                    <IconImage size={16} />
-                    {screenshotPreview ? "Replace image" : "Choose image"}
-                  </button>
-                  {screenshotUploading && (
-                    <span
-                      className="da-generate-hint"
-                      data-testid="screenshot-uploading"
-                    >
-                      Uploading…
-                    </span>
-                  )}
-                </div>
-                {screenshotPreview && (
-                  // The downscaled data URL doubles as the preview thumbnail —
-                  // in-memory only, exactly the bytes that were uploaded.
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={screenshotPreview}
-                    alt={
-                      screenshotName
-                        ? `Screenshot preview — ${screenshotName}`
-                        : "Screenshot preview"
-                    }
-                    data-testid="screenshot-preview"
-                    style={{
-                      display: "block",
-                      maxWidth: "100%",
-                      maxHeight: 140,
-                      marginTop: 8,
-                      borderRadius: 6,
-                      border: "1px solid var(--border, rgba(128,128,128,.35))",
-                    }}
-                  />
-                )}
-                {screenshotPreview && screenshotName && !screenshotUploading && (
-                  <span
-                    className="da-generate-hint da-generate-hint--ok"
-                    data-testid="screenshot-ready-hint"
-                  >
-                    {screenshotKey ? `✓ ${screenshotName}` : screenshotName}
-                  </span>
-                )}
-                {screenshotError && (
-                  <p
-                    className="locate-image-error"
-                    data-testid="screenshot-error"
-                    role="alert"
-                  >
-                    {screenshotError}
-                  </p>
-                )}
-                {!screenshotPreview &&
-                  !screenshotError &&
-                  !screenshotUploading && (
-                    <p className="src-fallback-line">
-                      Upload a screenshot of a design you like — we&apos;ll
-                      match its look.
-                    </p>
-                  )}
+                <ScreenshotStrip
+                  screenshots={screenshots}
+                  onAdd={() => screenshotInputRef.current?.click()}
+                  onRemove={handleRemoveScreenshot}
+                  uploading={screenshotUploading}
+                  error={screenshotError}
+                />
               </>
             )}
           </div>
@@ -2072,10 +2018,10 @@ export function GenerateModal({
                 submitting ||
                 prdId == null ||
                 (codebaseMode && !repoSel) ||
-                // Screenshot mode gates on a SUCCEEDED upload: the staged key
-                // is nulled on pick and set only when the upload resolves, so
-                // this also covers the in-flight window.
-                (designSource === "screenshot" && !screenshotKey)
+                // Screenshot mode gates on at least one SUCCEEDED upload —
+                // the generalisation of the old "exactly one" gate to
+                // "at-least-one" now that the strip holds an array.
+                (designSource === "screenshot" && screenshots.length === 0)
               }
             >
               {submitting ? "Generating…" : "Generate →"}

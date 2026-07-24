@@ -1942,9 +1942,10 @@ export const designAgentApi = {
     manual_design?: { primary_color: string; font_family: string } | null  // manual floor
     github_repo?: string | null  // connected-repo full_name ("org/repo"); prompt context only
     design_source?: "figma" | "github" | "website" | "screenshot" | null  // explicit source selector; null = back-compat implicit precedence
-    /** Staged upload key returned by `uploadScreenshot` (screenshot source
-     *  only). Absent/omitted for every other source. */
-    screenshot_key?: string | null
+    /** Staged upload keys returned by `uploadScreenshot`, one call per slot,
+     *  in upload (= prompt) order (screenshot source only). Absent/omitted
+     *  for every other source. */
+    screenshot_keys?: string[] | null
     /** The screen route the PM confirmed in the locate UX. Sent only on the
      *  codebase generation path so the backend can resolve it into a recreate
      *  pre-seed. Absent / null = blank-canvas generation. */
