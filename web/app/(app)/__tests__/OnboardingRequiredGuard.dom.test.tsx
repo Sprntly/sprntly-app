@@ -85,9 +85,9 @@ describe("OnboardingRequiredGuard", () => {
       workspace: { onboarding_completed_at: null, onboarding_step: 3 },
     }
     const { queryByText } = renderGuard()
-    // Step 3 → the third slug ("metrics"), mapped locally via slugForStep.
+    // Step 3 → the third slug ("connectors"), mapped locally via slugForStep.
     await waitFor(() =>
-      expect(replace).toHaveBeenCalledWith("/onboarding/metrics"),
+      expect(replace).toHaveBeenCalledWith("/onboarding/connectors"),
     )
     // The cache was re-checked first, and the postLoginPath waterfall (getUser
     // → workspace fetch → invite accept) never ran for a known-workspace user.

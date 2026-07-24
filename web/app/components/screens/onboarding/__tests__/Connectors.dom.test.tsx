@@ -11,7 +11,7 @@
 //     entirely — there are no locked placeholder rows.
 //   - the FOOTER drives it: Skip/Continue complete the open category and
 //     reveal the next; only when none are left does Continue leave the step,
-//     relabelled "Continue to workspace"
+//     relabelled "Continue to your key"
 //   - a reviewed category collapses to a "Connected" row (there is no
 //     "Skipped" variant) and stays re-openable; the "N of M reviewed" counter
 //     + progress bar track position
@@ -19,8 +19,8 @@
 //     otherwise-unsupported provider/category visible)
 //   - connectable cards open the connect modal with the right provider
 //   - connectors are OPTIONAL: leaving with none stamps skipped_fields
-//   - leaving advances to step 6 and routes to /onboarding/workspace; Back goes
-//     to /onboarding/api-key
+//   - leaving advances to step 4 and routes to /onboarding/api-key; Back goes
+//     to /onboarding/import-context
 //   - the no-workspace redirect happens in an EFFECT, never during render
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
@@ -167,7 +167,7 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(rows()[2].getAttribute("data-conn")).toBe(SHOWN_CATEGORIES[2].key)
   })
 
-  it("renders the header + sub copy verbatim, on step 5 of the dots", () => {
+  it("renders the header + sub copy verbatim, on step 3 of the dots", () => {
     const { container } = mountLoaded()
     // Header: "Connect your tools." with the period inside the italic <em>.
     const h = container.querySelector(".onb-card .onb-h") as HTMLElement
@@ -177,10 +177,10 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(sub.textContent).toBe(
       "The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later.",
     )
-    // The chrome marks step 5 of the 10 numbered steps.
+    // The chrome marks step 3 of the 10 numbered steps.
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("5")
+    ).toBe("3")
     // Design accordion shell: onb-card → conn-steps → conn-step rows.
     expect(container.querySelector(".onb-card .conn-steps")).not.toBeNull()
     expect(container.querySelectorAll(".conn-steps .conn-step").length).toBeGreaterThan(0)
@@ -205,7 +205,7 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     }
   })
 
-  it("relabels Continue to 'Continue to workspace' only on the final category", () => {
+  it("relabels Continue to 'Continue to your key' only on the final category", () => {
     const { container } = mountLoaded()
     // Categories remain → the footer just advances the accordion.
     expect(footerContinue(container).textContent).toMatch(/^Continue/)
@@ -213,7 +213,7 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(footerSkip(container).textContent?.trim()).toBe("Skip")
     // On the last one, completing it leaves nothing incomplete → it leaves.
     advanceToLastCategory(container)
-    expect(footerContinue(container).textContent).toMatch(/Continue to workspace/)
+    expect(footerContinue(container).textContent).toMatch(/Continue to your key/)
   })
 
   it("tracks position with the 'N of M reviewed' counter and the progress bar", () => {
@@ -415,14 +415,14 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(screen.queryByText("Heap")).toBeNull()
   })
 
-  it("advances to step 6 and routes to workspace once a connection is live (no skip marking)", async () => {
+  it("advances to step 4 and routes to api-key once a connection is live (no skip marking)", async () => {
     const { container } = mountLoaded([{ provider: "mixpanel", status: "active" }])
     await screen.findByText("Live")
     advanceToLastCategory(container)
     fireEvent.click(footerContinue(container))
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
@@ -433,8 +433,8 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     advanceToLastCategory(container)
     fireEvent.click(footerContinue(container))
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
     })
     // Continue (not Skip) doesn't stamp the field as skipped, even at zero.
     expect(markSkippedMock).not.toHaveBeenCalled()
@@ -446,8 +446,8 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     fireEvent.click(footerSkip(container))
     await waitFor(() => {
       expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
     })
   })
 
@@ -457,15 +457,15 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     advanceToLastCategory(container)
     fireEvent.click(footerSkip(container))
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 6)
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
 
-  it("Back routes to the api-key step", () => {
+  it("Back routes to the import-context step", () => {
     mountLoaded()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

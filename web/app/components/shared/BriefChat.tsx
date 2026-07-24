@@ -1221,6 +1221,21 @@ export function BriefChat() {
     if (!v2) return []
     return [v2.hero, ...v2.supporting].filter(Boolean) as Finding[]
   }, [v2])
+  // Per-user Top Insights filter: show the findings whose insight types
+  // intersect this member's Settings selection (content.insightTypeFilter,
+  // loaded by AppShell). Empty selection — or a selection that matches none of
+  // this week's findings — surfaces all of them (never a blank surface). Only
+  // the RENDERED set is filtered; the canonical brief, its indices, and every
+  // Generate-PRD/prototype CTA stay bound to the top-3 the backend persisted.
+  const visibleFindings: Finding[] = useMemo(() => {
+    const filter = content.insightTypeFilter ?? []
+    if (filter.length === 0) return findings
+    const wanted = new Set(filter)
+    const matched = findings.filter((f) =>
+      (f.insightTypes ?? []).some((t) => wanted.has(t)),
+    )
+    return matched.length > 0 ? matched : findings
+  }, [findings, content.insightTypeFilter])
   // Dismissed cards stay in the list (greyed out via the dismissed prop), so the
   // finding is never removed — only collapsed until restored.
 
@@ -1293,9 +1308,9 @@ export function BriefChat() {
                     the old separate persistent-intro + greeting that double-led
                     with "Good day {name}". */}
                 <p className="bc-greeting">{greeting}</p>
-                {findings.length > 0 ? (
+                {visibleFindings.length > 0 ? (
                   <div className="fc-stack">
-                    {findings.map((f) => {
+                    {visibleFindings.map((f) => {
                       const key = f.detailKey
                       const meta = key ? content.briefDetails?.[key]?.meta : undefined
                       const insightState = meta != null

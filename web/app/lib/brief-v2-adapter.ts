@@ -65,6 +65,12 @@ interface BriefV2CardBase {
   skillType: BriefSkillType
   skillAccent: string
   skillLabel: string
+  // The user-facing insight-type categories this finding belongs to (from the
+  // backend's `insight_types`). Drives the per-user filter on the Top Insights
+  // tab — a member sees the findings whose types intersect their Settings
+  // selection. Optional: the adapter always sets it (to [] for legacy briefs),
+  // but hand-built test fixtures needn't. Consumers treat absent as "no types".
+  insightTypes?: string[]
   // The skill card's CTAs (View/Draft PRD, View/Generate prototype) when the
   // backend attached `_card`; empty for legacy briefs (callers fall back).
   ctas: BriefSkillCta[]
@@ -386,6 +392,7 @@ function buildCardBase(
     skillType: resolveSkillType(insight),
     skillAccent: accentForInsight(insight),
     skillLabel: labelForInsight(insight),
+    insightTypes: Array.isArray(insight.insight_types) ? insight.insight_types : [],
     ctas: Array.isArray(insight._card?.ctas) ? insight._card!.ctas : [],
     category: categoryFor(insight, m.actionAccent),
     priority,
@@ -491,8 +498,31 @@ function buildSourcesLine(insights: Insight[]): string {
 
 // ---- Public entry point ---------------------------------------------------
 
-export function briefToBriefV2State(brief: Brief): BriefV2State {
-  const insights = (brief.insights || []).filter((i) => Boolean(i))
+// Choose which findings this reader sees. With NO filter we render the
+// canonical top-3 brief unchanged. With a filter we draw from `_pool` — the
+// wider ranked superset the backend retained (top POOL_SIZE) — and keep the
+// findings whose `insight_types` intersect the reader's selection, capped to
+// the same 3 slots the render uses (hero + up to 2 supporting). Findings stay
+// in the pool's best-first order, so the top matches lead. If a filter matches
+// nothing this week (a type with no findings), we fall back to the unfiltered
+// top 3 so the surface is never blank.
+const MAX_RENDERED_FINDINGS = 3
+
+export function selectFindingsForTypes(brief: Brief, selectedTypes: string[]): Insight[] {
+  const topThree = (brief.insights || []).filter((i): i is Insight => Boolean(i))
+  if (!selectedTypes || selectedTypes.length === 0) return topThree
+  const wanted = new Set(selectedTypes)
+  const pool = ((brief._pool && brief._pool.length ? brief._pool : brief.insights) || []).filter(
+    (i): i is Insight => Boolean(i),
+  )
+  const matched = pool.filter(
+    (i) => Array.isArray(i.insight_types) && i.insight_types.some((t) => wanted.has(t)),
+  )
+  return (matched.length ? matched : topThree).slice(0, MAX_RENDERED_FINDINGS)
+}
+
+export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []): BriefV2State {
+  const insights = selectFindingsForTypes(brief, selectedTypes)
   const insufficientEvidence = brief._insufficient_evidence === true
   const emptyReason = brief._empty_reason?.trim() || null
   const empty: BriefV2State = {

@@ -160,7 +160,7 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/product")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
@@ -198,7 +198,7 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/product")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
@@ -228,7 +228,7 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/product")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
     })
     expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
     const arg = createWorkspaceMock.mock.calls[0][0] as Record<string, unknown>

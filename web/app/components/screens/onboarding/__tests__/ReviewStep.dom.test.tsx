@@ -117,7 +117,7 @@ describe("ReviewStep (onboarding step 08 — AI business context, review & accep
     // stays disabled rather than sitting live over an empty page.
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("8")
+    ).toBe("9")
     expect(draftMock).toHaveBeenCalledTimes(1)
     const skeleton = container.querySelector(".onb-draft-skel") as HTMLElement
     expect(skeleton).not.toBeNull()

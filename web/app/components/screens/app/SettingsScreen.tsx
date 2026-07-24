@@ -15,6 +15,7 @@ import { BusinessContextSettings } from "./settings/BusinessContextSettings"
 import { StrategicSettings } from "./settings/StrategicSettings"
 import { FeatureFlagsSettings } from "./settings/FeatureFlagsSettings"
 import { NotificationsSettings } from "./settings/NotificationsSettings"
+import { TopInsightsSettings } from "./settings/TopInsightsSettings"
 import { BillingSettings } from "./settings/BillingSettings"
 import { SecuritySettings } from "./settings/SecuritySettings"
 import { AdminSettings } from "./settings/AdminSettings"
@@ -52,6 +53,8 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
       return <BusinessContextSettings />
     case "comms-brief":
       return <NotificationsSettings />
+    case "top-insights":
+      return <TopInsightsSettings />
     case "billing":
       return <BillingSettings />
     case "security":
@@ -96,6 +99,7 @@ export function resolveSectionId(raw: string | null): SettingsSectionId {
 const FULL_BLEED_SECTIONS: ReadonlySet<SettingsSectionId> = new Set([
   "profile",
   "comms-brief",
+  "top-insights",
   "product-category",
   "company-profile",
   "process",
@@ -145,6 +149,13 @@ function NavIcon({ id }: { id: SettingsSectionId }) {
         <svg {...p}>
           <rect x="2" y="4" width="20" height="16" rx="2" />
           <path d="M22 7l-10 6L2 7" />
+        </svg>
+      )
+    case "top-insights":
+      return (
+        <svg {...p}>
+          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2" />
+          <circle cx="12" cy="12" r="5" />
         </svg>
       )
     case "product-category":

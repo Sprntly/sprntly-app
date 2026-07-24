@@ -171,7 +171,7 @@ export function CompanyStep() {
       // runs server-side; the provider outlives this navigation.
       const analysisSite = ws?.product?.website ?? normalizedSite
       if (ws && analysisSite) startWebsiteAnalysis(analysisSite, ws.id)
-      router.push("/onboarding/product")
+      router.push("/onboarding/import-context")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your company.")
       setSaving(false)

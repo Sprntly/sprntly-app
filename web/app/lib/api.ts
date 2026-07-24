@@ -215,6 +215,12 @@ export type Insight = {
    *  change that has nothing to render. Gates the "Generate prototype"
    *  option. Older briefs omit it → treated as prototypeable (shown). */
   prototypeable?: boolean
+  /** The user-facing insight-type categories this finding belongs to (1–2 of
+   *  the canonical slugs in lib/insight-types). Set by the backend so each
+   *  reader can filter the pool to the types they picked. Older briefs omit it
+   *  → the finding matches no specific filter and shows only in the default
+   *  (unfiltered) view. */
+  insight_types?: string[]
 }
 export type Brief = {
   id: number
@@ -227,6 +233,12 @@ export type Brief = {
   week_label: string
   summary_headline: string
   insights: Insight[]
+  /** The render-only FILTER pool: the full ranked set (top POOL_SIZE findings),
+   *  each classified into `insight_types`. `insights` above is the canonical
+   *  top-3 brief; the frontend renders from `_pool` when the reader has an
+   *  insight-type filter, falling back to `insights`. Absent on briefs generated
+   *  before the pool existed — treat `insights` as the pool in that case. */
+  _pool?: Insight[]
   /** Backend evidence-gate flag: set when the brief was saved EMPTY because the
    *  KG lacked enough connected-source evidence (vs. a brand-new account with no
    *  data at all). Lets the UI tell "we got your upload, but need more connected
@@ -1129,6 +1141,81 @@ export const companyDocsApi = {
     form.append("doc_type", docType)
     return api.post<CompanyDocUploadResponse>("/v1/company/documents", form)
   },
+}
+
+// ---- LLM context import -----------------------------------------------------
+
+/** The onboarding fields an import could prefill. Every key is optional: an
+ *  export only carries what the user actually told their assistant, and the
+ *  backend deliberately omits anything it could not read rather than filling a
+ *  gap with a guess (see backend/app/llm_context.py). */
+export type LlmContextFields = {
+  company_name?: string
+  company_website?: string
+  mission?: string
+  strategy?: string
+  portfolio?: string
+  planning_cycle?: string
+  product_name?: string
+  product_website?: string
+  surfaces?: string[]
+  monetization?: string
+  users_description?: string
+  competitors?: string[]
+  metrics?: string[]
+  prioritization_framework?: string
+  team_scope?: string
+  notes?: string
+}
+
+export type LlmContextImportResponse = {
+  /** False when we recognised none of the expected sections — the caller must
+   *  surface `note` rather than claiming a successful import. Note this is the
+   *  DETERMINISTIC read only; a false here with a live `job_id` is not yet a
+   *  failed import, because the LLM pass may still find fields. */
+  ok: boolean
+  fields: LlmContextFields
+  /** Sections we read but had nowhere to put, kept so nothing is lost. */
+  unmapped: Record<string, string>
+  format_version: string | null
+  note: string | null
+  /** The background LLM extraction kicked off by this upload, or null when it
+   *  couldn't start. The heading parse above only understands files our own
+   *  prompt produced; this pass reads context documents of any shape, so it
+   *  runs server-side while the user works through the connectors step. */
+  job_id?: number | null
+}
+
+export type LlmContextJobStatus = {
+  status: "generating" | "ready" | "error"
+  /** Populated once `status === "ready"` — the same shape as the upload
+   *  response, so one apply path handles both reads. */
+  result: LlmContextImportResponse | null
+  error: string | null
+}
+
+export const llmContextApi = {
+  /** The prompt the user pastes into Claude / ChatGPT / Gemini. Fetched rather
+   *  than duplicated in the UI so the copy can never drift from what the
+   *  backend parser expects to read back. */
+  prompt: () =>
+    api.get<{ prompt: string; format_version: string }>(
+      "/v1/connectors/llm-context/prompt",
+    ),
+  /** Upload the .md the assistant produced (multipart). */
+  importFile: (file: File) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    return api.post<LlmContextImportResponse>(
+      "/v1/connectors/llm-context/import",
+      form,
+    )
+  },
+  /** Poll the background LLM extraction the upload kicked off. */
+  importStatus: (jobId: number) =>
+    api.get<LlmContextJobStatus>(
+      `/v1/connectors/llm-context/import/${jobId}`,
+    ),
 }
 
 // ---- sources ----------------------------------------------------------------

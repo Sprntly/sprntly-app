@@ -230,9 +230,45 @@ describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization +
     // Competitors are parsed/deduped onto the company row with the step bump.
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       competitors: ["Fitbit", "Oura"],
-      onboarding_step: 3,
+      onboarding_step: 7,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
+  })
+
+  it("fills fields from a context import that lands AFTER mount, without overwriting typed input", () => {
+    // The background import lands ~30-60s after upload. The step mounts empty
+    // (no product yet), the user may start typing, and when the import applies
+    // its extracted values onto the workspace the still-empty fields must adopt
+    // them while anything already typed stays put. The old `if (draft) return`
+    // full-reset seeded once on mount and never saw the late workspace update.
+    const { rerender } = mount()
+    expect(urlInput().value).toBe("")
+    // User types their own users description before the import arrives.
+    fireEvent.change(usersTextarea(), { target: { value: "My own users" } })
+
+    const imported = makeWorkspace({
+      onboarding_step: 2,
+      competitors: ["Cursor", "Devin"],
+      product: makeProduct({
+        name: "Acme",
+        website: "https://sprntly.ai",
+        surfaces: ["web", "api"],
+        monetization: ["seat"],
+        users_description: "Imported users that must NOT override the typed value",
+      }),
+    })
+    act(() => {
+      onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: imported }))
+      rerender(React.createElement(ProductStep))
+    })
+
+    // Empty fields adopt the import…
+    expect(urlInput().value).toBe("https://sprntly.ai")
+    expect(surfaceChip("Web").getAttribute("aria-pressed")).toBe("true")
+    expect(surfaceChip("API").getAttribute("aria-pressed")).toBe("true")
+    expect(monetizationSelect().value).toBe("seat")
+    // …but the field the user already typed is left exactly as they left it.
+    expect(usersTextarea().value).toBe("My own users")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

@@ -8,7 +8,7 @@
 // seeding priority (up to 5 pre-selected); picking a 6th metric flashes the
 // limit warning; Continue requires ≥1 metric AND a framework; a valid Continue
 // PUTs the picks to the from-selection endpoint, persists the framework via
-// updateWorkspace (onboarding_step 4) and routes to /onboarding/api-key;
+// updateWorkspace (onboarding_step 8) and routes to /onboarding/invite;
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -215,7 +215,7 @@ describe("MetricsStep (onboarding step 03 — up to 5 metrics + framework)", () 
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("a valid Continue PUTs the picks, saves the framework (step 4) and routes to api-key", async () => {
+  it("a valid Continue PUTs the picks, saves the framework and routes to invite (step 8)", async () => {
     kpiSelectionMock.mockResolvedValue({ ok: true, version: 1, north_star: "x" })
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 4 }))
     const { container } = mount()
@@ -227,7 +227,7 @@ describe("MetricsStep (onboarding step 03 — up to 5 metrics + framework)", () 
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
     })
     expect(kpiSelectionMock).toHaveBeenCalledTimes(1)
     const payload = kpiSelectionMock.mock.calls[0][0] as {
@@ -236,9 +236,75 @@ describe("MetricsStep (onboarding step 03 — up to 5 metrics + framework)", () 
     expect(payload.metrics.map((m) => m.metric)).toEqual(DEFAULT_POOL.slice(0, 3))
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       prioritization_framework: "rice",
-      onboarding_step: 4,
+      onboarding_step: 8,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
+  })
+
+  it("adopts metrics from a context import that lands AFTER mount, superseding the defaults", () => {
+    // The regression this guards: the background LLM import finishes ~30-60s
+    // after upload (while the user is on connectors), so the metrics step first
+    // mounts showing business/industry DEFAULTS. When the import lands it writes
+    // the extracted metrics onto companies.kpi_tree and OnboardingContext pushes
+    // a new workspace object. The old two-effect `candidatesSeeded` latch froze
+    // the defaults in and locked the import out — the picker never updated.
+    const { container, rerender } = mount()
+    expect(chipNames(container)).toEqual(DEFAULT_POOL)
+    expect(selectedChips(container)).toEqual(DEFAULT_POOL.slice(0, 3))
+
+    const imported = makeWorkspace({
+      onboarding_step: 3,
+      kpi_tree: {
+        north_star: "Insight-to-Impact Cycle Time",
+        north_star_description: "",
+        metrics: [
+          { name: "Insight-to-Impact Cycle Time", description: "" },
+          { name: "DS Agent benchmark recall", description: "" },
+          { name: "ARR", description: "" },
+        ],
+      },
+    })
+    act(() => {
+      onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: imported }))
+      rerender(React.createElement(MetricsStep))
+    })
+
+    // Imported metrics REPLACE the defaults, all pre-selected (up to 5).
+    expect(chipNames(container)).toEqual([
+      "Insight-to-Impact Cycle Time",
+      "DS Agent benchmark recall",
+      "ARR",
+    ])
+    expect(selectedChips(container)).toEqual([
+      "Insight-to-Impact Cycle Time",
+      "DS Agent benchmark recall",
+      "ARR",
+    ])
+  })
+
+  it("does NOT override the user's own pick when the import lands after they've chosen", () => {
+    const { container, rerender } = mount()
+    // The user curates the pool first — this must freeze it against the import.
+    fireEvent.click(chipByName(container, DEFAULT_POOL[0]))
+    const afterUserPick = selectedChips(container)
+    expect(afterUserPick).toEqual(DEFAULT_POOL.slice(1, 3))
+
+    const imported = makeWorkspace({
+      onboarding_step: 3,
+      kpi_tree: {
+        north_star: "Imported NS",
+        north_star_description: "",
+        metrics: [{ name: "Imported NS", description: "" }],
+      },
+    })
+    act(() => {
+      onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: imported }))
+      rerender(React.createElement(MetricsStep))
+    })
+
+    // The user's curation stands — the import never clobbers it.
+    expect(chipNames(container)).toEqual(DEFAULT_POOL)
+    expect(selectedChips(container)).toEqual(afterUserPick)
   })
 
   it("shows the loading shell while the workspace is loading", () => {

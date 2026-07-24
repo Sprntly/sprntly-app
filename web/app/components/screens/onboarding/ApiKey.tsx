@@ -7,6 +7,7 @@ import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { advanceOnboardingStep, markSkippedFields } from "../../../lib/onboarding/store"
 import { adminApi, ApiError, apiErrorMessage } from "../../../lib/api"
+import { stepForSlug } from "../../../lib/onboarding/types"
 
 /**
  * Onboarding "api-key" step — collect the company's own Anthropic (Claude) API
@@ -62,13 +63,18 @@ export function ApiKey() {
   // Always continuable — an empty field just skips (the step is optional).
   const canContinue = true
 
-  // Next numbered step is connectors (index 5 in ONBOARDING_STEP_SLUGS).
+  // Next numbered step is workspace. Derived, not hardcoded: the flow order
+  // has been renumbered twice and a stale literal silently resumes the user
+  // onto the wrong step.
   async function toNextStep(skipped: boolean) {
     if (!workspace || auth.kind !== "authed") return
     if (skipped) await markSkippedFields(auth.user.id, ["api_key"])
-    const updated = await advanceOnboardingStep(workspace.id, 5)
+    const updated = await advanceOnboardingStep(
+      workspace.id,
+      stepForSlug("workspace") ?? 5,
+    )
     setWorkspace(updated)
-    router.push("/onboarding/connectors")
+    router.push("/onboarding/workspace")
   }
 
   async function onContinue() {
@@ -133,7 +139,7 @@ export function ApiKey() {
           </button>
         </>
       }
-      onBack={() => router.push("/onboarding/metrics")}
+      onBack={() => router.push("/onboarding/connectors")}
       onContinue={onContinue}
       continueDisabled={saving || !canContinue}
       loading={saving}

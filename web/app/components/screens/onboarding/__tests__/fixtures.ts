@@ -117,6 +117,8 @@ export function makeOnboardingCtx(over: Record<string, unknown> = {}) {
     websiteAnalysis: null,
     setWebsiteAnalysis: () => {},
     startWebsiteAnalysis: () => {},
+    contextImport: "idle" as const,
+    startContextImport: () => {},
     ...over,
   }
 }

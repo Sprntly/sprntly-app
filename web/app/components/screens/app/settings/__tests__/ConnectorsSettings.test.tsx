@@ -1,4 +1,5 @@
-// View tests for the Settings → Connectors pane (commit D).
+// View tests for the Settings → Connectors pane (commit D; master/detail
+// layout — category rail + one open category panel).
 // Same node-env SSR pattern as design-agent component tests
 // (web/app/components/design-agent/__tests__/CompletionBar.test.tsx).
 import * as React from "react"
@@ -13,6 +14,7 @@ import {
   connectStartErrorMessage,
   filterConnectorCategories,
   isAdminGateError,
+  resolveSelectedCategory,
 } from "../ConnectorsSettings"
 import {
   CONNECTOR_CATALOG,
@@ -30,6 +32,11 @@ import {
 
 function noop() {}
 function noopUpload() {}
+
+/** Connector rows in the (single) open category panel. */
+function countRows(html: string): number {
+  return (html.match(/class="set-conn-row"/g) ?? []).length
+}
 
 function activeConn(provider: string, label = "alice@meridian.health"): ConnectionSummary {
   return {
@@ -123,23 +130,100 @@ describe("ConnectorsSettingsView — Regenerate brief", () => {
   })
 })
 
-describe("ConnectorsSettingsView — grouped by category", () => {
-  it("renders one card per catalog category with its title", () => {
-    const html = render()
-    for (const cat of CONNECTOR_CATALOG) {
-      expect(html).toContain(`data-category="${cat.key}"`)
-      // `&` in titles (e.g. "Customer Voice & Support") is HTML-encoded.
-      expect(html).toContain(cat.title.replace(/&/g, "&amp;"))
-    }
-    expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
-      CONNECTOR_CATALOG.length,
+describe("resolveSelectedCategory", () => {
+  it("returns null when there are no categories", () => {
+    expect(resolveSelectedCategory([], "analytics")).toBeNull()
+  })
+
+  it("defaults to the first category when nothing is selected", () => {
+    expect(resolveSelectedCategory(CONNECTOR_CATALOG, null)?.key).toBe(
+      CONNECTOR_CATALOG[0].key,
     )
   })
 
-  it("shows category sub-labels as the card-head hint", () => {
+  it("returns the selected category when the key matches", () => {
+    expect(resolveSelectedCategory(CONNECTOR_CATALOG, "design")?.key).toBe("design")
+  })
+
+  it("falls back to the first VISIBLE category for a stale/filtered-out key", () => {
+    const visible = filterConnectorCategories(CONNECTOR_CATALOG, "jira")
+    expect(resolveSelectedCategory(visible, "design")?.key).toBe("pm")
+  })
+})
+
+describe("ConnectorsSettingsView — category rail (master column)", () => {
+  it("renders one rail tab per catalog category, in catalog order", () => {
     const html = render()
-    expect(html).toContain("· required") // Analytics
-    expect(html).toContain("· powers On-Call Agent") // Monitoring
+    const keys = [...html.matchAll(/role="tab" id="conn-cat-tab-([a-z_]+)"/g)].map(
+      (m) => m[1],
+    )
+    expect(keys).toEqual(CONNECTOR_CATALOG.map((c) => c.key))
+    for (const cat of CONNECTOR_CATALOG) {
+      // `&` in titles (e.g. "Voice of Customer & Support") is HTML-encoded.
+      expect(html).toContain(cat.title.replace(/&/g, "&amp;"))
+    }
+    expect(html).toContain('role="tablist"')
+  })
+
+  it("selects the first category by default (dark pill + aria-selected)", () => {
+    const html = render()
+    const first = CONNECTOR_CATALOG[0]
+    expect(html).toContain(
+      `id="conn-cat-tab-${first.key}" aria-controls="conn-cat-panel-${first.key}" ` +
+        'aria-selected="true" tabindex="0" class="set-conn-rail-item is-active"',
+    )
+    // Roving tabindex: every other tab is out of the page tab order.
+    expect((html.match(/tabindex="0"/g) ?? []).length).toBe(1)
+    expect((html.match(/tabindex="-1"/g) ?? []).length).toBe(
+      CONNECTOR_CATALOG.length - 1,
+    )
+  })
+
+  it("renders ONLY the selected category's panel and connector rows", () => {
+    const html = render({ selectedCategoryKey: "design" })
+    // One panel, and it's Design.
+    expect((html.match(/role="tabpanel"/g) ?? []).length).toBe(1)
+    expect(html).toContain('id="conn-cat-panel-design"')
+    // Design's connectors are rendered; other categories' are not.
+    expect(html).toContain("Figma")
+    expect(html).toContain("Framer")
+    expect(html).not.toContain("Slack")
+    expect(html).not.toContain("Mixpanel")
+    expect(countRows(html)).toBe(
+      CONNECTOR_CATALOG.find((c) => c.key === "design")!.items.length,
+    )
+  })
+
+  it("swaps the rendered connectors when another category is selected", () => {
+    const design = render({ selectedCategoryKey: "design" })
+    const comms = render({ selectedCategoryKey: "comms" })
+    expect(design).toContain("Figma")
+    expect(design).not.toContain("Slack")
+    expect(comms).toContain("Slack")
+    expect(comms).not.toContain("Figma")
+    expect(comms).toContain('id="conn-cat-panel-comms"')
+    expect(comms).toContain(
+      'id="conn-cat-tab-comms" aria-controls="conn-cat-panel-comms" aria-selected="true"',
+    )
+  })
+
+  it("shows the selected category's sub-label as the panel-head hint", () => {
+    expect(render({ selectedCategoryKey: "analytics" })).toContain("· required")
+    expect(render({ selectedCategoryKey: "monitoring" })).toContain(
+      "· powers On-Call Agent",
+    )
+    // The hint belongs to the OPEN category only.
+    expect(render({ selectedCategoryKey: "analytics" })).not.toContain(
+      "· powers On-Call Agent",
+    )
+  })
+
+  it("falls back to the first visible category when search hides the selection", () => {
+    // "design" is selected but the query only leaves the PM category.
+    const html = render({ selectedCategoryKey: "design", searchQuery: "jira" })
+    expect(html).toContain('id="conn-cat-panel-pm"')
+    expect(html).toContain("Jira")
+    expect(html).not.toContain("Figma")
   })
 })
 
@@ -214,19 +298,23 @@ describe("apiKeyHelp — api-key modal help copy", () => {
 })
 
 describe("ConnectorsSettingsView — per-row behavior", () => {
-  it("renders 41 connector rows total (v6 catalog + Uploaded documents)", () => {
-    const html = render()
-    const matches = html.match(/class="set-conn-row"/g) ?? []
-    expect(matches.length).toBe(41)
+  it("renders only the OPEN category's rows, not all 41 catalog connectors", () => {
+    const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
+    expect(total).toBe(41) // v6 catalog + Uploaded documents
+    for (const cat of CONNECTOR_CATALOG) {
+      expect(countRows(render({ selectedCategoryKey: cat.key }))).toBe(
+        cat.items.length,
+      )
+    }
   })
 
   it("Asana row is wired for OAuth connect (no sync-engine support yet)", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "pm" })
     expect(html).toContain("Asana")
   })
 
   it("shows 'Off' pill + 'Connect' action for an apikey-supported connector with no connection", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "design" })
     // Both `oauth: true` and `authType: "apikey"` rows surface a Connect action.
     expect(html).toContain("Figma")
     expect(html).toContain("Connect")
@@ -245,7 +333,7 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
   })
 
   it("shows 'Coming soon' (disabled) action for non-OAuth connector with no connection", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "analytics" })
     // Mixpanel has oauth: false — should be disabled with "Coming soon".
     expect(html).toContain("Coming soon")
     // The Coming soon buttons should be disabled.
@@ -255,61 +343,57 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
   it("shows 'Active' pill + 'Configure' action when a matching active connection exists", () => {
     const map = new Map<string, ConnectionSummary>()
     map.set("figma", activeConn("figma", "design@meridian.health"))
-    const html = render({ connectionByProvider: map })
+    const html = render({ connectionByProvider: map, selectedCategoryKey: "design" })
     expect(html).toContain("Active")
     expect(html).toContain("Configure")
     expect(html).toContain("design@meridian.health")
   })
 
   it("uses inline brand-color background on the logo box for letter-only connectors", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "analytics" })
     // Connectors without a bundled SVG → brand-color box + letter.
     expect(html).toContain("background:#7856FF") // Mixpanel
     expect(html).toContain("background:#FF6E6E") // Heap
   })
 })
 
-describe("ConnectorsSettingsView — per-category upload strips", () => {
-  it("renders one upload strip per category card that allows manual upload", () => {
-    const html = render()
+describe("ConnectorsSettingsView — the open category's upload strip", () => {
+  it("renders exactly one upload strip — the open category's", () => {
+    const html = render({ selectedCategoryKey: "analytics" })
     const matches = html.match(/class="set-conn-upload"/g) ?? []
-    expect(matches.length).toBe(
-      CONNECTOR_CATALOG.filter((c) => c.allowsManualUpload !== false).length,
-    )
-  })
-
-  it("labels each strip with its category (e.g. 'Upload analytics export')", () => {
-    const html = render()
-    expect(html).toContain("Upload analytics export")
-    expect(html).toContain("Upload business documentation export")
+    expect(matches.length).toBe(1)
+    expect(html).toContain("Upload files to this category")
   })
 
   it("hides the upload strip for integration-only categories (comms, code, pm)", () => {
-    const html = render()
     // Those categories must be populated by connecting the real integration,
     // so they opt out via `allowsManualUpload: false` in the catalog.
-    expect(html).not.toContain("Upload communications export")
-    expect(html).not.toContain("Upload codebase export")
-    expect(html).not.toContain("Upload project management export")
-    // The connector rows themselves are untouched.
-    expect(html).toContain("Slack")
-    expect(html).toContain("GitHub")
-    expect(html).toContain("Jira")
+    for (const key of ["comms", "code", "pm"]) {
+      const html = render({ selectedCategoryKey: key })
+      expect(html).not.toContain("Upload files to this category")
+      // The connector rows themselves are untouched.
+      expect(countRows(html)).toBe(
+        CONNECTOR_CATALOG.find((c) => c.key === key)!.items.length,
+      )
+    }
+    expect(render({ selectedCategoryKey: "comms" })).toContain("Slack")
+    expect(render({ selectedCategoryKey: "code" })).toContain("GitHub")
+    expect(render({ selectedCategoryKey: "pm" })).toContain("Jira")
   })
 
   it("advertises the shared accepted-types hint", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "analytics" })
     // The `&` in the hint is HTML-encoded as `&amp;` by renderToStaticMarkup.
     expect(html).toContain(UPLOAD_ACCEPT_HINT.replace(/&/g, "&amp;"))
   })
 
   it("accepts the shared broad extension list", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "analytics" })
     expect(html).toContain(`accept="${UPLOAD_EXTENSIONS.join(",")}"`)
   })
 
   it("shows the idle upload labels and enabled inputs by default", () => {
-    const html = render()
+    const html = render({ selectedCategoryKey: "analytics" })
     expect(html).toContain("ti-cloud-upload")
     // Idle: no busy markers, inputs are selectable.
     expect(html).not.toContain("Uploading…")
@@ -318,7 +402,7 @@ describe("ConnectorsSettingsView — per-category upload strips", () => {
   })
 
   it("shows an in-flight busy state (spinner + 'Uploading…') and disables the inputs while uploading", () => {
-    const html = render({ uploading: true })
+    const html = render({ uploading: true, selectedCategoryKey: "analytics" })
     expect(html).toContain("Uploading…")
     // Spinner icon swaps in; busy class + aria-busy drive the visible state.
     expect(html).toContain("ti-spin")
@@ -359,14 +443,22 @@ describe("ConnectorsSettingsView — uploaded files list (FIX #1)", () => {
 })
 
 describe("ConnectorsSettingsView — Settings tab uses the connectable-only catalog", () => {
+  /** Every category's panel markup concatenated — the whole connectable set. */
+  function renderAllPanels(): string {
+    const cats = connectableCatalog()
+    return cats
+      .map((c) => render({ categories: cats, selectedCategoryKey: c.key }))
+      .join("")
+  }
+
   it("renders no 'Coming soon' rows when given connectableCatalog()", () => {
-    const html = render({ categories: connectableCatalog() })
+    const html = renderAllPanels()
     expect(html).not.toContain("Coming soon")
     expect(html).not.toMatch(/<button[^>]*disabled/)
   })
 
   it("shows the wired connectors and hides the 'Coming soon' ones", () => {
-    const html = render({ categories: connectableCatalog() })
+    const html = renderAllPanels()
     // Wired (kept):
     for (const name of ["Slack", "GitHub", "Figma", "ClickUp", "Jira", "Google Docs", "HubSpot", "Fireflies"]) {
       expect(html).toContain(name)
@@ -377,24 +469,36 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
     }
   })
 
-  it("groups the wired connectors into their categories (empty categories dropped)", () => {
-    const html = render({ categories: connectableCatalog() })
+  it("puts the wired connectors in their categories (empty categories dropped)", () => {
     const keptCategories = connectableCatalog()
-    // 12 wired connector rows across the surviving categories, one upload
-    // strip per surviving category that allows manual upload.
-    expect((html.match(/class="set-conn-row"/g) ?? []).length).toBe(12)
-    expect((html.match(/class="set-block sp-conn-cat"/g) ?? []).length).toBe(
+    // One rail tab per surviving category, and 12 wired connector rows spread
+    // across them (one category's worth showing at a time).
+    const one = render({ categories: keptCategories })
+    expect((one.match(/role="tab" id="conn-cat-tab-/g) ?? []).length).toBe(
       keptCategories.length,
     )
-    expect((html.match(/class="set-conn-upload"/g) ?? []).length).toBe(
-      keptCategories.filter((c) => c.allowsManualUpload !== false).length,
+    expect((one.match(/role="tabpanel"/g) ?? []).length).toBe(1)
+    const rowsAcrossPanels = keptCategories.reduce(
+      (n, c) =>
+        n + countRows(render({ categories: keptCategories, selectedCategoryKey: c.key })),
+      0,
     )
+    expect(rowsAcrossPanels).toBe(12)
+    // Each surviving category that allows manual upload shows its strip.
+    expect(
+      keptCategories.filter(
+        (c) =>
+          (render({ categories: keptCategories, selectedCategoryKey: c.key }).match(
+            /class="set-conn-upload"/g,
+          ) ?? []).length === 1,
+      ).length,
+    ).toBe(keptCategories.filter((c) => c.allowsManualUpload !== false).length)
     // Categories with no wired connectors (e.g. Monitoring) are dropped.
-    expect(html).not.toContain("powers On-Call Agent")
+    expect(one).not.toContain("powers On-Call Agent")
   })
 
   it("renders each connector's real brand logo from a locally bundled SVG", () => {
-    const html = render({ categories: connectableCatalog() })
+    const html = renderAllPanels()
     // 8 of the 10 wired connectors have an official bundled SVG mark
     // (Fireflies and Sprinklr keep their letter glyphs).
     for (const id of [

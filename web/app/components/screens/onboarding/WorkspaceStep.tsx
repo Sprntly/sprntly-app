@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { useFieldValidation } from "../../onboarding/InterviewLayout"
@@ -9,8 +9,16 @@ import { OptionalDisclosure } from "../../onboarding/OptionalDisclosure"
 import { UploadOrTypeBlock } from "../../onboarding/UploadOrTypeBlock"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { updateWorkspace } from "../../../lib/onboarding/store"
+import { applyImportedContext } from "../../../lib/onboarding/applyImportedContext"
+import { stepForSlug } from "../../../lib/onboarding/types"
+import type { WorkspaceCompany } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
-import { companyDocsApi, onboardingApi, roadmapDocApi } from "../../../lib/api"
+import {
+  companyDocsApi,
+  llmContextApi,
+  roadmapDocApi,
+  type LlmContextFields,
+} from "../../../lib/api"
 
 const DRAFT_KEY = "workspace-step"
 
@@ -31,51 +39,51 @@ const EMPTY_BLOCK: BlockState = {
 }
 
 /**
- * Onboarding step 06 — "Your workspace" (2026-07-21 screenshot spec).
+ * Onboarding step 05 — "Your workspace" (2026-07-21 screenshot spec,
+ * reordered 2026-07-22).
  *
  * Collapses the three former steps (team 06, strategy 07, decisions 08) into
  * one card, since they all describe the same thing: the slice of the product
  * this team owns.
  *
  *   - Workspace name* + what it works on* — the old team step. Both are
- *     WORKSPACE-owned fields (2026-07-22): the name IS the workspaces.name the
- *     left-sidebar switcher displays, and scope is workspaces.team_scope. They
- *     are written to the DEFAULT workspace row via onboardingApi.createWorkspace
- *     — a single source of truth shared with Settings → Process.
- *   - Team strategy + roadmap — the old strategy step, kept as TWO
- *     upload-or-type blocks under one heading. The spec draws them as a single
- *     block, but they persist to different columns and different upload
- *     endpoints (roadmapDocApi feeds the brief as a high-weight priorities
- *     signal), so merging them would silently drop that routing.
- *   - Sizing + anything else, behind "Add more". Both are workspace-owned too
- *     (workspaces.sizing_methodology / additional_context), shared with
- *     Settings → Process. "Anything else" is the old decisions step's field; the
- *     spec folds "how decisions get made" into that free-text prompt rather than
- *     keeping a dedicated field, and companies.decision_process (which still
- *     feeds the business-context draft) stays populated via Settings → Process.
+ *     COMPANY fields (companies.team_name / team_scope), deliberately not the
+ *     workspaces row, which stays "Default" until renamed in
+ *     Settings → Workspaces.
+ *   - Team strategy / roadmap — the old strategy step, as ONE upload-or-type
+ *     block, per the spec: people describe where they're going and how they
+ *     plan to get there in one breath, and splitting it made both halves feel
+ *     half-answered. Typed text lands in companies.team_strategy; the file goes
+ *     to roadmapDocApi, the higher-value of the two pipelines (it feeds the
+ *     brief as a high-weight priorities signal). companies.team_roadmap still
+ *     exists and is still editable in Settings → Process — onboarding just no
+ *     longer writes it, and deliberately doesn't null it out either.
+ *   - Sizing + anything else, behind "Add more". Sizing is new to onboarding
+ *     but NOT a new column — it reuses companies.sizing_methodology, already
+ *     owned by Settings → Process, so the two surfaces stay in sync. "Anything
+ *     else" is the old decisions step's additional_context; the spec folds
+ *     "how decisions get made" into that free-text prompt rather than keeping
+ *     a dedicated field, and companies.decision_process (which still feeds the
+ *     business-context draft) stays populated via Settings → Process.
  *
  * Uploads fire inline as picked (a transient failure is a non-blocking
- * notice); typed text persists on Continue. The onboarding_step marker is the
- * only companies write here (updateWorkspace) — the six fields go to the
- * workspace row.
+ * notice); typed text persists on Continue.
  */
 export function WorkspaceStep() {
   const auth = useAuth()
-  const { workspace, setWorkspace, loading } = useOnboarding()
+  const { workspace, setWorkspace, loading, startContextImport } = useOnboarding()
   const router = useRouter()
 
   const draft = loadDraft(DRAFT_KEY)
   const [teamName, setTeamName] = useState((draft?.teamName as string) ?? "")
   const [teamScope, setTeamScope] = useState((draft?.teamScope as string) ?? "")
   const [teamStrategy, setTeamStrategy] = useState((draft?.teamStrategy as string) ?? "")
-  const [teamRoadmap, setTeamRoadmap] = useState((draft?.teamRoadmap as string) ?? "")
   const [sizingMethodology, setSizingMethodology] = useState((draft?.sizingMethodology as string) ?? "")
   const [additionalContext, setAdditionalContext] = useState(
     (draft?.additionalContext as string) ?? "",
   )
 
   const [strategyBlock, setStrategyBlock] = useState<BlockState>({ ...EMPTY_BLOCK })
-  const [roadmapBlock, setRoadmapBlock] = useState<BlockState>({ ...EMPTY_BLOCK })
   const [sizingDoc, setSizingDoc] = useState<{
     fileName: string | null
     uploading: boolean
@@ -85,18 +93,39 @@ export function WorkspaceStep() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Seed from the saved workspace (draft takes priority).
+  // True once the textarea holds whatever companies.team_roadmap had, so the
+  // save can retire that column instead of leaving the same prose in both.
+  const roadmapAbsorbed = useRef(false)
+
+  // Seed from the saved workspace, filling only fields still empty — so the
+  // context import that lands ~30-60s after upload pops its values in when it
+  // arrives (team scope especially) without overwriting typed text or a restored
+  // draft. Runs on every `workspace` change, which is what lets the late import
+  // take effect; the old `if (draft) return` full-reset seeded once and missed it.
   useEffect(() => {
     if (!workspace) return
-    if (draft) return
-    setTeamName(workspace.team_name ?? "")
-    setTeamScope(workspace.team_scope ?? "")
-    setTeamStrategy(workspace.team_strategy ?? "")
-    setTeamRoadmap(workspace.team_roadmap ?? "")
-    setSizingMethodology(workspace.sizing_methodology ?? "")
-    setAdditionalContext(workspace.additional_context ?? "")
-    if (workspace.team_strategy) setStrategyBlock((b) => ({ ...b, typedOpen: true }))
-    if (workspace.team_roadmap) setRoadmapBlock((b) => ({ ...b, typedOpen: true }))
+    const roadmap = (workspace.team_roadmap ?? "").trim()
+
+    setTeamName((v) => v || (workspace.team_name ?? ""))
+    setTeamScope((v) => v || (workspace.team_scope ?? ""))
+    setSizingMethodology((v) => v || (workspace.sizing_methodology ?? ""))
+    setAdditionalContext((v) => v || (workspace.additional_context ?? ""))
+
+    // One field now, two legacy columns. If the field already holds text (typed
+    // or draft), only fold in the legacy roadmap column when it isn't there yet;
+    // otherwise seed from the saved strategy + roadmap, joined.
+    setTeamStrategy((s) => {
+      if (s.trim()) {
+        if (!roadmap || s.includes(roadmap)) return s
+        return `${s.trim()}\n\n${roadmap}`
+      }
+      return [(workspace.team_strategy ?? "").trim(), roadmap]
+        .filter((v) => v.length > 0)
+        .join("\n\n")
+    })
+    if ((workspace.team_strategy ?? "").trim() || roadmap)
+      setStrategyBlock((b) => ({ ...b, typedOpen: true }))
+    roadmapAbsorbed.current = true
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -106,14 +135,13 @@ export function WorkspaceStep() {
           teamName,
           teamScope,
           teamStrategy,
-          teamRoadmap,
           sizingMethodology,
           additionalContext,
         })
     }
     document.addEventListener("visibilitychange", onHide)
     return () => document.removeEventListener("visibilitychange", onHide)
-  }, [teamName, teamScope, teamStrategy, teamRoadmap, sizingMethodology, additionalContext])
+  }, [teamName, teamScope, teamStrategy, sizingMethodology, additionalContext])
 
   // Redirect when there's no workspace to anchor the step.
   useEffect(() => {
@@ -133,6 +161,12 @@ export function WorkspaceStep() {
     },
   ])
 
+  /**
+   * One picker for the merged strategy/roadmap block. Goes to roadmapDocApi
+   * rather than companyDocsApi("team_strategy") because that's the pipeline
+   * that feeds the brief as a high-weight priorities signal — the strictly
+   * more useful home for whichever of the two the user drops here.
+   */
   async function pickStrategyDoc(file: File | null) {
     if (!file) return
     setStrategyBlock((b) => ({
@@ -143,42 +177,15 @@ export function WorkspaceStep() {
       notice: null,
     }))
     try {
-      await companyDocsApi.upload(file, "team_strategy")
-      setStrategyBlock((b) => ({
-        ...b,
-        uploading: false,
-        uploaded: true,
-        notice: `${file.name} · uploaded just now.`,
-      }))
-    } catch {
-      setStrategyBlock((b) => ({
-        ...b,
-        uploading: false,
-        notice: `Couldn't upload "${file.name}" just now — re-try here or add it later in Settings. This won't block setup.`,
-      }))
-    }
-  }
-
-  async function pickRoadmapDoc(file: File | null) {
-    if (!file) return
-    setRoadmapBlock((b) => ({
-      ...b,
-      fileName: file.name,
-      uploading: true,
-      uploaded: false,
-      notice: null,
-    }))
-    try {
       await roadmapDocApi.upload(file)
-      setRoadmapBlock((b) => ({
+      setStrategyBlock((b) => ({
         ...b,
         uploading: false,
         uploaded: true,
-        notice:
-          "Your roadmap · uploaded just now — we'll pressure-test it against your data.",
+        notice: `${file.name} · uploaded just now — we'll pressure-test it against your data.`,
       }))
     } catch {
-      setRoadmapBlock((b) => ({
+      setStrategyBlock((b) => ({
         ...b,
         uploading: false,
         notice: `Couldn't upload "${file.name}" just now — re-try here or add it later in Settings. This won't block setup.`,
@@ -211,24 +218,21 @@ export function WorkspaceStep() {
     if (!validate().ok) return
     setSaving(true)
     try {
-      // The six "Your workspace" fields live on the DEFAULT workspace row
-      // (2026-07-22 — moved off companies). Write them via the onboarding
-      // workspace endpoint (name → the workspaces.name the switcher shows, plus
-      // the five typed blocks).
-      await onboardingApi.createWorkspace(teamName.trim(), {
+      const updated = await updateWorkspace(workspace.id, {
+        team_name: teamName.trim() || null,
         team_scope: teamScope.trim() || null,
         team_strategy: teamStrategy.trim() || null,
-        team_roadmap: teamRoadmap.trim() || null,
+        // Retired from onboarding: its text now lives in team_strategy. Only
+        // cleared once we know the field absorbed it (Settings → Process can
+        // still write the column afterwards).
+        ...(roadmapAbsorbed.current ? { team_roadmap: null } : {}),
         sizing_methodology: sizingMethodology.trim() || null,
         additional_context: additionalContext.trim() || null,
+        onboarding_step: stepForSlug("product") ?? 6,
       })
-      // Advance onboarding (ONLY the step marker — a companies field). The
-      // returned WorkspaceCompany re-reads the just-written workspace row, so
-      // team_* reflect the typed values and back-navigation re-seeds from them.
-      const updated = await updateWorkspace(workspace.id, { onboarding_step: 7 })
       setWorkspace({ ...updated, product: workspace.product })
       clearDraft(DRAFT_KEY)
-      router.push("/onboarding/invite")
+      router.push("/onboarding/product")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your workspace.")
       setSaving(false)
@@ -239,7 +243,7 @@ export function WorkspaceStep() {
 
   return (
     <OnboardingChrome
-      step={6}
+      step={5}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -248,7 +252,7 @@ export function WorkspaceStep() {
       }
       subtitle="A workspace is where you and your team collaborate — generate PRDs, prototypes and evidence, and get insights delivered to you."
       footerMeta="Team"
-      onBack={() => router.push("/onboarding/connectors")}
+      onBack={() => router.push("/onboarding/api-key")}
       onContinue={() => void save()}
       continueLabel="Next"
       continueDisabled={saving}
@@ -296,13 +300,14 @@ export function WorkspaceStep() {
 
         <div className="onb-section">
           <div className="onb-section-h">
-            Team strategy / roadmap <span className="opt">— upload or paste both</span>
+            Team strategy / roadmap{" "}
+            <span className="opt">— upload or paste both</span>
           </div>
         </div>
 
         <UploadOrTypeBlock
-          title="Team strategy"
-          sub="What you're trying to achieve this half, and why"
+          title="Team strategy / roadmap"
+          sub="What you're trying to achieve and your current plan — upload docs, or paste below"
           tint="var(--accent-ink)"
           uploading={strategyBlock.uploading}
           uploaded={strategyBlock.uploaded}
@@ -315,30 +320,10 @@ export function WorkspaceStep() {
           }
           typed={teamStrategy}
           onTypedChange={setTeamStrategy}
-          typedPlaceholder="What this team is trying to achieve this half, and why"
+          typedPlaceholder="What this team is trying to achieve this half and why, plus what's committed, in progress and planned"
           dataField="team-strategy"
         />
 
-        <div style={{ marginTop: 16 }}>
-          <UploadOrTypeBlock
-            title="Team roadmap"
-            sub="What's committed, in progress and planned — PDF, doc or sheet"
-            tint="var(--info)"
-            uploading={roadmapBlock.uploading}
-            uploaded={roadmapBlock.uploaded}
-            fileName={roadmapBlock.fileName}
-            notice={roadmapBlock.notice}
-            onPickFile={(f) => void pickRoadmapDoc(f)}
-            typedOpen={roadmapBlock.typedOpen}
-            onToggleTyped={() =>
-              setRoadmapBlock((b) => ({ ...b, typedOpen: !b.typedOpen }))
-            }
-            typed={teamRoadmap}
-            onTypedChange={setTeamRoadmap}
-            typedPlaceholder="What's committed, in progress, and planned"
-            dataField="team-roadmap"
-          />
-        </div>
 
         <OptionalDisclosure label="Add more ">
           <div className="form-grid">
@@ -390,7 +375,129 @@ export function WorkspaceStep() {
             </div>
           </div>
         </OptionalDisclosure>
+
+        {/* Second chance at the step-2 import, placed here because this step
+            asks for the most typing in the whole flow — an .md export can fill
+            the scope and strategy blocks above instead of the user writing
+            them out. Behaves EXACTLY like the dedicated import step: it applies
+            every extractable field across the flow (via applyImportedContext)
+            AND kicks the background LLM pass so a file that doesn't match our
+            heading contract still extracts. The fields land as editable values,
+            never a silent commit. */}
+        <LlmContextUploadBanner
+          workspace={workspace}
+          startContextImport={startContextImport}
+          applyImportFields={async (fields) => {
+            if (!workspace) return
+            // Prefill every step the same way the dedicated import step does —
+            // team scope on THIS step re-seeds from the updated workspace, and
+            // product/metrics/company fields land on their own steps.
+            setWorkspace(await applyImportedContext(workspace, fields))
+            // Plus the two this step owns that applyImportedContext doesn't map:
+            // the company strategy reads well as the team strategy here, and the
+            // catch-all notes seed the "anything else" box.
+            if (fields.strategy && !teamStrategy.trim()) {
+              setTeamStrategy(fields.strategy)
+              setStrategyBlock((b) => ({ ...b, typedOpen: true }))
+            }
+            if (fields.notes && !additionalContext.trim())
+              setAdditionalContext(fields.notes)
+          }}
+        />
       </div>
     </OnboardingChrome>
+  )
+}
+
+/**
+ * "Ran our prompt in your LLM? Upload the .md" — the banner from the v7
+ * workspace screenshot. The SAME import the dedicated step-2 screen runs, so
+ * both entry points behave identically: it applies the deterministic parse
+ * across the flow AND kicks the background LLM pass (Reader 2), so a file that
+ * doesn't follow our heading contract still extracts and prefills rather than
+ * reading as empty here. `applyImportFields` writes the fields; the backend
+ * files the upload to the knowledge graph either way.
+ */
+function LlmContextUploadBanner({
+  workspace,
+  applyImportFields,
+  startContextImport,
+}: {
+  workspace: WorkspaceCompany | null
+  applyImportFields: (fields: LlmContextFields) => Promise<void>
+  startContextImport: (jobId: number, workspaceId: string) => void
+}) {
+  const fileRef = useRef<HTMLInputElement | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+
+  async function onPick(file: File | null) {
+    if (!file) return
+    setBusy(true)
+    setNotice(null)
+    try {
+      const res = await llmContextApi.importFile(file)
+      // Kick the background LLM pass so a reworded / free-form document still
+      // extracts. Without this a file our heading walk can't read (res.ok is
+      // false) would prefill nothing here — the whole reason step 2 does it too.
+      if (res.job_id && workspace) startContextImport(res.job_id, workspace.id)
+      if (res.ok) {
+        await applyImportFields(res.fields)
+        setNotice(
+          `Read "${file.name}" — we filled in what was still blank. Check it over before continuing.`,
+        )
+      } else if (res.job_id) {
+        // Heading walk found nothing, but the LLM pass is now reading it and
+        // will fill the fields in when it lands (typically within a minute).
+        setNotice(
+          `Reading "${file.name}" — we'll fill in what we find in a moment.`,
+        )
+      } else {
+        setNotice(
+          res.note ??
+            "We couldn't read that file. Make sure it's the .md our prompt produced.",
+        )
+      }
+    } catch (e) {
+      setNotice(e instanceof Error ? e.message : `Couldn't read "${file.name}".`)
+    } finally {
+      setBusy(false)
+      if (fileRef.current) fileRef.current.value = ""
+    }
+  }
+
+  return (
+    <div className="onb-md-banner">
+      <div className="onb-md-banner-body">
+        <span className="onb-md-banner-title">
+          Ran our prompt in your AI? Upload the <code>.md</code>
+        </span>
+        <span className="onb-md-banner-desc">
+          Drop the exported file and we&apos;ll pre-fill this whole step instead
+          of you typing it.
+        </span>
+      </div>
+      <button
+        type="button"
+        className="btn btn-secondary"
+        onClick={() => fileRef.current?.click()}
+        disabled={busy}
+      >
+        {busy ? "Reading…" : "Upload .md"}
+      </button>
+      <input
+        ref={fileRef}
+        type="file"
+        accept=".md,.markdown,.txt,text/markdown,text/plain"
+        style={{ display: "none" }}
+        onChange={(e) => void onPick(e.target.files?.[0] ?? null)}
+        aria-label="AI context export"
+      />
+      {notice && (
+        <p className="onb-field-hint" role="status">
+          {notice}
+        </p>
+      )}
+    </div>
   )
 }

@@ -2968,3 +2968,237 @@ async def github_webhook(
         logger.info("GitHub webhook: ignoring event %s delivery=%s", event, x_github_delivery)
         return {"ok": True, "event": event, "handled": False}
     return {"ok": True, "event": event, "handled": True}
+
+
+# ───────────────────── Bring-your-own-LLM context ─────────────────────
+#
+#   GET    /v1/connectors/llm-context/prompt          -> the prompt to paste
+#   POST   /v1/connectors/llm-context/import          -> upload the .md
+#   GET    /v1/connectors/llm-context/import/{job_id} -> the LLM pass's result
+#
+# The user runs our prompt in whichever assistant they already use — Claude,
+# ChatGPT, Gemini — and uploads the Markdown it returns. Deliberately
+# integration-free: there is no OAuth path here, because an Anthropic token
+# authorises Messages API calls and cannot read a user's claude.ai
+# conversation history, so a "connect your account" flow could not actually
+# produce the context it promised. One prompt works everywhere instead.
+#
+# TWO READS, ONE UPLOAD. The POST runs the deterministic heading parse inline
+# and returns those fields immediately, so the user can move on the instant the
+# file lands. It ALSO kicks a background LLM extraction over the same file,
+# because the heading walk only understands documents our own prompt produced —
+# an edited export, a reworded one, or a strategy doc the user already had
+# reads as empty to it and reads fine to the LLM.
+#
+# That background pass is why the import step hands off to CONNECTORS rather
+# than product: connecting tools is the one step in the flow the import cannot
+# prefill, so it is the step worth spending the extraction's latency on. By the
+# time the user reaches metrics and product, the job has landed.
+#
+# Neither path writes to the workspace: both return `fields` for the onboarding
+# form to prefill and the user to confirm. An import must never silently
+# overwrite something the user already typed.
+#
+# Strong refs to in-flight extraction tasks — asyncio holds only a weak
+# reference to a bare create_task result, so without this the task can be
+# garbage-collected mid-run and the row would be stuck 'generating' (mirrors
+# routes/onboarding.py).
+_context_tasks: set[asyncio.Task] = set()
+
+#: Context exports are prose, not corpora — a few hundred KB at the outside.
+#: A tighter cap than the 20MB document limit keeps a mis-drop (a video, a DB
+#: dump) from being read into memory before we reject it.
+LLM_CONTEXT_MAX_BYTES = 2 * 1024 * 1024
+
+#: The document source the uploaded export is filed under, so the context the
+#: user handed over also grounds the agents instead of only prefilling a form.
+LLM_CONTEXT_SOURCE_NAME = "LLM context export"
+LLM_CONTEXT_SOURCE_DESCRIPTION = (
+    "Company, product, user and strategy context exported from the user's own "
+    "AI assistant during onboarding."
+)
+
+
+def _context_result(parsed, *, note: str | None = None) -> dict:
+    """The response shape the import returns."""
+    return {
+        "ok": not parsed.is_empty,
+        "fields": parsed.fields,
+        "unmapped": parsed.unmapped,
+        "format_version": parsed.format_version,
+        # Honest reporting: an export we could not read anything out of is a
+        # failed import the user should hear about, not a silent no-op.
+        "note": note
+        or (
+            None
+            if not parsed.is_empty
+            else "We couldn't find any of the expected sections in that file. "
+            "Check it was produced by our prompt, or fill the steps in manually."
+        ),
+    }
+
+
+async def _run_context_extraction(job_id: int, markdown: str) -> None:
+    """Background worker: run the LLM extraction and complete the job row.
+
+    Never raises — `extract_context_fields` already degrades to the
+    deterministic parse on any LLM failure, and anything left (a DB blip while
+    writing the row) is logged and marked `error` so the client's poll
+    terminates instead of spinning on 'generating' forever.
+    """
+    from app.db.llm_context_jobs import complete_context_job, fail_context_job
+    from app.llm_context import extract_context_fields
+
+    try:
+        parsed = await asyncio.to_thread(extract_context_fields, markdown)
+        complete_context_job(job_id, _context_result(parsed))
+    except Exception as exc:  # noqa: BLE001 — a stuck job is worse than a failed one
+        logger.exception("llm-context: extraction job %s failed", job_id)
+        try:
+            fail_context_job(job_id, str(exc))
+        except Exception:  # noqa: BLE001
+            logger.exception("llm-context: could not mark job %s failed", job_id)
+
+
+async def _start_context_extraction(company_id: str, markdown: str) -> int | None:
+    """Kick the background LLM pass, returning its job id (None if it couldn't
+    start). Best-effort: the deterministic parse is already in the caller's
+    response, so a job that never starts costs coverage, not the import."""
+    from app.db.llm_context_jobs import start_context_job
+
+    try:
+        job_id = start_context_job(company_id)
+    except Exception:  # noqa: BLE001 — the inline parse still stands
+        logger.exception("llm-context: could not start the extraction job")
+        return None
+
+    if "pytest" in sys.modules:
+        # The TestClient doesn't keep the app's event loop alive between
+        # requests, so a fire-and-forget create_task would never run and a
+        # client's status poll would spin forever. Run the worker inline under
+        # pytest for deterministic results (mirrors routes/onboarding.py).
+        await _run_context_extraction(job_id, markdown)
+        return job_id
+
+    task = asyncio.create_task(_run_context_extraction(job_id, markdown))
+    _context_tasks.add(task)
+    task.add_done_callback(_context_tasks.discard)
+    return job_id
+
+
+async def _import_context_markdown(company, markdown: str) -> dict:
+    """Parse an export, kick the LLM pass, and file the raw document.
+
+    Returns the DETERMINISTIC parse plus a `job_id` for the background LLM
+    extraction, so the user gets whatever we can read instantly and the wider
+    reading catches up while they work through connectors.
+
+    Filing is best-effort and never fails the import: the prefill is the thing
+    the user is waiting on, and a storage hiccup should not cost them the
+    parse. The failure is logged and reported in `note` rather than swallowed.
+    """
+    from app.llm_context import parse_context_markdown
+
+    parsed = parse_context_markdown(markdown)
+    note = None
+    try:
+        from app.document_sources import add_document_file, create_document_source
+
+        src = create_document_source(
+            company.company_id,
+            name=LLM_CONTEXT_SOURCE_NAME,
+            description=LLM_CONTEXT_SOURCE_DESCRIPTION,
+            workspace_id=getattr(company, "workspace_id", None),
+        )
+        add_document_file(
+            company.company_id,
+            src.id,
+            filename="llm-context-export.md",
+            data=markdown.encode("utf-8"),
+            content_type="text/markdown",
+        )
+        _ensure_uploads_connection(company.company_id)
+        kickoff_sync(company.company_id, uploads.UPLOADS_PROVIDER)
+    except Exception:  # noqa: BLE001 — filing must not cost the user their prefill
+        logger.exception("llm-context: could not file the export as a document source")
+        note = (
+            "We read your context, but couldn't also save the file to your "
+            "documents. Nothing is lost — you can upload it again from Settings."
+        )
+
+    job_id = await _start_context_extraction(company.company_id, markdown)
+    result = _context_result(parsed, note=note)
+    # `ok` is about whether the USER's upload produced anything usable, and the
+    # LLM pass may yet find fields the heading walk missed. So a file the walk
+    # read nothing from is not a failure while a job is still running — the
+    # client shows "reading…" and the poll settles it either way.
+    if job_id is not None and not result["ok"]:
+        result["note"] = None
+    return {**result, "job_id": job_id}
+
+
+@router.get("/llm-context/prompt")
+def llm_context_prompt():
+    """The prompt the user pastes into Claude / ChatGPT / Gemini.
+
+    It contains nothing about this company, but it lives on the connectors
+    router so the frontend has one place to fetch it and the copy shown in the
+    UI can never drift from what the parser expects to read back.
+    """
+    from app.llm_context import CONTEXT_FORMAT_VERSION, CONTEXT_PROMPT
+
+    return {"prompt": CONTEXT_PROMPT, "format_version": CONTEXT_FORMAT_VERSION}
+
+
+@router.post("/llm-context/import")
+async def llm_context_import(
+    file: Annotated[UploadFile, File(description="The .md the assistant produced")],
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Upload the Markdown export and get back onboarding prefill fields."""
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "That file is empty")
+    if len(data) > LLM_CONTEXT_MAX_BYTES:
+        raise HTTPException(
+            413,
+            "Context exports are text — this one is over "
+            f"{LLM_CONTEXT_MAX_BYTES // (1024 * 1024)}MB. "
+            "Upload the .md the prompt produced.",
+        )
+    try:
+        markdown = data.decode("utf-8")
+    except UnicodeDecodeError:
+        # A PDF/DOCX dropped on a Markdown field is the likely cause; say so
+        # rather than surfacing a decoder error.
+        raise HTTPException(
+            415,
+            "That doesn't look like a text file. Upload the .md your assistant "
+            "produced, or add other documents under Settings -> Connectors.",
+        ) from None
+    return await _import_context_markdown(company, markdown)
+
+
+@router.get("/llm-context/import/{job_id}")
+def llm_context_import_status(
+    job_id: int,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Status + result for the background LLM extraction.
+
+    Returns `{status, result, error}`. Once `status == 'ready'`, `result`
+    carries the SAME {ok, fields, unmapped, format_version, note} shape the
+    POST returns, so the onboarding form applies it through one code path
+    regardless of which read produced it. 404 when the job doesn't belong to
+    the caller's company (no cross-tenant existence disclosure).
+    """
+    from app.db.llm_context_jobs import get_context_job
+
+    row = get_context_job(job_id)
+    if not row or row.get("company_id") != company.company_id:
+        raise HTTPException(404, "Import job not found")
+    return {
+        "status": row.get("status") or "generating",
+        "result": row.get("result"),
+        "error": row.get("error"),
+    }

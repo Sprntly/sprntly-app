@@ -296,6 +296,23 @@ CREATE TABLE website_analysis_jobs (
 );
 CREATE INDEX website_analysis_jobs_company_idx ON website_analysis_jobs (company_id, id DESC);
 
+-- Fire-and-forget LLM-context extraction jobs (mirrors
+-- 20260723130000_llm_context_jobs.sql). The onboarding import step parses the
+-- uploaded Markdown inline with the deterministic heading walk and ALSO kicks
+-- an LLM pass here, which reads context documents of any shape. Status walks
+-- generating → ready (or error); `result` holds the same
+-- {ok, fields, unmapped, format_version, note} dict the POST returns.
+CREATE TABLE llm_context_jobs (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    status      TEXT NOT NULL DEFAULT 'generating',
+    result      TEXT,
+    error       TEXT,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX llm_context_jobs_company_idx ON llm_context_jobs (company_id, id DESC);
+
 -- Multi-agent generated docs (mirrors 20260613100000_multi_agent_docs.sql).
 -- No company_id column: tenant ownership is bound via brief_id -> brief ->
 -- dataset -> company (app.deps.ownership.require_owned_brief). Was previously

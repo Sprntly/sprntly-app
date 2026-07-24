@@ -10,6 +10,7 @@ import {
   INDUSTRIES,
   BUSINESS_TYPES,
   PRIORITIZATION_FRAMEWORKS,
+  stepForSlug,
 } from "../../../lib/onboarding/types"
 import { updateWorkspace } from "../../../lib/onboarding/store"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
@@ -38,7 +39,8 @@ function canSaveMetrics(picked: SupportingMetric[]): boolean {
 }
 
 /**
- * Onboarding step 03 — "Your metrics" (v6 screenshot spec 2026-07-17).
+ * Onboarding step 07 — "Your metrics" (v6 screenshot spec 2026-07-17,
+ * reordered 2026-07-22).
  *
  * Pick up to 5 success metrics (at least one), plus "How does your team
  * prioritize?"* — the prioritization framework moved here from the old team
@@ -59,7 +61,13 @@ export function MetricsStep() {
   const [selected, setSelected] = useState<string[]>((draft?.selected as string[]) ?? [])
   const [customMetric, setCustomMetric] = useState("")
   const [framework, setFramework] = useState((draft?.framework as string) ?? "")
-  const candidatesSeeded = useRef(false)
+  // Which source seeded the candidate pool. Lets a late-arriving context import
+  // (metrics on companies.kpi_tree) SUPERSEDE the analysis/defaults shown on
+  // mount, while latching so a new `suggestedMetrics` array reference can't loop
+  // the effect. `metricsTouched` freezes the pool the moment the user picks, so
+  // the import — which lands ~30-60s after upload — never overwrites their choice.
+  const metricsSource = useRef<"none" | "defaults" | "imported" | "draft">("none")
+  const metricsTouched = useRef(false)
   const [limitWarning, setLimitWarning] = useState<string | null>(null)
   const [limitNonce, setLimitNonce] = useState(0)
 
@@ -94,39 +102,51 @@ export function MetricsStep() {
     if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
 
-  // Seed the framework from the saved workspace (draft takes priority).
+  // Seed the framework from the saved workspace. Fill-only: a value the user
+  // picked (or restored from a draft) is never overwritten when a late import
+  // lands — it only fills the field while it is still empty.
   useEffect(() => {
     if (!workspace) return
-    if (draft?.framework) return
-    setFramework(workspace.prioritization_framework ?? "")
-  }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Hydrate the picker from a KPI tree already saved on the workspace.
-  useEffect(() => {
-    if (!workspace) return
-    if (candidatesSeeded.current) return
-    if (draft?.candidates) {
-      candidatesSeeded.current = true
-      return
-    }
-    const named = workspace.kpi_tree.metrics.filter((m) => m.name.trim().length > 0)
-    if (named.length) {
-      candidatesSeeded.current = true
-      const pool = mergeCandidates(
-        named.map((m) => ({ name: m.name, description: m.description ?? "" })),
-      )
-      setCandidates(pool)
-      setSelected(pool.slice(0, METRIC_PICKS).map((c) => c.name))
-    }
+    const imported = workspace.prioritization_framework ?? ""
+    if (imported) setFramework((cur) => cur || imported)
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const suggestedMetrics = websiteAnalysis?.suggested_metrics ?? []
 
-  // Seed the candidate pool from analysis suggestions, else defaults. Preselect
-  // the first 3 (the screenshot's "3 of 5" default) — up to 5 are allowed.
+  // Seed the metric picker, preferring metrics already on the workspace
+  // (companies.kpi_tree — where the context import writes) over analysis
+  // suggestions and business/industry defaults. Runs on every relevant change,
+  // so the import that finishes ~30-60s after upload (while the user is on the
+  // connectors step) SUPERSEDES the defaults shown on mount the moment it
+  // arrives — the bug before was a single latch that froze the defaults in and
+  // locked the import out. Latched per-source so it can't loop on a new
+  // `suggestedMetrics` reference, and frozen entirely once the user picks.
   useEffect(() => {
-    if (candidatesSeeded.current) return
+    if (!workspace) return
+    if (metricsTouched.current) return
+    // A saved draft is the user's own prior work — treat it as their pick.
+    if (draft?.candidates) {
+      metricsSource.current = "draft"
+      return
+    }
+    if (metricsSource.current === "imported") return
 
+    const named = workspace.kpi_tree.metrics.filter((m) => m.name.trim().length > 0)
+    if (named.length) {
+      const pool = mergeCandidates(
+        named.map((m) => ({ name: m.name, description: m.description ?? "" })),
+      )
+      metricsSource.current = "imported"
+      setCandidates(pool)
+      setSelected(pool.slice(0, METRIC_PICKS).map((c) => c.name))
+      return
+    }
+
+    // No workspace metrics yet — show analysis/defaults once and wait for a
+    // possible import to replace them. Not re-seeded on later renders (the
+    // `defaults` latch below), so a fresh `suggestedMetrics` array reference
+    // can't loop this effect. Preselect the first 3 (the "3 of 5" default).
+    if (metricsSource.current !== "none") return
     const fromAnalysis: MetricCandidate[] = suggestedMetrics
       .filter((m) => m.metric)
       .map((m) => ({ name: m.metric, description: m.description ?? "" }))
@@ -140,10 +160,10 @@ export function MetricsStep() {
 
     const pool = mergeCandidates(fromAnalysis, fromBizDefaults, fromIndustryFallback)
     if (pool.length === 0) return
-    candidatesSeeded.current = true
+    metricsSource.current = "defaults"
     setCandidates(pool)
     setSelected(pool.slice(0, 3).map((c) => c.name))
-  }, [suggestedMetrics, resolvedBusinessType, resolvedIndustry])
+  }, [workspace, suggestedMetrics, resolvedBusinessType, resolvedIndustry]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(() => [
     {
@@ -159,6 +179,8 @@ export function MetricsStep() {
   ])
 
   function toggle(name: string) {
+    // The user is now curating the pool — freeze it against a later import.
+    metricsTouched.current = true
     const key = name.toLowerCase()
     const isSelected = selected.some((s) => s.toLowerCase() === key)
     if (!isSelected && selected.length >= METRIC_PICKS) {
@@ -178,6 +200,8 @@ export function MetricsStep() {
   function addCustom() {
     const m = customMetric.trim()
     if (!m) return
+    // The user is now curating the pool — freeze it against a later import.
+    metricsTouched.current = true
     const key = m.toLowerCase()
     setCandidates((prev) =>
       prev.some((c) => c.name.toLowerCase() === key)
@@ -211,7 +235,7 @@ export function MetricsStep() {
       }
       const updated = await updateWorkspace(workspace.id, {
         prioritization_framework: framework || null,
-        onboarding_step: 4,
+        onboarding_step: stepForSlug("invite") ?? 8,
       })
       setWorkspace(updated)
       clearDraft(DRAFT_KEY)
@@ -224,16 +248,17 @@ export function MetricsStep() {
   }
 
   async function go() {
-    // Next numbered step is api-key (index 4 in ONBOARDING_STEP_SLUGS — the
-    // value persist() writes); it's optional/skippable and precedes connectors.
-    if (await persist()) router.push("/onboarding/api-key")
+    // Next numbered step is invite — persist() writes its index, derived
+    // from the slug list rather than hardcoded so a reorder can't strand a
+    // resuming user on the wrong step.
+    if (await persist()) router.push("/onboarding/invite")
   }
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
     <OnboardingChrome
-      step={3}
+      step={7}
       saveLabel="Saved · auto-saves"
       title={
         <>

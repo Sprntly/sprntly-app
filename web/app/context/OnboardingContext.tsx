@@ -20,8 +20,14 @@ import {
   resumeWebsiteAnalysis,
   runWebsiteAnalysis,
 } from "../lib/onboarding/runWebsiteAnalysis"
+import {
+  getPendingContextImport,
+  rememberContextImport,
+  resumeContextImport,
+} from "../lib/onboarding/runContextImport"
+import { applyImportedContext } from "../lib/onboarding/applyImportedContext"
 import type { UserProfile, WorkspaceCompany } from "../lib/onboarding/types"
-import type { AnalyzeWebsiteResponse } from "../lib/api"
+import type { AnalyzeWebsiteResponse, LlmContextFields } from "../lib/api"
 
 type OnboardingCtx = {
   /**
@@ -64,7 +70,33 @@ type OnboardingCtx = {
    * to the persisted job instead of re-POSTing). A `null` website is a no-op.
    */
   startWebsiteAnalysis: (website: string | null, workspaceId: string) => void
+  /**
+   * State of the background LLM extraction kicked off by the import-context
+   * step. "idle" when nothing was uploaded, "running" while the job is in
+   * flight, "done" once its fields have been merged onto the workspace, and
+   * "failed" when it errored or timed out (the deterministic parse applied at
+   * upload time still stands in that case).
+   *
+   * Read by the steps the import prefills so they can say "we filled this in
+   * from your file" rather than leaving the user guessing why a form they
+   * never touched has values in it.
+   */
+  contextImport: ContextImportState
+  /**
+   * Fire-and-forget the background extraction poll for a just-uploaded context
+   * file, applying whatever it returns onto the workspace as a prefill.
+   *
+   * Lives on the PROVIDER, not the import step, for the same reason
+   * `startWebsiteAnalysis` does: the provider wraps the whole `/onboarding/*`
+   * tree, so the poll survives the user advancing to connectors and the fields
+   * land in time for the metrics and product steps. Safe to call more than
+   * once — it runs at most one job per provider lifetime.
+   */
+  startContextImport: (jobId: number, workspaceId: string) => void
 }
+
+/** @see OnboardingCtx.contextImport */
+export type ContextImportState = "idle" | "running" | "done" | "failed"
 
 const Ctx = createContext<OnboardingCtx | null>(null)
 
@@ -107,6 +139,57 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
       })
     },
     [],
+  )
+
+  // ---- Background LLM context extraction (the import-context step) ----------
+  const [contextImport, setContextImport] = useState<ContextImportState>("idle")
+  // One extraction per provider lifetime, so a re-render, a second
+  // `startContextImport` call, and the re-attach effect below can't double-poll.
+  const contextImportStartedRef = useRef(false)
+  // The LATEST workspace, for the async apply below. The poll resolves tens of
+  // seconds after it started — by then the user has worked through connectors
+  // and may have edited fields, so applying against the workspace captured at
+  // kickoff would write from a stale snapshot and could resurrect a value they
+  // deliberately cleared. A ref keeps the callback identity stable too.
+  const workspaceRef = useRef<WorkspaceCompany | null>(null)
+  useEffect(() => {
+    workspaceRef.current = workspace
+  }, [workspace])
+
+  const applyImported = useCallback(async (fields: LlmContextFields) => {
+    const current = workspaceRef.current
+    if (!current) return
+    try {
+      const next = await applyImportedContext(current, fields)
+      // Identity is the "nothing to write" signal — see applyImportedContext.
+      if (next !== current) setWorkspace(next)
+      setContextImport("done")
+    } catch {
+      // The extraction succeeded but the write didn't. Report it rather than
+      // claiming a prefill that never landed; the steps still work by hand.
+      setContextImport("failed")
+    }
+  }, [])
+
+  // Poll a just-kicked-off extraction and merge what it finds. Fire-and-forget:
+  // the import step navigates on immediately and never awaits this.
+  const startContextImport = useCallback(
+    (jobId: number, workspaceId: string) => {
+      if (contextImportStartedRef.current) return
+      if (!jobId || !workspaceId) return
+      contextImportStartedRef.current = true
+      setContextImport("running")
+      // Persist before polling so a reload mid-connectors re-attaches instead
+      // of orphaning the job.
+      rememberContextImport(workspaceId, workspaceId, jobId)
+      void resumeContextImport(jobId, workspaceId, workspaceId).then(
+        ({ result }) => {
+          if (result?.fields) void applyImported(result.fields)
+          else setContextImport("failed")
+        },
+      )
+    },
+    [applyImported],
   )
 
   // Tracks whether the FIRST authed load has completed, so subsequent refreshes
@@ -181,6 +264,17 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
     })
   }, [workspaceId])
 
+  // Same re-attach, for the context extraction: a reload while the user is on
+  // connectors would otherwise orphan a job still running server-side and cost
+  // them the prefill it was about to produce.
+  useEffect(() => {
+    if (!workspaceId) return
+    if (contextImportStartedRef.current) return
+    const pending = getPendingContextImport(workspaceId, workspaceId)
+    if (!pending) return
+    startContextImport(Number(pending.id), workspaceId)
+  }, [workspaceId, startContextImport])
+
   const value = useMemo(
     () => ({
       loading,
@@ -192,6 +286,8 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
       websiteAnalysis,
       setWebsiteAnalysis,
       startWebsiteAnalysis,
+      contextImport,
+      startContextImport,
     }),
     [
       loading,
@@ -201,6 +297,8 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
       refresh,
       websiteAnalysis,
       startWebsiteAnalysis,
+      contextImport,
+      startContextImport,
     ],
   )
 
