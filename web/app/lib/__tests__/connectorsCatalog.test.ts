@@ -12,9 +12,9 @@ import {
 } from "../connectorsCatalog"
 
 const EXPECTED_CATEGORIES = [
-  // "Your documents" leads: the user's own uploaded documents as a connector
+  // "Company Documents" leads: the user's own uploaded documents as a connector
   // (see the `uploads` category in connectorsCatalog.ts).
-  "Your documents",
+  "Company Documents",
   "Analytics",
   "Voice of Customer & Support",
   "Customer Relationship (CRM)",
@@ -28,7 +28,7 @@ const EXPECTED_CATEGORIES = [
 ] as const
 
 describe("CONNECTOR_CATALOG — design-3 shape", () => {
-  it("has exactly the 11 categories, in v6 order (Your documents leads; CRM added; docs + revenue appended)", () => {
+  it("has exactly the 11 categories, in v6 order (Company Documents leads; CRM added; docs + revenue appended)", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
@@ -75,8 +75,8 @@ describe("CONNECTOR_CATALOG — category sub-labels", () => {
     expect(monitoring.subLabel).toBe("powers On-Call Agent")
   })
 
-  it("Your documents is labelled 'upload your own'", () => {
-    const uploads = CONNECTOR_CATALOG.find((c) => c.title === "Your documents")!
+  it("Company Documents is labelled 'upload your own'", () => {
+    const uploads = CONNECTOR_CATALOG.find((c) => c.title === "Company Documents")!
     expect(uploads.subLabel).toBe("upload your own")
   })
 
@@ -85,7 +85,7 @@ describe("CONNECTOR_CATALOG — category sub-labels", () => {
       (c) =>
         c.title !== "Analytics"
         && c.title !== "Monitoring & Reliability"
-        && c.title !== "Your documents",
+        && c.title !== "Company Documents",
     )
     for (const c of others) {
       expect(c.subLabel).toBeUndefined()
@@ -222,7 +222,7 @@ describe("Business documentation category", () => {
 describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
   it("keeps only the categories that still have a wired connector, in order", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
-      "Your documents",
+      "Company Documents",
       "Analytics",
       "Voice of Customer & Support",
       "Customer Relationship (CRM)",
@@ -270,7 +270,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Business documentation")).toEqual(["google_drive"])
     expect(byTitle("Codebase")).toEqual(["github"])
     expect(byTitle("Communications")).toEqual(["slack"])
-    expect(byTitle("Your documents")).toEqual(["uploads"])
+    expect(byTitle("Company Documents")).toEqual(["uploads"])
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {

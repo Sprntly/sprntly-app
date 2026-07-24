@@ -27,7 +27,7 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     // OUT of NON_EVIDENCE_CATEGORIES. Mirrors the backend's
     // _EVIDENCE_PROVIDER_EXCEPTIONS entry for `uploads`.
     key: "uploads",
-    title: "Your documents",
+    title: "Company Documents",
     subLabel: "upload your own",
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
