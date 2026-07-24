@@ -117,3 +117,19 @@ def test_clarify_validates_task(tenant_client, monkeypatch):
     monkeypatch.setattr(prd_clarify, "llm_call", lambda **kw: called.append(1))
     assert t.client.post("/v1/prd/clarify-task", json={"task": "ab"}).status_code == 422
     assert called == []
+
+
+def test_clarify_passes_skip_default_and_drops_blank(tenant_client, monkeypatch):
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(prd_clarify, "llm_call", lambda **kw: _llm_result({
+        "sufficient": False,
+        "questions": [
+            {"prompt": "Who are the target users?", "skip_default": " all end users "},
+            {"prompt": "What is out of scope?", "skip_default": "   "},
+        ],
+    }))
+    body = t.client.post(
+        "/v1/prd/clarify-task", json={"task": "build a dashboard"}
+    ).json()
+    assert body["questions"][0]["skip_default"] == "all end users"
+    assert body["questions"][1]["skip_default"] is None

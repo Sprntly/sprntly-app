@@ -30,6 +30,7 @@ Part A renders the **author's name directly under the title**, labeled `Author`.
 
 ## Input handling
 - **Mine artifacts before asking.** Read everything provided and extract facts first.
+- **Clarify answers are stated facts.** When the task carries an “Additional details from the user” block (the pre-generation clarify gate’s answers), treat every line in it as an authoritative, stated decision: ground the relevant sections on it and NEVER re-raise it as a `[NEED]`/`[ESCALATE]` item — re-asking what the user just answered reads as not having listened.
 - **Ask at most 5 clarifying questions**, ranked by leverage. Anything unresolved goes to **User input needed**, not into a guess.
 - **Company template adaptation:** if a company PRD template is present, map content into *their* section structure — but keep the v4 visual system unless the company supplies its own brand tokens. Template adaptation copies structure, not judgment.
 
@@ -95,7 +96,7 @@ Discovery ("should we build anything?") → `evidence-brief` / `continuous-disco
 - [ ] Part A matches the visual specification exactly (tokens, components, blank-impact slot, pills, tags, appendix box).
 - [ ] Section order: Context → Problem → Evidence → Users → Goal → Hypothesis → Requirements → User input needed → Appendix.
 - [ ] Context passes the cold-reader test: product + audience, today's workflow, terms of art defined.
-- [ ] Every evidence item carries a type label, source, and date; the Evidence header carries the single link to the PRD’s Sprntly evidence page — never fabricated; quotes verbatim; types varied where the signals allow.
+- [ ] Every evidence item carries a type label, source, and date — never fabricated; quotes verbatim; types varied where the signals allow. The Evidence header carries NO link (matches item 5).
 - [ ] Problem frames business + user; no smuggled solution.
 - [ ] Goal: one primary metric w/ formula + baseline; projected impact filled with chain + confidence, or rendered as the designed blank; guardrails separate.
 - [ ] Requirements table default with Happy path / Edge case / Failure types (so `implementation-spec` inherits the branches); ≤5 user inputs, tagged, owned.

@@ -101,10 +101,15 @@ type ChatTab = {
 // The questions turn the clarify gate posts into the tab's thread — an
 // agent-style message (empty `query` renders no user bubble) listing 3–5
 // targeted questions plus the "generate now" escape hatch.
-function clarifyQuestionsTurn(questions: { prompt: string; options: string[] }[]): ThreadTurn {
+function clarifyQuestionsTurn(
+  questions: { prompt: string; options: string[]; skip_default?: string | null }[],
+): ThreadTurn {
   const lines = questions.map((q, i) => {
     const opts = q.options.length ? ` (e.g. ${q.options.join(" / ")})` : ""
-    return `${i + 1}. ${q.prompt}${opts}`
+    // Skips are informed, not silent: each question states the assumption the
+    // author proceeds with when it goes unanswered.
+    const skip = q.skip_default ? ` — if skipped, I'll assume: ${q.skip_default}` : ""
+    return `${i + 1}. ${q.prompt}${opts}${skip}`
   })
   return {
     id: `clarify-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`,
