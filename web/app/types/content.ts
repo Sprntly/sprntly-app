@@ -222,6 +222,10 @@ export interface ConversationRow {
   _tabId?: string
   /** The Supabase conversation id, once persisted (tagged by ChatScreen). */
   _dbId?: number
+  /** The PRD this conversation is about, when it was opened from a PRD tab (else
+   *  null). Carried from `ConversationRecord.prd_id` so resuming a PRD chat from
+   *  history can re-bind the tab to its PRD and reopen the content panel. */
+  prd_id?: number | null
 }
 
 export interface TeamMemberRow {
