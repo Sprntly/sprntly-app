@@ -1,12 +1,31 @@
-// CommentsPanel tests. Node-env vitest (no DOM, no router, no testing-library),
-// so — following the CompletionBar / page.test convention — we SSR-render the
-// pure view via renderToStaticMarkup and unit-test the extracted helpers
-// (captureAnchorId / findAnchorMatches / buildPinModel / runLoadComments /
-// runCreateComment / runResolveComment / authorInitials / shortRelativeTime)
-// with injected deps.
+// @vitest-environment jsdom
+//
+// CommentsPanel tests. Most of this file predates jsdom in this suite and
+// stays on the renderToStaticMarkup convention — following the CompletionBar /
+// page.test convention — SSR-rendering the pure view and unit-testing the
+// extracted helpers (captureAnchorId / findAnchorMatches / buildPinModel /
+// runLoadComments / runCreateComment / runResolveComment / authorInitials /
+// shortRelativeTime) with injected deps. jsdom is a strict superset for those
+// — nothing about them changes here.
+//
+// The handleClarifyConfirm await-then-conditionally-resolve tests further down
+// DO need a real mounted container (clicking Apply → the dialog's own "Apply
+// change" button → observing whether the comment resolved + the dialog
+// closed), so those use @testing-library/react's `render`/`fireEvent`/`act`
+// against spies on the real designAgentApi methods (listComments,
+// clarifyComment, resolveComment), mirroring IterateComposer.test.tsx's own
+// real-mount tests for the same class of bug.
 import * as React from "react"
 import { renderToStaticMarkup } from "react-dom/server"
-import { describe, expect, it, vi } from "vitest"
+import {
+  render as rtlRender,
+  screen,
+  fireEvent,
+  act,
+  cleanup,
+  waitFor,
+} from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 // Sprntly components carry no `import React`; vitest's esbuild transform uses
 // the classic runtime, so expose React globally (CompletionBar/page test
@@ -28,7 +47,13 @@ import {
 } from "../CommentsPanel"
 import { CompletionBar } from "../CompletionBar"
 import { PrototypeViewer } from "../PrototypeViewer"
+import { designAgentApi } from "../../../lib/api"
 import type { CommentRecord } from "../../../lib/api"
+
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+})
 
 function comment(overrides: Partial<CommentRecord> = {}): CommentRecord {
   return {
@@ -461,6 +486,97 @@ describe("CommentsPanelView — Apply / Ignore routing", () => {
     // Applying never gets called by the Ignore button.
     expect(onApply).not.toHaveBeenCalled()
     expect(onIterateComment).not.toHaveBeenCalled()
+  })
+
+  // The next two tests need a REAL mounted container (the full click-Apply →
+  // dialog's own "Apply change" → handleClarifyConfirm round trip): a bare
+  // handler simulation can't observe whether the dialog stayed open or the
+  // comment actually resolved. Mounts the real `CommentsPanel` via
+  // @testing-library/react, mirroring IterateComposer.test.tsx's own real-mount
+  // tests for the same class of bug (the container's await-then-conditionally-
+  // proceed contract).
+  it("test_clarify_confirm_rejected_keeps_dialog_open_and_comment_unresolved — a rejected onIterateComment leaves the dialog open and the comment unresolved", async () => {
+    const openComment = comment({ id: 21, status: "open" })
+    vi.spyOn(designAgentApi, "listComments").mockResolvedValue([openComment])
+    vi.spyOn(designAgentApi, "clarifyComment").mockResolvedValue({
+      question: "Anything else to add?",
+    })
+    const resolveComment = vi.spyOn(designAgentApi, "resolveComment")
+    const onIterateComment = vi.fn().mockResolvedValue(false)
+
+    rtlRender(
+      React.createElement(CommentsPanel, {
+        token: "tok-9",
+        prototypeId: 9,
+        onIterateComment,
+      }),
+    )
+
+    const applyBtn = await screen.findByTestId("comment-apply-21")
+    await act(async () => {
+      fireEvent.click(applyBtn)
+    })
+    // The clarify dialog opened and resolved its (mocked) clarifying question.
+    await waitFor(() => {
+      expect(screen.getByText("Anything else to add?")).toBeTruthy()
+    })
+
+    const confirmBtn = document.querySelector<HTMLButtonElement>(".modal-confirm")
+    expect(confirmBtn).not.toBeNull()
+    await act(async () => {
+      fireEvent.click(confirmBtn!)
+      // Let handleClarifyConfirm's `await onIterateComment(...)` settle.
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(onIterateComment).toHaveBeenCalledTimes(1)
+    // Rejected → the comment must NOT resolve and the dialog must stay open
+    // (the enriched prompt is preserved for a retry).
+    expect(resolveComment).not.toHaveBeenCalled()
+    expect(document.querySelector(".modal-confirm")).not.toBeNull()
+  })
+
+  it("test_clarify_confirm_accepted_resolves_comment_and_closes_dialog — an accepted onIterateComment resolves the comment and closes the dialog", async () => {
+    const openComment = comment({ id: 22, status: "open" })
+    vi.spyOn(designAgentApi, "listComments").mockResolvedValue([openComment])
+    vi.spyOn(designAgentApi, "clarifyComment").mockResolvedValue({
+      question: "Anything else to add?",
+    })
+    const resolveComment = vi
+      .spyOn(designAgentApi, "resolveComment")
+      .mockResolvedValue({ ...openComment, status: "resolved", resolved_at: "2026-07-23T00:00:00Z" })
+    const onIterateComment = vi.fn().mockResolvedValue(true)
+
+    rtlRender(
+      React.createElement(CommentsPanel, {
+        token: "tok-9",
+        prototypeId: 9,
+        onIterateComment,
+      }),
+    )
+
+    const applyBtn = await screen.findByTestId("comment-apply-22")
+    await act(async () => {
+      fireEvent.click(applyBtn)
+    })
+    await waitFor(() => {
+      expect(screen.getByText("Anything else to add?")).toBeTruthy()
+    })
+
+    const confirmBtn = document.querySelector<HTMLButtonElement>(".modal-confirm")
+    expect(confirmBtn).not.toBeNull()
+    await act(async () => {
+      fireEvent.click(confirmBtn!)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(onIterateComment).toHaveBeenCalledTimes(1)
+    // Accepted (regression guard) → resolves exactly once and closes the dialog.
+    expect(resolveComment).toHaveBeenCalledTimes(1)
+    expect(resolveComment).toHaveBeenCalledWith(9, 22)
+    expect(document.querySelector(".modal-confirm")).toBeNull()
   })
 
   it("test_can_apply_false_hides_buttons_on_public_mount — no apply/iterate seam → no Apply/Ignore buttons", () => {

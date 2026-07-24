@@ -55,8 +55,12 @@ export type UsePinMarkingParams = {
   /** Called after a pin is dropped (signed-in: open the comments sidebar). */
   onPinDropped?: () => void
   /** Signed-in only — run the iterate immediately with the pin instruction. When
-   *  supplied it takes precedence over onPinApply. Public passes neither. */
-  onPinIterate?: (instruction: string, x: null) => void
+   *  supplied it takes precedence over onPinApply. Public passes neither.
+   *  Resolves `true` when the shared runner actually started a run, `false`
+   *  when it was rejected (e.g. a second submit while one is already in
+   *  flight) — `handlePinApply` awaits this and only resolves the pin when it
+   *  resolves `true`. */
+  onPinIterate?: (instruction: string, x: null) => Promise<boolean>
   /** Signed-in only — pre-fill the composer via a synthetic CommentRecord (the
    *  applyTarget seam) when no iterate runner is wired. Public passes neither. */
   onPinApply?: (comment: CommentRecord) => void
@@ -491,7 +495,7 @@ export function usePinMarking({
   // instruction; `id` is negative so it never collides with a real comment id and
   // is harmless if forwarded as applied_comment_id (the backend treats unknown ids
   // as "no linked comment").
-  function handlePinApply(n: number) {
+  async function handlePinApply(n: number) {
     const pin = pins.find((p) => p.n === n)
     if (!pin || !pin.saved) return
     const region = pinRegionHint(pin.xPct, pin.yPct)
@@ -505,9 +509,13 @@ export function usePinMarking({
     // composer + comment Apply. Falls back to the old applyTarget pre-fill
     // (`onPinApply`) only when no runner is wired. The agent decides
     // applicability; the client fabricates no change. Then mark the pin resolved
-    // (optimistically) and PERSIST the resolve through `onResolve`.
+    // (optimistically) and PERSIST the resolve through `onResolve` — but ONLY
+    // when the runner actually started a run: awaiting `onPinIterate` and
+    // gating the resolve on `true` stops a rejected Apply (a run already in
+    // flight) from marking the pin resolved as if it had been handled.
     if (onPinIterate) {
-      onPinIterate(instruction, null)
+      const started = await onPinIterate(instruction, null)
+      if (!started) return
     } else {
       const synthetic: CommentRecord = {
         id: -pin.n,

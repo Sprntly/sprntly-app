@@ -396,10 +396,14 @@ function InTabCanvas({
     },
   })
 
-  // The single fixed entry the composer and both Apply paths call.
+  // The single fixed entry the composer and both Apply paths call. Returns the
+  // shared runner's outcome (true = a run started, false = rejected — e.g. a
+  // second submit while one is already in flight) so every caller can await it
+  // and only proceed with its own optimistic UI update when a run actually
+  // started, instead of assuming success the instant it is called.
   const runCanvasIterate = useCallback(
     (instruction: string, appliedCommentId?: number | null) => {
-      void iterateRun.runIterate(instruction, appliedCommentId)
+      return iterateRun.runIterate(instruction, appliedCommentId)
     },
     [iterateRun],
   )
@@ -408,7 +412,7 @@ function InTabCanvas({
   // comment id. The agent decides applicability; the client fabricates no change.
   const runCommentIterate = useCallback(
     (comment: CommentRecord) => {
-      runCanvasIterate(comment.body, comment.id)
+      return runCanvasIterate(comment.body, comment.id)
     },
     [runCanvasIterate],
   )

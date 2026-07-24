@@ -180,9 +180,24 @@ export function useIterateRun({
    * links a comment when the run came from Apply.
    */
   const runIterate = useCallback(
-    async (instruction: string, appliedCommentId?: number | null) => {
+    async (
+      instruction: string,
+      appliedCommentId?: number | null,
+    ): Promise<boolean> => {
       const prompt = instruction.trim()
-      if (!prompt || inFlightRef.current) return
+      if (!prompt) return false
+      if (inFlightRef.current) {
+        // A second submit while a run is already in flight used to be dropped
+        // silently — no request, no error, no thread entry, and the caller
+        // (composer / comment Apply / pin Apply) behaved as if it had
+        // succeeded. Reject visibly instead, reusing the existing `error`
+        // activity-kind rendering rather than inventing new UI.
+        appendActivity({
+          kind: "error",
+          text: "Still applying the previous change — wait for it to finish, then try again.",
+        })
+        return false
+      }
       inFlightRef.current = true
       setRunning(true)
       setError(null)
@@ -307,7 +322,8 @@ export function useIterateRun({
 
         // An agent that paused IMMEDIATELY (before the loop) — surface it here.
         if (proto.pending_question != null) {
-          return resolvePendingQuestion(proto)
+          resolvePendingQuestion(proto)
+          return true
         }
 
         // 4) Wait for the run to COMPLETE. The authoritative signal is the SSE
@@ -345,7 +361,8 @@ export function useIterateRun({
 
         // 5a) Agent paused with a clarifying question → surface it in-stream.
         if (proto.pending_question != null) {
-          return resolvePendingQuestion(proto)
+          resolvePendingQuestion(proto)
+          return true
         }
 
         // 5b) Hard-failure / timeout surface as an error (never a done line).
@@ -372,7 +389,8 @@ export function useIterateRun({
           await new Promise((r) => setTimeout(r, TICK_MS))
           proto = await withAuthRetry(() => api.get(prototypeId))
           if (proto.pending_question != null) {
-            return resolvePendingQuestion(proto)
+            resolvePendingQuestion(proto)
+            return true
           }
           if (proto.status === "failed") {
             throw new Error(iterateFailureCopy(proto.error ?? "", prototypeId))
@@ -391,10 +409,15 @@ export function useIterateRun({
         })
         // A real completion staged a new bundle — reload the center iframe.
         onComplete(proto, { reloadBundle: true })
+        return true
       } catch (e) {
         const msg = e instanceof Error ? e.message : "Could not run the change"
         setError(msg)
         appendActivity({ kind: "error", text: msg })
+        // The run STARTED (inFlightRef was already set above this point) — it
+        // failed/timed out after starting, a different outcome than being
+        // rejected before starting.
+        return true
       } finally {
         esRef.current?.close()
         esRef.current = null
