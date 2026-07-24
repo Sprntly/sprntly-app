@@ -302,9 +302,10 @@ describe("ConnectorsSettingsView — per-row behavior", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
     expect(total).toBe(41) // v6 catalog + Uploaded documents
     for (const cat of CONNECTOR_CATALOG) {
-      expect(countRows(render({ selectedCategoryKey: cat.key }))).toBe(
-        cat.items.length,
-      )
+      // The `uploads` provider is never rendered as a connector row — it's
+      // surfaced as the document-source list instead.
+      const expected = cat.items.filter((i) => i.id !== "uploads").length
+      expect(countRows(render({ selectedCategoryKey: cat.key }))).toBe(expected)
     }
   })
 
@@ -394,7 +395,7 @@ describe("ConnectorsSettingsView — the open category's upload strip", () => {
 
   it("shows the idle upload labels and enabled inputs by default", () => {
     const html = render({ selectedCategoryKey: "analytics" })
-    expect(html).toContain("ti-cloud-upload")
+    expect(html).toContain("tabler-icon-cloud-upload")
     // Idle: no busy markers, inputs are selectable.
     expect(html).not.toContain("Uploading…")
     expect(html).not.toContain("is-uploading")
@@ -405,7 +406,7 @@ describe("ConnectorsSettingsView — the open category's upload strip", () => {
     const html = render({ uploading: true, selectedCategoryKey: "analytics" })
     expect(html).toContain("Uploading…")
     // Spinner icon swaps in; busy class + aria-busy drive the visible state.
-    expect(html).toContain("ti-spin")
+    expect(html).toContain("icon-spin")
     expect(html).toContain("is-uploading")
     expect(html).toMatch(/aria-busy="true"/)
     // The file inputs are blocked so overlapping uploads can't be fired mid-flight.
@@ -413,14 +414,19 @@ describe("ConnectorsSettingsView — the open category's upload strip", () => {
   })
 })
 
-describe("ConnectorsSettingsView — uploaded files list (FIX #1)", () => {
-  function sourceFile(filename: string, kind = "pdf"): SourceFile {
+describe("ConnectorsSettingsView — uploaded files list (per category)", () => {
+  function sourceFile(
+    filename: string,
+    kind = "pdf",
+    category = "",
+  ): SourceFile {
     return {
       filename,
       kind,
       size_bytes: 2048,
       md_chars: 100,
       added_at: "2026-06-01T10:00:00Z",
+      category,
     }
   }
 
@@ -428,17 +434,76 @@ describe("ConnectorsSettingsView — uploaded files list (FIX #1)", () => {
     expect(render({ files: [] })).not.toContain("Uploaded files")
   })
 
-  it("renders a single company-wide list when files exist", () => {
+  it("keeps uncategorized (legacy) files in the global list", () => {
     const html = render({
       files: [sourceFile("q2-metrics.pdf"), sourceFile("notes.txt", "txt")],
     })
     expect(html).toContain("Uploaded files")
-    expect(html).toContain("across all categories")
+    expect(html).toContain("not yet under a category")
     expect(html).toContain("q2-metrics.pdf")
     expect(html).toContain("notes.txt")
-    // One shared list, not one per category.
-    const lists = html.match(/class="src-list"/g) ?? []
-    expect(lists.length).toBe(1)
+  })
+
+  it("lists a categorized file under its category, not in the global list", () => {
+    const html = render({
+      selectedCategoryKey: "analytics",
+      files: [sourceFile("dash.pdf", "pdf", "analytics")],
+    })
+    // Shown under the selected category…
+    expect(html).toContain('data-testid="category-files"')
+    expect(html).toContain("dash.pdf")
+    // …and NOT surfaced in the global "not yet under a category" bucket.
+    expect(html).not.toContain("not yet under a category")
+  })
+
+  it("does not show a category's files under a different category", () => {
+    const html = render({
+      selectedCategoryKey: "design",
+      files: [sourceFile("dash.pdf", "pdf", "analytics")],
+    })
+    expect(html).not.toContain('data-testid="category-files"')
+    expect(html).not.toContain("dash.pdf")
+  })
+
+  it("offers an icon-only trash button to remove each uploaded file", () => {
+    const html = render({
+      selectedCategoryKey: "analytics",
+      files: [sourceFile("dash.pdf", "pdf", "analytics")],
+    })
+    expect(html).toContain('data-testid="category-files"')
+    expect(html).toContain("src-trash")
+    expect(html).toContain("tabler-icon-trash")
+    expect(html).toContain('aria-label="Remove dash.pdf"')
+  })
+
+  it("separates uploaded files from connectors with a labeled divider", () => {
+    const html = render({
+      selectedCategoryKey: "voice",
+      files: [sourceFile("guide.pdf", "pdf", "voice")],
+    })
+    // A labeled "Uploaded files" divider heads the file list so it doesn't
+    // read as another connector card.
+    expect(html).toContain("set-conn-uploads-head")
+    expect(html).toContain("Uploaded files")
+    expect(html).toContain('data-testid="category-files"')
+  })
+
+  it("shows a Removing… busy state on the file being removed", () => {
+    const html = render({
+      selectedCategoryKey: "analytics",
+      files: [sourceFile("dash.pdf", "pdf", "analytics")],
+      removingFilename: "dash.pdf",
+    })
+    expect(html).toContain("Removing…")
+    expect(html).toContain("icon-spin")
+    expect(html).toMatch(/aria-busy="true"/)
+    expect(html).toMatch(/<button[^>]*disabled/)
+  })
+
+  it("offers a Remove action on legacy uncategorized files too", () => {
+    const html = render({ files: [sourceFile("old.pdf")] })
+    expect(html).toContain("not yet under a category")
+    expect(html).toContain("Remove")
   })
 })
 
@@ -471,8 +536,9 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
 
   it("puts the wired connectors in their categories (empty categories dropped)", () => {
     const keptCategories = connectableCatalog()
-    // One rail tab per surviving category, and 12 wired connector rows spread
-    // across them (one category's worth showing at a time).
+    // One rail tab per surviving category. 12 connectors are wired, but the
+    // `uploads` provider is never shown as a row (it's the document-source
+    // list), so only 11 connector rows render across the panels.
     const one = render({ categories: keptCategories })
     expect((one.match(/role="tab" id="conn-cat-tab-/g) ?? []).length).toBe(
       keptCategories.length,
@@ -483,7 +549,7 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
         n + countRows(render({ categories: keptCategories, selectedCategoryKey: c.key })),
       0,
     )
-    expect(rowsAcrossPanels).toBe(12)
+    expect(rowsAcrossPanels).toBe(11)
     // Each surviving category that allows manual upload shows its strip.
     expect(
       keptCategories.filter(
@@ -582,46 +648,76 @@ describe("ConnectorsSettingsView — uploaded document sources", () => {
     files: [],
   }
 
-  it("offers an add-a-source affordance on the uploads category", () => {
-    const html = render()
+  // The named-source UI now lives under the merged "Company documentation"
+  // category (key "docs"), which is where the `uploads` connector was moved.
+  function renderDocs(
+    override: Partial<React.ComponentProps<typeof ConnectorsSettingsView>> = {},
+  ): string {
+    return render({ selectedCategoryKey: "docs", ...override })
+  }
+
+  it("offers an add-a-source affordance on the Company documentation category", () => {
+    const html = renderDocs()
     expect(html).toContain('data-testid="add-upload-source"')
     expect(html).toContain("Add a document source")
-    expect(html).toContain("Name it, describe it, attach any files")
+    // Direct file-picker flow — no name/description step.
+    expect(html).toContain("Pick files")
+    expect(html).toContain('type="file"')
   })
 
-  it("does not render the generic upload strip on the uploads category", () => {
-    // Files are attached inside the named-source flow instead.
-    expect(render()).not.toContain("Upload your documents export")
+  it("does not render the generic upload strip on the Company documentation category", () => {
+    // Files are attached inside the named-source flow instead
+    // (allowsManualUpload: false on the merged category).
+    expect(renderDocs()).not.toContain("Upload files to this category")
   })
 
-  it("lists each source with its name, doc count and description", () => {
-    const html = render({ uploadSources: [source] })
+  it("lists each source with its name and description (no doc-count chip)", () => {
+    const html = renderDocs({ uploadSources: [source] })
     expect(html).toContain('data-testid="upload-sources"')
     expect(html).toContain("Q3 churn interviews")
-    expect(html).toContain("3 docs")
     expect(html).toContain("12 enterprise accounts")
+    // The "N docs" chip was removed from source rows.
+    expect(html).not.toContain("src-kind-chip")
+    expect(html).not.toContain("3 docs")
   })
 
-  it("singularizes a one-document source", () => {
-    const html = render({ uploadSources: [{ ...source, file_count: 1 }] })
-    expect(html).toContain("1 doc<")
+  it("removes a source via an icon-only trash button (no 'Remove' text label)", () => {
+    const html = renderDocs({ uploadSources: [source] })
+    // Icon-only delete: the .src-trash button carries the trash glyph, and the
+    // "Remove" wording lives in aria-label/title, not a visible text node.
+    expect(html).toContain("src-trash")
+    expect(html).toContain("tabler-icon-trash")
+    expect(html).toContain(`aria-label="Remove ${source.name}"`)
+    // Adding more files to an existing source was removed.
+    expect(html).not.toContain("Add files")
   })
 
-  it("offers add-files and remove per source", () => {
-    const html = render({ uploadSources: [source] })
-    expect(html).toContain("Add files")
-    expect(html).toContain("Remove")
+  it("shows a Removing… busy state on the source being removed", () => {
+    const html = renderDocs({ uploadSources: [source], removingSourceId: source.id })
+    expect(html).toContain("Removing…")
+    expect(html).toContain("icon-spin")
+    expect(html).toMatch(/aria-busy="true"/)
+    expect(html).toMatch(/<button[^>]*disabled/)
   })
 
   it("renders no source list when there are none", () => {
-    expect(render()).not.toContain('data-testid="upload-sources"')
+    expect(renderDocs()).not.toContain('data-testid="upload-sources"')
   })
 
-  it("shows the uploads connector as Connect when off and Configure when active", () => {
-    expect(render()).toContain("Uploaded documents")
-    const active = render({
-      connectionByProvider: new Map([["uploads", activeConn("uploads", "Your uploaded documents")]]),
-    })
-    expect(active).toContain("Your uploaded documents")
+  it("does NOT render the Uploaded documents provider as a connector row", () => {
+    // It's the user's own files, surfaced as the source list — not a connector.
+    const html = renderDocs()
+    expect(html).not.toContain("Uploaded documents")
+  })
+
+  it("still shows the real doc connectors (Google Docs) under the category", () => {
+    const html = renderDocs()
+    expect(html).toContain("Google Docs")
+  })
+
+  it("separates the document sources from the connector with a labeled divider", () => {
+    const html = renderDocs({ uploadSources: [source] })
+    expect(html).toContain("set-conn-uploads-head")
+    expect(html).toContain("Your documents")
   })
 })

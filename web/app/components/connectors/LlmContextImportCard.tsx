@@ -77,8 +77,8 @@ export function LlmContextImportCard() {
    *  structured fields and the document still grounds the agents. */
   function importedLine(fileName: string, fieldCount: number): string {
     return fieldCount > 0
-      ? `Read ${fieldCount} field${fieldCount === 1 ? "" : "s"} of context from "${fileName}". It's saved to your Company Documents and feeding your knowledge graph.`
-      : `Added "${fileName}" to your Company Documents — it's feeding your knowledge graph.`
+      ? `Read ${fieldCount} field${fieldCount === 1 ? "" : "s"} of context from "${fileName}". It's saved to your Company documentation and feeding your knowledge graph.`
+      : `Added "${fileName}" to your Company documentation — it's feeding your knowledge graph.`
   }
 
   /** Poll reader 2 — the background LLM pass — and upgrade the status once it
@@ -138,7 +138,7 @@ export function LlmContextImportCard() {
     if (res.filed === false) {
       setStatus(
         res.note ??
-          `We read "${file.name}" but couldn't save it to your Company Documents, so it isn't in your knowledge graph yet. Try again in a moment.`,
+          `We read "${file.name}" but couldn't save it to your Company documentation, so it isn't in your knowledge graph yet. Try again in a moment.`,
       )
       return
     }
@@ -152,7 +152,7 @@ export function LlmContextImportCard() {
     // Reader 1 read nothing. The file is already filed + feeding the KG, so
     // confirm that now and let reader 2 upgrade the line if the LLM reads more.
     setStatus(
-      `Added "${file.name}" to your Company Documents — it's feeding your knowledge graph. Reading it for a fuller picture…`,
+      `Added "${file.name}" to your Company documentation — it's feeding your knowledge graph. Reading it for a fuller picture…`,
     )
     if (res.job_id != null) {
       void refineWithReader2(res.job_id, file.name)

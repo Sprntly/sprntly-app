@@ -830,9 +830,10 @@ export const companiesApi = {
       slug,
       display_name: displayName,
     }),
-  uploadFiles: (slug: string, files: File[]) => {
+  uploadFiles: (slug: string, files: File[], category = "") => {
     const form = new FormData()
     for (const f of files) form.append("files", f, f.name)
+    if (category) form.append("category", category)
     return api.post<UploadFilesResponse>(
       `/v1/datasets/${encodeURIComponent(slug)}/files`,
       form,
@@ -1232,6 +1233,9 @@ export type SourceFile = {
   size_bytes: number
   md_chars: number
   added_at: string
+  /** Connector category the file was uploaded under. "" = legacy/uncategorized
+   *  (uploaded before per-category attribution existed). */
+  category?: string
 }
 export type ListSourcesResponse = { slug: string; files: SourceFile[] }
 export type DeleteSourceResponse = {

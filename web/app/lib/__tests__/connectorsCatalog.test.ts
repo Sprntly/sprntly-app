@@ -12,9 +12,6 @@ import {
 } from "../connectorsCatalog"
 
 const EXPECTED_CATEGORIES = [
-  // "Company Documents" leads: the user's own uploaded documents as a connector
-  // (see the `uploads` category in connectorsCatalog.ts).
-  "Company Documents",
   "Analytics",
   "Voice of Customer & Support",
   "Customer Relationship (CRM)",
@@ -23,16 +20,18 @@ const EXPECTED_CATEGORIES = [
   "Design",
   "Codebase",
   "Communications",
-  "Business documentation",
+  // "Company documentation" merges the user's own uploaded documents with the
+  // external doc tools (Notion, Google Docs) — see the `docs` category.
+  "Company documentation",
   "Revenue",
 ] as const
 
 describe("CONNECTOR_CATALOG — design-3 shape", () => {
-  it("has exactly the 11 categories, in v6 order (Company Documents leads; CRM added; docs + revenue appended)", () => {
+  it("has exactly the 10 categories, in v6 order (Uploaded documents merged into Company documentation; revenue appended)", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 41 connector rows across all categories (v6 roster + Uploaded documents)", () => {
+  it("totals 41 connector rows across all categories (Uploaded documents now lives under Company documentation)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
     expect(total).toBe(41)
   })
@@ -75,17 +74,11 @@ describe("CONNECTOR_CATALOG — category sub-labels", () => {
     expect(monitoring.subLabel).toBe("powers On-Call Agent")
   })
 
-  it("Company Documents is labelled 'upload your own'", () => {
-    const uploads = CONNECTOR_CATALOG.find((c) => c.title === "Company Documents")!
-    expect(uploads.subLabel).toBe("upload your own")
-  })
-
   it("other categories have no sub-label", () => {
     const others = CONNECTOR_CATALOG.filter(
       (c) =>
         c.title !== "Analytics"
-        && c.title !== "Monitoring & Reliability"
-        && c.title !== "Company Documents",
+        && c.title !== "Monitoring & Reliability",
     )
     for (const c of others) {
       expect(c.subLabel).toBeUndefined()
@@ -113,8 +106,10 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Business documentation: Notion, Google Docs", () => {
-    expect(items("Business documentation")).toEqual(["Notion", "Google Docs"])
+  it("Company documentation: Uploaded documents, Notion, Google Docs", () => {
+    expect(items("Company documentation")).toEqual([
+      "Uploaded documents", "Notion", "Google Docs",
+    ])
   })
 
   it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong", () => {
@@ -200,29 +195,33 @@ describe("CONNECTOR_IDS_CONNECTABLE", () => {
 })
 
 describe("Google Docs uses the existing google_drive OAuth backend", () => {
-  it("the Google Docs row in Business documentation has id 'google_drive' (matches backend provider)", () => {
-    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Business documentation")!
+  it("the Google Docs row in Company documentation has id 'google_drive' (matches backend provider)", () => {
+    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Company documentation")!
     const gdocs = docs.items.find((i) => i.name === "Google Docs")
     expect(gdocs?.id).toBe("google_drive")
     expect(gdocs?.oauth).toBe(true)
   })
 })
 
-describe("Business documentation category", () => {
-  it("contains Notion + Google Docs and they no longer sit under Project Management", () => {
-    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Business documentation")!
-    expect(docs.items.map((i) => i.id)).toEqual(["notion", "google_drive"])
+describe("Company documentation category", () => {
+  it("merges Uploaded documents with Notion + Google Docs; docs tools stay out of Project Management", () => {
+    const docs = CONNECTOR_CATALOG.find((c) => c.title === "Company documentation")!
+    expect(docs.items.map((i) => i.id)).toEqual(["uploads", "notion", "google_drive"])
     const pm = CONNECTOR_CATALOG.find((c) => c.title === "Project Management")!
     const pmIds = pm.items.map((i) => i.id)
     expect(pmIds).not.toContain("notion")
     expect(pmIds).not.toContain("google_drive")
+  })
+
+  it("has no standalone 'Company Documents' category — it was merged in", () => {
+    expect(CONNECTOR_CATALOG.find((c) => c.title === "Company Documents")).toBeUndefined()
+    expect(CONNECTOR_CATALOG.filter((c) => c.key === "uploads")).toEqual([])
   })
 })
 
 describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
   it("keeps only the categories that still have a wired connector, in order", () => {
     expect(connectableCatalog().map((c) => c.title)).toEqual([
-      "Company Documents",
       "Analytics",
       "Voice of Customer & Support",
       "Customer Relationship (CRM)",
@@ -230,7 +229,7 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
       "Design",
       "Codebase",
       "Communications",
-      "Business documentation",
+      "Company documentation",
     ])
   })
 
@@ -267,10 +266,11 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     expect(byTitle("Voice of Customer & Support")).toEqual(["sprinklr", "fireflies"])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
-    expect(byTitle("Business documentation")).toEqual(["google_drive"])
     expect(byTitle("Codebase")).toEqual(["github"])
     expect(byTitle("Communications")).toEqual(["slack"])
-    expect(byTitle("Company Documents")).toEqual(["uploads"])
+    // Merged category keeps only its WIRED rows (Notion isn't wired yet):
+    // Uploaded documents (upload) + Google Docs (google_drive OAuth).
+    expect(byTitle("Company documentation")).toEqual(["uploads", "google_drive"])
   })
 
   it("preserves each category's upload strip metadata (uploads still work when empty)", () => {
