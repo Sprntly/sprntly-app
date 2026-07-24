@@ -163,11 +163,31 @@ def _run_sync(company_id: str, provider: str) -> None:
 
 def _run_drive_sync(company_id: str) -> None:
     """Blocking Google Drive sync body — runs inside the daemon thread.
-    Fully isolated: sync_google_drive stamps its own per-file errors; config
-    errors (not connected / no dataset yet) raised before stamping are caught
-    and stamped here best-effort."""
+    Fully isolated: sync_google_drive stamps its own per-file errors; genuine
+    failures raised before stamping are caught and stamped here best-effort.
+
+    A connected-but-unconfigured row (no dataset, or nothing picked yet) is a
+    quiet no-op, NOT an error: pre-KG-ingest the scheduler never touched Drive
+    rows, and stamping "dataset is required" on them every cycle would surface
+    a scary Settings error for a state the user never acted on."""
     try:
+        import json as _json
+
         from app.connectors.google_drive_sync import sync_google_drive
+
+        row = db.get_connection(company_id, "google_drive")
+        if not row:
+            return
+        try:
+            config = _json.loads(row.get("config_json") or "{}")
+        except (TypeError, ValueError):
+            config = {}
+        if not (config.get("dataset") and config.get("files")):
+            logger.info(
+                "auto-sync: google_drive for %s has no dataset/picked files "
+                "yet — skipping", company_id,
+            )
+            return
 
         result = sync_google_drive(company_id=company_id)
         logger.info(

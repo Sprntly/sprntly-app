@@ -2,7 +2,8 @@
 
 Drive bypasses the token-based PULLERS registry: google_drive_sync hands
 changed files here as DriveDocs, and each file is chunk-extracted as its own
-document with origin="connector" plus a per-file kg_source provenance row.
+document (origin="upload" — Drive is a documents source) plus a per-file
+kg_source provenance row.
 kg_file_mtime advances only for fully-extracted files, so failures retry on
 the next sync.
 """
@@ -58,7 +59,7 @@ def test_chunks_overlong_single_line_kept_whole():
 
 # ─────────────────────────── extract_drive_docs ───────────────────────────
 
-def test_extract_writes_connector_origin_and_source_row(monkeypatch):
+def test_extract_writes_upload_origin_and_source_row(monkeypatch):
     seen = []
 
     def fake_extract(facade, company_id, *, doc_name, text, agent=None,
@@ -72,7 +73,10 @@ def test_extract_writes_connector_origin_and_source_row(monkeypatch):
 
     r = extract_drive_docs(facade, "co-1", [_doc()])
 
-    assert seen[0]["origin"] == "connector"
+    # "upload", NOT "connector": Drive is a documents source, and the only
+    # consumer of origin is the brief gate's upload-only relaxation — a
+    # connector origin here would disable it for uploads+Drive tenants.
+    assert seen[0]["origin"] == "upload"
     assert seen[0]["agent"] == "ingest:google_drive"
     assert "Google Drive" in seen[0]["source_hint"]
     assert seen[0]["doc_name"] == "roadmap"  # single chunk → bare name

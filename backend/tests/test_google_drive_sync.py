@@ -207,6 +207,61 @@ def test_sync_downloads_and_ingests_each_picked_file(drive_connected, kg_kickoff
             p.stop()
 
 
+def test_first_kg_sync_grandfathers_preexisting_files(drive_connected, kg_kickoff):
+    """A connection that synced before KG ingest shipped (corpus file_mtime
+    exists, no kg_file_mtime ledger) adopts the corpus mtimes on its first
+    KG-aware sync instead of re-extracting every file into near-duplicate
+    signals. Files edited AFTER that still reach the KG."""
+    import json as _json
+
+    company_id = drive_connected
+    row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+    cfg = _json.loads(row["config_json"])
+    cfg["file_mtime"] = {"file0001aa": "2026-05-20T12:00:00.000Z"}
+    db.patch_connection_config(
+        company_id, google_oauth.GOOGLE_DRIVE_PROVIDER, cfg
+    )
+
+    meta = {
+        "id": "file0001aa",
+        "name": "notes.txt",
+        "mimeType": "text/plain",
+        "modifiedTime": "2026-05-20T12:00:00.000Z",
+        "size": "12",
+    }
+    patches = (
+        patch("app.connectors.google_drive_sync.build_drive_service",
+              return_value=MagicMock()),
+        patch("app.connectors.google_drive_sync.get_file_metadata",
+              side_effect=lambda service, fid: dict(meta)),
+        patch("app.connectors.google_drive_sync.download_file_content",
+              return_value=("notes.txt", b"edited content")),
+        patch("app.connectors.google_drive_sync._refresh_credentials",
+              return_value=MagicMock()),
+    )
+    for p in patches:
+        p.start()
+    try:
+        # First KG-aware sync: unchanged file is grandfathered, NOT extracted.
+        result = sync_google_drive(company_id=company_id)
+        assert result.skipped[0]["reason"] == "unchanged"
+        assert result.kg_queued == []
+        assert kg_kickoff == []
+        row = db.get_connection(company_id, google_oauth.GOOGLE_DRIVE_PROVIDER)
+        cfg = _json.loads(row["config_json"])
+        assert cfg["kg_file_mtime"] == {"file0001aa": "2026-05-20T12:00:00.000Z"}
+
+        # The file is edited later: both corpus + KG pick up the new version.
+        meta["modifiedTime"] = "2026-06-01T00:00:00.000Z"
+        result2 = sync_google_drive(company_id=company_id)
+        assert len(result2.synced) == 1
+        assert result2.kg_queued == ["notes"]
+        assert len(kg_kickoff) == 1
+    finally:
+        for p in patches:
+            p.stop()
+
+
 def test_sync_stores_picked_files_passed_in(drive_connected):
     """Passing files= overwrites the stored picked-file list, then syncs them."""
     company_id = drive_connected
