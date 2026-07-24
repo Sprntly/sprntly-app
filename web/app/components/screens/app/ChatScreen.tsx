@@ -2129,22 +2129,23 @@ export function ChatScreen() {
         // (jobResume) so a backgrounded/remounted tab re-attaches via the mount
         // resume effect instead of re-asking.
         ask: () => {
-          // PRD-tab chat: send the tab's PRD id (and its conversation for
-          // follow-up history) so the answer is grounded on the open PRD +
-          // its insight/evidence/tickets/prototype. Resolved at send time —
-          // tabsRef, not the closure — so a PRD that finished generating
-          // after the tab opened is still picked up. `sendQuery` carries any
-          // attached-document content; `isStopped` lets the user stop the ask.
+          // Resolved at send time — tabsRef, not the closure — so a
+          // conversation created (or a PRD that finished generating) AFTER the
+          // tab opened is still picked up. `sendQuery` carries any attached-
+          // document content; `isStopped` lets the user stop the ask.
           const targetTab = tabsRef.current.find((t) => t.id === targetTabId)
           return runAskGeneration(sendQuery, activeCompany, targetTabId, {
             isCancelled: () => !mountedRef.current,
             isStopped: () => stoppedTabsRef.current.has(targetTabId),
-            ...(targetTab?.prdId != null
-              ? {
-                  prd_id: targetTab.prdId,
-                  ...(targetTab.dbConvId != null ? { conversation_id: targetTab.dbConvId } : {}),
-                }
-              : {}),
+            // Replay this tab's conversation so the model sees the prior turns
+            // (history) on EVERY follow-up, not just PRD-tab chats — the backend
+            // loads history by conversation_id, so without this each ask is
+            // context-free and a follow-up like "get all in to-do status" loses
+            // the thread it was answering.
+            ...(targetTab?.dbConvId != null ? { conversation_id: targetTab.dbConvId } : {}),
+            // PRD-tab chat: also send the PRD id so the answer is grounded on the
+            // open PRD + its insight/evidence/tickets/prototype.
+            ...(targetTab?.prdId != null ? { prd_id: targetTab.prdId } : {}),
           })
         },
         onResult: (tabId, res) => {

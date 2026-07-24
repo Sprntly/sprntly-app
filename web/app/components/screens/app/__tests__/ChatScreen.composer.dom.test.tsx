@@ -65,9 +65,11 @@ vi.mock("../../../../lib/api", () => {
 // ask off the network and (b) capture the query string ChatScreen sends so A4
 // can assert the attached file content was folded in.
 const askedQueries: string[] = []
+const askedOpts: Array<Record<string, unknown> | undefined> = []
 vi.mock("../../../../lib/runAskGeneration", () => ({
-  runAskGeneration: vi.fn(async (query: string) => {
+  runAskGeneration: vi.fn(async (query: string, _company: string, _tabId: string, opts?: Record<string, unknown>) => {
     askedQueries.push(query)
+    askedOpts.push(opts)
     return { answer: "ok", sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" }
   }),
   resumeAskGeneration: vi.fn(),
@@ -169,6 +171,7 @@ beforeEach(() => {
   searchString = ""
   replaceSpy.mockClear()
   askedQueries.length = 0
+  askedOpts.length = 0
 })
 afterEach(() => {
   cleanup()
@@ -363,6 +366,54 @@ describe("ChatScreen thread composer (A2 / A3 / A4)", () => {
     // left at the old too-short "24px" that crushed the box below one line.
     expect(textarea.style.height).toBe("")
     expect(textarea.style.height).not.toBe("24px")
+  })
+
+  // Regression (multi-turn context): a follow-up in a PLAIN chat tab that
+  // already has a conversation id MUST forward that conversation_id so the
+  // backend replays the prior turns (history). The old code only sent it for
+  // PRD tabs, so normal chats silently lost all context — a follow-up like
+  // "get all in to-do status" reached the model with no thread, and the scope
+  // gate refused it as out-of-scope.
+  it("forwards conversation_id on a follow-up in a plain (non-PRD) chat", async () => {
+    const tabId = "tab-conv-100"
+    sessionStorage.setItem(
+      "sprntly_chat_tabs_anon_acme",
+      JSON.stringify([
+        {
+          id: tabId,
+          title: "Jira chat",
+          thread: [
+            {
+              id: "turn-1",
+              query: "can you get me tickets on jira?",
+              reply: { answer: "Sure — give me an issue key or a status.", sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" },
+            },
+          ],
+          dbConvId: 100, // a conversation already exists (created on the first turn)
+          briefMeta: null,
+        },
+      ]),
+    )
+    sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", tabId)
+    renderScreen()
+
+    const textarea = document.querySelector(".bc-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "get all in to do status" } })
+    })
+    const sendBtn = within(document.querySelector(".bc-composer") as HTMLElement).getByLabelText("Send")
+    await act(async () => {
+      fireEvent.click(sendBtn)
+    })
+
+    await waitFor(() => {
+      expect(askedOpts.length).toBeGreaterThan(0)
+    })
+    const opts = askedOpts[askedOpts.length - 1]
+    expect(opts?.conversation_id).toBe(100)
+    // A plain chat tab carries no PRD id.
+    expect(opts).not.toHaveProperty("prd_id")
   })
 
   // A4: an attached file's content is appended to the outgoing query on send.
