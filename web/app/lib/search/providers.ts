@@ -97,7 +97,7 @@ function chatItem(c: ConversationRecord): SearchItem {
     breadcrumb: ["History"],
     keywords: [],
     iconId: "chat",
-    action: { kind: "resume-chat", dbId: c.id, title: c.title || "Untitled chat" },
+    action: { kind: "resume-chat", dbId: c.id, title: c.title || "Untitled chat", prdId: c.prd_id ?? null },
   }
 }
 

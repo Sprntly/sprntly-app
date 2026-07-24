@@ -14956,6 +14956,44 @@
     margin-left: auto;
   }
 
+  /* The instruction copy sits on its own full-width row under the title +
+     actions, so it can be a proper step-by-step sentence rather than a cramped
+     inline label. Overrides the generic .set-conn-upload .muted (right-aligned,
+     ultra-light) — this one is the primary guidance, so it reads left and a
+     touch darker. */
+  .set-conn-llm-context .set-conn-llm-desc {
+    flex-basis: 100%;
+    width: 100%;
+    margin: 2px 0 0;
+    line-height: 1.5;
+    color: #5b655e;
+  }
+
+  /* "Show prompt" sits on its own row directly under the description — a
+     left-aligned trigger, so it wraps full-width but the button keeps its
+     natural size. */
+  .set-conn-llm-context .set-conn-llm-show {
+    flex-basis: 100%;
+    width: 100%;
+    margin-top: 8px;
+  }
+
+  /* The reveal-and-edit prompt panel (shared onb-prompt-panel styling) also
+     drops onto its own full-width row inside the card, like the status line. */
+  .set-conn-llm-context .onb-prompt-panel {
+    flex-basis: 100%;
+    width: 100%;
+    margin-top: 6px;
+  }
+
+  /* Inside a settings pane (Business Context) the import card stacks above the
+     other cards, so give it the same bottom rhythm the pset cards use instead
+     of butting up against the next one. Scoped to .pset-body so the Connectors
+     usage — where the strip sits flush in the upload list — is unaffected. */
+  .pset-body .set-conn-llm-context {
+    margin-bottom: 18px;
+  }
+
   /* The status line drops onto its own full-width row beneath the actions. */
   .set-conn-llm-context .muted[role="status"] {
     flex-basis: 100%;

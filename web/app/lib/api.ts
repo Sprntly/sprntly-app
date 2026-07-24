@@ -1184,6 +1184,12 @@ export type LlmContextImportResponse = {
    *  prompt produced; this pass reads context documents of any shape, so it
    *  runs server-side while the user works through the connectors step. */
   job_id?: number | null
+  /** True when the raw .md was actually filed as a document source AND handed
+   *  to the knowledge-graph ingest. Distinct from `ok` (whether the heading
+   *  walk read structured fields): a caller that only cares about grounding the
+   *  agents — e.g. the Business Context import, which never prefills — keys its
+   *  success message off this, not `ok`. Absent on background-job results. */
+  filed?: boolean
 }
 
 export type LlmContextJobStatus = {
@@ -3286,8 +3292,37 @@ export type ConversationRecord = {
 }
 
 /** Extracted text of a file attached to a chat turn — persisted with the turn
- *  so reloaded threads (and the chat→PRD flow) still see earlier documents. */
-export type TurnAttachment = { name: string; content: string }
+ *  so reloaded threads (and the chat→PRD flow) still see earlier documents.
+ *  `key`/`mime` point at the ORIGINAL uploaded file in storage so a reopened chat
+ *  can render the real document (PDF/image inline, everything downloadable) — not
+ *  just the extracted text. Null on legacy turns / text pasted without an upload. */
+export type TurnAttachment = {
+  name: string
+  content: string
+  key?: string | null
+  mime?: string | null
+  size?: number | null
+}
+
+export const attachmentsApi = {
+  /** Stash the ORIGINAL uploaded file so a reopened chat can render it back.
+   *  Returns the storage key + sniffed metadata to persist on the turn. */
+  upload: (file: File) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    return api.post<{ key: string; name: string; mime: string; size: number }>(
+      "/v1/conversations/attachments",
+      form,
+    )
+  },
+  /** Fresh short-lived signed URLs (view inline + download) for a stored key.
+   *  Bearer-authed here; the returned URLs are public so an <iframe>/<img> can
+   *  load them directly. Re-minted on every viewer open (the URLs expire). */
+  sign: (key: string, name?: string) =>
+    api.get<{ view_url: string; download_url: string; mime: string }>(
+      `/v1/conversations/attachments/sign?key=${encodeURIComponent(key)}${name ? `&name=${encodeURIComponent(name)}` : ""}`,
+    ),
+}
 
 export type ConversationTurn = {
   id: number
@@ -3307,7 +3342,7 @@ export const conversationsApi = {
    *  tab can rehydrate the earlier chat. `conversation` is null when none exists. */
   byPrd: (prdId: number) =>
     api.get<{ conversation: ConversationRecord | null; turns: ConversationTurn[] }>(`/v1/conversations/by-prd/${prdId}`),
-  update: (id: number, body: { title?: string; preview?: string; query?: string; reply?: string; pinned?: boolean }) =>
+  update: (id: number, body: { title?: string; preview?: string; query?: string; reply?: string; pinned?: boolean; prd_id?: number }) =>
     api.patch<ConversationRecord>(`/v1/conversations/${id}`, body),
   remove: (id: number) =>
     api.delete(`/v1/conversations/${id}`),
