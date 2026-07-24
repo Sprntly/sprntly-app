@@ -27,6 +27,22 @@ def test_is_jira_lookup_positive():
         assert is_jira_lookup(q), q
 
 
+def test_is_jira_lookup_tracker_agnostic_pm_noun():
+    # The PM noun ("ticket"/"issue"/"epic"...) + a read verb is the PRIMARY
+    # trigger — no "jira" word or issue key required. This is what makes the
+    # path serve any connected tracker (Jira today, Asana / ClickUp later): the
+    # bare "get me tickets" must route to the live lookup, not the stale KG.
+    for q in [
+        "get me tickets",
+        "get me my tickets",
+        "show me the open bugs",
+        "find the checkout epic",
+        "pull up the tickets in review",
+        "get all my stories",
+    ]:
+        assert is_jira_lookup(q), q
+
+
 def test_is_jira_lookup_negative():
     for q in [
         "generate a PRD for onboarding",
