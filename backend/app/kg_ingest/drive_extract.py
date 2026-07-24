@@ -4,10 +4,20 @@ Drive has no token-based puller (its records come from the connection's
 picked-file config, not a bare API token), so it bypasses the PULLERS
 registry: ``google_drive_sync.sync_google_drive`` downloads + converts each
 changed file and hands the markdown here as ``DriveDoc``s. Each file is
-extracted as its own document (chunked by char budget) with
-``origin="connector"`` and a Drive-specific source hint, and gets a
+extracted as its own document (chunked by char budget) with a
+Drive-specific source hint, and gets a
 ``kg_source`` row (``source_type="google_drive"``) recording file-level
 provenance (Drive file id, modifiedTime, link).
+
+Provenance origin is ``"upload"``, NOT ``"connector"``: the only functional
+consumer of ``provenance["origin"]`` is the brief sufficiency gate's
+UPLOAD-ONLY relaxation (synthesis/convergence.is_upload_only), and per the
+data-source policy (#846) Drive is a *documents* source — the same
+evidentiary class as manual uploads. Stamping "connector" would silently
+disable that relaxation for uploads+Drive tenants (connecting Drive must
+never make briefs stricter). Drive-ness is still fully recorded via
+``agent="ingest:google_drive"``, ``provenance["doc"]``, and the kg_source
+rows.
 
 Retry-safe by design: a file's ``kg_file_mtime`` entry on the connection
 config is advanced ONLY after every chunk of that file extracted successfully,
@@ -104,7 +114,10 @@ def extract_drive_docs(
                     doc_name=doc_name, text=part,
                     agent="ingest:google_drive",
                     source_hint=_DRIVE_SOURCE_HINT,
-                    origin="connector",
+                    # "upload", not "connector" — see module docstring: Drive is
+                    # a documents source, and a connector origin would disable
+                    # the brief gate's upload-only relaxation for this tenant.
+                    origin="upload",
                 )
                 for k in ("signals", "themes", "skipped"):
                     totals[k] += r[k]
@@ -160,17 +173,9 @@ def _record_kg_result(company_id: str, ok: dict[str, str], errors: list[str]) ->
         )
 
 
-def run_drive_extract(company_id: str, docs: list[DriveDoc]) -> dict:
-    """Blocking extract + bookkeeping (the inline path used by the brief's
-    first-time seed)."""
-    facade = GraphFacade()
-    result = extract_drive_docs(facade, company_id, docs)
-    _record_kg_result(company_id, result["ok"], result["errors"])
-    return result
-
-
-# Per-company locks so overlapping kickoffs (manual sync racing the scheduled
-# refresh) serialize instead of extracting the same files twice in parallel.
+# Per-company locks so overlapping runs (manual sync racing the scheduled
+# refresh, or the brief's inline seed racing a picker-save thread) serialize
+# instead of extracting the same files twice in parallel.
 _extract_locks: dict[str, threading.Lock] = {}
 _extract_locks_guard = threading.Lock()
 
@@ -184,16 +189,27 @@ def _extract_lock(company_id: str) -> threading.Lock:
         return lock
 
 
-def _run_locked(company_id: str, docs: list[DriveDoc]) -> None:
+def run_drive_extract(company_id: str, docs: list[DriveDoc]) -> dict:
+    """Blocking extract + bookkeeping (also the inline path used by the
+    brief's first-time seed). Serialized per company — both the daemon-thread
+    and inline callers go through here, so concurrent runs can't double-extract
+    the same files."""
     with _extract_lock(company_id):
-        try:
-            r = run_drive_extract(company_id, docs)
-            logger.info(
-                "drive-extract done: %s files=%s signals=%s errors=%s",
-                company_id, r["files"], r["signals"], len(r["errors"]),
-            )
-        except Exception:  # noqa: BLE001 — fully isolated
-            logger.exception("drive-extract failed for %s", company_id)
+        facade = GraphFacade()
+        result = extract_drive_docs(facade, company_id, docs)
+        _record_kg_result(company_id, result["ok"], result["errors"])
+        return result
+
+
+def _run_isolated(company_id: str, docs: list[DriveDoc]) -> None:
+    try:
+        r = run_drive_extract(company_id, docs)
+        logger.info(
+            "drive-extract done: %s files=%s signals=%s errors=%s",
+            company_id, r["files"], r["signals"], len(r["errors"]),
+        )
+    except Exception:  # noqa: BLE001 — fully isolated
+        logger.exception("drive-extract failed for %s", company_id)
 
 
 def kickoff_drive_extract(company_id: str, docs: list[DriveDoc]) -> bool:
@@ -203,7 +219,7 @@ def kickoff_drive_extract(company_id: str, docs: list[DriveDoc]) -> bool:
         return False
     try:
         t = threading.Thread(
-            target=_run_locked, args=(company_id, docs),
+            target=_run_isolated, args=(company_id, docs),
             name="drive-kg-extract", daemon=True,
         )
         t.start()

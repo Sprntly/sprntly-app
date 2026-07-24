@@ -288,6 +288,17 @@ def sync_google_drive(
 
     mtime_map: dict[str, str] = dict(config.get("file_mtime") or {})
     kg_mtime_map: dict[str, str] = dict(config.get("kg_file_mtime") or {})
+    # Grandfather pre-existing connections: on the very first KG-aware sync
+    # (no kg_file_mtime key in config, ever) the already-synced files were
+    # extracted long ago by the corpus seed — adopt their corpus mtimes
+    # instead of re-extracting the same bytes into near-duplicate signals.
+    # New and edited files still extract normally. The key is then persisted
+    # below even when empty, so this fires exactly once per connection — a
+    # later sync where extraction is still pending/failed must NOT
+    # re-grandfather away the retry.
+    grandfathered = "kg_file_mtime" not in config
+    if grandfathered:
+        kg_mtime_map = dict(mtime_map)
 
     from app.kg_ingest.drive_extract import (  # lazy — keeps graph/LLM deps off module load
         DriveDoc,
@@ -406,7 +417,13 @@ def sync_google_drive(
                 link=meta.get("webViewLink") or "",
             ))
 
-    merge_config(row, {"file_mtime": mtime_map, "dataset": slug})
+    patch: dict = {"file_mtime": mtime_map, "dataset": slug}
+    if grandfathered:
+        # Persist the adopted ledger so the next sync doesn't grandfather
+        # again over a by-then-updated file_mtime. Safe from clobbering the
+        # extraction thread's own patch: the KG kick below hasn't run yet.
+        patch["kg_file_mtime"] = kg_mtime_map
+    merge_config(row, patch)
     err = None
     if result.errors:
         err = f"{len(result.errors)} file(s) failed"

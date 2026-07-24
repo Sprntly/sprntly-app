@@ -34,10 +34,15 @@ Picked files sync on two ledgers kept in the connection config
   kg_source so the brief's corpus seed doesn't re-extract it as an upload.
 - **Knowledge graph** (`kg_file_mtime`) — changed files are handed to
   `app/kg_ingest/drive_extract.py`, which chunk-extracts each file as its
-  own document with `origin="connector"` and writes a per-file
+  own document and writes a per-file
   `kg_source(source_type="google_drive")` provenance row (Drive file id,
   modifiedTime, webViewLink). `kg_file_mtime` advances only after a file
   fully extracts, so lost background threads retry on the next sync.
+  Signals carry `origin="upload"` (Drive is a *documents* source — a
+  `connector` origin would disable the brief gate's upload-only relaxation;
+  see the drive_extract module docstring). Pre-existing connections are
+  grandfathered on their first KG-aware sync: already-synced files adopt
+  their corpus mtimes instead of re-extracting into near-duplicate signals.
 
 Sync triggers: Picker save, the Settings "Sync" button, the scheduler's
 6-hourly `refresh_connectors` job (via `kickoff_sync`, which special-cases

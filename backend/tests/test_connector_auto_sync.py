@@ -62,6 +62,11 @@ def test_kickoff_google_drive_starts_drive_thread(monkeypatch):
     assert started["daemon"] is True
 
 
+_DRIVE_ROW_CONFIGURED = {
+    "config_json": '{"dataset": "acme", "files": [{"id": "file0001aa"}]}'
+}
+
+
 def test_run_drive_sync_calls_full_sync(monkeypatch):
     calls = {}
 
@@ -76,6 +81,8 @@ def test_run_drive_sync_calls_full_sync(monkeypatch):
 
     import app.connectors.google_drive_sync as gds
 
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: dict(_DRIVE_ROW_CONFIGURED))
     monkeypatch.setattr(gds, "sync_google_drive", fake_sync)
     auto_sync._run_drive_sync("co-9")
     assert calls["company_id"] == "co-9"
@@ -84,6 +91,8 @@ def test_run_drive_sync_calls_full_sync(monkeypatch):
 def test_run_drive_sync_stamps_error_on_failure(monkeypatch):
     import app.connectors.google_drive_sync as gds
 
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: dict(_DRIVE_ROW_CONFIGURED))
     monkeypatch.setattr(
         gds, "sync_google_drive",
         lambda **kw: (_ for _ in ()).throw(RuntimeError("drive down")),
@@ -96,6 +105,27 @@ def test_run_drive_sync_stamps_error_on_failure(monkeypatch):
     auto_sync._run_drive_sync("co-9")  # must not raise
     assert stamped["provider"] == "google_drive"
     assert "drive down" in stamped["last_sync_error"]
+
+
+def test_run_drive_sync_quiet_noop_when_unconfigured(monkeypatch):
+    """A connected-but-unconfigured Drive row (no dataset / nothing picked)
+    is skipped silently — no sync attempt, and crucially NO last_sync_error
+    stamp for Settings to scare the user with every scheduler cycle."""
+    import app.connectors.google_drive_sync as gds
+
+    monkeypatch.setattr(auto_sync.db, "get_connection",
+                        lambda cid, prov: {"config_json": "{}"})
+    monkeypatch.setattr(
+        gds, "sync_google_drive",
+        lambda **kw: (_ for _ in ()).throw(AssertionError("must not sync")),
+    )
+    stamped = {}
+    monkeypatch.setattr(
+        auto_sync.db, "update_connection_sync",
+        lambda cid, prov, **kw: stamped.update(kw),
+    )
+    auto_sync._run_drive_sync("co-9")
+    assert stamped == {}
 
 
 def test_run_sync_stamps_success(monkeypatch):
