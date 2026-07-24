@@ -24,6 +24,7 @@ import {
   tzOptionLabel,
 } from "../../../../lib/briefSchedule"
 import { updateWorkspace } from "../../../../lib/onboarding/store"
+import { INSIGHT_TYPES, cleanInsightTypes } from "../../../../lib/insight-types"
 import { SlackChannelPicker } from "../../../connectors/SlackChannelPicker"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
@@ -34,6 +35,16 @@ type ScheduleFields = {
   weekday: number
   hour: number
   timezone: string
+  // Workspace-level Top Insights filter — which insight types the brief should
+  // surface for everyone in the workspace (companies.notification_settings.
+  // brief_insight_types / brief_insight_note). Empty = surface everything.
+  insightTypes: string[]
+  insightNote: string
+}
+
+/** Stable order-insensitive key for comparing an insight-type selection. */
+function typesKey(types: string[]): string {
+  return [...types].sort().join(",")
 }
 
 export function NotificationsSettings() {
@@ -45,6 +56,9 @@ export function NotificationsSettings() {
   const [weekday, setWeekday] = useState(0)
   const [hour, setHour] = useState(6)
   const [timezone, setTimezone] = useState("UTC")
+  // Workspace-level insight-type filter + free-text note.
+  const [insightTypes, setInsightTypes] = useState<string[]>([])
+  const [insightNote, setInsightNote] = useState("")
   // The persisted "every other week" anchor. Kept out of ScheduleFields on
   // purpose: it is derived, never edited directly, so it must not arm Save.
   const [storedAnchor, setStoredAnchor] = useState<string | null>(null)
@@ -76,12 +90,16 @@ export function NotificationsSettings() {
       hour: typeof n.brief_hour === "number" ? n.brief_hour : 6,
       timezone:
         typeof n.timezone === "string" && n.timezone ? n.timezone : browserTimezone(),
+      insightTypes: cleanInsightTypes(n.brief_insight_types),
+      insightNote: typeof n.brief_insight_note === "string" ? n.brief_insight_note : "",
     }
     setEmailDigest(loaded.emailDigest)
     setFrequency(loaded.frequency)
     setWeekday(loaded.weekday)
     setHour(loaded.hour)
     setTimezone(loaded.timezone)
+    setInsightTypes(loaded.insightTypes)
+    setInsightNote(loaded.insightNote)
     setStoredAnchor(typeof n.brief_anchor_date === "string" ? n.brief_anchor_date : null)
     setSnapshot(loaded)
   }, [workspace])
@@ -92,7 +110,16 @@ export function NotificationsSettings() {
       frequency !== snapshot.frequency ||
       weekday !== snapshot.weekday ||
       hour !== snapshot.hour ||
-      timezone !== snapshot.timezone)
+      timezone !== snapshot.timezone ||
+      typesKey(insightTypes) !== typesKey(snapshot.insightTypes) ||
+      insightNote.trim() !== snapshot.insightNote.trim())
+
+  function toggleInsightType(value: string) {
+    setInsightTypes((prev) =>
+      prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value],
+    )
+    setSaved(false)
+  }
 
   const loadSlack = useCallback(async () => {
     setSlackLoading(true)
@@ -175,10 +202,15 @@ export function NotificationsSettings() {
           brief_hour: hour,
           brief_minute: 0,
           timezone,
+          // Workspace-level Top Insights filter. Cleaned to known slugs so a
+          // stale client can't violate the companies_brief_insight_types check
+          // constraint; note is stored as null when blank.
+          brief_insight_types: cleanInsightTypes(insightTypes),
+          brief_insight_note: insightNote.trim() || null,
         },
       })
       setStoredAnchor(anchor)
-      setSnapshot({ emailDigest, frequency, weekday, hour, timezone })
+      setSnapshot({ emailDigest, frequency, weekday, hour, timezone, insightTypes, insightNote })
       setSaved(true)
       await refresh()
     } catch (e) {
@@ -186,7 +218,7 @@ export function NotificationsSettings() {
     } finally {
       setSaving(false)
     }
-  }, [workspace, emailDigest, frequency, weekday, hour, timezone, refresh])
+  }, [workspace, emailDigest, frequency, weekday, hour, timezone, insightTypes, insightNote, refresh])
 
   function onDiscard() {
     if (!snapshot) return
@@ -195,6 +227,8 @@ export function NotificationsSettings() {
     setWeekday(snapshot.weekday)
     setHour(snapshot.hour)
     setTimezone(snapshot.timezone)
+    setInsightTypes(snapshot.insightTypes)
+    setInsightNote(snapshot.insightNote)
     setError(null)
   }
 
@@ -258,6 +292,52 @@ export function NotificationsSettings() {
         </p>
 
         <div className="pset-stack">
+          {/* ───────── WHAT: workspace Top Insights filter ─────────
+              Workspace-level — the admin picks which insight types the brief
+              surfaces for everyone. Empty = surface everything. */}
+          <section className="pset-card">
+            <div className="pset-card-head">
+              <h3 className="pset-card-title">Top Insights</h3>
+              <span className="pset-card-hint">
+                · what your workspace should surface — pick any, or leave empty for everything
+              </span>
+            </div>
+            <div className="metric-chips" data-field="insight-types">
+              {INSIGHT_TYPES.map((opt) => {
+                const isSel = insightTypes.includes(opt.value)
+                return (
+                  <button
+                    type="button"
+                    key={opt.value}
+                    className={`metric ${isSel ? "sel" : ""}`}
+                    aria-pressed={isSel}
+                    title={opt.description}
+                    onClick={() => toggleInsightType(opt.value)}
+                  >
+                    {opt.label}
+                  </button>
+                )
+              })}
+            </div>
+            <div className="pset-field" style={{ marginTop: 14 }}>
+              <label className="pset-label" htmlFor="comms-insight-note">
+                Or describe it in your words (optional)
+              </label>
+              <textarea
+                id="comms-insight-note"
+                className="input"
+                rows={3}
+                value={insightNote}
+                maxLength={1000}
+                onChange={(e) => {
+                  setInsightNote(e.target.value)
+                  setSaved(false)
+                }}
+                placeholder='e.g. "Show the top user problems and the one thing we should ship this week to move activation."'
+              />
+            </div>
+          </section>
+
           {/* ───────── WHERE: Slack (per-user) ───────── */}
           <section className="pset-card">
             <div className="pset-card-head">

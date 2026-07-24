@@ -667,10 +667,11 @@ export interface AppContentState {
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]
   connectedConnectorIds: string[]
-  /** THIS member's saved insight-type filter (from user_insight_prefs), loaded
-   *  once by AppShell. The Top Insights tab shows the findings whose types
-   *  intersect it; empty/absent = surface everything (no filter). Optional so
-   *  the default content state and existing fixtures need no change. */
+  /** The workspace's Top Insights filter (companies.notification_settings.
+   *  brief_insight_types), loaded once by AppShell. The Top Insights tab shows
+   *  the findings whose types intersect it; empty/absent = surface everything
+   *  (no filter). Optional so the default content state and existing fixtures
+   *  need no change. */
   insightTypeFilter?: string[]
   /** `null` = hide count badge */
   sidebarBriefCount: number | null

@@ -11,12 +11,11 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
     ])
   })
 
-  it("You group contains Profile, Comms & Brief, Top Insights, and Workspaces", () => {
+  it("You group contains Profile, Comms & Brief, and Workspaces", () => {
     const you = SETTINGS_NAV.find((g) => g.groupLabel === "You")!
     expect(you.items.map((i) => i.id)).toEqual([
       "profile",
       "comms-brief",
-      "top-insights",
       "workspaces",
     ])
   })
@@ -49,7 +48,6 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
     expect(byId).toEqual({
       profile: "Profile",
       "comms-brief": "Comms & Brief",
-      "top-insights": "Top Insights",
       "product-category": "Product & Category",
       "company-profile": "Company Profile",
       process: "Process & Planning",
