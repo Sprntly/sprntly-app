@@ -232,6 +232,8 @@ def test_build_runs_llm_and_renders(monkeypatch):
     assert "CALLS…" in captured["input"] and "=== CALLS ===" in captured["input"]
     # The extraction prompt carries the v3 method anchors.
     assert "CAPTURE" in captured["system"] and "1–5" in captured["system"]
+    # Full-window corpora exceed the default request timeout — must stream.
+    assert captured["long_output"] is True
 
 
 def test_build_raises_on_non_dict_output(monkeypatch):

@@ -507,6 +507,10 @@ def build(
         json_schema=SCHEMA,
         skill=_VOC_SKILL,
         max_tokens=16000,
+        # A full-window corpus (100+ calls, ~70k input tokens) + a big JSON
+        # report exceeds the default per-request timeout — stream on the long
+        # read timeout like the other document-scale generations.
+        long_output=True,
     )
     data = result.output
     if not isinstance(data, dict):
