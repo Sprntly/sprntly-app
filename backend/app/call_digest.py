@@ -37,9 +37,15 @@ _DEFAULT_WINDOW_DAYS = 7
 # exist", not a hard 7-day cutoff. Explicit windows are never widened: if the
 # user asked for last week and it was empty, saying so is the honest answer.
 _AUTOWIDEN_DAYS = (30, 90)
-# Bound the corpus handed to the skill so a busy month of calls can't blow the
-# context budget. Calls are newest-first; we keep the most recent under budget.
-_CORPUS_CHAR_BUDGET = 80_000
+# Bound the corpus handed to the skill so a busy quarter of calls can't blow
+# the context budget (~75k tokens at 4 chars/token, well inside the model's
+# window next to the method block). When the full-quote corpus exceeds it, the
+# fit is ADAPTIVE: every call stays in, with fewer verbatim quotes per call —
+# dropping whole calls (the old behaviour) silently shrank "the last 30 days"
+# to the newest ~5–7 calls.
+_CORPUS_CHAR_BUDGET = 300_000
+# Quote-trim ladder for the adaptive fit; 0 = distilled summary only.
+_QUOTE_CAPS = (60, 30, 15, 8, 4, 0)
 
 
 @dataclass
@@ -59,6 +65,8 @@ class DigestCorpus:
     calls: list[CallTranscript] = field(default_factory=list)
     text: str = ""
     error: str = ""
+    total: int = 0        # calls found in the window (≥ count when truncated)
+    quote_cap: int | None = None  # per-call quote cap applied by the fit (None = untrimmed)
 
     @property
     def count(self) -> int:
@@ -172,19 +180,32 @@ def has_call_source(company_id: str) -> bool:
     return _load_api_key(company_id) is not None
 
 
-def _select_within_budget(calls: list[CallTranscript]) -> list[CallTranscript]:
-    """Keep the most recent calls (input is newest-first) that fit the char
-    budget, so a busy month can't blow the context. The first call is always
-    kept even if it alone exceeds the budget."""
+def _fit_corpus(
+    calls: list[CallTranscript],
+) -> tuple[list[CallTranscript], str, int | None]:
+    """Fit ALL calls into the char budget by trimming verbatim quotes per call,
+    dropping whole calls only as a last resort.
+
+    Walks the quote-cap ladder until the corpus fits: every call in the window
+    stays represented (a 30-day ask covers 30 days of calls), trading quote
+    depth for coverage. If even summary-only rendering overflows, keeps the most
+    recent calls under budget (input is newest-first; the first call is always
+    kept). Returns (selected_calls, corpus_text, applied_quote_cap) —
+    quote_cap is None when nothing was trimmed."""
+    for cap in _QUOTE_CAPS:
+        blocks = [c.render(max_quotes=cap) for c in calls]
+        text = "\n\n".join(blocks)
+        if len(text) <= _CORPUS_CHAR_BUDGET:
+            return calls, text, None if cap == _QUOTE_CAPS[0] else cap
     selected: list[CallTranscript] = []
     size = 0
     for c in calls:
-        block = len(c.render())
+        block = len(c.render(max_quotes=0)) + 2
         if selected and size + block > _CORPUS_CHAR_BUDGET:
             break
         selected.append(c)
         size += block
-    return selected
+    return selected, "\n\n".join(c.render(max_quotes=0) for c in selected), 0
 
 
 def build_corpus(company_id: str, window: Window) -> DigestCorpus:
@@ -203,9 +224,11 @@ def build_corpus(company_id: str, window: Window) -> DigestCorpus:
         return DigestCorpus(status="error", window=window, error=str(e))
     if not calls:
         return DigestCorpus(status="no_calls", window=window)
-    selected = _select_within_budget(calls)
-    text = "\n\n".join(c.render() for c in selected)
-    return DigestCorpus(status="ok", window=window, calls=selected, text=text)
+    selected, text, quote_cap = _fit_corpus(calls)
+    return DigestCorpus(
+        status="ok", window=window, calls=selected, text=text,
+        total=len(calls), quote_cap=quote_cap,
+    )
 
 
 # ── Answer assembly ──────────────────────────────────────────────────────────
@@ -277,8 +300,21 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     # frontend renders it in a sandboxed iframe). See app.voc_report.
     from app import voc_report
 
+    # Disclose any fit applied so the report's run line can state real coverage
+    # instead of implying every word of every call is present.
+    coverage = f"{corpus.count} calls"
+    if corpus.total > corpus.count:
+        coverage = (
+            f"most recent {corpus.count} of {corpus.total} calls — older calls "
+            "omitted for space; note this as a coverage caveat"
+        )
+    elif corpus.quote_cap is not None:
+        coverage += (
+            f"; verbatim quotes sampled to ~{corpus.quote_cap} per call to fit "
+            "every call in — distilled summaries are complete"
+        )
     source_line = (
-        f"=== CUSTOMER CALLS — {window.label} ({corpus.count} calls) ==="
+        f"=== CUSTOMER CALLS — {window.label} ({coverage}) ==="
     )
     try:
         html = voc_report.build(
