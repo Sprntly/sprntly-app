@@ -1,0 +1,42 @@
+name: Test ds-agent
+
+# ds-agent had a real pytest suite (tests/) that no workflow ran — its deploy
+# (deploy-agent.yml) shipped code that CI never exercised. This runs the server
+# tests on every ds-agent change so a regression shows up on the PR, and it is
+# the required check that gates deploy-agent.yml.
+#
+# Scope: tests/ only. The legacy ds_agent/legacy/test_pipeline_e2e.py is the
+# retired stage-1 pipeline (no longer imported by the running service) and pulls
+# the heavy pandas/sklearn path — it is intentionally not part of this gate.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'ds-agent/**'
+      - '.github/workflows/test-agent.yml'
+  # No paths filter on PRs: required checks must run on every PR or the PR gets
+  # stuck "pending" (see test-backend.yml).
+  pull_request: {}
+
+jobs:
+  pytest-agent:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: ds-agent/pyproject.toml
+
+      - name: Install ds-agent (with dev extras)
+        working-directory: ds-agent
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e '.[dev]'
+
+      - name: Run pytest (server tests)
+        working-directory: ds-agent
+        run: python -m pytest tests/ -q --strict-markers
