@@ -8,7 +8,8 @@
     "build": "next build && node scripts/postbuild-static-fix.mjs",
     "start": "next start",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@sentry/nextjs": "^10.66.0",

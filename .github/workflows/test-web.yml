@@ -12,13 +12,10 @@ on:
       - 'backend/data/sprntly_*_template.md'
       - 'backend/data/sprntly_*_sample.md'
       - 'backend/skills/prd-author/templates/prd-template.md'
-  pull_request:
-    paths:
-      - 'web/**'
-      - '.github/workflows/test-web.yml'
-      - 'backend/data/sprntly_*_template.md'
-      - 'backend/data/sprntly_*_sample.md'
-      - 'backend/skills/prd-author/templates/prd-template.md'
+  # No paths filter on PRs: required checks must run on every PR or the PR gets
+  # stuck "pending" (see test-backend.yml). Running the web suite on all PRs also
+  # covers the cross-stack contract case (a backend template edit) for free.
+  pull_request: {}
 
 jobs:
   vitest:
@@ -33,6 +30,12 @@ jobs:
       - name: Install deps
         working-directory: web
         run: npm ci --no-audit --no-fund
+      - name: Typecheck (tsc --noEmit)
+        # Fast, standalone type check on the fast lane. `next build` (below) also
+        # type-checks, but this fails in seconds on a type regression instead of
+        # after a full build, and runs even if the build step is later cached.
+        working-directory: web
+        run: npm run typecheck
       - name: Vitest
         working-directory: web
         # Defensive headroom: raise the vitest worker's V8 heap above Node's
