@@ -33,6 +33,65 @@ _utc_now = utc_now
 _supabase_client: Any | None = None
 
 
+def _force_http1(client: Any) -> None:
+    """Swap every sub-client session onto HTTP/1.1 httpx clients.
+
+    supabase-py's sync sub-clients (postgrest, storage3, gotrue) all
+    default to `httpx.Client(http2=True)`, and the h2 state machine is not
+    thread-safe. Each session is shared by every request thread (FastAPI
+    runs sync endpoints in a threadpool) plus background jobs, and
+    concurrent use corrupts the connection state — HTTP/2 multiplexes all
+    threads onto one connection whose stream bookkeeping then races
+    (`KeyError` in `h2._open_streams`, `LocalProtocolError: Invalid input
+    ... in state ...`). The worst shape (staging 2026-07-24) corrupts
+    without raising: every later Supabase call hangs forever, so
+    `retry_on_disconnect` never fires while /healthz stays green. With
+    HTTP/1.1 the pool checks out one whole connection per request, so
+    threads never share protocol state.
+
+    `options.httpx_client` can't express this — supabase-py passes the
+    same instance to every sub-client and each rewrites its `base_url` —
+    so we replace the sessions after construction. Attribute layout is
+    pinned by supabase==2.16.0 and locked in by tests.
+
+    `client.functions` also defaults to HTTP/2 but is lazily built and
+    unused by this backend — extend this swap if that ever changes.
+    """
+    import httpx
+
+    def _clone_http1(old: Any) -> httpx.Client:
+        return httpx.Client(
+            base_url=old.base_url,
+            headers=old.headers,
+            timeout=old.timeout,
+            follow_redirects=True,
+            http2=False,
+        )
+
+    # postgrest: request builders read `.session` per call.
+    pg = client.postgrest
+    old_pg = pg.session
+    pg.session = _clone_http1(old_pg)
+    old_pg.close()
+
+    # storage3: `.session` and the bucket API's `._client` are the same
+    # object — swap both references.
+    st = client.storage
+    old_st = st.session
+    st.session = st._client = _clone_http1(old_st)
+    old_st.close()
+
+    # gotrue: base URL and headers travel per-request, the session is a
+    # bare client; `auth.admin` shares the parent's instance.
+    au = client.auth
+    old_au = au._http_client
+    au._http_client = au.admin._http_client = httpx.Client(
+        follow_redirects=True,
+        http2=False,
+    )
+    old_au.close()
+
+
 def supabase_client() -> Any | None:
     """Return a memoized supabase-py Client, or None if not configured.
 
@@ -47,10 +106,12 @@ def supabase_client() -> Any | None:
         return None
     try:
         from supabase import create_client
-        _supabase_client = create_client(
+        client = create_client(
             settings.supabase_url,
             settings.supabase_service_role_key,
         )
+        _force_http1(client)
+        _supabase_client = client
     except Exception:
         logger.exception("Failed to create Supabase client")
         return None
