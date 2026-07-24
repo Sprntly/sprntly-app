@@ -278,7 +278,7 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
     sufficient: false,
     missing: ["Target users", "Success criteria"],
     questions: [
-      { prompt: "Who are the target users?", options: ["Admins", "End users"] },
+      { prompt: "Who are the target users?", options: ["Admins", "End users"], skip_default: "all end users" },
       { prompt: "How will you measure success?", options: [] },
     ],
   }
@@ -293,6 +293,8 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
     // …questions appear in the tab's chat, and NOTHING generated yet.
     await waitFor(() => expect(document.body.textContent).toContain("Who are the target users?"))
     expect(document.body.textContent).toContain("generate now")
+    // Skips are informed: the stated default rides with its question.
+    expect(document.body.textContent).toContain("if skipped, I'll assume: all end users")
     expect(generateFromTask).not.toHaveBeenCalled()
 
     // The user answers in the same tab → generation runs with the combined task.

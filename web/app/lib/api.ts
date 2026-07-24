@@ -1641,7 +1641,7 @@ export const prdApi = {
   clarifyTask: (task: string, sourceDocs?: TurnAttachment[]) =>
     api.post<{
       sufficient: boolean
-      questions: { prompt: string; options: string[] }[]
+      questions: { prompt: string; options: string[]; skip_default?: string | null }[]
       missing: string[]
     }>("/v1/prd/clarify-task", {
       task,
