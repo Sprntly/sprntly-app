@@ -84,10 +84,22 @@ import {
 } from "../../../connectors/CredentialsPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
-import { UploadSourceModal } from "../../../connectors/UploadSourceModal"
+// This project ships @tabler/icons-react (SVG components) but NOT the `ti`
+// webfont, so `<i className="ti ti-…">` renders an empty box — use the
+// components instead.
+import { IconCloudUpload, IconLoader2, IconTrash } from "@tabler/icons-react"
 
 /** Provider id of the "upload your own documents" connector. */
 export const UPLOADS_PROVIDER_ID = "uploads"
+
+/**
+ * Catalog category KEY of the merged "Company documentation" category — the
+ * home of the `uploads` connector (named document sources) alongside Notion /
+ * Google Docs. NOT the same as UPLOADS_PROVIDER_ID: this is the UI grouping,
+ * that is the connector. The named-source list + "Add a document source"
+ * picker render only under this category.
+ */
+export const DOCUMENTS_CATEGORY_KEY = "docs"
 
 /**
  * Provider page (keyed by connector id) where the user can view and copy
@@ -220,6 +232,13 @@ export type ConnectorsSettingsViewProps = {
    */
   uploading?: boolean
   /**
+   * True while a new document source is being created from picked files.
+   * Drives the "Add a document source" tile's busy state so the user sees
+   * immediate feedback (spinner + "Documents uploading…") during the
+   * multi-second create-and-ingest instead of the picker just closing.
+   */
+  addingSource?: boolean
+  /**
    * Fired when the "Regenerate brief" button is clicked. Kicks off the full
    * pipeline (KG ingest → brief → PRD → evidence) from the latest sources.
    */
@@ -233,22 +252,33 @@ export type ConnectorsSettingsViewProps = {
   searchQuery?: string
   onSearchChange?: (value: string) => void
   /**
-   * All files uploaded to the active company. The backend stores uploads at
-   * the company level with no per-category attribution, so this is a single
-   * company-wide list rendered once (not filtered per category).
+   * All files uploaded to the active company. Each carries the connector
+   * `category` it was uploaded under; files are listed inside their category
+   * card, and only legacy files with no category (`category === ""`) fall back
+   * to the global "Uploaded files" list at the foot of the pane.
    */
   files: SourceFile[]
   /**
    * The user's own named document sources (the `uploads` connector). Rendered
-   * inside the "Company Documents" category card so the connector's data is
-   * visible where the connector is, not in a separate island.
+   * inside the merged "Company documentation" category card so the connector's
+   * data is visible where the connector is, not in a separate island.
    */
   uploadSources?: UploadSource[]
-  /** Open the "add your documents" modal (also the row's Connect action). */
-  onAddUploadSource?: () => void
-  /** Open the modal in add-files-to-existing-source mode. */
-  onAddFilesToSource?: (sourceId: string) => void
+  /**
+   * Create a new document source directly from the picked files — no
+   * name/description step. Also the row's Connect action for the uploads
+   * category.
+   */
+  onAddUploadSource?: (files: FileList) => void
   onRemoveUploadSource?: (sourceId: string) => void
+  /** Id of the source currently being removed — drives its "Removing…" busy
+   *  state. */
+  removingSourceId?: string | null
+  /** Remove one uploaded file (per-category or legacy) by its stored filename. */
+  onRemoveFile?: (filename: string) => void
+  /** Filename of the file currently being removed — drives its "Removing…"
+   *  busy state. */
+  removingFilename?: string | null
   /**
    * Key of the category selected in the left rail. `null`/unknown key =
    * "the first visible category" (see resolveSelectedCategory), so the
@@ -269,6 +299,7 @@ export function ConnectorsSettingsView({
   onConfigure,
   onUpload,
   uploading = false,
+  addingSource = false,
   files,
   onRegenerateBrief,
   regenerating,
@@ -277,8 +308,10 @@ export function ConnectorsSettingsView({
   onSearchChange,
   uploadSources = [],
   onAddUploadSource,
-  onAddFilesToSource,
   onRemoveUploadSource,
+  removingSourceId = null,
+  onRemoveFile,
+  removingFilename = null,
   selectedCategoryKey = null,
   onSelectCategory,
 }: ConnectorsSettingsViewProps) {
@@ -315,6 +348,49 @@ export function ConnectorsSettingsView({
     // keyboard and screen readers, not just visually correct.
     const rail = e.currentTarget.parentElement
     rail?.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus()
+  }
+
+  /**
+   * One uploaded-file row (kind · size · added), with a Remove action that
+   * shows a "Removing…" busy state until the delete resolves. Shared by the
+   * per-category list and the legacy uncategorized list so both look the same
+   * and both can delete. Not a hook — stays pure for the SSR tests.
+   */
+  function fileRow(f: SourceFile) {
+    const removing = removingFilename === f.filename
+    return (
+      <li key={f.filename} className="src-row src-row--source">
+        <span className="src-row-icon" aria-hidden>
+          {iconForKind(f.kind)}
+        </span>
+        <span className="src-row-text">
+          <span className="src-row-name" title={f.filename}>
+            {truncateFilename(f.filename, 40)}
+          </span>
+          <span className="src-meta">
+            {f.kind.toUpperCase()} · {humanizeBytes(f.size_bytes)} ·{" "}
+            {formatRelativeDate(f.added_at)}
+          </span>
+        </span>
+        <span className="src-row-actions">
+          <button
+            type="button"
+            className="src-trash"
+            aria-label={removing ? "Removing…" : `Remove ${f.filename}`}
+            title={removing ? "Removing…" : "Remove"}
+            disabled={removing}
+            aria-busy={removing}
+            onClick={() => onRemoveFile?.(f.filename)}
+          >
+            {removing ? (
+              <IconLoader2 size={15} className="icon-spin" aria-hidden />
+            ) : (
+              <IconTrash size={15} aria-hidden />
+            )}
+          </button>
+        </span>
+      </li>
+    )
   }
 
   return (
@@ -437,9 +513,15 @@ export function ConnectorsSettingsView({
             </div>
 
             {/* Same row markup as the old grouped layout — the wrapper is what
-                turns each row into its own bordered card in the new design. */}
+                turns each row into its own bordered card in the new design.
+                The `uploads` provider is intentionally NOT shown as a connector
+                row: it isn't a third-party integration, it's the user's own
+                document sources, surfaced as the file list + "Add a document
+                source" picker below. */}
             <div className="set-conn-rows">
-              {activeCategory.items.map((item) => {
+              {activeCategory.items
+                .filter((item) => item.id !== UPLOADS_PROVIDER_ID)
+                .map((item) => {
                 const conn = connectionByProvider.get(item.id) ?? null
                 const state = getConnectorRowState(item, conn)
                 return (
@@ -488,70 +570,120 @@ export function ConnectorsSettingsView({
               })}
             </div>
 
-            {/* The user's own document sources live inside their connector's
-                pane: name, doc count, the description they gave, and
-                per-source add/remove. Only for the uploads category. */}
-            {activeCategory.key === "uploads" && uploadSources.length > 0 ? (
+            {/* Uploaded documents/files sit under their OWN labeled divider so
+                they read as "your documents", clearly separate from — never
+                attached to — the connector(s) above. The header heads the whole
+                documents area (sources + the add-a-source picker). */}
+            {activeCategory.key === DOCUMENTS_CATEGORY_KEY ? (
+              <div className="set-conn-uploads-head">Your documents</div>
+            ) : null}
+
+            {/* The user's own document sources: name, the description they gave,
+                and a per-source remove. Only for the Company documentation
+                category. */}
+            {activeCategory.key === DOCUMENTS_CATEGORY_KEY && uploadSources.length > 0 ? (
               <ul className="src-list" data-testid="upload-sources">
-                {uploadSources.map((s) => (
-                  <li key={s.id} className="src-row src-row--source">
-                    <span className="src-row-icon" aria-hidden>
-                      {iconForKind("md")}
-                    </span>
-                    {/* Name and the user's description share one cell so a long
-                        description truncates instead of shoving the actions. */}
-                    <span className="src-row-text">
-                      <span
-                        className="src-row-name"
-                        title={s.description || s.name}
-                      >
-                        {s.name}
+                {uploadSources.map((s) => {
+                  const removing = removingSourceId === s.id
+                  return (
+                    <li key={s.id} className="src-row src-row--source">
+                      <span className="src-row-icon" aria-hidden>
+                        {iconForKind("md")}
                       </span>
-                      {s.description ? (
-                        <span className="src-meta">{s.description}</span>
-                      ) : null}
-                    </span>
-                    <span className="src-kind-chip">
-                      {s.file_count} doc{s.file_count === 1 ? "" : "s"}
-                    </span>
-                    <span className="src-row-actions">
-                      <button
-                        type="button"
-                        className="src-act"
-                        onClick={() => onAddFilesToSource?.(s.id)}
-                      >
-                        <i className="ti ti-plus" aria-hidden />
-                        Add files
-                      </button>
-                      <button
-                        type="button"
-                        className="src-act src-act--danger"
-                        onClick={() => onRemoveUploadSource?.(s.id)}
-                      >
-                        <i className="ti ti-trash" aria-hidden />
-                        Remove
-                      </button>
-                    </span>
-                  </li>
-                ))}
+                      {/* Name and the user's description share one cell so a long
+                          description truncates instead of shoving the actions. */}
+                      <span className="src-row-text">
+                        <span
+                          className="src-row-name"
+                          title={s.description || s.name}
+                        >
+                          {s.name}
+                        </span>
+                        {s.description ? (
+                          <span className="src-meta">{s.description}</span>
+                        ) : null}
+                      </span>
+                      <span className="src-row-actions">
+                        <button
+                          type="button"
+                          className="src-trash"
+                          aria-label={removing ? "Removing…" : `Remove ${s.name}`}
+                          title={removing ? "Removing…" : "Remove"}
+                          disabled={removing}
+                          aria-busy={removing}
+                          onClick={() => onRemoveUploadSource?.(s.id)}
+                        >
+                          {removing ? (
+                            <IconLoader2 size={15} className="icon-spin" aria-hidden />
+                          ) : (
+                            <IconTrash size={15} aria-hidden />
+                          )}
+                        </button>
+                      </span>
+                    </li>
+                  )
+                })}
               </ul>
             ) : null}
 
             {/* Always offer a NEW named source here — the per-source rows above
-                only extend or remove existing ones, and once the connector is
-                Active its row action becomes "Configure". */}
-            {activeCategory.key === "uploads" ? (
-              <button
-                type="button"
-                className="set-conn-upload set-conn-add-source"
+                only remove existing ones, and once the connector is Active its
+                row action becomes "Configure". */}
+            {activeCategory.key === DOCUMENTS_CATEGORY_KEY ? (
+              <label
+                className={`set-conn-upload set-conn-add-source${
+                  addingSource ? " is-uploading" : ""
+                }`}
                 data-testid="add-upload-source"
-                onClick={() => onAddUploadSource?.()}
+                aria-busy={addingSource}
               >
-                <i className="ti ti-cloud-upload" aria-hidden />
-                Add a document source
-                <span className="muted">Name it, describe it, attach any files</span>
-              </button>
+                {addingSource ? (
+                  <IconLoader2 size={16} className="icon-spin" aria-hidden />
+                ) : (
+                  <IconCloudUpload size={16} aria-hidden />
+                )}
+                {addingSource ? "Documents uploading…" : "Add a document source"}
+                <span className="muted">
+                  {addingSource
+                    ? "Adding them to your sources…"
+                    : "Pick files — they’re added as a new source"}
+                </span>
+                <input
+                  type="file"
+                  multiple
+                  accept={UPLOAD_EXTENSIONS.join(",")}
+                  // Block re-selection while the current batch is still creating
+                  // the source so overlapping picks can't fire mid-flight.
+                  disabled={addingSource}
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    if (e.target.files && e.target.files.length > 0) {
+                      onAddUploadSource?.(e.target.files)
+                      // Reset so the same file can be picked again after a failed run.
+                      e.target.value = ""
+                    }
+                  }}
+                />
+              </label>
             ) : null}
+
+            {/* Files uploaded to THIS category, listed under it (not in the
+                global bucket) — under their OWN labeled divider so an upload
+                never reads as "attached" to the connector rows above. Legacy
+                files with no category stay in the bottom list instead. */}
+            {(() => {
+              const categoryFiles = files.filter(
+                (f) => (f.category ?? "") === activeCategory.key,
+              )
+              return categoryFiles.length > 0 ? (
+                <>
+                  <div className="set-conn-uploads-head">Uploaded files</div>
+                  <ul className="src-list" data-testid="category-files">
+                    {categoryFiles.map(fileRow)}
+                  </ul>
+                </>
+              ) : null
+            })()}
 
             {/* Manual upload strip — a dashed full-width row at the foot of the
                 detail column. Hidden for categories that opt out via
@@ -569,10 +701,11 @@ export function ConnectorsSettingsView({
                 }
                 aria-busy={uploading}
               >
-                <i
-                  className={`ti ${uploading ? "ti-loader-2 ti-spin" : "ti-cloud-upload"}`}
-                  aria-hidden
-                />
+                {uploading ? (
+                  <IconLoader2 size={16} className="icon-spin" aria-hidden />
+                ) : (
+                  <IconCloudUpload size={16} aria-hidden />
+                )}
                 {uploading ? "Uploading…" : "Upload files to this category"}
                 <span className="muted">
                   {activeCategory.uploadAccept ?? UPLOAD_ACCEPT_HINT}
@@ -599,35 +732,27 @@ export function ConnectorsSettingsView({
         </div>
       ) : null}
 
-      {files.length > 0 ? (
-        <div className="set-block sp-conn-files">
-          <div className="set-block-h">
-            <div className="set-block-t">
-              Uploaded files
-              <span className="set-block-s-inline">
-                {"  ·  "}
-                {files.length} file{files.length === 1 ? "" : "s"} across all
-                categories
-              </span>
+      {/* Legacy uploads with no category attribution. Newly uploaded files are
+          listed under their category card above; only pre-existing files
+          (category "") collect here, so this section empties over time. */}
+      {(() => {
+        const uncategorized = files.filter((f) => !f.category)
+        return uncategorized.length > 0 ? (
+          <div className="set-block sp-conn-files">
+            <div className="set-block-h">
+              <div className="set-block-t">
+                Uploaded files
+                <span className="set-block-s-inline">
+                  {"  ·  "}
+                  {uncategorized.length} file
+                  {uncategorized.length === 1 ? "" : "s"} not yet under a category
+                </span>
+              </div>
             </div>
+            <ul className="src-list">{uncategorized.map(fileRow)}</ul>
           </div>
-          <ul className="src-list">
-            {files.map((f) => (
-              <li key={f.filename} className="src-row">
-                <span className="src-row-icon" aria-hidden>
-                  {iconForKind(f.kind)}
-                </span>
-                <span className="src-row-name" title={f.filename}>
-                  {truncateFilename(f.filename, 40)}
-                </span>
-                <span className="src-kind-chip">{f.kind.toUpperCase()}</span>
-                <span className="src-meta">{humanizeBytes(f.size_bytes)}</span>
-                <span className="src-meta">{formatRelativeDate(f.added_at)}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
+        ) : null
+      })()}
     </div>
   )
 }
@@ -666,9 +791,6 @@ export function ConnectorsSettings() {
   const [uploadSources, setUploadSources] = useState<UploadSource[]>(
     () => _uploadSourcesCache ?? [],
   )
-  // null = modal closed; "" = creating a new source; a source id = adding
-  // files to that existing source.
-  const [uploadTarget, setUploadTarget] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState("")
   // Which category the detail column shows. null = "the first visible one",
   // so we don't have to wait for the catalog (or a search) to settle before
@@ -679,6 +801,9 @@ export function ConnectorsSettings() {
   // Spinner ONLY on the first-ever (cold) load — a warm revisit shows cache.
   const [loading, setLoading] = useState(() => _connectionsCache === null)
   const [uploading, setUploading] = useState(false)
+  const [addingSource, setAddingSource] = useState(false)
+  const [removingSourceId, setRemovingSourceId] = useState<string | null>(null)
+  const [removingFilename, setRemovingFilename] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [regenerating, setRegenerating] = useState(false)
   const [regenerateError, setRegenerateError] = useState<string | null>(null)
@@ -692,6 +817,9 @@ export function ConnectorsSettings() {
   // Set when we send the user to a provider's OAuth page in a sibling tab —
   // tells the visibility listener to refresh connections when they switch back.
   const oauthInFlight = useRef(false)
+  // Hidden file input the uploads-connector "Connect" row action clicks —
+  // connecting the uploads source IS picking files (no OAuth, no modal).
+  const uploadConnectInputRef = useRef<HTMLInputElement>(null)
 
   // Connector routes resolve the active company entirely from the
   // Supabase JWT (require_company), so the frontend doesn't need to
@@ -816,8 +944,10 @@ export function ConnectorsSettings() {
       }
 
       if (item?.authType === "upload") {
-        // No third party: connecting IS naming a source and uploading files.
-        setUploadTarget("")
+        // No third party: connecting IS picking files. Open the OS file picker
+        // straight away — no name/description step — and the chosen files land
+        // as a new source (handleCreateSourceFromFiles).
+        uploadConnectInputRef.current?.click()
         return
       }
 
@@ -925,7 +1055,7 @@ export function ConnectorsSettings() {
       if (list.length === 0) return
       setUploading(true)
       try {
-        const r = await companiesApi.uploadFiles(activeCompany, list)
+        const r = await companiesApi.uploadFiles(activeCompany, list, categoryKey)
         // Refresh the company-wide uploaded-files list so the new file shows
         // up in the connectors pane immediately.
         await reloadFiles()
@@ -962,32 +1092,48 @@ export function ConnectorsSettings() {
   // ── Uploaded documents ────────────────────────────────────────────────
   // Creating a source also creates the connection row server-side, so we
   // reload connections too and the row flips to Active without a refresh.
-  const handleUploadSource = useCallback(
-    async (name: string, description: string, picked: File[]) => {
-      const targetId = uploadTarget
-      const r =
-        targetId
-          ? await connectorsApi.addUploadSourceFiles(targetId, picked)
-          : await connectorsApi.createUploadSource(name, description, picked)
-      await reloadUploadSources()
-      await reload()
-      const added = r.source.file_count
-      showToast(
-        targetId ? "Documents added" : `${r.source.name} added`,
-        `${added} document${added === 1 ? "" : "s"} — digesting them into your knowledge base now.`,
-      )
-      if (r.errors.length > 0) {
+  // No name/description step — clicking "Add a document source" opens the file
+  // picker and the chosen files land as a new source in one shot. The backend
+  // still requires a name, so we derive a readable one from the files.
+  const handleCreateSourceFromFiles = useCallback(
+    async (picked: FileList) => {
+      const list = Array.from(picked)
+      if (list.length === 0) return
+      const first = list[0].name.replace(/\.[^./\\]+$/, "")
+      const name = (
+        list.length === 1 ? first : `${first} +${list.length - 1} more`
+      ).slice(0, 200)
+      setAddingSource(true)
+      try {
+        const r = await connectorsApi.createUploadSource(name, "", list)
+        await reloadUploadSources()
+        await reload()
+        const added = r.source.file_count
         showToast(
-          "Some files failed",
-          r.errors.map((e) => `${e.filename}: ${e.error}`).join("; "),
+          `${r.source.name} added`,
+          `${added} document${added === 1 ? "" : "s"} — digesting them into your knowledge base now.`,
         )
+        if (r.errors.length > 0) {
+          showToast(
+            "Some files failed",
+            r.errors.map((e) => `${e.filename}: ${e.error}`).join("; "),
+          )
+        }
+      } catch (e) {
+        showToast(
+          "Could not add documents",
+          e instanceof Error ? e.message : String(e),
+        )
+      } finally {
+        setAddingSource(false)
       }
     },
-    [uploadTarget, reload, reloadUploadSources, showToast],
+    [reload, reloadUploadSources, showToast],
   )
 
   const handleRemoveUploadSource = useCallback(
     async (sourceId: string) => {
+      setRemovingSourceId(sourceId)
       try {
         await connectorsApi.removeUploadSource(sourceId)
         await reloadUploadSources()
@@ -997,15 +1143,32 @@ export function ConnectorsSettings() {
           "Could not remove source",
           e instanceof Error ? e.message : String(e),
         )
+      } finally {
+        setRemovingSourceId(null)
       }
     },
     [reload, reloadUploadSources, showToast],
   )
 
-  const uploadTargetName =
-    uploadTarget
-      ? (uploadSources.find((s) => s.id === uploadTarget)?.name ?? "this source")
-      : null
+  // Delete one uploaded file (per-category or legacy) by its stored filename.
+  const handleRemoveFile = useCallback(
+    async (filename: string) => {
+      if (!activeCompany) return
+      setRemovingFilename(filename)
+      try {
+        await sourcesApi.remove(activeCompany, filename)
+        await reloadFiles()
+      } catch (e) {
+        showToast(
+          "Could not remove file",
+          e instanceof Error ? e.message : String(e),
+        )
+      } finally {
+        setRemovingFilename(null)
+      }
+    },
+    [activeCompany, reloadFiles, showToast],
+  )
 
   const configuringConnection =
     configuringProviderId != null
@@ -1023,6 +1186,7 @@ export function ConnectorsSettings() {
         onConfigure={onConfigure}
         onUpload={onUpload}
         uploading={uploading}
+        addingSource={addingSource}
         files={files}
         onRegenerateBrief={handleRegenerateBrief}
         regenerating={regenerating}
@@ -1032,17 +1196,29 @@ export function ConnectorsSettings() {
         selectedCategoryKey={selectedCategoryKey}
         onSelectCategory={setSelectedCategoryKey}
         uploadSources={uploadSources}
-        onAddUploadSource={() => setUploadTarget("")}
-        onAddFilesToSource={(sourceId) => setUploadTarget(sourceId)}
+        onAddUploadSource={(files) => void handleCreateSourceFromFiles(files)}
         onRemoveUploadSource={(sourceId) =>
           void handleRemoveUploadSource(sourceId)
         }
+        removingSourceId={removingSourceId}
+        onRemoveFile={(filename) => void handleRemoveFile(filename)}
+        removingFilename={removingFilename}
       />
-      <UploadSourceModal
-        open={uploadTarget != null}
-        addingToSourceName={uploadTargetName}
-        onUpload={handleUploadSource}
-        onClose={() => setUploadTarget(null)}
+      {/* Hidden picker the uploads-connector "Connect" row action triggers —
+          same direct create-source-from-files flow as "Add a document source",
+          just reachable from the connector row when the source is still Off. */}
+      <input
+        ref={uploadConnectInputRef}
+        type="file"
+        multiple
+        accept={UPLOAD_EXTENSIONS.join(",")}
+        style={{ display: "none" }}
+        onChange={(e) => {
+          if (e.target.files && e.target.files.length > 0) {
+            void handleCreateSourceFromFiles(e.target.files)
+            e.target.value = ""
+          }
+        }}
       />
       <ConfigureConnectorDrawer
         providerId={configuringProviderId}

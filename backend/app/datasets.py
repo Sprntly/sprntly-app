@@ -17,6 +17,7 @@ inserts a row + mkdir, upload writes the file + converts it.
 from __future__ import annotations
 
 import io
+import json
 import re
 import zipfile
 from dataclasses import dataclass
@@ -75,6 +76,59 @@ def dataset_path(slug: str) -> Path:
 
 def raw_path(slug: str) -> Path:
     return dataset_path(slug) / "raw"
+
+
+# Per-file category attribution --------------------------------------------
+# Manual uploads carry the connector *category* they were dropped into
+# (e.g. "business_docs", "analytics") so the UI can list each file under its
+# category instead of one global bucket. The mapping is a small JSON sidecar
+# keyed by the STORED raw basename (what list_files reports as `filename`).
+# Files with no entry are "uncategorized" (all pre-existing uploads), which the
+# UI keeps in its legacy global list.
+_CATEGORIES_FILE = "file_categories.json"
+
+
+def _categories_path(slug: str) -> Path:
+    return dataset_path(slug) / _CATEGORIES_FILE
+
+
+def read_file_categories(slug: str) -> dict[str, str]:
+    """Return the {stored_raw_basename: category} map, or {} if none/unreadable."""
+    p = _categories_path(slug)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+    except Exception:  # pragma: no cover — corrupt sidecar, treat as empty
+        logger.warning("Unreadable category sidecar for %s", slug, exc_info=True)
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if v}
+
+
+def set_file_categories(slug: str, filenames: list[str], category: str) -> None:
+    """Record `category` for each stored raw basename. No-op if category blank."""
+    category = (category or "").strip()
+    if not category or not filenames:
+        return
+    current = read_file_categories(slug)
+    for name in filenames:
+        current[name] = category
+    _write_file_categories(slug, current)
+
+
+def forget_file_category(slug: str, filename: str) -> None:
+    """Drop a file's category entry (called when the file is deleted)."""
+    current = read_file_categories(slug)
+    if current.pop(filename, None) is not None:
+        _write_file_categories(slug, current)
+
+
+def _write_file_categories(slug: str, mapping: dict[str, str]) -> None:
+    p = _categories_path(slug)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(mapping, indent=2, sort_keys=True))
 
 
 def create_dataset(slug: str, display_name: str) -> dict:

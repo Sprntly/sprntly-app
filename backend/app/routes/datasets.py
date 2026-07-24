@@ -107,12 +107,17 @@ def create(
 async def upload_files(
     slug: str,
     files: Annotated[list[UploadFile], File(description="Source files to ingest")],
+    category: Annotated[str, Form(description="Connector category the files belong to")] = "",
     company: WorkspaceContext = Depends(require_workspace),
 ):
     """Accept one or more files; convert each to markdown; persist both.
 
     Partial success is acceptable: if 4 of 5 files convert and 1 fails, the
     response includes a per-file result so the frontend can show ✓/✗ on each.
+
+    `category` is the optional connector category the files were dropped into
+    (e.g. "business_docs"); it's recorded per stored file so the UI can list
+    each upload under its category instead of one global bucket.
     """
     # Tenant gate (404 if not the caller's company) + lazily register the
     # caller's own dataset row if onboarding hasn't created it yet.
@@ -128,6 +133,9 @@ async def upload_files(
 
     results: list[dict] = []
     errors: list[dict] = []
+    # Stored raw basenames of everything that landed, so we can tag them with
+    # the category after the loop (list_files keys attribution by this name).
+    stored_names: list[str] = []
     for upload in files:
         filename = upload.filename or "untitled"
         data = await upload.read()
@@ -154,6 +162,7 @@ async def upload_files(
                 errors.append({"filename": filename, "error": f"Could not read zip: {e}"})
                 continue
             for ing in z_ingested:
+                stored_names.append(Path(ing.stored_raw_path).name)
                 results.append({
                     "filename": ing.original_filename,
                     "md_path": ing.md_path,
@@ -174,11 +183,16 @@ async def upload_files(
             logger.exception("Ingest failed for %s/%s", slug, filename)
             errors.append({"filename": filename, "error": f"Conversion failed: {e}"})
             continue
+        stored_names.append(Path(ingested.stored_raw_path).name)
         results.append({
             "filename": ingested.original_filename,
             "md_path": ingested.md_path,
             "md_chars": ingested.md_chars,
         })
+
+    # Tag the freshly-stored files with the category they were dropped into so
+    # the UI can list them under that category (no-op when category is blank).
+    datasets.set_file_categories(slug, stored_names, category)
 
     # Eagerly extract the freshly-uploaded docs into the KG in the background so
     # they're available the moment a brief runs (incremental + content-hash
@@ -203,6 +217,7 @@ def list_files(
 
     raw_dir = datasets.raw_path(slug)
     base_dir = datasets.dataset_path(slug)
+    categories = datasets.read_file_categories(slug)
     files: list[dict] = []
     if raw_dir.exists():
         for p in raw_dir.iterdir():
@@ -235,6 +250,7 @@ def list_files(
                 "size_bytes": stat.st_size,
                 "md_chars": md_chars,
                 "added_at": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+                "category": categories.get(p.name, ""),
             })
 
     files.sort(key=lambda f: f["added_at"], reverse=True)
@@ -265,6 +281,7 @@ def delete_file(
 
     raw_target.unlink()
     raw_removed = True
+    datasets.forget_file_category(slug, filename)
 
     base_dir = datasets.dataset_path(slug)
     md_base = md_filename(filename)

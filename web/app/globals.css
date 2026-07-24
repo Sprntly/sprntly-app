@@ -12866,14 +12866,28 @@
     white-space: nowrap;
   }
 
-  /* ─── Uploaded document sources (the `uploads` connector's own rows) ───
-     A source row carries more than a file row does — a user-given name, a doc
-     count, an OPTIONAL description and two actions. Borrowing .src-row's
-     file-shaped grid pushed the last action into the trailing 32px trash
-     column and clipped it whenever a description was present, so these rows
-     get their own track list and stack name + description in one cell. */
+  /* ─── Uploaded document sources + per-category files ───
+     These rows carry a name, an OPTIONAL second line (a source description, or
+     a file's kind · size · added meta) and ONE action (Remove). Borrowing
+     .src-row's file-shaped grid clipped the action whenever a second line was
+     present, so they get their own three-track list and stack name + meta in
+     one cell. */
   .src-row--source {
-    grid-template-columns: 22px minmax(0, 1fr) auto auto;
+    grid-template-columns: 22px minmax(0, 1fr) auto;
+  }
+
+  /* Labeled divider that separates the user's own uploaded documents/files
+     from the connector card(s) above, so an upload never reads as "attached"
+     to a connector. Sits in every category that accepts file uploads. */
+  .set-conn-uploads-head {
+    margin: 20px 0 10px;
+    padding-top: 16px;
+    border-top: 1px solid var(--line);
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink-2);
   }
 
   .src-row-text {
@@ -12989,6 +13003,19 @@
   .src-trash:disabled {
     opacity: 0.4;
     cursor: not-allowed;
+  }
+
+  /* Spin animation for the @tabler/icons-react <IconLoader2> busy spinner used
+     across the connectors pane (trash buttons, upload strips). The `ti`
+     webfont isn't shipped, so these are real SVG components, not font glyphs. */
+  .icon-spin {
+    animation: icon-spin 0.8s linear infinite;
+  }
+
+  @keyframes icon-spin {
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   .src-dropzone {
