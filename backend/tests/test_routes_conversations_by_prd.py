@@ -11,6 +11,9 @@ Covered:
 - by-prd returns an empty (not 404) shape for a PRD with no conversation
 - by-prd is tenant-scoped: another company's PRD conversation is not visible
 - by-prd returns the MOST RECENT conversation when a PRD has several
+- PATCH back-patches prd_id (command flows create the conversation BEFORE the
+  async generate returns the prd_id, so it's first stored null), making the
+  conversation findable by-prd afterwards
 """
 from __future__ import annotations
 
@@ -62,6 +65,24 @@ def test_by_prd_is_tenant_scoped(tenant_client):
     resp = b.client.get("/v1/conversations/by-prd/7")
     assert resp.status_code == 200, resp.text
     assert resp.json()["conversation"] is None
+
+
+def test_patch_back_patches_prd_id(tenant_client):
+    # The command-flow race: a PRD chat's conversation is created from the seed
+    # turn BEFORE the async generate returns the prd_id, so it starts null. PATCH
+    # must be able to set it afterwards, and the row must then be findable by-prd.
+    t = tenant_client.make(slug="acme")
+    conv = _create(t.client, title="PRD chat")  # no prd_id at create → null
+    assert conv.get("prd_id") is None
+    cid = conv["id"]
+
+    resp = t.client.patch(f"/v1/conversations/{cid}", json={"prd_id": 88})
+    assert resp.status_code == 200, resp.text
+
+    # The by-prd lookup now resolves the conversation the reopen-from-history path
+    # relies on.
+    found = t.client.get("/v1/conversations/by-prd/88").json()["conversation"]
+    assert found is not None and found["id"] == cid
 
 
 def test_by_prd_returns_most_recent(tenant_client):

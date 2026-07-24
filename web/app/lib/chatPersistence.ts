@@ -110,8 +110,10 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
       title: string
       query: string
       /** Extracted text of files attached to this turn — persisted with it so a
-       *  reloaded thread (and the chat→PRD flow) still sees the documents. */
-      attachments?: { name: string; content: string }[]
+       *  reloaded thread (and the chat→PRD flow) still sees the documents. The
+       *  optional `key`/`mime` point at the ORIGINAL file in storage so the
+       *  reopened chip can render/download the real document. */
+      attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
     },
   ): Promise<void> {
     try {

@@ -509,6 +509,7 @@ export function ChatsScreen() {
       _pinned: c.pinned,
       _agentType: c.agent_type,
       _dbId: c.id,
+      prd_id: c.prd_id ?? null,
     } as ConversationRow & { _pinned?: boolean; _agentType?: string; _dbId?: number })),
   [dbChats])
 
@@ -598,6 +599,7 @@ export function ChatsScreen() {
         dbId,
         title: row.title,
         fallbackTurns,
+        prdId: row.prd_id ?? null,
       }))
       goTo("chat")
       return
@@ -616,6 +618,7 @@ export function ChatsScreen() {
         dbId: dbId ?? 0,
         title: row.title,
         turns: fakeTurns,
+        prdId: row.prd_id ?? null,
       }))
       goTo("chat")
       return

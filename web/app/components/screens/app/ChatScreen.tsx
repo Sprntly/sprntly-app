@@ -17,7 +17,7 @@ import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleto
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
-import { ApiError, askApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, attachmentsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -43,8 +43,10 @@ type ThreadTurn = {
   query: string
   /** Files attached to this turn, shown as clickable cards above the ask. Each
    *  carries the extracted/plain-text `content` so the card can open a viewer —
-   *  this is the SAME text folded into the backend query, never re-fetched. */
-  attachments?: { name: string; content?: string }[]
+   *  this is the SAME text folded into the backend query, never re-fetched — plus
+   *  a storage `key`/`mime` pointing at the ORIGINAL file so the viewer can render
+   *  the real document (PDF/image inline) and offer a download after a reload. */
+  attachments?: { name: string; content?: string; key?: string | null; mime?: string | null; size?: number | null }[]
   reply?: AskResponse
   error?: string
   /** The user stopped this ask before it answered (composer Stop button). Renders
@@ -269,17 +271,22 @@ function attachmentMeta(name: string, content?: string): string {
 }
 
 /** A clickable file card on a user turn — Claude-style: an icon tile, the file
- *  name, and a type/size sub-line. Clicking opens the content viewer. */
+ *  name, and a type/size sub-line. Clicking opens the viewer (renders the ORIGINAL
+ *  file when it was stored, else the extracted text). `downloadable` reflects that
+ *  the original file was stored, so the card is viewable even with no extracted
+ *  text (e.g. a PDF imported straight to a PRD). */
 function TurnAttachmentCard({
   name,
   content,
+  downloadable,
   onOpen,
 }: {
   name: string
   content?: string
+  downloadable?: boolean
   onOpen: () => void
 }) {
-  const viewable = !!content
+  const viewable = !!content || !!downloadable
   return (
     <button
       type="button"
@@ -304,15 +311,20 @@ function TurnAttachmentCard({
   )
 }
 
-/** Full-screen overlay that renders an attachment's extracted content (the same
- *  text sent to the agent). Opened by clicking a file card on a user turn. */
+/** Full-screen overlay that renders an attachment. When the ORIGINAL file was
+ *  stored (`key`), it fetches a fresh signed URL and renders the real document —
+ *  PDF/image inline, everything else offered as a download — falling back to the
+ *  extracted text. Opened by clicking a file card on a user turn. */
 function AttachmentViewer({
   attachment,
   onClose,
 }: {
-  attachment: { name: string; content: string }
+  attachment: { name: string; content: string; key?: string | null; mime?: string | null }
   onClose: () => void
 }) {
+  const [urls, setUrls] = useState<{ view_url: string; download_url: string; mime: string } | null>(null)
+  const [status, setStatus] = useState<"idle" | "loading" | "error">(attachment.key ? "loading" : "idle")
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose()
@@ -320,6 +332,23 @@ function AttachmentViewer({
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
   }, [onClose])
+
+  // Sign-on-open: the stored URL expires, so mint a fresh one each time the
+  // viewer opens. Best-effort — a failure falls back to the extracted text.
+  useEffect(() => {
+    if (!attachment.key) return
+    let cancelled = false
+    setStatus("loading")
+    attachmentsApi.sign(attachment.key, attachment.name)
+      .then((u) => { if (!cancelled) { setUrls(u); setStatus("idle") } })
+      .catch(() => { if (!cancelled) setStatus("error") })
+    return () => { cancelled = true }
+  }, [attachment.key, attachment.name])
+
+  const mime = urls?.mime || attachment.mime || ""
+  const isPdf = /pdf/i.test(mime) || /\.pdf$/i.test(attachment.name)
+  const isImage = /^image\//i.test(mime) || /\.(png|jpe?g|gif|webp)$/i.test(attachment.name)
+  const hasText = !!attachment.content.trim()
 
   return (
     <div className="bc-file-viewer-backdrop" role="dialog" aria-modal="true" aria-label={attachment.name} onClick={onClose}>
@@ -332,15 +361,58 @@ function AttachmentViewer({
             </svg>
             {attachment.name}
           </span>
-          <button type="button" className="bc-file-viewer-close" aria-label="Close" onClick={onClose}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            {urls?.download_url ? (
+              <a
+                className="bc-file-viewer-download"
+                href={urls.download_url}
+                download={attachment.name}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Download ${attachment.name}`}
+                aria-label={`Download ${attachment.name}`}
+                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 6, color: "inherit", opacity: 0.75 }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+              </a>
+            ) : null}
+            <button type="button" className="bc-file-viewer-close" aria-label="Close" onClick={onClose}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </span>
         </div>
         <div className="bc-file-viewer-body">
-          {attachment.content.trim() ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+          {attachment.key && status === "loading" ? (
+            <p className="bc-file-viewer-empty">Loading document…</p>
+          ) : urls && isPdf ? (
+            <iframe
+              src={urls.view_url}
+              title={attachment.name}
+              data-testid="attachment-pdf-frame"
+              style={{ width: "100%", height: "100%", minHeight: "70vh", border: "none" }}
+            />
+          ) : urls && isImage ? (
+            <img
+              src={urls.view_url}
+              alt={attachment.name}
+              data-testid="attachment-image"
+              style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block", margin: "0 auto" }}
+            />
+          ) : hasText ? (
+            <>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+              {urls && !isPdf && !isImage ? (
+                <p className="bc-file-viewer-empty">This file type can’t be previewed inline — use the download button above to open the original.</p>
+              ) : null}
+            </>
+          ) : urls ? (
+            <p className="bc-file-viewer-empty">This file type can’t be previewed inline — use the download button above to open the original.</p>
           ) : (
             <p className="bc-file-viewer-empty">No preview available for this file.</p>
           )}
@@ -678,7 +750,7 @@ export function ChatScreen() {
   const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
   // The attachment whose content is open in the viewer overlay (click a file
   // card on a user turn). Null = closed.
-  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string } | null>(null)
+  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string; key?: string | null; mime?: string | null } | null>(null)
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
@@ -776,7 +848,9 @@ export function ChatScreen() {
       const reader = new FileReader()
       reader.onload = () => {
         const content = reader.result as string
-        setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000) }])
+        // Keep the raw File on text attachments too — the original bytes are
+        // uploaded on send so the chip can render/download the real file later.
+        setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000), file }])
       }
       reader.readAsText(file)
     })
@@ -855,7 +929,14 @@ export function ChatScreen() {
           const reply = next?.role === "assistant"
             ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse
             : undefined
-          restored.push({ id: `prdhist-${conversation.id}-${i}`, query: t.content, reply })
+          restored.push({
+            id: `prdhist-${conversation.id}-${i}`,
+            query: t.content,
+            reply,
+            // Carry the file chip (with its storage key) so a reopened import-PRD
+            // chat can still render/download the original document.
+            ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+          })
           if (reply) i++
         }
       }
@@ -1471,6 +1552,29 @@ export function ChatScreen() {
   }
   const persistence = persistenceRef.current
 
+  // Back-patch a conversation's prd_id once BOTH the PRD id and the DB
+  // conversation id are known. The in-chat command flows (import a document,
+  // "generate a PRD for X") create the conversation from their seed turn BEFORE
+  // the async import/generate call returns the prd_id — so the conversation is
+  // first persisted with prd_id=null. Without this back-patch, reopening that
+  // chat from history has no prd_id to rebind the tab to, so the "View PRD"
+  // button never renders and the content panel never reopens (the reported bug).
+  // Fires at most once per conversation; a failed PATCH is retried on a later
+  // render (the id is removed from the seen-set so the next pass re-attempts).
+  const patchedPrdConvRef = useRef<Set<number>>(new Set())
+  useEffect(() => {
+    for (const t of tabs) {
+      if (t.prdId == null || t.dbConvId == null) continue
+      if (patchedPrdConvRef.current.has(t.dbConvId)) continue
+      const convId = t.dbConvId
+      const prdId = t.prdId
+      patchedPrdConvRef.current.add(convId)
+      void import("../../../lib/api")
+        .then(({ conversationsApi }) => conversationsApi.update(convId, { prd_id: prdId }))
+        .catch(() => { patchedPrdConvRef.current.delete(convId) })
+    }
+  }, [tabs])
+
   // Resume a conversation from ChatsScreen or IdeationScreen. Two payload
   // shapes: with `turns` (built locally / legacy) the tab opens pre-filled;
   // with only a `dbId` (All-chats row click) the tab opens INSTANTLY in a
@@ -1487,9 +1591,30 @@ export function ChatScreen() {
         turns?: { role: string; content: string }[]
         /** Preview-derived thread used when the background fetch yields nothing. */
         fallbackTurns?: { role: string; content: string }[]
+        /** The PRD this conversation is about (from ConversationRecord.prd_id),
+         *  when it was opened from a PRD tab. Re-binds the resumed tab to its PRD
+         *  so the "View PRD" button renders and the content panel auto-reopens —
+         *  without it, a resumed PRD chat came back as a plain, PRD-less tab. */
+        prdId?: number | null
+      }
+      // Re-bind a resumed tab to its PRD: set prdId (only when still null so a
+      // reused, live tab is never clobbered) and rehydrate the PRD's saved thread
+      // if this tab hasn't got one. Setting prdId is what makes the existing
+      // reload-restore effect reopen the panel + render the in-chat PRD button.
+      // Also mark the tab `prdInFlow` so the PRD card + clarifying questions render
+      // INLINE, right after the command turn (thread[0]) — a resumed PRD chat reads
+      // chronologically (question → card → questions). Without it the card +
+      // questions were pinned ABOVE the user's own "generate a PRD" message (the
+      // reported out-of-order bug). The card node anchors to thread[0] by INDEX, so
+      // it survives the background rehydrate that rebuilds turns with fresh ids.
+      const bindPrd = (tabId: string, prdId?: number | null) => {
+        if (prdId == null) return
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId && t.prdId == null ? { ...t, prdId, prdInFlow: true } : t))
+        void hydratePrdThread(tabId, prdId)
       }
       const buildRestored = (
-        turns: { role: string; content: string; attachments?: { name: string; content: string }[] | null }[],
+        turns: { role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
         keyPrefix: string,
       ): ThreadTurn[] => {
         const restored: ThreadTurn[] = []
@@ -1518,8 +1643,9 @@ export function ChatScreen() {
       if (preloaded.length > 0) {
         // The resumed tab's dbConvId is set via openTab(..., data.dbId) —
         // per-tab now, no shared ref.
-        openTab(data.title || "Resumed chat", preloaded, data.dbId)
+        const preTabId = openTab(data.title || "Resumed chat", preloaded, data.dbId)
         setActiveConv(0)
+        bindPrd(preTabId, data.prdId)
         return
       }
 
@@ -1527,6 +1653,7 @@ export function ChatScreen() {
       if (!data.dbId) return
       const tabId = openTab(data.title || "Resumed chat", [], data.dbId)
       setActiveConv(0)
+      bindPrd(tabId, data.prdId)
       // openTab reuses an existing same-title tab; if it already carries a
       // thread there's nothing to hydrate.
       const existing = tabsRef.current.find((t) => t.id === tabId)
@@ -1569,7 +1696,7 @@ export function ChatScreen() {
         }
       })()
     } catch { /* ignore corrupt data */ }
-  }, [openTab, showToast])
+  }, [openTab, showToast, hydratePrdThread])
   // Check on mount + whenever we navigate to this screen
   useEffect(() => { checkResume() }, [checkResume])
   // Re-check when the route lands on chat (covers goTo("chat") from ChatsScreen)
@@ -1597,7 +1724,7 @@ export function ChatScreen() {
       turnId: string,
       query: string,
       targetTabId: string,
-      turnAttachments?: { name: string; content: string }[],
+      turnAttachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[],
     ) => {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
@@ -1689,8 +1816,31 @@ export function ChatScreen() {
   // the pendingPrdTab effect does for cross-surface opens. No-op without a seed.
   const seedCommandTurn = useCallback((req: LocalPrdTabRequest, tabId: string) => {
     if (!req.seedQuery) return
+    const seedQuery = req.seedQuery
     const turnId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    pushPendingConversation(turnId, req.seedQuery, tabId)
+    // "convert this document into a PRD": the doc BECOMES the PRD, so there's no
+    // in-chat extracted text (content empty — conversationPrdDocs skips it so it
+    // never re-feeds as a source doc). Upload the ORIGINAL file so the chip on the
+    // ask can render/download the real document after a reopen; persist with its
+    // storage key, and patch the optimistic seed turn so it's viewable live too.
+    if (req.source.kind === "importDoc") {
+      const file = req.source.file
+      void (async () => {
+        // Best-effort upload (the `.then` wrapper catches a sync throw too); the
+        // seed turn still persists as a name-only chip if storage is unavailable.
+        const stored = await Promise.resolve().then(() => attachmentsApi.upload(file)).catch(() => null)
+        const attachment = { name: file.name, content: "", key: stored?.key ?? null, mime: stored?.mime ?? null, size: stored?.size ?? null }
+        if (stored?.key) {
+          setTabs((prev) => prev.map((t) => t.id === tabId
+            ? { ...t, thread: t.thread.map((tn) => tn.query === seedQuery ? { ...tn, attachments: [attachment] } : tn) }
+            : t))
+        }
+        pushPendingConversation(turnId, seedQuery, tabId, [attachment])
+        finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
+      })()
+      return
+    }
+    pushPendingConversation(turnId, seedQuery, tabId)
     finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
   }, [pushPendingConversation, finalizeConversationTurn])
 
@@ -2054,25 +2204,46 @@ export function ChatScreen() {
       // extract runs. runTabAsk re-adds this (addToSet is idempotent) and owns the
       // eventual clear on the ask's completion.
       let sendQuery = displayQuery
-      // Extracted attachment texts, persisted with the turn (survives reload;
-      // read back by conversationPrdDocs for a later "generate a PRD").
-      let persistedAttachments: { name: string; content: string }[] | undefined
+      // Extracted attachment texts + the ORIGINAL file's storage key, persisted
+      // with the turn (survives reload; text read back by conversationPrdDocs for
+      // a later "generate a PRD"; key lets the chip render/download the real file).
+      let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
       if (hasAttachments) {
         setBusyTabs((prev) => addToSet(prev, targetTabId))
         const pending = attachments
         let ctx: string
         try {
-          // Extract each attachment's text ONCE: plain-text attachments inline
-          // their content; documents (.pdf/.pptx/.docx/.doc) are parsed to
-          // markdown server-side. Order is preserved via the resolved array so
-          // the same text feeds BOTH the backend query and the clickable card's
-          // viewer — the document is never re-fetched to display it.
+          // Per attachment, in parallel: (1) extract its text ONCE — plain-text
+          // inlines its content, documents (.pdf/.pptx/.docx/.doc) are parsed to
+          // markdown server-side; (2) upload the ORIGINAL file to storage so the
+          // chip can render/download the real document after a reload. The upload
+          // is best-effort (a failure leaves the text-only chip, never blocks the
+          // send). Order is preserved via the resolved array.
           const extracted = await Promise.all(
             pending.map(async (a) => {
-              const text = a.file
-                ? (await askApi.extractFile(a.file)).markdown.slice(0, 50000)
-                : a.content
-              return { name: a.name, content: text }
+              const [text, stored] = await Promise.all([
+                // Text files were already read client-side (content present) — use
+                // it. Only binary docs (content empty, raw file kept) need the
+                // server-side markdown extraction.
+                a.content
+                  ? Promise.resolve(a.content)
+                  : a.file
+                  ? askApi.extractFile(a.file).then((r) => r.markdown.slice(0, 50000))
+                  : Promise.resolve(a.content),
+                // Best-effort — an upload failure (or a missing storage backend)
+                // must never block the send. The `.then` wrapper also catches a
+                // synchronous throw, not just a rejection.
+                a.file
+                  ? Promise.resolve().then(() => attachmentsApi.upload(a.file!)).catch(() => null)
+                  : Promise.resolve(null),
+              ])
+              return {
+                name: a.name,
+                content: text,
+                key: stored?.key ?? null,
+                mime: stored?.mime ?? null,
+                size: stored?.size ?? null,
+              }
             }),
           )
           // Clamp the TOTAL context so question + attachments stay under the
@@ -2081,9 +2252,9 @@ export function ChatScreen() {
             .map((e) => `--- ${e.name} ---\n${e.content}`)
             .join("\n\n")
             .slice(0, 100000)
-          // Backfill the extracted content onto the optimistic turn so its card
-          // opens a viewer — the SAME text folded into the query, never re-fetched.
-          const withContent = extracted.map((e) => ({ name: e.name, content: e.content }))
+          // Backfill the extracted content + stored file key onto the optimistic
+          // turn so its card opens a viewer / downloads the original.
+          const withContent = extracted.map((e) => ({ name: e.name, content: e.content, key: e.key, mime: e.mime, size: e.size }))
           persistedAttachments = withContent
           setTabs((prev) => prev.map((t) => t.id === targetTabId
             ? { ...t, thread: t.thread.map((tn) => tn.id === id ? { ...tn, attachments: withContent } : tn) }
@@ -3046,8 +3217,9 @@ export function ChatScreen() {
                                   key={i}
                                   name={a.name}
                                   content={a.content}
+                                  downloadable={!!a.key}
                                   onOpen={() =>
-                                    setViewerAttachment({ name: a.name, content: a.content ?? "" })
+                                    setViewerAttachment({ name: a.name, content: a.content ?? "", key: a.key, mime: a.mime })
                                   }
                                 />
                               ))}

@@ -32,7 +32,7 @@ export type SearchItemAction =
   | { kind: "new-chat" }
   /** Resume a saved conversation — the ChatsScreen handoff pattern:
    *  write `sprntly_resume_conv` then land on the chat surface. */
-  | { kind: "resume-chat"; dbId: number; title: string }
+  | { kind: "resume-chat"; dbId: number; title: string; prdId: number | null }
   /** Open a generated PRD as a chat tab + panel (NavigationContext.openPrdTab). */
   | { kind: "prd-tab"; prdId: number; title: string; briefId: number | null; insightIndex: number | null }
   /** Switch the active workspace (WorkspaceContext.setActiveWorkspace). */

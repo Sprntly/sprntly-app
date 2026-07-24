@@ -71,6 +71,7 @@ vi.mock("../../../lib/api", () => ({
             query: "",
             reply: "",
             pinned: false,
+            prd_id: 88,
             created_at: "2026-07-01",
             updated_at: "2026-07-01",
           },
@@ -172,7 +173,9 @@ describe("CommandPalette", () => {
     const row = (await findRowByTitle("Pricing experiments")).closest("button")!
     fireEvent.click(row)
     const handoff = JSON.parse(localStorage.getItem("sprntly_resume_conv")!)
-    expect(handoff).toEqual({ dbId: 7, title: "Pricing experiments", fallbackTurns: [] })
+    // The PRD binding (prd_id) must ride along so the resumed tab reopens its
+    // content panel and shows the "View PRD" button.
+    expect(handoff).toEqual({ dbId: 7, title: "Pricing experiments", fallbackTurns: [], prdId: 88 })
     expect(goToMock).toHaveBeenCalledWith("chat")
   })
 
