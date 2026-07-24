@@ -323,6 +323,50 @@ describe("NotificationsSettings — brief frequency", () => {
   })
 })
 
+describe("NotificationsSettings — workspace Top Insights filter", () => {
+  /** An insight-type chip button by its visible label. */
+  function insightChip(label: string): HTMLButtonElement {
+    const btn = Array.from(
+      document.querySelectorAll('[data-field="insight-types"] button'),
+    ).find((b) => (b.textContent ?? "").includes(label))
+    if (!btn) throw new Error(`insight chip "${label}" not found`)
+    return btn as HTMLButtonElement
+  }
+
+  it("loads a saved brief_insight_types selection as pressed chips", () => {
+    mountWith({ brief_insight_types: ["wins", "user_feedback"] })
+    expect(insightChip("Wins to celebrate").getAttribute("aria-pressed")).toBe("true")
+    expect(insightChip("User feedback & complaints").getAttribute("aria-pressed")).toBe("true")
+    expect(insightChip("Competitor & market moves").getAttribute("aria-pressed")).toBe("false")
+  })
+
+  it("persists the workspace selection + note under brief_insight_types/brief_insight_note, merging existing keys", async () => {
+    mountWith({ email_recipients: ["a@co.com"] })
+    // Empty by default — pick one type to arm Save.
+    await act(async () => {
+      fireEvent.click(insightChip("Wins to celebrate"))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /save changes/i }))
+    })
+    await waitFor(() => expect(updateWorkspaceMock).toHaveBeenCalledTimes(1))
+    const [, patch] = updateWorkspaceMock.mock.calls[0] as [string, Notif]
+    const ns = patch.notification_settings as Notif
+    expect(ns.brief_insight_types).toEqual(["wins"])
+    expect(ns.brief_insight_note).toBeNull()
+    // Untouched sibling key survives the merge.
+    expect(ns.email_recipients).toEqual(["a@co.com"])
+  })
+
+  it("drops unknown stored slugs rather than rendering a phantom chip", () => {
+    mountWith({ brief_insight_types: ["wins", "not_a_real_type"] })
+    // Only the six canonical chips render; the bogus slug is filtered on load.
+    const chips = document.querySelectorAll('[data-field="insight-types"] button')
+    expect(chips.length).toBe(6)
+    expect(insightChip("Wins to celebrate").getAttribute("aria-pressed")).toBe("true")
+  })
+})
+
 describe("NotificationsSettings — copy", () => {
   it("renders the Top Product Insights heading and cadence subtitle", () => {
     mountWith({})

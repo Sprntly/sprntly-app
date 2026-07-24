@@ -29,7 +29,7 @@ import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
 import { useAuth } from "../lib/auth"
 import { connectorsApi, teamApi, type TeamMemberRecord } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
-import { fetchInsightPrefs } from "../lib/onboarding/insightPrefs"
+import { cleanInsightTypes } from "../lib/insight-types"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
 import { useGenerationNotify } from "./hooks/useGenerationNotify"
 
@@ -94,16 +94,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .catch(() => {})
   }, [setContent, workspace?.id])
 
-  // Load THIS member's saved insight-type filter (user_insight_prefs) so the
-  // Top Insights tab shows only the types they picked in onboarding / Settings →
-  // Top Insights. Empty = surface everything. Mirrored into ContentContext so
-  // BriefChat reads it without taking on workspace/auth deps of its own.
+  // The Top Insights filter is workspace-level: an admin picks the insight
+  // types in onboarding / Settings → Comms & Brief, stored on
+  // companies.notification_settings.brief_insight_types, and every member sees
+  // the same filtered brief. Empty = surface everything. Mirrored into
+  // ContentContext so BriefChat reads it without taking on workspace deps.
   useEffect(() => {
-    if (!workspace?.id || auth.kind !== "authed") return
-    void fetchInsightPrefs(workspace.id, auth.user.id)
-      .then((prefs) => setContent({ insightTypeFilter: prefs.insightTypes }))
-      .catch(() => {})
-  }, [setContent, workspace?.id, auth])
+    if (!workspace) return
+    const types = cleanInsightTypes(workspace.notification_settings?.brief_insight_types)
+    setContent({ insightTypeFilter: types })
+  }, [setContent, workspace])
 
   // Load real team members from the database so ticket reassignment and
   // other assignee pickers show actual company users instead of demo data.

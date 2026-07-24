@@ -8,8 +8,7 @@ import { OptionalDisclosure } from "../../onboarding/OptionalDisclosure"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { useContent } from "../../../context/ContentContext"
 import { updateWorkspace } from "../../../lib/onboarding/store"
-import { fetchInsightPrefs, saveInsightPrefs } from "../../../lib/onboarding/insightPrefs"
-import { INSIGHT_TYPES } from "../../../lib/insight-types"
+import { INSIGHT_TYPES, cleanInsightTypes } from "../../../lib/insight-types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { hasLiveAnalyticsConnection } from "../../../lib/onboarding/connectorsWizard"
@@ -40,9 +39,10 @@ import { Check } from "../../auth/icons"
 const DRAFT_KEY = "personalize-step"
 
 // The insight-type chips come from the shared canonical list
-// (lib/insight-types) so onboarding, settings, and the Top Insights tab all
-// offer the same six. The selection is now PER-USER (user_insight_prefs), not a
-// workspace field — each member personalizes their own Top Insights filter.
+// (lib/insight-types) so onboarding and Settings → Comms & Brief offer the same
+// six. The selection is WORKSPACE-level — persisted on
+// companies.notification_settings.brief_insight_types (+ brief_insight_note) —
+// so the whole workspace's brief is filtered to what the admin picks here.
 
 /** Where the brief lands. Teams has no backend delivery path yet. */
 const DESTINATIONS: { value: string; label: string; disabled?: boolean }[] = [
@@ -108,24 +108,20 @@ export function PersonalizeStep() {
     if (typeof n.brief_channel === "string") setDestination(n.brief_channel)
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Seed the insight-type selection from THIS member's saved per-user prefs, so
-  // returning to the step (or having set it in Settings) doesn't reset it. A
-  // local draft wins over the saved prefs; an empty selection keeps the sensible
-  // defaults above rather than blanking the chips.
+  // Seed the insight-type selection from the workspace's saved default
+  // (notification_settings.brief_insight_types), so returning to the step (or
+  // having set it in Settings) doesn't reset it. A local draft wins; an empty
+  // saved selection keeps the sensible defaults above rather than blanking the
+  // chips.
   useEffect(() => {
-    if (!workspace || auth.kind !== "authed" || draft) return
-    let cancelled = false
-    fetchInsightPrefs(workspace.id, auth.user.id)
-      .then((prefs) => {
-        if (cancelled) return
-        if (prefs.insightTypes.length) setSurfaces(prefs.insightTypes)
-        if (prefs.note) setNote(prefs.note)
-      })
-      .catch(() => {})
-    return () => {
-      cancelled = true
+    if (!workspace || draft) return
+    const n = workspace.notification_settings ?? {}
+    const saved = cleanInsightTypes(n.brief_insight_types)
+    if (saved.length) setSurfaces(saved)
+    if (typeof n.brief_insight_note === "string" && n.brief_insight_note) {
+      setNote(n.brief_insight_note)
     }
-  }, [workspace, auth]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onHide = () => {
@@ -191,20 +187,18 @@ export function PersonalizeStep() {
     setError(null)
     setSaving(true)
     try {
-      // Per-user: which insight types THIS member wants as their Top Insights.
-      // Stored per-user (user_insight_prefs), never on the workspace — the brief
-      // stays workspace-wide and each teammate filters their own view.
-      await saveInsightPrefs(workspace.id, auth.user.id, {
-        insightTypes: surfaces,
-        note: note.trim() || null,
-      })
-      // Delivery is workspace-level (one scheduled digest per workspace). Merge
-      // — never clobber the other notification_settings keys (email_recipients,
-      // drip, Slack target, …).
+      // Workspace-level: the insight types the whole workspace's brief should
+      // surface, plus delivery (one scheduled digest per workspace). All merged
+      // into notification_settings — never clobber the other keys
+      // (email_recipients, drip, Slack target, …).
       const existing = workspace.notification_settings ?? {}
       const updated = await updateWorkspace(workspace.id, {
         notification_settings: {
           ...existing,
+          // Top Insights filter for the workspace. Cleaned to known slugs so a
+          // stale client can't violate the companies_brief_insight_types check.
+          brief_insight_types: cleanInsightTypes(surfaces),
+          brief_insight_note: note.trim() || null,
           brief_channel: destination,
           email_enabled: destination === "email",
           brief_frequency: frequency,

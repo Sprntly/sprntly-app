@@ -30,8 +30,6 @@ const updateWorkspaceMock = vi.fn()
 const connectorsListMock = vi.fn()
 const finishMock = vi.fn()
 const prefetchMetricsMock = vi.fn()
-const saveInsightPrefsMock = vi.fn()
-const fetchInsightPrefsMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
@@ -43,10 +41,6 @@ vi.mock("../../../../context/ContentContext", () => ({
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
-}))
-vi.mock("../../../../lib/onboarding/insightPrefs", () => ({
-  saveInsightPrefs: (...a: unknown[]) => saveInsightPrefsMock(...a),
-  fetchInsightPrefs: (...a: unknown[]) => fetchInsightPrefsMock(...a),
 }))
 vi.mock("../../../../lib/api", () => ({
   connectorsApi: { list: (...a: unknown[]) => connectorsListMock(...a) },
@@ -80,8 +74,6 @@ function mount(workspace = makeWorkspace({ onboarding_step: 9 })) {
   updateWorkspaceMock.mockResolvedValue(workspace)
   finishMock.mockResolvedValue(undefined)
   prefetchMetricsMock.mockResolvedValue(undefined)
-  saveInsightPrefsMock.mockResolvedValue({ insightTypes: [], note: null })
-  fetchInsightPrefsMock.mockResolvedValue({ insightTypes: [], note: null })
   return render(React.createElement(PersonalizeStep))
 }
 
@@ -158,16 +150,11 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/define-metrics")
     })
-    // The insight-type selection is saved PER-USER (user_insight_prefs), keyed
-    // by (company id, user id) — not on the workspace notification_settings.
-    const [companyId, userId, prefs] = saveInsightPrefsMock.mock.calls[0]
-    expect(companyId).toBe(workspaceUnderTest.id)
-    expect(userId).toBe("u-1")
+    // The insight-type selection is WORKSPACE-level, persisted on
+    // companies.notification_settings.brief_insight_types.
+    const ns = updateWorkspaceMock.mock.calls[0][1].notification_settings
     // default ["top_problems","build_priorities"], toggled top_problems off + wins on
-    expect(prefs.insightTypes).toEqual(["build_priorities", "wins"])
-    // The insight types no longer live on the workspace patch.
-    expect(updateWorkspaceMock.mock.calls[0][1].notification_settings.brief_insight_types)
-      .toBeUndefined()
+    expect(ns.brief_insight_types).toEqual(["build_priorities", "wins"])
     // The closer belongs to define-metrics on this branch.
     expect(finishMock).not.toHaveBeenCalled()
   })
