@@ -283,19 +283,28 @@ def _in_jira_thread(history: list[dict] | None) -> bool:
 
 
 def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
-    """True when the question asks to READ live Jira — either an issue key with a
+    """True when the question asks to READ live tracker issues — a tracker read
+    verb on a PM noun ("get me tickets", "show my epics"), an issue key with a
     lookup verb / PM noun, the word "jira" alongside such context, or a Jira-style
-    filter follow-up within an active Jira thread (using `history`). Merely NAMING
-    Jira (e.g. as one competitor in a CIR request) is not a lookup, so "jira"
-    alone doesn't trigger. Vetoed for create/generate/push phrasings. The trigger
-    for the on-demand Jira-lookup path (app/jira_lookup.py)."""
+    filter follow-up within an active Jira thread (using `history`). The PM noun
+    ("ticket") — not the word "jira" — is the primary trigger, so the same path
+    serves whichever tracker is connected (Jira today, Asana / ClickUp later);
+    naming "jira" is just one more way in. Merely NAMING Jira (e.g. as one
+    competitor in a CIR request) is not a lookup, so "jira" alone doesn't trigger.
+    Vetoed for create/generate/push phrasings. The trigger for the on-demand
+    lookup path (app/jira_lookup.py)."""
     if _JIRA_LOOKUP_VETO.search(question):
         return False
     has_key = bool(_JIRA_ISSUE_KEY.search(question))
     has_jira = bool(_JIRA_WORD.search(question))
-    has_context = bool(
-        _JIRA_PM_NOUN.search(question) or _JIRA_LOOKUP_VERB.search(question)
-    )
+    has_pm_noun = bool(_JIRA_PM_NOUN.search(question))
+    has_verb = bool(_JIRA_LOOKUP_VERB.search(question))
+    has_context = has_pm_noun or has_verb
+    # Primary, tracker-agnostic trigger: a read verb on a PM noun — "get me
+    # tickets", "show the open bugs", "find the checkout epic". No "jira" word or
+    # key needed, so future trackers (Asana / ClickUp) route here the same way.
+    if has_pm_noun and has_verb:
+        return True
     # An explicit issue key with any lookup context (verb, PM noun, or "jira").
     if has_key and (has_context or has_jira):
         return True
