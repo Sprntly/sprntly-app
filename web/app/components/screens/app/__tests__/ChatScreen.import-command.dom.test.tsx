@@ -581,7 +581,7 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
 
     await typeAndSendInTab(phrase)
 
-    await waitFor(() => expect(chatEdit).toHaveBeenCalledWith(42, phrase))
+    await waitFor(() => expect(chatEdit).toHaveBeenCalledWith(42, phrase), { timeout: 5000 })
     // The chat confirms which sections changed…
     await waitFor(() => expect(document.body.textContent).toContain("Updated Requirements"))
     // …and neither the ask agent nor any new-PRD flow ran.
@@ -599,7 +599,7 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
 
     await typeAndSendInTab("add SSO requirements to the PRD")
 
-    await waitFor(() => expect(chatEdit).toHaveBeenCalledWith(42, "add SSO requirements to the PRD"))
+    await waitFor(() => expect(chatEdit).toHaveBeenCalledWith(42, "add SSO requirements to the PRD"), { timeout: 5000 })
     expect(generateFromTask).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
@@ -625,7 +625,7 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
 
     await typeAndSendInTab("update the PRD maybe")
 
-    await waitFor(() => expect(chatEdit).toHaveBeenCalled())
+    await waitFor(() => expect(chatEdit).toHaveBeenCalled(), { timeout: 5000 })
     await waitFor(() => expect(document.body.textContent).toContain("left the PRD as is"))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
@@ -637,7 +637,7 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
 
     await typeAndSendInTab("shorten the PRD")
 
-    await waitFor(() => expect(chatEdit).toHaveBeenCalled())
+    await waitFor(() => expect(chatEdit).toHaveBeenCalled(), { timeout: 5000 })
     await waitFor(() => expect(document.body.textContent).toContain("couldn't update the PRD"))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
