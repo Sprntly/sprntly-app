@@ -295,8 +295,9 @@ def _glance_row(g: dict) -> str:
     minor = g.get("minor")
     problem = _e(g.get("problem")) if minor else f"<b>{_e(g.get('problem'))}</b>"
     metric_cls = "metric none" if g.get("metric_none") else "metric"
+    row_cls = ' class="minor"' if minor else ""
     return (
-        f'<tr{" class=\"minor\"" if minor else ""}>'
+        f"<tr{row_cls}>"
         f"<td>{problem}</td>"
         f"<td>{_e(g.get('accounts'))}</td>"
         f'<td class="f{fr}">{fr} / 5</td>'
