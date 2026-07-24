@@ -1633,6 +1633,20 @@ export const prdApi = {
       // PRD on them (they used to be silently forgotten by this command).
       ...(sourceDocs && sourceDocs.length ? { source_docs: sourceDocs } : {}),
     }),
+  /** Clarify-first sufficiency gate (runs on EVERY chat-PRD command before
+   *  generation): does the task + attached documents carry the ingredients a
+   *  grounded PRD needs? sufficient=false comes with 3–5 targeted questions
+   *  the chat asks first. Backend fails open to sufficient, so this can never
+   *  block generation. */
+  clarifyTask: (task: string, sourceDocs?: TurnAttachment[]) =>
+    api.post<{
+      sufficient: boolean
+      questions: { prompt: string; options: string[] }[]
+      missing: string[]
+    }>("/v1/prd/clarify-task", {
+      task,
+      ...(sourceDocs && sourceDocs.length ? { source_docs: sourceDocs } : {}),
+    }),
   /** LLM fallback for the chat command decision (tier 2): does this message ask
    *  us to CREATE a PRD? Called only when the message names a PRD but the regex
    *  tier (isPrdCommand) didn't match — novel phrasings. `task` echoes the

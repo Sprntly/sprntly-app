@@ -90,7 +90,40 @@ type ChatTab = {
    *  background (row click in All chats navigates instantly; the tab shows a
    *  loading state until the history lands). Transient — never persisted. */
   hydrating?: boolean
+  /** Clarify-first gate (issue d): set when the sufficiency check found the
+   *  task too thin and posted questions into this tab's thread. The NEXT
+   *  message in this tab is treated as the answers (or a "generate now" skip)
+   *  and generation runs with the combined task. Transient — never persisted;
+   *  a reload simply drops back to a fresh command. */
+  pendingClarify?: { task: string; sourceDocs?: { name: string; content: string }[] }
 }
+
+// The questions turn the clarify gate posts into the tab's thread — an
+// agent-style message (empty `query` renders no user bubble) listing 3–5
+// targeted questions plus the "generate now" escape hatch.
+function clarifyQuestionsTurn(questions: { prompt: string; options: string[] }[]): ThreadTurn {
+  const lines = questions.map((q, i) => {
+    const opts = q.options.length ? ` (e.g. ${q.options.join(" / ")})` : ""
+    return `${i + 1}. ${q.prompt}${opts}`
+  })
+  return {
+    id: `clarify-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`,
+    query: "",
+    reply: {
+      answer:
+        "Before I write this PRD, a few details would make it much stronger. " +
+        "Answer what you can in one message — or say \"generate now\" and I'll " +
+        "proceed with what I have:\n\n" +
+        lines.join("\n"),
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse,
+  }
+}
+
+// "generate now" / "just proceed" — the user declines the clarify questions
+// and wants the PRD from the original material as-is.
+const CLARIFY_SKIP_RE =
+  /^\s*(?:just\s+)?(?:generate|proceed|go\s+ahead|skip|continue)(?:\s+(?:it|now|anyway|as\s+is|without|the\s+prd))?\s*[.!]*\s*$/i
 
 // The Weekly Brief is a pinned, non-closable FIRST tab on this surface.
 // It is synthesized in the render — never stored in the `tabs` state or
@@ -977,6 +1010,31 @@ export function ChatScreen() {
           : source.kind === "importDoc" || source.kind === "generateTask"
           ? await (async () => {
               const { prdApi } = await import("../../../lib/api")
+              if (source.kind === "generateTask") {
+                // Clarify-first gate (issue d): ALWAYS check sufficiency before
+                // generating — even a detailed-looking prompt can be missing
+                // users or success criteria. Fail-open on any error so the gate
+                // can never block a PRD. Insufficient → park the task on the
+                // tab, post the questions into its thread, and stop here; the
+                // user's next message in this tab carries the answers.
+                const verdict = await Promise.resolve()
+                  .then(() => prdApi.clarifyTask(source.task, source.sourceDocs))
+                  .catch(() => ({ sufficient: true, questions: [], missing: [] }))
+                if (!verdict.sufficient && verdict.questions.length) {
+                  setTabs((prev) => prev.map((t) => t.id === tabId
+                    ? {
+                        ...t,
+                        prdGenerating: false,
+                        pendingClarify: { task: source.task, sourceDocs: source.sourceDocs },
+                        thread: [...t.thread, clarifyQuestionsTurn(verdict.questions)],
+                      }
+                    : t))
+                  if (activeTabIdRef.current === tabId) {
+                    setContent({ prdGenerating: false, prdPartialHtml: null })
+                  }
+                  return { ok: false as const, message: "", clarify: true }
+                }
+              }
               const start = source.kind === "importDoc"
                 ? await prdApi.importDoc(source.file, source.company)
                 : await prdApi.generateFromTask(source.task, false, source.sourceDocs)
@@ -1017,7 +1075,9 @@ export function ChatScreen() {
           // conversation (no-op); an existing one restores the user's prior turns.
           // The upfront ready/load path already hydrated, so skip those here.
           if (knownPrdId == null) void hydratePrdThread(tabId, result.prd.prd_id)
-        } else {
+        } else if (!(result as { clarify?: boolean }).clarify) {
+          // (The clarify outcome already cleared its own spinner and posted the
+          // questions — it is a handled stop, not a failure.)
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
           showToast("PRD unavailable", result.message.slice(0, 200))
@@ -1642,6 +1702,68 @@ export function ChatScreen() {
   // inside its own async block (network AFTER the render). The find-or-create
   // backend still serves an already-generated PRD from the DB rather than
   // regenerating it.
+  // The user answered the clarify questions (or said "generate now") in a tab
+  // whose task was parked by the sufficiency gate: run generation IN THIS TAB
+  // with the combined task. Mirrors the generateTask panel block, minus the
+  // clarify gate (one round of questions, then we generate — re-gating would
+  // loop a terse but sufficient answer back into more questions).
+  const runClarifiedGeneration = useCallback((
+    prdApi: Pick<typeof import("../../../lib/api").prdApi, "generateFromTask">,
+    targetTabId: string,
+    task: string,
+    sourceDocs: { name: string; content: string }[] | undefined,
+    userMessage: string,
+  ) => {
+    const id =
+      typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    const ack: AskResponse = {
+      answer:
+        "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime.",
+      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+    } as AskResponse
+    setTabs((prev) => prev.map((t) => t.id === targetTabId
+      ? {
+          ...t,
+          pendingClarify: undefined,
+          prdGenerating: true,
+          thread: [...t.thread, { id, query: userMessage, reply: ack }],
+        }
+      : t))
+    if (targetTabId === activeTabIdRef.current) {
+      setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+    }
+    pushPendingConversation(id, userMessage, targetTabId)
+    finalizeConversationTurn(id, { reply: ack }, targetTabId)
+    void (async () => {
+      const onPartial = (html: string) => {
+        if (activeTabIdRef.current === targetTabId) setContent({ prdPartialHtml: html })
+      }
+      try {
+        const start = await prdApi.generateFromTask(task, false, sourceDocs)
+        setTabs((prev) => prev.map((t) => t.id === targetTabId
+          ? { ...t, prdId: start.prd_id, title: start.title ? `PRD · ${start.title}` : t.title }
+          : t))
+        const result = await resumePrdGeneration(start.prd_id, undefined, onPartial)
+        if (result.ok) {
+          setTabs((prev) => prev.map((t) => t.id === targetTabId
+            ? { ...t, prd: result.prd, prdId: result.prd.prd_id, prdGenerating: false }
+            : t))
+          if (activeTabIdRef.current === targetTabId) {
+            setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
+          }
+        } else {
+          setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
+          if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+          showToast("PRD unavailable", result.message.slice(0, 200))
+        }
+      } catch (e) {
+        setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
+        if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+      }
+    })()
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast])
+
   // An edit-phrased message on a PRD tab ("make this PRD shorter", "add a
   // rollout section to the PRD") routes to the scoped chat-edit endpoint: the
   // document actually changes (issue b — before this, the ask agent answered in
@@ -1776,6 +1898,20 @@ export function ChatScreen() {
       const isPrdTab = !!(activeTab && (activeTab.prd || activeTab.prdId != null || activeTab.prdGenerating))
       const deicticPrd = /\b(this|that|the current|my)\s+prd\b/i.test(trimmed)
       const deicticTicket = /\b(this|that|the current|my)\s+tickets?\b/i.test(trimmed)
+      // Clarify-first answers: this tab's PRD task is parked behind the
+      // sufficiency gate's questions — the message IS the answers (or a
+      // "generate now" skip), never a fresh command/ask. Checked before every
+      // other branch so an answer like "make it for enterprise admins" can't
+      // be misread as an edit or command phrasing.
+      if (activeTab?.pendingClarify && !docFile) {
+        const { task, sourceDocs } = activeTab.pendingClarify
+        const combined = CLARIFY_SKIP_RE.test(trimmed)
+          ? task
+          : `${task}\n\nAdditional details from the user:\n${trimmed}`
+        const { prdApi } = await import("../../../lib/api")
+        runClarifiedGeneration(prdApi, activeTab.id, combined, sourceDocs, trimmed)
+        return
+      }
       if (isTicketsCommand(trimmed) && !(!docFile && deicticTicket && isPrdTab)) {
         if (docFile) {
           setAttachments([])
@@ -2049,7 +2185,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, setContent, showToast],
+    [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────

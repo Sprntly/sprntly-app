@@ -23,7 +23,7 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { briefCurrent, importDoc, extractFile, storiesGenerate, generateFromTask, listInputQuestions, chatEdit } = vi.hoisted(() => ({
+const { briefCurrent, importDoc, extractFile, storiesGenerate, generateFromTask, listInputQuestions, chatEdit, clarifyTask } = vi.hoisted(() => ({
   briefCurrent: vi.fn(),
   importDoc: vi.fn(),
   extractFile: vi.fn(),
@@ -31,6 +31,7 @@ const { briefCurrent, importDoc, extractFile, storiesGenerate, generateFromTask,
   generateFromTask: vi.fn(),
   listInputQuestions: vi.fn(),
   chatEdit: vi.fn(),
+  clarifyTask: vi.fn(),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -51,6 +52,7 @@ vi.mock("../../../../lib/api", () => {
       listInputQuestions: (...a: unknown[]) => listInputQuestions(...a),
       answerInputQuestion: vi.fn(),
       chatEdit: (...a: unknown[]) => chatEdit(...a),
+      clarifyTask: (...a: unknown[]) => clarifyTask(...a),
     },
     storiesApi: {
       getForPrd: vi.fn().mockResolvedValue({ status: "none", fresh: false, stories: [] }),
@@ -186,6 +188,8 @@ beforeEach(() => {
   generateFromTask.mockResolvedValue({ prd_id: 55, status: "generating", title: "Dark mode" })
   listInputQuestions.mockReset()
   listInputQuestions.mockResolvedValue([]) // no clarifying questions by default
+  clarifyTask.mockReset()
+  clarifyTask.mockResolvedValue({ sufficient: true, questions: [], missing: [] })
   chatEdit.mockReset()
   chatEdit.mockResolvedValue({
     prd: { id: 42, payload_md: "<html><body><h1>Updated</h1></body></html>", llm_part: null, brief_id: 1, insight_index: 0, source: "upload" },
