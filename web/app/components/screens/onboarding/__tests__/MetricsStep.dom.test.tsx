@@ -241,6 +241,72 @@ describe("MetricsStep (onboarding step 03 — up to 5 metrics + framework)", () 
     expect(advanceStepMock).not.toHaveBeenCalled()
   })
 
+  it("adopts metrics from a context import that lands AFTER mount, superseding the defaults", () => {
+    // The regression this guards: the background LLM import finishes ~30-60s
+    // after upload (while the user is on connectors), so the metrics step first
+    // mounts showing business/industry DEFAULTS. When the import lands it writes
+    // the extracted metrics onto companies.kpi_tree and OnboardingContext pushes
+    // a new workspace object. The old two-effect `candidatesSeeded` latch froze
+    // the defaults in and locked the import out — the picker never updated.
+    const { container, rerender } = mount()
+    expect(chipNames(container)).toEqual(DEFAULT_POOL)
+    expect(selectedChips(container)).toEqual(DEFAULT_POOL.slice(0, 3))
+
+    const imported = makeWorkspace({
+      onboarding_step: 3,
+      kpi_tree: {
+        north_star: "Insight-to-Impact Cycle Time",
+        north_star_description: "",
+        metrics: [
+          { name: "Insight-to-Impact Cycle Time", description: "" },
+          { name: "DS Agent benchmark recall", description: "" },
+          { name: "ARR", description: "" },
+        ],
+      },
+    })
+    act(() => {
+      onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: imported }))
+      rerender(React.createElement(MetricsStep))
+    })
+
+    // Imported metrics REPLACE the defaults, all pre-selected (up to 5).
+    expect(chipNames(container)).toEqual([
+      "Insight-to-Impact Cycle Time",
+      "DS Agent benchmark recall",
+      "ARR",
+    ])
+    expect(selectedChips(container)).toEqual([
+      "Insight-to-Impact Cycle Time",
+      "DS Agent benchmark recall",
+      "ARR",
+    ])
+  })
+
+  it("does NOT override the user's own pick when the import lands after they've chosen", () => {
+    const { container, rerender } = mount()
+    // The user curates the pool first — this must freeze it against the import.
+    fireEvent.click(chipByName(container, DEFAULT_POOL[0]))
+    const afterUserPick = selectedChips(container)
+    expect(afterUserPick).toEqual(DEFAULT_POOL.slice(1, 3))
+
+    const imported = makeWorkspace({
+      onboarding_step: 3,
+      kpi_tree: {
+        north_star: "Imported NS",
+        north_star_description: "",
+        metrics: [{ name: "Imported NS", description: "" }],
+      },
+    })
+    act(() => {
+      onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace: imported }))
+      rerender(React.createElement(MetricsStep))
+    })
+
+    // The user's curation stands — the import never clobbers it.
+    expect(chipNames(container)).toEqual(DEFAULT_POOL)
+    expect(selectedChips(container)).toEqual(afterUserPick)
+  })
+
   it("shows the loading shell while the workspace is loading", () => {
     onboardingMock.mockReturnValue(makeOnboardingCtx({ loading: true, workspace: null }))
     render(React.createElement(MetricsStep))

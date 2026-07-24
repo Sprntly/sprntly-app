@@ -9,7 +9,9 @@ import { OptionalDisclosure } from "../../onboarding/OptionalDisclosure"
 import { UploadOrTypeBlock } from "../../onboarding/UploadOrTypeBlock"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { updateWorkspace } from "../../../lib/onboarding/store"
+import { applyImportedContext } from "../../../lib/onboarding/applyImportedContext"
 import { stepForSlug } from "../../../lib/onboarding/types"
+import type { WorkspaceCompany } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import {
   companyDocsApi,
@@ -69,7 +71,7 @@ const EMPTY_BLOCK: BlockState = {
  */
 export function WorkspaceStep() {
   const auth = useAuth()
-  const { workspace, setWorkspace, loading } = useOnboarding()
+  const { workspace, setWorkspace, loading, startContextImport } = useOnboarding()
   const router = useRouter()
 
   const draft = loadDraft(DRAFT_KEY)
@@ -95,35 +97,34 @@ export function WorkspaceStep() {
   // save can retire that column instead of leaving the same prose in both.
   const roadmapAbsorbed = useRef(false)
 
-  // Seed from the saved workspace (draft takes priority).
+  // Seed from the saved workspace, filling only fields still empty — so the
+  // context import that lands ~30-60s after upload pops its values in when it
+  // arrives (team scope especially) without overwriting typed text or a restored
+  // draft. Runs on every `workspace` change, which is what lets the late import
+  // take effect; the old `if (draft) return` full-reset seeded once and missed it.
   useEffect(() => {
     if (!workspace) return
     const roadmap = (workspace.team_roadmap ?? "").trim()
-    if (draft) {
-      // A draft wins for everything typed, but the legacy roadmap column still
-      // has to end up in the one field — append it if it isn't there already.
-      if (roadmap) {
-        setTeamStrategy((s) => {
-          if (s.includes(roadmap)) return s
-          return s.trim() ? `${s.trim()}\n\n${roadmap}` : roadmap
-        })
-        setStrategyBlock((b) => ({ ...b, typedOpen: true }))
+
+    setTeamName((v) => v || (workspace.team_name ?? ""))
+    setTeamScope((v) => v || (workspace.team_scope ?? ""))
+    setSizingMethodology((v) => v || (workspace.sizing_methodology ?? ""))
+    setAdditionalContext((v) => v || (workspace.additional_context ?? ""))
+
+    // One field now, two legacy columns. If the field already holds text (typed
+    // or draft), only fold in the legacy roadmap column when it isn't there yet;
+    // otherwise seed from the saved strategy + roadmap, joined.
+    setTeamStrategy((s) => {
+      if (s.trim()) {
+        if (!roadmap || s.includes(roadmap)) return s
+        return `${s.trim()}\n\n${roadmap}`
       }
-      roadmapAbsorbed.current = true
-      return
-    }
-    setTeamName(workspace.team_name ?? "")
-    setTeamScope(workspace.team_scope ?? "")
-    // One field now, two legacy columns: show them joined so a returning user
-    // sees everything they typed before the merge, and re-saving folds it into
-    // team_strategy.
-    const merged = [(workspace.team_strategy ?? "").trim(), roadmap]
-      .filter((v) => v.length > 0)
-      .join("\n\n")
-    setTeamStrategy(merged)
-    setSizingMethodology(workspace.sizing_methodology ?? "")
-    setAdditionalContext(workspace.additional_context ?? "")
-    if (merged) setStrategyBlock((b) => ({ ...b, typedOpen: true }))
+      return [(workspace.team_strategy ?? "").trim(), roadmap]
+        .filter((v) => v.length > 0)
+        .join("\n\n")
+    })
+    if ((workspace.team_strategy ?? "").trim() || roadmap)
+      setStrategyBlock((b) => ({ ...b, typedOpen: true }))
     roadmapAbsorbed.current = true
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -378,14 +379,27 @@ export function WorkspaceStep() {
         {/* Second chance at the step-2 import, placed here because this step
             asks for the most typing in the whole flow — an .md export can fill
             the scope and strategy blocks above instead of the user writing
-            them out. Same endpoint, same parser; the fields land as editable
-            values on this step, never as a silent commit. */}
+            them out. Behaves EXACTLY like the dedicated import step: it applies
+            every extractable field across the flow (via applyImportedContext)
+            AND kicks the background LLM pass so a file that doesn't match our
+            heading contract still extracts. The fields land as editable values,
+            never a silent commit. */}
         <LlmContextUploadBanner
-          onImported={(fields) => {
-            if (fields.team_scope && !teamScope.trim())
-              setTeamScope(fields.team_scope)
-            if (fields.strategy && !teamStrategy.trim())
+          workspace={workspace}
+          startContextImport={startContextImport}
+          applyImportFields={async (fields) => {
+            if (!workspace) return
+            // Prefill every step the same way the dedicated import step does —
+            // team scope on THIS step re-seeds from the updated workspace, and
+            // product/metrics/company fields land on their own steps.
+            setWorkspace(await applyImportedContext(workspace, fields))
+            // Plus the two this step owns that applyImportedContext doesn't map:
+            // the company strategy reads well as the team strategy here, and the
+            // catch-all notes seed the "anything else" box.
+            if (fields.strategy && !teamStrategy.trim()) {
               setTeamStrategy(fields.strategy)
+              setStrategyBlock((b) => ({ ...b, typedOpen: true }))
+            }
             if (fields.notes && !additionalContext.trim())
               setAdditionalContext(fields.notes)
           }}
@@ -397,13 +411,21 @@ export function WorkspaceStep() {
 
 /**
  * "Ran our prompt in your LLM? Upload the .md" — the banner from the v7
- * workspace screenshot. Imports the export, then hands the caller the fields
- * so it can fill only the inputs the user has left blank.
+ * workspace screenshot. The SAME import the dedicated step-2 screen runs, so
+ * both entry points behave identically: it applies the deterministic parse
+ * across the flow AND kicks the background LLM pass (Reader 2), so a file that
+ * doesn't follow our heading contract still extracts and prefills rather than
+ * reading as empty here. `applyImportFields` writes the fields; the backend
+ * files the upload to the knowledge graph either way.
  */
 function LlmContextUploadBanner({
-  onImported,
+  workspace,
+  applyImportFields,
+  startContextImport,
 }: {
-  onImported: (fields: LlmContextFields) => void
+  workspace: WorkspaceCompany | null
+  applyImportFields: (fields: LlmContextFields) => Promise<void>
+  startContextImport: (jobId: number, workspaceId: string) => void
 }) {
   const fileRef = useRef<HTMLInputElement | null>(null)
   const [busy, setBusy] = useState(false)
@@ -415,10 +437,20 @@ function LlmContextUploadBanner({
     setNotice(null)
     try {
       const res = await llmContextApi.importFile(file)
+      // Kick the background LLM pass so a reworded / free-form document still
+      // extracts. Without this a file our heading walk can't read (res.ok is
+      // false) would prefill nothing here — the whole reason step 2 does it too.
+      if (res.job_id && workspace) startContextImport(res.job_id, workspace.id)
       if (res.ok) {
-        onImported(res.fields)
+        await applyImportFields(res.fields)
         setNotice(
           `Read "${file.name}" — we filled in what was still blank. Check it over before continuing.`,
+        )
+      } else if (res.job_id) {
+        // Heading walk found nothing, but the LLM pass is now reading it and
+        // will fill the fields in when it lands (typically within a minute).
+        setNotice(
+          `Reading "${file.name}" — we'll fill in what we find in a moment.`,
         )
       } else {
         setNotice(

@@ -69,16 +69,20 @@ export function ProductStep() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Seed from the saved workspace/product (draft takes priority).
+  // Seed from the saved workspace/product, filling only fields still empty — so
+  // the context import that lands ~30-60s after upload (while the user is on the
+  // connectors step) pops its values in the moment it arrives, without ever
+  // overwriting anything typed here or restored from a draft. Runs on every
+  // `workspace` change, which is what lets the late import take effect at all —
+  // the old `if (draft) return` full-reset only seeded once and missed it.
   useEffect(() => {
     if (!workspace) return
-    if (draft) return
-    setProductName(workspace.product?.name ?? workspace.display_name)
-    setProductUrl(workspace.product?.website ?? "")
-    setSurfaces(workspace.product?.surfaces ?? [])
-    setMonetization(workspace.product?.monetization?.[0] ?? "")
-    setUsersDescription(workspace.product?.users_description ?? "")
-    setCompetitors((workspace.competitors ?? []).join(", "))
+    setProductName((v) => v || workspace.product?.name || workspace.display_name || "")
+    setProductUrl((v) => v || workspace.product?.website || "")
+    setSurfaces((v) => (v.length ? v : workspace.product?.surfaces ?? []))
+    setMonetization((v) => v || workspace.product?.monetization?.[0] || "")
+    setUsersDescription((v) => v || workspace.product?.users_description || "")
+    setCompetitors((v) => v || (workspace.competitors ?? []).join(", "))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
