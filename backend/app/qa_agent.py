@@ -40,6 +40,7 @@ from app.skill_router import (
     detect_intent,
     is_call_digest,
     is_data_analysis_request,
+    is_jira_lookup,
     is_voc_report_request,
 )
 from app.skills.catalog import NON_ROUTABLE, routable_manifest
@@ -491,6 +492,20 @@ def answer(
         from app.ds import chat_analysis
 
         return chat_analysis.answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
+
+    # Live Jira read: a question referencing a Jira issue/epic wants the CURRENT
+    # state — status, comments, epic children — not the periodic, comment-less
+    # KG snapshot the generic router would answer from. Intercept before routing
+    # and let the model fetch the real issues live (read-only tool loop). When
+    # Jira isn't connected, jira_lookup returns a helpful connect message rather
+    # than falling through. A slash command (handled by route()) is exempt so an
+    # explicit skill invocation that merely names Jira isn't hijacked.
+    if not pinned_skill and not question.lstrip().startswith("/") and is_jira_lookup(question, history):
+        from app import jira_lookup
+
+        return jira_lookup.answer(
             enterprise_id=enterprise_id, question=question, history=history
         )
 

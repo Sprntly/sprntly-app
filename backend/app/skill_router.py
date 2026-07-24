@@ -219,6 +219,96 @@ def is_data_analysis_request(question: str) -> bool:
     return any(p.search(question) for p in _DATA_ANALYSIS_RULES)
 
 
+# ── Jira-lookup intent (live project-management reads) ───────────────────────
+# "what's the status of PROJ-142", "summarize the checkout epic in Jira", "which
+# tickets are open on the billing board". Triggers an on-demand LIVE read from a
+# connected Jira (app/jira_lookup.py) instead of answering from the periodic,
+# comment-less KG snapshot. Like call-digest, qa_agent checks this BEFORE the
+# generic router, which would otherwise answer from the stale KG.
+#
+# A Jira issue key ("PROJ-142"): 2–10 leading upper-alnum chars, a hyphen, then
+# digits. Case-SENSITIVE so lowercase false friends ("covid-19", "utf-8") don't
+# match; real keys are uppercase.
+_JIRA_ISSUE_KEY = re.compile(r"\b[A-Z][A-Z0-9]{1,9}-\d+\b")
+_JIRA_WORD = re.compile(r"\bjira\b", re.I)
+_JIRA_PM_NOUN = re.compile(
+    r"\b(ticket|issue|epic|story|stories|bug|task|sub-?task|sprint|board|backlog)s?\b",
+    re.I,
+)
+_JIRA_LOOKUP_VERB = re.compile(
+    r"\b(look\s*up|pull\s*up|show|find|get|fetch|open|status\s+of|"
+    r"details?\s+(?:of|for|on)|what'?s?\s+(?:the\s+)?status)\b",
+    re.I,
+)
+# This path is READ-ONLY. A create/generate/push phrasing belongs to the
+# user-stories skill or the Jira push flow, not here — veto it so those still
+# route normally even when they mention Jira. Deliberately excludes "update" /
+# "edit": "status update on PROJ-1" / "latest update" are READS, and the genuine
+# write commands ("update PROJ-1 to done") carry no PM-noun/lookup-verb, so they
+# never trigger a positive match anyway.
+_JIRA_LOOKUP_VETO = re.compile(
+    r"\b(create|generate|write|draft|make|build|author|produce|compose|push|"
+    r"sync|move|transition|assign|comment\s+on|close|resolve|delete)\b",
+    re.I,
+)
+
+
+# A follow-up INSIDE an active Jira thread rarely repeats "jira" or a key — it
+# just refines the search ("get all in to-do status", "only the PROJ ones",
+# "which are assigned to me"). Two signals gate the sticky route: the recent
+# turns are about Jira (_JIRA_THREAD_MARKER, checked over history), AND the
+# current message reads like a Jira filter (_JIRA_FILTER). Generic pivots
+# ("prioritize these", "what's our churn rate?") match neither and fall through.
+_JIRA_THREAD_MARKER = re.compile(r"\bjira\b|view in jira|issue key|workflow status", re.I)
+_JIRA_FILTER = re.compile(
+    r"\b(to[\s-]?do|in[\s-]?progress|in\s+review|done|open|closed|blocked|"
+    r"backlog|status|project|board|sprint|epic|tickets?|issues?|bugs?|"
+    r"tasks?|stor(?:y|ies)|assigned|assignee|priority|label)\b",
+    re.I,
+)
+
+
+def _in_jira_thread(history: list[dict] | None) -> bool:
+    """True when the recent conversation is an active Jira thread — one of the
+    last few turns names Jira or carries an issue key (e.g. the assistant's Jira
+    clarifying question, or a just-fetched issue). Lets a bare follow-up route
+    back to the Jira path instead of dead-ending at the scope gate."""
+    if not history:
+        return False
+    for turn in history[-4:]:
+        content = turn.get("content") or ""
+        if _JIRA_THREAD_MARKER.search(content) or _JIRA_ISSUE_KEY.search(content):
+            return True
+    return False
+
+
+def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
+    """True when the question asks to READ live Jira — either an issue key with a
+    lookup verb / PM noun, the word "jira" alongside such context, or a Jira-style
+    filter follow-up within an active Jira thread (using `history`). Merely NAMING
+    Jira (e.g. as one competitor in a CIR request) is not a lookup, so "jira"
+    alone doesn't trigger. Vetoed for create/generate/push phrasings. The trigger
+    for the on-demand Jira-lookup path (app/jira_lookup.py)."""
+    if _JIRA_LOOKUP_VETO.search(question):
+        return False
+    has_key = bool(_JIRA_ISSUE_KEY.search(question))
+    has_jira = bool(_JIRA_WORD.search(question))
+    has_context = bool(
+        _JIRA_PM_NOUN.search(question) or _JIRA_LOOKUP_VERB.search(question)
+    )
+    # An explicit issue key with any lookup context (verb, PM noun, or "jira").
+    if has_key and (has_context or has_jira):
+        return True
+    # "in jira" / "jira board" / "look up ... in jira" — jira + a PM-read context,
+    # but never "jira" on its own (product mention).
+    if has_jira and has_context:
+        return True
+    # Sticky follow-up: a Jira-style filter continuing an active Jira thread.
+    if _JIRA_FILTER.search(question) and _in_jira_thread(history):
+        return True
+    return False
+
+
 def detect_intent(question: str) -> SkillMatch | None:
     """Match a user question to a skill via keyword rules.
 
