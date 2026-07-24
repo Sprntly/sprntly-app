@@ -3101,6 +3101,13 @@ async def _import_context_markdown(company, markdown: str) -> dict:
 
     parsed = parse_context_markdown(markdown)
     note = None
+    # Whether the raw .md was actually filed as a document source AND handed to
+    # the KG ingest. This is the real "your context reached the knowledge graph"
+    # signal — distinct from `ok` (did the heading walk read structured fields).
+    # The Settings/Business-Context card leans on it: it never prefills, so
+    # filing IS the whole outcome there, and it must not claim a KG feed that a
+    # storage hiccup silently swallowed.
+    filed = False
     try:
         from app.document_sources import add_document_file, create_document_source
 
@@ -3119,6 +3126,7 @@ async def _import_context_markdown(company, markdown: str) -> dict:
         )
         _ensure_uploads_connection(company.company_id)
         kickoff_sync(company.company_id, uploads.UPLOADS_PROVIDER)
+        filed = True
     except Exception:  # noqa: BLE001 — filing must not cost the user their prefill
         logger.exception("llm-context: could not file the export as a document source")
         note = (
@@ -3131,10 +3139,12 @@ async def _import_context_markdown(company, markdown: str) -> dict:
     # `ok` is about whether the USER's upload produced anything usable, and the
     # LLM pass may yet find fields the heading walk missed. So a file the walk
     # read nothing from is not a failure while a job is still running — the
-    # client shows "reading…" and the poll settles it either way.
-    if job_id is not None and not result["ok"]:
+    # client shows "reading…" and the poll settles it either way. Preserve a
+    # FILING-failure note though (filed is False): that isn't the "found nothing"
+    # verdict the job can overturn, it's the KG feed the user needs to know about.
+    if job_id is not None and not result["ok"] and filed:
         result["note"] = None
-    return {**result, "job_id": job_id}
+    return {**result, "job_id": job_id, "filed": filed}
 
 
 @router.get("/llm-context/prompt")

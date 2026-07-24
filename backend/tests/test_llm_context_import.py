@@ -372,6 +372,9 @@ def test_upload_returns_prefill_fields_and_files_the_export(import_env, monkeypa
     # The context also becomes a document source, so it grounds the agents
     # rather than only pre-filling a form.
     add.assert_called_once()
+    # …and the response says so: `filed` is the "reached the knowledge graph"
+    # signal the Business Context card reports success from.
+    assert body["filed"] is True
     # The upload also hands off a background LLM extraction for the fields the
     # heading walk can't reach; its job id rides back on the response.
     assert isinstance(body["job_id"], int)
@@ -397,6 +400,10 @@ def test_upload_of_an_unreadable_file_defers_to_the_extraction_job(import_env, m
     # A job is running, so the premature "we found nothing" note is suppressed.
     assert body["note"] is None
     assert isinstance(body["job_id"], int)
+    # The raw file still reached the knowledge graph even though the heading
+    # walk read nothing — that's exactly the case the Business Context card
+    # reports as a success rather than "couldn't read that file".
+    assert body["filed"] is True
 
     # With the LLM patched to fail, the job settles on the same honest verdict
     # the old synchronous response used to give directly.
@@ -406,6 +413,35 @@ def test_upload_of_an_unreadable_file_defers_to_the_extraction_job(import_env, m
     assert done["status"] == "ready"
     assert done["result"]["ok"] is False
     assert done["result"]["note"], "a job that found nothing must say so"
+
+
+def test_upload_reports_a_filing_failure_instead_of_hiding_it(import_env, monkeypatch):
+    """If the raw .md can't be filed as a document source, it never reached the
+    knowledge graph — and the Business Context card, which only cares about the
+    KG feed, must not claim success. So `filed` is False and the explanatory
+    note survives even though a background job is running: a filing failure is
+    NOT the "found nothing" verdict the job can overturn, so it must NOT be
+    swept under the note-suppression that unreadable-but-filed uploads get.
+
+    Uses an unreadable body on purpose (ok is False), which is exactly the path
+    that previously wiped the note whenever a job was live."""
+    client = company_client(monkeypatch).client
+    with patch(
+        "app.document_sources.create_document_source",
+        side_effect=RuntimeError("storage down"),
+    ), patch("app.routes.connectors.kickoff_sync"), _no_llm():
+        r = client.post(
+            "/v1/connectors/llm-context/import",
+            files=_md_file("nothing we recognise here"),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    # It never got filed, so it isn't in the knowledge graph…
+    assert body["filed"] is False
+    # …and the note that says so is preserved, not wiped by the live job.
+    assert body["note"]
+    assert "couldn't also save" in body["note"]
 
 
 def test_upload_rejects_binary_with_a_useful_message(import_env, monkeypatch):

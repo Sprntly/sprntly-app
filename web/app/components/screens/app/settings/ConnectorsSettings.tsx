@@ -84,7 +84,6 @@ import {
 } from "../../../connectors/CredentialsPromptModal"
 import { ConfigureConnectorDrawer } from "../../../connectors/ConfigureConnectorDrawer"
 import { ConnectorLogo } from "../../../connectors/ConnectorLogo"
-import { LlmContextImportCard } from "../../../connectors/LlmContextImportCard"
 import { UploadSourceModal } from "../../../connectors/UploadSourceModal"
 
 /** Provider id of the "upload your own documents" connector. */
@@ -241,7 +240,7 @@ export type ConnectorsSettingsViewProps = {
   files: SourceFile[]
   /**
    * The user's own named document sources (the `uploads` connector). Rendered
-   * inside the "Your documents" category card so the connector's data is
+   * inside the "Company Documents" category card so the connector's data is
    * visible where the connector is, not in a separate island.
    */
   uploadSources?: UploadSource[]
@@ -250,13 +249,6 @@ export type ConnectorsSettingsViewProps = {
   /** Open the modal in add-files-to-existing-source mode. */
   onAddFilesToSource?: (sourceId: string) => void
   onRemoveUploadSource?: (sourceId: string) => void
-  /**
-   * Slot rendered under the uploads category's actions — the
-   * import-from-your-AI card. Passed in rather than imported so this View
-   * stays hook-free and IO-free for the renderToStaticMarkup tests; the
-   * hooks wrapper supplies the real (stateful) card.
-   */
-  uploadsExtra?: ReactNode
   /**
    * Key of the category selected in the left rail. `null`/unknown key =
    * "the first visible category" (see resolveSelectedCategory), so the
@@ -287,7 +279,6 @@ export function ConnectorsSettingsView({
   onAddUploadSource,
   onAddFilesToSource,
   onRemoveUploadSource,
-  uploadsExtra,
   selectedCategoryKey = null,
   onSelectCategory,
 }: ConnectorsSettingsViewProps) {
@@ -550,23 +541,16 @@ export function ConnectorsSettingsView({
                 only extend or remove existing ones, and once the connector is
                 Active its row action becomes "Configure". */}
             {activeCategory.key === "uploads" ? (
-              <>
-                <button
-                  type="button"
-                  className="set-conn-upload set-conn-add-source"
-                  data-testid="add-upload-source"
-                  onClick={() => onAddUploadSource?.()}
-                >
-                  <i className="ti ti-cloud-upload" aria-hidden />
-                  Add a document source
-                  <span className="muted">Name it, describe it, attach any files</span>
-                </button>
-                {/* The Settings-side twin of onboarding's import step, for
-                    users who skipped it or have new context worth handing
-                    over. A slot, so this pure View never owns its state or
-                    IO — the hooks wrapper supplies the real card. */}
-                {uploadsExtra}
-              </>
+              <button
+                type="button"
+                className="set-conn-upload set-conn-add-source"
+                data-testid="add-upload-source"
+                onClick={() => onAddUploadSource?.()}
+              >
+                <i className="ti ti-cloud-upload" aria-hidden />
+                Add a document source
+                <span className="muted">Name it, describe it, attach any files</span>
+              </button>
             ) : null}
 
             {/* Manual upload strip — a dashed full-width row at the foot of the
@@ -1049,7 +1033,6 @@ export function ConnectorsSettings() {
         onSelectCategory={setSelectedCategoryKey}
         uploadSources={uploadSources}
         onAddUploadSource={() => setUploadTarget("")}
-        uploadsExtra={<LlmContextImportCard />}
         onAddFilesToSource={(sourceId) => setUploadTarget(sourceId)}
         onRemoveUploadSource={(sourceId) =>
           void handleRemoveUploadSource(sourceId)

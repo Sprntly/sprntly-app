@@ -18,6 +18,7 @@ import {
 } from "../../../../lib/api"
 import { profileDisplayName } from "../../../../context/WorkspaceContext"
 import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
+import { LlmContextImportCard } from "../../../connectors/LlmContextImportCard"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
 /** The doc form's id — the pane bar's Save submits it from outside the form. */
@@ -743,6 +744,15 @@ export function BusinessContextSettings() {
         <p className="pset-sub">
           The structured lens every Sprntly agent reads your company through.
         </p>
+
+        {/* Bring in the context the user has already given their own AI
+            assistant. Moved here from Settings → Connectors: this whole-company
+            import feeds the lens below (and Product, Metrics, Process…), so it
+            belongs with the business context it grounds, not in the data-source
+            list. Same behaviour as before — it files the .md as a document
+            source and ingests it into the knowledge graph; it does not silently
+            overwrite fields you've already filled. */}
+        <LlmContextImportCard />
 
         {/* The prose summary accepted at the end of onboarding (v6 step 9,
             "Here's what we learned") — companies.business_context_summary.

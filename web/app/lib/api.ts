@@ -1184,6 +1184,12 @@ export type LlmContextImportResponse = {
    *  prompt produced; this pass reads context documents of any shape, so it
    *  runs server-side while the user works through the connectors step. */
   job_id?: number | null
+  /** True when the raw .md was actually filed as a document source AND handed
+   *  to the knowledge-graph ingest. Distinct from `ok` (whether the heading
+   *  walk read structured fields): a caller that only cares about grounding the
+   *  agents — e.g. the Business Context import, which never prefills — keys its
+   *  success message off this, not `ok`. Absent on background-job results. */
+  filed?: boolean
 }
 
 export type LlmContextJobStatus = {
