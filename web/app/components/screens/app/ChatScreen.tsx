@@ -88,6 +88,11 @@ type ChatTab = {
    *  opening message and stays at the top. PERSISTED (in the slim tab payload) so
    *  the ordering survives reload — must NOT be stripped like `prd`/`prdGenerating`. */
   prdInFlow?: boolean
+  /** The thread id of the command turn a `prdInFlow` tab anchors its inline PRD
+   *  card + questions to. A command typed in a REUSED chat tab lands mid-thread,
+   *  so `thread[0]` (the legacy anchor) is the wrong turn there. PERSISTED with
+   *  the thread (same slim payload), whose turn ids it references. */
+  prdFlowTurnId?: string
   /** True while a resumed conversation's turns are being fetched in the
    *  background (row click in All chats navigates instantly; the tab shows a
    *  loading state until the history lands). Transient — never persisted. */
@@ -202,6 +207,11 @@ type LocalPrdSource =
   | { kind: "generateTask"; task: string; sourceDocs?: { name: string; content: string }[] }
 type LocalPrdTabRequest = Omit<PrdTabRequest, "source"> & {
   source: PrdTabRequest["source"] | LocalPrdSource
+  /** Generate IN THIS TAB: pin the target to an existing chat tab so the PRD
+   *  lands in the ACTIVE tab's artifacts panel (its command turn appended to the
+   *  live thread) instead of spawning a new tab. Set by the in-chat command
+   *  flows when the active tab is a plain, PRD-less chat. */
+  inTabId?: string
 }
 
 // The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
@@ -613,6 +623,7 @@ export function ChatScreen() {
         evidenceGenerating: false,
         // Persisted: preserves the inline-vs-header card ordering across reload.
         prdInFlow: t.prdInFlow ?? false,
+        prdFlowTurnId: t.prdFlowTurnId,
       }))
     } catch { return [] }
   })
@@ -666,7 +677,7 @@ export function ChatScreen() {
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
           insightBody: t.insightBody ?? null, prdId: t.prdId ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
-          prdInFlow: t.prdInFlow ?? false,
+          prdInFlow: t.prdInFlow ?? false, prdFlowTurnId: t.prdFlowTurnId,
         })))
       } else {
         setTabs([])
@@ -984,7 +995,12 @@ export function ChatScreen() {
     const { title, source } = req
     const meta = source.kind === "generateIdeation" || source.kind === "importDoc" || source.kind === "generateTask"
       ? null : source.meta
-    const existing = tabsRef.current.find((t) => t.title === title)
+    // Same-tab generation: a pinned `inTabId` (a PRD command typed in a plain
+    // chat tab) reuses THAT tab, so the PRD lands beside the conversation that
+    // motivated it. Otherwise fall back to the title-match reuse (a re-issued
+    // command) or a fresh tab.
+    const existing = (req.inTabId ? tabsRef.current.find((t) => t.id === req.inTabId) : undefined)
+      ?? tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",
     // "generate a PRD"): seed the thread with the user's message + an
@@ -1026,6 +1042,9 @@ export function ChatScreen() {
           // Never downgrade a header tab to in-flow, but a command re-issued on a
           // command tab keeps it in-flow.
           prdInFlow: t.prdInFlow || prdInFlow,
+          // Anchor the inline PRD card to THIS command turn — in a reused chat
+          // tab the command lands mid-thread, not at thread[0].
+          ...(seedTurn && prdInFlow ? { prdFlowTurnId: seedTurn.id } : {}),
         } : t))
       }
     } else {
@@ -1034,6 +1053,7 @@ export function ChatScreen() {
         insightBody: req.insightBody ?? null, prdId: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
         prdInFlow,
+        ...(seedTurn && prdInFlow ? { prdFlowTurnId: seedTurn.id } : {}),
       }])
       setActiveTabId(tabId)
     }
@@ -1967,6 +1987,24 @@ export function ChatScreen() {
     }
   }, [finalizeConversationTurn, pushPendingConversation, setContent])
 
+  // Same-tab generation: a PRD command typed in a REGULAR chat tab generates the
+  // PRD in THAT tab's artifacts panel — the conversation that motivated it stays
+  // on screen next to the document — instead of spawning a new tab. Only a
+  // plain, PRD-less chat tab qualifies: a tab already bound to a PRD
+  // (prd/prdId/generating) keeps its binding (one PRD per tab — a new-topic
+  // command there still opens its own tab), and a brief-insight tab (briefMeta)
+  // keeps its insight→PRD flow (the chatInsightState effect stamps the INSIGHT's
+  // prd id onto the tab, which would fight an unrelated task-PRD). A
+  // still-hydrating resumed tab is skipped too (its background thread fetch
+  // would race the seeded command turn). No active tab (landing / brief
+  // surface) → undefined → the command opens its own tab as before.
+  const reusableActiveTab = useCallback((): ChatTab | undefined => {
+    const t = tabsRef.current.find((x) => x.id === activeTabIdRef.current)
+    return t && t.prd == null && t.prdId == null && !t.prdGenerating &&
+      t.briefMeta == null && !t.hydrating
+      ? t : undefined
+  }, [])
+
   const prdCommandFlow = useCallback((seedQuery?: string, taskOverride?: string | null) => {
     // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
     // the PRD from the user's own words. A GENERIC "generate a PRD" (no topic) is
@@ -1996,9 +2034,11 @@ export function ChatScreen() {
     // The title is a placeholder derived from the task until the backend's real
     // title lands (openPrdInTab renames the tab once generateFromTask resolves).
     const placeholder = effectiveTask.length > 37 ? `${effectiveTask.slice(0, 37)}…` : effectiveTask
+    const inTab = reusableActiveTab()
     const req: LocalPrdTabRequest = {
       title: `PRD · ${placeholder}`,
       seedQuery,
+      ...(inTab ? { inTabId: inTab.id } : {}),
       source: {
         kind: "generateTask",
         task: effectiveTask,
@@ -2007,7 +2047,7 @@ export function ChatScreen() {
     }
     const tabId = openPrdInTab(req)
     seedCommandTurn(req, tabId)
-  }, [openPrdInTab, seedCommandTurn, showToast])
+  }, [openPrdInTab, reusableActiveTab, seedCommandTurn, showToast])
 
   // A command phrasing over an ATTACHED DOCUMENT is the chat entry to the
   // PRD-import flow: upload the doc to POST /v1/prd/import — the same conversion
@@ -2024,14 +2064,16 @@ export function ChatScreen() {
   // AFTER the render). The placeholder title is the file name until the backend's
   // real title lands.
   const importPrdCommandFlow = useCallback((file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
+    const inTab = reusableActiveTab()
     const req: LocalPrdTabRequest = {
       title: file.name,
       seedQuery: opts.seedQuery,
+      ...(inTab ? { inTabId: inTab.id } : {}),
       source: { kind: "importDoc", file, company: activeCompany, openTickets: opts.openTickets },
     }
     const tabId = openPrdInTab(req)
     seedCommandTurn(req, tabId)
-  }, [activeCompany, openPrdInTab, seedCommandTurn])
+  }, [activeCompany, openPrdInTab, reusableActiveTab, seedCommandTurn])
 
   const submitAsk = useCallback(
     async (rawQuery: string) => {
@@ -2942,9 +2984,26 @@ export function ChatScreen() {
     />
   ) : null
   // Command-opened PRD tab with at least one turn → render the card + questions
-  // INLINE after thread[0]; otherwise (header open, or an empty thread) keep them
-  // at the TOP as before.
+  // INLINE after the command turn; otherwise (header open, or an empty thread)
+  // keep them at the TOP as before.
   const inlinePrdCards = !!activeTab?.prdInFlow && thread.length > 0
+  // Which turn the inline card anchors AFTER. Precedence: the tab's recorded
+  // command-turn id (same-tab generation appends the command mid-thread, and the
+  // thread — ids included — persists with the tab); else the last
+  // command-looking turn (a fresh-session reopen rehydrates the merged
+  // conversation with fresh ids, so the id lookup misses); else thread[0] (the
+  // legacy command-opened tab, whose first turn IS the command).
+  const inlinePrdAnchorIdx = useMemo(() => {
+    if (!inlinePrdCards) return -1
+    if (activeTab?.prdFlowTurnId) {
+      const i = thread.findIndex((t) => t.id === activeTab.prdFlowTurnId)
+      if (i >= 0) return i
+    }
+    for (let i = thread.length - 1; i >= 0; i--) {
+      if (thread[i].query && isPrdCommand(thread[i].query)) return i
+    }
+    return 0
+  }, [inlinePrdCards, activeTab?.prdFlowTurnId, thread])
 
   return (
     <AppLayout
@@ -3279,13 +3338,14 @@ export function ChatScreen() {
                           ) : null}
                         </div>
                         {/* IN-CHAT COMMAND open: the insight/PRD card + clarifying
-                            questions render as the reply BELOW the command turn
-                            (thread[0]) — anchored by INDEX so it survives a reload
-                            that rehydrates the thread with fresh turn ids — instead
-                            of being pinned above the whole conversation (the
-                            out-of-order bug). Header opens render them at the top
-                            (see the block above) and skip this. */}
-                        {inlinePrdCards && idx === 0 ? (
+                            questions render as the reply BELOW the command turn —
+                            `inlinePrdAnchorIdx` resolves which turn that is (the
+                            recorded command turn for same-tab generation, thread[0]
+                            for legacy command-opened tabs) — instead of being
+                            pinned above the whole conversation (the out-of-order
+                            bug). Header opens render them at the top (see the
+                            block above) and skip this. */}
+                        {inlinePrdCards && idx === inlinePrdAnchorIdx ? (
                           <>
                             {insightCardNode}
                             {prdQuestionsNode}
