@@ -46,7 +46,14 @@ _SYSTEM = (
     "Rules: call a tool before answering anything factual about an issue. If a "
     "key doesn't exist or a search returns nothing, say so plainly — do not "
     "invent issues. Cite issue keys (and their browse links when present) in "
-    "your answer. Be concise and concrete."
+    "your answer. Be concise and concrete.\n\n"
+    "Follow-ups: the question is often a continuation that never repeats the "
+    "issue it means (\"can you get me all the details about it?\", \"who owns "
+    "that one?\", \"and the comments\"). Resolve the reference from the "
+    "conversation above — the key you or the user already named is the issue "
+    "they mean — and jira_get_issue it directly rather than searching again. "
+    "Only when the conversation names no issue at all should you search, or ask "
+    "which one they mean."
 )
 
 _SEARCH_TOOL = {
@@ -95,9 +102,13 @@ def _plain_payload(answer: str, *, confidence: float = 0.0) -> dict:
 
 
 def _render_history(history: list[dict] | None) -> str:
+    """Recent turns as plain text. Wide enough (10 turns ≈ 5 exchanges) that the
+    issue key the follow-up refers to is still in view — the model resolves
+    "it"/"that one" against this block, so trimming it too hard is what turns a
+    follow-up back into a blind re-search."""
     if not history:
         return ""
-    recent = history[-6:]
+    recent = history[-10:]
     rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}" for t in recent]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 

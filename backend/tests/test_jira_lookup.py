@@ -87,6 +87,50 @@ def test_is_jira_lookup_followup_needs_both_thread_and_filter():
     assert not is_jira_lookup("get all in to do status", no_thread)
 
 
+def test_is_jira_lookup_anaphoric_followup():
+    # The reported miss: the lookup answered "get me ticket about cars", then the
+    # follow-up referred to the issue by pronoun only. It carries no PM noun, no
+    # key and no filter word, so judging it on its own words dead-ended it at the
+    # scope gate ("I can only help with your product work"). The thread is what
+    # carries it back to the live tracker.
+    thread = [
+        {"role": "user", "content": "get me ticket about cars"},
+        {"role": "assistant", "content": "KAN-1033 — Build a car driving feature. "
+                                         "Type: Task. Status: In Review."},
+    ]
+    for q in ["can you get me all the details about it?",
+              "tell me more about it",
+              "who is it assigned to?",
+              "what's the description on that one"]:
+        assert is_jira_lookup(q, thread), q
+        assert not is_jira_lookup(q), q  # stateless miss — the thread carries it
+
+
+def test_is_jira_lookup_thread_detected_from_users_own_question():
+    # Thread detection reads the user's OWN earlier questions, not just the
+    # assistant's answers — a tracker ask whose reply named no key at all still
+    # keeps the thread open for the next turn.
+    thread = [
+        {"role": "user", "content": "get me tickets about cars"},
+        {"role": "assistant", "content": "I couldn't find anything matching that."},
+    ]
+    assert is_jira_lookup("can you get me all the details about it?", thread)
+
+
+def test_is_jira_lookup_followup_pivot_veto():
+    thread = [
+        {"role": "user", "content": "get me ticket about cars"},
+        {"role": "assistant", "content": "KAN-1033 — Build a car driving feature."},
+    ]
+    # Pronoun + read verb, but the subject has moved off the tracker → normal
+    # routing, not a live Jira read.
+    for q in ["prioritize these features",
+              "what's the status of our roadmap?",
+              "get me the details of our churn",
+              "write a prd for it"]:  # write phrasing also vetoed
+        assert not is_jira_lookup(q, thread), q
+
+
 def test_is_jira_lookup_bare_key_needs_context():
     # A bare key with neither a PM noun nor a lookup verb doesn't hijack.
     assert not is_jira_lookup("the deploy for ABC-12 landed and metrics improved")

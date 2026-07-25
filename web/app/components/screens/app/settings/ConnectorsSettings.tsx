@@ -732,27 +732,9 @@ export function ConnectorsSettingsView({
         </div>
       ) : null}
 
-      {/* Legacy uploads with no category attribution. Newly uploaded files are
-          listed under their category card above; only pre-existing files
-          (category "") collect here, so this section empties over time. */}
-      {(() => {
-        const uncategorized = files.filter((f) => !f.category)
-        return uncategorized.length > 0 ? (
-          <div className="set-block sp-conn-files">
-            <div className="set-block-h">
-              <div className="set-block-t">
-                Uploaded files
-                <span className="set-block-s-inline">
-                  {"  ·  "}
-                  {uncategorized.length} file
-                  {uncategorized.length === 1 ? "" : "s"} not yet under a category
-                </span>
-              </div>
-            </div>
-            <ul className="src-list">{uncategorized.map(fileRow)}</ul>
-          </div>
-        ) : null
-      })()}
+      {/* Files carrying no category attribution (legacy uploads) are not
+          surfaced anywhere: every file the user sees belongs to the category
+          card it sits under. */}
     </div>
   )
 }

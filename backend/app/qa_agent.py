@@ -39,6 +39,7 @@ from app.prompts import (
 from app.skill_router import (
     detect_intent,
     is_call_digest,
+    is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
     is_voc_report_request,
@@ -136,7 +137,13 @@ _ROUTER_SYSTEM = (
     "is a greeting / a question about this assistant. in_scope=false ONLY when "
     "the question is clearly outside those domains (general trivia, news, "
     "weather, sports, entertainment, personal advice, unrelated general "
-    "knowledge). When in doubt, prefer in_scope=true."
+    "knowledge). When in doubt, prefer in_scope=true.\n\n"
+    "The question is often a FOLLOW-UP whose subject lives in the conversation "
+    "above, not in its own words (\"can you get me all the details about it?\", "
+    "\"who owns that one?\"). Resolve pronouns and ellipsis against the earlier "
+    "turns BEFORE judging scope and skill: if the thread is about the user's "
+    "product work, a bare follow-up to it is in_scope=true — never out of scope "
+    "merely for being short or topic-less on its own."
 )
 
 
@@ -522,7 +529,14 @@ def answer(
     # Out-of-domain question (router classified it, no skill matched) → the
     # canned refusal, deterministically. Never let the answer model improvise
     # on a topic we hold no ground truth for.
-    if decision.source == "out_of_scope":
+    #
+    # Exception: a follow-up that points back at the thread ("...the details
+    # about it?") carries no topic of its own, so the gate can read it as
+    # out-of-domain when the thing it refers to is squarely in domain. Those
+    # answer on the direct path WITH the history folded in — whose grounding
+    # rules still apply, and whose ASK_SYSTEM scope clause still refuses if the
+    # resolved question really is off-topic.
+    if decision.source == "out_of_scope" and not is_context_dependent_followup(question, history):
         return _out_of_scope_payload()
 
     # PRD-tab grounding, shared by the direct and skill paths. Best-effort:

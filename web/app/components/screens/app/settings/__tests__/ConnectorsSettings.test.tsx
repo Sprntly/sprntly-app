@@ -434,14 +434,14 @@ describe("ConnectorsSettingsView — uploaded files list (per category)", () => 
     expect(render({ files: [] })).not.toContain("Uploaded files")
   })
 
-  it("keeps uncategorized (legacy) files in the global list", () => {
+  it("hides uncategorized (legacy) files entirely", () => {
     const html = render({
       files: [sourceFile("q2-metrics.pdf"), sourceFile("notes.txt", "txt")],
     })
-    expect(html).toContain("Uploaded files")
-    expect(html).toContain("not yet under a category")
-    expect(html).toContain("q2-metrics.pdf")
-    expect(html).toContain("notes.txt")
+    expect(html).not.toContain("Uploaded files")
+    expect(html).not.toContain("not yet under a category")
+    expect(html).not.toContain("q2-metrics.pdf")
+    expect(html).not.toContain("notes.txt")
   })
 
   it("lists a categorized file under its category, not in the global list", () => {
@@ -500,10 +500,13 @@ describe("ConnectorsSettingsView — uploaded files list (per category)", () => 
     expect(html).toMatch(/<button[^>]*disabled/)
   })
 
-  it("offers a Remove action on legacy uncategorized files too", () => {
-    const html = render({ files: [sourceFile("old.pdf")] })
-    expect(html).toContain("not yet under a category")
-    expect(html).toContain("Remove")
+  it("does not surface legacy uncategorized files under any category", () => {
+    const html = render({
+      selectedCategoryKey: "analytics",
+      files: [sourceFile("old.pdf")],
+    })
+    expect(html).not.toContain("old.pdf")
+    expect(html).not.toContain('data-testid="category-files"')
   })
 })
 
