@@ -95,6 +95,13 @@ import { NavigationProvider, useNavigation } from "../../../../context/Navigatio
 import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
+// Trailing arg of the PRD generate calls: the chat's conversation id, handed to
+// the backend so it binds conversation → PRD itself (a chat that leaves the page
+// mid-generation must still come back attached to its document). A brand-new
+// command tab has no conversation row yet, so the call goes out with null rather
+// than waiting on one — the generation must never queue behind persistence.
+const SEED_CONV_ID = null
+
 // Surfaces the current toast title — the Toast UI is mounted by AppShell, not in
 // this isolated render, so this probe is how we observe the "ask for a topic"
 // prompt.
@@ -161,7 +168,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, SEED_CONV_ID)
     // Not the brief-insight path, and not the ask agent.
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
@@ -189,7 +196,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     expect(classifyCommand).toHaveBeenCalledWith("let's get a PRD going for the checkout revamp")
     // The classifier-extracted task drives generation (the regex extractor
     // can't parse this phrasing by definition).
-    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined, SEED_CONV_ID)
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
@@ -232,7 +239,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
 
     // The generate POST is in flight (called with the parsed task) but NOT
     // resolved…
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, SEED_CONV_ID)
     // …yet the user's command, the acknowledgment, and the generating PRD card
     // are already on screen.
     expect(document.body.textContent).toContain("generate a PRD for dark mode on mobile")
@@ -260,7 +267,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await act(async () => { fireEvent.click(sendBtn) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined, SEED_CONV_ID)
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 })
@@ -334,6 +341,6 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, SEED_CONV_ID)
   })
 })

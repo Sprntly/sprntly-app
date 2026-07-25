@@ -216,16 +216,26 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
   // An Ideation idea is NOT this week's top insight — it's one of the items the
   // brief did not prioritize — so it needs its own wording.
   const fromIdeation = source.kind === "generateIdeation"
-  const answer = withTickets
-    ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready. Use the View PRD button above to reopen the panel anytime."
+  // WHERE the View PRD button actually lands, which differs by open kind and
+  // must match the render (see `inlinePrdCards`): an in-chat command puts the
+  // PRD card right below this reply, a header open pins it at the top of the
+  // thread. The copy said "above" for every case, so a command-opened chat
+  // pointed the user at a button that was in fact sitting under this message.
+  const inline = source.kind === "importDoc" || source.kind === "generateTask"
+    || (source.kind === "resume" && !!req.seedQuery)
+  const locator = inline
+    ? "Use the View PRD button just below to reopen the panel anytime."
+    : "Use the View PRD button above to reopen the panel anytime."
+  const lead = withTickets
+    ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready."
     : fromIdeation
-    ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype. Use the View PRD button above to reopen the panel anytime."
+    ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype."
     : fromTask
-      ? "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+      ? "Generating a PRD for that — it'll open in the panel on the right when ready."
       : importing
-        ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-        : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-  return { answer, key_points: [], citations: [], confidence: 1, unanswered: "" }
+        ? "Importing your document as a PRD — it'll open in the panel on the right when ready."
+        : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready."
+  return { answer: `${lead} ${locator}`, key_points: [], citations: [], confidence: 1, unanswered: "" }
 }
 
 // Attached-file chips shown under a composer. Rendered by BOTH the landing and
@@ -971,6 +981,40 @@ export function ChatScreen() {
     }
   }, [activeTabId, resolvedInsightPrdId, hydratePrdThread])
 
+  // The DB conversation id for a command-seeded PRD tab, promised per tab.
+  // `seedCommandTurn` registers it (synchronously, via
+  // persistence.ensureConversation) the instant a command opens a tab; the
+  // import/generate call inside `openPrdInTab` awaits it and hands the id to
+  // the backend, which binds conversation → PRD itself.
+  //
+  // Why this exists: the conversation row is necessarily created BEFORE the
+  // prd_id is known, and the client used to back-patch the link from a React
+  // effect. Navigating away mid-generation unmounted that effect, so the chat
+  // kept prd_id=NULL and came back from history with no PRD attached at all.
+  // The backend can't lose the link that way. Best-effort throughout: no id (or
+  // a slow create) just falls back to the client back-patch below.
+  const seedConvIdRef = useRef<Map<string, Promise<number | null>>>(new Map())
+
+  // Bind a tab's chat conversation to the PRD it just started, for the case the
+  // conversation didn't exist yet when the generate call went out (a brand-new
+  // command tab). Runs inside the generate promise chain — NOT a React effect —
+  // so it still completes after the user navigates away, which is precisely when
+  // the old effect-based back-patch was lost. The write itself is the backend's
+  // (ownership-checked PATCH); we only supply the pairing.
+  const bindConvToPrd = useCallback(async (tabId: string, prdId: number) => {
+    try {
+      const pending = seedConvIdRef.current.get(tabId)
+      const convId = pending
+        ? await pending
+        : tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
+      if (convId == null) return
+      const { conversationsApi } = await import("../../../lib/api")
+      await conversationsApi.update(convId, { prd_id: prdId })
+    } catch {
+      // Non-fatal: the tabs effect below re-attempts while the screen is mounted.
+    }
+  }, [])
+
   // ── Open a PRD as a NEW CHAT TAB with the content panel over it ─────────────
   // A "view/generate PRD" from another surface (brief cards, brief composer,
   // backlog) routes here via NavigationContext.openPrdTab → pendingPrdTab. We
@@ -1121,9 +1165,20 @@ export function ChatScreen() {
                   return { ok: false as const, message: "", clarify: true }
                 }
               }
+              // This chat's DB conversation, IF it already has one (a command
+              // issued in an existing chat). Read synchronously — the POST must
+              // never wait on persistence: gating it on the conversation create
+              // delayed the whole generation behind a round-trip, which is the
+              // latency bug this flow exists to avoid. A brand-new command tab
+              // has no id yet and binds a moment later (bindConvToPrd below).
+              const knownConvId = tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
               const start = source.kind === "importDoc"
-                ? await prdApi.importDoc(source.file, source.company)
-                : await prdApi.generateFromTask(source.task, false, source.sourceDocs)
+                ? await prdApi.importDoc(source.file, source.company, knownConvId)
+                : await prdApi.generateFromTask(source.task, false, source.sourceDocs, knownConvId)
+              // Not bound at creation? Bind now, from THIS promise chain rather
+              // than a React effect — the chain outlives the screen, so leaving
+              // the page mid-generation no longer orphans the chat from its PRD.
+              if (knownConvId == null) void bindConvToPrd(tabId, start.prd_id)
               // Stamp the now-known prd_id immediately (as the resume path does
               // upfront) so a reload past this point can find + resume the run,
               // and adopt the backend's cleaner title over the placeholder.
@@ -1175,7 +1230,7 @@ export function ChatScreen() {
       }
     })()
     return tabId
-  }, [setContent, showToast, hydratePrdThread, openContentPanel])
+  }, [setContent, showToast, hydratePrdThread, openContentPanel, bindConvToPrd])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
@@ -1818,6 +1873,18 @@ export function ChatScreen() {
     if (!req.seedQuery) return
     const seedQuery = req.seedQuery
     const turnId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
+    const title = seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery
+    // Create this tab's conversation NOW and publish its id, so the in-flight
+    // import/generate can hand it to the backend (see seedConvIdRef). This only
+    // creates the row — the turns still persist through pushPendingConversation
+    // below, which reuses the very same conversation (create-once per tab). The
+    // registration is synchronous, so the generate call awaiting it a microtask
+    // later always finds it. Doc imports especially need this: their turn
+    // persistence waits on a file upload first, which is far too late.
+    seedConvIdRef.current.set(
+      tabId,
+      persistence.ensureConversation(tabId, { turnId, title, query: seedQuery }),
+    )
     // "convert this document into a PRD": the doc BECOMES the PRD, so there's no
     // in-chat extracted text (content empty — conversationPrdDocs skips it so it
     // never re-feeds as a source doc). Upload the ORIGINAL file so the chip on the
@@ -1842,7 +1909,7 @@ export function ChatScreen() {
     }
     pushPendingConversation(turnId, seedQuery, tabId)
     finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
-  }, [pushPendingConversation, finalizeConversationTurn])
+  }, [pushPendingConversation, finalizeConversationTurn, persistence])
 
   // "Generate a PRD …" is a COMMAND, not a conversation: it opens the PRD as its
   // OWN chat tab (with the Evidence/PRD/Tickets panel), never as a chat message.
@@ -1873,7 +1940,10 @@ export function ChatScreen() {
       typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
     const ack: AskResponse = {
       answer:
-        "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime.",
+        // This ack lands on a LATER turn of an existing command tab, so the PRD
+        // card sits further up the thread (it anchors to thread[0]) — neither
+        // "above" nor "below" is reliably true here, so point at the chat.
+        "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button in this chat to reopen the panel anytime.",
       sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
     } as AskResponse
     setTabs((prev) => prev.map((t) => t.id === targetTabId
@@ -1894,7 +1964,13 @@ export function ChatScreen() {
         if (activeTabIdRef.current === targetTabId) setContent({ prdPartialHtml: html })
       }
       try {
-        const start = await prdApi.generateFromTask(task, false, sourceDocs)
+        // Same durable binding as the command flows, and free here: the tab has
+        // been chatting (the clarifying questions landed in it), so its
+        // conversation already exists and the id is a synchronous read — no
+        // round-trip in front of the user's generation.
+        const knownConvId = tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ?? null
+        const start = await prdApi.generateFromTask(task, false, sourceDocs, knownConvId)
+        if (knownConvId == null) void bindConvToPrd(targetTabId, start.prd_id)
         setTabs((prev) => prev.map((t) => t.id === targetTabId
           ? { ...t, prdId: start.prd_id, title: start.title ? `PRD · ${start.title}` : t.title }
           : t))
@@ -1917,7 +1993,7 @@ export function ChatScreen() {
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
-  }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast])
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast, bindConvToPrd])
 
   // An edit-phrased message on a PRD tab ("make this PRD shorter", "add a
   // rollout section to the PRD") routes to the scoped chat-edit endpoint: the
