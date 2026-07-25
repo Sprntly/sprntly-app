@@ -104,6 +104,18 @@ import { NavigationProvider, useNavigation } from "../../../../context/Navigatio
 import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
+// Trailing arg of the PRD generate/import calls: the chat's conversation id,
+// handed to the backend so it binds conversation → PRD itself (a chat that
+// leaves the page mid-generation must still come back attached to its
+// document). Same-tab treatment and that binding compose well — a command that
+// stays in the current tab already HAS a conversation, so the id is a
+// synchronous read and the backend binds at PRD-creation time, leaving no
+// window at all. A command that opens its own new tab has no conversation row
+// yet and passes null rather than waiting on one (the generation must never
+// queue behind persistence); the link is written a moment later.
+const NO_CONV_ID = null
+const BOUND_CONV_ID = 1
+
 // The ContentPanel itself renders in AppShell (outside this tree) — observe
 // which panel tab is open via the navigation context.
 function PanelProbe() {
@@ -230,7 +242,8 @@ describe("ChatScreen — same-tab PRD generation", () => {
     // A NEW-topic command on that PRD-bound tab must not evict its PRD.
     await typeAndSendInThread("generate a PRD for password reset flows")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(2))
-    expect(generateFromTask).toHaveBeenLastCalledWith("password reset flows", false, undefined)
+    // Its own NEW tab, so there is no conversation row to bind yet.
+    expect(generateFromTask).toHaveBeenLastCalledWith("password reset flows", false, undefined, NO_CONV_ID)
     await waitFor(() => expect(chatTabCount()).toBe(2))
   })
 
@@ -272,7 +285,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
     await typeAndSendInThread("spec this out")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     // Seeded from THIS tab's conversation — and generated right here.
-    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined, BOUND_CONV_ID)
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
   })
@@ -285,7 +298,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
 
     await typeAndSendInThread("let's get a PRD going for the checkout revamp")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined, BOUND_CONV_ID)
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
   })
@@ -297,7 +310,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
 
     const file = await attachDoc()
     await typeAndSendInThread("generate a PRD from this document")
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID))
 
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
@@ -312,7 +325,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
 
     const file = await attachDoc()
     await typeAndSendInThread("convert this PRD into tickets")
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", BOUND_CONV_ID))
 
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")

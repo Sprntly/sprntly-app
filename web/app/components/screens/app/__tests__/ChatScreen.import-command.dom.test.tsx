@@ -118,12 +118,22 @@ import { NavigationProvider, useNavigation } from "../../../../context/Navigatio
 import { ContentProvider, useContent } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
-// The PRD command flows hand their chat's conversation id to the backend, which
-// binds conversation → PRD itself (so navigating away mid-generation can't leave
-// the chat orphaned from its document). Persistence is unauthenticated in this
-// suite, so the create fails and the flows pass `null` — asserting it here pins
-// the fail-open contract: no conversation id must never block a generation.
-const SEED_CONV_ID = null
+// Trailing argument of the PRD generate/import calls: the chat's conversation
+// id, handed to the backend so it binds conversation → PRD itself (a chat that
+// leaves the page mid-generation must still come back attached to its
+// document). Which value applies depends on whether the command had a chat to
+// come from:
+//
+//   NO_CONV_ID — a command typed on a FRESH surface. There is no conversation
+//     row yet and the call must not wait for one (queueing every generation
+//     behind a persistence round-trip is the latency bug this flow avoids), so
+//     it goes out with null and the link is written a moment later.
+//   BOUND_CONV_ID — a command typed MID-CONVERSATION. Since #881 these stay in
+//     the current tab, which already has its conversation, so the id is a
+//     synchronous read and the backend binds at PRD-creation time — no window
+//     at all in the case the bug was reported from.
+const NO_CONV_ID = null
+const BOUND_CONV_ID = 1
 
 // The ContentPanel itself renders in AppShell (outside this test's tree), so
 // observe which panel tab is open via the navigation context directly.
@@ -213,7 +223,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     await typeAndSend("Convert this PRD into tickets")
 
     // Uploaded the ORIGINAL file to the import endpoint for the active company…
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", SEED_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
     // …polled the already-kicked-off import to ready (third arg = live-preview
     // onPartial callback)…
     await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined, expect.any(Function)))
@@ -235,7 +245,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
       const file = await attachDoc(name)
       await typeAndSend("convert this PRD into tickets")
 
-      await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", SEED_CONV_ID))
+      await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
       await waitFor(() => expect(panelTab()).toBe("tickets"))
       expect(runAskGeneration).not.toHaveBeenCalled()
     },
@@ -248,7 +258,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
 
     // Ordering matters: the phrasing matches BOTH command regexes, but the user
     // asked for tickets — it must import + open tickets, not run the brief flow.
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", SEED_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
     await waitFor(() => expect(panelTab()).toBe("tickets"))
     expect(briefCurrent).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
@@ -259,7 +269,7 @@ describe("ChatScreen — 'convert this PRD into tickets' over an attached docume
     const file = await attachDoc()
     await typeAndSend("generate a PRD from this")
 
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", SEED_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
     await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalledWith(42, undefined, expect.any(Function)))
     // The panel stays on the PRD tab — the user asked for a PRD, not tickets —
     // and no ticket generation is kicked off.
@@ -367,7 +377,7 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     const file = await attachDoc()
     await typeAndSend("Import this document as a PRD")
 
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", SEED_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
     await waitFor(() => expect(panelTab()).toBe("prd"))
     // It must never go to the ask agent — that path answers "no document was
     // attached" because the ask payload is text-only.
@@ -381,7 +391,7 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     const file = await attachDoc()
     await typeAndSend("convert this document to a PRD")
 
-    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", SEED_CONV_ID))
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme", NO_CONV_ID))
     await waitFor(() => expect(panelTab()).toBe("prd"))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
@@ -664,7 +674,7 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
 
     // Second import: the attached document is what "this PRD" names.
     await waitFor(() => expect(importDoc).toHaveBeenCalledTimes(2))
-    expect(importDoc).toHaveBeenLastCalledWith(file, "acme", SEED_CONV_ID)
+    expect(importDoc).toHaveBeenLastCalledWith(file, "acme", NO_CONV_ID)
     await waitFor(() => expect(panelTab()).toBe("tickets"))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
@@ -675,7 +685,7 @@ describe("ChatScreen — deictic PRD phrasings beside an open PRD tab", () => {
 
     await typeAndSendInTab("generate a PRD for dark mode on mobile")
 
-    await waitFor(() => expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, SEED_CONV_ID))
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID))
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
@@ -740,7 +750,9 @@ describe("ChatScreen — documents attached EARLIER in the thread ground a later
       "please review this deck",
       false,
       [{ name: "Fraznet Enhancements.pptx", content: "## Slide 1\n\nFraznet MRT workflow" }],
-      SEED_CONV_ID,
+      // Mid-conversation: the tab already has its conversation, so the backend
+      // binds at creation time.
+      BOUND_CONV_ID,
     )
     // The doc grounds a chat-task PRD — it is NOT re-routed to the import flow
     // (that stays same-message-attachment only).
@@ -759,7 +771,7 @@ describe("ChatScreen — documents attached EARLIER in the thread ground a later
       "our checkout drops users at the payment step",
       false,
       undefined,
-      SEED_CONV_ID,
+      BOUND_CONV_ID,
     )
   })
 })
