@@ -2967,6 +2967,60 @@ export const adminApi = {
   testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
 }
 
+// ── Usage (owner/admin only): LLM spend + token usage for this workspace ──
+// Every `est_cost_usd` here is ESTIMATED — the provider APIs return token counts,
+// never dollars, so the backend prices tokens against the published rate card.
+// Surface it as "estimated" in the UI; it will not match an Anthropic invoice to
+// the cent. `cost_basis` carries that provenance from the API.
+
+/** The numeric columns every usage rollup shares. */
+export type UsageBucket = {
+  calls: number
+  failed_calls: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_input_tokens: number
+  cache_read_input_tokens: number
+  est_cost_usd: number
+}
+
+export type UsageSummary = {
+  range: { start: string; end: string; days: number; tz: string }
+  cost_basis: string
+  /** Always "customer_key": only calls billed to the company's OWN Anthropic
+   *  key are counted. Usage on Sprntly's platform key is spend we absorb and is
+   *  deliberately excluded — it is not the customer's to see or pay. */
+  scope: string
+  totals: UsageBucket
+  /** One entry per calendar day in the range — empty days included. */
+  daily: (UsageBucket & { day: string })[]
+  by_feature: (UsageBucket & { feature: string })[]
+  by_model: (UsageBucket & { model: string })[]
+  by_provider: (UsageBucket & { provider: string })[]
+  by_operation: (UsageBucket & { operation: string })[]
+}
+
+/** Guess the viewer's IANA zone so "today" on the chart is their calendar day. */
+function localTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  } catch {
+    return "UTC"
+  }
+}
+
+export const usageApi = {
+  summary: (days: number, tz: string = localTimeZone()) =>
+    api.get<UsageSummary>(
+      `/v1/admin/usage/summary?days=${days}&tz=${encodeURIComponent(tz)}`,
+    ),
+  /** The same rollup as CSV text (the request helper returns non-JSON as-is). */
+  exportCsv: (days: number, tz: string = localTimeZone()) =>
+    api.get<string>(
+      `/v1/admin/usage/export.csv?days=${days}&tz=${encodeURIComponent(tz)}`,
+    ),
+}
+
 // ── Staff admin panel (dedicated owner-only credential) ──
 // Org invites + per-company entitlements. Auth is fully separate from the
 // normal app session: POST /v1/staff/login (id + password from env on the

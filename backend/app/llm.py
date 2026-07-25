@@ -19,6 +19,7 @@ from anthropic import Anthropic
 from fastapi import HTTPException
 
 from app.config import settings
+from app.llm_metering import install_metering
 
 logger = logging.getLogger(__name__)
 
@@ -177,10 +178,18 @@ def strip_code_fence(text: str) -> str:
 
 
 @lru_cache(maxsize=16)
-def _client_for_key(api_key: str) -> Anthropic:
+def _client_for_key(api_key: str, key_mode: str = "platform") -> Anthropic:
     """Cached Anthropic client keyed by the API key. max_retries=0: the SDK's own
-    retry layer is disabled so ours is the single source of truth."""
-    return Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=0)
+    retry layer is disabled so ours is the single source of truth.
+
+    The client is instrumented for usage metering before being cached, so every
+    call through it lands in `llm_usage_events` without any call site opting in
+    (see app.llm_metering). `key_mode` records whose key is billed; it is part
+    of the cache key only for correctness-by-construction — it is a function of
+    `api_key`, so it never actually splits the cache.
+    """
+    client = Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=0)
+    return install_metering(client, key_mode)
 
 
 def get_client() -> Anthropic:
@@ -188,12 +197,12 @@ def get_client() -> Anthropic:
     # key when configured, the platform key only when allowed (unbound / still
     # onboarding / contracted `use_platform_key`), else raise. Embeddings go
     # through OpenAI and never call this factory.
-    from app.llm_keys import resolve_llm_api_key
+    from app.llm_keys import resolve_llm_api_key_with_mode
 
-    key = resolve_llm_api_key(settings.anthropic_api_key or None)
+    key, key_mode = resolve_llm_api_key_with_mode(settings.anthropic_api_key or None)
     if not key:
         raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
-    return _client_for_key(key)
+    return _client_for_key(key, key_mode)
 
 
 def _is_retryable(exc: Exception) -> bool:
