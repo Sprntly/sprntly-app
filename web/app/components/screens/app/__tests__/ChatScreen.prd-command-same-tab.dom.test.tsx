@@ -23,10 +23,13 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask, classifyCommand, clarifyTask } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand, clarifyTask, importDoc, extractFile, storiesGenerate } = vi.hoisted(() => ({
   generateFromTask: vi.fn().mockResolvedValue({ prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3" }),
   classifyCommand: vi.fn().mockResolvedValue({ is_prd_command: false, task: null, confidence: 0.9 }),
   clarifyTask: vi.fn().mockResolvedValue({ sufficient: true, questions: [], missing: [] }),
+  importDoc: vi.fn().mockResolvedValue({ prd_id: 42, status: "generating", title: "Imported PRD" }),
+  extractFile: vi.fn().mockResolvedValue({ name: "Fraznet Enhancements.pptx", markdown: "## Slide 1\n\nFraznet MRT workflow" }),
+  storiesGenerate: vi.fn().mockResolvedValue({ job_id: 1, status: "generating" }),
 }))
 vi.mock("../../../../lib/api", () => {
   class ApiError extends Error {
@@ -35,13 +38,23 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
-    askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
+    askApi: {
+      ask: vi.fn(),
+      skills: vi.fn().mockResolvedValue({ skills: [] }),
+      extractFile: (...a: unknown[]) => extractFile(...a),
+    },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 7, insights: [{ title: "x" }] }) },
-    prdApi: { generateFromTask, classifyCommand, clarifyTask },
+    prdApi: { generateFromTask, classifyCommand, clarifyTask, importDoc, listInputQuestions: vi.fn().mockResolvedValue([]) },
+    storiesApi: {
+      getForPrd: vi.fn().mockResolvedValue({ status: "none", fresh: false, stories: [] }),
+      generate: (...a: unknown[]) => storiesGenerate(...a),
+    },
+    attachmentsApi: { upload: vi.fn().mockResolvedValue(null) },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
       update: vi.fn().mockResolvedValue({}),
+      byPrd: vi.fn().mockResolvedValue({ conversation: null, turns: [] }),
     },
   }
 })
@@ -87,16 +100,26 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
   useBriefPrototypeMap: () => ({ entriesByInsight: protoMap, loading: false, error: false, refetch: vi.fn() }),
 }))
 
-import { NavigationProvider } from "../../../../context/NavigationContext"
+import { NavigationProvider, useNavigation } from "../../../../context/NavigationContext"
 import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
+
+// The ContentPanel itself renders in AppShell (outside this tree) — observe
+// which panel tab is open via the navigation context.
+function PanelProbe() {
+  const { contentPanelTab } = useNavigation()
+  return React.createElement("div", { "data-testid": "panel-probe" }, contentPanelTab ?? "closed")
+}
 
 function renderChat() {
   return render(
     React.createElement(
       NavigationProvider,
       null,
-      React.createElement(ContentProvider, null, React.createElement(ChatScreen)),
+      React.createElement(ContentProvider, null,
+        React.createElement(ChatScreen),
+        React.createElement(PanelProbe),
+      ),
     ),
   )
 }
@@ -123,6 +146,18 @@ async function typeAndSendInThread(text: string) {
 // "+" control carry none, so this counts exactly the spawned chat tabs.
 const chatTabCount = () => screen.queryAllByTitle("Close tab").length
 
+// Attach a document via whichever composer is on screen (landing or thread —
+// only one renders at a time, each with its own hidden file input).
+async function attachDoc(name = "Fraznet Enhancements.pptx"): Promise<File> {
+  const input = document.querySelector('input[type="file"]') as HTMLInputElement
+  expect(input).toBeTruthy()
+  const file = new File(["pptx-bytes"], name, {
+    type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  })
+  await act(async () => { fireEvent.change(input, { target: { files: [file] } }) })
+  return file
+}
+
 beforeEach(() => {
   localStorage.clear()
   sessionStorage.clear()
@@ -131,6 +166,9 @@ beforeEach(() => {
   runPrdGeneration.mockClear()
   generateFromTask.mockClear()
   classifyCommand.mockClear()
+  importDoc.mockClear()
+  extractFile.mockClear()
+  storiesGenerate.mockClear()
   clarifyTask.mockClear()
   clarifyTask.mockResolvedValue({ sufficient: true, questions: [], missing: [] })
 })
@@ -219,5 +257,70 @@ describe("ChatScreen — same-tab PRD generation", () => {
     const combined = generateFromTask.mock.calls[0][0] as string
     expect(combined).toContain("dark mode on mobile")
     expect(combined).toContain("enterprise admins")
+  })
+})
+
+// Every OTHER chat phrasing that generates a PRD must get the same-tab
+// treatment too — they all funnel through the same two command flows, and these
+// pin each entry point so a future dispatch change can't quietly regress one.
+describe("ChatScreen — same-tab treatment across the other PRD command shapes", () => {
+  it("'spec this out' (generic, no PRD noun) seeds from the conversation and stays in the tab", async () => {
+    renderChat()
+    await typeAndSend("our checkout drops 42% of users at the payment step")
+    await waitFor(() => expect(document.body.textContent).toContain("canned"))
+
+    await typeAndSendInThread("spec this out")
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    // Seeded from THIS tab's conversation — and generated right here.
+    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined)
+    expect(chatTabCount()).toBe(1)
+    expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
+  })
+
+  it("an LLM-fallback phrasing (regex miss, classifier yes) generates in the same tab", async () => {
+    classifyCommand.mockResolvedValueOnce({ is_prd_command: true, task: "checkout revamp", confidence: 0.92 })
+    renderChat()
+    await typeAndSend("our checkout drops 42% of users at the payment step")
+    await waitFor(() => expect(document.body.textContent).toContain("canned"))
+
+    await typeAndSendInThread("let's get a PRD going for the checkout revamp")
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined)
+    expect(chatTabCount()).toBe(1)
+    expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
+  })
+
+  it("a doc-attached 'generate a PRD' mid-conversation imports into the SAME tab", async () => {
+    renderChat()
+    await typeAndSend("our checkout drops 42% of users at the payment step")
+    await waitFor(() => expect(document.body.textContent).toContain("canned"))
+
+    const file = await attachDoc()
+    await typeAndSendInThread("generate a PRD from this document")
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
+
+    expect(chatTabCount()).toBe(1)
+    expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
+    expect(document.body.textContent).toContain("Importing your document as a PRD")
+    expect(runAskGeneration).toHaveBeenCalledTimes(1) // only the first, real question
+  })
+
+  it("a doc-attached tickets command mid-conversation stays in the tab and lands on Tickets", async () => {
+    renderChat()
+    await typeAndSend("our checkout drops 42% of users at the payment step")
+    await waitFor(() => expect(document.body.textContent).toContain("canned"))
+
+    const file = await attachDoc()
+    await typeAndSendInThread("convert this PRD into tickets")
+    await waitFor(() => expect(importDoc).toHaveBeenCalledWith(file, "acme"))
+
+    expect(chatTabCount()).toBe(1)
+    expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
+    // Once the imported PRD is ready, the panel lands on the Tickets tab and
+    // user-stories generation kicks — same tab throughout.
+    await waitFor(() => expect(storiesGenerate).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(document.querySelector('[data-testid="panel-probe"]')?.textContent).toBe("tickets"))
+    expect(chatTabCount()).toBe(1)
   })
 })
