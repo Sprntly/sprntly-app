@@ -127,6 +127,33 @@ def test_answer_out_of_scope_returns_canned(monkeypatch):
     assert out["_skill_source"] == "scope_gate"
 
 
+def test_answer_scope_gate_spares_anaphoric_followup(monkeypatch):
+    # A follow-up whose subject lives in the previous turn ("...about it?") reads
+    # as topic-less on its own, which is what the router mistook for
+    # out-of-domain. It must answer in context instead of getting the refusal.
+    monkeypatch.setattr(
+        qa, "llm_call", lambda **k: _route_out("none", 0.9, "no topic", in_scope=False)
+    )
+    seen = {}
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda dataset, q, **k: seen.update(q=q) or {"answer": "Here you go.", "citations": []},
+    )
+    history = [
+        {"role": "user", "content": "what did users say about the onboarding flow?"},
+        {"role": "assistant", "content": "Most complaints were about the email step."},
+    ]
+    out = qa.answer(
+        enterprise_id="ent",
+        question="can you get me all the details about it?",
+        dataset="acme",
+        history=history,
+    )
+    assert out["answer"] != qa.OUT_OF_SCOPE_MESSAGE
+    # ...and the prior turns rode along, so "it" is resolvable.
+    assert "onboarding flow" in seen["q"]
+
+
 def test_answer_pinned_skill_bypasses_scope_gate(monkeypatch):
     # A pinned follow-up has already chosen a PM skill — the router (and its
     # scope flag) is never consulted.
