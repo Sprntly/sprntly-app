@@ -1165,7 +1165,10 @@ export type LlmContextFields = {
   competitors?: string[]
   metrics?: string[]
   prioritization_framework?: string
+  /** The workspace step's mandatory name (contract v2). */
+  team_name?: string
   team_scope?: string
+  sizing_methodology?: string
   notes?: string
 }
 

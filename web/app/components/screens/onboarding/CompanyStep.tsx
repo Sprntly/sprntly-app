@@ -16,7 +16,7 @@ import {
   updateWorkspace,
   upsertPrimaryProduct,
 } from "../../../lib/onboarding/store"
-import { PLANNING_CYCLES } from "../../../lib/onboarding/types"
+import { PLANNING_CYCLES, stepForSlug } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { companyDocsApi } from "../../../lib/api"
 import { Check } from "../../auth/icons"
@@ -24,8 +24,8 @@ import { Check } from "../../auth/icons"
 const DRAFT_KEY = "company-step"
 
 /**
- * Onboarding step 01 — "Tell us about your company" (v6 screenshot spec
- * 2026-07-17).
+ * Onboarding step 02 — "Tell us about your company" (v6 screenshot spec
+ * 2026-07-17; moved behind the import step 2026-07-25).
  *
  * Fields: company name* (the only mandatory one), company website, mission &
  * vision, and strategy / OKRs (typed, or a doc upload alongside), plus an
@@ -33,7 +33,13 @@ const DRAFT_KEY = "company-step"
  *
  * On Continue we persist the company (+ product website seed), kick the
  * website analysis in the BACKGROUND (no interstitial — the result lands on
- * the onboarding context for later steps/settings), and advance to product.
+ * the onboarding context for later steps/settings), and advance to connectors.
+ *
+ * The workspace may already exist when this loads — the import step creates it
+ * (unnamed) when a file is uploaded there, and the heading parse has already
+ * written whatever the export said about the company. So the fields here seed
+ * FILL-ONLY from `workspace`, both to show those imported values and so the
+ * background extraction landing mid-step can't overwrite what is being typed.
  */
 export function CompanyStep() {
   const auth = useAuth()
@@ -59,16 +65,19 @@ export function CompanyStep() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  // Seed from the saved workspace on first load (draft takes priority).
+  // Seed from the saved workspace, filling only fields still empty — the same
+  // rule the product/workspace/metrics steps use. It runs on every `workspace`
+  // change rather than once, which is what lets the import that landed on step
+  // 1 (and the background extraction that finishes while this step is open) pop
+  // its values in; a restored draft and anything already typed always win.
   useEffect(() => {
     if (!workspace) return
-    if (draft) return
-    setCompanyName(workspace.display_name)
-    setWebsite(workspace.product?.website ?? "")
-    setMission(workspace.mission ?? "")
-    setStrategy(workspace.strategy ?? "")
-    setPortfolio(workspace.portfolio ?? "")
-    setPlanningCycle(workspace.planning_cycle ?? "")
+    setCompanyName((v) => v || workspace.display_name)
+    setWebsite((v) => v || (workspace.product?.website ?? ""))
+    setMission((v) => v || (workspace.mission ?? ""))
+    setStrategy((v) => v || (workspace.strategy ?? ""))
+    setPortfolio((v) => v || (workspace.portfolio ?? ""))
+    setPlanningCycle((v) => v || (workspace.planning_cycle ?? ""))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Save draft on visibility change (tab switch / minimize) — not per keystroke.
@@ -124,6 +133,7 @@ export function CompanyStep() {
     }
     const normalizedSite = normalizeProductWebsite(website)
     setSaving(true)
+    const nextStep = stepForSlug("connectors") ?? 3
     try {
       let ws = workspace
       if (workspace) {
@@ -133,7 +143,7 @@ export function CompanyStep() {
           strategy: strategy.trim() || null,
           portfolio: portfolio.trim() || null,
           planning_cycle: planningCycle || null,
-          onboarding_step: 2,
+          onboarding_step: nextStep,
         })
         const product = await upsertPrimaryProduct(workspace.id, {
           name: workspace.product?.name ?? companyName.trim(),
@@ -151,6 +161,7 @@ export function CompanyStep() {
           mission,
           strategy,
           userId: auth.user.id,
+          onboardingStep: nextStep,
         })
         // Portfolio + planning cycle aren't createWorkspace params — patch them
         // on right after (still one Continue for the user).
@@ -171,7 +182,7 @@ export function CompanyStep() {
       // runs server-side; the provider outlives this navigation.
       const analysisSite = ws?.product?.website ?? normalizedSite
       if (ws && analysisSite) startWebsiteAnalysis(analysisSite, ws.id)
-      router.push("/onboarding/import-context")
+      router.push("/onboarding/connectors")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your company.")
       setSaving(false)
@@ -182,7 +193,7 @@ export function CompanyStep() {
 
   return (
     <OnboardingChrome
-      step={1}
+      step={2}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -191,6 +202,7 @@ export function CompanyStep() {
       }
       subtitle="Add what you can — expand the optional sections to make it sharper."
       footerMeta="Company"
+      onBack={() => router.push("/onboarding/import-context")}
       onContinue={() => void save()}
       continueLabel="Next"
       continueDisabled={saving}
