@@ -8,12 +8,11 @@ import {
 } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
-import { useCompany } from "../../context/CompanyContext"
 import { PrdSections } from "./PrdSections"
 import { PrdHtmlView, type PrdHtmlHandle } from "./PrdHtmlView"
 import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
 import { EmptyPane } from "./EmptyPane"
-import { ApiError, multiAgentApi, prdApi } from "../../lib/api"
+import { multiAgentApi, prdApi } from "../../lib/api"
 import { markdownToPrdState } from "../../lib/prd-adapter"
 import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { mergeHistory, type HistoryEntry } from "../../lib/prdHistory"
@@ -97,7 +96,6 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
 } = {}) {
   const { showToast, openContentPanel } = useNavigation()
   const { content, setContent } = useContent()
-  const { activeCompany } = useCompany()
   const prd = content.prd
 
   // Jump to the Evidence tab from the HTML PRD's injected "View more evidence"
@@ -123,7 +121,22 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
     return () => { cancelled = true }
   }, [prd?.prd_id])
 
-  const [prdLoading, setPrdLoading] = useState(false)
+  // NO "load the workspace's latest PRD" fallback lives here any more.
+  //
+  // It used to fire whenever the panel had no PRD and nothing was generating,
+  // fetching prdApi.latest(company) to spare the old standalone PRD screen an
+  // empty pane on refresh. That screen is gone — this component is only ever the
+  // right rail now, and every caller that opens the PRD tab already supplies
+  // either a loaded PRD or `prdGenerating: true`.
+  //
+  // What it actually did was surface an UNRELATED document. Ask the chat to
+  // "generate a PRD for <x>", get the clarify-first questions back, and the rail
+  // sat empty and not-generating for exactly as long as it took to answer —
+  // whereupon this effect filled it with whatever PRD happened to be newest in
+  // the workspace. The user read that as the answer to their request. The same
+  // trap was armed after a failed generation, a stopped one, and on some tab
+  // switches. A specific PRD is always reachable by id (loadPrdById / the tab's
+  // prdId), so "most recent thing in the workspace" was never the right answer.
 
   // Parsed QA test-scenario sections to render under the PRD. Empty until a
   // ready qa-scenarios doc is fetched and parsed; a failed/absent/not-ready
@@ -131,22 +144,6 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
   // briefId/insightIndex (carried on PrdState), so EVERY load path triggers it —
   // including the brief card's "View PRD" (loadPrdById), not just latest/openGen.
   const [qaSections, setQaSections] = useState<PrdSection[]>([])
-
-  useEffect(() => {
-    // Skip the "load latest PRD" fetch while a generation is actively in flight —
-    // the in-progress flow will populate `content.prd` itself, and we don't want
-    // to race it with a stale latest record.
-    if (prd || !activeCompany || content.prdGenerating) return
-    let cancelled = false
-    setPrdLoading(true)
-    prdApi.latest(activeCompany).then((record) => {
-      if (cancelled || !record.payload_md) return
-      setContent({ prd: { ...markdownToPrdState(record.payload_md), prd_id: record.id, figma_file_key: undefined, llmPart: record.llm_part, briefId: record.brief_id, insightIndex: record.insight_index, source: record.source } })
-    }).catch((e) => {
-      if (e instanceof ApiError && e.status === 404) return
-    }).finally(() => { if (!cancelled) setPrdLoading(false) })
-    return () => { cancelled = true }
-  }, [prd, activeCompany, content.prdGenerating, setContent])
 
   // After the PRD's brief reference is known, ALSO fetch the QA test-scenarios
   // doc for the same brief_id + insight_index. Render its parsed sections only
@@ -329,10 +326,6 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
             {content.prdGenerating ? (
               <div data-testid="prd-generating" style={{ display: "flex", alignItems: "center", gap: 12, padding: 32, color: "var(--ink-2)" }}>
                 <span className="prd-loader" aria-hidden /> Generating PRD…
-              </div>
-            ) : prdLoading ? (
-              <div style={{ display: "flex", alignItems: "center", gap: 12, padding: 32, color: "var(--ink-2)" }}>
-                <span className="prd-loader" aria-hidden /> Loading PRD…
               </div>
             ) : (
               <EmptyPane title="No PRD draft loaded" hint="Generate a PRD from the Weekly Brief by selecting an insight and clicking Generate PRD." placeholders={0} />
