@@ -72,9 +72,13 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
     // after the user turn, before `getApi()` settles — shares this same create
     // instead of starting a second one. This is the core of the "ONE conversation
     // per tab" invariant under fire-and-forget timing.
-    const prdId = deps.getTabPrdId?.(tabId) ?? undefined
     const createPromise: Promise<number> = (async () => {
       const api = await deps.getApi()
+      // Read the tab's PRD id as LATE as possible: a PRD command stamps it on
+      // the tab the moment its generate call returns, which can land while this
+      // create is still in flight. Reading it here rather than up front means
+      // the row is often inserted already bound to its PRD.
+      const prdId = deps.getTabPrdId?.(tabId) ?? undefined
       const conv = await api.create({
         title: create.title,
         preview: create.query.slice(0, 200),
@@ -149,7 +153,33 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
     }
   }
 
-  return { pushUserTurn, pushAssistantTurn, resolveConvId }
+  /**
+   * Create this tab's conversation NOW (if it has none) and resolve its id,
+   * WITHOUT writing a turn — the turn follows through the normal
+   * pushUserTurn path, which reuses this same conversation.
+   *
+   * Used by the PRD command flows, which must hand the conversation id to
+   * `POST /v1/prd/import` / `generate-from-task` so the backend can bind the
+   * two rows the moment it creates the PRD. Doing that on the client instead
+   * meant the link was lost whenever the user navigated away mid-generation.
+   *
+   * Registers the create synchronously (via resolveConvId's in-flight map), so
+   * a caller that fires immediately after this returns will share it rather
+   * than racing a second create. Resolves null on failure — every caller must
+   * treat the id as best-effort and proceed without it.
+   */
+  function ensureConversation(
+    tabId: string,
+    args: { turnId: string; title: string; query: string },
+  ): Promise<number | null> {
+    try {
+      return resolveConvId(tabId, args).catch(() => null)
+    } catch {
+      return Promise.resolve(null)
+    }
+  }
+
+  return { pushUserTurn, pushAssistantTurn, resolveConvId, ensureConversation }
 }
 
 export type ChatPersistence = ReturnType<typeof createChatPersistence>

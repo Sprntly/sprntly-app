@@ -35,6 +35,7 @@ from app.db import (
 )
 from app.db.ideation import get_ideation_item
 from app.db.briefs import ensure_uploads_brief, get_current_brief
+from app.db.conversations import bind_conversation_to_prd
 from app.db.evidences import find_existing_evidence_for_theme
 from app.evidence_kg import generate_task_evidence
 from app.ingest import convert
@@ -305,6 +306,10 @@ class TaskGenerateIn(BaseModel):
     task: str = Field(..., min_length=3, max_length=4000)
     force: bool = False
     source_docs: list[TaskSourceDoc] | None = Field(default=None, max_length=8)
+    # The chat conversation this command came from, when there is one. Bound to
+    # the PRD server-side so navigating away mid-generation can't orphan the
+    # chat from its document. Optional — older clients omit it.
+    conversation_id: int | None = None
 
 
 def _render_source_docs(docs: list[TaskSourceDoc]) -> str:
@@ -351,6 +356,13 @@ async def generate_from_task(
     if not body.force:
         existing = find_existing_prd_for_theme(brief_id, theme_id, variant=PRD_VARIANT)
         if existing:
+            # Re-issuing the command resolves the SAME PRD — the new chat still
+            # needs to point at it, or reopening that chat shows no PRD at all.
+            if body.conversation_id is not None:
+                bind_conversation_to_prd(
+                    body.conversation_id, existing["id"],
+                    company.company_id, company.user_id,
+                )
             return {
                 "prd_id": existing["id"],
                 "status": existing["status"],
@@ -379,6 +391,13 @@ async def generate_from_task(
         theme_id=theme_id,
     )
     # No _record_prd_action: there is no real theme to advance in the lifecycle.
+
+    # Link the commanding chat to this PRD NOW — before the (multi-second)
+    # generation runs and before the client could navigate away.
+    if body.conversation_id is not None:
+        bind_conversation_to_prd(
+            body.conversation_id, prd_id, company.company_id, company.user_id
+        )
 
     # Documents attached earlier in the chat thread ride along as authoritative
     # source material (extra_source_md) — layered on top of the normal KG/task
@@ -495,6 +514,11 @@ _MAX_IMPORT_BYTES = 25 * 1024 * 1024  # 25 MB
 async def import_prd(
     file: UploadFile = File(...),
     dataset: str = Form(...),
+    # The chat conversation this import was commanded from, when there is one.
+    # Bound to the new PRD here (server-side) so leaving the page mid-import can
+    # never orphan the chat from the document it produced. Optional: other
+    # callers (and older clients) simply omit it.
+    conversation_id: int | None = Form(None),
     company: WorkspaceContext = Depends(require_workspace),
 ):
     """Import an existing PRD the customer uploaded (PDF/PPT/DOCX/…).
@@ -544,6 +568,13 @@ async def import_prd(
         variant=PRD_VARIANT,
         source="upload",
     )
+
+    # Link the commanding chat to this PRD NOW — before the (multi-second)
+    # generation runs and before the client could navigate away.
+    if conversation_id is not None:
+        bind_conversation_to_prd(
+            conversation_id, prd_id, company.company_id, company.user_id
+        )
 
     task = asyncio.create_task(
         generate_prd_and_warm(

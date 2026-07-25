@@ -1725,13 +1725,22 @@ export const prdApi = {
    *  the task text (find-or-create keyed on it) and grounds on the company's
    *  data. Same fire-and-forget contract as `generate`: returns a prd_id to
    *  poll via prdApi.get(id) until status === 'ready'. */
-  generateFromTask: (task: string, force = false, sourceDocs?: TurnAttachment[]) =>
+  generateFromTask: (
+    task: string,
+    force = false,
+    sourceDocs?: TurnAttachment[],
+    /** The chat conversation this command came from. The backend binds it to the
+     *  new PRD immediately, so navigating away mid-generation can't leave the
+     *  chat orphaned (reopened from history with no PRD and no View PRD button). */
+    conversationId?: number | null,
+  ) =>
     api.post<PrdStartResponse>("/v1/prd/generate-from-task", {
       task,
       force,
       // Documents attached earlier in the chat thread — the backend grounds the
       // PRD on them (they used to be silently forgotten by this command).
       ...(sourceDocs && sourceDocs.length ? { source_docs: sourceDocs } : {}),
+      ...(conversationId != null ? { conversation_id: conversationId } : {}),
     }),
   /** Clarify-first sufficiency gate (runs on EVERY chat-PRD command before
    *  generation): does the task + attached documents carry the ingredients a
@@ -1775,10 +1784,13 @@ export const prdApi = {
    *  skill. Same fire-and-forget contract as `generate`: returns a prd_id to
    *  poll via prdApi.get(id) until status === 'ready'. `dataset` is the company
    *  slug the PRD belongs to. */
-  importDoc: (file: File, dataset: string) => {
+  importDoc: (file: File, dataset: string, conversationId?: number | null) => {
     const form = new FormData()
     form.append("file", file, file.name)
     form.append("dataset", dataset)
+    // See generateFromTask: binds the commanding chat to the PRD server-side so
+    // leaving the page mid-import can't orphan it.
+    if (conversationId != null) form.append("conversation_id", String(conversationId))
     return api.post<PrdStartResponse>("/v1/prd/import", form)
   },
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
