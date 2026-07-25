@@ -780,20 +780,28 @@ describe("ChatScreen — documents attached EARLIER in the thread ground a later
     await typeAndSendInTab("generate a PRD")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith(
-      "please review this deck",
-      false,
-      [{ name: "Fraznet Enhancements.pptx", content: "## Slide 1\n\nFraznet MRT workflow" }],
-      // Mid-conversation: the tab already has its conversation, so the backend
-      // binds at creation time.
-      BOUND_CONV_ID,
-    )
+    // The attached document still leads, and the CONVERSATION now rides with it:
+    // a command like this means "build it from what we've been discussing", and
+    // the substance often sits in the agent's replies rather than the user's
+    // typing. Attachment first, transcript last (closest to the prompt's end).
+    const docs = generateFromTask.mock.calls[0][2] as { name: string; content: string }[]
+    expect(docs.map((d) => d.name)).toEqual([
+      "Fraznet Enhancements.pptx",
+      "Conversation (this chat)",
+    ])
+    expect(docs[0].content).toContain("Fraznet MRT workflow")
+    expect(docs[1].content).toContain("please review this deck")
+    expect(generateFromTask.mock.calls[0][0]).toBe("please review this deck")
+    expect(generateFromTask.mock.calls[0][1]).toBe(false)
+    // Mid-conversation: the tab already has its conversation, so the backend
+    // binds at creation time.
+    expect(generateFromTask.mock.calls[0][3]).toBe(BOUND_CONV_ID)
     // The doc grounds a chat-task PRD — it is NOT re-routed to the import flow
     // (that stays same-message-attachment only).
     expect(importDoc).not.toHaveBeenCalled()
   })
 
-  it("a command with NO thread documents sends no sourceDocs", async () => {
+  it("with no attached documents, the CONVERSATION is what grounds the PRD", async () => {
     renderChat()
     await typeAndSend("our checkout drops users at the payment step")
     await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
@@ -801,11 +809,30 @@ describe("ChatScreen — documents attached EARLIER in the thread ground a later
     await typeAndSendInTab("generate a PRD")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith(
-      "our checkout drops users at the payment step",
-      false,
-      undefined,
-      BOUND_CONV_ID,
-    )
+    // Previously this sent NOTHING but the task text, so the backend fell back to
+    // retrieving over the workspace KG and returned a PRD about whatever the
+    // workspace was mostly about. The thread is the authoritative material now;
+    // the KG stays as the supporting layer underneath it.
+    const docs = generateFromTask.mock.calls[0][2] as { name: string; content: string }[]
+    expect(docs.map((d) => d.name)).toEqual(["Conversation (this chat)"])
+    expect(docs[0].content).toContain("our checkout drops users at the payment step")
+    // The agent's own reply is carried too — that is where a fetched ticket or
+    // finding lives, and it was the whole point of the reported bug.
+    expect(docs[0].content).toContain("Sprntly:")
+    expect(generateFromTask.mock.calls[0][3]).toBe(BOUND_CONV_ID)
+  })
+
+  it("leaves Sprntly's own PRD chatter out of the grounding material", async () => {
+    renderChat()
+    await typeAndSend("our checkout drops users at the payment step")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    await typeAndSendInTab("generate a PRD")
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+
+    // The command acknowledgment ("…Use the View PRD button…") is process
+    // chatter about making a PRD, not material about the product — feeding it
+    // back would read as a requirement.
+    const docs = generateFromTask.mock.calls[0][2] as { name: string; content: string }[]
+    expect(docs[0].content).not.toContain("View PRD button")
   })
 })

@@ -116,6 +116,14 @@ import { ChatScreen } from "../ChatScreen"
 const NO_CONV_ID = null
 const BOUND_CONV_ID = 1
 
+// A PRD command grounds on the CONVERSATION (agent replies included), sent as
+// authoritative source material so the document is about what was discussed
+// rather than whatever the workspace KG retrieves. A command that spawns its own
+// fresh tab has no thread behind it yet, so it still sends no docs.
+const CONVERSATION_DOC = expect.arrayContaining([
+  expect.objectContaining({ name: "Conversation (this chat)" }),
+])
+
 // The ContentPanel itself renders in AppShell (outside this tree) — observe
 // which panel tab is open via the navigation context.
 function PanelProbe() {
@@ -242,8 +250,9 @@ describe("ChatScreen — same-tab PRD generation", () => {
     // A NEW-topic command on that PRD-bound tab must not evict its PRD.
     await typeAndSendInThread("generate a PRD for password reset flows")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(2))
-    // Its own NEW tab, so there is no conversation row to bind yet.
-    expect(generateFromTask).toHaveBeenLastCalledWith("password reset flows", false, undefined, NO_CONV_ID)
+    // Its own NEW tab, so there is no conversation row to bind yet — and no
+    // thread behind it either, so nothing to ground on but the topic itself.
+    expect(generateFromTask).toHaveBeenLastCalledWith("password reset flows", false, CONVERSATION_DOC, NO_CONV_ID)
     await waitFor(() => expect(chatTabCount()).toBe(2))
   })
 
@@ -285,7 +294,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
     await typeAndSendInThread("spec this out")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     // Seeded from THIS tab's conversation — and generated right here.
-    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined, BOUND_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, CONVERSATION_DOC, BOUND_CONV_ID)
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
   })
@@ -298,7 +307,7 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
 
     await typeAndSendInThread("let's get a PRD going for the checkout revamp")
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined, BOUND_CONV_ID)
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, CONVERSATION_DOC, BOUND_CONV_ID)
     expect(chatTabCount()).toBe(1)
     expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
   })

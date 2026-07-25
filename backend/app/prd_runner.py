@@ -350,30 +350,139 @@ def _render_import_source(md: str) -> str:
     return _IMPORT_SOURCE_FRAMING.format(source=md.strip())
 
 
-# Chat-task PRDs: documents the user attached EARLIER in the conversation
-# ("here's the requirements doc" … then later "generate a PRD"). Unlike
+# ── Chat PRD grounding: thread-only vs layered ───────────────────────────────
+# True  → a chat PRD grounds ONLY on the user's session material (the thread and
+#         any uploaded document). Workspace/KG retrieval is skipped entirely, so
+#         nothing from the wider workspace can reach the prompt.
+# False → the earlier behaviour: the user's material leads and the retrieved
+#         workspace evidence follows it, demoted to background.
+#
+# Set True at the user's request after the layered version still produced PRDs
+# carrying workspace content: asking for a PRD of Jira ticket KAN-1033 ("Build a
+# car driving feature") returned a document about the workspace's reconditioning
+# /MRT theme, because retrieval matched hard on the shared word "ticket".
+# Demoting that block was not enough — its mere presence kept pulling the
+# document off-topic.
+#
+# THIS IS A DELIBERATE EXPERIMENT AND IS MEANT TO BE REVERSIBLE. Flipping this
+# one flag back to False restores layered grounding; the demoted-context path
+# and its framing are kept intact for exactly that reason. What is lost while
+# True: workspace metrics, prior findings and house terminology no longer enrich
+# a chat PRD, so it says only what the conversation and its documents support.
+# The brief, ideation and import paths are unaffected either way — they carry no
+# `extra_source_md`.
+CHAT_SOURCE_EXCLUSIVE = True
+
+
+# Chat-task PRDs: what the user brought to THIS session — the conversation
+# itself (their messages and the assistant's replies, which is where a fetched
+# ticket or finding appears) and any document they attached. Unlike
 # `import_source_md` (an existing PRD, faithfully re-laid-out, KG grounding
-# skipped), these are SOURCE MATERIAL layered on top of the normal task/KG
-# grounding: requirements must trace to them, but the document is input, not
-# the finished artifact.
-_USER_DOCS_FRAMING = """\
-DOCUMENTS ATTACHED BY THE USER IN THIS CONVERSATION
+# skipped), this is SOURCE MATERIAL rather than the finished artifact — but it
+# is the PRIMARY source, and it decides what the document is about.
+#
+# It says so explicitly because merely including this material was not enough.
+# Reported case: the user pulled up Jira ticket KAN-1033 ("Build a car driving
+# feature") and asked for a PRD of it. The workspace KG is dense with unrelated
+# reconditioning/MRT material, retrieval matched hard on the word "ticket", and
+# the PRD came back titled "MRT Ticket Auto-Creation" — about the workspace, not
+# about the ticket the user was looking at. Ordering and precedence are the fix:
+# this block goes FIRST, and the retrieved workspace context that follows is
+# explicitly demoted to background that may not move the subject.
+# Thread-only mode (CHAT_SOURCE_EXCLUSIVE). Deliberately shaped like
+# _IMPORT_SOURCE_FRAMING — a short instruction followed by DELIMITED source text
+# — because that shape is known to author well, while the first attempt here did
+# not: it described the material in prose and referred to "workspace context
+# supplied after this block". With retrieval skipped there IS no block after it,
+# and the model rendered the dangling reference literally ("Workspace context
+# (background only) — [none provided]") and then restated the transcript instead
+# of writing a PRD from it. Hence: no forward references to material that may not
+# exist, and an explicit "input, never output" instruction.
+_CHAT_ONLY_SOURCE_FRAMING = """\
+SOURCE MATERIAL — THIS CONVERSATION
 
-The block below is the text of document(s) the user attached in chat while \
-discussing this task. They are authoritative source material for this PRD:
+The block below is the user's own working session: the messages exchanged in \
+this chat — BOTH their requests and the assistant's replies, which is where a \
+fetched ticket, search result or summary appears — plus the text of any document \
+they attached. It is the ONLY source for this PRD; no other evidence is supplied.
 
-- Ground requirements, scope, constraints, and terminology in these documents \
-wherever they speak — the user attached them precisely so the PRD reflects them.
-- Do NOT fabricate content beyond the documents and the other evidence provided.
-- Where a document conflicts with other evidence, prefer the document — it is \
-the user's own, more specific context.
+- AUTHOR a PRD from this material. Do NOT restate, summarise, quote back or \
+reformat the conversation: the transcript is INPUT, never output. Nothing that \
+reads as chat ("User:", "Sprntly:", a pasted ticket table) belongs in the \
+document.
+- The subject is whatever this material is about — if it centres on a specific \
+ticket, feature or problem, that IS the PRD's subject.
+- Take scope, requirements, constraints and terminology from here.
+- Where it is silent, say so with the METHOD's markers (`[NEED: …]` / \
+`[ASSUMPTION]`) rather than inventing content or reaching for an adjacent \
+product area. A thin conversation yields a short, honest PRD.
+
+--- BEGIN CONVERSATION ---
+{docs}
+--- END CONVERSATION ---
+"""
+
+
+def _render_chat_only_source(md: str) -> str:
+    """Wrap the user's session material as the sole source for a chat PRD."""
+    return _CHAT_ONLY_SOURCE_FRAMING.format(docs=md.strip())
+
+
+_USER_SOURCE_FRAMING = """\
+PRIMARY SOURCE — THE USER'S OWN MATERIAL FROM THIS SESSION
+
+Everything below came from the user's current session: the messages exchanged in \
+this chat — BOTH their requests and the assistant's replies, which is where a \
+fetched ticket, search result, or summary appears — plus the text of any \
+document they attached.
+
+This is the PRIMARY source for the PRD, and it decides what the PRD is ABOUT:
+
+- The subject, scope, terminology and requirements come from HERE. If this \
+material centres on a specific ticket, feature, or problem, that IS the PRD's \
+subject — write about it, not about an adjacent topic that merely resembles it.
+- Ground requirements, scope, constraints and terminology in this material \
+wherever it speaks: the user put it in front of you precisely so the PRD \
+reflects it.
+- Any workspace context supplied after this block is BACKGROUND ONLY. It may add \
+supporting detail that genuinely fits this subject; it must never change, widen \
+or replace the subject.
+- Where the two conflict, THIS material wins — it is the user's own, more \
+specific and more recent context.
+- Do NOT fabricate content beyond this material and the supporting evidence.
 
 {docs}"""
 
 
 def _render_user_docs(md: str) -> str:
-    """Wrap chat-attached document text in its source-material framing."""
-    return _USER_DOCS_FRAMING.format(docs=md.strip())
+    """Wrap the user's session material (conversation + attached documents) in
+    its primary-source framing."""
+    return _USER_SOURCE_FRAMING.format(docs=md.strip())
+
+
+# The retrieved workspace/KG evidence, when it is NOT the primary source. Same
+# text as always — only relabelled and pushed below the user's own material, so a
+# strong-but-off-topic retrieval hit cannot present itself as the subject.
+_SUPPORTING_CONTEXT_FRAMING = """\
+SUPPORTING WORKSPACE CONTEXT — BACKGROUND ONLY
+
+The block below was retrieved from the workspace's knowledge graph by matching \
+the task text. It is corroborating background, NOT the subject: the PRD's \
+subject is fixed by the PRIMARY SOURCE above.
+
+- Use it only where it genuinely supports that subject — metrics, prior \
+findings, existing behaviour, house terminology.
+- A strong keyword match here does NOT make something the topic. If this context \
+is about a different product area than the primary source, leave it out rather \
+than bending the PRD toward it.
+
+{evidence}"""
+
+
+def _render_supporting_context(evidence: str) -> str:
+    """Demote retrieved KG/corpus evidence to background when the user supplied
+    their own primary material."""
+    return _SUPPORTING_CONTEXT_FRAMING.format(evidence=evidence.strip())
 
 
 def _build_context(
@@ -426,22 +535,34 @@ def _build_context(
     # brief at insight_index); the ideation path passes the synthesized insight so
     # the trail resolves the right theme. Splitting the call keeps existing
     # monkeypatches of _resolve_grounding (3-arg) working.
+    has_user_source = bool(extra_source_md and extra_source_md.strip())
     if import_source_md is not None:
         # PRD-import path: the customer's uploaded PRD text IS the source. Frame
         # it for faithful re-layout and skip KG/corpus grounding (trail=None →
         # empty kg_refs in the decision log).
         evidence, trail = _render_import_source(import_source_md), None
+    elif has_user_source and CHAT_SOURCE_EXCLUSIVE:
+        # Chat PRDs ground on the user's session material ALONE — retrieval is
+        # not run at all, so there is no workspace evidence to leak in and
+        # trail=None leaves kg_refs empty (as on the import path). Uses the
+        # thread-only framing, which must not reference a workspace block that
+        # will not be there.
+        evidence, trail = _render_chat_only_source(extra_source_md or ""), None
     elif insight_override is not None:
         evidence, trail = _resolve_grounding(dataset, brief, insight_index, insight)
     else:
         evidence, trail = _resolve_grounding(dataset, brief, insight_index)
-    # `extra_source_md` — documents the user attached in chat (the chat-task
-    # path). Layered ON TOP of the normal grounding, not replacing it: the KG
-    # trail/decision log stay intact, and the docs ride in the evidence block
-    # under their own authoritative-source framing.
-    if extra_source_md and extra_source_md.strip():
-        docs_block = _render_user_docs(extra_source_md)
-        evidence = f"{evidence}\n\n{docs_block}" if (evidence or "").strip() else docs_block
+    # Layered mode (CHAT_SOURCE_EXCLUSIVE = False): the user's material leads and
+    # the retrieved workspace evidence follows, demoted to background. Ordering
+    # matters as much as wording — appending the user's material AFTER a long KG
+    # block left the model anchored on whatever the workspace was about.
+    if has_user_source and not CHAT_SOURCE_EXCLUSIVE:
+        user_block = _render_user_docs(extra_source_md or "")
+        evidence = (
+            f"{user_block}\n\n{_render_supporting_context(evidence)}"
+            if (evidence or "").strip()
+            else user_block
+        )
     # Part A is generated as a self-contained HTML page in the prd-author visual
     # system. The template is the skill's own HTML skeleton (with {{placeholders}}
     # + an EMPTY `<style>` marker) — injected verbatim so the model fills the exact
