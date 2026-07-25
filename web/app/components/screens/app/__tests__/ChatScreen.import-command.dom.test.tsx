@@ -568,8 +568,18 @@ async function openPrdTabViaImport() {
   await typeAndSend("generate a PRD from this")
   await waitFor(() => expect(importDoc).toHaveBeenCalledTimes(1))
   await waitFor(() => expect(panelTab()).toBe("prd"))
-  // The tab's PRD has landed (resume poll resolved) before the test proceeds.
   await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalled())
+  // …and, crucially, wait for that PRD to be RENDERED onto the tab — not merely
+  // for the poll to have been called. The chat-edit branch is gated on the tab
+  // carrying a prd id, and submitAsk reads `activeTab` from render state, so a
+  // phrase typed before the re-render lands routes to the ask agent instead and
+  // chatEdit is never called. That race is invisible on a fast machine and cost
+  // three CI failures on a loaded runner. "View PRD" is the precise signal: the
+  // label is "Generating PRD…" until the document is on the tab.
+  await waitFor(() => {
+    const labels = Array.from(document.querySelectorAll("button")).map((b) => b.textContent ?? "")
+    expect(labels.some((t) => t.includes("View PRD"))).toBe(true)
+  })
   runAskGeneration.mockClear()
   briefCurrent.mockClear()
 }

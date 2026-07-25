@@ -199,7 +199,16 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     })
     mount()
 
+    // Wait for the button to be ENABLED, not merely labelled. `hasAnalytics`
+    // starts null, which is falsy — so "Looks right · enter Sprntly" renders on
+    // the very first paint, while `continueDisabled` (saving || hasAnalytics ===
+    // null) still holds the button shut until the connector probe resolves.
+    // Matching the label alone let the click land on a disabled button, where it
+    // was swallowed and `replace` never ran; the test then failed on whether the
+    // probe happened to win the race, which it lost on a loaded CI runner. The
+    // sibling probe-failure test below already waits on `disabled` this way.
     await waitFor(() => {
+      expect(continueBtn().disabled).toBe(false)
       expect(continueBtn().textContent).toMatch(/Looks right · enter Sprntly/)
     })
 
