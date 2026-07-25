@@ -76,6 +76,26 @@ def _log_embedding_usage(
                 },
                 model=model,
             )
+            # Usage ledger row. Embeddings never touch the Anthropic client, so
+            # the metering proxy can't see them — this is the one call site that
+            # has to report itself. `provider='openai'` keeps them separable on
+            # the dashboard: they are billed to OUR OpenAI account regardless of
+            # whose Claude key the workspace uses, so they must not be folded
+            # into a customer's "spend on your key" total.
+            from app.db.llm_usage import record_usage
+            from app.usage_context import Feature
+
+            record_usage(
+                company_id=enterprise_id,
+                feature=Feature.EMBEDDINGS,
+                operation=purpose,
+                provider="openai",
+                model=model,
+                key_mode="platform",
+                input_tokens=prompt_tokens,
+                est_cost_usd=round(cost, 6),
+                latency_ms=duration_ms,
+            )
     except Exception:  # noqa: BLE001 — telemetry must never break embedding
         logger.exception("embedding usage logging failed (continuing)")
 
