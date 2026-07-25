@@ -24,14 +24,16 @@ import {
  * semantic slug with its screen component, in flow order (2026-07-21
  * screenshot spec):
  *
- *   1. company        → CompanyStep       (name*; website/strategy, mission +
- *                                        portfolio + planning cycle behind
- *                                        "Add more")
- *   2. import-context → ImportContextStep (bring your existing AI-assistant
+ *   1. import-context → ImportContextStep (bring your existing AI-assistant
  *                                        context in — paste our prompt into
  *                                        any assistant, upload the .md it
  *                                        returns. OPTIONAL: skipping means
- *                                        typing the later steps by hand)
+ *                                        typing the later steps by hand. FIRST
+ *                                        since 2026-07-25 so it prefills every
+ *                                        step there is, company included)
+ *   2. company        → CompanyStep       (name*; website/strategy, mission +
+ *                                        portfolio + planning cycle behind
+ *                                        "Add more")
  *   3. connectors     → Connectors        (connect your tools — all optional)
  *   4. api-key        → ApiKey            (own Claude/Anthropic key — OPTIONAL,
  *                                        skippable; also in Settings → Admin)
@@ -60,8 +62,8 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   slug: OnboardingStepSlug
   Component: React.ComponentType
 }> = [
-  { slug: "company", Component: CompanyStep },
   { slug: "import-context", Component: ImportContextStep },
+  { slug: "company", Component: CompanyStep },
   { slug: "connectors", Component: Connectors },
   { slug: "api-key", Component: ApiKey },
   { slug: "workspace", Component: WorkspaceStep },

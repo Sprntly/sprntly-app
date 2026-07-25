@@ -1,4 +1,4 @@
-import { orgInviteApi } from "../api"
+import { onboardingApi, orgInviteApi } from "../api"
 import { generateSlug } from "../onboard-helpers"
 import { getSupabase } from "../supabase/client"
 import {
@@ -389,7 +389,13 @@ export async function fetchWorkspaceForUser(
 }
 
 export async function createWorkspace(input: {
+  /** May be blank: the import-context step creates the row before the company
+   *  is known (the upload endpoint needs a tenant), and the company step then
+   *  collects the name into the same row. `companies.display_name` allows an
+   *  empty string; `products.name` does NOT, which is why the product below is
+   *  skipped rather than seeded blank. */
   companyName: string
+  /** Blank → no primary product is created yet (products_name_nonempty). */
   productName: string
   productWebsite?: string | null
   /** The signup choice, denormalized from profiles.account_type so
@@ -410,8 +416,13 @@ export async function createWorkspace(input: {
   competitors?: string[]
   techStack?: string[]
   userId: string
+  /** Where to park the resume marker — the 1-based index of the step the user
+   *  lands on NEXT. Defaults to 2 (`company`), which is where the import step
+   *  sends them; the company step passes its own successor. */
+  onboardingStep?: number
 }): Promise<WorkspaceCompany> {
   const supabase = getSupabase()
+  const nextStep = clampStep(input.onboardingStep ?? 2)
 
   // The slug is an opaque, name-independent token that always satisfies the
   // backend slug format. The company name flows into display_name only. On a
@@ -437,7 +448,7 @@ export async function createWorkspace(input: {
         tech_stack: input.techStack ?? [],
         kpi_tree: emptyKpiTree(),
         feature_flags: DEFAULT_FEATURE_FLAGS,
-        onboarding_step: 2,
+        onboarding_step: nextStep,
       })
       .select("*")
       .single()
@@ -458,19 +469,57 @@ export async function createWorkspace(input: {
       } catch {
         /* no pending invite, or transient — onboarding proceeds regardless */
       }
-      const product = await upsertPrimaryProduct(String(company.id), {
-        name: input.productName,
-        website: input.productWebsite ?? null,
-      })
+      // No name yet (import-first) → no product row. `products_name_nonempty`
+      // rejects a blank one, and the company/product steps both upsert it.
+      const product = input.productName.trim()
+        ? await upsertPrimaryProduct(String(company.id), {
+            name: input.productName,
+            website: input.productWebsite ?? null,
+          })
+        : null
       await supabase
         .from("profiles")
-        .update({ onboarding_step: 2 })
+        .update({ onboarding_step: nextStep })
         .eq("id", input.userId)
       return rowToCompany(company as Record<string, unknown>, product)
     }
     if (companyErr?.code !== "23505") throw companyErr ?? new Error("Could not create workspace")
   }
   throw new Error("Could not create workspace — please try again.")
+}
+
+/** The workspace name plus the five fields the `workspaces` row owns. */
+export type WorkspaceOwnedFields = {
+  team_scope?: string | null
+  team_strategy?: string | null
+  team_roadmap?: string | null
+  sizing_methodology?: string | null
+  additional_context?: string | null
+}
+
+/**
+ * Persist the "Your workspace" block — the workspace NAME plus the five typed
+ * fields that live with it.
+ *
+ * These moved off the companies row and onto the company's default `workspaces`
+ * row (20260722120000_workspace_owned_fields.sql), and `rowToCompany` reads them
+ * from there. Writing them through `updateWorkspace` therefore patches the
+ * columns that migration left DORMANT and then reads the workspaces row back —
+ * so the value returns to the caller as whatever it was before, and the write
+ * vanishes entirely on the next fetch. This goes to the endpoint that owns the
+ * row instead: it renames the company's default workspace (never creates a
+ * second), writes the five fields, and is idempotent.
+ *
+ * `name` is mandatory server-side, so callers writing only the typed fields
+ * pass the name the workspace already has.
+ */
+export async function saveWorkspaceOwnedFields(
+  name: string,
+  fields: WorkspaceOwnedFields,
+): Promise<void> {
+  const clean = name.trim()
+  if (!clean) throw new Error("Workspace name cannot be empty")
+  await onboardingApi.createWorkspace(clean.slice(0, 100), fields)
 }
 
 export async function updateWorkspace(

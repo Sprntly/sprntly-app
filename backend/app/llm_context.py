@@ -55,7 +55,12 @@ logger = logging.getLogger(__name__)
 #: Bumped whenever the heading contract below changes in a way that would make
 #: an older export parse wrong. Emitted in the prompt and echoed in the parse
 #: result so a stale export is recognisable rather than silently mis-mapped.
-CONTEXT_FORMAT_VERSION = "1"
+#:
+#: v2 (2026-07-25): `## Team` carries `- Name:` / `- Owns:` bullets instead of
+#: prose (the workspace step's mandatory NAME field had no source before), and
+#: `## Sizing` was added. A v1 export still parses — the Team prose falls back
+#: to team_scope exactly as it did.
+CONTEXT_FORMAT_VERSION = "2"
 
 #: The prompt we hand the user to run in their own assistant.
 #:
@@ -419,7 +424,11 @@ do not, write exactly: UNKNOWN
 
 ## Prioritization
 
+## Sizing
+
 ## Team
+- Name:
+- Owns:
 
 ## Anything else
 
@@ -432,8 +441,15 @@ Guidance per section:
 - Metrics: the metrics the team is judged on, comma-separated. Name the north star
   first if one is defined. Do NOT carry over a stale value or target — Stage 3 makes
   those HIGHLY VOLATILE, so a number with no recent source is omitted entirely.
-- Prioritization: how the team decides what to build next.
-- Team: the team or workspace name, then what it owns end to end.
+- Prioritization: how the team decides what to build next. Name the framework if
+  they use one (RICE, ICE, WSJF, MoSCoW, Kano, volume/severity), and otherwise
+  describe the actual basis — goals and OKRs, impact vs effort, customer pain
+  volume. One line is enough; this is read back as a classification.
+- Sizing: how the team sizes work — story points, Fibonacci, t-shirt sizes, who
+  sizes, how estimates are calibrated against past work.
+- Team → Name: the team or workspace the user works in, e.g. "Nutrition &
+  Sleep" — NOT the company name again, unless the whole company is one team.
+  Owns: what that team owns end to end — surfaces, flows, outcomes.
 - Anything else: everything the sections above have no room for and that Stage 4's
   must-attempt blocks turned up — notable past decisions and their outcomes, the
   not-doing list and anti-positioning, known constraints, strategic bets, internal
@@ -476,6 +492,10 @@ _SECTION_FIELDS: dict[str, str] = {
     "competitors": "competitors",
     "metrics": "metrics",
     "prioritization": "prioritization_framework",
+    "sizing": "sizing_methodology",
+    # v1 exports wrote the team section as prose. v2 asks for `- Name:` /
+    # `- Owns:` bullets (see _BULLET_FIELDS); this stays so an older file's
+    # prose still lands on the scope field rather than being dropped.
     "team": "team_scope",
     "anything else": "notes",
 }
@@ -489,6 +509,8 @@ _BULLET_FIELDS: dict[tuple[str, str], str] = {
     ("product", "website"): "product_website",
     ("product", "surfaces"): "surfaces",
     ("product", "monetization"): "monetization",
+    ("team", "name"): "team_name",
+    ("team", "owns"): "team_scope",
 }
 
 #: Sections the prompt asks for that are for the HUMAN, not for onboarding: the
@@ -565,7 +587,16 @@ _PLANNING_CYCLE_ALIASES: dict[str, str] = {
     "every month": "monthly",
 }
 
+#: Deliberately WIDE (2026-07-25). Prioritization is the field an export is
+#: least likely to phrase canonically — almost nobody writes "goal-based", they
+#: write "whatever moves the north star this half" — and the six options are
+#: broad enough that the common phrasings genuinely belong to one of them. A
+#: blank here also costs more than elsewhere: the metrics step makes the
+#: framework MANDATORY, so an unmapped value is a form the import promised to
+#: fill and didn't.
 _FRAMEWORK_ALIASES: dict[str, str] = {
+    # goal-based — the honest home for "we build what moves the goal", which is
+    # what most teams describe when they name no framework at all.
     "goal based": "goal-based",
     "goal-based": "goal-based",
     "based on goal": "goal-based",
@@ -573,21 +604,100 @@ _FRAMEWORK_ALIASES: dict[str, str] = {
     "goal": "goal-based",
     "goals": "goal-based",
     "objective based": "goal-based",
+    "objectives": "goal-based",
+    "okr": "goal-based",
+    "okrs": "goal-based",
+    "okr based": "goal-based",
+    "okr driven": "goal-based",
+    "goal driven": "goal-based",
+    "outcome based": "goal-based",
+    "outcome driven": "goal-based",
+    "outcomes": "goal-based",
+    "strategic alignment": "goal-based",
+    "strategy": "goal-based",
+    "north star": "goal-based",
+    "metric impact": "goal-based",
+    "impact on metrics": "goal-based",
+    # rice, and the neighbouring impact-vs-effort scoring models. ICE is RICE
+    # without reach; an unweighted impact/effort grid is the same instinct.
     "rice": "rice",
+    "rice scoring": "rice",
+    "reach impact confidence effort": "rice",
+    "ice": "rice",
+    "ice scoring": "rice",
+    "impact confidence ease": "rice",
+    "impact effort": "rice",
+    "impact and effort": "rice",  # "impact/effort" → " and "
+    "impact vs effort": "rice",
+    "impact versus effort": "rice",
+    "effort and impact": "rice",
+    "value and effort": "rice",
+    "value vs effort": "rice",
+    "value versus effort": "rice",
+    "value effort": "rice",
+    "weighted scoring": "rice",
+    "scoring model": "rice",
+    # wsjf
     "wsjf": "wsjf",
+    "weighted shortest job first": "wsjf",
+    "cost of delay": "wsjf",
+    "cost of delay and job size": "wsjf",  # "cost of delay / job size"
+    # moscow
     "moscow": "moscow",
+    "must should could": "moscow",
+    "must and should and could": "moscow",  # "must/should/could"
+    "must have should have": "moscow",
+    "must have should have could have": "moscow",
+    # kano
     "kano": "kano",
+    "kano model": "kano",
+    # volume-severity
     "volume and severity": "volume-severity",  # "volume/severity" → " and "
     "volume severity": "volume-severity",
     "volume-severity": "volume-severity",
+    "severity and volume": "volume-severity",
+    "severity": "volume-severity",
+    "ticket volume": "volume-severity",
+    "issue volume": "volume-severity",
 }
 
-#: Distinctive framework tokens safe to match as whole words inside a longer
-#: phrase — "RICE scoring for anything above two engineer-weeks" is
-#: unambiguously RICE. Deliberately NOT applied to planning cycle, where a
-#: sentence like "six-week cycles, quarterly OKR reviews" would wrongly match
-#: "quarterly" when the real cadence is six-weekly.
-_FRAMEWORK_KEYWORDS: tuple[str, ...] = ("rice", "wsjf", "moscow", "kano")
+#: Framework tokens safe to match as whole words inside a longer phrase —
+#: "RICE scoring for anything above two engineer-weeks" is unambiguously RICE.
+#: ORDER IS THE PRECEDENCE: the first token found wins, so the named
+#: frameworks are checked before the softer goal/impact phrasings, and a
+#: sentence naming both ("RICE, in service of the quarter's OKRs") resolves to
+#: the framework rather than the goal.
+#:
+#: Deliberately NOT applied to planning cycle, where a sentence like "six-week
+#: cycles, quarterly OKR reviews" would wrongly match "quarterly" when the real
+#: cadence is six-weekly.
+_FRAMEWORK_KEYWORDS: tuple[str, ...] = (
+    "rice",
+    "wsjf",
+    "weighted shortest job first",
+    "moscow",
+    "must and should and could",  # "must/should/could"
+    "must should could",
+    "must have should have",
+    "kano",
+    "ice",
+    "cost of delay",
+    "impact and effort",
+    "impact vs effort",
+    "impact versus effort",
+    "value and effort",
+    "value vs effort",
+    "value versus effort",
+    "reach impact confidence effort",
+    "ticket volume",
+    "severity",
+    "okrs",
+    "okr",
+    "north star",
+    "strategic alignment",
+    "goals",
+    "goal",
+)
 
 _MONETIZATION_ALIASES: dict[str, str] = {
     "subscription": "subscription",
@@ -850,6 +960,13 @@ def parse_context_markdown(markdown: str) -> ParsedContext:
             continue
         if _is_unknown(prose):
             continue
+        # A section can carry BOTH bullets and leftover prose — `## Team` does
+        # from v2 on, and assistants like to add a sentence under a bullet list.
+        # The bullets are the contract, so keep what they set and file the prose
+        # instead of letting it overwrite the parsed value.
+        if target in result.fields:
+            result.unmapped[heading] = prose
+            continue
         if target in _VOCAB_FIELDS:
             # planning_cycle / prioritization_framework carry a DB CHECK, so a
             # raw phrase here would fail the workspace write, not just render an
@@ -893,7 +1010,9 @@ _TEXT_LIMITS: dict[str, int] = {
     "strategy": 2000,
     "portfolio": 500,
     "users_description": 2000,
+    "team_name": 100,
     "team_scope": 2000,
+    "sizing_methodology": 1000,
     "notes": 20000,
 }
 
@@ -953,6 +1072,24 @@ Closed vocabularies — return ONLY these exact values, or "" / []:
 If the document describes something outside a vocabulary, return "" for that
 field and leave the description in `notes`. Do not bend it to the nearest
 option.
+
+ONE EXCEPTION — prioritization_framework is a CLASSIFICATION, not a quote.
+Teams rarely name a framework; they describe how they choose. Map the
+description onto the listed value that expresses it:
+  · scored on reach / impact / confidence / effort, ICE, or any impact-vs-effort
+    or value-vs-effort weighing  → rice
+  · cost of delay, job size, weighted shortest job first  → wsjf
+  · must / should / could / won't  → moscow
+  · basic needs vs delighters, satisfaction curves  → kano
+  · ranked by how many users hit it and how badly — ticket volume, severity,
+    support load  → volume-severity
+  · chosen by which goal, OKR, metric, north star or strategic bet it moves —
+    including a plain "whatever moves the number this quarter"  → goal-based
+This is still not a licence to guess: return "" when the document says nothing
+about how work is chosen, or when it describes something none of the six can
+express ("the CEO decides", "loudest customer wins"). The user reviews and can
+change it on the metrics step, but a blank there is a required field they must
+fill by hand — so classify when the description supports it.
 """
 
 _EXTRACT_SCHEMA: dict = {
@@ -1026,9 +1163,24 @@ _EXTRACT_SCHEMA: dict = {
                 '"" if not stated.'
             ),
         },
+        "team_name": {
+            "type": "string",
+            "description": (
+                "The name of the team or workspace the user works in (e.g. "
+                '"Nutrition & Sleep"), NOT the company name unless the whole '
+                'company is one team. "" if not stated.'
+            ),
+        },
         "team_scope": {
             "type": "string",
-            "description": 'The team or workspace name and what it owns end to end. "" if not stated.',
+            "description": 'What that team owns end to end. "" if not stated.',
+        },
+        "sizing_methodology": {
+            "type": "string",
+            "description": (
+                "How the team sizes work — story points, t-shirt sizes, who "
+                'sizes, how estimates are calibrated. "" if not stated.'
+            ),
         },
         "notes": {
             "type": "string",
@@ -1042,7 +1194,8 @@ _EXTRACT_SCHEMA: dict = {
         "company_name", "company_website", "mission", "strategy", "portfolio",
         "planning_cycle", "product_name", "product_website", "surfaces",
         "monetization", "users_description", "competitors", "metrics",
-        "prioritization_framework", "team_scope", "notes",
+        "prioritization_framework", "team_name", "team_scope",
+        "sizing_methodology", "notes",
     ],
 }
 

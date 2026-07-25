@@ -8,7 +8,10 @@ import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { OptionalDisclosure } from "../../onboarding/OptionalDisclosure"
 import { UploadOrTypeBlock } from "../../onboarding/UploadOrTypeBlock"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { updateWorkspace } from "../../../lib/onboarding/store"
+import {
+  saveWorkspaceOwnedFields,
+  updateWorkspace,
+} from "../../../lib/onboarding/store"
 import { applyImportedContext } from "../../../lib/onboarding/applyImportedContext"
 import { stepForSlug } from "../../../lib/onboarding/types"
 import type { WorkspaceCompany } from "../../../lib/onboarding/types"
@@ -46,10 +49,10 @@ const EMPTY_BLOCK: BlockState = {
  * one card, since they all describe the same thing: the slice of the product
  * this team owns.
  *
- *   - Workspace name* + what it works on* — the old team step. Both are
- *     COMPANY fields (companies.team_name / team_scope), deliberately not the
- *     workspaces row, which stays "Default" until renamed in
- *     Settings → Workspaces.
+ *   - Workspace name* + what it works on* — the old team step. Both live on the
+ *     company's default `workspaces` row (2026-07-22), which is also what the
+ *     sidebar switcher displays; they are written through the onboarding
+ *     workspace endpoint, never as a companies patch.
  *   - Team strategy / roadmap — the old strategy step, as ONE upload-or-type
  *     block, per the spec: people describe where they're going and how they
  *     plan to get there in one breath, and splitting it made both halves feel
@@ -218,8 +221,10 @@ export function WorkspaceStep() {
     if (!validate().ok) return
     setSaving(true)
     try {
-      const updated = await updateWorkspace(workspace.id, {
-        team_name: teamName.trim() || null,
+      // The name + the five typed blocks live on the `workspaces` row, so they
+      // go through the endpoint that owns it — a companies patch would write
+      // the columns 20260722120000 left dormant and silently lose the lot.
+      await saveWorkspaceOwnedFields(teamName, {
         team_scope: teamScope.trim() || null,
         team_strategy: teamStrategy.trim() || null,
         // Retired from onboarding: its text now lives in team_strategy. Only
@@ -228,6 +233,10 @@ export function WorkspaceStep() {
         ...(roadmapAbsorbed.current ? { team_roadmap: null } : {}),
         sizing_methodology: sizingMethodology.trim() || null,
         additional_context: additionalContext.trim() || null,
+      })
+      // Company-owned, and it re-reads the workspaces row — so `updated` comes
+      // back carrying what was just written above.
+      const updated = await updateWorkspace(workspace.id, {
         onboarding_step: stepForSlug("product") ?? 6,
       })
       setWorkspace({ ...updated, product: workspace.product })
@@ -389,19 +398,12 @@ export function WorkspaceStep() {
           startContextImport={startContextImport}
           applyImportFields={async (fields) => {
             if (!workspace) return
-            // Prefill every step the same way the dedicated import step does —
-            // team scope on THIS step re-seeds from the updated workspace, and
-            // product/metrics/company fields land on their own steps.
+            // Prefill every step the same way the dedicated import step does.
+            // Everything this step owns — name, scope, strategy (from the
+            // company strategy), sizing, the catch-all notes — is written by
+            // applyImportedContext now, and the fill-only seed effect above
+            // pulls it into these inputs when the workspace updates.
             setWorkspace(await applyImportedContext(workspace, fields))
-            // Plus the two this step owns that applyImportedContext doesn't map:
-            // the company strategy reads well as the team strategy here, and the
-            // catch-all notes seed the "anything else" box.
-            if (fields.strategy && !teamStrategy.trim()) {
-              setTeamStrategy(fields.strategy)
-              setStrategyBlock((b) => ({ ...b, typedOpen: true }))
-            }
-            if (fields.notes && !additionalContext.trim())
-              setAdditionalContext(fields.notes)
           }}
         />
       </div>

@@ -426,7 +426,7 @@ export function Connectors() {
           reviewed
         </>
       }
-      onBack={() => router.push("/onboarding/import-context")}
+      onBack={() => router.push("/onboarding/company")}
       onSkip={() => onFooterAdvance(true)}
       onContinue={() => onFooterAdvance(false)}
       continueLabel={leavesStep ? "Continue to your key" : "Continue"}
