@@ -387,6 +387,38 @@ def _in_tracker_thread(history: list[dict] | None) -> bool:
     return False
 
 
+# A bare acceptance of the assistant's OWN offer. The lookup routinely ends with
+# "Would you like me to fetch the full details of this ticket?", and the natural
+# reply is one word. That word carries no ticket, no verb, no pronoun and no
+# filter — every other signal this module looks for is absent, so the message
+# fell through to the generic agent, which then reported it had no details for a
+# ticket the previous turn had just listed. Reported from a live thread.
+_TRACKER_AFFIRMATIVE = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|ya|sure|ok|okay|please|"
+    r"yes\s+please|go\s+ahead|do\s+it|sounds\s+good|"
+    r"that'?s?\s+right)\b[\s.!,]*$",
+    re.I,
+)
+
+
+def _answers_tracker_question(question: str, history: list[dict] | None) -> bool:
+    """True when this message is a bare "yes" accepting what the assistant just
+    offered to do.
+
+    Gated on the assistant having ACTUALLY asked something — the most recent
+    assistant turn must end in a question mark. Without that gate a stray "ok"
+    anywhere in a tracker thread would be treated as a fetch request; with it,
+    the word is only meaningful because a question is sitting directly above it.
+    """
+    if not _TRACKER_AFFIRMATIVE.match(question or ""):
+        return False
+    for turn in reversed(history or []):
+        if (turn.get("role") or "user") != "assistant":
+            continue
+        return (turn.get("content") or "").strip().endswith("?")
+    return False
+
+
 def _continues_tracker_thread(question: str) -> bool:
     """True when this message reads as a continuation of a tracker thread rather
     than a new subject — a filter refinement, or a pull for more of an issue the
@@ -424,7 +456,15 @@ def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
         return True
     if _JIRA_LOOKUP_VETO.search(question):
         return False
-    return _in_tracker_thread(history) and _continues_tracker_thread(question)
+    if not _in_tracker_thread(history):
+        return False
+    # Either the message continues the thread on its own words, or it is a bare
+    # "yes" to the assistant's own offer — which says nothing by itself and
+    # everything in context.
+    return (
+        _continues_tracker_thread(question)
+        or _answers_tracker_question(question, history)
+    )
 
 
 def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:

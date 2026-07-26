@@ -136,6 +136,49 @@ def test_is_jira_lookup_sticky_change_followup_in_thread():
         assert is_jira_lookup(q, thread), q
 
 
+def test_is_jira_lookup_bare_yes_accepts_the_assistants_offer():
+    """The lookup ends with "Would you like me to fetch the full details?" and
+    the natural reply is one word.
+
+    Reported live: the answer to that offer was "yes", which carries no ticket,
+    verb, pronoun or filter — so every signal this router looks for was absent
+    and it fell through to the generic agent, which then said it had no details
+    for the ticket the turn above had just listed.
+    """
+    thread = [
+        {"role": "user", "content": "get me ticket about car"},
+        {"role": "assistant", "content": "I found 1 ticket related to \"car\": "
+                                         "KAN-1033 — Build a car driving feature. "
+                                         "Would you like me to fetch the full "
+                                         "details of this ticket?"},
+    ]
+    for q in ["yes", "Yes", "yes please", "yeah", "sure", "ok", "go ahead", "do it"]:
+        assert is_jira_lookup(q, thread), q
+        # Nothing about the word itself is a tracker read — the thread is the
+        # only reason it means anything.
+        assert not is_jira_lookup(q), q
+
+
+def test_bare_yes_needs_an_actual_question_above_it():
+    """Gated on the assistant having asked something. Otherwise a stray "ok" in
+    a tracker thread would be read as a fetch request."""
+    no_question = [
+        {"role": "user", "content": "get me ticket about car"},
+        {"role": "assistant", "content": "KAN-1033 — Build a car driving feature."},
+    ]
+    assert not is_jira_lookup("yes", no_question)
+    assert not is_jira_lookup("ok", no_question)
+
+
+def test_bare_yes_outside_a_tracker_thread_is_ignored():
+    """A "yes" answering some other question must not reach the tracker."""
+    other = [
+        {"role": "user", "content": "should we raise prices?"},
+        {"role": "assistant", "content": "Would you like me to model that?"},
+    ]
+    assert not is_jira_lookup("yes", other)
+
+
 def test_is_jira_lookup_sticky_followup_in_thread():
     # A filter follow-up ("get all in to-do status") carries no "jira" word and no
     # key, so it misses statelessly — but inside an active Jira thread it must
