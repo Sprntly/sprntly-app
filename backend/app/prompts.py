@@ -303,12 +303,19 @@ Corpus:
 # scope gate returns it deterministically (see qa_agent._out_of_scope_payload);
 # the ASK_SYSTEM clause below is the defense-in-depth for questions that reach
 # the answer model anyway (router failure, cached paths).
+# NB: the wording is deliberately TOPICAL-ONLY. An earlier version added
+# "I don't have grounded data on that topic, so I won't guess" — which read to
+# the answer model as the sanctioned reply for ANY question its sources didn't
+# cover, so a perfectly in-scope ideation question on a data-less workspace
+# ("how would dark mode look in my product?") got refused as off-topic
+# (ask job 383, 2026-07-26). Scope is about the TOPIC, never about how much
+# data we happen to hold; the no-data case has its own instruction in
+# ASK_SYSTEM below.
 OUT_OF_SCOPE_MESSAGE = (
     "I can only help with your product work — questions about your product, "
     "problems and evidence, prioritization, tickets, PRDs, user feedback, "
-    "prototypes, design, engineering, and project management. I don't have "
-    "grounded data on that topic, so I won't guess. Try asking about your "
-    "product, customers, or roadmap instead."
+    "prototypes, design, engineering, and project management. Try asking "
+    "about your product, customers, or roadmap instead."
 )
 
 
@@ -329,6 +336,17 @@ exactly this text as the whole answer, empty key_points and citations, and \
 confidence 1.0:
 
 """ + f'"{OUT_OF_SCOPE_MESSAGE}"' + """
+
+Scope is about the TOPIC, not about your sources. A question that IS about \
+the user's product work but that your sources barely cover (or don't cover \
+at all — e.g. a workspace with nothing connected yet asking "how would dark \
+mode look in my product?") must NEVER get that canned reply. Instead, answer \
+it as a senior PM coworker: say plainly, in one sentence, that no connected \
+data covers this yet, then reason from what you DO have (the product \
+description, business context, and general product-management judgment — \
+clearly framed as reasoning, not as findings), and close by naming which \
+sources or data would ground the answer properly. Grounding rules still \
+apply to numbers: never invent metrics or quotes.
 
 Your answer is rendered as a full-page response on the home surface, not a \
 chat bubble. For any quantitative question, write the answer the way a data \
