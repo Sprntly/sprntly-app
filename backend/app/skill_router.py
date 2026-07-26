@@ -248,7 +248,22 @@ _JIRA_LOOKUP_VERB = re.compile(
 # never trigger a positive match anyway.
 _JIRA_LOOKUP_VETO = re.compile(
     r"\b(create|generate|write|draft|make|build|author|produce|compose|push|"
-    r"sync|move|transition|assign|comment\s+on|close|resolve|delete)\b",
+    r"sync|delete)\b",
+    re.I,
+)
+# CHANGING an issue that already exists is now this path's job too — the skill
+# can propose an edit, which the user confirms before anything is written (see
+# jira_lookup._PROPOSE_TOOL). So the mutation verbs came OUT of the veto above,
+# which used to send "move it to In Review" to a skill that could only talk
+# about it.
+#
+# Creation stays vetoed. "create a ticket for the login bug" is the user-stories
+# skill's job, and "push these stories to jira" is the push flow's — neither is a
+# change to an issue that exists. `delete` stays vetoed because nothing here
+# implements it, and a confident-sounding refusal beats a silent no-op.
+_JIRA_WRITE_VERB = re.compile(
+    r"\b(update|set|change|edit|rename|move|transition|assign|unassign|"
+    r"re-?open|close|resolve|add\s+a\s+comment|comment\s+on)\b",
     re.I,
 )
 
@@ -278,7 +293,17 @@ _TRACKER_THREAD_WINDOW = 8
 _TRACKER_ANAPHORA = re.compile(
     r"\b(it|its|it'?s|them|they|those|these|"
     r"th(?:at|is)\s+(?:one|ticket|issue|epic|stor(?:y|ies)|bug|task)|"
-    r"the\s+(?:one|first|second|last|same|other)|the\s+above)\b",
+    r"the\s+(?:one|first|second|last|same|other)|the\s+above)\b"
+    # A BARE "this"/"that" standing in for the issue on screen. The alternatives
+    # above all require a following noun ("that ticket"), which missed the most
+    # natural follow-up of all — "give me full details on this" — and dropped it
+    # to the generic agent, which answered that it had no details for a ticket
+    # the previous turn had just fetched.
+    # Restricted to the two positions where a bare this/that is genuinely
+    # referential: as the object of a preposition, or ending the message. A bare
+    # this/that anywhere would swallow "I think that we should ship".
+    r"|\b(?:on|about|for|of|with|from|into)\s+th(?:is|at)\b"
+    r"|\bth(?:is|at)\s*[?.!]*\s*$",
     re.I,
 )
 # What such a follow-up asks FOR — attributes of an issue already on screen.
@@ -316,6 +341,18 @@ def _stateless_tracker_lookup(question: str) -> bool:
     # key needed, so future trackers (Asana / ClickUp) route here the same way.
     if has_pm_noun and has_verb:
         return True
+    # A change aimed at an issue that already exists — "update PROJ-1's due date",
+    # "assign the login bug to Ada", "move DEV-88 to In Review". Requires a key or
+    # a PM noun so a bare "update the roadmap" is not dragged in here.
+    m_write = _JIRA_WRITE_VERB.search(question)
+    if m_write and (has_key or has_pm_noun):
+        m_key = _JIRA_ISSUE_KEY.search(question)
+        # …and the verb must come BEFORE the issue it acts on. "we shipped in the
+        # UTF-8 encoding update" trips both halves otherwise: UTF-8 looks exactly
+        # like an issue key, and there "update" is a noun at the end of a
+        # sentence, not a command.
+        if not (m_key and m_write.start() > m_key.start()):
+            return True
     # An explicit issue key with any lookup context (verb, PM noun, or "jira").
     if has_key and (has_context or has_jira):
         return True
@@ -363,6 +400,11 @@ def _continues_tracker_thread(question: str) -> bool:
     if _TRACKER_ANAPHORA.search(question) and (
         _JIRA_LOOKUP_VERB.search(question) or _TRACKER_DETAIL.search(question)
     ):
+        return True
+    # "move it to In Review", "set its due date to August 31" — a change pointed
+    # at whatever the thread is already showing. The issue is named nowhere in
+    # the message, so only the thread makes it resolvable.
+    if _JIRA_WRITE_VERB.search(question):
         return True
     return False
 

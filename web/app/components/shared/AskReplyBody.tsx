@@ -7,6 +7,7 @@ import type { AskResponse } from "../../lib/api"
 import { looksLikeHtmlBrief } from "../../lib/htmlBrief"
 import { useAnswerSimulatedStream } from "../../lib/useAnswerSimulatedStream"
 import { HtmlReportView } from "./HtmlReportView"
+import { JiraChangeConfirm } from "./JiraChangeConfirm"
 import { InlineChart, parseChartBody } from "./InlineChart"
 
 /** Pull a plain-text body out of react-markdown's `code` children prop. */
@@ -86,6 +87,12 @@ export function AskReplyBody({
           {visible}
         </ReactMarkdown>
       </div>
+      {/* A Jira change the agent proposed. Held back until the answer has
+          finished revealing, so the confirm button can't be clicked while the
+          sentence explaining what it does is still being typed out. */}
+      {done && reply._pending_jira_change ? (
+        <JiraChangeConfirm change={reply._pending_jira_change} />
+      ) : null}
       {done && !omitCitations && reply.citations?.length ? (
         <div className="ai-bar-reply-cites ai-bar-reply-cites--stream-reveal">
           {reply.citations.map((c, i) => (

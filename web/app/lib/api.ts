@@ -404,12 +404,54 @@ export const ideationApi = {
 }
 
 export type AskCitation = { source: string; evidence: string }
+/** A Jira change the agent has PROPOSED and the user has not yet confirmed.
+ *  Rides on the ask answer; the chat renders it as a confirm card. Nothing is
+ *  written until the user acts on it — see jiraApi.applyChange. */
+export type PendingJiraChange = {
+  issue_key: string
+  summary: string
+  /** Jira field ids → values, already validated against the issue's editmeta. */
+  fields: Record<string, unknown>
+  /** Target workflow status name; status moves via a transition, not a field. */
+  to_status: string
+  comment: string
+  /** Human "Field: before → after" lines, rendered verbatim on the card. */
+  preview: string[]
+}
+
 export type AskResponse = {
   answer: string
   key_points: string[]
   citations: AskCitation[]
   confidence: number
   unanswered: string
+  /** Present only when the Jira agent proposed a change awaiting confirmation. */
+  _pending_jira_change?: PendingJiraChange
+}
+
+/** What POST /v1/jira/write reports back. Each part is independent: a request
+ *  can set fields, move status and comment, and any one of them can fail on its
+ *  own, so the UI reports exactly what landed rather than one boolean. */
+export type JiraWriteResult = {
+  ok: boolean
+  issue_key: string
+  applied: string[]
+  failed: string[]
+  fields?: { ok: boolean; updated?: string[]; rejected?: string[]; error?: string }
+  status?: { ok: boolean; status?: string; error?: string }
+  comment?: { ok: boolean; comment_id?: string; error?: string }
+}
+
+export const jiraApi = {
+  /** Apply a change the user CONFIRMED in the chat. This is the only call in
+   *  the app that mutates Jira from a conversation — the agent can only
+   *  propose, so this must be triggered by a person clicking Confirm. */
+  applyChange: (change: {
+    issue_key: string
+    fields?: Record<string, unknown>
+    to_status?: string
+    comment?: string
+  }) => api.post<JiraWriteResult>("/v1/jira/write", change),
 }
 
 export type SkillInfo = {

@@ -20987,3 +20987,68 @@
   .akey-current { align-items: flex-start; }
   .akey-input-row { flex-direction: column; align-items: stretch; }
 }
+
+/* ── Jira change confirmation ─────────────────────────────────────────────────
+   The gate between a proposed change and a real edit to someone's ticket. Styled
+   as a distinct bordered card rather than inline chat text so it reads as an
+   action to take, not as more of the agent's prose — the one place in the chat
+   where a click leaves the product and changes a system a whole team watches. */
+.jira-confirm {
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 12px 14px;
+}
+
+.jira-confirm-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.jira-confirm-kind {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--accent-ink, #1f6f4a);
+  background: var(--accent-soft, #e8f3ed);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.jira-confirm-key { font-weight: 600; font-size: 13px; }
+.jira-confirm-summary { color: var(--ink-3); font-size: 13px; }
+
+.jira-confirm-lines {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.jira-confirm-lines li { margin: 2px 0; }
+
+.jira-confirm-actions { display: flex; gap: 8px; }
+
+/* Deliberately stated under the buttons, not above them: the reassurance is
+   most useful at the moment of hesitation, right where the cursor is. */
+.jira-confirm-note {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--ink-4);
+}
+
+.jira-confirm-result,
+.jira-confirm--done {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.jira-confirm-error {
+  font-size: 12px;
+  color: var(--danger, #b23c3c);
+  margin-bottom: 8px;
+}
