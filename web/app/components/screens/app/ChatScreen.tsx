@@ -846,6 +846,24 @@ export function ChatScreen() {
   // `busy` const below `activeTab`), so switching to an idle tab shows an enabled
   // composer even while another tab is still loading.
   const [busyTabs, setBusyTabs] = useState<ReadonlySet<string>>(new Set())
+  // The message the user just sent, rendered the INSTANT they hit send.
+  //
+  // Every send now opens with an awaited backend decision (POST /v1/chat/intent —
+  // a full LLM round-trip) before ANY branch knows whether this message becomes a
+  // chat turn or a command that seeds its own turn. That await used to sit in
+  // front of every render, so the composer cleared into an empty screen for
+  // multiple seconds and the send read as dropped. This is the bridge: the user's
+  // words + a thinking skeleton, on screen on the send's own commit.
+  //
+  // Deliberately NOT a ThreadTurn and never persisted — the command flows
+  // (openPrdInTab's seedTurn, seedCommandTurn) own the real turn they seed, and a
+  // pre-rendered turn here would duplicate both the bubble and the Supabase row.
+  // Whichever branch wins renders its real turn and clears this in the SAME
+  // commit, so the handoff is invisible. `tabId` is the tab the send was aimed at
+  // (null on the landing surface) so it only shows where it was typed.
+  const [pendingSend, setPendingSend] = useState<
+    { tabId: string | null; query: string; attachments: { name: string }[] } | null
+  >(null)
   // Insight keys ("briefId:insightIndex") known to already have a saved evidence
   // brief — flips the chat's first action to "View Evidence" (else it offers the
   // PRD). Populated per active insight via loadEvidenceByInsight (see effect below).
@@ -2325,6 +2343,21 @@ export function ChatScreen() {
   const submitAsk = useCallback(
     async (rawQuery: string) => {
       const trimmed = rawQuery.trim()
+      // A doc-only send (empty ask + attachment) is allowed; a truly empty send is
+      // a no-op. Hoisted above the pending-send render below (it used to sit just
+      // before the optimistic turn) so an empty send can never strand a
+      // placeholder on screen.
+      if (trimmed.length < 1 && attachments.length === 0) return
+      // Show the user's message NOW — before the dispatch decision, which is a
+      // network round-trip away. `settlePendingSend()` retires it at every exit
+      // below; the branch that wins renders its own real turn in the same commit.
+      // See the `pendingSend` declaration for why this isn't a ThreadTurn.
+      setPendingSend({
+        tabId: activeTabId,
+        query: trimmed,
+        attachments: attachments.map((a) => ({ name: a.name })),
+      })
+      const settlePendingSend = () => setPendingSend(null)
       // Command phrasings are COMMANDS, not questions for the ask agent —
       // intercept before any tab/ask work. Tickets is checked FIRST: "create
       // tickets from this PRD" matches the PRD rule too, but the user asked for
@@ -2354,6 +2387,7 @@ export function ChatScreen() {
           : `${task}\n\nAdditional details from the user:\n${trimmed}`
         const { prdApi } = await import("../../../lib/api")
         runClarifiedGeneration(prdApi, activeTab.id, combined, sourceDocs, trimmed)
+        settlePendingSend()
         return
       }
       // ── Action-envelope dispatch (flag: chat_intent_envelope) ─────────────
@@ -2387,11 +2421,13 @@ export function ChatScreen() {
             if (docFile) {
               setAttachments([])
               importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+              settlePendingSend()
               return
             }
             if (activeTab?.prd) {
               setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
               openContentPanel("tickets")
+              settlePendingSend()
               return
             }
             // No PRD on this tab → the ask path answers (user-stories skill in
@@ -2400,6 +2436,7 @@ export function ChatScreen() {
             const targetPrd = envelope.prd_id ?? tabPrdId
             if (!docFile && activeTab && targetPrd != null && envelope.instruction) {
               void prdChatEditFlow(envelope.instruction, activeTab.id, targetPrd)
+              settlePendingSend()
               return
             }
             // No resolvable target/instruction → grounded ask (it can at least
@@ -2408,9 +2445,11 @@ export function ChatScreen() {
             if (docFile) {
               setAttachments([])
               importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+              settlePendingSend()
               return
             }
             prdCommandFlow(trimmed, envelope.task)
+            settlePendingSend()
             return
           }
           // generate_prototype: ChatScreen has no chat prototype flow (parity
@@ -2424,6 +2463,7 @@ export function ChatScreen() {
         if (docFile) {
           setAttachments([])
           importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+          settlePendingSend()
           return
         }
         // No document: mirror the reply-footer "Create tickets" action when this
@@ -2432,6 +2472,7 @@ export function ChatScreen() {
         if (activeTab?.prd) {
           setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
           openContentPanel("tickets")
+          settlePendingSend()
           return
         }
       } else if (
@@ -2445,17 +2486,20 @@ export function ChatScreen() {
         // second failure mode of the old deictic guard. A still-generating tab
         // (no prd id yet) skips this branch and gets a grounded text answer.
         void prdChatEditFlow(trimmed, activeTab!.id, (activeTab!.prd?.prd_id ?? activeTab!.prdId)!)
+        settlePendingSend()
         return
       } else if (isPrdCommand(trimmed) && !(!docFile && deicticPrd && isPrdTab)) {
         if (docFile) {
           setAttachments([])
           importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+          settlePendingSend()
           return
         }
         // No document — open the PRD tab from the brief's top insight instead of
         // sending it to the ask agent (which would answer with a raw prd-author
         // HTML dump).
         prdCommandFlow(trimmed)
+        settlePendingSend()
         return
       } else if (mentionsPrd(trimmed) && !(isPrdTab && !docFile)) {
         // LLM fallback tier: the message NAMES a PRD but the regex tier didn't
@@ -2473,9 +2517,11 @@ export function ChatScreen() {
           if (docFile) {
             setAttachments([])
             importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+            settlePendingSend()
             return
           }
           prdCommandFlow(trimmed, verdict.task)
+          settlePendingSend()
           return
         }
       }
@@ -2491,16 +2537,16 @@ export function ChatScreen() {
       // in. Keeping them separate means the backend is unaffected while the UI
       // stays clean, the way Claude's chat renders it.
       const displayQuery = trimmed
-      // A doc-only send (empty ask + attachment) is allowed; a truly empty send
-      // is a no-op. (Previously this was checked post-extraction as
-      // `sendQuery.length < 1`; the equivalent pre-extraction check lets us abort
-      // before rendering anything.)
-      if (displayQuery.length < 1 && attachments.length === 0) return
+      // (The empty-send no-op is checked at the top of this function, before the
+      // pending-send placeholder is rendered.)
       // Early cheap guard: if the ACTIVE tab already has an ask in flight, bail
       // before doing any work. (Authoritative per-tab guard happens once
       // targetTabId is resolved below — needed for the no-active-tab case where
       // openTab creates the target.)
-      if (activeTabId != null && askingTabsRef.current.has(activeTabId)) return
+      if (activeTabId != null && askingTabsRef.current.has(activeTabId)) {
+        settlePendingSend()
+        return
+      }
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       // Capture the target tab ID up-front so async callbacks always write to
@@ -2548,6 +2594,10 @@ export function ChatScreen() {
           return { ...t, title, thread: [...t.thread, newTurn] }
         }))
       }
+      // The real turn is now on the tab, so the placeholder has been handed off.
+      // Same tick as the openTab/setTabs above → React batches both into ONE
+      // commit, so the swap from placeholder to turn never flickers.
+      settlePendingSend()
       // A fresh ask on this tab clears any leftover Stop flag from a prior ask so
       // the new one is never treated as pre-stopped.
       stoppedTabsRef.current.delete(targetTabId)
@@ -2976,6 +3026,10 @@ export function ChatScreen() {
     }
     // Cheap active-tab guard; submitAsk re-checks per the resolved target tab.
     if (activeTabId != null && askingTabsRef.current.has(activeTabId)) return
+    // A send is already mid-dispatch (its intent decision is still in flight).
+    // The busy/asking markers aren't set until the ask itself starts, so without
+    // this a second Enter during that window would double-send.
+    if (pendingSend) return
     setDraft("")
     void submitAsk(q)
     const ta = composerRef.current
@@ -3185,7 +3239,13 @@ export function ChatScreen() {
   const showInsightMsg = !!(activeTab?.prd || activeTab?.briefMeta || activeTab?.prdGenerating || activeTab?.prdId != null)
   // A resumed tab whose history is still fetching shows the thread view (with
   // a loading skeleton) — never the "Welcome back" landing.
-  const showThreadView = hasThread || showInsightMsg || !!activeTab?.hydrating
+  // Is the just-sent message aimed at the surface currently on screen? Scoped to
+  // the tab it was typed in, so switching tabs mid-dispatch doesn't drag the
+  // placeholder along. On the landing surface both sides are null, which is the
+  // match we want: the first message of a brand-new chat renders instantly there
+  // too, before the ask path's openTab has run.
+  const pendingSendHere = !!pendingSend && pendingSend.tabId === activeTabId
+  const showThreadView = hasThread || showInsightMsg || !!activeTab?.hydrating || pendingSendHere
   // The tab title is "PRD · <insight>"; the message shows the insight sentence on
   // its own (the "PRD" kind is already a chip), so strip the redundant prefix.
   const insightText = (activeTab?.prd?.title ?? activeTab?.title ?? "").replace(/^PRD · /, "")
@@ -3707,6 +3767,44 @@ export function ChatScreen() {
                         </Fragment>
                       )
                     })}
+                    {/* PENDING SEND — the user's message plus a thinking
+                        skeleton, rendered from the send's own commit while the
+                        dispatch decision (POST /v1/chat/intent) is still in
+                        flight. Not a thread turn: whichever branch wins seeds
+                        its own real turn and clears this in the same commit.
+                        Attachment chips are name-only and inert here, exactly
+                        as the optimistic turn renders them before extraction. */}
+                    {pendingSendHere && pendingSend ? (
+                      <div className="bc-turn" data-testid="pending-send" aria-busy="true">
+                        <div className="bc-user-head">
+                          <span className="bc-avatar">{userInitials}</span>
+                          <span className="bc-user-name">{name}</span>
+                        </div>
+                        {pendingSend.attachments.length ? (
+                          <div className="bc-user-attachments">
+                            {pendingSend.attachments.map((a, i) => (
+                              <TurnAttachmentCard key={i} name={a.name} onOpen={() => {}} />
+                            ))}
+                          </div>
+                        ) : null}
+                        {pendingSend.query ? (
+                          <div className="bc-user-bubble">{pendingSend.query}</div>
+                        ) : null}
+                        <div className="bc-agent-head">
+                          <span className="bc-agent-mark">
+                            <IconSparkle size={14} />
+                          </span>
+                          <span className="bc-agent-name">{AGENT_NAME}</span>
+                          <span className="bc-agent-badge">
+                            <IconSparkle size={10} />
+                            Product Coworker
+                          </span>
+                        </div>
+                        <div className="bc-agent-body">
+                          <AssistantThinkingSkeleton compact />
+                        </div>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               )}
