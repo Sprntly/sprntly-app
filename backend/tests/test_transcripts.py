@@ -2,8 +2,11 @@
 
 Covers:
   * The shared-access-code login: success mints a 12h JWT that passes
-    require_transcripts; a wrong code 401s; an unset TRANSCRIPTS_ACCESS_CODE_HASH
-    ⇒ 404 everywhere, login included (fail closed, invisible).
+    require_transcripts; a wrong code 401s; NO credential at all ⇒ 404
+    everywhere, login included (fail closed, invisible).
+  * All three credential forms: the argon2id hash, the plaintext
+    TRANSCRIPTS_ACCESS_CODE, and the hardcoded app.auth.TRANSCRIPTS_DEFAULT_CODE
+    — which is accepted even when an env credential is also set.
   * require_transcripts gate: 404 for no token, a Supabase USER token, and a
     STAFF token (same signing secret, wrong audience) — the two internal
     surfaces are deliberately not interchangeable in either direction.
@@ -35,13 +38,27 @@ def _db():
     return require_client()
 
 
-def _enable_surface(monkeypatch, *, code_hash: str = ACCESS_CODE_HASH):
+def _enable_surface(
+    monkeypatch,
+    *,
+    code_hash: str = ACCESS_CODE_HASH,
+    plain_code: str = "",
+    default_code: str = "",
+):
     """Configure the shared access code.
 
     Must run AFTER company_client() — that helper reloads app.config/app.auth,
-    which would discard an earlier settings patch."""
+    which would discard an earlier settings patch.
+
+    `default_code` blanks app.auth.TRANSCRIPTS_DEFAULT_CODE by default: the
+    hardcoded code is accepted everywhere, so leaving it set would mean the
+    disabled-surface and wrong-code tests pass for the wrong reason (and, once
+    it's removed, would silently start failing).
+    """
     import app.auth as auth_mod
 
+    monkeypatch.setattr(auth_mod, "TRANSCRIPTS_DEFAULT_CODE", default_code)
+    monkeypatch.setattr(auth_mod.settings, "transcripts_access_code", plain_code)
     monkeypatch.setattr(
         auth_mod.settings, "transcripts_access_code_hash", code_hash
     )
@@ -135,14 +152,65 @@ def test_login_wrong_code_401(isolated_settings, monkeypatch):
 
 
 def test_surface_disabled_404s_everything(isolated_settings, monkeypatch):
-    """Unset hash ⇒ login and every route 404 — the surface is invisible."""
+    """NO credential of any kind ⇒ login and every route 404 — the surface is
+    invisible. Needs the hardcoded default blanked too, since that alone is
+    enough to keep the surface open."""
     ctx = company_client(monkeypatch)
-    _enable_surface(monkeypatch, code_hash="")
+    _enable_surface(monkeypatch, code_hash="", plain_code="", default_code="")
 
     assert _login(ctx).status_code == 404
     assert ctx.client.get("/v1/transcripts/conversations").status_code == 404
     assert ctx.client.get("/v1/transcripts/companies").status_code == 404
     assert ctx.client.get("/v1/transcripts/conversations/1").status_code == 404
+
+
+def test_plaintext_env_code_logs_in(isolated_settings, monkeypatch):
+    """TRANSCRIPTS_ACCESS_CODE works with no argon2 hash configured."""
+    ctx = company_client(monkeypatch)
+    _enable_surface(monkeypatch, code_hash="", plain_code="plain-sesame")
+
+    assert _login(ctx, code="plain-sesame").status_code == 200
+    assert _login(ctx, code="plain-sesam").status_code == 401
+
+
+def test_hardcoded_default_code_logs_in(isolated_settings, monkeypatch):
+    """The committed fallback opens the surface with NO env configuration."""
+    import app.auth as auth_mod
+
+    ctx = company_client(monkeypatch)
+    _enable_surface(
+        monkeypatch, code_hash="", plain_code="", default_code="hardcoded-code"
+    )
+    assert auth_mod.transcripts_surface_enabled() is True
+
+    r = _login(ctx, code="hardcoded-code")
+    assert r.status_code == 200, r.text
+    ctx.client.headers["Authorization"] = f"Bearer {r.json()['token']}"
+    assert ctx.client.get("/v1/transcripts/conversations").status_code == 200
+
+
+def test_hardcoded_code_is_accepted_even_when_a_hash_is_configured(
+    isolated_settings, monkeypatch
+):
+    """Documents the deliberate backdoor: configuring a real credential does
+    NOT disable the hardcoded code. Both open the surface. Delete this test
+    along with TRANSCRIPTS_DEFAULT_CODE."""
+    ctx = company_client(monkeypatch)
+    _enable_surface(monkeypatch, default_code="hardcoded-code")
+
+    assert _login(ctx, code=ACCESS_CODE).status_code == 200
+    assert _login(ctx, code="hardcoded-code").status_code == 200
+    assert _login(ctx, code="neither-of-those").status_code == 401
+
+
+def test_shipped_default_code_is_the_documented_one(isolated_settings, monkeypatch):
+    """Guards the actual shipped constant — the tests above all patch it, so
+    without this nothing checks the value the deployed app really accepts."""
+    import app.auth as auth_mod
+
+    ctx = company_client(monkeypatch)
+    assert auth_mod.TRANSCRIPTS_DEFAULT_CODE == "sprntly-transcripts-2026"
+    assert _login(ctx, code="sprntly-transcripts-2026").status_code == 200
 
 
 def test_no_token_404(isolated_settings, monkeypatch):
