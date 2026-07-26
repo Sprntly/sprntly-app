@@ -1,15 +1,19 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 01 — "Tell us about your company"
+// Container mount test for onboarding step 02 — "Tell us about your company"
 // (v6 screenshot spec 2026-07-17). Covers: the name/website/mission/strategy
 // fields render (seeded from the saved workspace) with only the name starred;
 // an empty name blocks Continue (field error, no persistence, no navigation);
 // the website is OPTIONAL for everyone — an empty one saves fine and simply
 // skips the background analysis; a successful save with a workspace present
-// goes updateWorkspace (incl. portfolio/planning_cycle/onboarding_step 2) +
+// goes updateWorkspace (incl. portfolio/planning_cycle/onboarding_step 3) +
 // upsertPrimaryProduct → background website analysis → push(/onboarding/
-// product); a first-time save (no workspace) creates one with account_type
+// connectors); a first-time save (no workspace) creates one with account_type
 // "company" (the personal split is retired).
+//
+// The workspace may ALREADY exist here since 2026-07-25: the import step now
+// runs first and creates it when a file is uploaded there. Hence the seeding
+// is fill-only and the resume marker points at connectors, not at the import.
 //
 // product-helpers (validateProductWebsite / normalizeProductWebsite) run REAL
 // — they're pure and accept an empty website.
@@ -107,7 +111,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-describe("CompanyStep (onboarding step 01 — company name* + optional context)", () => {
+describe("CompanyStep (onboarding step 02 — company name* + optional context)", () => {
   it("renders name/website/mission/strategy fields seeded from the workspace — only the name is starred", () => {
     mount()
     expect(screen.getByText(/Tell us about your/)).not.toBeNull()
@@ -160,7 +164,7 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
@@ -168,7 +172,7 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
       strategy: null,
       portfolio: null,
       planning_cycle: null,
-      onboarding_step: 2,
+      onboarding_step: 3,
     })
     expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
       name: "Acme",
@@ -198,7 +202,7 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
@@ -206,7 +210,7 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
       strategy: null,
       portfolio: null,
       planning_cycle: null,
-      onboarding_step: 2,
+      onboarding_step: 3,
     })
     // The typed website is normalized to https and seeded onto the product.
     expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
@@ -228,7 +232,7 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     })
     expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
     const arg = createWorkspaceMock.mock.calls[0][0] as Record<string, unknown>
@@ -238,6 +242,9 @@ describe("CompanyStep (onboarding step 01 — company name* + optional context)"
     // Sign-up always writes account_type "company" since v6.
     expect(arg.accountType).toBe("company")
     expect(arg.userId).toBe("u-1")
+    // The resume marker points at the step AFTER this one (connectors), not at
+    // the import step this one now sits behind.
+    expect(arg.onboardingStep).toBe(3)
     // No portfolio/planning cycle typed → no follow-up patch.
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
   })

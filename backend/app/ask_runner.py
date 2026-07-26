@@ -18,6 +18,7 @@ from app.db import (
     start_cached_ask,
 )
 from app.llm import DEFAULT_MODEL, call_json
+from app.usage_context import Feature, usage_scope
 from app.prompts import (
     ASK_CACHE_VERSION,
     ASK_SYSTEM,
@@ -88,7 +89,12 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
         company_id = company_id_for_dataset(dataset)
     except Exception:  # noqa: BLE001 — key binding must never break warming
         company_id = None
-    with company_llm_key(company_id):
+    # This path calls `app.llm` directly rather than through the gateway, so the
+    # usage label has to be stated here — the gateway's automatic
+    # agent -> feature mapping doesn't apply.
+    with company_llm_key(company_id), usage_scope(
+        feature=Feature.ASK, operation="warm"
+    ):
         return call_json(
             system=ASK_SYSTEM,
             user=user,

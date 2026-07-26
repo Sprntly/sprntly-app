@@ -53,8 +53,8 @@ describe("clampStep — out-of-range persisted indices", () => {
 
 describe("slugForStep — resume index → slug (clamped)", () => {
   it("maps each in-range index to its ordered slug", () => {
-    expect(slugForStep(1)).toBe("company")
-    expect(slugForStep(2)).toBe("import-context")
+    expect(slugForStep(1)).toBe("import-context")
+    expect(slugForStep(2)).toBe("company")
     expect(slugForStep(3)).toBe("connectors")
     expect(slugForStep(4)).toBe("api-key")
     expect(slugForStep(5)).toBe("workspace")
@@ -70,7 +70,7 @@ describe("slugForStep — resume index → slug (clamped)", () => {
     expect(slugForStep(11)).toBe("personalize")
     expect(slugForStep(12)).toBe("personalize")
     expect(slugForStep(20)).toBe("personalize")
-    expect(slugForStep(0)).toBe("company")
+    expect(slugForStep(0)).toBe("import-context")
   })
 })
 

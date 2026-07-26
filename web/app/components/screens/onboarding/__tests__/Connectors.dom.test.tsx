@@ -20,7 +20,7 @@
 //   - connectable cards open the connect modal with the right provider
 //   - connectors are OPTIONAL: leaving with none stamps skipped_fields
 //   - leaving advances to step 4 and routes to /onboarding/api-key; Back goes
-//     to /onboarding/import-context
+//     to /onboarding/company
 //   - the no-workspace redirect happens in an EFFECT, never during render
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
@@ -462,10 +462,10 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
 
-  it("Back routes to the import-context step", () => {
+  it("Back routes to the company step", () => {
     mountLoaded()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/company")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

@@ -33,6 +33,8 @@ from app.auth import CompanyContext
 from app.config import settings
 from app.entitlements import require_agents_module
 from app.llm import DEFAULT_MODEL
+from app.llm_metering import install_metering
+from app.usage_context import Feature, usage_scope
 
 logger = logging.getLogger(__name__)
 
@@ -63,20 +65,23 @@ _SYSTEM_PROMPT = (
 # Lazy-init the Anthropic client so importing this module doesn't 500 in
 # test environments without ANTHROPIC_API_KEY set.
 @lru_cache(maxsize=16)
-def _client_for_key(api_key: str) -> Anthropic:
-    return Anthropic(api_key=api_key, max_retries=0)
+def _client_for_key(api_key: str, key_mode: str = "platform") -> Anthropic:
+    # Instrumented for usage metering before caching, so the tool-use loop's
+    # per-turn calls land in `llm_usage_events` like every other surface.
+    client = Anthropic(api_key=api_key, max_retries=0)
+    return install_metering(client, key_mode)
 
 
 def get_llm_client() -> Anthropic:
     """Return the Anthropic client for the acting company (see app.llm_keys):
     the company's own key when configured, the platform key only when allowed,
     else raise. Tests patch this."""
-    from app.llm_keys import resolve_llm_api_key
+    from app.llm_keys import resolve_llm_api_key_with_mode
 
-    key = resolve_llm_api_key(settings.anthropic_api_key or None)
+    key, key_mode = resolve_llm_api_key_with_mode(settings.anthropic_api_key or None)
     if not key:
         raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
-    return _client_for_key(key)
+    return _client_for_key(key, key_mode)
 
 
 class ChatWithToolsIn(BaseModel):
@@ -106,75 +111,79 @@ def chat_with_tools(
     ):
         raise HTTPException(404, "GitHub installation not found")
     # Bind the company's own Claude key (if configured) so this factory returns a
-    # client keyed to it; the returned client stays bound to that key for the
-    # whole tool loop below.
+    # client keyed to it. The binding now spans the WHOLE tool loop, not just the
+    # factory call: usage metering reads the acting company from this same
+    # contextvar at each `messages.create`, so a binding that ended after the
+    # factory would leave every turn of the loop unattributed.
     from app.llm_keys import company_llm_key
 
-    with company_llm_key(company.company_id):
+    with company_llm_key(company.company_id), usage_scope(
+        feature=Feature.CHAT, operation="tools", user_id=company.user_id
+    ):
         client = get_llm_client()
-    tools = registry.list_tools()
+        tools = registry.list_tools()
 
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": body.message},
-    ]
-    tool_calls: list[str] = []
-    iteration = 0
-    truncated = False
-    final_text = ""
+        messages: list[dict[str, Any]] = [
+            {"role": "user", "content": body.message},
+        ]
+        tool_calls: list[str] = []
+        iteration = 0
+        truncated = False
+        final_text = ""
 
-    while iteration < MAX_ITERATIONS:
-        iteration += 1
-        resp = client.messages.create(
-            model=_MODEL,
-            max_tokens=_MAX_TOKENS_PER_TURN,
-            system=_SYSTEM_PROMPT,
-            tools=tools,
-            messages=messages,
-        )
+        while iteration < MAX_ITERATIONS:
+            iteration += 1
+            resp = client.messages.create(
+                model=_MODEL,
+                max_tokens=_MAX_TOKENS_PER_TURN,
+                system=_SYSTEM_PROMPT,
+                tools=tools,
+                messages=messages,
+            )
 
-        stop_reason = getattr(resp, "stop_reason", None)
-        content_blocks = list(getattr(resp, "content", []) or [])
+            stop_reason = getattr(resp, "stop_reason", None)
+            content_blocks = list(getattr(resp, "content", []) or [])
 
-        if stop_reason == "tool_use":
-            # Append the assistant's tool-use turn verbatim so the next
-            # call sees the model's request, then run each tool and feed
-            # results back as a user turn.
-            messages.append({"role": "assistant", "content": content_blocks})
-            tool_results: list[dict[str, Any]] = []
-            for block in content_blocks:
-                if getattr(block, "type", None) != "tool_use":
-                    continue
-                tool_calls.append(block.name)
-                try:
-                    result = registry.dispatch(
-                        block.name,
-                        dict(block.input or {}),
-                        installation_id=body.installation_id,
+            if stop_reason == "tool_use":
+                # Append the assistant's tool-use turn verbatim so the next
+                # call sees the model's request, then run each tool and feed
+                # results back as a user turn.
+                messages.append({"role": "assistant", "content": content_blocks})
+                tool_results: list[dict[str, Any]] = []
+                for block in content_blocks:
+                    if getattr(block, "type", None) != "tool_use":
+                        continue
+                    tool_calls.append(block.name)
+                    try:
+                        result = registry.dispatch(
+                            block.name,
+                            dict(block.input or {}),
+                            installation_id=body.installation_id,
+                        )
+                        payload = json.dumps(result, default=str)
+                    except Exception as exc:  # noqa: BLE001 — feed back to model
+                        logger.warning(
+                            "tool %s failed: %s", block.name, exc
+                        )
+                        payload = json.dumps({"error": str(exc)})
+                    tool_results.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": payload,
+                        }
                     )
-                    payload = json.dumps(result, default=str)
-                except Exception as exc:  # noqa: BLE001 — feed back to model
-                    logger.warning(
-                        "tool %s failed: %s", block.name, exc
-                    )
-                    payload = json.dumps({"error": str(exc)})
-                tool_results.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": payload,
-                    }
-                )
-            messages.append({"role": "user", "content": tool_results})
-            continue
+                messages.append({"role": "user", "content": tool_results})
+                continue
 
-        # stop_reason == "end_turn" (normal completion) OR something else
-        # (max_tokens, stop_sequence, etc.) — extract whatever text we have.
-        final_text = _extract_text(content_blocks)
-        break
-    else:
-        # while-else: ran MAX_ITERATIONS without breaking via end_turn.
-        truncated = True
-        final_text = _extract_text(content_blocks) if content_blocks else ""
+            # stop_reason == "end_turn" (normal completion) OR something else
+            # (max_tokens, stop_sequence, etc.) — extract whatever text we have.
+            final_text = _extract_text(content_blocks)
+            break
+        else:
+            # while-else: ran MAX_ITERATIONS without breaking via end_turn.
+            truncated = True
+            final_text = _extract_text(content_blocks) if content_blocks else ""
 
     # If we exit because the model kept calling tools past the cap, the
     # last response we have is a tool_use one — no text to surface.

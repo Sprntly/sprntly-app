@@ -184,8 +184,17 @@ def llm_call(
     # propagates even when the primitive runs the Anthropic call on a worker
     # thread. See app.llm_keys.
     from app.llm_keys import company_llm_key
+    from app.usage_context import feature_for_agent, usage_scope
 
-    with company_llm_key(enterprise_id):
+    # Usage metering reads the acting company from `company_llm_key` and the
+    # feature label from `usage_scope`, both at the `messages.create` inside.
+    # Deriving the label from the `agent`/`purpose` this function already
+    # receives means every gateway caller is attributed without being touched.
+    # An explicit inner scope set by a caller still wins (usage_scope inherits
+    # only what the inner block leaves unset).
+    with company_llm_key(enterprise_id), usage_scope(
+        feature=feature_for_agent(agent), operation=purpose
+    ):
         if json_schema is not None:
             # The method (if any) is already merged into user_cacheable_prefix
             # above, so it stays cache-friendly across calls; the agent system

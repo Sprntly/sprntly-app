@@ -17,7 +17,7 @@ import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleto
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
-import { ApiError, askApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, attachmentsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -43,8 +43,10 @@ type ThreadTurn = {
   query: string
   /** Files attached to this turn, shown as clickable cards above the ask. Each
    *  carries the extracted/plain-text `content` so the card can open a viewer —
-   *  this is the SAME text folded into the backend query, never re-fetched. */
-  attachments?: { name: string; content?: string }[]
+   *  this is the SAME text folded into the backend query, never re-fetched — plus
+   *  a storage `key`/`mime` pointing at the ORIGINAL file so the viewer can render
+   *  the real document (PDF/image inline) and offer a download after a reload. */
+  attachments?: { name: string; content?: string; key?: string | null; mime?: string | null; size?: number | null }[]
   reply?: AskResponse
   error?: string
   /** The user stopped this ask before it answered (composer Stop button). Renders
@@ -86,6 +88,11 @@ type ChatTab = {
    *  opening message and stays at the top. PERSISTED (in the slim tab payload) so
    *  the ordering survives reload — must NOT be stripped like `prd`/`prdGenerating`. */
   prdInFlow?: boolean
+  /** The thread id of the command turn a `prdInFlow` tab anchors its inline PRD
+   *  card + questions to. A command typed in a REUSED chat tab lands mid-thread,
+   *  so `thread[0]` (the legacy anchor) is the wrong turn there. PERSISTED with
+   *  the thread (same slim payload), whose turn ids it references. */
+  prdFlowTurnId?: string
   /** True while a resumed conversation's turns are being fetched in the
    *  background (row click in All chats navigates instantly; the tab shows a
    *  loading state until the history lands). Transient — never persisted. */
@@ -96,6 +103,15 @@ type ChatTab = {
    *  and generation runs with the combined task. Transient — never persisted;
    *  a reload simply drops back to a fresh command. */
   pendingClarify?: { task: string; sourceDocs?: { name: string; content: string }[] }
+  /** True from the moment a PRD command is acknowledged until the agent's NEXT
+   *  visible response — the clarifying questions, or the generation starting.
+   *  Drives a live thinking indicator under the acknowledgment.
+   *
+   *  Without it that window is dead air: the ack says a PRD is coming, the rail
+   *  is deliberately not open yet (it may turn out to be questions, not a
+   *  document), and nothing on screen moves while the sufficiency check runs —
+   *  which reads as a hung app. Transient; never persisted. */
+  prdCommandThinking?: boolean
 }
 
 // The questions turn the clarify gate posts into the tab's thread — an
@@ -182,6 +198,64 @@ export function conversationPrdDocs(
   return docs.slice(-PRD_DOCS_MAX)
 }
 
+// The conversation ITSELF as grounding material.
+//
+// "Generate a PRD for this" means "build it from what we've been discussing" —
+// and the substance usually sits in the AGENT's replies (a fetched Jira ticket,
+// a retrieved finding, a summary), not only in what the user typed.
+// conversationToPrdTask reads user turns only, so a request like
+//   "get me a ticket of car"  →  <the KAN-1033 ticket>  →  "generate a prd for this"
+// sent the backend five words and left the ticket in the browser. With nothing
+// else to go on, KG retrieval grounded the document on whatever the workspace
+// happened to be about, and the PRD came back about an unrelated subject.
+//
+// This rides the EXISTING source-doc channel, which the backend layers on top of
+// KG grounding as authoritative material (routes/prd.py `extra_source_md`), so
+// the thread leads and the workspace stays the supporting layer. It deliberately
+// does NOT replace grounding — that is the uploaded-file import path
+// (`import_source_md`), which is untouched.
+const PRD_TRANSCRIPT_DOC_NAME = "Conversation (this chat)"
+// Sprntly's own process chatter about making a PRD is not product material: the
+// command acknowledgment and the clarify gate's question list would both read as
+// requirements if fed back in. Matched on TEXT, not turn ids, so the filter still
+// holds for a thread rehydrated from Supabase (which rebuilds turns with fresh
+// ids and reconstructs replies as plain answers).
+const PRD_ACK_ANSWER_RE = /View PRD button/
+const PRD_CLARIFY_ANSWER_RE = /^Before I write this PRD/
+export function conversationTranscriptDoc(
+  thread: ThreadTurn[],
+): { name: string; content: string } | null {
+  const parts: string[] = []
+  for (const t of thread) {
+    const q = t.query?.trim()
+    if (q) parts.push(`User: ${q}`)
+    const a = typeof t.reply?.answer === "string" ? t.reply.answer.trim() : ""
+    if (a && !PRD_ACK_ANSWER_RE.test(a) && !PRD_CLARIFY_ANSWER_RE.test(a)) {
+      parts.push(`Sprntly: ${a}`)
+    }
+  }
+  const joined = parts.join("\n\n").trim()
+  if (!joined) return null
+  // Newest wins on overflow — the tail of a long chat is what "this" refers to.
+  return {
+    name: PRD_TRANSCRIPT_DOC_NAME,
+    content: joined.length > PRD_DOC_MAX_CHARS ? joined.slice(-PRD_DOC_MAX_CHARS) : joined,
+  }
+}
+
+// Everything a chat-command PRD grounds on: documents attached in this thread
+// PLUS the conversation. The transcript takes one of the backend's 8 doc slots,
+// so attachments yield a slot rather than silently pushing it out, and it goes
+// LAST so the most recent context sits closest to the end of the prompt.
+export function prdGroundingDocs(
+  thread: ThreadTurn[],
+): { name: string; content: string }[] {
+  const attachments = conversationPrdDocs(thread)
+  const transcript = conversationTranscriptDoc(thread)
+  if (!transcript) return attachments
+  return [...attachments.slice(-(PRD_DOCS_MAX - 1)), transcript]
+}
+
 // ── ChatScreen-local PRD tab sources ────────────────────────────────────────
 // The in-chat command flows ("convert this doc to a PRD", "generate a PRD for
 // X") must render the tab's seed turn + generating skeleton on the CURRENT
@@ -200,6 +274,11 @@ type LocalPrdSource =
   | { kind: "generateTask"; task: string; sourceDocs?: { name: string; content: string }[] }
 type LocalPrdTabRequest = Omit<PrdTabRequest, "source"> & {
   source: PrdTabRequest["source"] | LocalPrdSource
+  /** Generate IN THIS TAB: pin the target to an existing chat tab so the PRD
+   *  lands in the ACTIVE tab's artifacts panel (its command turn appended to the
+   *  live thread) instead of spawning a new tab. Set by the in-chat command
+   *  flows when the active tab is a plain, PRD-less chat. */
+  inTabId?: string
 }
 
 // The agent's acknowledgment for a command-opened PRD tab (seedQuery set on the
@@ -214,16 +293,26 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
   // An Ideation idea is NOT this week's top insight — it's one of the items the
   // brief did not prioritize — so it needs its own wording.
   const fromIdeation = source.kind === "generateIdeation"
-  const answer = withTickets
-    ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready. Use the View PRD button above to reopen the panel anytime."
+  // WHERE the View PRD button actually lands, which differs by open kind and
+  // must match the render (see `inlinePrdCards`): an in-chat command puts the
+  // PRD card right below this reply, a header open pins it at the top of the
+  // thread. The copy said "above" for every case, so a command-opened chat
+  // pointed the user at a button that was in fact sitting under this message.
+  const inline = source.kind === "importDoc" || source.kind === "generateTask"
+    || (source.kind === "resume" && !!req.seedQuery)
+  const locator = inline
+    ? "Use the View PRD button just below to reopen the panel anytime."
+    : "Use the View PRD button above to reopen the panel anytime."
+  const lead = withTickets
+    ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready."
     : fromIdeation
-    ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype. Use the View PRD button above to reopen the panel anytime."
+    ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype."
     : fromTask
-      ? "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
+      ? "Generating a PRD for that — it'll open in the panel on the right when ready."
       : importing
-        ? "Importing your document as a PRD — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-        : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime."
-  return { answer, key_points: [], citations: [], confidence: 1, unanswered: "" }
+        ? "Importing your document as a PRD — it'll open in the panel on the right when ready."
+        : "Generating a PRD from this week's top insight — it'll open in the panel on the right when ready."
+  return { answer: `${lead} ${locator}`, key_points: [], citations: [], confidence: 1, unanswered: "" }
 }
 
 // Attached-file chips shown under a composer. Rendered by BOTH the landing and
@@ -269,17 +358,22 @@ function attachmentMeta(name: string, content?: string): string {
 }
 
 /** A clickable file card on a user turn — Claude-style: an icon tile, the file
- *  name, and a type/size sub-line. Clicking opens the content viewer. */
+ *  name, and a type/size sub-line. Clicking opens the viewer (renders the ORIGINAL
+ *  file when it was stored, else the extracted text). `downloadable` reflects that
+ *  the original file was stored, so the card is viewable even with no extracted
+ *  text (e.g. a PDF imported straight to a PRD). */
 function TurnAttachmentCard({
   name,
   content,
+  downloadable,
   onOpen,
 }: {
   name: string
   content?: string
+  downloadable?: boolean
   onOpen: () => void
 }) {
-  const viewable = !!content
+  const viewable = !!content || !!downloadable
   return (
     <button
       type="button"
@@ -304,15 +398,20 @@ function TurnAttachmentCard({
   )
 }
 
-/** Full-screen overlay that renders an attachment's extracted content (the same
- *  text sent to the agent). Opened by clicking a file card on a user turn. */
+/** Full-screen overlay that renders an attachment. When the ORIGINAL file was
+ *  stored (`key`), it fetches a fresh signed URL and renders the real document —
+ *  PDF/image inline, everything else offered as a download — falling back to the
+ *  extracted text. Opened by clicking a file card on a user turn. */
 function AttachmentViewer({
   attachment,
   onClose,
 }: {
-  attachment: { name: string; content: string }
+  attachment: { name: string; content: string; key?: string | null; mime?: string | null }
   onClose: () => void
 }) {
+  const [urls, setUrls] = useState<{ view_url: string; download_url: string; mime: string } | null>(null)
+  const [status, setStatus] = useState<"idle" | "loading" | "error">(attachment.key ? "loading" : "idle")
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose()
@@ -320,6 +419,23 @@ function AttachmentViewer({
     document.addEventListener("keydown", onKey)
     return () => document.removeEventListener("keydown", onKey)
   }, [onClose])
+
+  // Sign-on-open: the stored URL expires, so mint a fresh one each time the
+  // viewer opens. Best-effort — a failure falls back to the extracted text.
+  useEffect(() => {
+    if (!attachment.key) return
+    let cancelled = false
+    setStatus("loading")
+    attachmentsApi.sign(attachment.key, attachment.name)
+      .then((u) => { if (!cancelled) { setUrls(u); setStatus("idle") } })
+      .catch(() => { if (!cancelled) setStatus("error") })
+    return () => { cancelled = true }
+  }, [attachment.key, attachment.name])
+
+  const mime = urls?.mime || attachment.mime || ""
+  const isPdf = /pdf/i.test(mime) || /\.pdf$/i.test(attachment.name)
+  const isImage = /^image\//i.test(mime) || /\.(png|jpe?g|gif|webp)$/i.test(attachment.name)
+  const hasText = !!attachment.content.trim()
 
   return (
     <div className="bc-file-viewer-backdrop" role="dialog" aria-modal="true" aria-label={attachment.name} onClick={onClose}>
@@ -332,15 +448,58 @@ function AttachmentViewer({
             </svg>
             {attachment.name}
           </span>
-          <button type="button" className="bc-file-viewer-close" aria-label="Close" onClick={onClose}>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            {urls?.download_url ? (
+              <a
+                className="bc-file-viewer-download"
+                href={urls.download_url}
+                download={attachment.name}
+                target="_blank"
+                rel="noopener noreferrer"
+                title={`Download ${attachment.name}`}
+                aria-label={`Download ${attachment.name}`}
+                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", padding: 6, color: "inherit", opacity: 0.75 }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                  <polyline points="7 10 12 15 17 10" />
+                  <line x1="12" y1="15" x2="12" y2="3" />
+                </svg>
+              </a>
+            ) : null}
+            <button type="button" className="bc-file-viewer-close" aria-label="Close" onClick={onClose}>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden>
+                <path d="M18 6 6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </span>
         </div>
         <div className="bc-file-viewer-body">
-          {attachment.content.trim() ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+          {attachment.key && status === "loading" ? (
+            <p className="bc-file-viewer-empty">Loading document…</p>
+          ) : urls && isPdf ? (
+            <iframe
+              src={urls.view_url}
+              title={attachment.name}
+              data-testid="attachment-pdf-frame"
+              style={{ width: "100%", height: "100%", minHeight: "70vh", border: "none" }}
+            />
+          ) : urls && isImage ? (
+            <img
+              src={urls.view_url}
+              alt={attachment.name}
+              data-testid="attachment-image"
+              style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", display: "block", margin: "0 auto" }}
+            />
+          ) : hasText ? (
+            <>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{attachment.content}</ReactMarkdown>
+              {urls && !isPdf && !isImage ? (
+                <p className="bc-file-viewer-empty">This file type can’t be previewed inline — use the download button above to open the original.</p>
+              ) : null}
+            </>
+          ) : urls ? (
+            <p className="bc-file-viewer-empty">This file type can’t be previewed inline — use the download button above to open the original.</p>
           ) : (
             <p className="bc-file-viewer-empty">No preview available for this file.</p>
           )}
@@ -541,6 +700,7 @@ export function ChatScreen() {
         evidenceGenerating: false,
         // Persisted: preserves the inline-vs-header card ordering across reload.
         prdInFlow: t.prdInFlow ?? false,
+        prdFlowTurnId: t.prdFlowTurnId,
       }))
     } catch { return [] }
   })
@@ -594,7 +754,7 @@ export function ChatScreen() {
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
           insightBody: t.insightBody ?? null, prdId: t.prdId ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
-          prdInFlow: t.prdInFlow ?? false,
+          prdInFlow: t.prdInFlow ?? false, prdFlowTurnId: t.prdFlowTurnId,
         })))
       } else {
         setTabs([])
@@ -613,7 +773,10 @@ export function ChatScreen() {
   // strip large/transient fields (prd, evidence, *Generating)
   useEffect(() => {
     try {
-      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, hydrating: _h, ...rest }) => rest)
+      // prdCommandThinking is stripped with the rest: the in-flight call it
+      // tracks does not survive a reload, so restoring it would leave a
+      // thinking indicator spinning forever with nothing behind it.
+      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => rest)
       sessionStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
   }, [tabs, tabsKey])
@@ -678,7 +841,7 @@ export function ChatScreen() {
   const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
   // The attachment whose content is open in the viewer overlay (click a file
   // card on a user turn). Null = closed.
-  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string } | null>(null)
+  const [viewerAttachment, setViewerAttachment] = useState<{ name: string; content: string; key?: string | null; mime?: string | null } | null>(null)
   // Per-tab in-flight guard — keyed by tabId. Prevents a tab from firing a second
   // ask while its own is still in flight, while letting OTHER tabs send concurrently.
   const askingTabsRef = useRef<Set<string>>(new Set())
@@ -776,7 +939,9 @@ export function ChatScreen() {
       const reader = new FileReader()
       reader.onload = () => {
         const content = reader.result as string
-        setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000) }])
+        // Keep the raw File on text attachments too — the original bytes are
+        // uploaded on send so the chip can render/download the real file later.
+        setAttachments((prev) => [...prev, { name: file.name, content: content.slice(0, 50000), file }])
       }
       reader.readAsText(file)
     })
@@ -855,7 +1020,14 @@ export function ChatScreen() {
           const reply = next?.role === "assistant"
             ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse
             : undefined
-          restored.push({ id: `prdhist-${conversation.id}-${i}`, query: t.content, reply })
+          restored.push({
+            id: `prdhist-${conversation.id}-${i}`,
+            query: t.content,
+            reply,
+            // Carry the file chip (with its storage key) so a reopened import-PRD
+            // chat can still render/download the original document.
+            ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+          })
           if (reply) i++
         }
       }
@@ -890,6 +1062,40 @@ export function ChatScreen() {
     }
   }, [activeTabId, resolvedInsightPrdId, hydratePrdThread])
 
+  // The DB conversation id for a command-seeded PRD tab, promised per tab.
+  // `seedCommandTurn` registers it (synchronously, via
+  // persistence.ensureConversation) the instant a command opens a tab; the
+  // import/generate call inside `openPrdInTab` awaits it and hands the id to
+  // the backend, which binds conversation → PRD itself.
+  //
+  // Why this exists: the conversation row is necessarily created BEFORE the
+  // prd_id is known, and the client used to back-patch the link from a React
+  // effect. Navigating away mid-generation unmounted that effect, so the chat
+  // kept prd_id=NULL and came back from history with no PRD attached at all.
+  // The backend can't lose the link that way. Best-effort throughout: no id (or
+  // a slow create) just falls back to the client back-patch below.
+  const seedConvIdRef = useRef<Map<string, Promise<number | null>>>(new Map())
+
+  // Bind a tab's chat conversation to the PRD it just started, for the case the
+  // conversation didn't exist yet when the generate call went out (a brand-new
+  // command tab). Runs inside the generate promise chain — NOT a React effect —
+  // so it still completes after the user navigates away, which is precisely when
+  // the old effect-based back-patch was lost. The write itself is the backend's
+  // (ownership-checked PATCH); we only supply the pairing.
+  const bindConvToPrd = useCallback(async (tabId: string, prdId: number) => {
+    try {
+      const pending = seedConvIdRef.current.get(tabId)
+      const convId = pending
+        ? await pending
+        : tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
+      if (convId == null) return
+      const { conversationsApi } = await import("../../../lib/api")
+      await conversationsApi.update(convId, { prd_id: prdId })
+    } catch {
+      // Non-fatal: the tabs effect below re-attempts while the screen is mounted.
+    }
+  }, [])
+
   // ── Open a PRD as a NEW CHAT TAB with the content panel over it ─────────────
   // A "view/generate PRD" from another surface (brief cards, brief composer,
   // backlog) routes here via NavigationContext.openPrdTab → pendingPrdTab. We
@@ -903,7 +1109,12 @@ export function ChatScreen() {
     const { title, source } = req
     const meta = source.kind === "generateIdeation" || source.kind === "importDoc" || source.kind === "generateTask"
       ? null : source.meta
-    const existing = tabsRef.current.find((t) => t.title === title)
+    // Same-tab generation: a pinned `inTabId` (a PRD command typed in a plain
+    // chat tab) reuses THAT tab, so the PRD lands beside the conversation that
+    // motivated it. Otherwise fall back to the title-match reuse (a re-issued
+    // command) or a fresh tab.
+    const existing = (req.inTabId ? tabsRef.current.find((t) => t.id === req.inTabId) : undefined)
+      ?? tabsRef.current.find((t) => t.title === title)
     const tabId = existing?.id ?? `tab-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
     // A command phrasing opened this tab ("convert this PRD into tickets",
     // "generate a PRD"): seed the thread with the user's message + an
@@ -945,6 +1156,9 @@ export function ChatScreen() {
           // Never downgrade a header tab to in-flow, but a command re-issued on a
           // command tab keeps it in-flow.
           prdInFlow: t.prdInFlow || prdInFlow,
+          // Anchor the inline PRD card to THIS command turn — in a reused chat
+          // tab the command lands mid-thread, not at thread[0].
+          ...(seedTurn && prdInFlow ? { prdFlowTurnId: seedTurn.id } : {}),
         } : t))
       }
     } else {
@@ -953,11 +1167,20 @@ export function ChatScreen() {
         insightBody: req.insightBody ?? null, prdId: null,
         prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
         prdInFlow,
+        ...(seedTurn && prdInFlow ? { prdFlowTurnId: seedTurn.id } : {}),
       }])
       setActiveTabId(tabId)
     }
     setDraft("")
-    setPrdPanelPending(true)
+    // A "generate a PRD for X" command may be answered with QUESTIONS rather
+    // than a document — the clarify-first gate runs before any generation.
+    // Opening the rail now would park an EMPTY PRD panel beside those questions,
+    // and an empty panel is exactly what used to get filled with the workspace's
+    // most recent (unrelated) PRD, reading as if it were the answer. So this one
+    // kind waits: the panel opens the moment generation actually starts, either
+    // straight after the gate passes (below) or when the user answers.
+    const clarifyFirst = source.kind === "generateTask"
+    if (!clarifyFirst) setPrdPanelPending(true)
 
     // Reopening an EXISTING PRD (ready | load)? Rehydrate its saved chat thread by
     // prd_id so the user's prior questions come back. New PRDs (generate*) have no
@@ -990,8 +1213,19 @@ export function ChatScreen() {
     // not only on success: `prdId` is what survives the sessionStorage
     // round-trip, so a reload mid-generation can find and resume the run
     // instead of orphaning it client-side.
-    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: null, prdId: knownPrdId ?? t.prdId, briefMeta: meta, prdGenerating: true } : t))
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
+    setTabs((prev) => prev.map((t) => t.id === tabId
+      ? {
+          ...t, prd: null, prdId: knownPrdId ?? t.prdId, briefMeta: meta,
+          // `clarifyFirst` shows a thinking indicator in the CHAT instead of a
+          // generating rail, since we don't yet know which of the two the agent
+          // is about to produce.
+          ...(clarifyFirst ? { prdCommandThinking: true } : { prdGenerating: true }),
+        }
+      : t))
+    // `clarifyFirst` holds the generating state back too — the card would
+    // otherwise read "Generating PRD…" while the agent is still asking what to
+    // build. Both flip on together once the gate passes.
+    if (!clarifyFirst) setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     void (async () => {
       // Live preview: forward the accumulating Part A HTML (throttled inside
       // runPrdGeneration) into shared content so PrdPanelContent renders the
@@ -1030,6 +1264,8 @@ export function ChatScreen() {
                     ? {
                         ...t,
                         prdGenerating: false,
+                        // The questions ARE the response — indicator off.
+                        prdCommandThinking: false,
                         pendingClarify: { task: source.task, sourceDocs: source.sourceDocs },
                         thread: [...t.thread, clarifyQuestionsTurn(verdict.questions)],
                       }
@@ -1039,10 +1275,33 @@ export function ChatScreen() {
                   }
                   return { ok: false as const, message: "", clarify: true }
                 }
+                // Sufficient (or the gate failed open): generation starts NOW,
+                // so this is the moment the rail earns its place on screen —
+                // still before the generate POST, so the spinner is optimistic
+                // exactly as it is for every other command kind.
+                // The generating rail + card take over the "working" signal here,
+                // so the chat indicator hands off rather than stacking.
+                setTabs((prev) => prev.map((t) => t.id === tabId
+                  ? { ...t, prdGenerating: true, prdCommandThinking: false } : t))
+                if (activeTabIdRef.current === tabId) {
+                  setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
+                  setPrdPanelPending(true)
+                }
               }
+              // This chat's DB conversation, IF it already has one (a command
+              // issued in an existing chat). Read synchronously — the POST must
+              // never wait on persistence: gating it on the conversation create
+              // delayed the whole generation behind a round-trip, which is the
+              // latency bug this flow exists to avoid. A brand-new command tab
+              // has no id yet and binds a moment later (bindConvToPrd below).
+              const knownConvId = tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
               const start = source.kind === "importDoc"
-                ? await prdApi.importDoc(source.file, source.company)
-                : await prdApi.generateFromTask(source.task, false, source.sourceDocs)
+                ? await prdApi.importDoc(source.file, source.company, knownConvId)
+                : await prdApi.generateFromTask(source.task, false, source.sourceDocs, knownConvId)
+              // Not bound at creation? Bind now, from THIS promise chain rather
+              // than a React effect — the chain outlives the screen, so leaving
+              // the page mid-generation no longer orphans the chat from its PRD.
+              if (knownConvId == null) void bindConvToPrd(tabId, start.prd_id)
               // Stamp the now-known prd_id immediately (as the resume path does
               // upfront) so a reload past this point can find + resume the run,
               // and adopt the backend's cleaner title over the placeholder.
@@ -1083,18 +1342,20 @@ export function ChatScreen() {
         } else if (!(result as { clarify?: boolean }).clarify) {
           // (The clarify outcome already cleared its own spinner and posted the
           // questions — it is a handled stop, not a failure.)
-          setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
+          setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false, prdCommandThinking: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
           showToast("PRD unavailable", result.message.slice(0, 200))
         }
       } catch (e) {
-        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false } : t))
+        // Both flags off on ANY failure — an indicator that never stops is worse
+        // than the dead air it was added to fix.
+        setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false, prdCommandThinking: false } : t))
         if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
     return tabId
-  }, [setContent, showToast, hydratePrdThread, openContentPanel])
+  }, [setContent, showToast, hydratePrdThread, openContentPanel, bindConvToPrd])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
@@ -1170,7 +1431,10 @@ export function ChatScreen() {
       openContentPanel("prd")
       try {
         const { prdApi } = await import("../../../lib/api")
-        const start = await prdApi.generateFromTask(convTask)
+        // Same grounding as the typed command: this button means the same thing
+        // ("build a PRD from this chat"), so it must send the same material —
+        // it was previously passing the task text alone, not even attachments.
+        const start = await prdApi.generateFromTask(convTask, false, prdGroundingDocs(tab.thread))
         // Stamp the id on the tab NOW (it persists to sessionStorage) so a
         // reload mid-generation can resume this run instead of orphaning it.
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdId: start.prd_id } : t))
@@ -1471,6 +1735,29 @@ export function ChatScreen() {
   }
   const persistence = persistenceRef.current
 
+  // Back-patch a conversation's prd_id once BOTH the PRD id and the DB
+  // conversation id are known. The in-chat command flows (import a document,
+  // "generate a PRD for X") create the conversation from their seed turn BEFORE
+  // the async import/generate call returns the prd_id — so the conversation is
+  // first persisted with prd_id=null. Without this back-patch, reopening that
+  // chat from history has no prd_id to rebind the tab to, so the "View PRD"
+  // button never renders and the content panel never reopens (the reported bug).
+  // Fires at most once per conversation; a failed PATCH is retried on a later
+  // render (the id is removed from the seen-set so the next pass re-attempts).
+  const patchedPrdConvRef = useRef<Set<number>>(new Set())
+  useEffect(() => {
+    for (const t of tabs) {
+      if (t.prdId == null || t.dbConvId == null) continue
+      if (patchedPrdConvRef.current.has(t.dbConvId)) continue
+      const convId = t.dbConvId
+      const prdId = t.prdId
+      patchedPrdConvRef.current.add(convId)
+      void import("../../../lib/api")
+        .then(({ conversationsApi }) => conversationsApi.update(convId, { prd_id: prdId }))
+        .catch(() => { patchedPrdConvRef.current.delete(convId) })
+    }
+  }, [tabs])
+
   // Resume a conversation from ChatsScreen or IdeationScreen. Two payload
   // shapes: with `turns` (built locally / legacy) the tab opens pre-filled;
   // with only a `dbId` (All-chats row click) the tab opens INSTANTLY in a
@@ -1487,9 +1774,30 @@ export function ChatScreen() {
         turns?: { role: string; content: string }[]
         /** Preview-derived thread used when the background fetch yields nothing. */
         fallbackTurns?: { role: string; content: string }[]
+        /** The PRD this conversation is about (from ConversationRecord.prd_id),
+         *  when it was opened from a PRD tab. Re-binds the resumed tab to its PRD
+         *  so the "View PRD" button renders and the content panel auto-reopens —
+         *  without it, a resumed PRD chat came back as a plain, PRD-less tab. */
+        prdId?: number | null
+      }
+      // Re-bind a resumed tab to its PRD: set prdId (only when still null so a
+      // reused, live tab is never clobbered) and rehydrate the PRD's saved thread
+      // if this tab hasn't got one. Setting prdId is what makes the existing
+      // reload-restore effect reopen the panel + render the in-chat PRD button.
+      // Also mark the tab `prdInFlow` so the PRD card + clarifying questions render
+      // INLINE, right after the command turn (thread[0]) — a resumed PRD chat reads
+      // chronologically (question → card → questions). Without it the card +
+      // questions were pinned ABOVE the user's own "generate a PRD" message (the
+      // reported out-of-order bug). The card node anchors to thread[0] by INDEX, so
+      // it survives the background rehydrate that rebuilds turns with fresh ids.
+      const bindPrd = (tabId: string, prdId?: number | null) => {
+        if (prdId == null) return
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId && t.prdId == null ? { ...t, prdId, prdInFlow: true } : t))
+        void hydratePrdThread(tabId, prdId)
       }
       const buildRestored = (
-        turns: { role: string; content: string; attachments?: { name: string; content: string }[] | null }[],
+        turns: { role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
         keyPrefix: string,
       ): ThreadTurn[] => {
         const restored: ThreadTurn[] = []
@@ -1518,8 +1826,9 @@ export function ChatScreen() {
       if (preloaded.length > 0) {
         // The resumed tab's dbConvId is set via openTab(..., data.dbId) —
         // per-tab now, no shared ref.
-        openTab(data.title || "Resumed chat", preloaded, data.dbId)
+        const preTabId = openTab(data.title || "Resumed chat", preloaded, data.dbId)
         setActiveConv(0)
+        bindPrd(preTabId, data.prdId)
         return
       }
 
@@ -1527,6 +1836,7 @@ export function ChatScreen() {
       if (!data.dbId) return
       const tabId = openTab(data.title || "Resumed chat", [], data.dbId)
       setActiveConv(0)
+      bindPrd(tabId, data.prdId)
       // openTab reuses an existing same-title tab; if it already carries a
       // thread there's nothing to hydrate.
       const existing = tabsRef.current.find((t) => t.id === tabId)
@@ -1569,7 +1879,7 @@ export function ChatScreen() {
         }
       })()
     } catch { /* ignore corrupt data */ }
-  }, [openTab, showToast])
+  }, [openTab, showToast, hydratePrdThread])
   // Check on mount + whenever we navigate to this screen
   useEffect(() => { checkResume() }, [checkResume])
   // Re-check when the route lands on chat (covers goTo("chat") from ChatsScreen)
@@ -1597,7 +1907,7 @@ export function ChatScreen() {
       turnId: string,
       query: string,
       targetTabId: string,
-      turnAttachments?: { name: string; content: string }[],
+      turnAttachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[],
     ) => {
       const prev = conversationsRef.current
       const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
@@ -1689,10 +1999,45 @@ export function ChatScreen() {
   // the pendingPrdTab effect does for cross-surface opens. No-op without a seed.
   const seedCommandTurn = useCallback((req: LocalPrdTabRequest, tabId: string) => {
     if (!req.seedQuery) return
+    const seedQuery = req.seedQuery
     const turnId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
-    pushPendingConversation(turnId, req.seedQuery, tabId)
+    const title = seedQuery.length > 52 ? `${seedQuery.slice(0, 49)}…` : seedQuery
+    // Create this tab's conversation NOW and publish its id, so the in-flight
+    // import/generate can hand it to the backend (see seedConvIdRef). This only
+    // creates the row — the turns still persist through pushPendingConversation
+    // below, which reuses the very same conversation (create-once per tab). The
+    // registration is synchronous, so the generate call awaiting it a microtask
+    // later always finds it. Doc imports especially need this: their turn
+    // persistence waits on a file upload first, which is far too late.
+    seedConvIdRef.current.set(
+      tabId,
+      persistence.ensureConversation(tabId, { turnId, title, query: seedQuery }),
+    )
+    // "convert this document into a PRD": the doc BECOMES the PRD, so there's no
+    // in-chat extracted text (content empty — conversationPrdDocs skips it so it
+    // never re-feeds as a source doc). Upload the ORIGINAL file so the chip on the
+    // ask can render/download the real document after a reopen; persist with its
+    // storage key, and patch the optimistic seed turn so it's viewable live too.
+    if (req.source.kind === "importDoc") {
+      const file = req.source.file
+      void (async () => {
+        // Best-effort upload (the `.then` wrapper catches a sync throw too); the
+        // seed turn still persists as a name-only chip if storage is unavailable.
+        const stored = await Promise.resolve().then(() => attachmentsApi.upload(file)).catch(() => null)
+        const attachment = { name: file.name, content: "", key: stored?.key ?? null, mime: stored?.mime ?? null, size: stored?.size ?? null }
+        if (stored?.key) {
+          setTabs((prev) => prev.map((t) => t.id === tabId
+            ? { ...t, thread: t.thread.map((tn) => tn.query === seedQuery ? { ...tn, attachments: [attachment] } : tn) }
+            : t))
+        }
+        pushPendingConversation(turnId, seedQuery, tabId, [attachment])
+        finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
+      })()
+      return
+    }
+    pushPendingConversation(turnId, seedQuery, tabId)
     finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
-  }, [pushPendingConversation, finalizeConversationTurn])
+  }, [pushPendingConversation, finalizeConversationTurn, persistence])
 
   // "Generate a PRD …" is a COMMAND, not a conversation: it opens the PRD as its
   // OWN chat tab (with the Evidence/PRD/Tickets panel), never as a chat message.
@@ -1723,7 +2068,10 @@ export function ChatScreen() {
       typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
     const ack: AskResponse = {
       answer:
-        "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button above to reopen the panel anytime.",
+        // This ack lands on a LATER turn of an existing command tab, so the PRD
+        // card sits further up the thread (it anchors to thread[0]) — neither
+        // "above" nor "below" is reliably true here, so point at the chat.
+        "Generating a PRD for that — it'll open in the panel on the right when ready. Use the View PRD button in this chat to reopen the panel anytime.",
       sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
     } as AskResponse
     setTabs((prev) => prev.map((t) => t.id === targetTabId
@@ -1736,6 +2084,10 @@ export function ChatScreen() {
       : t))
     if (targetTabId === activeTabIdRef.current) {
       setContent({ prd: null, prdGenerating: true, prdPartialHtml: null })
+      // The rail was deliberately NOT opened while the questions were pending
+      // (see `clarifyFirst` in openPrdInTab), so answering them is what opens
+      // it — otherwise the generation would run with no panel to land in.
+      setPrdPanelPending(true)
     }
     pushPendingConversation(id, userMessage, targetTabId)
     finalizeConversationTurn(id, { reply: ack }, targetTabId)
@@ -1744,7 +2096,13 @@ export function ChatScreen() {
         if (activeTabIdRef.current === targetTabId) setContent({ prdPartialHtml: html })
       }
       try {
-        const start = await prdApi.generateFromTask(task, false, sourceDocs)
+        // Same durable binding as the command flows, and free here: the tab has
+        // been chatting (the clarifying questions landed in it), so its
+        // conversation already exists and the id is a synchronous read — no
+        // round-trip in front of the user's generation.
+        const knownConvId = tabsRef.current.find((t) => t.id === targetTabId)?.dbConvId ?? null
+        const start = await prdApi.generateFromTask(task, false, sourceDocs, knownConvId)
+        if (knownConvId == null) void bindConvToPrd(targetTabId, start.prd_id)
         setTabs((prev) => prev.map((t) => t.id === targetTabId
           ? { ...t, prdId: start.prd_id, title: start.title ? `PRD · ${start.title}` : t.title }
           : t))
@@ -1767,7 +2125,7 @@ export function ChatScreen() {
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
-  }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast])
+  }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast, bindConvToPrd])
 
   // An edit-phrased message on a PRD tab ("make this PRD shorter", "add a
   // rollout section to the PRD") routes to the scoped chat-edit endpoint: the
@@ -1817,6 +2175,24 @@ export function ChatScreen() {
     }
   }, [finalizeConversationTurn, pushPendingConversation, setContent])
 
+  // Same-tab generation: a PRD command typed in a REGULAR chat tab generates the
+  // PRD in THAT tab's artifacts panel — the conversation that motivated it stays
+  // on screen next to the document — instead of spawning a new tab. Only a
+  // plain, PRD-less chat tab qualifies: a tab already bound to a PRD
+  // (prd/prdId/generating) keeps its binding (one PRD per tab — a new-topic
+  // command there still opens its own tab), and a brief-insight tab (briefMeta)
+  // keeps its insight→PRD flow (the chatInsightState effect stamps the INSIGHT's
+  // prd id onto the tab, which would fight an unrelated task-PRD). A
+  // still-hydrating resumed tab is skipped too (its background thread fetch
+  // would race the seeded command turn). No active tab (landing / brief
+  // surface) → undefined → the command opens its own tab as before.
+  const reusableActiveTab = useCallback((): ChatTab | undefined => {
+    const t = tabsRef.current.find((x) => x.id === activeTabIdRef.current)
+    return t && t.prd == null && t.prdId == null && !t.prdGenerating &&
+      t.briefMeta == null && !t.hydrating
+      ? t : undefined
+  }, [])
+
   const prdCommandFlow = useCallback((seedQuery?: string, taskOverride?: string | null) => {
     // A command naming a SPECIFIC task ("generate a PRD for dark mode") builds
     // the PRD from the user's own words. A GENERIC "generate a PRD" (no topic) is
@@ -1830,10 +2206,12 @@ export function ChatScreen() {
     const task = taskOverride ?? (seedQuery ? prdCommandTask(seedQuery) : null)
     const activeTabNow = tabsRef.current.find((t) => t.id === activeTabIdRef.current)
     const effectiveTask = task || conversationToPrdTask(activeTabNow?.thread ?? [])
-    // Documents attached earlier in this conversation ground the PRD — with or
-    // without an explicit topic. (The doc-on-the-SAME-message case routes to
-    // importPrdCommandFlow before this flow is ever called.)
-    const sourceDocs = conversationPrdDocs(activeTabNow?.thread ?? [])
+    // What the PRD grounds on: documents attached earlier in this conversation
+    // AND the conversation itself — the agent's replies included, since that is
+    // where a fetched ticket or finding actually lives. (The doc-on-the-SAME-
+    // message case routes to importPrdCommandFlow before this flow is ever
+    // called, and keeps its own replace-grounding behaviour.)
+    const sourceDocs = prdGroundingDocs(activeTabNow?.thread ?? [])
     if (!effectiveTask) {
       // No explicit topic and no conversation to ground it — ask for a topic.
       // This branch stays synchronous (no network), so it never has the gap.
@@ -1846,9 +2224,11 @@ export function ChatScreen() {
     // The title is a placeholder derived from the task until the backend's real
     // title lands (openPrdInTab renames the tab once generateFromTask resolves).
     const placeholder = effectiveTask.length > 37 ? `${effectiveTask.slice(0, 37)}…` : effectiveTask
+    const inTab = reusableActiveTab()
     const req: LocalPrdTabRequest = {
       title: `PRD · ${placeholder}`,
       seedQuery,
+      ...(inTab ? { inTabId: inTab.id } : {}),
       source: {
         kind: "generateTask",
         task: effectiveTask,
@@ -1857,7 +2237,7 @@ export function ChatScreen() {
     }
     const tabId = openPrdInTab(req)
     seedCommandTurn(req, tabId)
-  }, [openPrdInTab, seedCommandTurn, showToast])
+  }, [openPrdInTab, reusableActiveTab, seedCommandTurn, showToast])
 
   // A command phrasing over an ATTACHED DOCUMENT is the chat entry to the
   // PRD-import flow: upload the doc to POST /v1/prd/import — the same conversion
@@ -1874,14 +2254,16 @@ export function ChatScreen() {
   // AFTER the render). The placeholder title is the file name until the backend's
   // real title lands.
   const importPrdCommandFlow = useCallback((file: File, opts: { openTickets: boolean; seedQuery?: string }) => {
+    const inTab = reusableActiveTab()
     const req: LocalPrdTabRequest = {
       title: file.name,
       seedQuery: opts.seedQuery,
+      ...(inTab ? { inTabId: inTab.id } : {}),
       source: { kind: "importDoc", file, company: activeCompany, openTickets: opts.openTickets },
     }
     const tabId = openPrdInTab(req)
     seedCommandTurn(req, tabId)
-  }, [activeCompany, openPrdInTab, seedCommandTurn])
+  }, [activeCompany, openPrdInTab, reusableActiveTab, seedCommandTurn])
 
   const submitAsk = useCallback(
     async (rawQuery: string) => {
@@ -2054,25 +2436,46 @@ export function ChatScreen() {
       // extract runs. runTabAsk re-adds this (addToSet is idempotent) and owns the
       // eventual clear on the ask's completion.
       let sendQuery = displayQuery
-      // Extracted attachment texts, persisted with the turn (survives reload;
-      // read back by conversationPrdDocs for a later "generate a PRD").
-      let persistedAttachments: { name: string; content: string }[] | undefined
+      // Extracted attachment texts + the ORIGINAL file's storage key, persisted
+      // with the turn (survives reload; text read back by conversationPrdDocs for
+      // a later "generate a PRD"; key lets the chip render/download the real file).
+      let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
       if (hasAttachments) {
         setBusyTabs((prev) => addToSet(prev, targetTabId))
         const pending = attachments
         let ctx: string
         try {
-          // Extract each attachment's text ONCE: plain-text attachments inline
-          // their content; documents (.pdf/.pptx/.docx/.doc) are parsed to
-          // markdown server-side. Order is preserved via the resolved array so
-          // the same text feeds BOTH the backend query and the clickable card's
-          // viewer — the document is never re-fetched to display it.
+          // Per attachment, in parallel: (1) extract its text ONCE — plain-text
+          // inlines its content, documents (.pdf/.pptx/.docx/.doc) are parsed to
+          // markdown server-side; (2) upload the ORIGINAL file to storage so the
+          // chip can render/download the real document after a reload. The upload
+          // is best-effort (a failure leaves the text-only chip, never blocks the
+          // send). Order is preserved via the resolved array.
           const extracted = await Promise.all(
             pending.map(async (a) => {
-              const text = a.file
-                ? (await askApi.extractFile(a.file)).markdown.slice(0, 50000)
-                : a.content
-              return { name: a.name, content: text }
+              const [text, stored] = await Promise.all([
+                // Text files were already read client-side (content present) — use
+                // it. Only binary docs (content empty, raw file kept) need the
+                // server-side markdown extraction.
+                a.content
+                  ? Promise.resolve(a.content)
+                  : a.file
+                  ? askApi.extractFile(a.file).then((r) => r.markdown.slice(0, 50000))
+                  : Promise.resolve(a.content),
+                // Best-effort — an upload failure (or a missing storage backend)
+                // must never block the send. The `.then` wrapper also catches a
+                // synchronous throw, not just a rejection.
+                a.file
+                  ? Promise.resolve().then(() => attachmentsApi.upload(a.file!)).catch(() => null)
+                  : Promise.resolve(null),
+              ])
+              return {
+                name: a.name,
+                content: text,
+                key: stored?.key ?? null,
+                mime: stored?.mime ?? null,
+                size: stored?.size ?? null,
+              }
             }),
           )
           // Clamp the TOTAL context so question + attachments stay under the
@@ -2081,9 +2484,9 @@ export function ChatScreen() {
             .map((e) => `--- ${e.name} ---\n${e.content}`)
             .join("\n\n")
             .slice(0, 100000)
-          // Backfill the extracted content onto the optimistic turn so its card
-          // opens a viewer — the SAME text folded into the query, never re-fetched.
-          const withContent = extracted.map((e) => ({ name: e.name, content: e.content }))
+          // Backfill the extracted content + stored file key onto the optimistic
+          // turn so its card opens a viewer / downloads the original.
+          const withContent = extracted.map((e) => ({ name: e.name, content: e.content, key: e.key, mime: e.mime, size: e.size }))
           persistedAttachments = withContent
           setTabs((prev) => prev.map((t) => t.id === targetTabId
             ? { ...t, thread: t.thread.map((tn) => tn.id === id ? { ...tn, attachments: withContent } : tn) }
@@ -2771,9 +3174,26 @@ export function ChatScreen() {
     />
   ) : null
   // Command-opened PRD tab with at least one turn → render the card + questions
-  // INLINE after thread[0]; otherwise (header open, or an empty thread) keep them
-  // at the TOP as before.
+  // INLINE after the command turn; otherwise (header open, or an empty thread)
+  // keep them at the TOP as before.
   const inlinePrdCards = !!activeTab?.prdInFlow && thread.length > 0
+  // Which turn the inline card anchors AFTER. Precedence: the tab's recorded
+  // command-turn id (same-tab generation appends the command mid-thread, and the
+  // thread — ids included — persists with the tab); else the last
+  // command-looking turn (a fresh-session reopen rehydrates the merged
+  // conversation with fresh ids, so the id lookup misses); else thread[0] (the
+  // legacy command-opened tab, whose first turn IS the command).
+  const inlinePrdAnchorIdx = useMemo(() => {
+    if (!inlinePrdCards) return -1
+    if (activeTab?.prdFlowTurnId) {
+      const i = thread.findIndex((t) => t.id === activeTab.prdFlowTurnId)
+      if (i >= 0) return i
+    }
+    for (let i = thread.length - 1; i >= 0; i--) {
+      if (thread[i].query && isPrdCommand(thread[i].query)) return i
+    }
+    return 0
+  }, [inlinePrdCards, activeTab?.prdFlowTurnId, thread])
 
   return (
     <AppLayout
@@ -3035,10 +3455,20 @@ export function ChatScreen() {
                       return (
                         <Fragment key={turn.id}>
                         <div className="bc-turn">
-                          <div className="bc-user-head">
-                            <span className="bc-avatar">{userInitials}</span>
-                            <span className="bc-user-name">{name}</span>
-                          </div>
+                          {/* Only when the user actually said something. A turn
+                              can be AGENT-ONLY — the clarify gate posts its
+                              questions as a turn with an empty `query` — and an
+                              unconditional header put the user's name and avatar
+                              above a message they never sent, reading as a blank
+                              question of their own. Attachments count as saying
+                              something: a file sent with no text is still the
+                              user's turn. */}
+                          {turn.query || turn.attachments?.length ? (
+                            <div className="bc-user-head">
+                              <span className="bc-avatar">{userInitials}</span>
+                              <span className="bc-user-name">{name}</span>
+                            </div>
+                          ) : null}
                           {turn.attachments?.length ? (
                             <div className="bc-user-attachments">
                               {turn.attachments.map((a, i) => (
@@ -3046,8 +3476,9 @@ export function ChatScreen() {
                                   key={i}
                                   name={a.name}
                                   content={a.content}
+                                  downloadable={!!a.key}
                                   onOpen={() =>
-                                    setViewerAttachment({ name: a.name, content: a.content ?? "" })
+                                    setViewerAttachment({ name: a.name, content: a.content ?? "", key: a.key, mime: a.mime })
                                   }
                                 />
                               ))}
@@ -3083,6 +3514,17 @@ export function ChatScreen() {
                                 simulateTyping={hasFreshReply}
                               />
                             ) : null}
+                            {/* A PRD command is acknowledged instantly, but the
+                                agent's real response — clarifying questions, or
+                                the generation starting — is a network call away.
+                                Keep something moving under the acknowledgment for
+                                that whole window; it stops the moment either one
+                                lands (see prdCommandThinking). */}
+                            {isLast && turn.reply && activeTab?.prdCommandThinking ? (
+                              <div data-testid="prd-command-thinking">
+                                <AssistantThinkingSkeleton compact />
+                              </div>
+                            ) : null}
                           </div>
                           {/* Artifact-action row (Generate/View PRD + prototype)
                               — ONLY on a PRD-bound tab whose insight card isn't
@@ -3107,13 +3549,14 @@ export function ChatScreen() {
                           ) : null}
                         </div>
                         {/* IN-CHAT COMMAND open: the insight/PRD card + clarifying
-                            questions render as the reply BELOW the command turn
-                            (thread[0]) — anchored by INDEX so it survives a reload
-                            that rehydrates the thread with fresh turn ids — instead
-                            of being pinned above the whole conversation (the
-                            out-of-order bug). Header opens render them at the top
-                            (see the block above) and skip this. */}
-                        {inlinePrdCards && idx === 0 ? (
+                            questions render as the reply BELOW the command turn —
+                            `inlinePrdAnchorIdx` resolves which turn that is (the
+                            recorded command turn for same-tab generation, thread[0]
+                            for legacy command-opened tabs) — instead of being
+                            pinned above the whole conversation (the out-of-order
+                            bug). Header opens render them at the top (see the
+                            block above) and skip this. */}
+                        {inlinePrdCards && idx === inlinePrdAnchorIdx ? (
                           <>
                             {insightCardNode}
                             {prdQuestionsNode}

@@ -1417,8 +1417,13 @@ async def generate_prototype(
     bind propagates across every `await` and `asyncio.to_thread` in the impl
     (see app.llm_keys). `workspace_id` is the company id."""
     from app.llm_keys import company_llm_key
+    from app.usage_context import Feature, usage_scope
 
-    with company_llm_key(workspace_id):
+    # The same bind carries the usage-metering attribution: every
+    # `get_design_agent_client` call inside is metered as design_agent/generate.
+    with company_llm_key(workspace_id), usage_scope(
+        feature=Feature.DESIGN_AGENT, operation="generate"
+    ):
         return await _generate_prototype_impl(
             prototype_id,
             workspace_id,
@@ -1915,8 +1920,13 @@ async def iterate_prototype(
     # Bind the company's own Claude key (when configured) for the edit loop, same
     # as the scaffold path (generate_prototype). `workspace_id` is the company id.
     from app.llm_keys import company_llm_key
+    from app.usage_context import Feature, usage_scope
 
-    with company_llm_key(workspace_id):
+    # `mode` distinguishes the edit paths (iterate / manual edit) — carry it as
+    # the usage operation so the dashboard can separate them from generations.
+    with company_llm_key(workspace_id), usage_scope(
+        feature=Feature.DESIGN_AGENT, operation=str(mode or "iterate")
+    ):
         result = await agent_loop(
             system_blocks=effective_system_blocks,
             user_message=user_message,

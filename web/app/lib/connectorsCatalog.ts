@@ -19,26 +19,6 @@ import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 // (lib/onboarding/connectorsWizard.ts).
 export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
-    // The user's OWN documents, as a first-class connector rather than a
-    // loose per-category upload strip: they name the source, optionally say
-    // what the documents are, and attach any number of files of any type.
-    // Its own category (not `docs`) because — unlike Notion / Google Docs —
-    // a deliberately named-and-described corpus IS evidence, so it must stay
-    // OUT of NON_EVIDENCE_CATEGORIES. Mirrors the backend's
-    // _EVIDENCE_PROVIDER_EXCEPTIONS entry for `uploads`.
-    key: "uploads",
-    title: "Your documents",
-    subLabel: "upload your own",
-    uploadAccept: UPLOAD_ACCEPT_HINT,
-    uploadExtensions: UPLOAD_EXTENSIONS,
-    // Files are attached inside the named-source flow (which accepts ANY
-    // type), not via the generic per-category strip.
-    allowsManualUpload: false,
-    items: [
-      { id: "uploads", name: "Uploaded documents", logo: "D", logoText: "D", logoColor: "#4B5563", oauth: false, authType: "upload", types: ["documents"] },
-    ],
-  },
-  {
     key: "analytics",
     title: "Analytics",
     subLabel: "required",
@@ -162,13 +142,27 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     ],
   },
   {
-    // Notion and Google Docs are documentation tools, not project trackers —
-    // settings-only (not an onboarding wizard category since v6).
+    // "Company documentation": the user's OWN uploaded documents (a first-class
+    // `uploads` connector — named, described corpora they hand us) merged with
+    // the external documentation tools (Notion, Google Docs), so all company
+    // docs live under one heading.
+    //
+    // Evidence is preserved per-PROVIDER, not per-category: this category stays
+    // in NON_EVIDENCE_CATEGORIES (Notion / Google Docs are context, not
+    // customer/product evidence on their own), while the `uploads` provider is
+    // an explicit evidence exception (see EVIDENCE_PROVIDER_EXCEPTIONS) —
+    // mirrors the backend's _EVIDENCE_PROVIDER_EXCEPTIONS. Settings-only (not an
+    // onboarding wizard category since v6).
     key: "docs",
-    title: "Business documentation",
+    title: "Company documentation",
+    // One upload path only: the named-source picker ("Add a document source",
+    // rendered for this category in ConnectorsSettings), NOT the generic
+    // per-category strip.
+    allowsManualUpload: false,
     uploadAccept: UPLOAD_ACCEPT_HINT,
     uploadExtensions: UPLOAD_EXTENSIONS,
     items: [
+      { id: "uploads",      name: "Uploaded documents", logo: "D", logoText: "D", logoColor: "#4B5563", oauth: false, authType: "upload", types: ["documents"] },
       { id: "notion",       name: "Notion",      logo: "N", logoText: "N", logoColor: "#000000", logoSvg: "/connectors/notion.svg", oauth: false, types: ["documents"] },
       // Backend provider is `google_drive` (existing OAuth + sync). Surface
       // it as "Google Docs" per design — the connector pulls Google Docs
@@ -285,12 +279,25 @@ export const NON_EVIDENCE_CATEGORIES: ReadonlySet<string> = new Set([
   "docs",
 ])
 
-/** Provider ids in the evidence-bearing categories (see NON_EVIDENCE_CATEGORIES). */
-const EVIDENCE_PROVIDER_IDS: ReadonlySet<string> = new Set(
-  CONNECTOR_CATALOG
+/**
+ * Providers that feed the brief with evidence REGARDLESS of their category's
+ * classification — mirrors the backend's `_EVIDENCE_PROVIDER_EXCEPTIONS`.
+ * `uploads` lives in the merged (non-evidence) "Company documentation" category
+ * alongside Notion / Google Docs, but a deliberately named-and-described corpus
+ * of the user's OWN documents IS evidence, so it must still count as a data
+ * source. (Intercom is likewise an exception on the backend, but its `voice`
+ * category is already evidence-bearing here, so it needs no entry.)
+ */
+const EVIDENCE_PROVIDER_EXCEPTIONS: ReadonlySet<string> = new Set(["uploads"])
+
+/** Provider ids in the evidence-bearing categories (see NON_EVIDENCE_CATEGORIES),
+ *  plus the per-provider exceptions above. */
+const EVIDENCE_PROVIDER_IDS: ReadonlySet<string> = new Set([
+  ...CONNECTOR_CATALOG
     .filter((cat) => !NON_EVIDENCE_CATEGORIES.has(cat.key))
     .flatMap((cat) => cat.items.map((i) => i.id)),
-)
+  ...EVIDENCE_PROVIDER_EXCEPTIONS,
+])
 
 /** True iff `id` is a connector that feeds the brief with evidence. Unknown ids
  *  return false — an id we don't recognize can't be shown to gather anything. */

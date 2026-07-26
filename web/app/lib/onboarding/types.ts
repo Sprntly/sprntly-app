@@ -275,34 +275,40 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  * the single source of truth for the onboarding route order. The flow follows
  * the 2026-07-21 screenshot spec (which collapsed team/strategy/decisions into
  * one workspace step and added a personalize step) + the optional api-key step
- * the spec omits but we keep — 9 steps + the define-metrics sub-flow:
+ * the spec omits but we keep — 10 steps + the define-metrics sub-flow:
  *
- *   1. company     → CompanyStep         (name* + website + strategy/OKRs;
+ *   1. import-context → ImportContextStep (hand over the .md your own
+ *                                         assistant already wrote — OPTIONAL.
+ *                                         FIRST since 2026-07-25 so it can
+ *                                         prefill EVERY step, the company one
+ *                                         included; it creates the company row
+ *                                         itself when a file is uploaded.)
+ *   2. company     → CompanyStep         (name* + website + strategy/OKRs;
  *                                         mission, portfolio + planning cycle
  *                                         behind "Add more". Kicks the website
  *                                         analysis in the BACKGROUND.)
- *   2. product     → ProductStep         (name* + website + surfaces* +
- *                                         monetization + users; competitors
- *                                         behind a disclosure)
- *   3. metrics     → MetricsStep         (pick up to 5 success metrics* +
- *                                         prioritization framework*)
+ *   3. connectors  → Connectors          (connect your tools — OPTIONAL,
+ *                                         skippable; zero connectors is a
+ *                                         supported finish)
  *   4. api-key     → ApiKey              (the workspace's own Claude/Anthropic
  *                                         key — OPTIONAL, skippable; set now so
  *                                         the token-heavy knowledge-graph build
  *                                         runs on it, or later in Settings →
  *                                         Admin)
- *   5. connectors  → Connectors          (connect your tools — OPTIONAL,
- *                                         skippable; zero connectors is a
- *                                         supported finish)
- *   6. workspace   → WorkspaceStep       (workspace name* + what it works on* +
+ *   5. workspace   → WorkspaceStep       (workspace name* + what it works on* +
  *                                         team strategy/roadmap; sizing +
  *                                         anything else behind "Add more")
- *   7. invite      → InviteStep          (teammates: email + job role +
+ *   6. product     → ProductStep         (name* + website + surfaces* +
+ *                                         monetization + users; competitors
+ *                                         behind a disclosure)
+ *   7. metrics     → MetricsStep         (pick up to 5 success metrics* +
+ *                                         prioritization framework*)
+ *   8. invite      → InviteStep          (teammates: email + job role +
  *                                         permission, bulk paste, CSV import;
  *                                         skippable)
- *   8. review      → ReviewStep          (AI-drafted business context — read,
+ *   9. review      → ReviewStep          (AI-drafted business context — read,
  *                                         edit, accept)
- *   9. personalize → PersonalizeStep     (what the workspace surfaces + brief
+ *  10. personalize → PersonalizeStep     (what the workspace surfaces + brief
  *                                         delivery cadence/channel/time)
  *
  * After step 9 the UNNUMBERED define-metrics sub-flow (route
@@ -327,23 +333,30 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  * persisted values (including stale ones from older flows) in range.
  */
 export const ONBOARDING_STEP_SLUGS = [
-  "company",
-  // Step 2 (client feedback, 2026-07-22): hand over the context you have
-  // already explained to your own AI assistant instead of retyping it. Sits
-  // right after `company` because everything from here on — product, users,
-  // metrics, workspace scope — is what the import prefills. It is OPTIONAL:
-  // "Fill it in manually" advances with nothing imported.
+  // Step 1 (client feedback, 2026-07-22; moved AHEAD of `company` 2026-07-25):
+  // hand over the context you have already explained to your own AI assistant
+  // instead of retyping it. It went first for one reason — behind `company` it
+  // could prefill every step EXCEPT the one the user had just typed by hand,
+  // which is the step the export answers most completely. Nothing in the flow
+  // now precedes it, so every field it can fill is a field the user never sees
+  // blank. It is OPTIONAL: "Fill it in manually" advances with nothing
+  // imported, and the company row is then created by `company` exactly as
+  // before (an upload here creates it early — see ImportContextStep).
   "import-context",
+  "company",
   // Reordered from the v7 spec (client feedback, 2026-07-22). `connectors` and
-  // `api-key` are pulled up to sit directly after the import, and `product`
-  // moved to the far side of `workspace`.
+  // `api-key` are pulled up to sit right behind the import + company pair, and
+  // `product` moved to the far side of `workspace`.
   //
   // The reason is the import: it kicks a background LLM extraction over the
   // uploaded file, and connectors + api-key are the two steps in the flow that
   // extraction cannot prefill (one wires OAuth, the other takes a secret). So
   // they are the steps worth spending its latency on. Everything the import
   // DOES prefill — metrics, workspace scope, product — now sits behind them,
-  // and opens with the extracted fields already in place.
+  // and opens with the extracted fields already in place. `company` sits ahead
+  // of them because it is where the workspace is created when the import was
+  // skipped; the deterministic heading parse has already landed by then, and
+  // its fields are seeded fill-only so a late extraction still pops in.
   "connectors",
   "api-key",
   "workspace",

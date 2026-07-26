@@ -404,12 +404,54 @@ export const ideationApi = {
 }
 
 export type AskCitation = { source: string; evidence: string }
+/** A Jira change the agent has PROPOSED and the user has not yet confirmed.
+ *  Rides on the ask answer; the chat renders it as a confirm card. Nothing is
+ *  written until the user acts on it — see jiraApi.applyChange. */
+export type PendingJiraChange = {
+  issue_key: string
+  summary: string
+  /** Jira field ids → values, already validated against the issue's editmeta. */
+  fields: Record<string, unknown>
+  /** Target workflow status name; status moves via a transition, not a field. */
+  to_status: string
+  comment: string
+  /** Human "Field: before → after" lines, rendered verbatim on the card. */
+  preview: string[]
+}
+
 export type AskResponse = {
   answer: string
   key_points: string[]
   citations: AskCitation[]
   confidence: number
   unanswered: string
+  /** Present only when the Jira agent proposed a change awaiting confirmation. */
+  _pending_jira_change?: PendingJiraChange
+}
+
+/** What POST /v1/jira/write reports back. Each part is independent: a request
+ *  can set fields, move status and comment, and any one of them can fail on its
+ *  own, so the UI reports exactly what landed rather than one boolean. */
+export type JiraWriteResult = {
+  ok: boolean
+  issue_key: string
+  applied: string[]
+  failed: string[]
+  fields?: { ok: boolean; updated?: string[]; rejected?: string[]; error?: string }
+  status?: { ok: boolean; status?: string; error?: string }
+  comment?: { ok: boolean; comment_id?: string; error?: string }
+}
+
+export const jiraApi = {
+  /** Apply a change the user CONFIRMED in the chat. This is the only call in
+   *  the app that mutates Jira from a conversation — the agent can only
+   *  propose, so this must be triggered by a person clicking Confirm. */
+  applyChange: (change: {
+    issue_key: string
+    fields?: Record<string, unknown>
+    to_status?: string
+    comment?: string
+  }) => api.post<JiraWriteResult>("/v1/jira/write", change),
 }
 
 export type SkillInfo = {
@@ -830,9 +872,10 @@ export const companiesApi = {
       slug,
       display_name: displayName,
     }),
-  uploadFiles: (slug: string, files: File[]) => {
+  uploadFiles: (slug: string, files: File[], category = "") => {
     const form = new FormData()
     for (const f of files) form.append("files", f, f.name)
+    if (category) form.append("category", category)
     return api.post<UploadFilesResponse>(
       `/v1/datasets/${encodeURIComponent(slug)}/files`,
       form,
@@ -1164,7 +1207,10 @@ export type LlmContextFields = {
   competitors?: string[]
   metrics?: string[]
   prioritization_framework?: string
+  /** The workspace step's mandatory name (contract v2). */
+  team_name?: string
   team_scope?: string
+  sizing_methodology?: string
   notes?: string
 }
 
@@ -1184,6 +1230,12 @@ export type LlmContextImportResponse = {
    *  prompt produced; this pass reads context documents of any shape, so it
    *  runs server-side while the user works through the connectors step. */
   job_id?: number | null
+  /** True when the raw .md was actually filed as a document source AND handed
+   *  to the knowledge-graph ingest. Distinct from `ok` (whether the heading
+   *  walk read structured fields): a caller that only cares about grounding the
+   *  agents — e.g. the Business Context import, which never prefills — keys its
+   *  success message off this, not `ok`. Absent on background-job results. */
+  filed?: boolean
 }
 
 export type LlmContextJobStatus = {
@@ -1226,6 +1278,9 @@ export type SourceFile = {
   size_bytes: number
   md_chars: number
   added_at: string
+  /** Connector category the file was uploaded under. "" = legacy/uncategorized
+   *  (uploaded before per-category attribution existed). */
+  category?: string
 }
 export type ListSourcesResponse = { slug: string; files: SourceFile[] }
 export type DeleteSourceResponse = {
@@ -1712,13 +1767,22 @@ export const prdApi = {
    *  the task text (find-or-create keyed on it) and grounds on the company's
    *  data. Same fire-and-forget contract as `generate`: returns a prd_id to
    *  poll via prdApi.get(id) until status === 'ready'. */
-  generateFromTask: (task: string, force = false, sourceDocs?: TurnAttachment[]) =>
+  generateFromTask: (
+    task: string,
+    force = false,
+    sourceDocs?: TurnAttachment[],
+    /** The chat conversation this command came from. The backend binds it to the
+     *  new PRD immediately, so navigating away mid-generation can't leave the
+     *  chat orphaned (reopened from history with no PRD and no View PRD button). */
+    conversationId?: number | null,
+  ) =>
     api.post<PrdStartResponse>("/v1/prd/generate-from-task", {
       task,
       force,
       // Documents attached earlier in the chat thread — the backend grounds the
       // PRD on them (they used to be silently forgotten by this command).
       ...(sourceDocs && sourceDocs.length ? { source_docs: sourceDocs } : {}),
+      ...(conversationId != null ? { conversation_id: conversationId } : {}),
     }),
   /** Clarify-first sufficiency gate (runs on EVERY chat-PRD command before
    *  generation): does the task + attached documents carry the ingredients a
@@ -1762,10 +1826,13 @@ export const prdApi = {
    *  skill. Same fire-and-forget contract as `generate`: returns a prd_id to
    *  poll via prdApi.get(id) until status === 'ready'. `dataset` is the company
    *  slug the PRD belongs to. */
-  importDoc: (file: File, dataset: string) => {
+  importDoc: (file: File, dataset: string, conversationId?: number | null) => {
     const form = new FormData()
     form.append("file", file, file.name)
     form.append("dataset", dataset)
+    // See generateFromTask: binds the commanding chat to the PRD server-side so
+    // leaving the page mid-import can't orphan it.
+    if (conversationId != null) form.append("conversation_id", String(conversationId))
     return api.post<PrdStartResponse>("/v1/prd/import", form)
   },
   /** Fetch a PRD by id. payload_md is only filled when status === 'ready'. */
@@ -2954,6 +3021,60 @@ export const adminApi = {
   testLlmKey: () => api.post<{ ok: true }>("/v1/admin/llm-key/test"),
 }
 
+// ── Usage (owner/admin only): LLM spend + token usage for this workspace ──
+// Every `est_cost_usd` here is ESTIMATED — the provider APIs return token counts,
+// never dollars, so the backend prices tokens against the published rate card.
+// Surface it as "estimated" in the UI; it will not match an Anthropic invoice to
+// the cent. `cost_basis` carries that provenance from the API.
+
+/** The numeric columns every usage rollup shares. */
+export type UsageBucket = {
+  calls: number
+  failed_calls: number
+  input_tokens: number
+  output_tokens: number
+  cache_creation_input_tokens: number
+  cache_read_input_tokens: number
+  est_cost_usd: number
+}
+
+export type UsageSummary = {
+  range: { start: string; end: string; days: number; tz: string }
+  cost_basis: string
+  /** Always "customer_key": only calls billed to the company's OWN Anthropic
+   *  key are counted. Usage on Sprntly's platform key is spend we absorb and is
+   *  deliberately excluded — it is not the customer's to see or pay. */
+  scope: string
+  totals: UsageBucket
+  /** One entry per calendar day in the range — empty days included. */
+  daily: (UsageBucket & { day: string })[]
+  by_feature: (UsageBucket & { feature: string })[]
+  by_model: (UsageBucket & { model: string })[]
+  by_provider: (UsageBucket & { provider: string })[]
+  by_operation: (UsageBucket & { operation: string })[]
+}
+
+/** Guess the viewer's IANA zone so "today" on the chart is their calendar day. */
+function localTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"
+  } catch {
+    return "UTC"
+  }
+}
+
+export const usageApi = {
+  summary: (days: number, tz: string = localTimeZone()) =>
+    api.get<UsageSummary>(
+      `/v1/admin/usage/summary?days=${days}&tz=${encodeURIComponent(tz)}`,
+    ),
+  /** The same rollup as CSV text (the request helper returns non-JSON as-is). */
+  exportCsv: (days: number, tz: string = localTimeZone()) =>
+    api.get<string>(
+      `/v1/admin/usage/export.csv?days=${days}&tz=${encodeURIComponent(tz)}`,
+    ),
+}
+
 // ── Staff admin panel (dedicated owner-only credential) ──
 // Org invites + per-company entitlements. Auth is fully separate from the
 // normal app session: POST /v1/staff/login (id + password from env on the
@@ -3286,8 +3407,37 @@ export type ConversationRecord = {
 }
 
 /** Extracted text of a file attached to a chat turn — persisted with the turn
- *  so reloaded threads (and the chat→PRD flow) still see earlier documents. */
-export type TurnAttachment = { name: string; content: string }
+ *  so reloaded threads (and the chat→PRD flow) still see earlier documents.
+ *  `key`/`mime` point at the ORIGINAL uploaded file in storage so a reopened chat
+ *  can render the real document (PDF/image inline, everything downloadable) — not
+ *  just the extracted text. Null on legacy turns / text pasted without an upload. */
+export type TurnAttachment = {
+  name: string
+  content: string
+  key?: string | null
+  mime?: string | null
+  size?: number | null
+}
+
+export const attachmentsApi = {
+  /** Stash the ORIGINAL uploaded file so a reopened chat can render it back.
+   *  Returns the storage key + sniffed metadata to persist on the turn. */
+  upload: (file: File) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    return api.post<{ key: string; name: string; mime: string; size: number }>(
+      "/v1/conversations/attachments",
+      form,
+    )
+  },
+  /** Fresh short-lived signed URLs (view inline + download) for a stored key.
+   *  Bearer-authed here; the returned URLs are public so an <iframe>/<img> can
+   *  load them directly. Re-minted on every viewer open (the URLs expire). */
+  sign: (key: string, name?: string) =>
+    api.get<{ view_url: string; download_url: string; mime: string }>(
+      `/v1/conversations/attachments/sign?key=${encodeURIComponent(key)}${name ? `&name=${encodeURIComponent(name)}` : ""}`,
+    ),
+}
 
 export type ConversationTurn = {
   id: number
@@ -3307,7 +3457,7 @@ export const conversationsApi = {
    *  tab can rehydrate the earlier chat. `conversation` is null when none exists. */
   byPrd: (prdId: number) =>
     api.get<{ conversation: ConversationRecord | null; turns: ConversationTurn[] }>(`/v1/conversations/by-prd/${prdId}`),
-  update: (id: number, body: { title?: string; preview?: string; query?: string; reply?: string; pinned?: boolean }) =>
+  update: (id: number, body: { title?: string; preview?: string; query?: string; reply?: string; pinned?: boolean; prd_id?: number }) =>
     api.patch<ConversationRecord>(`/v1/conversations/${id}`, body),
   remove: (id: number) =>
     api.delete(`/v1/conversations/${id}`),

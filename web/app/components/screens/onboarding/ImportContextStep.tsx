@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import {
@@ -10,11 +11,13 @@ import {
   type LlmContextImportResponse,
 } from "../../../lib/api"
 import { applyImportedContext } from "../../../lib/onboarding/applyImportedContext"
-import { advanceOnboardingStep } from "../../../lib/onboarding/store"
+import { advanceOnboardingStep, createWorkspace } from "../../../lib/onboarding/store"
 import { stepForSlug } from "../../../lib/onboarding/types"
+import type { WorkspaceCompany } from "../../../lib/onboarding/types"
 
 /**
- * Onboarding step 02 — "Import your context" (client feedback, 2026-07-22).
+ * Onboarding step 01 — "Import your context" (client feedback, 2026-07-22;
+ * moved ahead of the company step 2026-07-25).
  *
  * The premise: most PMs have already explained their company, product, users
  * and strategy to an assistant many times over. Retyping all of it is the
@@ -33,22 +36,31 @@ import { stepForSlug } from "../../../lib/onboarding/types"
  * copy-paste prompt works in every assistant today and needs no registered
  * app on either side.
  *
- * TWO READS PER UPLOAD, and the second is why this step hands off to
- * CONNECTORS rather than product. The POST returns a deterministic heading
- * parse instantly — exact, but it only understands files our own prompt
- * produced. It also kicks a background LLM extraction that reads context
- * documents of ANY shape (an edited export, a reworded one, a strategy doc
- * the user already had). That pass costs a round-trip, so the user spends it
- * on the one step the import cannot prefill: connecting their tools. The
- * fields land on onboarding context while they work, and metrics/product open
- * pre-filled. Nothing here blocks on it — "Keep going" is live the moment the
- * upload returns, and an extraction that fails or times out just leaves the
- * later steps to be typed.
+ * TWO READS PER UPLOAD, and the second is why nothing here blocks. The POST
+ * returns a deterministic heading parse instantly — exact, but it only
+ * understands files our own prompt produced. It also kicks a background LLM
+ * extraction that reads context documents of ANY shape (an edited export, a
+ * reworded one, a strategy doc the user already had). That pass costs a
+ * round-trip, which the user spends on the steps ahead: company first, then
+ * connectors and the api key, the two the extraction cannot prefill at all
+ * (one wires OAuth, the other takes a secret). The fields land on onboarding
+ * context while they work, and every step behind opens pre-filled — each seeds
+ * fill-only, so a late arrival pops into a field they haven't typed in and
+ * leaves the ones they have alone. "Keep going" is live the moment the upload
+ * returns, and an extraction that fails or times out just leaves the later
+ * steps to be typed.
  *
  * An import writes ONLY onto fields the workspace has left empty, on both
  * passes. Later steps already seed their inputs from `workspace`, so the user
  * reviews and edits every imported value on the step that owns it — an import
  * prefills a form, it never commits an answer on the user's behalf.
+ *
+ * IT RUNS FIRST, which is the point: behind the company step it could prefill
+ * everything except the step the user had just typed out by hand. The cost is
+ * that the upload endpoint is tenant-scoped (`require_workspace`) and at step 1
+ * there may be no company row yet — so picking a file CREATES one first, with a
+ * blank name that the company step then collects. Skipping the step creates
+ * nothing at all; the company step still makes the row exactly as it always did.
  */
 
 /** Ordered for the summary line: the fields worth naming back to the user. */
@@ -65,7 +77,9 @@ const FIELD_LABELS: Array<[keyof LlmContextFields, string]> = [
   ["competitors", "competitors"],
   ["metrics", "metrics"],
   ["prioritization_framework", "prioritization"],
+  ["team_name", "workspace name"],
   ["team_scope", "team scope"],
+  ["sizing_methodology", "sizing"],
 ]
 
 function summarise(fields: LlmContextFields): string[] {
@@ -76,6 +90,7 @@ function summarise(fields: LlmContextFields): string[] {
 }
 
 export function ImportContextStep() {
+  const auth = useAuth()
   const { workspace, setWorkspace, loading, contextImport, startContextImport } =
     useOnboarding()
   const router = useRouter()
@@ -121,9 +136,32 @@ export function ImportContextStep() {
   /** Merge imported values onto the workspace, leaving anything the user has
    *  already filled in untouched. Shared with the background extraction's
    *  apply path, so both reads of the file write through the same rules. */
-  async function applyFields(fields: LlmContextFields) {
-    if (!workspace) return
-    setWorkspace(await applyImportedContext(workspace, fields))
+  async function applyFields(target: WorkspaceCompany, fields: LlmContextFields) {
+    setWorkspace(await applyImportedContext(target, fields))
+  }
+
+  /**
+   * The company row the upload needs. `/llm-context/import` is tenant-scoped,
+   * and this step now runs BEFORE the one that creates the company — so an
+   * upload creates it here, unnamed. `display_name` stays blank on purpose:
+   * the import fills it when the export names the company, and the company
+   * step (which requires a name) collects it otherwise. A guessed placeholder
+   * would arrive there looking like the user's own answer.
+   */
+  async function ensureWorkspace(): Promise<WorkspaceCompany | null> {
+    if (workspace) return workspace
+    if (auth.kind !== "authed") return null
+    const created = await createWorkspace({
+      companyName: "",
+      // Blank → no product row yet (products_name_nonempty); the import and
+      // the product step both upsert one once something names it.
+      productName: "",
+      accountType: "company",
+      userId: auth.user.id,
+      onboardingStep: stepForSlug("company") ?? 2,
+    })
+    setWorkspace(created)
+    return created
   }
 
   async function onPickFile(file: File | null) {
@@ -131,11 +169,16 @@ export function ImportContextStep() {
     setError(null)
     setBusy(true)
     try {
+      const target = await ensureWorkspace()
+      if (!target) {
+        setError("Sign in again to import your context.")
+        return
+      }
       const response = await llmContextApi.importFile(file)
       setResult(response)
       if (response.ok) {
         try {
-          await applyFields(response.fields)
+          await applyFields(target, response.fields)
         } catch {
           // The parse succeeded; only the write failed. Say so honestly
           // instead of reporting an import that didn't land anywhere.
@@ -149,8 +192,8 @@ export function ImportContextStep() {
       // merges whatever it finds onto the workspace when it lands. Kicked even
       // when the heading parse read nothing, because reading the files that
       // parse cannot is the whole point of the second pass.
-      if (response.job_id && workspace) {
-        startContextImport(response.job_id, workspace.id)
+      if (response.job_id) {
+        startContextImport(response.job_id, target.id)
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : `Couldn't read "${file.name}".`)
@@ -174,8 +217,8 @@ export function ImportContextStep() {
   }
 
   /** Leave the step. Never awaits the background extraction — that is the
-   *  whole point of it running in the background, and connectors is the step
-   *  chosen to cover its latency. */
+   *  whole point of it running in the background, and the steps behind the
+   *  company one cover its latency. */
   function advance() {
     const ws = workspace
     if (ws) {
@@ -185,14 +228,14 @@ export function ImportContextStep() {
       void (async () => {
         try {
           setWorkspace(
-            await advanceOnboardingStep(ws.id, stepForSlug("connectors") ?? 3),
+            await advanceOnboardingStep(ws.id, stepForSlug("company") ?? 2),
           )
         } catch {
-          /* they land on connectors either way; resume just re-derives it */
+          /* they land on company either way; resume just re-derives it */
         }
       })()
     }
-    router.push("/onboarding/connectors")
+    router.push("/onboarding/company")
   }
 
   if (loading) return <div className="onb-shell">Loading…</div>
@@ -203,7 +246,7 @@ export function ImportContextStep() {
 
   return (
     <OnboardingChrome
-      step={2}
+      step={1}
       title={
         <>
           Import your <em>context.</em>
@@ -211,7 +254,6 @@ export function ImportContextStep() {
       }
       subtitle="The fastest way to set up: hand over the context you've already given your AI assistant, and the rest of setup arrives pre-filled for you to review. Nothing is shared — it stays in your workspace."
       footerMeta="Import context — optional"
-      onBack={() => router.push("/onboarding/company")}
       onContinue={advance}
       continueLabel={result ? "Keep going" : "Skip for now"}
       loading={busy}
@@ -250,8 +292,8 @@ export function ImportContextStep() {
               ? "Still reading the rest of your file…"
               : "Reading your file…"}
           </strong>{" "}
-          Keep going — we&apos;ll fill in whatever else we find while you
-          connect your tools, and it&apos;ll be waiting on the steps after.
+          Keep going — we&apos;ll fill in whatever else we find while you check
+          your company details, and it&apos;ll be waiting on the steps after.
         </div>
       )}
 

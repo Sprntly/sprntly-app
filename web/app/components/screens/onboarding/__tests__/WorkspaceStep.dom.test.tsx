@@ -7,10 +7,15 @@
 //
 // Covers: name* + scope* are required (error, no persistence, no navigation);
 // strategy and roadmap are ONE field that persists to team_strategy and uploads
-// through roadmapDocApi; sizing + "anything else" sit behind
-// the "Add more" disclosure and persist to the pre-existing
-// companies.sizing_methodology / additional_context columns; a valid Continue
-// writes all of it plus onboarding_step 6 and routes to /onboarding/product.
+// through roadmapDocApi; sizing + "anything else" sit behind the "Add more"
+// disclosure; a valid Continue writes all of it plus onboarding_step 6 and
+// routes to /onboarding/product.
+//
+// WHERE it writes is load-bearing: the name and the five typed blocks live on
+// the default `workspaces` row (20260722120000), so they go through the
+// onboarding workspace endpoint. Sent as a companies patch they land on the
+// columns that migration left dormant, read back as their old values, and the
+// whole step silently loses everything the user typed.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -23,6 +28,7 @@ const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const updateWorkspaceMock = vi.fn()
+const saveWorkspaceFieldsMock = vi.fn()
 const companyDocUploadMock = vi.fn()
 const roadmapUploadMock = vi.fn()
 const importFileMock = vi.fn()
@@ -35,6 +41,7 @@ vi.mock("../../../../context/OnboardingContext", () => ({
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
+  saveWorkspaceOwnedFields: (...a: unknown[]) => saveWorkspaceFieldsMock(...a),
 }))
 vi.mock("../../../../lib/onboarding/applyImportedContext", () => ({
   applyImportedContext: (...a: unknown[]) => applyImportedMock(...a),
@@ -52,6 +59,7 @@ function mount(workspace = makeWorkspace({ onboarding_step: 5 })) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace }))
   updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 6 }))
+  saveWorkspaceFieldsMock.mockResolvedValue(undefined)
   companyDocUploadMock.mockResolvedValue({ ok: true })
   roadmapUploadMock.mockResolvedValue({ ok: true })
   return render(React.createElement(WorkspaceStep))
@@ -146,15 +154,19 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/product")
     })
-    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
-      team_name: "Nutrition & Sleep",
+    // The name + the five typed blocks live on the `workspaces` row, so they go
+    // through the endpoint that owns it. A companies patch would write the
+    // columns 20260722120000 left dormant and lose the lot on the next fetch.
+    expect(saveWorkspaceFieldsMock).toHaveBeenCalledWith("Nutrition & Sleep", {
       team_scope: "Owns food logging and sleep tracking end to end.",
       team_strategy: null,
       // Retired from onboarding — the merged field absorbed it on seed.
       team_roadmap: null,
-      // Reuses the column Settings → Process already owns — NOT a new one.
       sizing_methodology: "Fibonacci points, sized by the whole squad.",
       additional_context: "We call the pairing flow 'sleep sync' internally.",
+    })
+    // Only the resume marker is company-owned.
+    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       onboarding_step: 6,
     })
   })
@@ -184,9 +196,9 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
       continueBtn().click()
     })
     await waitFor(() => {
-      expect(updateWorkspaceMock).toHaveBeenCalled()
+      expect(saveWorkspaceFieldsMock).toHaveBeenCalled()
     })
-    const payload = updateWorkspaceMock.mock.calls[0][1] as Record<string, unknown>
+    const payload = saveWorkspaceFieldsMock.mock.calls[0][1] as Record<string, unknown>
     expect(payload.team_strategy).toBe(
       "Win the daily-habit loop this half.\n\nQ3: sleep sync. Q4: calorie deficit v2.",
     )

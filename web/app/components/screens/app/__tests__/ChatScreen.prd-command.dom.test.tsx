@@ -95,12 +95,45 @@ import { NavigationProvider, useNavigation } from "../../../../context/Navigatio
 import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
+// Trailing arg of the PRD generate calls: the chat's conversation id, handed to
+// the backend so it binds conversation → PRD itself (a chat that leaves the page
+// mid-generation must still come back attached to its document).
+//
+// A command typed on a FRESH surface has no conversation row yet, and the call
+// must not wait for one — queueing every generation behind a persistence
+// round-trip is the latency bug this flow avoids — so it goes out with null.
+// A command typed MID-CONVERSATION stays in the current tab (#881), which
+// already has its conversation, so the id is a synchronous read and the
+// backend binds at PRD-creation time.
+const NO_CONV_ID = null
+const BOUND_CONV_ID = 1
+
+// A PRD command grounds on the CONVERSATION, not just the task text: the thread
+// (agent replies included) rides along as authoritative source material so the
+// document is about what was discussed rather than whatever the workspace KG
+// happens to retrieve. A command typed on a FRESH surface has no thread yet, so
+// it still sends no docs.
+const CONVERSATION_DOC = expect.arrayContaining([
+  expect.objectContaining({ name: "Conversation (this chat)" }),
+])
+
 // Surfaces the current toast title — the Toast UI is mounted by AppShell, not in
 // this isolated render, so this probe is how we observe the "ask for a topic"
 // prompt.
 function ToastProbe() {
   const { toast } = useNavigation()
   return React.createElement("div", { "data-testid": "toast-probe" }, toast?.title ?? "")
+}
+
+// The ContentPanel renders in AppShell, outside this tree — observe which tab is
+// open (if any) straight from the navigation context instead.
+function PanelProbe() {
+  const { contentPanelTab } = useNavigation()
+  return React.createElement("div", { "data-testid": "panel-probe" }, contentPanelTab ?? "closed")
+}
+
+function panelTab(): string {
+  return document.querySelector('[data-testid="panel-probe"]')?.textContent ?? ""
 }
 
 function renderChat() {
@@ -111,6 +144,7 @@ function renderChat() {
       React.createElement(ContentProvider, null,
         React.createElement(ChatScreen),
         React.createElement(ToastProbe),
+        React.createElement(PanelProbe),
       ),
     ),
   )
@@ -161,7 +195,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID)
     // Not the brief-insight path, and not the ask agent.
     expect(runPrdGeneration).not.toHaveBeenCalled()
     expect(runAskGeneration).not.toHaveBeenCalled()
@@ -189,7 +223,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     expect(classifyCommand).toHaveBeenCalledWith("let's get a PRD going for the checkout revamp")
     // The classifier-extracted task drives generation (the regex extractor
     // can't parse this phrasing by definition).
-    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("checkout revamp", false, undefined, NO_CONV_ID)
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
@@ -232,7 +266,7 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
 
     // The generate POST is in flight (called with the parsed task) but NOT
     // resolved…
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID)
     // …yet the user's command, the acknowledgment, and the generating PRD card
     // are already on screen.
     expect(document.body.textContent).toContain("generate a PRD for dark mode on mobile")
@@ -260,7 +294,12 @@ describe("ChatScreen — 'Generate a PRD' command", () => {
     await act(async () => { fireEvent.click(sendBtn) })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("our checkout drops 42% of users at the payment step", false, undefined)
+    // Mid-conversation, so the tab already carries its conversation — and the
+    // thread rides along as grounding material (CONVERSATION_DOC), which is what
+    // keeps the PRD about what was discussed instead of the workspace at large.
+    expect(generateFromTask).toHaveBeenCalledWith(
+      "our checkout drops 42% of users at the payment step", false, CONVERSATION_DOC, BOUND_CONV_ID,
+    )
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 })
@@ -319,6 +358,79 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
     expect(generateFromTask.mock.calls[0][0]).toBe("dark mode on mobile")
   })
 
+  // Reported twice by the user, from the same window: the moment between "…I'm
+  // generating a PRD" and the agent's actual response. It used to be dead air
+  // with an empty rail beside it — and an empty rail is what the old
+  // "load the workspace's latest PRD" fallback filled with a completely
+  // unrelated document, which read as the answer to the request.
+  describe("the wait after a PRD command", () => {
+    it("keeps a thinking indicator running until the questions land — and never opens an empty rail", async () => {
+      // Hold the sufficiency check unresolved so the in-flight window is
+      // observable rather than a microtask blur.
+      let resolveClarify!: (v: unknown) => void
+      clarifyTask.mockImplementationOnce(() => new Promise((res) => { resolveClarify = res as (v: unknown) => void }))
+
+      renderChat()
+      await typeAndSend("generate a PRD for dark mode on mobile")
+
+      // Acknowledged AND visibly working. Silence here is the bug.
+      expect(document.body.textContent).toContain("Generating a PRD for that")
+      expect(document.querySelector('[data-testid="prd-command-thinking"]')).toBeTruthy()
+      // The rail stays shut: this may resolve to questions, not a document, and
+      // an empty PRD panel next to a question is worse than no panel.
+      expect(panelTab()).toBe("closed")
+
+      await act(async () => { resolveClarify(QUESTIONS) })
+
+      await waitFor(() => expect(document.body.textContent).toContain("Who are the target users?"))
+      // The questions ARE the response — the indicator stops with them.
+      expect(document.querySelector('[data-testid="prd-command-thinking"]')).toBeNull()
+      expect(panelTab()).toBe("closed")
+      expect(generateFromTask).not.toHaveBeenCalled()
+    })
+
+    it("hands the indicator over to the generating rail when the task is sufficient", async () => {
+      renderChat() // default clarifyTask mock: sufficient
+      await typeAndSend("generate a PRD for dark mode on mobile")
+
+      await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+      // Generation is really underway now, so the rail earns its place and the
+      // chat indicator hands off rather than stacking a second spinner.
+      await waitFor(() => expect(panelTab()).toBe("prd"))
+      expect(document.querySelector('[data-testid="prd-command-thinking"]')).toBeNull()
+    })
+
+    it("posts the questions as an agent-only turn — no phantom user header above them", async () => {
+      clarifyTask.mockResolvedValueOnce(QUESTIONS)
+      renderChat()
+      await typeAndSend("generate a PRD for dark mode on mobile")
+      await waitFor(() => expect(document.body.textContent).toContain("Who are the target users?"))
+
+      // The clarify turn carries an empty `query`, so it must render with NO
+      // user header. The header used to be unconditional, which put the user's
+      // name and avatar above questions they never asked — reading as a blank
+      // message of their own sitting in their own thread.
+      const heads = document.querySelectorAll(".bc-user-head")
+      const bubbles = document.querySelectorAll(".bc-user-bubble")
+      expect(heads.length).toBe(1)
+      expect(bubbles.length).toBe(1)
+      expect(bubbles[0].textContent).toContain("generate a PRD for dark mode on mobile")
+    })
+
+    it("opens the rail once the user answers the questions", async () => {
+      clarifyTask.mockResolvedValueOnce(QUESTIONS)
+      renderChat()
+      await typeAndSend("generate a PRD for dark mode on mobile")
+      await waitFor(() => expect(document.body.textContent).toContain("Who are the target users?"))
+      expect(panelTab()).toBe("closed")
+
+      // Answering is what starts the generation — and what opens the rail. The
+      // deferral must not strand the panel shut for the actual document.
+      await typeAndSendInThread("generate now")
+      await waitFor(() => expect(panelTab()).toBe("prd"))
+    })
+  })
+
   it("a sufficient task generates immediately (the gate ran, no questions)", async () => {
     renderChat() // default clarifyTask mock: sufficient
     await typeAndSend("generate a PRD for dark mode on mobile")
@@ -334,6 +446,6 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
     await typeAndSend("generate a PRD for dark mode on mobile")
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
-    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined)
+    expect(generateFromTask).toHaveBeenCalledWith("dark mode on mobile", false, undefined, NO_CONV_ID)
   })
 })

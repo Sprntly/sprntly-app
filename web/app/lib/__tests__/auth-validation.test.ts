@@ -5,8 +5,62 @@ import {
   isWorkEmail,
   isAllowlistedEmail,
   normalizeEmail,
+  passwordStrength,
+  validatePassword,
   validateWorkEmail,
 } from "../auth-validation"
+
+describe("password rules", () => {
+  it("accepts a password with NO symbol", () => {
+    // The point of the change: a symbol used to be mandatory and no longer is.
+    expect(validatePassword("Password123")).toBeNull()
+    expect(validatePassword("Longenough1")).toBeNull()
+  })
+
+  it("still enforces length, an uppercase letter and a number", () => {
+    expect(validatePassword("Pass1")).toBe("Password must be at least 8 characters.")
+    expect(validatePassword("password123")).toBe("Include at least one uppercase letter.")
+    expect(validatePassword("PasswordOnly")).toBe("Include at least one number.")
+  })
+
+  it("still accepts a password WITH a symbol", () => {
+    // Dropping the requirement must not turn a symbol into a rejection.
+    expect(validatePassword("Password123!")).toBeNull()
+    expect(validatePassword("P@ssw0rd£€")).toBeNull()
+  })
+
+  it("keeps a symbol as a STRENGTH signal, just not a requirement", () => {
+    // Same length either way, so this isolates the symbol's contribution.
+    const order = ["weak", "fair", "good", "strong"]
+    const without = passwordStrength("Password1234")
+    const with_ = passwordStrength("Password123!")
+    expect(order.indexOf(with_)).toBeGreaterThan(order.indexOf(without))
+  })
+
+  it("reaches STRONG on length alone, with no symbol", () => {
+    // The reported bug: a symbol was the only route to a full bar, so a user
+    // told a symbol was optional still saw the meter stop short without one —
+    // which reads as the removed rule still being enforced somewhere.
+    // This is the exact password from that report.
+    expect(passwordStrength("Flmsdoifjm4567456456")).toBe("strong")
+    expect(passwordStrength("correcthorsebatteryS1")).toBe("strong")
+  })
+
+  it("still treats anything under 8 characters as weak", () => {
+    expect(passwordStrength("Pass123")).toBe("weak")
+    expect(passwordStrength("P@1x")).toBe("weak")
+  })
+
+  it("rates a longer password at least as strong as a shorter one", () => {
+    // Length must never REDUCE the score — the property the two-tier change
+    // could most plausibly have broken.
+    const order = ["weak", "fair", "good", "strong"]
+    const grow = ["Password1", "Password1234", "Password12345678"]
+    const scores = grow.map((p) => order.indexOf(passwordStrength(p)))
+    expect(scores).toEqual([...scores].sort((a, b) => a - b))
+  })
+})
+
 
 describe("email signup validation (post-gmail-unblock, 2026-06-06)", () => {
   afterEach(() => {

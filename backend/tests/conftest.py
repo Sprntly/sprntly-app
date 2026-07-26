@@ -1120,6 +1120,30 @@ CREATE TABLE conversation_turns (
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX idx_conv_turns_conv ON conversation_turns (conversation_id, created_at);
+
+-- Unified per-call LLM usage ledger (20260725120000_llm_usage_events.sql).
+-- The `llm_usage_summary` rollup is a Postgres function with no SQLite
+-- equivalent; tests exercise the read path via FakeSupabaseClient.rpc_returns.
+CREATE TABLE llm_usage_events (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id                  TEXT NOT NULL,
+    user_id                     TEXT,
+    feature                     TEXT NOT NULL,
+    operation                   TEXT,
+    provider                    TEXT NOT NULL DEFAULT 'anthropic',
+    model                       TEXT,
+    key_mode                    TEXT NOT NULL DEFAULT 'unknown',
+    input_tokens                INTEGER NOT NULL DEFAULT 0,
+    output_tokens               INTEGER NOT NULL DEFAULT 0,
+    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_input_tokens     INTEGER NOT NULL DEFAULT 0,
+    est_cost_usd                REAL,
+    latency_ms                  INTEGER,
+    status                      TEXT NOT NULL DEFAULT 'succeeded',
+    error_class                 TEXT,
+    created_at                  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_llm_usage_co_created ON llm_usage_events (company_id, created_at);
 """
 
 

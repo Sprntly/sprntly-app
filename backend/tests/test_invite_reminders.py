@@ -21,9 +21,39 @@ import pytest
 from app.db.client import require_client
 
 
+# The cycle tests seed "already sent" rows N days back and assert which step is
+# due. `due_at` shifts a weekend due-date to the next workday
+# (invite_reminders.next_workday), so against a REAL clock those calendar-day
+# offsets land on a Saturday on some days of the week and the step is not yet
+# due — the assertion then reads `0 == 1` for reasons that have nothing to do
+# with the code under test.
+#
+# That is not hypothetical: this suite went red on Sunday 2026-07-26 having
+# passed all week. Both failing tests computed a due date of Saturday the 25th,
+# which next_workday pushed to Monday the 27th — tomorrow, so nothing was due.
+#
+# Pinning "now" to one fixed WEDNESDAY fixes the calendar without weakening the
+# tests: the weekend shift is still exercised (see the time-math tests, which
+# call next_workday/due_at directly), it just no longer depends on which day the
+# suite happens to run.
+_FROZEN_NOW = datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc)  # Wednesday
+
+
+class _FrozenDatetime(datetime):
+    """`datetime` with `now()` pinned to _FROZEN_NOW. Subclassed rather than
+    stubbed so every other use of the class inside the module (parsing,
+    arithmetic, comparisons) keeps working untouched."""
+
+    @classmethod
+    def now(cls, tz=None):  # noqa: D102 - mirrors datetime.now
+        return _FROZEN_NOW if tz is not None else _FROZEN_NOW.replace(tzinfo=None)
+
+
 def _iso_days_ago(days: float) -> str:
+    """Seed timestamps are relative to the SAME frozen instant the cycle reads,
+    so the gap between a seeded send and "now" is exactly what each test says."""
     return (
-        (datetime.now(timezone.utc) - timedelta(days=days))
+        (_FROZEN_NOW - timedelta(days=days))
         .replace(microsecond=0)
         .isoformat()
     )
@@ -289,6 +319,20 @@ def ir_cycle(isolated_settings, monkeypatch):
     ir = importlib.import_module("app.invite_reminders")
     importlib.reload(ir)
     monkeypatch.setattr(ir, "send_reminder_email", lambda **kw: True)
+    # Freeze the clock the cycle reads (`now = datetime.now(timezone.utc)`), to
+    # the same instant the seed helpers use. Patched AFTER the reload, which
+    # would otherwise restore the real class.
+    monkeypatch.setattr(ir, "datetime", _FrozenDatetime)
+    # Pin the expiry window too. The cycle reads it from settings, which load
+    # from backend/.env — so whether a chained Day-7 test passed depended on the
+    # developer's own env file: .env here carries INVITE_EXPIRY_DAYS=14 while
+    # the config default and .env.example say 30. A Day-7 invite is ~20 days old
+    # by the time the chain reaches it (config: "Day 7 can land ~17 days out"),
+    # so under 14 it expires first and the step is never even considered.
+    # Tests about the reminder CHAIN must not hinge on an ambient env var; the
+    # one test that is genuinely about expiry sets its own value.
+    import app.config as cfg
+    monkeypatch.setattr(cfg.settings, "invite_expiry_days", 30, raising=False)
     return ir
 
 

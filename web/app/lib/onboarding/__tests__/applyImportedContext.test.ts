@@ -7,10 +7,12 @@ import { describe, expect, it, vi, beforeEach } from "vitest"
 
 const updateWorkspaceMock = vi.fn()
 const upsertProductMock = vi.fn()
+const saveWorkspaceFieldsMock = vi.fn()
 
 vi.mock("../store", () => ({
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
   upsertPrimaryProduct: (...a: unknown[]) => upsertProductMock(...a),
+  saveWorkspaceOwnedFields: (...a: unknown[]) => saveWorkspaceFieldsMock(...a),
   // Real serializer shape is irrelevant here; keep the metric names observable.
   serializeKpiTree: (tree: { north_star: string; metrics: Array<{ name: string }> }) => ({
     north_star: { metric: tree.north_star },
@@ -43,6 +45,7 @@ beforeEach(() => {
   vi.clearAllMocks()
   updateWorkspaceMock.mockImplementation(async (_id, patch) => makeWorkspace(patch))
   upsertProductMock.mockImplementation(async (_id, p) => p)
+  saveWorkspaceFieldsMock.mockResolvedValue(undefined)
 })
 
 describe("applyImportedContext", () => {
@@ -84,6 +87,71 @@ describe("applyImportedContext", () => {
     expect(patch.strategy).toBe("New strategy")
   })
 
+  it("fills the workspace step through the workspaces row, not a companies patch", async () => {
+    // These six moved onto the `workspaces` row in 2026-07: a companies patch
+    // writes columns nothing reads, so the import would look like it worked
+    // and be gone on the next fetch.
+    const out = await applyImportedContext(makeWorkspace(), {
+      team_name: "Nutrition & Sleep",
+      team_scope: "Owns food logging end to end.",
+      sizing_methodology: "Fibonacci points.",
+      strategy: "Win the half.",
+      notes: "Glossary: sleep sync.",
+    })
+
+    const [name, fields] = saveWorkspaceFieldsMock.mock.calls[0]
+    expect(name).toBe("Nutrition & Sleep")
+    expect(fields.team_scope).toBe("Owns food logging end to end.")
+    expect(fields.sizing_methodology).toBe("Fibonacci points.")
+    // The company strategy IS what that step's strategy/roadmap box wants.
+    expect(fields.team_strategy).toBe("Win the half.")
+    expect(fields.additional_context).toBe("Glossary: sleep sync.")
+    // None of them may travel on the companies patch.
+    const patch = updateWorkspaceMock.mock.calls[0][1]
+    for (const key of [
+      "team_name",
+      "team_scope",
+      "team_strategy",
+      "sizing_methodology",
+      "additional_context",
+    ]) {
+      expect(patch).not.toHaveProperty(key)
+    }
+    // The caller pushes the return value straight onto onboarding context, so
+    // it has to carry what was just written.
+    expect(out.team_name).toBe("Nutrition & Sleep")
+    expect(out.sizing_methodology).toBe("Fibonacci points.")
+  })
+
+  it("keeps the existing workspace name when the export doesn't name a team", async () => {
+    // The endpoint requires a name; passing "" would 422 and cost the user the
+    // rest of the block.
+    await applyImportedContext(makeWorkspace({ team_name: "Growth" }), {
+      team_scope: "Owns activation.",
+    })
+    expect(saveWorkspaceFieldsMock.mock.calls[0][0]).toBe("Growth")
+  })
+
+  it("leaves the workspace fields alone once the user has filled them", async () => {
+    const ws = makeWorkspace({
+      team_name: "Growth",
+      team_scope: "What I typed",
+      sizing_methodology: "T-shirts",
+      strategy: "My company strategy",
+      team_strategy: "My team strategy",
+      additional_context: "My notes",
+    })
+    const out = await applyImportedContext(ws, {
+      team_name: "Imported",
+      team_scope: "Imported",
+      sizing_methodology: "Imported",
+      strategy: "Imported",
+      notes: "Imported",
+    })
+    expect(out).toBe(ws)
+    expect(saveWorkspaceFieldsMock).not.toHaveBeenCalled()
+  })
+
   it("falls back to company_website for the product site when only that was exported", async () => {
     await applyImportedContext(makeWorkspace(), {
       product_name: "Acme",
@@ -91,6 +159,26 @@ describe("applyImportedContext", () => {
     })
     const productPatch = upsertProductMock.mock.calls[0][1]
     expect(productPatch.website).toBe("https://acme.example.com")
+  })
+
+  it("names the product from the company the import just read (import-first)", async () => {
+    // The import step creates the workspace UNNAMED, so the stored display_name
+    // is blank when this runs — falling back to it would leave the product
+    // nameless, which `products_name_nonempty` rejects outright.
+    await applyImportedContext(makeWorkspace({ display_name: "" }), {
+      company_name: "Samsung Health",
+      surfaces: ["web"],
+    })
+    expect(upsertProductMock.mock.calls[0][1].name).toBe("Samsung Health")
+  })
+
+  it("defers the product row when nothing names it yet", async () => {
+    // Rather than throwing on the constraint and reporting the whole import as
+    // failed — the product step collects the name a few screens later.
+    await applyImportedContext(makeWorkspace({ display_name: "" }), {
+      surfaces: ["web"],
+    })
+    expect(upsertProductMock).not.toHaveBeenCalled()
   })
 
   it("is a no-op that avoids any write when the export adds nothing new", async () => {

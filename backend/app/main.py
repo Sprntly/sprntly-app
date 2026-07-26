@@ -59,6 +59,7 @@ from app.routes import (
     ideation,
     ingest,
     internal_mcp,
+    jira_write,
     metrics,
     mcp_tokens,
     multi_agent,
@@ -71,6 +72,7 @@ from app.routes import (
     team,
     tickets,
     transcripts,
+    usage as usage_routes,
     workspaces as workspaces_routes,
     evidence,
     health,
@@ -302,6 +304,7 @@ app.include_router(ask.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)
 app.include_router(stories.router)
+app.include_router(jira_write.router)
 app.include_router(evidence.router)
 app.include_router(internal.router)
 # Bundle proxy (Option B) registered BEFORE design_agent.router (plan fix-item #2)
@@ -332,6 +335,7 @@ app.include_router(team.router)
 app.include_router(team.accept_router)
 app.include_router(workspaces_routes.router)
 app.include_router(admin.router)
+app.include_router(usage_routes.router)
 app.include_router(staff_admin.router)
 app.include_router(staff_admin.claim_router)
 app.include_router(transcripts.router)

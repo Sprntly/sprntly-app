@@ -248,17 +248,37 @@ _JIRA_LOOKUP_VERB = re.compile(
 # never trigger a positive match anyway.
 _JIRA_LOOKUP_VETO = re.compile(
     r"\b(create|generate|write|draft|make|build|author|produce|compose|push|"
-    r"sync|move|transition|assign|comment\s+on|close|resolve|delete)\b",
+    r"sync|delete)\b",
+    re.I,
+)
+# CHANGING an issue that already exists is now this path's job too — the skill
+# can propose an edit, which the user confirms before anything is written (see
+# jira_lookup._PROPOSE_TOOL). So the mutation verbs came OUT of the veto above,
+# which used to send "move it to In Review" to a skill that could only talk
+# about it.
+#
+# Creation stays vetoed. "create a ticket for the login bug" is the user-stories
+# skill's job, and "push these stories to jira" is the push flow's — neither is a
+# change to an issue that exists. `delete` stays vetoed because nothing here
+# implements it, and a confident-sounding refusal beats a silent no-op.
+_JIRA_WRITE_VERB = re.compile(
+    r"\b(update|set|change|edit|rename|move|transition|assign|unassign|"
+    r"re-?open|close|resolve|add\s+a\s+comment|comment\s+on)\b",
     re.I,
 )
 
 
-# A follow-up INSIDE an active Jira thread rarely repeats "jira" or a key — it
-# just refines the search ("get all in to-do status", "only the PROJ ones",
-# "which are assigned to me"). Two signals gate the sticky route: the recent
-# turns are about Jira (_JIRA_THREAD_MARKER, checked over history), AND the
-# current message reads like a Jira filter (_JIRA_FILTER). Generic pivots
-# ("prioritize these", "what's our churn rate?") match neither and fall through.
+# A follow-up INSIDE an active tracker thread rarely repeats "jira", an issue
+# key, or even a PM noun. It either refines the search ("get all in to-do
+# status", "only the PROJ ones") or points back at what the thread already put
+# on screen ("can you get me all the details about it?"). Judging that message
+# on its own words alone is what used to dead-end a live tracker thread at the
+# scope gate, so two signals gate the sticky route instead:
+#   1. the thread IS a tracker thread — _in_tracker_thread, which reads the
+#      user's OWN earlier questions as well as the assistant's answers, and
+#   2. the current message CONTINUES it — _continues_tracker_thread.
+# A genuine pivot ("prioritize these features", "what's our churn rate?") trips
+# the pivot veto and falls through to normal routing.
 _JIRA_THREAD_MARKER = re.compile(r"\bjira\b|view in jira|issue key|workflow status", re.I)
 _JIRA_FILTER = re.compile(
     r"\b(to[\s-]?do|in[\s-]?progress|in\s+review|done|open|closed|blocked|"
@@ -266,36 +286,73 @@ _JIRA_FILTER = re.compile(
     r"tasks?|stor(?:y|ies)|assigned|assignee|priority|label)\b",
     re.I,
 )
+# How far back a tracker thread stays "active" — 8 turns ≈ 4 exchanges, enough
+# that a couple of follow-ups don't age the original "get me ticket…" out.
+_TRACKER_THREAD_WINDOW = 8
+# Pointing back at what the thread already produced, instead of naming it again.
+_TRACKER_ANAPHORA = re.compile(
+    r"\b(it|its|it'?s|them|they|those|these|"
+    r"th(?:at|is)\s+(?:one|ticket|issue|epic|stor(?:y|ies)|bug|task)|"
+    r"the\s+(?:one|first|second|last|same|other)|the\s+above)\b"
+    # A BARE "this"/"that" standing in for the issue on screen. The alternatives
+    # above all require a following noun ("that ticket"), which missed the most
+    # natural follow-up of all — "give me full details on this" — and dropped it
+    # to the generic agent, which answered that it had no details for a ticket
+    # the previous turn had just fetched.
+    # Restricted to the two positions where a bare this/that is genuinely
+    # referential: as the object of a preposition, or ending the message. A bare
+    # this/that anywhere would swallow "I think that we should ship".
+    r"|\b(?:on|about|for|of|with|from|into)\s+th(?:is|at)\b"
+    r"|\bth(?:is|at)\s*[?.!]*\s*$",
+    re.I,
+)
+# What such a follow-up asks FOR — attributes of an issue already on screen.
+_TRACKER_DETAIL = re.compile(
+    r"\b(details?|description|summar(?:y|ise|ize)|acceptance\s+criteria|"
+    r"comments?|more|everything|expand|elaborate|who|assignee|assigned|"
+    r"status|priority|labels?|due|link|url)\b",
+    re.I,
+)
+# ...and what means the user has LEFT the tracker thread. Checked FIRST, so a
+# pivot that happens to carry a pronoun ("prioritize these features") or a
+# tracker-ish word ("what's the status of our roadmap?") routes normally.
+_TRACKER_PIVOT = re.compile(
+    r"\b(prioriti[sz]e|prioriti[sz]ation|roadmap|prd|brief|persona|churn|nps|"
+    r"csat|retention|revenue|arr|mrr|pricing|competitors?|competitive|"
+    r"prototype|surveys?|interviews?|calls?|meetings?|transcripts?|"
+    r"strateg(?:y|ic)|okrs?|kpis?|metrics?)\b",
+    re.I,
+)
 
 
-def _in_jira_thread(history: list[dict] | None) -> bool:
-    """True when the recent conversation is an active Jira thread — one of the
-    last few turns names Jira or carries an issue key (e.g. the assistant's Jira
-    clarifying question, or a just-fetched issue). Lets a bare follow-up route
-    back to the Jira path instead of dead-ending at the scope gate."""
-    if not history:
-        return False
-    for turn in history[-4:]:
-        content = turn.get("content") or ""
-        if _JIRA_THREAD_MARKER.search(content) or _JIRA_ISSUE_KEY.search(content):
-            return True
-    return False
-
-
-def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
-    """True when the question asks to READ live Jira — either an issue key with a
-    lookup verb / PM noun, the word "jira" alongside such context, or a Jira-style
-    filter follow-up within an active Jira thread (using `history`). Merely NAMING
-    Jira (e.g. as one competitor in a CIR request) is not a lookup, so "jira"
-    alone doesn't trigger. Vetoed for create/generate/push phrasings. The trigger
-    for the on-demand Jira-lookup path (app/jira_lookup.py)."""
+def _stateless_tracker_lookup(question: str) -> bool:
+    """The history-free half of is_jira_lookup — true when the message names a
+    tracker read on its own words. Split out so thread detection can ask it of
+    the user's earlier turns without recursing through the sticky branch."""
     if _JIRA_LOOKUP_VETO.search(question):
         return False
     has_key = bool(_JIRA_ISSUE_KEY.search(question))
     has_jira = bool(_JIRA_WORD.search(question))
-    has_context = bool(
-        _JIRA_PM_NOUN.search(question) or _JIRA_LOOKUP_VERB.search(question)
-    )
+    has_pm_noun = bool(_JIRA_PM_NOUN.search(question))
+    has_verb = bool(_JIRA_LOOKUP_VERB.search(question))
+    has_context = has_pm_noun or has_verb
+    # Primary, tracker-agnostic trigger: a read verb on a PM noun — "get me
+    # tickets", "show the open bugs", "find the checkout epic". No "jira" word or
+    # key needed, so future trackers (Asana / ClickUp) route here the same way.
+    if has_pm_noun and has_verb:
+        return True
+    # A change aimed at an issue that already exists — "update PROJ-1's due date",
+    # "assign the login bug to Ada", "move DEV-88 to In Review". Requires a key or
+    # a PM noun so a bare "update the roadmap" is not dragged in here.
+    m_write = _JIRA_WRITE_VERB.search(question)
+    if m_write and (has_key or has_pm_noun):
+        m_key = _JIRA_ISSUE_KEY.search(question)
+        # …and the verb must come BEFORE the issue it acts on. "we shipped in the
+        # UTF-8 encoding update" trips both halves otherwise: UTF-8 looks exactly
+        # like an issue key, and there "update" is a noun at the end of a
+        # sentence, not a command.
+        if not (m_key and m_write.start() > m_key.start()):
+            return True
     # An explicit issue key with any lookup context (verb, PM noun, or "jira").
     if has_key and (has_context or has_jira):
         return True
@@ -303,10 +360,122 @@ def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
     # but never "jira" on its own (product mention).
     if has_jira and has_context:
         return True
-    # Sticky follow-up: a Jira-style filter continuing an active Jira thread.
-    if _JIRA_FILTER.search(question) and _in_jira_thread(history):
+    return False
+
+
+def _in_tracker_thread(history: list[dict] | None) -> bool:
+    """True when the recent conversation is an active tracker thread. Two kinds
+    of evidence count, and either is enough:
+
+    - the ASSISTANT side named Jira or carried an issue key (its clarifying
+      question, or the issue it just fetched), and
+    - the USER's own earlier questions — one of them was itself a tracker lookup
+      ("get me ticket about cars"). This is what carries a thread whose answer
+      happened to name no key ("no matching issues", a plain prose reply) into
+      the next turn, and it's why the follow-up is read against every recent
+      question the user asked, not just the one they just sent."""
+    if not history:
+        return False
+    for turn in history[-_TRACKER_THREAD_WINDOW:]:
+        content = turn.get("content") or ""
+        if not content:
+            continue
+        if _JIRA_THREAD_MARKER.search(content) or _JIRA_ISSUE_KEY.search(content):
+            return True
+        if (turn.get("role") or "user") == "user" and _stateless_tracker_lookup(content):
+            return True
+    return False
+
+
+# A bare acceptance of the assistant's OWN offer. The lookup routinely ends with
+# "Would you like me to fetch the full details of this ticket?", and the natural
+# reply is one word. That word carries no ticket, no verb, no pronoun and no
+# filter — every other signal this module looks for is absent, so the message
+# fell through to the generic agent, which then reported it had no details for a
+# ticket the previous turn had just listed. Reported from a live thread.
+_TRACKER_AFFIRMATIVE = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|ya|sure|ok|okay|please|"
+    r"yes\s+please|go\s+ahead|do\s+it|sounds\s+good|"
+    r"that'?s?\s+right)\b[\s.!,]*$",
+    re.I,
+)
+
+
+def _answers_tracker_question(question: str, history: list[dict] | None) -> bool:
+    """True when this message is a bare "yes" accepting what the assistant just
+    offered to do.
+
+    Gated on the assistant having ACTUALLY asked something — the most recent
+    assistant turn must end in a question mark. Without that gate a stray "ok"
+    anywhere in a tracker thread would be treated as a fetch request; with it,
+    the word is only meaningful because a question is sitting directly above it.
+    """
+    if not _TRACKER_AFFIRMATIVE.match(question or ""):
+        return False
+    for turn in reversed(history or []):
+        if (turn.get("role") or "user") != "assistant":
+            continue
+        return (turn.get("content") or "").strip().endswith("?")
+    return False
+
+
+def _continues_tracker_thread(question: str) -> bool:
+    """True when this message reads as a continuation of a tracker thread rather
+    than a new subject — a filter refinement, or a pull for more of an issue the
+    thread already surfaced ("all the details about it", "who's on that one")."""
+    if _TRACKER_PIVOT.search(question):
+        return False
+    if _JIRA_FILTER.search(question):
+        return True
+    # Anaphora alone is too weak ("what does that mean for launch?"), so pair it
+    # with an actual read: a lookup verb or a request for issue attributes.
+    if _TRACKER_ANAPHORA.search(question) and (
+        _JIRA_LOOKUP_VERB.search(question) or _TRACKER_DETAIL.search(question)
+    ):
+        return True
+    # "move it to In Review", "set its due date to August 31" — a change pointed
+    # at whatever the thread is already showing. The issue is named nowhere in
+    # the message, so only the thread makes it resolvable.
+    if _JIRA_WRITE_VERB.search(question):
         return True
     return False
+
+
+def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
+    """True when the question asks to READ live tracker issues — a tracker read
+    verb on a PM noun ("get me tickets", "show my epics"), an issue key with a
+    lookup verb / PM noun, the word "jira" alongside such context, or a follow-up
+    continuing an active tracker thread (using `history`). The PM noun ("ticket")
+    — not the word "jira" — is the primary trigger, so the same path serves
+    whichever tracker is connected (Jira today, Asana / ClickUp later); naming
+    "jira" is just one more way in. Merely NAMING Jira (e.g. as one competitor in
+    a CIR request) is not a lookup, so "jira" alone doesn't trigger. Vetoed for
+    create/generate/push phrasings. The trigger for the on-demand lookup path
+    (app/jira_lookup.py)."""
+    if _stateless_tracker_lookup(question):
+        return True
+    if _JIRA_LOOKUP_VETO.search(question):
+        return False
+    if not _in_tracker_thread(history):
+        return False
+    # Either the message continues the thread on its own words, or it is a bare
+    # "yes" to the assistant's own offer — which says nothing by itself and
+    # everything in context.
+    return (
+        _continues_tracker_thread(question)
+        or _answers_tracker_question(question, history)
+    )
+
+
+def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:
+    """True when the message only means something as a continuation of the
+    thread — its subject lives in an earlier turn, not in its own words ("can you
+    get me all the details about it?"). Judged in isolation, such a message looks
+    topic-less, which is exactly what the scope gate mistakes for out-of-domain;
+    qa_agent uses this to answer it in context instead of refusing."""
+    if not history:
+        return False
+    return bool(_TRACKER_ANAPHORA.search(question))
 
 
 def detect_intent(question: str) -> SkillMatch | None:

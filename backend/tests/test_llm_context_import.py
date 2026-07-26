@@ -125,6 +125,72 @@ def test_parses_every_documented_section():
     assert "sleep sync" in f["notes"]
 
 
+def test_v2_team_bullets_and_sizing_fill_the_workspace_step():
+    """v2 (2026-07-25) asks for the team NAME and the sizing method.
+
+    Both are onboarding fields the export previously had no source for — the
+    workspace step's name is MANDATORY, so a user who imported still had to
+    type it. The v1 prose shape must keep working (see FULL_EXPORT), which is
+    why `team` stays in _SECTION_FIELDS as well as _BULLET_FIELDS.
+    """
+    from app.llm_context import parse_context_markdown
+
+    parsed = parse_context_markdown(
+        "<!-- sprntly-context v2 -->\n\n"
+        "## Sizing\nFibonacci story points, sized by the whole squad.\n\n"
+        "## Team\n- Name: Nutrition & Sleep\n"
+        "- Owns: Food logging, sleep tracking and the coaching surface.\n"
+    )
+    assert parsed.format_version == "2"
+    assert parsed.fields["team_name"] == "Nutrition & Sleep"
+    assert "Food logging" in parsed.fields["team_scope"]
+    assert "Fibonacci" in parsed.fields["sizing_methodology"]
+
+
+def test_team_bullets_are_not_overwritten_by_stray_prose():
+    """Assistants add a sentence under a bullet list. The bullets are the
+    contract, so the prose is filed rather than clobbering `- Owns:`."""
+    from app.llm_context import parse_context_markdown
+
+    parsed = parse_context_markdown(
+        "## Team\n- Name: Growth\n- Owns: Activation and onboarding.\n"
+        "Six engineers, two designers.\n"
+    )
+    assert parsed.fields["team_name"] == "Growth"
+    assert parsed.fields["team_scope"] == "Activation and onboarding."
+    assert "Six engineers" in " ".join(parsed.unmapped.values())
+
+
+def test_prioritization_classifies_the_way_teams_actually_describe_it():
+    """Client feedback (2026-07-25): the framework kept arriving blank.
+
+    It is the one closed vocabulary a real export almost never phrases
+    canonically — and the metrics step makes it MANDATORY, so a blank is a
+    required field the import promised to fill and didn't. The six options are
+    broad enough that these phrasings genuinely belong to one of them.
+    """
+    from app.llm_context import parse_context_markdown
+
+    cases = {
+        "Whatever moves the north star for the quarter.": "goal-based",
+        "We score everything on impact vs effort.": "rice",
+        "ICE scoring, reviewed at sprint planning.": "rice",
+        "Cost of delay against job size.": "wsjf",
+        "Must / should / could, agreed with the sponsor.": "moscow",
+        "By ticket volume and severity from support.": "volume-severity",
+        "Ranked against our OKRs for the half.": "goal-based",
+    }
+    for prose, expected in cases.items():
+        parsed = parse_context_markdown(f"## Prioritization\n{prose}\n")
+        assert parsed.fields.get("prioritization_framework") == expected, prose
+
+    # Still not a licence to guess: a process none of the six can express is
+    # left blank for the user to pick, and kept for the reviewer.
+    parsed = parse_context_markdown("## Prioritization\nThe CEO decides.\n")
+    assert "prioritization_framework" not in parsed.fields
+    assert "CEO decides" in " ".join(parsed.unmapped.values())
+
+
 def test_surfaces_map_to_the_product_step_vocabulary():
     """The product step accepts a fixed set of surface values, so free-text
     from an assistant must be mapped — and anything unmappable dropped from
@@ -372,6 +438,9 @@ def test_upload_returns_prefill_fields_and_files_the_export(import_env, monkeypa
     # The context also becomes a document source, so it grounds the agents
     # rather than only pre-filling a form.
     add.assert_called_once()
+    # …and the response says so: `filed` is the "reached the knowledge graph"
+    # signal the Business Context card reports success from.
+    assert body["filed"] is True
     # The upload also hands off a background LLM extraction for the fields the
     # heading walk can't reach; its job id rides back on the response.
     assert isinstance(body["job_id"], int)
@@ -397,6 +466,10 @@ def test_upload_of_an_unreadable_file_defers_to_the_extraction_job(import_env, m
     # A job is running, so the premature "we found nothing" note is suppressed.
     assert body["note"] is None
     assert isinstance(body["job_id"], int)
+    # The raw file still reached the knowledge graph even though the heading
+    # walk read nothing — that's exactly the case the Business Context card
+    # reports as a success rather than "couldn't read that file".
+    assert body["filed"] is True
 
     # With the LLM patched to fail, the job settles on the same honest verdict
     # the old synchronous response used to give directly.
@@ -406,6 +479,35 @@ def test_upload_of_an_unreadable_file_defers_to_the_extraction_job(import_env, m
     assert done["status"] == "ready"
     assert done["result"]["ok"] is False
     assert done["result"]["note"], "a job that found nothing must say so"
+
+
+def test_upload_reports_a_filing_failure_instead_of_hiding_it(import_env, monkeypatch):
+    """If the raw .md can't be filed as a document source, it never reached the
+    knowledge graph — and the Business Context card, which only cares about the
+    KG feed, must not claim success. So `filed` is False and the explanatory
+    note survives even though a background job is running: a filing failure is
+    NOT the "found nothing" verdict the job can overturn, so it must NOT be
+    swept under the note-suppression that unreadable-but-filed uploads get.
+
+    Uses an unreadable body on purpose (ok is False), which is exactly the path
+    that previously wiped the note whenever a job was live."""
+    client = company_client(monkeypatch).client
+    with patch(
+        "app.document_sources.create_document_source",
+        side_effect=RuntimeError("storage down"),
+    ), patch("app.routes.connectors.kickoff_sync"), _no_llm():
+        r = client.post(
+            "/v1/connectors/llm-context/import",
+            files=_md_file("nothing we recognise here"),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    # It never got filed, so it isn't in the knowledge graph…
+    assert body["filed"] is False
+    # …and the note that says so is preserved, not wiped by the live job.
+    assert body["note"]
+    assert "couldn't also save" in body["note"]
 
 
 def test_upload_rejects_binary_with_a_useful_message(import_env, monkeypatch):
@@ -435,7 +537,7 @@ def test_prompt_endpoint_serves_the_parser_s_contract(import_env, monkeypatch):
     assert "## Company" in body["prompt"]
     # The no-guessing instruction is load-bearing, not decoration.
     assert "UNKNOWN" in body["prompt"]
-    assert body["format_version"] == "1"
+    assert body["format_version"] == "2"
 
 
 # ─────────────────────── LLM extraction pass ───────────────────────

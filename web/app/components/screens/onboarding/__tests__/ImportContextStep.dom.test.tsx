@@ -1,13 +1,17 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 02 — "Import your context" (client
-// feedback 2026-07-22). Covers the show-then-copy disclosure (the prompt is
-// hidden until asked for, and Copy lives inside the revealed panel), the .md
-// upload path, and the two properties that make an import safe:
+// Container mount test for onboarding step 01 — "Import your context" (client
+// feedback 2026-07-22; moved ahead of the company step 2026-07-25). Covers the
+// show-then-copy disclosure (the prompt is hidden until asked for, and Copy
+// lives inside the revealed panel), the .md upload path, and the three
+// properties that make an import safe:
 //
 //   * a successful import prefills ONLY workspace fields that are still empty
 //     — it must never overwrite something the user already typed;
-//   * an unreadable export surfaces its `note` instead of claiming success.
+//   * an unreadable export surfaces its `note` instead of claiming success;
+//   * running first, an upload creates the company row itself — the upload
+//     endpoint is tenant-scoped, so without it the very first thing a new user
+//     can do would 403.
 //
 // There is deliberately no "Connect Claude" path to test: it was removed
 // because an Anthropic token cannot read claude.ai conversation history (see
@@ -20,22 +24,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
+const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
+const createWorkspaceMock = vi.fn()
 const updateWorkspaceMock = vi.fn()
 const upsertProductMock = vi.fn()
+const saveWorkspaceFieldsMock = vi.fn()
 const advanceStepMock = vi.fn()
 const promptMock = vi.fn()
 const importFileMock = vi.fn()
 const writeTextMock = vi.fn()
 
+vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
 }))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
+  createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a),
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
   upsertPrimaryProduct: (...a: unknown[]) => upsertProductMock(...a),
+  saveWorkspaceOwnedFields: (...a: unknown[]) => saveWorkspaceFieldsMock(...a),
   advanceOnboardingStep: (...a: unknown[]) => advanceStepMock(...a),
   // applyImportedContext serializes imported metrics into the KPI-tree shape;
   // a light stand-in keeps the flat list observable in the patch assertion.
@@ -55,9 +65,14 @@ import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 const PROMPT = "You are helping me export the context...\n\n## Company\n- Name:"
 
-function mount(workspace = makeWorkspace({ onboarding_step: 2 })) {
+function mount(
+  workspace: ReturnType<typeof makeWorkspace> | null = makeWorkspace({
+    onboarding_step: 1,
+  }),
+  ctx: Record<string, unknown> = {},
+) {
   onboardingMock.mockReturnValue(
-    makeOnboardingCtx({ workspace, setWorkspace: vi.fn(), loading: false }),
+    makeOnboardingCtx({ workspace, setWorkspace: vi.fn(), loading: false, ...ctx }),
   )
   return render(React.createElement(ImportContextStep))
 }
@@ -74,7 +89,9 @@ function uploadMd(container: HTMLElement, body = "## Portfolio\nOne app.\n") {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  promptMock.mockResolvedValue({ prompt: PROMPT, format_version: "1" })
+  authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" } })
+  promptMock.mockResolvedValue({ prompt: PROMPT, format_version: "2" })
+  saveWorkspaceFieldsMock.mockResolvedValue(undefined)
   updateWorkspaceMock.mockImplementation(async (_id, patch) =>
     makeWorkspace({ ...patch }),
   )
@@ -102,8 +119,8 @@ async function revealPrompt() {
   fireEvent.click(toggle)
 }
 
-describe("ImportContextStep (onboarding step 02 — import your context)", () => {
-  it("renders on step 2 of the dots, with no connect-an-account option", async () => {
+describe("ImportContextStep (onboarding step 01 — import your context)", () => {
+  it("renders on step 1 of the dots, with no connect-an-account option", async () => {
     const { container } = mount()
     await waitFor(() => expect(promptMock).toHaveBeenCalled())
 
@@ -111,7 +128,7 @@ describe("ImportContextStep (onboarding step 02 — import your context)", () =>
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute(
         "data-step",
       ),
-    ).toBe("2")
+    ).toBe("1")
     expect(container.textContent).toContain("Copy a prompt for your own AI")
     // The OAuth path is gone — it must not reappear as dead UI.
     expect(container.textContent).not.toContain("Connect Claude")
@@ -192,7 +209,7 @@ describe("ImportContextStep (onboarding step 02 — import your context)", () =>
   it("prefills only the workspace fields that are still empty", async () => {
     // The company already has a mission; the export carries a different one.
     const workspace = makeWorkspace({
-      onboarding_step: 2,
+      onboarding_step: 1,
       display_name: "",
       mission: "The mission the user already typed.",
     })
@@ -247,12 +264,53 @@ describe("ImportContextStep (onboarding step 02 — import your context)", () =>
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
   })
 
-  it("lets the user skip to the connectors step without importing", async () => {
+  it("lets the user skip to the company step without importing", async () => {
     mount()
     await waitFor(() => expect(promptMock).toHaveBeenCalled())
 
     fireEvent.click(screen.getByRole("button", { name: "Fill it in manually" }))
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/company")
+  })
+
+  it("skipping the step creates nothing — the company step still owns that", async () => {
+    mount(null)
+    await waitFor(() => expect(promptMock).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole("button", { name: "Fill it in manually" }))
+    expect(createWorkspaceMock).not.toHaveBeenCalled()
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/company")
+  })
+
+  it("creates the company row before uploading when there isn't one yet", async () => {
+    // Running first, this is the flow's first write. `/llm-context/import` is
+    // tenant-scoped, so uploading without a company row 403s — and the row is
+    // created UNNAMED, because a guessed name would reach the company step
+    // looking like the user's own answer.
+    createWorkspaceMock.mockResolvedValue(makeWorkspace({ id: "ws-new", display_name: "" }))
+    importFileMock.mockResolvedValue({
+      ok: true,
+      fields: { company_name: "Samsung Health" },
+      unmapped: {},
+      format_version: "2",
+      note: null,
+      job_id: 7,
+    })
+    const startContextImport = vi.fn()
+    const { container } = mount(null, { startContextImport })
+    await waitFor(() => expect(promptMock).toHaveBeenCalled())
+    uploadMd(container)
+
+    await waitFor(() => expect(importFileMock).toHaveBeenCalled())
+    expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
+    const arg = createWorkspaceMock.mock.calls[0][0] as Record<string, unknown>
+    expect(arg.companyName).toBe("")
+    // Blank name → no product row (products_name_nonempty).
+    expect(arg.productName).toBe("")
+    // The resume marker points at the company step, which collects the name.
+    expect(arg.onboardingStep).toBe(2)
+    // The import lands on the row we just created, not on a stale null.
+    await waitFor(() => expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-new", expect.anything()))
+    expect(startContextImport).toHaveBeenCalledWith(7, "ws-new")
   })
 
   it("stays usable when the prompt fetch fails", async () => {
