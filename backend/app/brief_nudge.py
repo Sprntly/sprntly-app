@@ -1,5 +1,5 @@
 """Brief nudge — generate + send the Slack messages that drive a user to OPEN
-their weekly brief, so they engage with the platform.
+their Top Insights brief, so they engage with the platform.
 
 This is the wiring behind the `brief-nudge` skill. The skill is the METHOD
 (what each message says, the Day 0→3 cadence, the honesty rules); this module
@@ -169,7 +169,7 @@ def nudge_slack_blocks(nudge: dict, deep_link: str) -> tuple[str, list[dict]]:
     """(plain-text fallback, Slack Block Kit blocks) for a generated nudge.
     Compact: bold headline, intro, the items, one CTA button."""
     slack = nudge.get("slack") or {}
-    headline = slack.get("headline") or "Your weekly brief is ready"
+    headline = slack.get("headline") or "Your Top Insights brief is ready"
     intro = slack.get("intro") or ""
     items = slack.get("items") or []
     cta_label = slack.get("cta_label") or "Open this week's brief"

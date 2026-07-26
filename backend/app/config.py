@@ -316,7 +316,7 @@ class Settings(BaseSettings):
     # app/design_agent/provider_alert.py. Empty ⇒ alert is a clean no-op (logged).
     design_agent_alert_email: str = ""
 
-    # Which engine produces the weekly brief.
+    # Which engine produces the Top Insights brief (formerly "weekly brief").
     #   "synthesis" (default) — KG-driven: seed-if-empty → run_synthesis over the
     #                           knowledge graph (kg_signal/kg_entity) → save_brief.
     #   "legacy"              — placeholder corpus→single-Claude-call pipeline,
@@ -328,13 +328,16 @@ class Settings(BaseSettings):
     # Pipeline scheduler
     scheduler_enabled: bool = False
     pipeline_interval_hours: int = 6
-    # Weekly-brief scheduler (v0 checklist 2.4): the brief fires Monday 09:00 in
-    # each company's configured timezone (companies.notification_settings.timezone,
-    # default UTC). The scheduler ticks every WEEKLY_BRIEF_TICK_MINUTES and, for
-    # each company, asks app.brief_schedule.should_run_weekly_brief whether the
-    # local Monday-09:00 firing window is open. Must be comfortably smaller than
-    # brief_schedule.DUE_WINDOW (1h) so a window is never skipped between ticks;
-    # 15 min gives ~4 chances to catch each window even if a tick runs late.
+    # Top-Insights brief scheduler (v0 checklist 2.4): the brief fires Monday
+    # 09:00 in each company's configured timezone
+    # (companies.notification_settings.timezone, default UTC). The scheduler
+    # ticks every BRIEF_TICK_MINUTES and, for each company, asks
+    # app.brief_schedule.should_run_brief whether the local Monday-09:00 firing
+    # window is open. Must be comfortably smaller than brief_schedule.DUE_WINDOW
+    # (1h) so a window is never skipped between ticks; 15 min gives ~4 chances
+    # to catch each window even if a tick runs late.
+    # NOTE: the setting kept its historical WEEKLY_BRIEF_TICK_MINUTES env name so
+    # existing staging/prod .env files keep working (they are hand-managed).
     weekly_brief_tick_minutes: int = 15
     # Ticket tracker sync: every tick, two-way sync each PRD whose tickets were
     # pushed to ClickUp/Jira (prd_ticket_sync rows with auto_sync=true). 15 min

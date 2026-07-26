@@ -555,7 +555,7 @@ def _seed_item(db, cid, theme_id, rank, score, *, status="proposed",
 
 
 def _seed_brief(db, slug):
-    """Seed a current weekly brief for a company slug (briefs.dataset == slug).
+    """Seed a current Top Insights brief for a company slug (briefs.dataset == slug).
 
     The ideation GET route gates on a brief existing, so the no-brief →
     empty-page invariant holds; this helper lets the populated tests satisfy
@@ -586,7 +586,7 @@ def test_get_ideation_returns_rank_ordered(isolated_settings, _override_company)
 
 
 def test_get_ideation_empty_when_no_brief(isolated_settings, _override_company):
-    """No weekly brief has ever been generated → the page is empty even if
+    """No Top Insights brief has ever been generated → the page is empty even if
     stale/orphaned ideation_items rows exist for the tenant."""
     from fastapi.testclient import TestClient
     import app.main as main_mod

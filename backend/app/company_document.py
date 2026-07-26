@@ -24,7 +24,7 @@ backend/tests/conftest.py). The original file bytes are base64-encoded into
 dataset / roadmap / template upload paths use).
 
 NOTE (follow-up): these docs are STORED only. Unlike roadmap_doc (which feeds the
-weekly brief) and company_template (which feeds prd-author), nothing here is wired
+Top Insights brief) and company_template (which feeds prd-author), nothing here is wired
 into synthesis yet. Feeding company_document text into agent context is a
 deliberate follow-up.
 """

@@ -56,7 +56,7 @@ export type SignUpInput = {
    *  company/personal split is retired from the UI). */
   accountType?: "company" | "personal"
   /** IANA timezone (e.g. "America/New_York"). Optional override; when absent we
-   *  auto-detect from the browser so the weekly brief fires Monday 06:00 local. */
+   *  auto-detect from the browser so the Top Insights brief fires Monday 06:00 local. */
   timezone?: string
 }
 

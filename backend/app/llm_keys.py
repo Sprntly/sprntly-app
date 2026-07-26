@@ -21,7 +21,7 @@ binders populate it:
     BackgroundTasks) inherit the binding via the contextvars snapshot taken at
     task creation.
   * `company_llm_key(company_id)` binds it explicitly for NON-request contexts
-    that carry a company id — the KG gateway, the weekly-brief scheduler, warm
+    that carry a company id — the KG gateway, the top-insights scheduler, warm
     Ask jobs, and the design-agent worker process (which runs outside any HTTP
     request).
 

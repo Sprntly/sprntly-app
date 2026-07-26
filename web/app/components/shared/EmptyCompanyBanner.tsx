@@ -34,7 +34,7 @@ export function EmptyCompanyBanner() {
   return (
     <div className="empty-banner" role="region" aria-label="Onboarding required">
       <div className="msg">
-        <strong>No companies yet.</strong> Upload your first company&apos;s sources to see a weekly brief.
+        <strong>No companies yet.</strong> Upload your first company&apos;s sources to see a Top Insights brief.
       </div>
       <Link
         href="/onboard"

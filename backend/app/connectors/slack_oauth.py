@@ -12,7 +12,7 @@ Flow:
 
 Message delivery:
     - post_message(channel, text) posts markdown to a Slack channel
-    - post_brief(channel, brief_payload) formats and posts a weekly brief
+    - post_brief(channel, brief_payload) formats and posts a Top Insights brief
 
 Slack v2 specifics worth knowing:
     - The exchange response separates bot creds from user creds:
@@ -268,11 +268,11 @@ def app_home_view() -> dict[str, Any]:
             {"type": "header", "text": {"type": "plain_text", "text": "Sprntly", "emoji": True}},
             {"type": "section", "text": {"type": "mrkdwn", "text":
                 "*Your AI product manager.* Sprntly turns your tools and conversations "
-                "into weekly briefs, PRDs, and prototypes."}},
+                "into Top Insights briefs, PRDs, and prototypes."}},
             {"type": "divider"},
             {"type": "section", "text": {"type": "mrkdwn", "text":
                 "*What this connection does*\n"
-                "• Posts your weekly brief and updates into the channel you choose\n"
+                "• Posts your Top Insights brief and updates into the channel you choose\n"
                 "• Reads messages from channels you add Sprntly to, to surface "
                 "product signals — never channels you haven't invited it to"}},
             {"type": "section", "text": {"type": "mrkdwn", "text":
@@ -513,7 +513,7 @@ def post_to_target(
     text: str,
     blocks: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Post a notification (weekly brief / nudge) to the user's chosen target.
+    """Post a notification (Top Insights brief / nudge) to the user's chosen target.
 
     The target lives on the connection's `config`:
       - target_type == "dm"      → DM the installing user (open_dm on their
@@ -740,8 +740,8 @@ def join_channel(bot_access_token: str, channel_id: str) -> bool:
 
 
 def format_brief_message(brief_payload: dict[str, Any]) -> str:
-    """Format a weekly brief payload into Slack mrkdwn."""
-    headline = brief_payload.get("summary_headline", "Weekly Brief")
+    """Format a Top Insights brief payload into Slack mrkdwn."""
+    headline = brief_payload.get("summary_headline", "Top Insights")
     week = brief_payload.get("week_label", "")
     insights = brief_payload.get("insights", [])
 

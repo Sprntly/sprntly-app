@@ -525,7 +525,7 @@ export function briefToContentPatch(brief: Brief): BriefHydrationPatch {
   }
 }
 
-/** Match weekly-brief section order: broken → better → new, then rank. */
+/** Match top-insights section order: broken → better → new, then rank. */
 const DETAIL_KEY_TAG_ORDER = ["fix", "double", "new"] as const
 
 export function pickDefaultDetailKey(briefDetails: Record<string, DetailState>): string | null {

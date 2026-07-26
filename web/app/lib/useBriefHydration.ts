@@ -80,7 +80,7 @@ export function useBriefHydration(company: string = "asurion"): BriefHydration {
   useEffect(() => {
     cancelled.current = false
     // On a genuine workspace switch, drop the previous workspace's brief from
-    // ContentContext immediately. Otherwise the weekly brief screen keeps
+    // ContentContext immediately. Otherwise the Top Insights brief screen keeps
     // rendering the old brief while the new one loads — and, when the new
     // workspace has no brief yet, forever (nothing overwrites the merged slice).
     if (prevCompanyRef.current !== undefined && prevCompanyRef.current !== company) {

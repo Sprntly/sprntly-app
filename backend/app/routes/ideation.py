@@ -11,7 +11,7 @@ Routes (all tenant-scoped via require_company):
                                   (in_progress | done | dismissed).
 
 Items are produced by the synthesis run (sequence_ideation) — every theme that
-didn't make the weekly brief's TOP 3, scored and persisted, with the weekly
+didn't make the Top Insights brief's TOP 3, scored and persisted, with the weekly
 prioritization pass marking the 25–30 worth showing as `shortlisted`. The GET
 route returns ONLY the visible set; the tail stays persisted but hidden (it
 competes again on the next weekly run).
@@ -72,7 +72,7 @@ class ReorderIn(BaseModel):
 
 
 def _company_has_brief(company_id: str) -> bool:
-    """True iff a current weekly brief exists for this company.
+    """True iff a current Top Insights brief exists for this company.
 
     Briefs are keyed by the dataset slug (`briefs.dataset == companies.slug`),
     mirroring how the brief routes scope by slug. No slug / no brief row → the
@@ -89,7 +89,7 @@ def get_ideation(company: CompanyContext = Depends(require_company)):
     """The enterprise's visible ideas: the weekly shortlist (25–30, picked by
     the prioritization pass from the latest analysis) plus user-pinned rows.
 
-    Empty when no weekly brief has ever been generated for the company: the
+    Empty when no Top Insights brief has ever been generated for the company: the
     ideation pool is the remainder of the brief's ranking, so with no brief
     there is no analysis to draw ideas from.
     """

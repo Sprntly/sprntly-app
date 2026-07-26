@@ -63,7 +63,7 @@ DEFAULT_CADENCE: tuple[DripStep, ...] = (
         body_text=(
             "Hi {name},\n\n"
             "Welcome to Sprntly! You're one step away from turning {company}'s "
-            "product signals into a weekly brief.\n\n"
+            "product signals into a Top Insights brief.\n\n"
             "To get the most out of Sprntly, connect your first data source "
             "(Slack, Linear, Zendesk, or Amplitude) so we can start building "
             "your knowledge graph.\n\n"
@@ -197,7 +197,7 @@ def render_step(step: DripStep, *, company: str, name: str) -> tuple[str, str]:
 
 
 # Branded shell tokens — mirrors supabase/templates/*.html and the
-# weekly-brief email (app/synthesis/email_delivery.py): paper background,
+# top-insights email (app/synthesis/email_delivery.py): paper background,
 # white card, serif headline, green CTA.
 _SERIF = "'Spectral',Georgia,'Times New Roman',serif"
 _SANS = "'Inter',-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif"

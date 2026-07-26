@@ -416,14 +416,14 @@ export function ConnectorsSettingsView({
         />
       </div>
 
-      {/* Rebuild the weekly brief (and its PRDs + evidence) from the latest
+      {/* Rebuild the Top Insights brief (and its PRDs + evidence) from the latest
           sources. Prominent primary action right under the intro copy so it's
           the obvious next step after connecting a tool or uploading files. */}
       <div className="set-conn-regen">
         <div className="set-conn-regen-copy">
           <div className="set-conn-regen-t">Regenerate brief</div>
           <div className="set-conn-regen-s">
-            Digest new sources and rebuild your weekly brief, PRDs, and evidence.
+            Digest new sources and rebuild your Top Insights brief, PRDs, and evidence.
           </div>
         </div>
         <button
@@ -1005,7 +1005,7 @@ export function ConnectorsSettings() {
   // evidence) from the latest connected sources and uploads. The endpoint is
   // fire-and-forget: it returns as soon as the background chain is scheduled,
   // so a resolved promise means "started", not "finished". We surface a toast
-  // and send the user to the Weekly brief, which polls itself to `ready`.
+  // and send the user to the Top Insights, which polls itself to `ready`.
   const handleRegenerateBrief = useCallback(async () => {
     if (regenerating) return
     setRegenerating(true)

@@ -49,7 +49,7 @@ class Feature:
     ASK = "ask"
     IDEATION = "ideation"
     SYNTHESIS = "synthesis"
-    WEEKLY_BRIEF = "weekly_brief"
+    TOP_INSIGHTS = "top_insights"
     EVIDENCE = "evidence"
     RESEARCH = "research"               # competitor / market / business context
     DOCUMENTS = "documents"             # PRD companion docs (tech design, risk, ...)
@@ -80,7 +80,7 @@ _AGENT_FEATURE: dict[str, str] = {
     # The KG document extractor (app/graph/extractor.py) passes its agent name
     # in as a parameter, so it never appears as a literal at a call site.
     "extractor": Feature.KG_INGEST,
-    "brief_nudge": Feature.WEEKLY_BRIEF,
+    "brief_nudge": Feature.TOP_INSIGHTS,
     "user_stories": Feature.STORIES,
     "oncall": Feature.ONCALL,
     "embeddings": Feature.EMBEDDINGS,

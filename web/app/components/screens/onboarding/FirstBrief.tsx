@@ -30,7 +30,7 @@ import { Check, FileText } from "../../auth/icons"
  * Phase → stage mapping (monotonic; stages only ever advance):
  *   1 "Workspace context saved"        active while preparing + seeding
  *   2 "Analyzing your sources"         active once seeding completes
- *   3 "Composing your first Weekly Brief"
+ *   3 "Composing your first Top Insights brief"
  *                                      active once the poller first reports
  *                                      status "generating"
  *
@@ -57,7 +57,7 @@ const STAGES = [
     pendingIcon: null,
   },
   {
-    label: "Composing your first Weekly Brief",
+    label: "Composing your first Top Insights brief",
     sub: "Lands on your Brief page when ready",
     pendingIcon: FileText,
   },
@@ -127,7 +127,7 @@ export function FirstBrief() {
       } else {
         setPhase({
           kind: "failed",
-          error: "Brief is still processing. Enter Sprntly and check the Weekly Brief in a few minutes.",
+          error: "Brief is still processing. Enter Sprntly and check Top Insights in a few minutes.",
         })
       }
     } catch (e) {
@@ -213,7 +213,7 @@ export function FirstBrief() {
       ? "Your workspace is live and your coworkers have finished their first pass."
       : phase.kind === "failed"
         ? "Your workspace is set up. The first Brief needs a bit more data — you can still enter Sprntly now and it will land on your Brief page once sources come in."
-        : "Your coworkers are reading everything you shared and composing your first Weekly Brief. It'll be waiting on your Brief page — this usually takes one to two minutes."
+        : "Your coworkers are reading everything you shared and composing your first Top Insights brief. It'll be waiting on your Brief page — this usually takes one to two minutes."
 
   const footerMeta =
     phase.kind === "ready"
@@ -224,8 +224,8 @@ export function FirstBrief() {
 
   const findings = phase.kind === "ready" ? phase.brief.insights.length : 0
 
-  // The weekly brief is sent Monday 06:00 in the company owner's timezone
-  // (backend: brief_schedule.should_run_weekly_brief / resolve_user_timezone),
+  // The Top Insights brief is sent Monday 06:00 in the company owner's timezone
+  // (backend: brief_schedule.should_run_brief / resolve_user_timezone),
   // which we capture from the browser at signup. Surface that browser timezone
   // when the runtime exposes one and fall back to "your local time".
   const localTimezone =
@@ -284,7 +284,7 @@ export function FirstBrief() {
             <Check style={{ width: 17, height: 17 }} />
           </div>
           <div>
-            <div className="t">Your Weekly Brief is waiting</div>
+            <div className="t">Your Top Insights are waiting</div>
             <div className="s">
               {findings > 0 ? `${findings} findings, ranked against your KPI tree — open` : "Open"}{" "}
               it to see what your coworkers found, and ask follow-ups in the thread.

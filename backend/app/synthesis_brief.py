@@ -1,6 +1,6 @@
 """KG-synthesis brief engine — the read path the UI already speaks.
 
-This is the engine behind the weekly brief. It bridges the UI's dataset-slug
+This is the engine behind the Top Insights brief. It bridges the UI's dataset-slug
 world to the knowledge-graph world:
 
     slug → company_id  (companies.slug is the tenant key + the dataset slug)
@@ -304,7 +304,7 @@ def generate_all_synthesis_briefs() -> None:
 
 
 def generate_brief_for(company_id_or_slug: str, *, deliver: bool = True) -> dict:
-    """Generate + persist the KG-driven weekly brief for one company.
+    """Generate + persist the KG-driven Top Insights brief for one company.
 
     ``deliver=False`` suppresses the on-generation Slack/email push (see
     run_synthesis) — for callers that deliver on their own schedule (the weekly

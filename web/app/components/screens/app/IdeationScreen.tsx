@@ -357,7 +357,7 @@ function ProposedContent({
           .sort((a, b) => a.rank - b.rank)
           .map(ideationItemToIdea)
         setIdeas(mapped)
-        // The shortlist refreshes when the weekly brief generates; the newest
+        // The shortlist refreshes when the Top Insights brief generates; the newest
         // updated_at is when this list was last prioritized.
         const newest = res.items
           .map((i) => i.updated_at)
@@ -443,7 +443,7 @@ function ProposedContent({
     )
   }
 
-  // Empty state — no weekly brief has been generated yet, so the analysis has
+  // Empty state — no Top Insights brief has been generated yet, so the analysis has
   // produced no ideas (the backend returns an empty list with no brief).
   if (load === "ready" && ideas.length === 0) {
     return (
@@ -738,7 +738,7 @@ function IdeaDetailModal({
 
           {/* Why it's here: Ideation is defined by NOT being prioritized. */}
           <p className="bl-modal-why">
-            Not prioritized in the weekly brief — it ranked #{idea.rank} behind
+            Not prioritized in the Top Insights brief — it ranked #{idea.rank} behind
             this week&apos;s top 3.
           </p>
 

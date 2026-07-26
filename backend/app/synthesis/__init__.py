@@ -1,4 +1,4 @@
-"""Synthesis Agent — the reasoner: KG → scored, ranked weekly brief."""
+"""Synthesis Agent — the reasoner: KG → scored, ranked Top Insights brief."""
 from app.synthesis.agent import run_synthesis
 from app.synthesis.convergence import ThemeConvergence, compute_convergence
 

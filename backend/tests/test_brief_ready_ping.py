@@ -1,7 +1,7 @@
 """Tests for the short "Hey, your brief is generated." ping.
 
 A USER-TRIGGERED regenerate (/v1/brief/regenerate, /regenerate-all, /generate)
-must NOT push the full weekly brief message — that stays reserved for the
+must NOT push the full Top Insights brief message — that stays reserved for the
 scheduled delivery time. It sends this one-line ping instead, with the same
 deep-link CTA button the weekly message carries, over the same per-user Slack
 and company email channels (same config gates).
@@ -80,7 +80,7 @@ def test_ping_email_is_short_with_cta(isolated_settings):
     assert "/brief" in html_body  # the CTA button target
     # Short ping — none of the weekly email's card structure.
     assert "PM COWORKER" not in html_body
-    assert "Weekly Brief" not in subject
+    assert "Top Insights" not in subject
 
 
 def test_ping_email_honors_email_enabled_gate(isolated_settings, monkeypatch):

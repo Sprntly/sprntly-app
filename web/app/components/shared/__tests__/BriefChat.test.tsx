@@ -453,7 +453,7 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
   })
 })
 
-describe("BriefChat finding card — 'From' source chips (weekly-brief skill format)", () => {
+describe("BriefChat finding card — 'From' source chips (top-insights skill format)", () => {
   it("renders the skill's source chips and NOT the legacy mini-chart / KPI stat columns", async () => {
     await act(async () => {
       renderBrief()
@@ -517,13 +517,11 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
     expect(screen.queryByText("Generate prototype")).toBeNull()
   })
 
-  it("still lets you OPEN an existing prototype on a non-prototypeable finding (view, not generate)", async () => {
-    // A prototype was already built for insight 0 (e.g. from the PRD chat, which
-    // doesn't consult `prototypeable`), but the synthesis LLM marked the finding
-    // non-prototypeable. The card must NOT hide an existing prototype behind the
-    // visualizability gate — it stays reachable as "View prototype". (The gate is
-    // reopened by `prototypeReady`, i.e. a real prototype exists — NOT merely by a
-    // PRD existing — so we still never offer *generate* on an ops/data finding.)
+  it("offers NO prototype button even when a prototype is already built (top-insights CTA posture)", async () => {
+    // The top-insights skill removed the prototype affordance from finding
+    // cards entirely — even a built-and-saved prototype is reached from the
+    // PRD flow, never from the card. The card's pair is evidence (primary) +
+    // PRD (ghost), nothing else.
     mapEntries.set(0, {
       insight_index: 0,
       prd_id: 42,
@@ -534,11 +532,11 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
     await act(async () => {
       renderBriefWith(brief)
     })
-    const btn = within(cardFor(HERO.title)).getByRole("button", { name: "View prototype" })
-    expect(btn).toBeTruthy()
-    // Clicking opens THAT insight's prototype (prd 42), not any generate flow.
-    fireEvent.click(btn)
-    expect(pushSpy).toHaveBeenCalledWith(prototypePath(42))
+    expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
+    // The evidence CTA is the primary in its place.
+    expect(
+      within(cardFor(HERO.title)).getByRole("button", { name: "View the evidence" }),
+    ).toBeTruthy()
   })
 
   it("keeps hiding the prototype option on a non-prototypeable finding with only a PRD (no prototype)", async () => {
@@ -653,7 +651,7 @@ describe("BriefChat — greeting paragraph", () => {
     expect((greeting.match(/Good day/g) ?? []).length).toBe(1)
   })
 
-  it("renders the 'Monday brief · <time>' timestamp in the agent head", async () => {
+  it("renders the 'Top Insights · <time>' timestamp in the agent head", async () => {
     await act(async () => {
       renderBrief()
     })
@@ -663,7 +661,7 @@ describe("BriefChat — greeting paragraph", () => {
     expect(head).not.toBeNull()
     const status = head!.querySelector(".bc-agent-status") as HTMLElement | null
     expect(status).not.toBeNull()
-    expect(status!.textContent).toMatch(/Monday brief · /)
+    expect(status!.textContent).toMatch(/Top Insights · /)
     expect(status!.textContent).toContain("7:01")
   })
 })
@@ -693,27 +691,27 @@ describe("BriefChat finding card — no prototype preview thumbnail", () => {
     expect(card.querySelector(".fc-preview")).toBeNull()
     expect(card.querySelector(".fc-preview-img")).toBeNull()
     expect(within(card).queryByText("Prototype preview · open design")).toBeNull()
-    // …but the prototypeable finding still offers the "View prototype" button
-    // (insight 0 has a READY prototype in the seeded map).
-    expect(within(card).queryByText("View prototype")).not.toBeNull()
+    // …and the card offers no prototype entry point at all — the top-insights
+    // CTA pair is evidence (primary) + PRD (ghost); prototypes live in the PRD
+    // flow.
+    expect(within(card).queryByText("View prototype")).toBeNull()
+    expect(within(card).queryByRole("button", { name: "View the evidence" })).not.toBeNull()
   })
 })
 
-// ── Prototype CTA relabels Generate → View once one is built + saved ───────────
-// The finding card's prototype button must reflect real DB state (the brief→
-// prototype map's prototypeReady), mirroring the chat surface: "Generate
-// prototype" until one is built, "View prototype" once it's saved. Previously the
-// label was a static adapter CTA string that never flipped.
-describe("BriefChat finding card — prototype affordance is view-only (generate removed)", () => {
-  it("renders NO prototype button with no built prototype, then 'View prototype' once ready in the DB", async () => {
-    // Empty map → no prototype built yet for this insight → no button at all
-    // (Generate prototype was removed from the brief; generation lives in the
-    // PRD panel footer).
+// ── Prototype affordance is gone from cards entirely ──────────────────────────
+// The top-insights skill CTA posture: a card carries exactly two CTAs —
+// "View the evidence" (primary) and Generate/View PRD (ghost). No prototype
+// button in any state, built or not; prototypes stay reachable from the PRD.
+describe("BriefChat finding card — prototype affordance removed from cards", () => {
+  it("renders NO prototype button with no built prototype, and none once one is ready in the DB either", async () => {
+    // Empty map → no prototype built yet for this insight → no button.
     await act(async () => { renderBrief() })
     expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
 
     cleanup()
-    // Seed a READY prototype for insight 0 (HERO's insightIndex) → View appears.
+    // Even a READY prototype for insight 0 (HERO's insightIndex) adds no card
+    // button — it is reached from the PRD flow instead.
     mapEntries.set(0, {
       insight_index: 0,
       prd_id: 42,
@@ -721,8 +719,8 @@ describe("BriefChat finding card — prototype affordance is view-only (generate
       prototype: { ready: true, preview_image_url: null },
     } as never)
     await act(async () => { renderBrief() })
-    expect(within(cardFor(HERO.title)).getByRole("button", { name: "View prototype" })).toBeTruthy()
-    expect(within(cardFor(HERO.title)).queryByRole("button", { name: "Generate prototype" })).toBeNull()
+    expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
+    expect(within(cardFor(HERO.title)).getByRole("button", { name: "View the evidence" })).toBeTruthy()
   })
 })
 

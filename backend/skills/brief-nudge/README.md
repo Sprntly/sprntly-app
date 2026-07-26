@@ -3,7 +3,7 @@
 > **Read this first.** This folder is a self-contained Agent Skill. It contains everything needed to understand, invoke, and reproduce a brief nudge: the behavior spec (`SKILL.md`), this guide, and the rendered examples (`examples/`). An LLM or a developer can pick it up with no other context and know **what the skill is, when to call it, what it needs, what it outputs, and what that output is for.**
 
 ## 1. What this skill is (one line)
-`brief-nudge` writes the multi-channel notification + reminder sequence — **Slack and email**, a **day-0 announcement** plus **day-1/2/3 reminders** (sent only while the brief is unopened) — that drives a user to open a brief such as `weekly-brief`, each message leading with the **business impact** and one **deep-link CTA**.
+`brief-nudge` writes the multi-channel notification + reminder sequence — **Slack and email**, a **day-0 announcement** plus **day-1/2/3 reminders** (sent only while the brief is unopened) — that drives a user to open a brief such as `top-insights`, each message leading with the **business impact** and one **deep-link CTA**.
 
 ## 2. What it produces
 For each **channel × day**, a ready-to-send message:
@@ -13,13 +13,13 @@ For each **channel × day**, a ready-to-send message:
 One nudge = one brief = one primary action.
 
 ## 3. What the output is used for
-This is the **delivery / activation layer** that sits *after* a brief is generated. It does not write the brief (`weekly-brief`) or run analysis — it gets the brief opened:
+This is the **delivery / activation layer** that sits *after* a brief is generated. It does not write the brief (`top-insights`) or run analysis — it gets the brief opened:
 - announce the brief the moment it's ready;
 - recover attention with honest, escalating reminders while it's unopened;
 - deep-link the reader straight to the **right workspace → the brief page**, so the CTA lands them exactly where they can act.
 
 ```
-weekly-brief  ->  brief-nudge  ->  user opens the brief and acts
+top-insights  ->  brief-nudge  ->  user opens the brief and acts
   (the artifact)   (THIS SKILL)      (Slack + email, day 0..3)
 ```
 
@@ -27,7 +27,7 @@ weekly-brief  ->  brief-nudge  ->  user opens the brief and acts
 **Call it when** a brief (or any surfaced artifact) needs opens, and you're delivering over Slack + email with a day-based cadence.
 Literal triggers: "notify users about the brief", "reminder sequence", "nudge users to open X", "Slack + email announcement", "drip reminders".
 
-**Do not call it** to write the brief (`weekly-brief`), to brief leadership on an external event (`market-event-brief`), or for incident / general customer comms (`customer-comms`).
+**Do not call it** to write the brief (`top-insights`), to brief leadership on an external event (`market-event-brief`), or for incident / general customer comms (`customer-comms`).
 
 ## 5. Inputs
 | Field | Required | Notes |

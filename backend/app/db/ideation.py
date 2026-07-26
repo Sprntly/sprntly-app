@@ -1,6 +1,6 @@
 """ideation_items store — the prioritized pool of product ideas.
 
-One row = one theme NOT in the current weekly brief, carrying its rank, score,
+One row = one theme NOT in the current Top Insights brief, carrying its rank, score,
 a one-line rationale, and a `shortlisted` flag set by the weekly prioritization
 pass (only shortlisted ideas are shown; the tail stays persisted so it can
 climb back in on a later run). The unique key (enterprise_id, theme_id) makes
