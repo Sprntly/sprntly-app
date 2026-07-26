@@ -1,104 +1,162 @@
 ---
 name: public-feedback-report
-description: Mine PUBLIC, external feedback about a company across every platform where users leave it — App Store & Google Play reviews, Reddit, G2/Capterra/Trustpilot, X/Twitter, Facebook, YouTube comments, forums — and turn it into a clean, report-style read of what users are saying, how it's trending over time, what's new, what's chronic and never getting fixed, and what to do. It tracks sentiment and volume over time, surfaces high-level themes with relative volume + sentiment + trend, splits issues into long-standing / new-and-emerging / improving-or-resolved, breaks feedback down by platform and audience, captures what users LOVE (not just complaints), flags switching-to-competitor signals, and ends in impact-ranked recommendations tied to the metrics the company cares about (rating, acquisition, retention, reputation). Because public data is a biased, partial sample, it reports RELATIVE share and direction, always labeled "sampled" — never fabricated precise counts, never invented quotes, never guessed root cause. This is the PUBLIC/external counterpart to `voice-of-customer-report`; it does NOT use calls, support tickets, interviews, or internal feedback (those are `voice-of-customer-report` / `meeting-summary`). Use when the user says "what are people saying about us online", "review mining", "app-store/Reddit/G2/Twitter feedback", "online reputation", "public sentiment", "what's trending in our reviews", or "how is sentiment changing over time".
+description: Mine PUBLIC, external feedback about a company — App Store & Google Play reviews, Reddit, G2/Capterra/Trustpilot, X, Facebook, YouTube, forums, Discord, GitHub, comparison sites — and turn it into a report of what users are saying, how it is trending, what is new, what is chronic, and what to build. Runs in two passes: a CAPTURE pass that logs every piece of feedback as an individual record tagged product or non_product, then an ANALYSIS pass that reports ONLY the product-actionable records, with non-product feedback (pricing, billing, support, sales, marketing, company) held in a short separate section so it cannot crowd the build list. Reports relative direction over collected records — never fabricated counts, never invented quotes, never guessed root cause, never percentages of the user base. Also answers follow-up questions against the captured record set ("what did the App Store say", "how long has this been raised", "show me March"). This is the PUBLIC/external counterpart to `voice-of-customer-report`; it does NOT use calls, support tickets, interviews, or internal feedback. Use when the user says "what are people saying about us online", "review mining", "app-store/Reddit/G2/Twitter feedback", "online reputation", "public sentiment", "what's trending in our reviews", or asks a question about feedback already captured.
 ---
 
-# Public Feedback Report (external review & social mining → trends → recommendations)
+# Public Feedback Report
 
 ## What it does
-Reads public feedback about a company from across the open web and produces **one report-style artifact** that answers: **what are users saying · how is it trending · what's new · what's chronic and unresolved · what should we do.** It is built around **change over time** — a single snapshot is the weak version; the value is the trend.
+Reads public feedback about a company and produces **one report** answering: what are users struggling with · how is it trending · what is new · what is chronic · what should we build. Built around **change over time** — a single snapshot is the weak version.
 
-It reads top to bottom:
-1. **TL;DR (written, user-first)** — what users are saying right now in their own voice, enumerated `#1/#2/#3`, with the sentiment & volume direction and the headline recommendation.
-2. **Sentiment & volume over time** — the trend lines: overall sentiment, mention volume, and average star-rating (App Store / Play / G2) this period vs prior, with spikes tied to releases/events.
-3. **Themes** — high-level themes, each with **relative volume (sampled), sentiment, a trend arrow, and 2–3 real sourced quotes.**
-4. **Long-standing · New/Emerging · Improving-or-Resolved** — the temporal cut: chronic issues recurring for a long time and still unresolved; what just appeared this period; what's declining (possibly fixed).
-5. **By platform** — where the feedback lives and how sentiment differs by audience (Reddit power users vs App Store mass vs G2 buyers vs X).
-6. **What users love** — the praise/strength themes to protect and amplify, not just the complaints.
-7. **Recommendations** — the highest-impact actions, ranked by **impact × severity × fit to the company's metrics**, each routed (→ `prd-author` / `competitive-intelligence-review` / marketing).
-8. **Coverage & integrity** — platforms, window, sample caveats.
+Two things make this skill different from a generic review summary:
 
-## Sources — public / external only
-**In scope:** App Store & Google Play reviews · Reddit · G2 / Capterra / Trustpilot / TrustRadius · X (Twitter) · Facebook · YouTube comments · public forums & communities · Hacker News / Product Hunt where relevant. Any platform where users leave **public** feedback.
-**Out of scope (different skills):** support tickets, sales/CSM calls, user interviews, NPS/CSAT you collected, in-product feedback → those are curated/first-party = **`voice-of-customer-report`**. A single meeting → `meeting-summary`. A competitor study → `competitive-intelligence-review`.
+1. **It separates product feedback from everything else, and only analyses the product half.** A PM reading this should be able to act on every line. Pricing gripes, billing failures and support rage are captured, counted and shown — but in their own short section, because they are somebody else's job.
+2. **It never invents a number.** Every percentage is computed over the records actually collected, and the report says so in plain words.
+
+## Two passes — do not skip the first
+
+### Pass 1 — CAPTURE (produces `<company>-feedback-records.json`)
+Run `references/capture-spec.md` in full. It governs collection. In summary:
+- **One record per distinct piece of feedback.** Never merge, collapse or deduplicate. Three people saying the same thing is three records — repetition is the signal.
+- **Tag every record `product` or `non_product`.** This is the most important field in the file. `non_product` records also get a subcategory (pricing, packaging, billing, sales, support, onboarding_service, marketing, company, other).
+- **Every record carries an owner** — which team can actually act on it.
+- **Sources are unbounded.** Never decline a source for not being on a list, and never reject one for being low quality. Record the source; capture the content.
+- **When an item contains both kinds of feedback, create separate records.** One review complaining about price, a bug and a rude rep is three records.
+- **When it will not sort cleanly, tag `unclear`.** Never discard.
+
+The record set is a deliverable, not scratch. It ships with the report and is what follow-up questions are answered from.
+
+### Pass 2 — ANALYSE (produces the report)
+Everything below runs **over the `product` records only**, except the three places explicitly noted: the competitor comparison, the non-product section, and the totals.
+
+## The sorting test (get this right and the rest is detail)
+**Could a product, design or engineering team change this?** Not "could an engineer build it" — the broader test.
+
+`product` includes bugs · missing capability · usability and workflow friction · performance and reliability · integration and ecosystem gaps · **discoverability** (the feature exists and they could not find it — that is a product problem, not a user problem) · documentation gaps · **workaround sharing** · public support-seeking · **evaluation and switching reasoning** · category and unmet-need discussion · competitor capability comparison.
+
+Flag two as high-value whenever found: **workaround sharing**, because a published workaround specifies the real requirement better than any feature request; and **evaluation reasoning**, because it comes from people who never talked to the company and cannot be heard any other way.
+
+### Boundary cases that decide the report's quality
+| They said | Sorts as | Because |
+|---|---|---|
+| "Too expensive" | non_product / pricing | It is a price opinion |
+| "The feature I need is locked behind a tier I can't justify" | **product** | Packaging is shaping capability access, and product can change that |
+| "Support never got back to me" | non_product / support | Channel performance |
+| "I had to contact support because I couldn't figure it out" | **product** | The real issue is discoverability |
+| "The onboarding call was useless" | non_product / onboarding_service | Service delivery |
+| "Setting it up took three days and I gave up" | **product** | In-product activation friction |
+| "Their marketing said it does X and it doesn't" | **both** | One marketing record for the claim, one product record for the gap |
+| "I switched to [rival] because of [capability]" | **product** / evaluation_reasoning | Names a capability |
+| "I switched to [rival] because it's cheaper" | non_product / pricing | Names a price |
+| "It's fine, just not worth the money" | non_product / pricing **+** any specific complaint inside it as its own product record | Two records |
 
 ## The discipline (non-negotiable)
-- **Public = a biased, partial sample.** Report **relative frequency / share of mentions and direction**, always **labeled "sampled."** **Never present a fake precise count** ("240 complaints") from public data — you don't own the denominator.
-- **Real quotes only**, sourced and platform-attributed — never invented, never a paraphrase in quotation marks.
-- **No root-cause guessing** — report what users say, not a guessed why.
-- **Sentiment is modeled, not certain** — state the method; spot-check; don't over-trust a percentage to the decimal.
-- **Trends need a volume floor** — don't call a 3→5 mention move a "spike"; normalize (mentions/week) before claiming a trend.
-- **Strengths count** — surface praise, not only problems.
+- **Public data is a partial, self-selected sample.** Report relative direction and rank order. **Never present a percentage of the user base.** Percentages are permitted only over the collected records, and must be labelled as such in plain words wherever they appear.
+- **Real quotes only** — sourced, dated, platform-attributed. Never invented, never a paraphrase in quotation marks. Reproduce one short quote per source and summarise the rest.
+- **No root-cause guessing.** Report what users say, not a guessed why.
+- **Never infer switching from tone.** Count someone as leaving only if they said so outright. Angry is not leaving.
+- **Never present undated or stale content as current.** Date every record; flag anything older than the window; any recommendation resting on stale records carries a check-this-first line.
+- **Strengths count.** Surface praise, not only problems.
+- **No fabricated trend lines.** If sentiment was not scored across a real time series, do not draw a numeric axis. Show collected volume by month and mark months with no coverage as gaps.
+
+## Write for the reader, not for us
+The report is read by people inside the company — PMs, engineers, execs — not by the team that built the skill. **No internal vocabulary in reader-visible text.** Banned: corpus, denominator, record set, capture layer, staleness flag, share-of-mention, signal, impact × severity, tier, extrapolate, prevalence. Say the plain version instead:
+
+| Don't write | Write |
+|---|---|
+| "corpus contamination flag" | "some of what we found was marketing, not real users" |
+| "the denominator is the corpus" | "these percentages are out of the 52 posts we found, not out of our users" |
+| "17 records staleness-flagged" | "17 of these are from 2024 or 2025 and may already be fixed" |
+| "2 explicit switching signals" | "two people said plainly they're leaving" |
+| "weight band" | "how often it came up" |
+
+Problems are written **as the user experiences them**, in their voice, with a plain gloss underneath naming what would be fixed and who owns it. `"My real rides get flagged and I can't get the flag removed"` — not "anomaly-detection false positives."
 
 ## Method
-0. **Scope:** the company (+ product names, handles, app IDs, G2 page), the **platforms** to cover, the **window + prior window** for trend, the **goal & metrics the company tracks** (rating, installs→activation, retention, reputation), and any prior run (for "what changed"). **Competitors:** either the user names them, or the skill **reasons and picks the top 2** — the rivals most mentioned in the corpus, the closest substitutes, and the names that show up in "switched to ___" mentions. State which 2 and why they were chosen.
-1. **Collect** mentions per platform across the window (and prior window). Capture verbatim · date · platform · rating (if any) · author-type if visible. De-dupe cross-posts; state the rule.
-2. **Classify** each mention: theme, sentiment (pos/neg/neutral) + intensity, type (bug / UX / pricing / performance / feature-request / support / praise / churn-or-switching signal), and platform.
-3. **Trend over time:** mentions/week and sentiment by period; **average rating trend** per store; detect spikes/anomalies and tie them to releases or events. Compare to the prior window.
-4. **Theme map:** every theme with **relative share (sampled)**, net sentiment, **trend arrow** (rising/flat/falling), first-seen → last-seen, and 2–3 real sourced quotes.
-5. **Temporal classification:** **Long-standing** (recurring across many periods, still live) · **New/Emerging** (appeared this window) · **Improving/Resolved** (declining; cross-check changelog if available) · **No-longer-raised** (used to appear regularly but is now absent — fixed or aged out; show what it was and roughly when it disappeared). The "gone" list matters: it's proof of progress and stops old issues haunting the narrative.
-6. **Platform & audience cut:** sentiment and top themes per platform; note where the audiences differ (e.g., Reddit churn rage vs G2 buyer concerns).
-7. **Strengths:** the praise themes — what users love about **us** — to protect/amplify.
-8. **Competitive comparison (us vs the top 2):**
-   - **Sentiment over time, us vs each competitor** — overlay the trend so the reader sees if we're pulling ahead or falling behind.
-   - **What users love about each competitor** — their praised strengths, side by side with ours, so our real differentiator (and their pull) is explicit.
-   - **Complaints head-to-head** — for the key dimensions (e.g. reliability, pricing/value, support, UX, integrations), is each competitor doing **better or worse than us** in public sentiment, and who's ahead. Plus **switching signals** — "switched to ___", "___ does this better" — as a churn-intent and share-of-voice read.
-   Competitor data is **sampled** too — same honesty bar; never fabricate their counts or quotes.
-9. **Recommend:** the highest-impact actions, ranked by **impact (reach × trend) × severity × fit to the company's metrics**; each names the metric/outcome it moves (rating, acquisition/conversion, retention, reputation) and routes onward. Cap at the most important ~5.
-10. **Coverage & integrity:** platforms covered, window, approximate sample size **labeled sampled**, locales/languages, what was unavailable, sentiment-model caveat.
+0. **Scope.** Company, products, handles, app IDs. Platforms. Window + prior window. The metrics the business is protecting. Any prior run. **Competitors:** user-named, or the skill picks the top 2 — most-named destination in leaving posts, closest substitutes, names appearing in "switched to ___". State which 2 and why. Exclude any competitor the company owns.
+1. **Capture.** Run pass 1. Produce the record file.
+2. **Compute the mix.** Product vs non-product split, and sentiment split within each, over collected records. **If non-product is the majority, that is itself a finding and must be stated, never hidden.**
+3. **Group product records into problems**, each with: how often it came up (rank band, never a percentage), how people felt, direction, first seen → last seen, and 1–2 real quotes.
+4. **Time split, in this order:** **New** (did not exist before this period) · **Still unresolved** (raised for a long time, still live) · **Looks fixed** (people have stopped raising it). The "looks fixed" column is proof of progress — never drop it.
+5. **Volume and sentiment by month across 24 months.** Green positive, amber neutral, red negative. Show months with no coverage as gaps and say so.
+6. **Platform cut.** What surfaces where, and why the audiences differ.
+7. **Strengths.** What people praise, in their words.
+8. **Competitors.** What users love about each rival · where we win and lose, on product dimensions · who said they are leaving and why. Rival data is equally partial — same honesty bar.
+9. **Recommend** ~5 product-actionable items, each led by its user-facing problem line, ordered by how many people it affects × how badly × what the business is protecting.
+10. **Non-product section** — the true proportion, plus the top 3 with their owning teams.
+11. **Coverage note**, on demand rather than on the page.
 
-## Output spec (report-style — Word-document feel)
-**A. Title + run line** — company · platforms · window (+ prior) · **the 2 competitors & how they were chosen** · goal & metrics · sample note (sampled) · confidence.
-**B. TL;DR (written, user-first)** — the user voice first, findings enumerated `#1/#2/#3` each on its own line, the sentiment & volume direction, and the headline recommendation last.
-**C. Sentiment & volume over time — us vs the top 2 competitors** — overlaid trend (our sentiment, each competitor's sentiment, and our volume), period vs prior, spikes annotated, so "are we pulling ahead or falling behind" is answered at a glance.
-**D. Themes** — cards/table: theme · relative share (sampled) · net sentiment · trend arrow · 2–3 real quotes.
-**E. Long-standing · New/Emerging · No-longer-raised** — clearly separated lists, each item dated (first→last seen). The "no-longer-raised / resolved" list is explicit — what used to be complained about and has now gone quiet.
-**F. By platform** — per-platform sentiment + top theme + a one-line audience read.
-**G. How we compare vs [Competitor A] & [Competitor B]** — the competitive block, together:
-   1. **What users love — us vs each competitor** (strengths side by side).
-   2. **Complaints head-to-head** — per dimension (reliability, pricing/value, support, UX, integrations…): our sentiment vs each competitor's, and **who's ahead / are they doing better or worse**.
-   3. **Switching signal** — share-of-voice and "switched to ___" mentions.
-**H. Recommendations** — the most important ~5, ranked by impact × severity × company-metric fit, **informed by the competitive gaps** (close where a rival is beating us; defend/amplify where we lead). Each is an **action card** naming the metric it moves and offering two actions: **Generate PRD** (route to `prd-author`) or **Move to backlog** (route to `prioritize`). Items sent to backlog drop into a backlog list; PRD-requested items are marked and handed off.
-**I. Coverage & integrity** — platforms, window, sample caveat (sampled, biased — for us *and* competitors), locales, sentiment-model note, verified-vs-inferred.
+## Output spec
+**A. Header** — "Generated by Sprntly" mark top right · period in the title · prepared date · what this covers / where we looked / what we were trying to answer, in plain sentences.
+**B. Count strip** — feedback collected · product-actionable · owned elsewhere · sources checked · how many said they are leaving. Show the real number however large; 52 and 1,400 are both fine and the reader needs to know which.
+**C. TL;DR — five points.** Three biggest problems, then **#4 what people are actually leaving over** and **#5 what is brand new this period**. Each in the user's voice with a short plain explanation and a real quote. Close with the single thing to do first.
+**D. Volume & sentiment across 24 months** — green/amber/red, event-annotated, coverage gaps marked.
+**E. The problems people are running into** — user-voice problem · how often · mood · direction · a real quote. Plain gloss naming the fix and the owner.
+**F. What's new · what's stuck · what's fixed** — in that order — beside **the feedback mix panel** (product vs non-product, sentiment within each, computed over collected records).
+**G. By platform.**
+**H. How we compare** — external ratings with any conflicts shown · what users love, us vs each rival · where we win and lose · who said they are leaving.
+**I. Recommendations** — product-actionable only. No per-item buttons.
+**J. Also worth a look — not for the product team** — the true proportion, top 3, owning teams.
+**K. Next steps** — one shared block: *"To address these, use Sprntly to turn them into a PRD, or add them straight to your backlog."* Two actions for the whole set, never per item.
+**L. Coverage note** — collapsed behind a single line, plus a machine-readable metadata block (see below). Not shown by default.
 
-Render as a clean, **report / Word-document-style** artifact. A worked example ships at `examples/lumio-public-feedback-report.html` — reference it for the exact look (trend vs competitors, comparison block, action-card recommendations).
+Render as a clean white report — no coloured surround, no card shadow, reads like a document.
 
-## What makes this complete (the pieces often missed)
-- **Trend over time, not a snapshot** — sentiment, volume, AND rating, vs the prior period.
-- **Sentiment vs the top 2 competitors over time** — are we pulling ahead or falling behind, not just our own line.
-- **Competitor strengths & head-to-head complaints** — what users love about *them*, and which issues they handle better or worse than us — so the report drives positioning, not just bug-fixing.
-- **Spike/anomaly detection tied to releases/events** (a price change or a bad update shows up here).
-- **Temporal split incl. "no-longer-raised"** — long-standing vs new vs resolved/gone, so chronic issues can't hide and progress is visible.
-- **Per-platform/audience segmentation** — the same product reads differently on Reddit vs G2.
-- **Strengths/praise**, not only complaints — what to protect and put in marketing.
-- **Switching & competitor mentions** — churn-intent and share-of-voice.
-- **Sampling honesty** — relative + sampled, never fake counts; the credibility of the whole report rests on this.
-- **Recurring cadence / "what changed since last report"** — the report is most valuable run monthly with diffs.
-- **Recommendations tied to the metrics the company tracks** and to the competitive gaps, ranked by impact × severity.
+## Report metadata (makes the report queryable)
+Embed `<script type="application/json" id="report-metadata">` carrying at minimum: generated_by, generated_at, window, totals, sentiment splits, **by_source** (per platform: totals, sentiment, product/non-product, earliest and latest post, any caution), **by_month** for the full chart window, **themes** (label, record ids, first_seen, last_seen, months_raised, status, category, owner), resolved items, switching, competitors, external ratings, and limits. This block is what follow-up questions are answered from — if it is thin, the report is a dead end.
 
-## Competitor selection
-The 2 competitors are either **named by the user** or **reasoned by the skill** — picked from who's most mentioned alongside the company, the closest substitutes, and the names in "switched to ___" mentions. The report always states which 2 and why, and treats their public data with the same sampling honesty as ours.
+## Query mode
+After delivering the report, the skill answers questions against the record set and metadata. Read the question, work out which of these it is, answer from the data, and say when the data cannot support an answer:
 
-## Relationship to neighbors
-- **`voice-of-customer-report`** — the **curated/first-party** counterpart (calls, tickets, interviews, internal feedback, with user data). Use it when you have direct access to the user; use **this** for public/anonymous channels.
-- **`feedback-synthesis`** — a quick thematic pass over a small pile; this is the exhaustive, trended, public-reputation report.
-- **`competitive-intelligence-review`** — competitor mentions found here can feed it.
+| They ask | Answer from | Also say |
+|---|---|---|
+| "What's the feedback from the App Store?" | `by_source` + records filtered by platform | How many posts, the sentiment split, and any caution on that source |
+| "How long has X been raised?" | `themes[x].first_seen` and `months_raised` | Whether it is still live, and whether the records are stale |
+| "Show me feedback from March" / a date range | `by_month` + records filtered by date | Flag if the range has no coverage |
+| "What's new?" / "What's fixed?" | themes by `status` · `resolved` | Dates for each |
+| "Why are people leaving?" | `switching` | The exact count, and that it is only explicit statements |
+| "What do people like?" | the praise theme | Their words, not ours |
+| "How many complained about X?" | count of records | **Always add** that it is how many posts we found, not how many users |
+| "Is this getting worse?" | `by_month` for that theme | Whether the change is big enough to mean anything given coverage gaps |
 
-## Quality checklist (the bar)
-- [ ] **Public/external sources only**; calls/tickets/interviews excluded.
-- [ ] **Relative share + direction, labeled "sampled"** — no fabricated precise counts.
-- [ ] **Trends over time**: sentiment + volume + rating, this period vs prior, spikes annotated.
-- [ ] **Long-standing / new-emerging / no-longer-raised** split, each item dated (the "gone" list is explicit).
-- [ ] Themes carry **relative volume + sentiment + trend + 2–3 real sourced quotes**.
-- [ ] **Per-platform** sentiment & audience read included.
-- [ ] **Competitive block present:** sentiment over time vs the **top 2 competitors** (named + why chosen), **what users love about each competitor**, and a **head-to-head complaints** read (better/worse per dimension) + switching signals.
-- [ ] **Strengths/praise** surfaced for us; **switching/competitor** signals flagged.
-- [ ] **Recommendations ranked by impact × severity × company-metric fit**, informed by competitive gaps, capped ~5, each with a metric + route.
-- [ ] **User-first written TL;DR** with `#1/#2/#3` and the headline recommendation.
-- [ ] **No invented quotes, no root-cause guessing**; sentiment-model + sampling caveats stated.
+**Query rules.** Answer from captured records only — never from memory of the company. If a source returned nothing, say so plainly rather than implying silence means satisfaction. Never let a filtered count get restated as a share of users. If a question needs data not captured, say what would need collecting.
 
-## Known gaps / limitations
-- Public data is a **biased sample** — vocal, skewed to the unhappy and the highly-engaged; it shows *direction and themes*, not true prevalence. Stated, never hidden.
-- Sentiment models err on sarcasm/mixed posts — spot-check; report bands, not false precision.
-- Bots/astroturf/review manipulation exist — flag suspicious spikes; don't treat raw volume as truth.
-- Coverage varies by platform API/access; gaps in collection become gaps in the report — state them.
+## Guardrails
+- Public/external sources only; calls, tickets and interviews belong to `voice-of-customer-report`.
+- Analysis section contains product-actionable feedback **only**. Non-product appears in its own section with its true proportion.
+- No percentages of the user base, ever. No fabricated counts, quotes, or trend lines.
+- No internal vocabulary in reader-visible text.
+- Switching counted only on explicit statements.
+- Stale records included but labelled, with a check-first line on anything built from them.
+- Marketing content published by rivals is captured and tagged, never counted as user feedback and never as switching evidence.
+
+## Relationship to neighbours
+- **`voice-of-customer-report`** — the first-party counterpart (calls, tickets, interviews, with user identity).
+- **`feedback-synthesis`** — a quick thematic pass over a small pile; this is the trended public report.
+- **`competitive-intelligence-review`** — competitor findings here can feed it.
+- **`prd-author`** — where recommendations route.
+- **`prioritize`** — where the backlog set routes.
+
+## Quality checklist
+- [ ] Capture pass run first; record file produced and shipped.
+- [ ] Every record tagged product / non_product with an owner; nothing merged or deduplicated.
+- [ ] Analysis contains product-actionable items only.
+- [ ] True product / non-product proportion stated, even when non-product is small.
+- [ ] Percentages computed over collected records and labelled in plain words.
+- [ ] TL;DR has five points including what people are leaving over and what is brand new.
+- [ ] Problems written in the user's voice with a plain gloss and an owner.
+- [ ] Time split ordered new → unresolved → fixed; the "fixed" column is present.
+- [ ] 24-month volume and sentiment chart, green/amber/red, coverage gaps marked.
+- [ ] Competitor block: named + why, what users love about each, where we win and lose, who said they are leaving.
+- [ ] Recommendations product-only, ~5, each led by its user problem.
+- [ ] Non-product section with the top 3 and owning teams.
+- [ ] One shared next-steps block naming Sprntly; no per-item buttons.
+- [ ] "Generated by Sprntly" mark present.
+- [ ] Metadata block rich enough to answer source, date-range and duration questions.
+- [ ] No internal vocabulary in anything the reader sees.
+
+## Known limits
+- Public data is self-selected and skews to the unhappy and the highly engaged. It shows direction and themes, never true prevalence.
+- Sentiment assigned by hand is consistent but subjective; sarcasm and mixed posts are the weak spot.
+- Collection reach varies by platform. Gaps in collection become gaps in the report — mark them rather than smoothing over them.
+- Review manipulation and rival marketing content both exist. Capture, tag, and keep them out of switching evidence.

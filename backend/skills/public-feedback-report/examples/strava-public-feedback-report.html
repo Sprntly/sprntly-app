@@ -1,0 +1,1007 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Public Feedback Report — Strava (Jan–Jul 2026)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,ital,wght@6..72,0,400;6..72,0,500;6..72,0,600;6..72,0,700;6..72,1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#1a1813;--ink2:#403c34;--soft:#8a857a;--line:#e8e6e0;--rule:#d8d5cd;--page:#fff;--bg:#fff;
+--accent:#1f6f52;--red:#bb463c;--red-s:#fbecea;--amber:#a9762a;--amber-s:#f7efdd;--teal:#1f7a5a;--teal-s:#e9f3ed;--blue:#3a5a9a;--blue-s:#eaeef8;--purple:#8a6fae;--neutral:#7a756a;
+--serif:'Newsreader',Georgia,serif;--sans:'Inter',system-ui,sans-serif;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--serif);line-height:1.6;-webkit-font-smoothing:antialiased;padding:0 16px 80px}
+.page{max-width:810px;margin:0 auto;background:var(--page);padding:64px 68px 54px}
+.eyebrow{font-family:var(--sans);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);font-weight:700}
+h1{font-weight:600;font-size:32px;line-height:1.15;margin:9px 0 6px}
+.stamp{font-family:var(--sans);font-size:11.5px;color:var(--soft);margin-bottom:13px}
+.runline{font-family:var(--sans);font-size:12.5px;color:var(--ink2);line-height:1.7;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);padding:13px 0}
+.runline b{color:var(--ink)}
+.chip{font-family:var(--sans);display:inline-block;margin-top:9px;font-size:11px;font-weight:600;border-radius:6px;padding:4px 10px}
+.chip.s{background:var(--amber-s);border:1px solid #ecd9b0;color:#8a5a00}
+.chip.c{background:var(--blue-s);border:1px solid #cdd8ef;color:var(--blue);margin-left:6px}
+.chip.p{background:var(--teal-s);border:1px solid #c8e0d3;color:var(--teal);margin-left:6px}
+h2{font-weight:600;font-size:13px;font-family:var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin:36px 0 0;padding-bottom:7px;border-bottom:2px solid var(--accent);display:inline-block}
+.sec{margin-top:8px}
+.scopenote{font-family:var(--sans);font-size:11.5px;color:var(--soft);font-style:italic;margin-top:10px}
+.tldr .src{font-style:italic;color:var(--ink2);font-size:15px;margin-top:15px}
+.tldr .intro{font-size:16.5px;margin-top:12px}.tldr .intro b{font-weight:600}
+.enum .item{font-size:16px;line-height:1.55;margin:14px 0}
+.enum .hash{font-family:var(--sans);font-weight:700;color:var(--accent);font-size:14.5px;margin-right:6px}
+.enum .item b{font-weight:600}
+.enum .sub{font-family:var(--sans);display:block;font-size:12.5px;color:var(--ink2);margin-top:4px;line-height:1.6}
+.enum .vq{display:block;font-size:14px;font-style:italic;color:var(--ink2);margin-top:5px;padding-left:16px;border-left:2px solid var(--line);margin-left:4px}
+.tldr .close{font-size:16.5px;margin-top:16px;padding-top:14px;border-top:1px dashed var(--line)}.tldr .close b{font-weight:600;color:var(--accent)}
+.chartwrap{margin-top:16px;border:1px solid var(--line);border-radius:10px;padding:16px 18px 10px;background:#fdfdfc}
+.legend{font-family:var(--sans);display:flex;gap:18px;font-size:12px;color:var(--ink2);margin-bottom:6px;flex-wrap:wrap}
+.legend span{display:inline-flex;align-items:center;gap:6px}.dot{width:14px;height:3px;border-radius:2px;display:inline-block}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px}
+.kpi{font-family:var(--sans);border:1px solid var(--line);border-radius:9px;padding:11px 13px;background:#fff}
+.kpi .l{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--soft);font-weight:700}
+.kpi .v{font-size:18px;font-weight:700;margin-top:3px}.kpi .v small{font-size:11.5px;font-weight:600;color:var(--soft)}
+.down{color:var(--red)}.up{color:var(--teal)}
+.tt,.plat,.cmp{font-family:var(--sans);width:100%;border-collapse:collapse;font-size:12.5px;margin-top:16px;border:1px solid var(--rule);border-radius:8px;overflow:hidden}
+.tt th,.plat th,.cmp th{background:#f6f5f1;text-align:left;padding:9px 11px;font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink2);font-weight:700}
+.tt td,.plat td,.cmp td{padding:11px;border-top:1px solid var(--line);vertical-align:top;color:var(--ink2)}
+.tt td b,.plat td b,.cmp td b{color:var(--ink)}
+.pq{font-family:var(--serif);font-size:14.5px;color:var(--ink);line-height:1.4}
+.pgloss{display:block;font-family:var(--sans);font-size:11.5px;color:var(--soft);margin-top:3px}
+.sent{font-weight:700;font-size:11px;padding:2px 7px;border-radius:5px;white-space:nowrap}
+.neg{background:var(--red-s);color:var(--red)}.pos{background:var(--teal-s);color:var(--teal)}.mix{background:var(--amber-s);color:var(--amber)}.neu{background:#efeee9;color:var(--neutral)}
+.tr-up{color:var(--red);font-weight:700}.tr-flat{color:var(--soft);font-weight:700}.tr-down{color:var(--teal);font-weight:700}
+.tq{font-style:italic;color:var(--ink2);font-family:var(--serif);font-size:13px}.tq .pf{font-style:normal;font-family:var(--sans);font-size:10.5px;color:var(--soft);font-weight:600;display:block;margin-top:2px}
+.tier{font-family:var(--sans);font-size:10px;font-weight:700;color:var(--soft);border:1px solid var(--line);border-radius:4px;padding:1px 4px;margin-left:4px;white-space:nowrap}
+/* temporal + mix side by side */
+.split{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-top:18px;align-items:start}
+.temporal{display:grid;grid-template-columns:1fr;gap:12px}
+.tcol{border:1px solid var(--line);border-radius:10px;padding:14px 15px;border-top:3px solid var(--tc)}
+.tcol.long{--tc:var(--red)}.tcol.new{--tc:var(--amber)}.tcol.gone{--tc:var(--teal)}
+.tcol h4{font-family:var(--sans);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--tc);margin-bottom:8px}
+.tcol .it{font-size:14px;color:var(--ink);margin:8px 0;line-height:1.4}.tcol .it .d{font-family:var(--sans);display:block;font-size:10.5px;color:var(--soft);margin-top:2px}
+.mixbox{border:1px solid var(--rule);border-radius:10px;padding:15px 16px;background:#fbfbf9}
+.mixbox h4{font-family:var(--sans);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--ink2);margin-bottom:4px}
+.mixbox .den{font-family:var(--sans);font-size:10.5px;color:var(--soft);line-height:1.5}
+.mixgroup{margin-top:15px}
+.mixlab{font-family:var(--sans);font-size:11px;font-weight:700;color:var(--ink2);display:flex;justify-content:space-between;margin-bottom:5px}
+.mixlab span{color:var(--soft);font-weight:600}
+.bar{display:flex;height:11px;border-radius:6px;overflow:hidden;background:#efeee9}
+.bar i{display:block;height:100%}
+.b-pos{background:var(--teal)}.b-neg{background:var(--red)}.b-neu{background:#c9c6bd}
+.b-prod{background:var(--accent)}.b-non{background:#b8b3a6}
+.mixkey{font-family:var(--sans);font-size:10.5px;color:var(--soft);margin-top:6px;display:flex;gap:11px;flex-wrap:wrap}
+.mixkey b{color:var(--ink2);font-weight:700}
+.mixnote{font-family:var(--sans);font-size:11px;color:var(--soft);line-height:1.55;margin-top:14px;border-top:1px solid var(--line);padding-top:11px}
+.mixnote b{color:var(--ink2)}
+.compgrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:13px;margin-top:16px}
+.lovecard{border:1px solid var(--line);border-radius:10px;padding:14px 15px;border-top:3px solid var(--lc)}
+.lovecard.us{--lc:var(--teal)}.lovecard.a{--lc:var(--blue)}.lovecard.b{--lc:var(--purple)}
+.lovecard .nm{font-family:var(--sans);font-size:13px;font-weight:700;color:var(--lc);margin-bottom:7px}
+.lovecard .li{font-size:13.5px;color:var(--ink2);padding:5px 0;border-top:1px solid var(--line)}.lovecard .li:first-of-type{border-top:none}.lovecard .li b{color:var(--ink)}
+.aheadtag{font-weight:700;font-size:11px;padding:2px 7px;border-radius:5px}
+.a-us{background:var(--teal-s);color:var(--teal)}.a-a{background:var(--blue-s);color:var(--blue)}.a-b{background:#efeaf6;color:var(--purple)}.a-none{background:#efeee9;color:var(--neutral)}
+.switch{font-family:var(--sans);font-size:12px;color:var(--ink2);background:var(--red-s);border:1px solid #eccfc9;border-radius:8px;padding:11px 14px;margin-top:14px;line-height:1.65}.switch b{color:var(--red)}
+.callout{font-family:var(--sans);font-size:12.5px;color:var(--ink2);background:#eef3f0;border:1px solid #cfe0d7;border-radius:8px;padding:11px 14px;margin-top:14px;line-height:1.65}.callout b{color:var(--ink)}
+.recintro{font-family:var(--sans);font-size:12.5px;color:var(--ink2);background:#eef3f0;border:1px solid #cfe0d7;border-radius:8px;padding:10px 13px;margin-top:6px;line-height:1.6}
+.reccard{border:1px solid var(--line);border-radius:11px;padding:15px 18px;margin-top:12px;background:#fff;border-left:4px solid var(--accent)}
+.reccard .rh{display:flex;align-items:baseline;gap:11px;flex-wrap:wrap}
+.recnum2{font-family:var(--sans);width:25px;height:25px;border-radius:6px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0}
+.reccard .rt{font-size:16.5px;font-weight:600}
+.prio{font-family:var(--sans);margin-left:auto;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:3px 9px;border-radius:5px}
+.prio.hi{background:var(--red-s);color:var(--red)}.prio.med{background:var(--amber-s);color:var(--amber)}
+.reccard .rm{font-family:var(--sans);font-size:12.5px;color:var(--ink2);margin-top:7px;line-height:1.6}.reccard .rm b{color:var(--ink)}
+.reccard .prob{font-family:var(--serif);font-size:14.5px;color:var(--ink);margin-top:6px;font-style:italic}
+.reccard .moves{font-family:var(--sans);font-size:11.5px;color:var(--accent);font-weight:600;margin-top:6px}
+.nonprod{margin-top:14px;border:1px solid var(--rule);border-radius:11px;padding:16px 19px;background:#fbfaf7}
+.nonprod .nph{font-family:var(--sans);font-size:12.5px;color:var(--ink2);line-height:1.6}.nonprod .nph b{color:var(--ink)}
+.npitem{display:flex;gap:13px;padding:12px 0;border-top:1px solid var(--line);margin-top:12px}
+.npitem:first-of-type{margin-top:14px}
+.nptag{font-family:var(--sans);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:3px 8px;border-radius:5px;background:#ede9e0;color:#6f6a5f;height:fit-content;white-space:nowrap;flex-shrink:0;margin-top:2px}
+.npbody .npt{font-size:15.5px;font-weight:600;line-height:1.3}
+.npbody .npm{font-family:var(--sans);font-size:12px;color:var(--ink2);margin-top:4px;line-height:1.6}
+.npbody .npo{font-family:var(--sans);font-size:11px;color:var(--soft);font-weight:600;margin-top:4px}
+.nextsteps{margin-top:20px;border:1px solid var(--rule);border-radius:11px;padding:16px 19px;background:#fbfbf9}
+.nextsteps h4{font-family:var(--sans);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--soft);font-weight:700}
+.nextsteps p{font-family:var(--sans);font-size:13px;color:var(--ink2);margin-top:7px;line-height:1.6}.nextsteps p b{color:var(--ink)}
+.recactions{display:flex;gap:9px;margin-top:13px;flex-wrap:wrap}
+.btn{font-family:var(--sans);font-size:12px;font-weight:600;line-height:1.4;border-radius:7px;padding:9px 14px;cursor:pointer;border:1px solid var(--rule);background:#fff;color:var(--ink2);transition:.15s}
+.btn:hover{background:#f3f1ea}
+.btn.prd{background:var(--accent);color:#fff;border-color:var(--accent)}.btn.prd:hover{background:#185a43}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.statusmsg{font-family:var(--sans);font-size:11.5px;font-weight:600;margin-top:9px;color:var(--teal)}
+.integrity{font-family:var(--sans);font-size:11.5px;line-height:1.65;color:var(--soft);margin-top:14px;border-top:1px solid var(--line);padding-top:14px}.integrity b{color:var(--ink2)}.integrity p{margin-top:9px}
+.metabar{font-family:var(--sans);margin-top:34px;border-top:1px solid var(--rule);padding-top:14px}
+.metatoggle{font-family:var(--sans);font-size:11.5px;font-weight:600;color:var(--soft);background:none;border:none;padding:0;cursor:pointer;letter-spacing:.02em}
+.metatoggle:hover{color:var(--accent)}
+.metatoggle:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.metatoggle .chev{display:inline-block;transition:transform .18s;margin-right:5px}
+.metatoggle[aria-expanded="true"] .chev{transform:rotate(90deg)}
+.brandmark{position:absolute;top:0;right:0;font-family:var(--sans);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--soft);font-weight:700}
+.brandmark b{color:var(--accent);letter-spacing:.06em}
+.pagehead{position:relative;padding-top:4px}
+.countstrip{display:flex;gap:0;margin-top:16px;border:1px solid var(--rule);border-radius:9px;overflow:hidden}
+.cs{flex:1;font-family:var(--sans);padding:10px 13px;border-left:1px solid var(--line)}
+.cs:first-child{border-left:none}
+.cs .l{font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--soft);font-weight:700}
+.cs .v{font-size:17px;font-weight:700;color:var(--ink);margin-top:2px}
+.cs .v small{font-size:11px;font-weight:600;color:var(--soft)}
+.printbtn{position:fixed;top:15px;right:15px;background:var(--ink);color:#fff;border:none;border-radius:8px;padding:9px 15px;font-family:var(--sans);font-size:12.5px;font-weight:600;cursor:pointer;opacity:.85}
+@media print{.printbtn{display:none}.brandmark{position:static;text-align:right;display:block;margin-bottom:6px}body{padding:0}.page{max-width:100%;padding:0}#metaPanel{display:block!important}.metatoggle .chev{display:none}.tcol,.tt,.plat,.cmp,.chartwrap,.lovecard,.reccard,.mixbox,.npitem{break-inside:avoid}}
+@media(max-width:680px){.split,.kpis,.compgrid{grid-template-columns:1fr}.page{padding:38px 24px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style></head><body>
+<button class="printbtn" onclick="window.print()">⤓ PDF</button>
+<div class="page">
+
+<div class="pagehead">
+<div class="brandmark">Generated by <b>Sprntly</b></div>
+<div class="eyebrow">Public feedback · January – July 2026</div>
+<h1>What people are saying about us online</h1>
+<div class="stamp">Prepared 21 July 2026 · first edition, so there is no previous month to compare against yet</div>
+</div>
+<div class="runline"><b>What this covers:</b> feedback people posted publicly about us between January and July 2026, plus older posts still being quoted as if they were current.<br><b>Where we looked:</b> Trustpilot, the App Store, Google Play, Reddit, our own Community Hub, cycling forums (mtbr, Bikerumor, road.cc, Pinkbike), YouTube, X, Hacker News and the BBB.<br><b>What we were trying to answer:</b> what should the product team fix next, and are we losing ground to Garmin Connect or Komoot?
+<br></div>
+<div class="countstrip">
+<div class="cs"><div class="l">Feedback collected</div><div class="v">52 <small>posts</small></div></div>
+<div class="cs"><div class="l">Product team can fix</div><div class="v">39 <small>75%</small></div></div>
+<div class="cs"><div class="l">Someone else owns</div><div class="v">13 <small>25%</small></div></div>
+<div class="cs"><div class="l">Sources checked</div><div class="v">11 <small>platforms</small></div></div>
+<div class="cs"><div class="l">Said they're leaving</div><div class="v">2 <small>explicitly</small></div></div>
+</div>
+
+<h2>TL;DR</h2>
+<div class="sec tldr">
+<p class="src">Everything below is something a product, design or engineering team can actually change. Complaints about price, billing and support were also collected, but they are kept separate further down so they don't drown out the build list.</p>
+<p class="intro">Three problems are doing most of the damage right now — plus the one people are actually leaving over, and the one that only just appeared:</p>
+<div class="enum">
+
+<div class="item"><span class="hash">#1</span><b>"I did that ride. Strava says I didn't — and I can't get it undone."</b>
+<span class="sub">January's leaderboard cleanup was a genuine win, but the system that spots fake activities also catches real ones. A GPS glitch is enough to trigger it, and the only way to fix it is to raise a support ticket. It hits the people who care most about the leaderboard hardest.</span>
+<span class="vq">"numerous legitimate activities flagged" — Trustpilot, 24 Jan 2026</span></div>
+
+<div class="item"><span class="hash">#2</span><b>"I get locked out, and I'm not sure my ride even saved."</b>
+<span class="sub">People are locked out of their accounts with no way to get back in on their own, Android keeps throwing server errors, and on 10 June login and syncing went down at the same time. Five people described being completely stuck — the worst outcome in the whole set.</span>
+<span class="vq">"locked out of my account due to a problem" — Trustpilot, 20 May 2026</span></div>
+
+<div class="item"><span class="hash">#3</span><b>"The apps I connect to Strava can't show my data anymore — not even to my coach."</b>
+<span class="sub">After we changed the rules for other apps, people who used Strava as the link between their watch and their training tools lost that. For them, being that link was the thing they were paying for.</span>
+<span class="vq">"killing half the reason I'm on Strava" — mtbr forum, Nov 2024</span></div>
+
+<div class="item"><span class="hash">#4</span><b>What people are actually leaving over: not being able to share their data.</b>
+<span class="sub">Two people said plainly that they are leaving, and both gave the same reason — the change to how other apps can use their data. Both named Garmin as where they are going. Everything else in this report is people complaining while staying. This is the only thing anyone said out loud they'd quit over.</span></div>
+
+<div class="item"><span class="hash">#5</span><b>What's brand new since January: three things that weren't here before.</b>
+<span class="sub">Real activities being wrongly flagged (started right after the January cleanup) · segments not carrying over when a ride is logged as an e-bike, so people lose their personal bests · notification settings being switched off but emails still arriving. None of these existed in last year's feedback.</span></div>
+
+</div>
+<p class="close"><b>What we'd do first:</b> let people appeal a flagged activity themselves, in the app. It stops January's win turning into a grievance, it takes work off a support queue people already struggle to reach, and it protects the exact athletes who keep the segment system alive.</p>
+</div>
+
+<h2>How feedback has looked over the last 24 months</h2>
+<div class="sec">
+<p class="scopenote">Each bar is the feedback we collected that month, coloured by how people felt. Bars are counts of posts we found — not a measure of how many people feel this way.</p>
+<div class="chartwrap">
+<div class="legend"><span><span class="dot" style="background:#1f7a5a"></span>Positive</span><span><span class="dot" style="background:#d9a441"></span>Neutral</span><span><span class="dot" style="background:#bb463c"></span>Negative</span></div>
+<svg viewBox="0 0 660 220" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Inter,sans-serif" role="img" aria-label="Monthly public feedback by sentiment over 24 months, August 2024 to July 2026">
+<line x1="52" y1="176.0" x2="648" y2="176.0" stroke="#eeece6"/>
+<text x="44" y="179.0" text-anchor="end" font-size="9" fill="#9a958a">0</text>
+<line x1="52" y1="103.0" x2="648" y2="103.0" stroke="#eeece6"/>
+<text x="44" y="106.0" text-anchor="end" font-size="9" fill="#9a958a">5</text>
+<line x1="52" y1="30.0" x2="648" y2="30.0" stroke="#eeece6"/>
+<text x="44" y="33.0" text-anchor="end" font-size="9" fill="#9a958a">10</text>
+<line x1="138.9" y1="22" x2="138.9" y2="176" stroke="#c8c3b6" stroke-width="1" stroke-dasharray="2 3"/>
+<text x="138.9" y="19" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">API terms change</text>
+<line x1="486.6" y1="22" x2="486.6" y2="176" stroke="#c8c3b6" stroke-width="1" stroke-dasharray="2 3"/>
+<text x="486.6" y="19" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">leaderboard cleanup</text>
+<line x1="610.7" y1="22" x2="610.7" y2="176" stroke="#c8c3b6" stroke-width="1" stroke-dasharray="2 3"/>
+<text x="610.7" y="19" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">outage</text>
+<line x1="56.7" y1="177" x2="72.2" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<line x1="81.5" y1="177" x2="97.0" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<rect x="106.3" y="146.8" width="15.5" height="29.2" fill="#d9a441"/>
+<rect x="106.3" y="132.2" width="15.5" height="14.6" fill="#bb463c"/>
+<text x="114.1" y="128.2" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">3</text>
+<rect x="131.2" y="146.8" width="15.5" height="29.2" fill="#d9a441"/>
+<rect x="131.2" y="30.0" width="15.5" height="116.8" fill="#bb463c"/>
+<text x="138.9" y="26.0" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">10</text>
+<line x1="156.0" y1="177" x2="171.5" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<rect x="180.8" y="146.8" width="15.5" height="29.2" fill="#d9a441"/>
+<text x="188.6" y="142.8" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">2</text>
+<line x1="205.7" y1="177" x2="221.2" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<line x1="230.5" y1="177" x2="246.0" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<line x1="255.3" y1="177" x2="270.8" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<rect x="280.2" y="161.4" width="15.5" height="14.6" fill="#1f7a5a"/>
+<text x="287.9" y="157.4" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">1</text>
+<line x1="305.0" y1="177" x2="320.5" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<line x1="329.8" y1="177" x2="345.3" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<rect x="354.7" y="161.4" width="15.5" height="14.6" fill="#bb463c"/>
+<text x="362.4" y="157.4" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">1</text>
+<rect x="379.5" y="132.2" width="15.5" height="43.8" fill="#bb463c"/>
+<text x="387.2" y="128.2" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">3</text>
+<rect x="404.3" y="161.4" width="15.5" height="14.6" fill="#d9a441"/>
+<text x="412.1" y="157.4" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">1</text>
+<line x1="429.2" y1="177" x2="444.7" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<line x1="454.0" y1="177" x2="469.5" y2="177" stroke="#d8d5cd" stroke-width="2.5"/>
+<rect x="478.8" y="161.4" width="15.5" height="14.6" fill="#d9a441"/>
+<rect x="478.8" y="30.0" width="15.5" height="131.4" fill="#bb463c"/>
+<text x="486.6" y="26.0" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">10</text>
+<rect x="503.7" y="161.4" width="15.5" height="14.6" fill="#1f7a5a"/>
+<rect x="503.7" y="146.8" width="15.5" height="14.6" fill="#d9a441"/>
+<rect x="503.7" y="88.4" width="15.5" height="58.4" fill="#bb463c"/>
+<text x="511.4" y="84.4" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">6</text>
+<rect x="528.5" y="132.2" width="15.5" height="43.8" fill="#1f7a5a"/>
+<rect x="528.5" y="117.6" width="15.5" height="14.6" fill="#d9a441"/>
+<rect x="528.5" y="103.0" width="15.5" height="14.6" fill="#bb463c"/>
+<text x="536.2" y="99.0" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">5</text>
+<rect x="553.3" y="132.2" width="15.5" height="43.8" fill="#d9a441"/>
+<rect x="553.3" y="117.6" width="15.5" height="14.6" fill="#bb463c"/>
+<text x="561.1" y="113.6" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">4</text>
+<rect x="578.2" y="161.4" width="15.5" height="14.6" fill="#d9a441"/>
+<rect x="578.2" y="146.8" width="15.5" height="14.6" fill="#bb463c"/>
+<text x="585.9" y="142.8" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">2</text>
+<rect x="603.0" y="161.4" width="15.5" height="14.6" fill="#1f7a5a"/>
+<rect x="603.0" y="146.8" width="15.5" height="14.6" fill="#bb463c"/>
+<text x="610.7" y="142.8" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">2</text>
+<rect x="627.8" y="146.8" width="15.5" height="29.2" fill="#bb463c"/>
+<text x="635.6" y="142.8" text-anchor="middle" font-size="8.5" fill="#8a857a" font-weight="600">2</text>
+<text x="64.4" y="192.0" text-anchor="middle" font-size="9.5" fill="#6f6a5f">Aug 24</text>
+<text x="138.9" y="192.0" text-anchor="middle" font-size="9.5" fill="#6f6a5f">Nov</text>
+<text x="213.4" y="192.0" text-anchor="middle" font-size="9.5" fill="#6f6a5f">Feb 25</text>
+<text x="287.9" y="192.0" text-anchor="middle" font-size="9.5" fill="#6f6a5f">May</text>
+<text x="362.4" y="192.0" text-anchor="middle" font-size="9.5" fill="#6f6a5f">Aug</text>
+<text x="436.9" y="192.0" text-anchor="middle" font-size="9.5" fill="#6f6a5f">Nov</text>
+<text x="511.4" y="192.0" text-anchor="middle" font-size="9.5" fill="#6f6a5f">Feb 26</text>
+<text x="585.9" y="192.0" text-anchor="middle" font-size="9.5" fill="#6f6a5f">May</text>
+<text x="635.6" y="192.0" text-anchor="middle" font-size="9.5" fill="#6f6a5f">Jul</text>
+<line x1="52" y1="176" x2="648" y2="176" stroke="#d8d5cd"/>
+<text x="52" y="210.0" font-size="9" fill="#a5a096">— flat line = no feedback collected that month (10 of the 24 months)</text>
+</svg>
+</div>
+<div class="kpis">
+<div class="kpi"><div class="l">Busiest month</div><div class="v">Jan 2026 <small>10 posts, 9 of them negative</small></div></div>
+<div class="kpi"><div class="l">Best month</div><div class="v up">Mar 2026 <small>3 of 5 posts positive</small></div></div>
+<div class="kpi"><div class="l">Last three months</div><div class="v down">Negative <small>4 negative, 1 positive, 1 neutral</small></div></div>
+</div>
+<p style="font-family:var(--sans);font-size:12px;color:var(--soft);margin-top:10px;font-style:italic">Two spikes stand out, and both follow something we did. <b>November 2024</b> is the change to how other apps can use people's data. <b>January 2026</b> is the leaderboard cleanup — it fixed a long-running complaint and created a new one at the same time. March was our best month in two years, then it drifted back down through the outage.</p>
+<div class="callout"><b>Worth knowing before you read the bars.</b> We only found feedback in 14 of these 24 months. The empty months almost certainly aren't quiet months — they're months we didn't reach. That means the shape of this chart tells you when people were loud enough to be noticed, not when things were actually better or worse.</div>
+</div>
+
+<h2>How we compare to Garmin Connect and Komoot</h2>
+<div class="sec">
+<div class="kpis">
+<div class="kpi"><div class="l">Our App Store rating</div><div class="v up">4.8★ <small>~306k ratings</small></div></div>
+<div class="kpi"><div class="l">Our Trustpilot rating</div><div class="v down">1.5★ <small>88% one-star</small></div></div>
+<div class="kpi"><div class="l">Our Google Play rating</div><div class="v">4.4–4.6★ <small>sources disagree</small></div></div>
+</div>
+<div class="callout"><b>Those first two numbers aren't a contradiction.</b> The App Store catches us on a good day — the tracking worked, the ride was fun. Trustpilot catches us on the day something went wrong and someone needed help. Both are true. And because the App Store rating is averaged over 300,000+ ratings, it won't move for a year even if we fix everything tomorrow — so don't use it to judge whether this work is landing.</div>
+</div>
+
+<h2>The problems people are running into</h2>
+<div class="sec">
+<p class="scopenote">Written the way people describe it themselves. The grey line underneath translates it into what we&#39;d actually be fixing, and who owns it.</p>
+<table class="tt">
+<tr><th style="width:44%">Problem, in the user's words</th><th>How often</th><th>Mood</th><th>Direction</th><th>Someone said</th></tr>
+<tr><td><span class="pq">"My real rides get flagged and I can't get the flag removed."</span><span class="pgloss">Our fake-activity detector catching real rides, with no way to appeal in the app · Product and Engineering</span></td><td>Most often</td><td><span class="sent neg">Negative</span></td><td class="tr-up">▲ new, rising</td><td class="tq">"numerous legitimate activities flagged"<span class="pf">Trustpilot · 24 Jan 2026</span></td></tr>
+<tr><td><span class="pq">"The apps I connected can't show my data anymore — not even to my coach."</span><span class="pgloss">Other apps can no longer display the data people send them · Product</span></td><td>High</td><td><span class="sent neg">Negative</span></td><td class="tr-flat">► chronic</td><td class="tq">"killing half the reason I'm on Strava"<span class="pf">mtbr forum · Nov 2024</span></td></tr>
+<tr><td><span class="pq">"I get locked out, and I'm not sure my activity made it in."</span><span class="pgloss">Locked-out accounts with no self-service recovery, plus syncing failures · Engineering</span></td><td>High</td><td><span class="sent neg">Negative</span></td><td class="tr-up">▲ spike Jun</td><td class="tq">"locked out of my account due to a problem"<span class="pf">Trustpilot · 20 May 2026</span></td></tr>
+<tr><td><span class="pq">"The map that keeps me safe running at night costs extra."</span><span class="pgloss">A safety feature is subscriber-only · Product</span></td><td>Medium</td><td><span class="sent neg">Negative</span></td><td class="tr-flat">► chronic</td><td class="tq">Night Heatmap subscriber-locked; described as putting a price on safety<span class="pf">Android Authority · 4 Jan 2026</span></td></tr>
+<tr><td><span class="pq">"Strava writes a paragraph about my run and I can't turn it off."</span><span class="pgloss">No proper way to turn off AI write-ups · Product</span></td><td>Medium</td><td><span class="sent neg">Negative</span></td><td class="tr-flat">► chronic</td><td class="tq">"The AI feedback feature is completely useless to me."<span class="pf">Strava Community Hub</span></td></tr>
+<tr><td><span class="pq">"It's built for the feed now, not for the trail."</span><span class="pgloss">Offline and off-road navigation falling behind · Product</span></td><td>Medium</td><td><span class="sent neg">Negative</span></td><td class="tr-up">▲ emerging</td><td class="tq">Interface prioritises AI and run-club features over rugged offline navigation<span class="pf">Bike198 · 30 Jan 2026</span></td></tr>
+<tr><td><span class="pq">"I can't tell what I actually get on my plan."</span><span class="pgloss">People can't tell what their plan includes · Design</span></td><td>Low</td><td><span class="sent neg">Negative</span></td><td class="tr-flat">► chronic</td><td class="tq">Which map layers are included at which tier is not clearly communicated<span class="pf">Android Authority · 4 Jan 2026</span></td></tr>
+<tr><td><span class="pq">"It tracks accurately, it's easy, and it works with whatever watch I own."</span><span class="pgloss">What people praise us for — accuracy, ease of use, working with any watch, and segments</span></td><td>Steady</td><td><span class="sent pos">Positive</span></td><td class="tr-flat">► steady</td><td class="tq">"Movement tracking is precise, and the app is user-friendly"<span class="pf">Trustpilot · 8 Mar 2026</span></td></tr>
+</table>
+<p style="font-family:var(--sans);font-size:11px;color:var(--soft);margin-top:7px">"How often" ranks these against each other within what we found. We can't turn it into a percentage of users, because we have no way of knowing how many people never posted at all.</p>
+</div>
+
+<h2>What&#39;s new, what&#39;s stuck, what&#39;s fixed</h2>
+<div class="sec"><div class="split">
+<div class="temporal">
+<div class="tcol new"><h4>🆕 New — didn&#39;t exist before this year</h4>
+<div class="it">Real activities getting wrongly flagged<span class="d">Started Jan 2026, right after the leaderboard cleanup · growing</span></div>
+<div class="it">Login and syncing went down together<span class="d">10 June 2026</span></div>
+<div class="it">Segments don&#39;t carry over to e-bike rides, so people lose personal bests<span class="d">Feb 2026</span></div>
+<div class="it">Emails still arriving after notifications are switched off<span class="d">Jan 2026</span></div></div>
+
+<div class="tcol long"><h4>⏳ Still unresolved — people have raised this for a long time</h4>
+<div class="it">Other apps can&#39;t display people&#39;s data, including to a coach<span class="d">Raised since Nov 2024 · still open</span></div>
+<div class="it">No proper way to turn off the AI write-up of your activity<span class="d">Raised since Oct 2024 · still open</span></div>
+<div class="it">Things moved behind the subscription faster than we explained why<span class="d">Raised since 2024 · still open</span></div>
+<div class="it">Recording bugs — rides logged twice, no auto-pause when you get in a car<span class="d">Raised through 2025 · we don&#39;t know if these are fixed</span></div></div>
+
+<div class="tcol gone"><h4>✅ Looks fixed — people have stopped bringing it up</h4>
+<div class="it">&quot;The leaderboards are full of cheats&quot;<span class="d">Our loudest complaint for years · went quiet after the January cleanup</span></div>
+<div class="it">&quot;There&#39;s still no dark mode&quot;<span class="d">Constant through 2023–24 · stopped the moment we shipped it</span></div></div>
+</div>
+
+<div class="mixbox">
+<h4>What the feedback is about</h4>
+<div class="den">Out of the <b>52 pieces of feedback</b> we found. These are percentages of what we collected — not of Strava&#39;s users.</div>
+
+<div class="mixgroup">
+<div class="mixlab">Can a product team fix it? <span>52 posts</span></div>
+<div class="bar"><i class="b-prod" style="width:75%"></i><i class="b-non" style="width:25%"></i></div>
+<div class="mixkey"><span><b>75%</b> yes · 39</span><span><b>25%</b> no · 13</span></div>
+</div>
+
+<div class="mixgroup">
+<div class="mixlab">How people felt — product issues <span>39 posts</span></div>
+<div class="bar"><i class="b-pos" style="width:15%"></i><i class="b-neu" style="width:21%"></i><i class="b-neg" style="width:64%"></i></div>
+<div class="mixkey"><span><b>15%</b> positive</span><span><b>21%</b> neutral</span><span><b>64%</b> negative</span></div>
+</div>
+
+<div class="mixgroup">
+<div class="mixlab">How people felt — everything else <span>13 posts</span></div>
+<div class="bar"><i class="b-neu" style="width:46%"></i><i class="b-neg" style="width:54%"></i></div>
+<div class="mixkey"><span><b>0%</b> positive</span><span><b>46%</b> neutral</span><span><b>54%</b> negative</span></div>
+</div>
+
+<div class="mixnote"><b>Two things to keep in mind.</b> Nobody said anything positive about billing, pricing or support — people don&#39;t post to praise an invoice, so treat that 0% as normal rather than alarming. And <b>17 of the 39 product issues are from 2024 or 2025</b>, mostly about the data-sharing rules and the AI write-ups. Some may already be fixed. They&#39;re here because people still quote them as if they&#39;re current, which is a problem in itself.</div>
+</div>
+</div>
+
+<div class="callout"><b>Don&#39;t skip the green column.</b> January&#39;s cleanup removed around 3.9 million rides that were logged in a vehicle or on an e-bike, and put roughly 293,000 real athletes back into the top ten. That ended the complaint we&#39;d been hearing longest. It&#39;s the best proof we have that we fix things people complain about — and almost nobody outside the subreddit has been told.</div>
+</div>
+
+<h2>By platform</h2>
+<div class="sec"><table class="plat">
+<tr><th>Platform</th><th>Audience</th><th>Sentiment</th><th>What shows up there</th></tr>
+<tr><td><b>Trustpilot / BBB</b></td><td>People with an unresolved problem</td><td><span class="sent neg">Most negative</span></td><td>Flags, lockouts, Android errors — plus most of the billing and support complaints</td></tr>
+<tr><td><b>App Store</b></td><td>Mass consumer</td><td><span class="sent pos">Strongly positive</span></td><td>Tracking, trail discovery, clubs, challenges</td></tr>
+<tr><td><b>Google Play</b></td><td>Android</td><td><span class="sent mix">Positive but softer</span></td><td>Crashes and server errors concentrated in the 1–3★ band</td></tr>
+<tr><td><b>Reddit</b></td><td>Power users &amp; cyclists</td><td><span class="sent mix">Engaged, critical</span></td><td>Flags, segments, e-bike handling, subscription value</td></tr>
+<tr><td><b>Cycling forums / YouTube</b></td><td>Data-serious athletes</td><td><span class="sent neg">Negative</span></td><td>The data-sharing change, coach access, and Garmin as the way out</td></tr>
+<tr><td><b>Strava Community Hub</b></td><td>Invested subscribers</td><td><span class="sent mix">Constructive, frustrated</span></td><td>AI opt-out — and one user asking to have it turned back on</td></tr>
+</table>
+<p style="font-family:var(--sans);font-size:11px;color:var(--soft);margin-top:7px">These groups aren't disagreeing with each other — they're describing different moments. App store reviewers are rating the run. Trustpilot reviewers are rating the day something went wrong.</p></div>
+
+<h2>How we compare vs Garmin Connect &amp; Komoot</h2>
+<div class="sec">
+<p style="font-family:var(--sans);font-size:12.5px;color:var(--ink2);margin-top:12px"><b>Why these two.</b> <b>Garmin Connect</b> is the app people name most when they say they're leaving — free with the hardware, deeper analytics, and and it gains directly from our data-sharing change. <b>Komoot</b> is the closest route-and-discovery substitute and the other name that kept coming up alongside ours. <i>We left Runna out — we own it, so its reviews are really ours.</i></p>
+<p style="font-family:var(--sans);font-size:12.5px;color:var(--ink2);margin-top:18px"><b>What users love — us vs each rival</b></p>
+<div class="compgrid">
+<div class="lovecard us"><div class="nm">💚 Strava (us)</div><div class="li"><b>Segments &amp; leaderboards</b> — nobody else has the game</div><div class="li"><b>The social layer</b> — kudos, clubs, the run-club wave</div><div class="li"><b>Works with any watch</b> — we don&#39;t lock people to hardware</div></div>
+<div class="lovecard a"><div class="nm">🔵 Garmin Connect</div><div class="li"><b>Analytics depth</b> — training load rivals paid tiers</div><div class="li"><b>Free with the watch</b> — no second subscription</div><div class="li"><b>Private by default</b> — no feed, no follower count</div></div>
+<div class="lovecard b"><div class="nm">🟣 Komoot</div><div class="li"><b>Route planning off-road</b> — the category benchmark</div><div class="li"><b>Trip discovery &amp; collections</b> for touring</div><div class="li"><b>One-off region purchases</b> — older customers still have them and love them</div></div>
+</div>
+
+<p style="font-family:var(--sans);font-size:12.5px;color:var(--ink2);margin-top:18px"><b>Where we win and lose against them</b></p>
+<table class="cmp">
+<tr><th>Dimension</th><th>Strava (us)</th><th>Garmin Connect</th><th>Komoot</th><th>Who's ahead</th></tr>
+<tr><td><b>Analytics depth</b></td><td><span class="sent mix">Decent, but paid-only</span></td><td><span class="sent pos">Positive</span></td><td><span class="sent neu">Not their game</span></td><td><span class="aheadtag a-a">Garmin — clear</span></td></tr>
+<tr><td><b>Route planning</b></td><td><span class="sent mix">Good, subscriber-only</span></td><td><span class="sent mix">Functional</span></td><td><span class="sent pos">Positive</span></td><td><span class="aheadtag a-b">Komoot</span></td></tr>
+<tr><td><b>Offline and off-road navigation</b></td><td><span class="sent neg">Falling behind</span></td><td><span class="sent pos">Strong</span></td><td><span class="sent pos">Strong</span></td><td><span class="aheadtag a-none">Both — we're last</span></td></tr>
+<tr><td><b>Community &amp; social</b></td><td><span class="sent pos">Positive</span></td><td><span class="sent neu">Deliberately absent</span></td><td><span class="sent mix">Thinner</span></td><td><span class="aheadtag a-us">Us — uncontested</span></td></tr>
+<tr><td><b>Letting people take their data elsewhere</b></td><td><span class="sent neg">Negative</span> since the rule change</td><td><span class="sent pos">Positive</span></td><td><span class="sent mix">Paid-only for new users</span></td><td><span class="aheadtag a-a">Garmin</span></td></tr>
+<tr><td><b>Platform reliability</b></td><td><span class="sent neg">Outage + lockouts</span></td><td><span class="sent mix">Mixed</span></td><td><span class="sent mix">Mixed</span></td><td><span class="aheadtag a-none">Nobody — all shaky</span></td></tr>
+<tr><td><b>Whether the team is still intact</b></td><td><span class="sent pos">Intact, shipping</span></td><td><span class="sent pos">Intact</span></td><td><span class="sent neg">~75% of staff cut</span></td><td><span class="aheadtag a-us">Us &amp; Garmin</span></td></tr>
+</table>
+<div class="switch"><b>⚠ Who said they're leaving.</b> Two people said it plainly, and we only counted people who said it outright — nobody was assumed to be leaving just because they sounded annoyed. Both named Garmin, and both gave the same reason: the change to how other apps can use their data. One said they'd send their Garmin data straight to the tools they use and skip us entirely.
+<br><br>Komoot isn't taking our users — it's losing its own since it was bought and most of its team was let go. That leaves route planning wide open, and route planning is the one thing on this list where we come last.
+<br><br><b>One caution:</b> a lot of the "best Strava alternatives" articles from 2026 are marketing written by rival apps, not real users. We kept them but marked them, and they don't count as anyone leaving.</div>
+</div>
+
+<h2>Recommendations</h2>
+<div class="sec">
+<p class="recintro">Everything here can be built by the product, design or engineering team. Ordered by how many people it affects, how badly it hurts them, and how much it matters to what the business is trying to protect this year.</p>
+
+<div class="reccard"><div class="rh"><span class="recnum2">1</span><span class="rt">Self-serve appeal for flagged activities</span><span class="prio hi">High impact</span></div><div class="prob">"My real rides get flagged and I can't get the flag removed."</div><div class="rm"><b>Why:</b> the January backfill retired our longest-running credibility complaint — a genuine asset. False positives now land on exactly the athletes who care most, and the only remedy is a support ticket into a queue with a 1.5★ public reputation. An in-product appeal with a visible decision, plus published false-positive handling, protects the gain and removes the dependency on a channel we don't control.</div><div class="moves">Moves: power-user retention ↑ · leaderboard trust ↑ · support volume ↓</div></div>
+
+<div class="reccard"><div class="rh"><span class="recnum2">2</span><span class="rt">A consented third-party data path — starting with coach access</span><span class="prio hi">High impact</span></div><div class="prob">"The apps I connected can't show my data anymore — not even to my coach."</div><div class="rm"><b>Why:</b> this is the only thing anyone said outright they were leaving over, and Garmin is the named beneficiary. Letting people choose to share their own data — starting with their coach, which is the clearest thing they asked for — wins most of the goodwill back without undoing what the rule was there to protect. <b>Check this first:</b> the complaints are from late 2024, so confirm what the product actually does today before scoping anything.</div><div class="moves">Moves: power-user retention ↑ · ecosystem partners ↑ · data-serious segment share</div></div>
+
+<div class="reccard"><div class="rh"><span class="recnum2">3</span><span class="rt">Lockout self-recovery and a no-lost-activity guarantee</span><span class="prio hi">High impact</span></div><div class="prob">"I get locked out, and I'm not sure my activity made it in."</div><div class="rm"><b>Why:</b> five people described being completely stuck — the worst outcome anyone reported — and the 10 June outage put login and sync down together. Two fixes: account recovery that doesn't route through a ticket, and a visible local-buffer guarantee so a ride recorded during an outage is provably safe.</div><div class="moves">Moves: blocking incidents ↓ · Android store rating ↑ · trust in recording ↑</div></div>
+
+<div class="reccard"><div class="rh"><span class="recnum2">4</span><span class="rt">Take safety-relevant map layers out from behind the tier</span><span class="prio med">Cheap trust</span></div><div class="prob">"The map that keeps me safe running at night costs extra."</div><div class="rm"><b>Why:</b> this is a packaging decision, and packaging is product's to change. Gating a safety surface is the single most quotable criticism in the current press cycle, and it's cheap to reverse. Pair it with making it obvious in the app what each plan actually includes — right now people can't tell.</div><div class="moves">Moves: install→activation ↑ · press narrative ↑ · perceived fairness ↑</div></div>
+
+<div class="reccard"><div class="rh"><span class="recnum2">5</span><span class="rt">A real off switch for AI insights</span><span class="prio med">Cheap win</span></div><div class="prob">"Strava writes a paragraph about my run and I can't turn it off."</div><div class="rm"><b>Why:</b> not many people, but they've been asking since 2024, and they're the committed subscribers who post in our own forum. Worth noting the other side: one person this year asked us to turn AI insights back <i>on</i> after they were switched off. People don't want it gone — they want to choose.</div><div class="moves">Moves: subscriber sentiment ↑ · forum goodwill ↑</div></div>
+
+</div>
+
+<h2>Also worth a look — not for the product team</h2>
+<div class="sec">
+<div class="nonprod">
+<p class="nph"><b>13 of the 52 posts we found — a quarter of everything — aren't things the product team can fix.</b> We kept them out of the section above so they wouldn't crowd out the build list, but they're real, they're clustered, and <b>not one of them was positive.</b> Here are the three biggest, and who owns them:</p>
+
+<div class="npitem"><span class="nptag">Support</span><div class="npbody"><div class="npt">Users can't reach a human, and tickets close without resolution</div><div class="npm">The biggest cluster of the three: multi-week replies, generic one-line answers, and an AI triage layer that resists escalation. It&#39;s the reason our Trustpilot rating is 1.5★ and our BBB rating is D- — the first thing someone sees when they search our name before subscribing. It also makes every product problem above look worse than it is, because from the user&#39;s side a bug they can&#39;t report and a bug we won&#39;t fix feel identical.</div><div class="npo">Owned by Support · 4 posts</div></div></div>
+
+<div class="npitem"><span class="nptag">Billing</span><div class="npbody"><div class="npt">Charges don't match what the account says the plan is</div><div class="npm">Renewal and discount disputes where the account page displays one rate and the card is charged another, and support restates the timeline rather than addressing the contradiction. Distinct from "too expensive" — this is an operations failure, not a pricing opinion.</div><div class="npo">Owned by Support and Finance · 2 posts</div></div></div>
+
+<div class="npitem"><span class="nptag">Pricing</span><div class="npbody"><div class="npt">The subscription is seen as top-of-market for what it returns</div><div class="npm">Cost-versus-value judgement, sharpest among users who only run and don't chase segments. Genuinely a pricing question, not a product one — where someone complained about a <i>specific feature</i> being locked away rather than the price itself, we put it in the product list above instead.</div><div class="npo">Owned by Pricing · 4 posts</div></div></div>
+</div>
+</div>
+
+<div class="nextsteps">
+<h4>Next steps</h4>
+<p><b>#1 and #3 are the pair to move on.</b> Both are about a user losing something they earned — a segment result, or an activity — with no way to get it back themselves. Fixing that is also the fastest reduction in load on the support queue described above.</p>
+<p>To address these, use <b>Sprntly</b> to turn them into a PRD, or add them straight to your backlog. The three items that aren&#39;t for the product team go to the teams that own them instead.</p>
+<div class="recactions">
+<button class="btn prd" onclick="genPRD(this)">Generate PRD with Sprntly</button>
+<button class="btn bk" onclick="toBacklog(this)">↘ Add to backlog</button>
+</div>
+<div class="statusmsg" role="status" id="setStatus"></div>
+</div>
+
+<div class="metabar">
+<button class="metatoggle" id="metaBtn" aria-expanded="false" aria-controls="metaPanel" onclick="toggleMeta()"><span class="chev">▸</span>Where this came from, and how much to trust it</button>
+<div id="metaPanel" hidden>
+<div class="integrity"><b>Where this came from and how much to trust it.</b>
+<p><b>How this was made.</b> Prepared 21 July 2026. We logged each piece of feedback separately — 52 in total — and tagged each one with whether the product team can fix it and who owns it. Nothing was merged or combined: if three people said the same thing, that&#39;s three entries, because how often something comes up matters. Every quote is real, dated and linked to where it was posted. Nothing here is made up. The full list is attached as <i>strava-feedback-records.json</i>.</p>
+<p><b>The big limitation.</b> We found this feedback by searching the web, not by pulling it directly from each platform. That matters: most of the Reddit and app-store comments reached us <i>via</i> news articles, so we&#39;re over-weighted towards whatever a journalist found quotable. Trustpilot we read directly, and Trustpilot is where angry people go. So: trust the list of problems, treat the ranking as a rough order, and be careful comparing one platform to another.</p>
+<p><b>What the percentages actually mean.</b> Every percentage is out of the 52 posts we found — never out of Strava's users. If it says 64% negative, that means 25 of the 39 product posts were negative. It does <i>not</i> mean 64% of our users are unhappy, and it shouldn't be quoted that way. We have no way of knowing how many people had a problem and never posted about it.</p>
+<p><b>About the quotes.</b> We quote one short line per source and summarise the rest in our own words. That&#39;s a limit on how much of someone else&#39;s writing we reproduce, not a gap in what we read — everything was read and logged.</p>
+<p><b>How old the feedback is.</b> 17 of the 39 product issues are from 2024 or 2025, mostly about the data-sharing rules and the AI write-ups. Some may already be fixed. We kept them because people still quote them as current, but any recommendation based on them says to check the facts first.</p>
+<p><b>Where sources disagree.</b> Google Play's rating is given as 4.4 by one source and 4.6 by another for the same period, so we show both rather than picking one. The 4.8★ App Store figure comes from a 2025 source and may be out of date. The positive / neutral / negative labels were assigned by hand, post by post — no sentiment model was used.</p>
+<p><b>Checks for fake feedback.</b> We saw no sign of bots or organised review attacks in the negative feedback. We did find "best Strava alternatives" articles written by rival apps as marketing — we kept them but marked them, and they don&#39;t count towards anyone leaving. We only counted someone as leaving if they said so outright: two people. Being annoyed was never treated as leaving.</p>
+<p><b>How often to run this.</b> Best run monthly, so each edition can be compared against the one before. This is the first, so there&#39;s nothing to compare it to yet — which is why the &quot;what&#39;s changed&quot; sections read as history rather than as a month-on-month move.</p>
+</div>
+</div>
+</div>
+
+</div>
+<script type="application/json" id="report-metadata">
+{
+ "generated_by": "Sprntly",
+ "skill": "public-feedback-report",
+ "schema_version": "2.0",
+ "company": "Strava",
+ "generated_at": "2026-07-21T14:51:00-07:00",
+ "edition": 1,
+ "window": {
+  "start": "2026-01-01",
+  "end": "2026-07-21",
+  "prior_window_start": "2025-07-01",
+  "prior_window_end": "2025-12-31",
+  "chart_window_months": 24,
+  "chart_window_start": "2024-08"
+ },
+ "record_set_file": "strava-feedback-records.json",
+ "queryable": true,
+ "answerable_questions": [
+  "feedback from a named source",
+  "feedback in a date range",
+  "how long a problem has been raised",
+  "what is new this period",
+  "what has stopped being raised",
+  "sentiment split overall, by source, by category",
+  "what people are leaving over",
+  "which team owns a problem",
+  "what people praise"
+ ],
+ "totals": {
+  "records": 52,
+  "product": 39,
+  "non_product": 13,
+  "product_share_pct": 75,
+  "non_product_share_pct": 25,
+  "sources_checked": 11,
+  "months_with_coverage": 14,
+  "months_in_chart_window": 24,
+  "switching_stated": 2,
+  "blocking_impact": 5,
+  "product_records_older_than_2026": 17
+ },
+ "sentiment": {
+  "all": {
+   "positive": 6,
+   "neutral": 14,
+   "negative": 32
+  },
+  "product": {
+   "positive": 6,
+   "neutral": 8,
+   "negative": 25,
+   "positive_pct": 15,
+   "neutral_pct": 21,
+   "negative_pct": 64
+  },
+  "non_product": {
+   "positive": 0,
+   "neutral": 6,
+   "negative": 7,
+   "positive_pct": 0,
+   "neutral_pct": 46,
+   "negative_pct": 54
+  }
+ },
+ "by_source": {
+  "Trustpilot": {
+   "total": 17,
+   "positive": 2,
+   "neutral": 0,
+   "negative": 15,
+   "product": 10,
+   "non_product": 7,
+   "earliest": "2025-08-01",
+   "latest": "2026-07-07"
+  },
+  "Press": {
+   "total": 10,
+   "positive": 0,
+   "neutral": 5,
+   "negative": 5,
+   "product": 7,
+   "non_product": 3,
+   "earliest": "2024-10-11",
+   "latest": "2026-06-10"
+  },
+  "Cycling forums": {
+   "total": 7,
+   "positive": 0,
+   "neutral": 3,
+   "negative": 4,
+   "product": 7,
+   "non_product": 0,
+   "earliest": "2024-11-19",
+   "latest": "2026-02-02"
+  },
+  "Blogs": {
+   "total": 6,
+   "positive": 0,
+   "neutral": 1,
+   "negative": 5,
+   "product": 6,
+   "non_product": 0,
+   "earliest": "2026-01-04",
+   "latest": "2026-07-07"
+  },
+  "Comparison & alternatives sites": {
+   "total": 5,
+   "positive": 1,
+   "neutral": 4,
+   "negative": 0,
+   "product": 3,
+   "non_product": 2,
+   "earliest": "2026-04-17",
+   "latest": "2026-06-17",
+   "caution": "largely marketing published by rival apps; excluded from switching evidence"
+  },
+  "Strava Community Hub": {
+   "total": 4,
+   "positive": 1,
+   "neutral": 0,
+   "negative": 3,
+   "product": 4,
+   "non_product": 0,
+   "earliest": "2024-11-11",
+   "latest": "2026-03-21"
+  },
+  "App Store": {
+   "total": 1,
+   "positive": 1,
+   "neutral": 0,
+   "negative": 0,
+   "product": 1,
+   "non_product": 0,
+   "earliest": "2025-05-22",
+   "latest": "2025-05-22",
+   "caution": "reached us via quoted coverage, not direct review access"
+  },
+  "Reddit / community announcements": {
+   "total": 1,
+   "positive": 1,
+   "neutral": 0,
+   "negative": 0,
+   "product": 1,
+   "non_product": 0,
+   "earliest": "2026-02-02",
+   "latest": "2026-02-02"
+  },
+  "Consumer complaint sites": {
+   "total": 1,
+   "positive": 0,
+   "neutral": 1,
+   "negative": 0,
+   "product": 0,
+   "non_product": 1,
+   "earliest": "2026-03-17",
+   "latest": "2026-03-17"
+  },
+  "Google Play": {
+   "total": 0,
+   "note": "rating referenced (4.4-4.6) but no individual reviews captured directly"
+  },
+  "X": {
+   "total": 0,
+   "note": "searched, nothing captured directly in window"
+  }
+ },
+ "by_month": {
+  "2024-08": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2024-09": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2024-10": {
+   "positive": 0,
+   "neutral": 2,
+   "negative": 1
+  },
+  "2024-11": {
+   "positive": 0,
+   "neutral": 2,
+   "negative": 8
+  },
+  "2024-12": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2025-01": {
+   "positive": 0,
+   "neutral": 2,
+   "negative": 0
+  },
+  "2025-02": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2025-03": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2025-04": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2025-05": {
+   "positive": 1,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2025-06": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2025-07": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2025-08": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 1
+  },
+  "2025-09": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 3
+  },
+  "2025-10": {
+   "positive": 0,
+   "neutral": 1,
+   "negative": 0
+  },
+  "2025-11": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2025-12": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 0
+  },
+  "2026-01": {
+   "positive": 0,
+   "neutral": 1,
+   "negative": 9
+  },
+  "2026-02": {
+   "positive": 1,
+   "neutral": 1,
+   "negative": 4
+  },
+  "2026-03": {
+   "positive": 3,
+   "neutral": 1,
+   "negative": 1
+  },
+  "2026-04": {
+   "positive": 0,
+   "neutral": 3,
+   "negative": 1
+  },
+  "2026-05": {
+   "positive": 0,
+   "neutral": 1,
+   "negative": 1
+  },
+  "2026-06": {
+   "positive": 1,
+   "neutral": 0,
+   "negative": 1
+  },
+  "2026-07": {
+   "positive": 0,
+   "neutral": 0,
+   "negative": 2
+  }
+ },
+ "themes": {
+  "flagged_activities": {
+   "label": "Real activities wrongly flagged",
+   "records": 4,
+   "record_ids": [
+    1,
+    2,
+    33,
+    34
+   ],
+   "first_seen": "2026-01-24",
+   "last_seen": "2026-07-07",
+   "months_raised": 6,
+   "status": "new",
+   "category": "product",
+   "owner": "product, engineering"
+  },
+  "account_lockouts_and_outage": {
+   "label": "Locked out, and activities may not save",
+   "records": 3,
+   "record_ids": [
+    3,
+    4,
+    31
+   ],
+   "first_seen": "2026-01-01",
+   "last_seen": "2026-06-10",
+   "months_raised": 6,
+   "status": "new",
+   "category": "product",
+   "owner": "engineering"
+  },
+  "third_party_data_access": {
+   "label": "Connected apps cannot display data, including to a coach",
+   "records": 6,
+   "record_ids": [
+    11,
+    12,
+    13,
+    14,
+    16,
+    17
+   ],
+   "first_seen": "2024-11-01",
+   "last_seen": "2024-11-19",
+   "months_raised": 20,
+   "status": "long_standing",
+   "category": "product",
+   "owner": "product",
+   "note": "all records predate 2026 - verify current behaviour before scoping"
+  },
+  "ai_insights_opt_out": {
+   "label": "No proper way to turn off AI activity write-ups",
+   "records": 7,
+   "record_ids": [
+    18,
+    19,
+    20,
+    21,
+    22,
+    23,
+    24
+   ],
+   "first_seen": "2024-10-11",
+   "last_seen": "2026-03-21",
+   "months_raised": 21,
+   "status": "long_standing",
+   "category": "product",
+   "owner": "product"
+  },
+  "capability_behind_paywall": {
+   "label": "Features moved behind the subscription, including a safety map",
+   "records": 3,
+   "record_ids": [
+    10,
+    25,
+    27
+   ],
+   "first_seen": "2025-08-01",
+   "last_seen": "2026-01-04",
+   "months_raised": 11,
+   "status": "long_standing",
+   "category": "product",
+   "owner": "product"
+  },
+  "recording_bugs": {
+   "label": "Rides logged twice, no auto-pause in a vehicle, e-bike segments lost",
+   "records": 3,
+   "record_ids": [
+    5,
+    6,
+    30
+   ],
+   "first_seen": "2025-09-01",
+   "last_seen": "2026-02-02",
+   "months_raised": 10,
+   "status": "long_standing",
+   "category": "product",
+   "owner": "engineering"
+  },
+  "offline_offroad_navigation": {
+   "label": "Offline and off-road navigation falling behind",
+   "records": 2,
+   "record_ids": [
+    28,
+    29
+   ],
+   "first_seen": "2026-01-30",
+   "last_seen": "2026-01-30",
+   "months_raised": 6,
+   "status": "new",
+   "category": "product",
+   "owner": "product"
+  },
+  "plan_contents_unclear": {
+   "label": "People cannot tell what their plan includes",
+   "records": 1,
+   "record_ids": [
+    26
+   ],
+   "first_seen": "2026-01-04",
+   "last_seen": "2026-01-04",
+   "months_raised": 6,
+   "status": "new",
+   "category": "product",
+   "owner": "design"
+  },
+  "notification_settings": {
+   "label": "Emails still arrive after notifications are switched off",
+   "records": 1,
+   "record_ids": [
+    7
+   ],
+   "first_seen": "2026-01-24",
+   "last_seen": "2026-01-24",
+   "months_raised": 6,
+   "status": "new",
+   "category": "product",
+   "owner": "product"
+  },
+  "social_pressure_design": {
+   "label": "Feed comparison pushes people to train through injury",
+   "records": 1,
+   "record_ids": [
+    35
+   ],
+   "first_seen": "2026-02-16",
+   "last_seen": "2026-02-16",
+   "months_raised": 5,
+   "status": "new",
+   "category": "product",
+   "owner": "design"
+  },
+  "praise": {
+   "label": "Accuracy, ease of use, works with any watch, segments",
+   "records": 5,
+   "record_ids": [
+    8,
+    9,
+    32,
+    36,
+    38
+   ],
+   "first_seen": "2025-05-22",
+   "last_seen": "2026-06-17",
+   "months_raised": 14,
+   "status": "steady",
+   "category": "product",
+   "owner": "product"
+  },
+  "support_unreachable": {
+   "label": "Cannot reach a human; tickets close unresolved",
+   "records": 4,
+   "record_ids": [
+    41,
+    43,
+    44,
+    45
+   ],
+   "first_seen": "2025-09-26",
+   "last_seen": "2026-03-31",
+   "months_raised": 10,
+   "status": "long_standing",
+   "category": "non_product",
+   "subcategory": "support",
+   "owner": "support"
+  },
+  "billing_disputes": {
+   "label": "Charges do not match the plan shown on the account",
+   "records": 2,
+   "record_ids": [
+    42,
+    46
+   ],
+   "first_seen": "2026-04-01",
+   "last_seen": "2026-07-07",
+   "months_raised": 3,
+   "status": "new",
+   "category": "non_product",
+   "subcategory": "billing",
+   "owner": "support, finance"
+  },
+  "pricing_value": {
+   "label": "Subscription seen as top-of-market for what it returns",
+   "records": 4,
+   "record_ids": [
+    40,
+    47,
+    49,
+    52
+   ],
+   "first_seen": "2025-01-01",
+   "last_seen": "2026-04-23",
+   "months_raised": 18,
+   "status": "long_standing",
+   "category": "non_product",
+   "subcategory": "pricing",
+   "owner": "pricing"
+  }
+ },
+ "resolved": [
+  {
+   "label": "Leaderboards are full of cheats",
+   "stopped_around": "2026-02",
+   "evidence": "January 2026 backfill removed ~3.9M vehicle/e-bike activities, restored ~293k athletes to top 10"
+  },
+  {
+   "label": "There is still no dark mode",
+   "stopped_around": "2024",
+   "evidence": "complaints ceased after the feature shipped"
+  }
+ ],
+ "switching": {
+  "count": 2,
+  "destination": "Garmin Connect",
+  "reason": "third-party data access restrictions",
+  "rule": "counted only on explicit statements; frustration never read as intent to leave"
+ },
+ "competitors": {
+  "selected": [
+   "Garmin Connect",
+   "Komoot"
+  ],
+  "selection_basis": "most-named destination in leaving posts; closest route-planning substitute",
+  "excluded": {
+   "Runna": "acquired by Strava"
+  }
+ },
+ "external_ratings": {
+  "app_store": {
+   "value": 4.8,
+   "ratings": 306000,
+   "as_of": "2025",
+   "caution": "may be stale"
+  },
+  "google_play": {
+   "value": "4.4-4.6",
+   "conflict": "sources disagree in the same period"
+  },
+  "trustpilot": {
+   "value": 1.5,
+   "one_star_share_pct": 88
+  },
+  "bbb": {
+   "grade": "D-"
+  }
+ },
+ "limits": {
+  "collection_method": "open-web retrieval, not platform API access",
+  "denominator_rule": "all percentages are over the 52 collected posts, never over the user base; no extrapolation to prevalence",
+  "coverage_gap": "10 of 24 months have no collected feedback; empty months indicate collection reach, not quiet months",
+  "sentiment_method": "assigned by hand per post; no sentiment model used",
+  "verbatim_rule": "one short quote per source; other posts summarised"
+ },
+ "prior_run": null,
+ "cadence": "monthly"
+}
+</script>
+<script>
+function toggleMeta(){var b=document.getElementById("metaBtn"),p=document.getElementById("metaPanel");var open=b.getAttribute("aria-expanded")==="true";b.setAttribute("aria-expanded",String(!open));p.hidden=open;}
+function genPRD(b){document.getElementById("setStatus").textContent="✓ Sent to Sprntly — drafting PRDs for #1 and #3";b.disabled=true;b.textContent="PRD requested";b.style.opacity=.6;b.style.cursor="default";}
+function toBacklog(b){document.getElementById("setStatus").textContent="✓ All 5 product items added to your backlog. The three non-product items were not included.";b.disabled=true;b.textContent="Added to backlog";b.style.opacity=.6;b.style.cursor="default";}
+</script>
+</body></html>
