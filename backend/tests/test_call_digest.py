@@ -49,6 +49,30 @@ def test_is_voc_report_request():
         assert not is_voc_report_request(q), q
 
 
+def test_is_voc_report_request_customer_feedback_phrasings():
+    # "Top/summarize customer feedback" asks are VoC by intent — no call-noun,
+    # no conversation-noun, no "voice of customer" literal (staging misroute:
+    # "What is the top customer feedback" fell to the generic answer path).
+    for q in [
+        "What is the top customer feedback",
+        "summarize customer feedback from last week",
+        "customer feedback themes this month",
+        "top user feedback right now?",
+        "what are the main pieces of client feedback",
+        "customer feedback report please",
+    ]:
+        assert is_voc_report_request(q), q
+    # No intent word near "customer feedback", or feedback isn't customers' —
+    # these must NOT divert.
+    for q in [
+        "give me feedback on my PRD draft",
+        "summarize the feedback from the beta survey",
+        "we built this from customer feedback",
+        "customer feedback",   # bare mention, no ask
+    ]:
+        assert not is_voc_report_request(q), q
+
+
 def test_is_voc_report_request_feedback_from_conversations():
     # "Feedback from customer conversations" phrasings are VoC by intent — they
     # carry no "voice of customer" literal and no call-noun, and previously fell
@@ -441,3 +465,47 @@ def test_voice_docs_reads_categorized_files_within_window(isolated_settings, mon
     # No window → the aged file appears too; revenue category never does.
     all_docs = cd._voice_docs("co", None)
     assert {d.name for d in all_docs} == {"calls.pdf", "old_calls.pdf"}
+
+
+def test_staging_scenario_top_customer_feedback_over_category_upload(
+    isolated_settings, monkeypatch,
+):
+    """Replay of the 2026-07-26 staging misroute end-to-end on this branch:
+    a feedback CSV uploaded via the Customer Voice & Support category strip,
+    NO Fireflies connected, question "What is the top customer feedback".
+    Must route to the digest (router match + has_call_source via docs) and run
+    the pinned VoC report over the uploaded file's converted text."""
+    import os
+
+    import app.voc_report as vr
+    from app import datasets
+    from app.ingest import md_filename
+
+    # The uploaded file, as the category strip stores it.
+    base, raw = datasets.dataset_path("acme"), datasets.raw_path("acme")
+    raw.mkdir(parents=True, exist_ok=True)
+    name = "user_feedback_raw_2026_07_21_to_2026_07_26.csv"
+    (raw / name).write_bytes(b"raw")
+    (base / md_filename(name)).write_text("latency complaint; mobile access ask")
+    datasets.set_file_categories("acme", [name], "voice")
+    fresh = (NOW - timedelta(days=2)).timestamp()
+    os.utime(raw / name, (fresh, fresh))
+
+    monkeypatch.setattr("app.db.companies.slug_for_company_id", lambda cid: "acme")
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)  # no Fireflies
+    monkeypatch.setattr(cd, "_utc_now", lambda: NOW)
+    captured = {}
+    monkeypatch.setattr(
+        vr, "build",
+        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>voc</body></html>",
+    )
+
+    question = "What is the top customer feedback"
+    assert is_voc_report_request(question)          # router now matches
+    assert cd.has_call_source("co") is True         # voice-category doc counts
+
+    p = cd.answer(enterprise_id="co", question=question)
+    assert p["_skill"] == "voice-of-customer-report"
+    assert p["answer"].startswith("<!DOCTYPE html>")
+    assert "latency complaint; mobile access ask" in captured["corpus_text"]
+    assert "UPLOADED VOICE DOCUMENTS" in captured["source_line"]

@@ -172,13 +172,34 @@ _VOC_FEEDBACK_CONVO_RULE = re.compile(
 )
 
 
+# "Top customer feedback" / "summarize customer feedback" asks are VoC by
+# intent too — they carry "feedback" but neither a call-noun nor a
+# conversation-noun, so both rules above miss them and they fell to the generic
+# answer path (user-reported misroute: "What is the top customer feedback"
+# answered as a generic finding instead of the pinned VoC report). Requires an
+# intent word near "customer|user|client feedback" in either order, so
+# incidental mentions ("built this from customer feedback") don't divert.
+# Widening is safe: qa_agent only reroutes when has_call_source() — companies
+# with no call/voice-upload data keep the generic path.
+_VOC_CUSTOMER_FEEDBACK_RULE = re.compile(
+    r"\b(?:top|summar[iy]\w*|recent|latest|key|main|biggest|common)\b"
+    r".{0,40}\b(?:customer|user|client)\s+feedback\b"
+    r"|\b(?:customer|user|client)\s+feedback\b.{0,40}"
+    r"\b(?:summar[iy]\w*|themes?|report|top|takeaways?)\b",
+    re.I | re.S,
+)
+
+
 def is_voc_report_request(question: str) -> bool:
-    """True for a bare 'voice of customer' / 'VoC report' request, or a
-    feedback-from-customer-conversations phrasing. Distinct from is_call_digest
-    (which needs a call-noun); used by qa_agent to route these to the live call
-    digest when a call source is connected."""
+    """True for a bare 'voice of customer' / 'VoC report' request, a
+    feedback-from-customer-conversations phrasing, or a top/summarize-customer-
+    feedback phrasing. Distinct from is_call_digest (which needs a call-noun);
+    used by qa_agent to route these to the live call digest when a call source
+    is connected."""
     return bool(
-        _VOC_REPORT_RULE.search(question) or _VOC_FEEDBACK_CONVO_RULE.search(question)
+        _VOC_REPORT_RULE.search(question)
+        or _VOC_FEEDBACK_CONVO_RULE.search(question)
+        or _VOC_CUSTOMER_FEEDBACK_RULE.search(question)
     )
 
 
