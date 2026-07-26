@@ -308,11 +308,14 @@ def _month_chart(months: list[dict]) -> str:
         x = cx - bar_w / 2
         total = totals[idx]
         if m.get("event"):
+            # Clamp the label so a verbose annotation can't overflow the
+            # 660-unit viewBox or collide with its neighbours.
+            event = str(m.get("event"))[:28]
             parts.append(
                 f'<line x1="{cx:.1f}" y1="22" x2="{cx:.1f}" y2="{base:.0f}" '
                 'stroke="#c8c3b6" stroke-width="1" stroke-dasharray="2 3"/>'
                 f'<text x="{cx:.1f}" y="19" text-anchor="middle" font-size="8.5" '
-                f'fill="#8a857a" font-weight="600">{_e(m.get("event"))}</text>'
+                f'fill="#8a857a" font-weight="600">{_e(event)}</text>'
             )
         if total == 0:
             parts.append(

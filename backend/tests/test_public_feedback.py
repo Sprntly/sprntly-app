@@ -69,6 +69,20 @@ def test_parse_records_garbage_and_non_list():
     assert pf._parse_records('[1, "x", {"verbatim": "ok"}]') == [{"verbatim": "ok"}]
 
 
+def test_parse_records_salvages_truncated_array():
+    # Output budget cut the array mid-record (nested object open) — every
+    # complete record before the cut must survive.
+    truncated = json.dumps(RECORDS)[:-1].rstrip("}") + ', {"verbatim": "cut off", "source": {"platform": "Red'
+    got = pf._parse_records(truncated)
+    assert got == RECORDS[:1] or got == RECORDS  # complete prefix, never []
+    assert len(got) >= 1
+
+
+def test_parse_records_bracketed_prose_before_array():
+    text = "We searched [several] sites and app stores.\n" + json.dumps(RECORDS)
+    assert pf._parse_records(text) == RECORDS
+
+
 # ── answer() branches ────────────────────────────────────────────────────────
 
 def _patch_profile(monkeypatch, profile=PROFILE, error=False):
@@ -103,15 +117,25 @@ def test_answer_capture_failure_is_graceful(monkeypatch):
 
 def test_answer_no_records_found(monkeypatch):
     _patch_profile(monkeypatch)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: [])
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
     out = pf.answer(enterprise_id="e1", question="public feedback?")
     assert "couldn't find enough feedback" in out["answer"]
     assert "Strava" in out["answer"]
 
 
+def test_answer_truncated_empty_capture_never_claims_no_feedback(monkeypatch):
+    # The sweep hit the output budget and nothing was salvageable: the honest
+    # answer is "retry", never "no feedback found".
+    _patch_profile(monkeypatch)
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], True))
+    out = pf.answer(enterprise_id="e1", question="public feedback?")
+    assert "hit an internal limit" in out["answer"]
+    assert "couldn't find enough feedback" not in out["answer"]
+
+
 def test_answer_happy_path_renders_and_persists(monkeypatch):
     _patch_profile(monkeypatch)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: list(RECORDS))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))
     calls: dict = {}
 
     def fake_llm_call(**kw):
@@ -147,7 +171,7 @@ def test_answer_happy_path_renders_and_persists(monkeypatch):
 
 def test_answer_save_failure_never_breaks_the_answer(monkeypatch):
     _patch_profile(monkeypatch)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: list(RECORDS))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))
     monkeypatch.setattr(
         pf, "llm_call", lambda **kw: SimpleNamespace(output=dict(REPORT_DATA))
     )
@@ -161,7 +185,7 @@ def test_answer_save_failure_never_breaks_the_answer(monkeypatch):
 
 def test_answer_synthesis_failure_is_graceful(monkeypatch):
     _patch_profile(monkeypatch)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: list(RECORDS))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))
     def boom(**kw): raise RuntimeError("model error")
     monkeypatch.setattr(pf, "llm_call", boom)
     out = pf.answer(enterprise_id="e1", question="q")

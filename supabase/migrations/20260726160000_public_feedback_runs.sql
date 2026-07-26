@@ -16,7 +16,9 @@
 --   metadata — the report's machine-readable rollup (by_source / by_month /
 --              themes / switching / totals / limits), embedded in the report
 --              as the #report-metadata block and queried by follow-ups
---   html     — the rendered report served back into chat
+--   html     — the rendered report, kept with the run it belongs to (audit +
+--              future re-serve/artifact surfaces; chat serves the copy in the
+--              ask payload today)
 
 create table if not exists public_feedback_runs (
     id            bigint generated always as identity primary key,
