@@ -325,11 +325,34 @@ _TRACKER_PIVOT = re.compile(
 )
 
 
+def _vetoed_as_creation(question: str) -> bool:
+    """True when a create/push verb GOVERNS this request, rather than merely
+    appearing in it.
+
+    The veto exists to keep "create a ticket for X" and "push these stories to
+    jira" out of the read path. Matching the verb anywhere in the sentence broke
+    the moment a ticket's own TITLE contained one: "get me ticket about car build
+    thread" was vetoed by the word "build" inside the title being searched for,
+    so a plain lookup fell through to the scope gate and answered "I can only
+    help with your product work".
+
+    Position decides it. A creation verb before the PM noun is a command about
+    what to make; after it, it is part of what is being looked for.
+    """
+    m_veto = _JIRA_LOOKUP_VETO.search(question)
+    if m_veto is None:
+        return False
+    m_noun = _JIRA_PM_NOUN.search(question)
+    # No PM noun at all ("generate a PRD", "draft it up") → still a creation
+    # phrasing, still vetoed.
+    return m_noun is None or m_veto.start() < m_noun.start()
+
+
 def _stateless_tracker_lookup(question: str) -> bool:
     """The history-free half of is_jira_lookup — true when the message names a
     tracker read on its own words. Split out so thread detection can ask it of
     the user's earlier turns without recursing through the sticky branch."""
-    if _JIRA_LOOKUP_VETO.search(question):
+    if _vetoed_as_creation(question):
         return False
     has_key = bool(_JIRA_ISSUE_KEY.search(question))
     has_jira = bool(_JIRA_WORD.search(question))
@@ -425,6 +448,12 @@ def _continues_tracker_thread(question: str) -> bool:
     thread already surfaced ("all the details about it", "who's on that one")."""
     if _TRACKER_PIVOT.search(question):
         return False
+    # A bare issue KEY inside a tracker thread — "how about KAN-1038", "and
+    # KAN-4?". Statelessly a key needs company (a verb or PM noun) so a passing
+    # mention like "the deploy for ABC-12 landed" doesn't hijack the chat; but
+    # once the conversation IS about tickets, naming a key is unambiguous.
+    if _JIRA_ISSUE_KEY.search(question):
+        return True
     if _JIRA_FILTER.search(question):
         return True
     # Asking for an ATTRIBUTE of the issue on screen — "i want to see full
@@ -462,7 +491,7 @@ def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
     (app/jira_lookup.py)."""
     if _stateless_tracker_lookup(question):
         return True
-    if _JIRA_LOOKUP_VETO.search(question):
+    if _vetoed_as_creation(question):
         return False
     if not _in_tracker_thread(history):
         return False

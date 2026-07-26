@@ -136,6 +136,49 @@ def test_is_jira_lookup_sticky_change_followup_in_thread():
         assert is_jira_lookup(q, thread), q
 
 
+def test_creation_veto_does_not_fire_on_a_word_inside_the_TITLE():
+    """Reported live: a ticket titled "Build thread feature" could not be found.
+
+    "get me ticket about car build thread" was vetoed by the word "build" — a
+    creation verb sitting inside the TITLE being searched for — so a plain lookup
+    fell through to the scope gate and answered "I can only help with your
+    product work". Position decides it: a creation verb before the PM noun is a
+    command about what to make; after it, it is part of what is being looked for.
+    """
+    for q in [
+        "get me ticket about car build thread",
+        "find the ticket called build thread feature",
+        "show me the issue about creating invoices",
+        "pull up the ticket for the make-model picker",
+    ]:
+        assert is_jira_lookup(q), q
+
+
+def test_creation_veto_still_fires_when_the_verb_leads():
+    for q in [
+        "create a ticket for the login bug",
+        "generate a PRD for onboarding",
+        "push these stories to jira",
+        "draft tickets from this doc",
+    ]:
+        assert not is_jira_lookup(q), q
+
+
+def test_bare_issue_key_routes_inside_a_tracker_thread():
+    """"how about KAN-1038" names a key and nothing else. Statelessly that is
+    not enough (a passing mention must not hijack the chat), but once the thread
+    is about tickets it is unambiguous — it answered from the stale KG instead,
+    listing every OTHER key it knew about."""
+    thread = [
+        {"role": "user", "content": "get me ticket about car"},
+        {"role": "assistant", "content": "KAN-1033 — Build a car driving feature."},
+    ]
+    for q in ["how about KAN-1038", "and KAN-4?", "KAN-999"]:
+        assert is_jira_lookup(q, thread), q
+    # Still not a lookup on its own words — the thread is what carries it.
+    assert not is_jira_lookup("the deploy for ABC-12 landed and metrics improved")
+
+
 def test_is_jira_lookup_attribute_request_without_a_pronoun():
     """"i want to see full detail" names WHAT is wanted but not what it belongs
     to — the thread already established that. Reported live: it fell through to
