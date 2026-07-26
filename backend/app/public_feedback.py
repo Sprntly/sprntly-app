@@ -104,6 +104,112 @@ _REPORT_SYSTEM = (
 )
 
 
+# ── Query mode — follow-ups answered from the latest stored run ──────────────
+# The skill's references/query-guide.md governs these answers. A follow-up that
+# FILTERS the captured set ("what did the App Store say", "show me March",
+# "why are people leaving") must not re-run the multi-minute web sweep — it is
+# answered from the stored records + metadata. A report-shaped ask ("what are
+# people saying about us online", "run a public feedback report") always runs
+# the full pipeline, so a fresh report is always one sentence away.
+
+_QUERY_SHAPES: list[re.Pattern] = [
+    # "what did/does the App Store / Reddit / Trustpilot say|show"
+    re.compile(r"\bwhat\b.{0,30}\b(?:say|saying|show(?:ing)?)\b", re.I),
+    # "feedback from March / the App Store / last quarter"
+    re.compile(r"\b(?:feedback|posts?|reviews?|complaints?)\s+(?:from|in|on)\b", re.I),
+    # "how long has X been raised / around / an issue"
+    re.compile(r"\bhow\s+long\s+has\b", re.I),
+    # "show me March" / "show me everything from Q1"
+    re.compile(r"\bshow\s+me\b", re.I),
+    # "why are people leaving" / "are we losing users"
+    re.compile(r"\bwhy\s+are\s+people\s+leaving\b|\bare\s+we\s+losing\b", re.I),
+    # "what do people like/love/praise"
+    re.compile(r"\bwhat\s+do\s+people\s+(?:like|love|praise)\b", re.I),
+    # "how many complained about X"
+    re.compile(r"\bhow\s+many\b.{0,40}\b(?:complain|post|said|mention)", re.I),
+    # "is X getting worse/better" / "what's new / fixed / still open"
+    re.compile(r"\bgetting\s+(?:worse|better)\b", re.I),
+    re.compile(r"\bwhat(?:'s| is| has)\s+(?:new|fixed|been\s+fixed|stuck|still\s+(?:open|unresolved))\b", re.I),
+]
+
+# A report-shaped ask always re-runs the pipeline, even when a stored run
+# exists — asking for the report again is asking for a fresh look.
+_REPORT_SHAPED = re.compile(
+    r"\breport\b|\breview\s+mining\b|\bwhat\s+are\s+people\s+saying\b"
+    r"|\bonline\s+reputation\b|\bpublic\s+standings?\b",
+    re.I,
+)
+
+_QUERY_SYSTEM = (
+    "You answer a follow-up question about a public-feedback report from the "
+    "CAPTURED RECORDS and REPORT METADATA provided — never from general "
+    "knowledge of the company. Follow the skill's references/query-guide.md:\n"
+    "- Counts are posts we found, never people or users — say so when giving "
+    "any count.\n"
+    "- Empty is not quiet: if a source or month has no records, say we did not "
+    "find any, not that people were happy.\n"
+    "- Lead with how old the records are when they predate the report window.\n"
+    "- Records tagged as rival marketing stay labelled and never count toward "
+    "switching or user sentiment.\n"
+    "- Answer the question that was asked — the filtered cut, not the whole "
+    "report — then offer the next useful cut.\n"
+    "- If the captured data cannot support the answer, say plainly what would "
+    "need collecting.\n"
+    "Cite the platform and post date for quotes. The report this data belongs "
+    "to is identified below; mention its date when relevant, and note the user "
+    "can ask for a fresh public feedback report if they want a new sweep."
+)
+
+
+def is_followup_query(question: str) -> bool:
+    """True when the question filters captured feedback rather than asking for
+    a (new) report. Only consulted once routing already picked the skill AND a
+    stored run exists."""
+    if _REPORT_SHAPED.search(question):
+        return False
+    return any(p.search(question) for p in _QUERY_SHAPES)
+
+
+def _answer_from_run(
+    *, enterprise_id: str, question: str, run: dict, history: list[dict] | None
+) -> dict:
+    """Answer a follow-up from a stored run's records + metadata. Raises on
+    LLM failure — the caller degrades to the full pipeline."""
+    from app.ask_runner import _ASK_RESPONSE_SCHEMA
+
+    context = (
+        f"Report: {run.get('window_label') or 'public feedback report'} · "
+        f"generated {str(run.get('created_at') or '')[:10]}\n\n"
+        "=== REPORT METADATA ===\n"
+        + json.dumps(run.get("metadata") or {}, ensure_ascii=False)
+        + "\n\n=== CAPTURED RECORDS ===\n"
+        + json.dumps(run.get("records") or [], ensure_ascii=False)
+    )
+    result = llm_call(
+        enterprise_id=enterprise_id,
+        agent="qa",
+        purpose="public_feedback_query",
+        model=ANSWER_MODEL,
+        system=_QUERY_SYSTEM,
+        input=_render_history(history) + f"Question: {question}\n\n{context}",
+        prompt_version="qa-public-feedback-query-v1",
+        json_schema=_ASK_RESPONSE_SCHEMA,
+        skill=PF_SKILL,
+        max_tokens=4000,
+    )
+    payload = result.output if isinstance(result.output, dict) else {
+        "answer": str(result.output), "key_points": [], "citations": [],
+        "confidence": 0.5, "unanswered": "",
+    }
+    payload.update({
+        "_skill": PF_SKILL,
+        "_skill_action": "Public feedback · from the "
+                         f"{str(run.get('created_at') or '')[:10]} report",
+        "_skill_source": "public-feedback-query",
+    })
+    return payload
+
+
 def _plain_payload(answer: str, *, confidence: float = 0.0) -> dict:
     """An Ask-shaped payload for the non-LLM branches, tagged so the UI
     attributes it to the public-feedback path."""
@@ -212,6 +318,26 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     falls through to the generic skill answer; every other degraded case
     returns a helpful plain message instead."""
     from app.research.market import company_profile
+
+    # Follow-up filter over an existing run → query mode (seconds, no web
+    # sweep). Best-effort on every side: no run, an unshaped question, or a
+    # query-mode failure all fall through to the full pipeline below.
+    if is_followup_query(question):
+        run = None
+        try:
+            from app import db
+
+            run = db.latest_public_feedback_run(enterprise_id)
+        except Exception:  # noqa: BLE001 — treat as no stored run
+            logger.exception("public-feedback: latest-run read failed for %s", enterprise_id)
+        if run:
+            try:
+                return _answer_from_run(
+                    enterprise_id=enterprise_id, question=question,
+                    run=run, history=history,
+                )
+            except Exception:  # noqa: BLE001 — fall back to a fresh run
+                logger.exception("public-feedback: query mode failed for %s", enterprise_id)
 
     try:
         profile = company_profile(enterprise_id)

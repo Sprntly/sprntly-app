@@ -168,6 +168,105 @@ def test_answer_synthesis_failure_is_graceful(monkeypatch):
     assert "found 2 public posts" in out["answer"]
 
 
+# ── query mode (follow-ups over the stored run) ─────────────────────────────
+
+RUN = {
+    "id": 7, "question": "what are people saying about us online?",
+    "window_label": "Public feedback · 2026",
+    "records": RECORDS, "metadata": {"totals": {"collected": 2}},
+    "created_at": "2026-07-26T22:00:00+00:00",
+}
+
+
+def test_followup_query_shapes():
+    for q in [
+        "what did the App Store say?",
+        "what are users saying on reddit?",
+        "show me the feedback from March",
+        "how long has the flagging problem been raised?",
+        "why are people leaving?",
+        "what do people like?",
+        "how many complained about crashes?",
+        "is the login problem getting worse?",
+        "what's new since last time?",
+    ]:
+        assert pf.is_followup_query(q), q
+
+
+def test_report_shaped_asks_never_query_mode():
+    for q in [
+        "what are people saying about us online?",
+        "run a public feedback report",
+        "give me a fresh report on our online reputation",
+        "review mining on the app store please",
+        "what's our public standing?",
+    ]:
+        assert not pf.is_followup_query(q), q
+
+
+def _patch_latest_run(monkeypatch, run):
+    import app.db as db
+
+    monkeypatch.setattr(db, "latest_public_feedback_run", lambda _eid: run)
+
+
+def test_followup_answers_from_stored_run(monkeypatch):
+    _patch_latest_run(monkeypatch, dict(RUN))
+    calls: dict = {}
+
+    def fake_llm_call(**kw):
+        calls["llm"] = kw
+        return SimpleNamespace(output={
+            "answer": "Seventeen posts on Trustpilot — posts we found, not users.",
+            "key_points": [], "citations": [], "confidence": 0.7, "unanswered": "",
+        })
+
+    monkeypatch.setattr(pf, "llm_call", fake_llm_call)
+    out = pf.answer(enterprise_id="e1", question="what did the App Store say?")
+    assert out["_skill_source"] == "public-feedback-query"
+    assert "2026-07-26" in out["_skill_action"]
+    # grounded on the stored records + metadata, cheap call, skill bound
+    assert calls["llm"]["purpose"] == "public_feedback_query"
+    assert "legit rides flagged" in calls["llm"]["input"]
+    assert '"collected": 2' in calls["llm"]["input"]
+    assert calls["llm"]["max_tokens"] == 4000
+
+
+def test_followup_without_run_falls_to_full_pipeline(monkeypatch):
+    _patch_profile(monkeypatch)
+    _patch_latest_run(monkeypatch, None)
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: [])
+    out = pf.answer(enterprise_id="e1", question="what did the App Store say?")
+    # no stored run → the full pipeline ran (and found nothing, in this stub)
+    assert "couldn't find enough feedback" in out["answer"]
+
+
+def test_followup_query_failure_falls_back_to_full_run(monkeypatch):
+    _patch_profile(monkeypatch)
+    _patch_latest_run(monkeypatch, dict(RUN))
+
+    def boom(**kw): raise RuntimeError("model error")
+    monkeypatch.setattr(pf, "llm_call", boom)
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: [])
+    out = pf.answer(enterprise_id="e1", question="what did the App Store say?")
+    assert "couldn't find enough feedback" in out["answer"]
+
+
+def test_report_shaped_ask_ignores_stored_run(monkeypatch):
+    _patch_profile(monkeypatch)
+    called = {"latest": False}
+    import app.db as db
+
+    def fake_latest(_eid):
+        called["latest"] = True
+        return dict(RUN)
+
+    monkeypatch.setattr(db, "latest_public_feedback_run", fake_latest)
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: [])
+    pf.answer(enterprise_id="e1", question="what are people saying about us online?")
+    assert called["latest"] is False  # report-shaped → straight to the pipeline
+
+
 # ── routing wire ─────────────────────────────────────────────────────────────
 
 def test_regex_routes_public_feedback_phrasings():

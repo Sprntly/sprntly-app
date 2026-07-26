@@ -80,7 +80,10 @@ from app.db.asks import (
 )
 
 # Public-feedback runs (captured record sets + rendered reports)
-from app.db.public_feedback_runs import save_public_feedback_run
+from app.db.public_feedback_runs import (
+    latest_public_feedback_run,
+    save_public_feedback_run,
+)
 
 # Website-analysis jobs (onboarding, fire-and-forget)
 from app.db.website_analysis import (
