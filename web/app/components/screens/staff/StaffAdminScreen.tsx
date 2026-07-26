@@ -43,9 +43,10 @@ import {
 export const MODULES: { key: string; label: string }[] = [
   { key: "agents", label: "Agents" },
   { key: "weekly_brief", label: "Weekly Brief" },
-  // Staged rollout of the action-envelope chat dispatch (backend intent
-  // routing instead of the client regex ladder). No resolver: a missing key
-  // is OFF — this one does NOT fail open.
+  // Action-envelope chat dispatch (backend intent routing instead of the
+  // client regex ladder). DEFAULT ON since 2026-07-26 — a missing key counts
+  // as ON (see chatIntentEnvelopeEnabled), so this checkbox is a per-company
+  // kill switch.
   { key: "chat_intent_envelope", label: "Chat Intent Envelope (beta)" },
 ]
 
@@ -71,6 +72,18 @@ export function weeklyBriefEnabled(flags: Record<string, boolean>): boolean {
   return true
 }
 
+/** Whether action-envelope chat dispatch is on — DEFAULT ON (2026-07-26): a
+ *  missing key counts as ON, matching DEFAULT_FEATURE_FLAGS and the app-side
+ *  gate (parseFeatureFlags fills the default). Only an explicit false — the
+ *  staff kill switch — turns it off. Display-level only — never written
+ *  back. */
+export function chatIntentEnvelopeEnabled(
+  flags: Record<string, boolean>,
+): boolean {
+  if ("chat_intent_envelope" in flags) return !!flags.chat_intent_envelope
+  return true
+}
+
 // Effective-state resolvers per flag-backed module. Both the org-row chips
 // and the editor checkboxes go through these so a grandfathered row (missing
 // / legacy-only keys) shows the SAME state everywhere. Toggling a checkbox
@@ -82,6 +95,7 @@ const MODULE_RESOLVERS: Record<
 > = {
   agents: agentsEnabled,
   weekly_brief: weeklyBriefEnabled,
+  chat_intent_envelope: chatIntentEnvelopeEnabled,
 }
 
 export function keyModeLabel(c: {

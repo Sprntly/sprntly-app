@@ -17,9 +17,11 @@ export type FeatureFlags = {
    *  display time (see StaffAdminScreen); stored data is never rewritten. */
   agents: boolean
   weekly_brief: boolean
-  /** Action-envelope chat dispatch (staged rollout): when ON, every chat
-   *  message is routed by POST /v1/chat/intent (backend, history-aware)
-   *  instead of the client regex/classifier ladder. Missing key = OFF. */
+  /** Action-envelope chat dispatch: when ON, every chat message is routed by
+   *  POST /v1/chat/intent (backend, history-aware) instead of the client
+   *  regex/classifier ladder. DEFAULT ON (decision 2026-07-26): a missing key
+   *  counts as ON — same grandfathering as agents/weekly_brief — so the staff
+   *  toggle is a per-company kill switch, not an opt-in. */
   chat_intent_envelope: boolean
   // Legacy keys — superseded by `agents` but kept so old stored rows and the
   // dormant FeatureFlagsSettings surface still typecheck.
@@ -266,7 +268,7 @@ export const PLANNING_CYCLES = [
 export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   agents: true,
   weekly_brief: true,
-  chat_intent_envelope: false,
+  chat_intent_envelope: true,
   on_demand_analysis: true,
   auto_prd_generation: true,
   engineer_agent: false,
