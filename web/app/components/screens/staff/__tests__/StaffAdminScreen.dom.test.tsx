@@ -77,6 +77,7 @@ import {
   MODULES,
   agentsEnabled,
   weeklyBriefEnabled,
+  chatIntentEnvelopeEnabled,
   keyModeLabel,
 } from "../StaffAdminScreen"
 
@@ -253,8 +254,8 @@ describe("StaffAdminScreen organizations", () => {
     expect(labels[0]).toBe("Agents")
     expect(labels[1]).toMatch(/^Prototype/)
     expect(labels[2]).toBe("Weekly Brief")
-    // Staged-rollout flag for the action-envelope chat dispatch: default OFF
-    // (no resolver — a missing key does NOT fail open, unlike Agents/Brief).
+    // Action-envelope chat dispatch: DEFAULT ON (missing key = on, like
+    // Agents/Brief); the checkbox is the per-company kill switch.
     expect(labels[3]).toBe("Chat Intent Envelope (beta)")
     // The retired modules leave no dead UI behind.
     expect(screen.queryByText("On-call Agent")).toBeNull()
@@ -496,6 +497,13 @@ describe("MODULES + agentsEnabled", () => {
     expect(agentsEnabled({})).toBe(true)
     expect(agentsEnabled({ engineer_agent: true, research_agent: true })).toBe(true)
     expect(agentsEnabled({ claude_code_handoff: false })).toBe(true)
+  })
+
+  it("chat intent envelope is DEFAULT ON; explicit false is the kill switch", () => {
+    expect(chatIntentEnvelopeEnabled({})).toBe(true)
+    expect(chatIntentEnvelopeEnabled({ agents: true })).toBe(true)
+    expect(chatIntentEnvelopeEnabled({ chat_intent_envelope: true })).toBe(true)
+    expect(chatIntentEnvelopeEnabled({ chat_intent_envelope: false })).toBe(false)
   })
 })
 

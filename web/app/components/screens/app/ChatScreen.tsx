@@ -681,10 +681,12 @@ export function ChatScreen() {
   const auth = useAuth()
   const { profile, workspace } = useWorkspace()
   const { content, setContent } = useContent()
-  // Action-envelope dispatch (staged rollout, staff-panel flag): when ON, one
+  // Action-envelope dispatch (DEFAULT ON; staff-panel kill switch): one
   // backend call (POST /v1/chat/intent — history-aware, sees the open PRD)
   // decides what each message asks for, replacing the client regex/classifier
-  // ladder in submitAsk. Missing key = OFF.
+  // ladder in submitAsk. parseFeatureFlags fills a missing key from
+  // DEFAULT_FEATURE_FLAGS (true), so only an explicit staff-set false — or a
+  // workspace that hasn't loaded — lands on the legacy ladder.
   const envelopeDispatchEnabled = workspace?.feature_flags?.chat_intent_envelope === true
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
