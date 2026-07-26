@@ -195,6 +195,17 @@ def _make_dispatch(session: jira_fetch.JiraSession, proposal: dict | None = None
                 project=inp.get("project"),
                 status=inp.get("status"),
             )
+            # Exactly one match → return it IN FULL, not the one-line summary.
+            #
+            # The lean field set exists because a search can return twenty rows
+            # and nobody wants twenty descriptions. With a single hit there is no
+            # such trade: the user asked about one ticket, got four fields and an
+            # offer to fetch the rest, and had to ask again for what they plainly
+            # already wanted. One extra API call buys the whole answer up front.
+            if len(hits) == 1 and hits[0].get("key"):
+                issue = jira_fetch.get_issue(session, hits[0]["key"])
+                if issue is not None:
+                    return jira_fetch.render_issue(issue)
             return jira_fetch.render_search(hits)
         if name == "jira_get_issue":
             key = (inp.get("issue_key") or "").strip()

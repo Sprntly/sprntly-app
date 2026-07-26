@@ -136,6 +136,77 @@ def test_is_jira_lookup_sticky_change_followup_in_thread():
         assert is_jira_lookup(q, thread), q
 
 
+def test_is_jira_lookup_attribute_request_without_a_pronoun():
+    """"i want to see full detail" names WHAT is wanted but not what it belongs
+    to — the thread already established that. Reported live: it fell through to
+    the generic agent, which replied that it had no detail for the ticket the
+    turn above had just listed."""
+    thread = [
+        {"role": "user", "content": "get me tickets about car"},
+        {"role": "assistant", "content": "KAN-1033 — Build a car driving feature."},
+    ]
+    for q in [
+        "i want to see full detail",
+        "show me the description",
+        "any comments on it",
+        "who is the assignee",
+    ]:
+        assert is_jira_lookup(q, thread), q
+
+
+def test_attribute_request_still_loses_to_a_pivot():
+    """The pivot veto runs first, so a tracker-ish word inside a genuine subject
+    change does not drag the conversation back to Jira."""
+    thread = [
+        {"role": "user", "content": "get me tickets about car"},
+        {"role": "assistant", "content": "KAN-1033 — Build a car driving feature."},
+    ]
+    for q in ["what's the status of our roadmap?", "give me the details of our churn"]:
+        assert not is_jira_lookup(q, thread), q
+
+
+def test_single_search_hit_returns_the_full_issue(monkeypatch):
+    """One match → the whole ticket, not four fields and an offer to fetch more.
+
+    The lean field set is there for a twenty-row list; with a single hit the
+    user has already told us which ticket they mean.
+    """
+    def fake_get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/comment"):
+            return _Resp({"comments": []})
+        if url.endswith("/search/jql"):
+            return _Resp({"issues": [
+                {"key": "KAN-1033", "fields": {
+                    "summary": "Build a car driving feature",
+                    "status": {"name": "In Progress"}, "issuetype": {"name": "Task"},
+                }},
+            ]})
+        return _Resp(_issue_payload("Task"))
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+    out = jl._make_dispatch(_session())("jira_search", {"text": "car"})
+    # The full render, not the one-line hit: description and the detail sections.
+    assert "description:" in out
+    assert "Repro steps" in out
+
+
+def test_multiple_search_hits_stay_lean(monkeypatch):
+    """Two or more matches keep the one-line-per-result list — expanding every
+    hit is what the lean field set exists to avoid."""
+    def fake_get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/search/jql"):
+            return _Resp({"issues": [
+                {"key": "A-1", "fields": {"summary": "one", "status": {"name": "To Do"}}},
+                {"key": "A-2", "fields": {"summary": "two", "status": {"name": "To Do"}}},
+            ]})
+        raise AssertionError("must not fetch a full issue for a multi-hit search")
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+    out = jl._make_dispatch(_session())("jira_search", {"text": "x"})
+    assert "A-1" in out and "A-2" in out
+    assert "description:" not in out
+
+
 def test_is_jira_lookup_bare_yes_accepts_the_assistants_offer():
     """The lookup ends with "Would you like me to fetch the full details?" and
     the natural reply is one word.
@@ -696,7 +767,9 @@ def test_dispatch_routes_to_tools(monkeypatch):
     monkeypatch.setattr(jf, "get_issue", lambda sess, key:
                         {"key": key, "summary": "x", "type": "Task", "status": "Done"})
     dispatch = jl._make_dispatch(s)
-    assert "P-1: s" in dispatch("jira_search", {"text": "pay"})
+    # A single search hit is expanded to the full issue (see the single-hit test
+    # above), so this asserts the KEY made it through rather than the lean line.
+    assert "P-1" in dispatch("jira_search", {"text": "pay"})
     assert "ABC-9: x" in dispatch("jira_get_issue", {"issue_key": "ABC-9"})
     assert "required" in dispatch("jira_get_issue", {})
     assert "unknown tool" in dispatch("nope", {})

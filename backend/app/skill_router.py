@@ -427,6 +427,14 @@ def _continues_tracker_thread(question: str) -> bool:
         return False
     if _JIRA_FILTER.search(question):
         return True
+    # Asking for an ATTRIBUTE of the issue on screen — "i want to see full
+    # detail", "what's the description", "any comments?", "who's it assigned
+    # to". These name what they want but not what it belongs to, because the
+    # thread already established that. Safe without a pronoun: we are inside a
+    # confirmed tracker thread and past the pivot veto, so a genuine subject
+    # change ("what's our churn rate?") has already been rejected above.
+    if _TRACKER_DETAIL.search(question):
+        return True
     # Anaphora alone is too weak ("what does that mean for launch?"), so pair it
     # with an actual read: a lookup verb or a request for issue attributes.
     if _TRACKER_ANAPHORA.search(question) and (
