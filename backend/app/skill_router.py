@@ -86,7 +86,7 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
 
     # Public feedback report (external reviews & social: App Store, Google Play,
     # Reddit, G2, X; "what are people saying about us online")
-    (re.compile(r"\b(review\s+mining|online\s+reputation|public\s+sentiment|app[\s-]?store|google\s+play|trustpilot|capterra|\bg2\b|reddit)\b", re.I),
+    (re.compile(r"\b(review\s+mining|online\s+reputation|public\s+sentiment|public\s+feedback|public\s+standings?|app[\s-]?store|google\s+play|trustpilot|capterra|\bg2\b|reddit)\b", re.I),
      "public-feedback-report", "Public feedback report", 0.85),
     (re.compile(r"\bwhat.{0,25}\b(saying|people\s+say).{0,15}\babout\s+us\b", re.I),
      "public-feedback-report", "Public feedback report", 0.85),

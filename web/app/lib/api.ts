@@ -425,6 +425,8 @@ export type AskResponse = {
   citations: AskCitation[]
   confidence: number
   unanswered: string
+  /** Skill id the backend attributed the answer to (e.g. voice-of-customer-report). */
+  _skill?: string | null
   /** Present only when the Jira agent proposed a change awaiting confirmation. */
   _pending_jira_change?: PendingJiraChange
 }

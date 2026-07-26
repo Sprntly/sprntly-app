@@ -554,6 +554,20 @@ def answer(
             dataset, q, enterprise_id=enterprise_id, prd_context=prd_context
         )
 
+    # Public-feedback routed: the report needs the public WEB (app stores,
+    # Reddit, review sites), which the generic skill answer can't reach — it
+    # would answer from the KG's first-party signal. Run the dedicated
+    # web-search pipeline instead; it returns None only when the company
+    # profile can't be read, falling through to the generic answer.
+    if decision.skill_id == "public-feedback-report":
+        from app import public_feedback
+
+        pf = public_feedback.answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
+        if pf is not None:
+            return _maybe_verify(pf, enterprise_id)
+
     # VoC routed with no live call source (call_digest is handled upstream): render
     # the pinned HTML report from KG signal when there is any; else fall through to
     # the generic answer (which explains what to connect).
