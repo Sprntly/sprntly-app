@@ -111,6 +111,19 @@ def test_route_skill_match_wins_over_scope_flag(monkeypatch):
     assert d.skill_id == "retention-churn" and d.source == "llm"
 
 
+def test_out_of_scope_message_judges_topic_not_data():
+    """The canned refusal must judge TOPIC, never data volume. The old 'I
+    don't have grounded data on that topic, so I won't guess' sentence taught
+    the ANSWER model to emit the refusal for in-scope questions on a
+    workspace with nothing connected ('how would dark mode look in my
+    product?' — ask job 383, 2026-07-26). The message stays topical-only, and
+    ASK_SYSTEM carries an explicit no-data carve-out instead."""
+    from app.prompts import ASK_SYSTEM
+
+    assert "grounded data" not in qa.OUT_OF_SCOPE_MESSAGE
+    assert "must NEVER get that canned reply" in ASK_SYSTEM
+
+
 def test_answer_out_of_scope_returns_canned(monkeypatch):
     monkeypatch.setattr(
         qa, "llm_call", lambda **k: _route_out("none", 0.9, "weather", in_scope=False)
