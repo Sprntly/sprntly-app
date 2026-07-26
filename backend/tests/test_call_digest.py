@@ -49,6 +49,30 @@ def test_is_voc_report_request():
         assert not is_voc_report_request(q), q
 
 
+def test_is_voc_report_request_customer_feedback_phrasings():
+    # "Top/summarize customer feedback" asks are VoC by intent — no call-noun,
+    # no conversation-noun, no "voice of customer" literal (staging misroute:
+    # "What is the top customer feedback" fell to the generic answer path).
+    for q in [
+        "What is the top customer feedback",
+        "summarize customer feedback from last week",
+        "customer feedback themes this month",
+        "top user feedback right now?",
+        "what are the main pieces of client feedback",
+        "customer feedback report please",
+    ]:
+        assert is_voc_report_request(q), q
+    # No intent word near "customer feedback", or feedback isn't customers' —
+    # these must NOT divert.
+    for q in [
+        "give me feedback on my PRD draft",
+        "summarize the feedback from the beta survey",
+        "we built this from customer feedback",
+        "customer feedback",   # bare mention, no ask
+    ]:
+        assert not is_voc_report_request(q), q
+
+
 def test_is_voc_report_request_feedback_from_conversations():
     # "Feedback from customer conversations" phrasings are VoC by intent — they
     # carry no "voice of customer" literal and no call-noun, and previously fell
@@ -293,7 +317,7 @@ def test_answer_explicit_window_is_never_widened(monkeypatch):
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: calls.append(1) or [])
     p = cd.answer(enterprise_id="co", question="summarize customer calls from last week")
     assert len(calls) == 1
-    assert "No customer calls found" in p["answer"] and "wider window" in p["answer"]
+    assert "No customer calls" in p["answer"] and "wider window" in p["answer"]
 
 
 def test_answer_autowiden_exhausted_says_90_days(monkeypatch):
@@ -323,3 +347,165 @@ def test_answer_report_failure_degrades_gracefully(monkeypatch):
     monkeypatch.setattr(vr, "build", boom)
     p = cd.answer(enterprise_id="co", question="summarize customer calls")
     assert "error" in p["answer"].lower() and p["_skill_source"] == "call-digest"
+
+
+# ── uploaded voice-category documents (connector-category uploads) ───────────
+
+def _doc(i, days_ago=1):
+    return cd.UploadedVoiceDoc(
+        name=f"doc{i}.pdf", added_at=NOW - timedelta(days=days_ago),
+        text=f"support export {i}")
+
+
+def test_build_corpus_docs_only_is_ok(monkeypatch):
+    """No Fireflies key but voice-category uploads exist → real corpus, not
+    not_connected. The docs render as <uploaded document> blocks."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [_doc(1), _doc(2)])
+    out = cd.build_corpus("co", cd.parse_window("calls last week", now=NOW))
+    assert out.status == "ok"
+    assert out.count == 0 and out.doc_count == 2
+    assert '<uploaded document name="doc1.pdf"' in out.text
+    assert "support export 2" in out.text
+
+
+def test_build_corpus_merges_calls_and_docs(monkeypatch):
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [_doc(1)])
+    out = cd.build_corpus("co", cd.parse_window("calls last week", now=NOW))
+    assert out.status == "ok"
+    assert out.count == 1 and out.doc_count == 1
+    # Calls first, then docs.
+    assert out.text.index("Call 1") < out.text.index('<uploaded document')
+
+
+def test_build_corpus_no_docs_in_window_is_no_calls_not_disconnected(monkeypatch):
+    """Voice docs exist but none dated inside the window (and no key): that's
+    an empty WINDOW (no_calls → auto-widen can rescue it), not not_connected."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(
+        cd, "_voice_docs",
+        lambda cid, w: [] if w is not None else [_doc(1, days_ago=400)])
+    out = cd.build_corpus("co", cd.parse_window("calls last week", now=NOW))
+    assert out.status == "no_calls"
+
+
+def test_build_corpus_fetch_error_degrades_to_docs(monkeypatch):
+    """Fireflies down but uploaded docs available → docs-only ok corpus
+    instead of an error dead-end."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    def boom(*a, **k):
+        raise RuntimeError("fireflies down")
+    monkeypatch.setattr(cd, "fetch_calls", boom)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [_doc(1)])
+    out = cd.build_corpus("co", cd.parse_window("calls last week", now=NOW))
+    assert out.status == "ok"
+    assert out.doc_count == 1 and out.count == 0
+    assert out.error  # the fetch failure is still recorded
+
+
+def test_has_call_source_true_from_docs_alone(monkeypatch):
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [_doc(1)])
+    assert cd.has_call_source("co") is True
+
+
+def test_answer_docs_only_runs_voc_report(monkeypatch):
+    """Docs-only tenant asking for VoC gets the SAME report pipeline; the
+    source line and skill action disclose the uploaded-document basis."""
+    import app.voc_report as vr
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
+    monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [_doc(1), _doc(2)])
+    captured = {}
+    monkeypatch.setattr(
+        vr, "build",
+        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>r</body></html>",
+    )
+    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    assert p["answer"].startswith("<!DOCTYPE html>")
+    assert "UPLOADED VOICE DOCUMENTS" in captured["source_line"]
+    assert "2 uploaded voice documents" in captured["source_line"]
+    assert "support export 1" in captured["corpus_text"]
+    assert "2 uploaded docs" in p["_skill_action"]
+
+
+def test_voice_docs_reads_categorized_files_within_window(isolated_settings, monkeypatch):
+    """_voice_docs end-to-end over a real dataset dir: voice-category files
+    inside the window are returned with their converted markdown text; other
+    categories and out-of-window files are excluded."""
+    import os
+
+    from app import datasets
+    from app.ingest import md_filename
+
+    base, raw = datasets.dataset_path("acme"), datasets.raw_path("acme")
+    raw.mkdir(parents=True, exist_ok=True)
+    for name, category, text in [
+        ("calls.pdf", "voice", "call transcript body"),
+        ("old_calls.pdf", "voice", "ancient transcript"),
+        ("mrr.xlsx", "revenue", "revenue body"),
+    ]:
+        (raw / name).write_bytes(b"raw")
+        (base / md_filename(name)).write_text(text)
+        datasets.set_file_categories("acme", [name], category)
+    # Pin upload times relative to the fixed NOW: calls.pdf inside the window,
+    # old_calls.pdf aged out of any 7-day window.
+    fresh = (NOW - timedelta(days=1)).timestamp()
+    os.utime(raw / "calls.pdf", (fresh, fresh))
+    old = (NOW - timedelta(days=300)).timestamp()
+    os.utime(raw / "old_calls.pdf", (old, old))
+
+    monkeypatch.setattr(
+        "app.db.companies.slug_for_company_id", lambda cid: "acme")
+    win = cd.Window(NOW - timedelta(days=7), NOW + timedelta(days=7), "test")
+    docs = cd._voice_docs("co", win)
+    assert [d.name for d in docs] == ["calls.pdf"]
+    assert docs[0].text == "call transcript body"
+    # No window → the aged file appears too; revenue category never does.
+    all_docs = cd._voice_docs("co", None)
+    assert {d.name for d in all_docs} == {"calls.pdf", "old_calls.pdf"}
+
+
+def test_staging_scenario_top_customer_feedback_over_category_upload(
+    isolated_settings, monkeypatch,
+):
+    """Replay of the 2026-07-26 staging misroute end-to-end on this branch:
+    a feedback CSV uploaded via the Customer Voice & Support category strip,
+    NO Fireflies connected, question "What is the top customer feedback".
+    Must route to the digest (router match + has_call_source via docs) and run
+    the pinned VoC report over the uploaded file's converted text."""
+    import os
+
+    import app.voc_report as vr
+    from app import datasets
+    from app.ingest import md_filename
+
+    # The uploaded file, as the category strip stores it.
+    base, raw = datasets.dataset_path("acme"), datasets.raw_path("acme")
+    raw.mkdir(parents=True, exist_ok=True)
+    name = "user_feedback_raw_2026_07_21_to_2026_07_26.csv"
+    (raw / name).write_bytes(b"raw")
+    (base / md_filename(name)).write_text("latency complaint; mobile access ask")
+    datasets.set_file_categories("acme", [name], "voice")
+    fresh = (NOW - timedelta(days=2)).timestamp()
+    os.utime(raw / name, (fresh, fresh))
+
+    monkeypatch.setattr("app.db.companies.slug_for_company_id", lambda cid: "acme")
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)  # no Fireflies
+    monkeypatch.setattr(cd, "_utc_now", lambda: NOW)
+    captured = {}
+    monkeypatch.setattr(
+        vr, "build",
+        lambda **k: captured.update(k) or "<!DOCTYPE html><html><body>voc</body></html>",
+    )
+
+    question = "What is the top customer feedback"
+    assert is_voc_report_request(question)          # router now matches
+    assert cd.has_call_source("co") is True         # voice-category doc counts
+
+    p = cd.answer(enterprise_id="co", question=question)
+    assert p["_skill"] == "voice-of-customer-report"
+    assert p["answer"].startswith("<!DOCTYPE html>")
+    assert "latency complaint; mobile access ask" in captured["corpus_text"]
+    assert "UPLOADED VOICE DOCUMENTS" in captured["source_line"]

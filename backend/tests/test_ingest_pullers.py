@@ -183,8 +183,9 @@ def test_runner_batches_and_aggregates(isolated_settings):
     facade = GraphFacade()
     seen_docs = []
     def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None,
-                     origin=None):
-        seen_docs.append((doc_name, len(text), source_hint, origin))
+                     origin=None, provenance_extra=None):
+        seen_docs.append((doc_name, len(text), source_hint, origin,
+                          provenance_extra))
         return {"signals": 2, "themes": 1, "skipped": 0}
 
     with patch.object(runner, "extract_document", side_effect=fake_extract):
@@ -194,12 +195,34 @@ def test_runner_batches_and_aggregates(isolated_settings):
     assert out["batches"] >= 2                       # char budget forces split
     assert out["signals"] == out["batches"] * 2
     assert not out["errors"]
-    assert all("clickup-sync-batch-" in d for d, _, _, _ in seen_docs)
-    assert all(l <= 7000 for _, l, _, _ in seen_docs)
-    assert all(h and "project_mgmt" in h for _, _, h, _ in seen_docs)
+    assert all("clickup-sync-batch-" in d for d, *_ in seen_docs)
+    assert all(l <= 7000 for _, l, *_ in seen_docs)
+    assert all(h and "project_mgmt" in h for _, _, h, *_ in seen_docs)
     # Connector syncs stamp origin="connector" so the brief gate never treats
     # a tenant with live connectors as upload-only.
-    assert all(o == "connector" for _, _, _, o in seen_docs)
+    assert all(o == "connector" for _, _, _, o, _ in seen_docs)
+    # Third-party syncs carry no channel stamp (only `uploads` does).
+    assert all(pe is None for *_, pe in seen_docs)
+
+
+def test_runner_stamps_upload_channel_for_uploads_provider(isolated_settings):
+    """The uploads "connector" is the user's own documents — its signals carry
+    channel="upload" so convergence keeps the upload-only brief relaxation
+    (same evidentiary class as manual uploads; mirrors #868's Drive rationale)."""
+    from app.graph import GraphFacade
+    from app.kg_ingest import runner
+
+    seen = []
+    def fake_extract(f, eid, **kw):
+        seen.append(kw)
+        return {"signals": 1, "themes": 0, "skipped": 0}
+
+    with patch.object(runner, "extract_document", side_effect=fake_extract):
+        out = runner.sync_provider(GraphFacade(), "ent-A", "uploads",
+                                   token="co-1", records=_recs(3, provider="uploads"))
+    assert not out["errors"]
+    assert seen and all(k["origin"] == "connector" for k in seen)
+    assert all(k["provenance_extra"] == {"channel": "upload"} for k in seen)
 
 
 def test_runner_isolates_batch_errors(isolated_settings):

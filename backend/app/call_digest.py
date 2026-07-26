@@ -59,6 +59,22 @@ class Window:
 
 
 @dataclass
+class UploadedVoiceDoc:
+    """A file uploaded into the Customer Voice & Support connector category —
+    the same evidentiary class as a fetched call, read from disk instead of
+    the Fireflies API. `added_at` (upload time) is what the window filters on:
+    uploaded transcripts carry no reliable call dates."""
+    name: str          # original stored filename, e.g. "Q3 Calls.pdf"
+    added_at: datetime
+    text: str
+
+    def render(self) -> str:
+        return (f'<uploaded document name="{self.name}" '
+                f'added="{self.added_at:%Y-%m-%d}">\n{self.text}\n'
+                f"</uploaded document>")
+
+
+@dataclass
 class DigestCorpus:
     status: str                                    # ok | not_connected | no_calls | error
     window: Window
@@ -67,10 +83,17 @@ class DigestCorpus:
     error: str = ""
     total: int = 0        # calls found in the window (≥ count when truncated)
     quote_cap: int | None = None  # per-call quote cap applied by the fit (None = untrimmed)
+    # Docs uploaded into the voice category and dated inside the window —
+    # merged into `text` after the calls (see build_corpus).
+    docs: list[UploadedVoiceDoc] = field(default_factory=list)
 
     @property
     def count(self) -> int:
         return len(self.calls)
+
+    @property
+    def doc_count(self) -> int:
+        return len(self.docs)
 
 
 # ── Window parsing ───────────────────────────────────────────────────────────
@@ -171,13 +194,62 @@ def _load_api_key(company_id: str) -> str | None:
     return token_json.get("api_key") or None
 
 
+#: Per-document char cap for the corpus. A single 300-page transcript export
+#: must not evict every other doc/call; the head carries the content anyway.
+_DOC_CHAR_CAP = 60_000
+
+#: Sidecar category key of "Customer Voice & Support" (web connectorsCatalog).
+_VOICE_CATEGORY = "voice"
+
+
+def _voice_docs(company_id: str, window: Window | None) -> list[UploadedVoiceDoc]:
+    """Files uploaded into the voice connector category, newest first,
+    upload-dated inside `window` (None = no date filter). Text comes from the
+    converted markdown sibling (md_filename; collision-suffixed siblings can't
+    be attributed — same limitation as list_files). Never raises."""
+    from app import datasets
+    from app.db.companies import slug_for_company_id
+    from app.ingest import md_filename
+
+    try:
+        slug = slug_for_company_id(company_id)
+        if not slug:
+            return []
+        raw_dir = datasets.raw_path(slug)
+        base_dir = datasets.dataset_path(slug)
+        out: list[UploadedVoiceDoc] = []
+        for raw_name, category in datasets.read_file_categories(slug).items():
+            if category != _VOICE_CATEGORY:
+                continue
+            raw = raw_dir / raw_name
+            if not raw.is_file():
+                continue
+            added = datetime.fromtimestamp(raw.stat().st_mtime, tz=timezone.utc)
+            if window and not (window.since <= added <= window.until):
+                continue
+            md = base_dir / md_filename(raw_name)
+            try:
+                text = md.read_text().strip()
+            except OSError:
+                continue
+            if text:
+                out.append(UploadedVoiceDoc(
+                    name=raw_name, added_at=added, text=text[:_DOC_CHAR_CAP]))
+        out.sort(key=lambda d: d.added_at, reverse=True)
+        return out
+    except Exception:  # noqa: BLE001 — degrade to no docs, never break chat
+        logger.exception("call-digest: could not read voice docs for %s", company_id)
+        return []
+
+
 def has_call_source(company_id: str) -> bool:
     """True when a live call source (Fireflies) is connected and its credential
-    is readable — i.e. build_corpus can actually fetch calls. Lets the router
-    divert a bare 'voice of customer' request to the live digest only when it
-    will find data; with none connected, the caller falls through to the skill's
-    what-to-connect guidance instead."""
-    return _load_api_key(company_id) is not None
+    is readable, OR documents have been uploaded into the Customer Voice &
+    Support connector category — i.e. build_corpus can assemble a real corpus.
+    Lets the router divert a bare 'voice of customer' request to the digest
+    only when it will find data; with neither, the caller falls through to the
+    skill's what-to-connect guidance instead."""
+    return _load_api_key(company_id) is not None or bool(_voice_docs(company_id, None))
 
 
 def _fit_corpus(
@@ -209,25 +281,56 @@ def _fit_corpus(
 
 
 def build_corpus(company_id: str, window: Window) -> DigestCorpus:
-    """Fetch every call in the window from Fireflies and assemble the corpus.
+    """Assemble the voice corpus for the window: every Fireflies call (when
+    connected) MERGED with documents uploaded into the Customer Voice & Support
+    category (upload-dated inside the window).
 
     Returns a DigestCorpus whose `status` tells the caller what happened:
-    not_connected (no Fireflies), no_calls (window empty), error (API failed),
-    or ok (corpus ready). Never raises — the chat answer degrades gracefully."""
+    not_connected (no Fireflies AND no voice docs at all), no_calls (both
+    sources empty for this window), error (API failed and no docs to fall back
+    on), or ok (corpus ready). Never raises — the chat answer degrades
+    gracefully."""
     api_key = _load_api_key(company_id)
-    if not api_key:
+    docs = _voice_docs(company_id, window)
+    if not api_key and not docs and not _voice_docs(company_id, None):
         return DigestCorpus(status="not_connected", window=window)
-    try:
-        calls = fetch_calls(api_key, since=window.since, until=window.until)
-    except Exception as e:  # noqa: BLE001 — surface as a graceful chat message
-        logger.warning("call-digest: fireflies fetch failed for %s: %s", company_id, e)
-        return DigestCorpus(status="error", window=window, error=str(e))
-    if not calls:
+
+    calls: list[CallTranscript] = []
+    fetch_error = ""
+    if api_key:
+        try:
+            calls = fetch_calls(api_key, since=window.since, until=window.until)
+        except Exception as e:  # noqa: BLE001 — surface as a graceful chat message
+            logger.warning("call-digest: fireflies fetch failed for %s: %s", company_id, e)
+            # With uploaded docs available the digest still has a corpus —
+            # degrade to docs-only instead of erroring the whole answer.
+            if not docs:
+                return DigestCorpus(status="error", window=window, error=str(e))
+            fetch_error = str(e)
+
+    if not calls and not docs:
         return DigestCorpus(status="no_calls", window=window)
-    selected, text, quote_cap = _fit_corpus(calls)
+
+    text, quote_cap, total = "", None, len(calls)
+    if calls:
+        calls, text, quote_cap = _fit_corpus(calls)
+    # Append docs into the remaining budget (newest first; each doc already
+    # capped at _DOC_CHAR_CAP). Docs-only corpora always keep at least one doc.
+    kept_docs: list[UploadedVoiceDoc] = []
+    size = len(text)
+    for d in docs:
+        block = d.render()
+        # (kept_docs or calls): a docs-only corpus always keeps its first doc.
+        if (kept_docs or calls) and size + len(block) + 2 > _CORPUS_CHAR_BUDGET:
+            break
+        kept_docs.append(d)
+        text = f"{text}\n\n{block}" if text else block
+        size = len(text)
+
     return DigestCorpus(
-        status="ok", window=window, calls=selected, text=text,
-        total=len(calls), quote_cap=quote_cap,
+        status="ok", window=window, calls=calls, text=text,
+        total=total, quote_cap=quote_cap, docs=kept_docs,
+        error=fetch_error,
     )
 
 
@@ -273,8 +376,9 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
         return _plain_payload(
             "I can summarize your customer calls, but no call source is connected "
             "yet. Connect **Fireflies** in Settings → Connectors (paste your "
-            "Fireflies API key) and I'll pull the transcripts and synthesize them "
-            "into a voice-of-customer report."
+            "Fireflies API key), or upload call transcripts / support exports "
+            "into the **Customer Voice & Support** category there, and I'll "
+            "synthesize them into a voice-of-customer report."
         )
     if corpus.status == "error":
         return _plain_payload(
@@ -285,14 +389,16 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     if corpus.status == "no_calls":
         if window.explicit:
             return _plain_payload(
-                f"No customer calls found in Fireflies for {window.label}. Try a "
-                "wider window (e.g. \"summarize calls from the last 30 days\"), or "
-                "check that your meetings are syncing to Fireflies."
+                f"No customer calls or uploaded voice documents found for "
+                f"{window.label}. Try a wider window (e.g. \"summarize calls "
+                "from the last 30 days\"), or check that your meetings are "
+                "syncing to Fireflies."
             )
         # Already auto-widened to the last step — a wider window won't help.
         return _plain_payload(
-            f"No customer calls found in Fireflies in {window.label}. Check that "
-            "your meetings are syncing to Fireflies (Settings → Connectors)."
+            f"No customer calls or uploaded voice documents found in "
+            f"{window.label}. Check that your meetings are syncing to Fireflies "
+            "(Settings → Connectors)."
         )
 
     # status == ok → run the VoC skill over the complete corpus and render the
@@ -313,8 +419,17 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             f"; verbatim quotes sampled to ~{corpus.quote_cap} per call to fit "
             "every call in — distilled summaries are complete"
         )
+    if corpus.doc_count:
+        docs_part = (
+            f"{corpus.doc_count} uploaded voice document"
+            f"{'s' if corpus.doc_count != 1 else ''} (window = upload date)"
+        )
+        coverage = f"{coverage} + {docs_part}" if corpus.count else docs_part
+    header = ("CUSTOMER CALLS + UPLOADED DOCUMENTS" if corpus.count and corpus.doc_count
+              else "UPLOADED VOICE DOCUMENTS" if corpus.doc_count
+              else "CUSTOMER CALLS")
     source_line = (
-        f"=== CUSTOMER CALLS — {window.label} ({coverage}) ==="
+        f"=== {header} — {window.label} ({coverage}) ==="
     )
     try:
         html = voc_report.build(
@@ -327,15 +442,20 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     except Exception:  # noqa: BLE001 — never break the chat
         logger.exception("call-digest: VoC report run failed for %s", enterprise_id)
         return _plain_payload(
-            f"I pulled {corpus.count} call(s) for {window.label} but hit an error "
-            "synthesizing the report. Please retry."
+            f"I gathered {corpus.count} call(s) and {corpus.doc_count} uploaded "
+            f"document(s) for {window.label} but hit an error synthesizing the "
+            "report. Please retry."
         )
 
+    sources = f"{corpus.count} calls"
+    if corpus.doc_count:
+        docs_label = f"{corpus.doc_count} uploaded doc{'s' if corpus.doc_count != 1 else ''}"
+        sources = f"{sources} + {docs_label}" if corpus.count else docs_label
     payload = {
         "answer": html, "key_points": [], "citations": [],
         "confidence": 0.6, "unanswered": "",
         "_skill": _VOC_SKILL,
-        "_skill_action": f"Voice of customer · {corpus.count} calls · {window.label}",
+        "_skill_action": f"Voice of customer · {sources} · {window.label}",
         "_skill_source": "call-digest",
     }
     return payload

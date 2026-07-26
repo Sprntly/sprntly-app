@@ -260,6 +260,45 @@ def test_seed_corpus_reextracts_when_content_changes(isolated_settings):
     assert out["docs"] == 1
 
 
+def test_seed_extracts_category_docs_as_connector_data(isolated_settings):
+    """A doc uploaded into an evidence-bearing connector category (voice/
+    analytics/revenue/crm/monitoring) extracts with that category's source
+    hint, deterministic default source_type, and origin="connector" +
+    channel="upload"; an uncategorized doc keeps the plain-upload path."""
+    from app.graph.facade import GraphFacade
+
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    facade = GraphFacade()
+
+    class _Doc:
+        def __init__(self, name, text):
+            self.name, self.text = name, text
+
+    class _Corpus:
+        docs = [_Doc("q3_calls", "transcript text"),
+                _Doc("strategy", "plain doc text")]
+
+    calls: list[dict] = []
+    with patch.object(sb, "load_corpus", return_value=_Corpus()), \
+         patch.object(sb.datasets, "md_file_categories",
+                      return_value={"q3_calls.md": "voice"}), \
+         patch.object(sb, "extract_document",
+                      side_effect=lambda *a, **k: calls.append(k) or
+                      {"signals": 1, "themes": 0, "skipped": 0}):
+        out = sb._seed_from_corpus(facade, "co-1", "acme")
+
+    assert out["docs"] == 2
+    by_doc = {c["doc_name"]: c for c in calls}
+    voice = by_doc["q3_calls"]
+    assert voice["origin"] == "connector"
+    assert voice["source_type_default"] == "customer_voice"
+    assert "customer_voice" in voice["source_hint"]
+    assert voice["provenance_extra"] == {"channel": "upload", "category": "voice"}
+    plain = by_doc["strategy"]
+    assert plain["origin"] == "upload"
+    assert "source_hint" not in plain and "source_type_default" not in plain
+
+
 def test_mark_corpus_doc_ingested_makes_seed_skip(isolated_settings):
     """A doc ledger-marked by the Drive sync (whose content reaches the KG
     via its own connector-origin extraction) is skipped by the corpus seed —

@@ -139,3 +139,39 @@ def has_type(provider: str | None, connector_type: str) -> bool:
 def providers_with_type(connector_type: str) -> list[str]:
     """Every provider carrying `connector_type`, catalog order."""
     return [p for p, ts in CONNECTOR_TYPES.items() if connector_type in ts]
+
+
+# ── Evidence-bearing UPLOAD categories (connector-category uploads) ──────────
+#
+# Files uploaded into a connector CATEGORY's upload strip (Settings →
+# Connectors; the category key rides in the file_categories.json sidecar, see
+# app.datasets) declare "I have this kind of data" — they are processed like
+# that category's connector data, not like plain company documentation:
+# extraction gets the category's source hint, signals default to the category's
+# KG source_type, and provenance carries origin="connector" (channel="upload").
+# Categories absent here (docs/pm/code/design/comms — the web catalog's
+# NON_EVIDENCE_CATEGORIES, which this map must stay the complement of) keep the
+# plain-upload path: origin="upload", no hint, LLM-classified source_type.
+#
+# Each entry: category key → (default KG source_type, extractor source hint).
+# The default source_type must be in graph.types.SIGNAL_SOURCE_TYPES (DB CHECK
+# constraint). monitoring/crm have no exact KG source_type; they default to the
+# closest evidence type and the hint tells the extractor the real context.
+EVIDENCE_UPLOAD_CATEGORIES: dict[str, tuple[str, str]] = {
+    "voice": ("customer_voice",
+              "customer_voice (user-uploaded customer voice/support documents: "
+              "call transcripts, support ticket exports, survey verbatims, "
+              "interview notes)"),
+    "analytics": ("analytics",
+                  "analytics (user-uploaded product analytics exports: metrics, "
+                  "funnels, dashboards, usage reports)"),
+    "revenue": ("revenue",
+                "revenue (user-uploaded revenue/billing exports: MRR reports, "
+                "deals, churn/expansion data)"),
+    "crm": ("revenue",
+            "revenue + customer_voice (user-uploaded CRM exports: deals/"
+            "pipeline, account notes, customer emails)"),
+    "monitoring": ("analytics",
+                   "analytics (user-uploaded monitoring/reliability exports: "
+                   "incident reports, error/uptime data)"),
+}
