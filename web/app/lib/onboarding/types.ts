@@ -17,6 +17,10 @@ export type FeatureFlags = {
    *  display time (see StaffAdminScreen); stored data is never rewritten. */
   agents: boolean
   weekly_brief: boolean
+  /** Action-envelope chat dispatch (staged rollout): when ON, every chat
+   *  message is routed by POST /v1/chat/intent (backend, history-aware)
+   *  instead of the client regex/classifier ladder. Missing key = OFF. */
+  chat_intent_envelope: boolean
   // Legacy keys — superseded by `agents` but kept so old stored rows and the
   // dormant FeatureFlagsSettings surface still typecheck.
   on_demand_analysis: boolean
@@ -262,6 +266,7 @@ export const PLANNING_CYCLES = [
 export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   agents: true,
   weekly_brief: true,
+  chat_intent_envelope: false,
   on_demand_analysis: true,
   auto_prd_generation: true,
   engineer_agent: false,

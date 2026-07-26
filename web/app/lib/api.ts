@@ -520,6 +520,48 @@ export const askApi = {
   },
 }
 
+/** The action envelope from POST /v1/chat/intent — the backend's history-aware
+ *  verdict on what ONE chat message asks for. Shaped like a one-iteration
+ *  tool-use turn: `intent` names the executor, the other fields are its
+ *  arguments, synthesized from the whole conversation (not the surface words
+ *  of the newest message). `prd_id`/`prd_title` echo the resolved TARGET (the
+ *  tab-sent PRD, or the one the conversation is bound to) so the reducer acts
+ *  on the same document the decision was grounded on. */
+export type ChatIntentEnvelope = {
+  intent: "answer" | "generate_prd" | "edit_prd" | "generate_tickets" | "generate_prototype"
+  confidence: number
+  /** generate_prd: self-contained task brief composed from the thread. */
+  task: string | null
+  /** edit_prd: the change to apply, self-contained. */
+  instruction: string | null
+  reason: string
+  /** "llm" | "fallback" | "low_confidence" | "no_target_prd" | "no_instruction" */
+  source: string
+  prd_id: number | null
+  prd_title: string | null
+}
+
+export const chatIntentApi = {
+  /** Decide the action for one chat message (flag: chat_intent_envelope).
+   *  Backend loads the conversation history itself; the client only ships the
+   *  light tab context. Fail-open BY THE CALLER: any network/HTTP failure →
+   *  fall back to the legacy regex ladder, never block the send. */
+  resolve: (
+    message: string,
+    opts?: {
+      conversationId?: number | null
+      prdId?: number | null
+      hasAttachments?: boolean
+    },
+  ) =>
+    api.post<ChatIntentEnvelope>("/v1/chat/intent", {
+      message,
+      ...(opts?.conversationId != null ? { conversation_id: opts.conversationId } : {}),
+      ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
+      ...(opts?.hasAttachments ? { has_attachments: true } : {}),
+    }),
+}
+
 export type PrdStartResponse = {
   prd_id: number
   status: "generating" | "ready" | "failed"

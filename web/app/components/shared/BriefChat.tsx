@@ -6,6 +6,7 @@ import remarkGfm from "remark-gfm"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useCompany } from "../../context/CompanyContext"
+import { useWorkspace } from "../../context/WorkspaceContext"
 import { briefApi, type AskResponse } from "../../lib/api"
 import { loadLatestPrd } from "../../lib/runPrdGeneration"
 import { runEvidenceGeneration } from "../../lib/runEvidenceGeneration"
@@ -611,6 +612,11 @@ export function BriefChat() {
   const router = useRouter()
   const { content, setContent } = useContent()
   const { activeCompany } = useCompany()
+  const { workspace } = useWorkspace()
+  // Action-envelope dispatch (staged rollout, staff-panel flag) — see
+  // ChatScreen.submitAsk for the full story. On the brief tab the envelope
+  // replaces the isPrdCommand/isPrototypeCommand/isTicketsCommand triage.
+  const envelopeDispatchEnabled = workspace?.feature_flags?.chat_intent_envelope === true
   // Keep the pipeline-status poll mounted (other surfaces rely on its side
   // effects); the brief header no longer reads its result directly.
   usePipelineStatus(activeCompany)
@@ -786,7 +792,7 @@ export function BriefChat() {
   }, [])
 
   // ── Composer agent flows (mirror the old AIBar command logic) ─────────────
-  const prdFlow = useCallback(async (query?: string) => {
+  const prdFlow = useCallback(async (query?: string, taskOverride?: string | null) => {
     // PRD generation is a COMMAND, not a conversation. It opens the PRD as its
     // OWN chat tab (with the Evidence / PRD / Tickets panel over it), never as a
     // bottom chat message. Resolve the brief's top insight, then hand off via
@@ -796,7 +802,9 @@ export function BriefChat() {
       // the PRD from the user's own words: the backend synthesizes the insight
       // (find-or-create keyed on the task text) and returns a generating prd_id
       // that opens in the standard PRD tab via the resume path.
-      const task = query ? prdCommandTask(query) : null
+      // The envelope's task (synthesized from the conversation) wins over the
+      // regex extractor, which only sees the message's own words.
+      const task = taskOverride ?? (query ? prdCommandTask(query) : null)
       if (task) {
         const { prdApi } = await import("../../lib/api")
         const start = await prdApi.generateFromTask(task)
@@ -959,21 +967,59 @@ export function BriefChat() {
       // Hand it to the host ChatScreen, which opens a fresh chat tab seeded with
       // the query (one new tab per chat started here). PRD / prototype / tickets
       // are COMMANDS that drive the right rail in place, so they stay on the brief.
-      const isCommand = isPrdCommand(q) || isPrototypeCommand(q) || isTicketsCommand(q)
-      if (!isCommand) {
-        setPendingChatHandoff({ query: q })
+      const legacyDispatch = () => {
+        const isCommand = isPrdCommand(q) || isPrototypeCommand(q) || isTicketsCommand(q)
+        if (!isCommand) {
+          setPendingChatHandoff({ query: q })
+          return
+        }
+        // A PRD command opens its work in the right rail (no chat turn), so don't
+        // echo it as a chat message either — it's a command, not a conversation.
+        if (!isPrdCommand(q)) appendUser(q)
+        void runGate(() => {
+          if (isPrdCommand(q)) return prdFlow(q)
+          if (isPrototypeCommand(q)) return prototypeFlow()
+          return ticketsFlow()
+        })
+      }
+      if (!envelopeDispatchEnabled) {
+        legacyDispatch()
         return
       }
-      // A PRD command opens its work in the right rail (no chat turn), so don't
-      // echo it as a chat message either — it's a command, not a conversation.
-      if (!isPrdCommand(q)) appendUser(q)
-      void runGate(() => {
-        if (isPrdCommand(q)) return prdFlow(q)
-        if (isPrototypeCommand(q)) return prototypeFlow()
-        return ticketsFlow()
-      })
+      // Action-envelope dispatch: the backend decides, grounded on the open
+      // PRD (the brief tab threads no conversation, so no conversation_id).
+      // Fail-open: any failure → the legacy regex triage above.
+      void (async () => {
+        const envelope = await import("../../lib/api")
+          .then(({ chatIntentApi }) =>
+            chatIntentApi.resolve(q, { prdId: content.prd?.prd_id ?? null }),
+          )
+          .catch(() => null)
+        if (!envelope) {
+          legacyDispatch()
+          return
+        }
+        switch (envelope.intent) {
+          case "generate_prd":
+            void runGate(() => prdFlow(q, envelope.task))
+            return
+          case "generate_prototype":
+            appendUser(q)
+            void runGate(() => prototypeFlow())
+            return
+          case "generate_tickets":
+            appendUser(q)
+            void runGate(() => ticketsFlow())
+            return
+          default:
+            // answer / edit_prd: the brief rail has no edit flow — hand the
+            // message to a real chat tab, whose grounded ask (and its own
+            // envelope pass) can act on it.
+            setPendingChatHandoff({ query: q })
+        }
+      })()
     },
-    [appendUser, prdFlow, prototypeFlow, runGate, showToast, ticketsFlow, setPendingChatHandoff],
+    [appendUser, content.prd, envelopeDispatchEnabled, prdFlow, prototypeFlow, runGate, showToast, ticketsFlow, setPendingChatHandoff],
   )
 
   const onAction = useCallback(
