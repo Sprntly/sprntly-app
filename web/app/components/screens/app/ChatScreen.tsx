@@ -78,6 +78,14 @@ type ChatTab = {
   /** Per-tab cached evidence. */
   evidence: PrdContent | null
   prdGenerating: boolean
+  /** True while an EXISTING PRD is being fetched from the DB — distinct from
+   *  `prdGenerating`, which means a document is being written.
+   *
+   *  The load path used to borrow `prdGenerating`, so reopening a chat that
+   *  already HAS a PRD flashed "Generating PRD…" before settling on "View PRD" —
+   *  claiming work was underway when the PRD had been finished for hours.
+   *  Transient; never persisted. */
+  prdLoading?: boolean
   evidenceGenerating: boolean
   /** This PRD tab was opened by an IN-CHAT COMMAND (import a doc + "generate prd",
    *  "generate a PRD for X", "create tickets from this doc") — its first thread
@@ -584,6 +592,7 @@ function ChatArtifactActions({
   prdExists,
   prdWaiting,
   prdGenerating,
+  prdLoading,
   onViewEvidence,
   onOpenPrd,
   prototypePrdId,
@@ -594,21 +603,27 @@ function ChatArtifactActions({
   prdExists: boolean
   prdWaiting: boolean
   prdGenerating: boolean
+  prdLoading?: boolean
   onViewEvidence: () => void
   onOpenPrd: () => void
   prototypePrdId: number | null
   prototypeReady: boolean
   onViewPrototype: () => void
 }) {
+  // Order matters: GENERATING (a document is being written) outranks LOADING
+  // (one exists and is being fetched), which outranks the settled View/Generate
+  // choice. Loading covers both fetching a known PRD and not yet knowing whether
+  // one exists — in neither case is anything being authored, so neither may say
+  // "Generating".
   const first = evidenceExists
     ? { label: "View Evidence", onClick: onViewEvidence, disabled: false }
     : {
         label: prdGenerating
           ? "Generating PRD…"
-          : prdWaiting ? "Loading…"
+          : prdLoading || prdWaiting ? "Loading PRD…"
           : prdExists ? "View PRD" : "Generate PRD",
         onClick: onOpenPrd,
-        disabled: prdGenerating || prdWaiting,
+        disabled: prdGenerating || prdLoading || prdWaiting,
       }
   const canPrototype = prototypePrdId != null
   return (
@@ -743,6 +758,9 @@ export function ChatScreen() {
   // on the NEXT commit — deferred one commit so the route-change panel-close (a
   // PRD opened from another surface routes to `/`) can't swallow it.
   const [prdPanelPending, setPrdPanelPending] = useState(false)
+  // Tab id of a chat just re-opened from history that owns a PRD — consumed by
+  // the effect that opens its panel once that tab is the active one.
+  const [resumePanelTabId, setResumePanelTabId] = useState<string | null>(null)
 
   // When the storage key changes (workspace switch OR a different user signs
   // in), reload tabs from the new user+company-scoped session storage so we
@@ -781,7 +799,7 @@ export function ChatScreen() {
       // prdCommandThinking is stripped with the rest: the in-flight call it
       // tracks does not survive a reload, so restoring it would leave a
       // thinking indicator spinning forever with nothing behind it.
-      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => rest)
+      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => rest)
       sessionStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
   }, [tabs, tabsKey])
@@ -1366,7 +1384,18 @@ export function ChatScreen() {
   const handleOpenPrd = useCallback(async () => {
     if (!activeTabId) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
-    if (!tab || tab.prdGenerating) return
+    if (!tab) return
+    // Mid-generation: there is no document to load yet, and kicking another
+    // build would duplicate the run — but the rail still has something to show
+    // (the live streaming draft / the generating state), and this is the path
+    // that refocusing a tab goes through. Returning early here left a tab that
+    // said "Generating PRD…" sitting next to a CLOSED panel, with no way back
+    // to it until the run finished. Show the panel, start nothing.
+    if (tab.prdGenerating) {
+      setContent({ prd: null, prdMeta: tab.briefMeta, prdGenerating: true })
+      openContentPanel("prd")
+      return
+    }
     // Already generated (loaded on this tab) — sync to context and open panel.
     if (tab.prd) {
       setContent({ prd: tab.prd, prdMeta: tab.briefMeta })
@@ -1384,19 +1413,27 @@ export function ChatScreen() {
     const savedPrdId = tab.prdId ?? (chatInsightState?.hasPrd ? chatInsightState.prdId : null)
     if (savedPrdId != null) {
       const prdId = savedPrdId
-      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: true } : t))
+      // LOADING, not generating. Borrowing `prdGenerating` here is what made a
+      // reopened chat flash "Generating PRD…" over a document that finished
+      // hours ago. The panel still shows its spinner (content.prdGenerating);
+      // only the tab's own label distinguishes fetching from writing.
+      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdLoading: true } : t))
       setContent({ prd: null, prdMeta: null, prdGenerating: true })
       openContentPanel("prd")
       try {
         const result = await loadPrdById(prdId)
         if (result.ok) {
-          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdLoading: false, prd: result.prd, prdId: result.prd.prd_id } : t))
           setContent({ prd: result.prd, prdMeta: tab.briefMeta, prdGenerating: false })
         } else if (result.generating) {
           // A healthy IN-FLIGHT PRD, not a failure — e.g. a reload restored this
           // tab mid-generation (the stamped-at-kickoff prdId is how we know it).
           // Re-enter poll+stream instead of toasting: the SSE replay frame
           // repaints everything generated so far, then live deltas continue.
+          // It really IS being written — hand the label over from loading to
+          // generating, which is the one case where "Generating PRD…" is true.
+          setTabs((prev) => prev.map((t) => t.id === activeTabId
+            ? { ...t, prdLoading: false, prdGenerating: true } : t))
           const resumed = await resumePrdGeneration(prdId, undefined, (html) => {
             if (activeTabIdRef.current === activeTabId) setContent({ prdPartialHtml: html })
           })
@@ -1409,12 +1446,14 @@ export function ChatScreen() {
             showToast("PRD generation failed", resumed.message)
           }
         } else {
-          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+          setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdLoading: false, prdGenerating: false } : t))
           setContent({ prdGenerating: false })
           showToast("Couldn't load PRD", result.message)
         }
       } catch (e) {
-        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
+        // Both flags off on any failure — a label stuck on "Loading PRD…" with
+        // a disabled button would leave no way back to the document.
+        setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdLoading: false, prdGenerating: false } : t))
         setContent({ prdGenerating: false })
         showToast("Couldn't load PRD", e instanceof Error ? e.message : "Unknown error")
       }
@@ -1800,6 +1839,17 @@ export function ChatScreen() {
         setTabs((prev) => prev.map((t) =>
           t.id === tabId && t.prdId == null ? { ...t, prdId, prdInFlow: true } : t))
         void hydratePrdThread(tabId, prdId)
+        // Opening a chat from history is an EXPLICIT request for that chat, so
+        // its PRD panel opens every time — not just the first.
+        //
+        // Neither existing trigger covers a re-open: the reload-restore effect
+        // fires at most once per tab (autoRestoredTabsRef), and the switch
+        // reconcile needs activeTabId to actually change, which it does not when
+        // you re-open the chat you were already on. Between them, the panel
+        // appeared the first time and never again. Clearing the claim lets the
+        // restore run again for this tab.
+        autoRestoredTabsRef.current.delete(tabId)
+        setResumePanelTabId(tabId)
       }
       const buildRestored = (
         turns: { role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
@@ -2765,6 +2815,17 @@ export function ChatScreen() {
   // it opens the panel) suppresses the reconcile during that hand-off.
   const autoRestoredTabsRef = useRef<Set<string>>(new Set())
   const prevTabForPanelRef = useRef(activeTabId)
+
+  // A chat re-opened from history whose conversation carries a PRD: open its
+  // panel once the resumed tab is actually active. Deferred through state rather
+  // than called inline because checkResume sets the active tab in the same pass —
+  // handleOpenPrd reads `activeTabId`, which has not updated yet at that point.
+  useEffect(() => {
+    if (!resumePanelTabId || activeTabId !== resumePanelTabId) return
+    setResumePanelTabId(null)
+    autoRestoredTabsRef.current.add(resumePanelTabId)
+    void handleOpenPrd()
+  }, [resumePanelTabId, activeTabId, handleOpenPrd])
   useEffect(() => {
     const switchedTab = prevTabForPanelRef.current !== activeTabId
     prevTabForPanelRef.current = activeTabId
@@ -3226,6 +3287,7 @@ export function ChatScreen() {
         prdExists={chatPrdExists}
         prdWaiting={chatPrdCtaWaiting}
         prdGenerating={!!activeTab?.prdGenerating}
+        prdLoading={!!activeTab?.prdLoading}
         onViewEvidence={handleOpenEvidence}
         onOpenPrd={handleOpenPrd}
         prototypePrdId={chatProtoPrdId}
@@ -3519,7 +3581,14 @@ export function ChatScreen() {
                       // or a restored orphan turn from history). Basing this on live
                       // busy state — not merely `reply === undefined` — means a
                       // sessionStorage-cached thread renders correctly on reload too.
-                      const isGenerating = busy && isLast
+                      // A PRD generation counts as in-flight too. Its command
+                      // turn's reply is the acknowledgment, and if that reply is
+                      // missing while the PRD is still being built, "No response
+                      // was generated" is the one thing that is certainly false —
+                      // the response is what the panel is rendering right now.
+                      const isGenerating =
+                        isLast &&
+                        (busy || !!activeTab?.prdGenerating || !!activeTab?.prdCommandThinking)
                       const hasFreshReply = !!turn.reply && !animatedTurnIds.current.has(turn.id)
                       if (hasFreshReply) animatedTurnIds.current.add(turn.id)
                       return (
@@ -3610,6 +3679,7 @@ export function ChatScreen() {
                               prdExists={chatPrdExists}
                               prdWaiting={chatPrdCtaWaiting}
                               prdGenerating={!!activeTab?.prdGenerating}
+        prdLoading={!!activeTab?.prdLoading}
                               onViewEvidence={handleOpenEvidence}
                               onOpenPrd={handleOpenPrd}
                               prototypePrdId={chatProtoPrdId}

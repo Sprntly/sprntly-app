@@ -52,6 +52,32 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
   // Per-tab in-flight create promises. Keyed by tabId; resolves to the new conv id.
   const inFlightCreates = new Map<string, Promise<number>>()
 
+  // Per-tab APPEND QUEUE — turns reach the DB in the order they were written.
+  //
+  // A user turn and its reply are pushed back to back, and each used to issue
+  // its own request the moment its own awaits settled. Two POSTs in flight at
+  // once means the server can insert them either way round, and the restore
+  // pairs a user turn with the row IMMEDIATELY after it — so an inverted pair
+  // comes back as a question with no answer. That is the reported bug: leaving
+  // a generating-PRD chat and reopening it from history showed "No response was
+  // generated for this message." exactly where the acknowledgment had been, on
+  // a tab that was visibly still generating.
+  //
+  // Queuing by TAB (not globally) keeps parallel chats independent, and the
+  // queue is joined synchronously at call time — after the awaits would be too
+  // late, since whichever push finished resolving first would queue first and
+  // the race would simply move.
+  const appendQueues = new Map<string, Promise<unknown>>()
+
+  function enqueueAppend(tabId: string, work: () => Promise<void>): Promise<void> {
+    const prev = appendQueues.get(tabId) ?? Promise.resolve()
+    // `work` runs whether the previous append resolved or rejected — one failed
+    // write must not wedge every later turn on this tab.
+    const next = prev.then(work, work)
+    appendQueues.set(tabId, next.then(() => undefined, () => undefined))
+    return next
+  }
+
   /**
    * Resolve the conversation id to write to for `tabId`, creating the
    * conversation exactly once if the tab has none yet. Concurrent callers for
@@ -107,7 +133,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
    * Persist the user's query for `tabId`. Creates the conversation if needed
    * (storing its id on the tab), then adds the user turn against it.
    */
-  async function pushUserTurn(
+  function pushUserTurn(
     tabId: string,
     args: {
       turnId: string
@@ -120,37 +146,41 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
       attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
     },
   ): Promise<void> {
-    try {
-      const convId = await resolveConvId(tabId, {
-        turnId: args.turnId,
-        title: args.title,
-        query: args.query,
-      })
-      if (convId == null) return
-      const api = await deps.getApi()
-      await api.addTurn(convId, "user", args.query, args.attachments)
-    } catch {
-      /* fire-and-forget: never break the UI on a persistence failure */
-    }
+    return enqueueAppend(tabId, async () => {
+      try {
+        const convId = await resolveConvId(tabId, {
+          turnId: args.turnId,
+          title: args.title,
+          query: args.query,
+        })
+        if (convId == null) return
+        const api = await deps.getApi()
+        await api.addTurn(convId, "user", args.query, args.attachments)
+      } catch {
+        /* fire-and-forget: never break the UI on a persistence failure */
+      }
+    })
   }
 
   /**
-   * Persist the assistant reply for `tabId`. Awaits any in-flight create so the
-   * assistant turn lands in the SAME conversation as its user turn.
+   * Persist the assistant reply for `tabId`. Queued behind its user turn (see
+   * enqueueAppend) so the pair lands in the order it was written.
    */
-  async function pushAssistantTurn(tabId: string, replyText: string): Promise<void> {
-    try {
-      let convId = deps.getTabConvId(tabId)
-      if (convId == null) {
-        const inFlight = inFlightCreates.get(tabId)
-        if (inFlight) convId = await inFlight
+  function pushAssistantTurn(tabId: string, replyText: string): Promise<void> {
+    return enqueueAppend(tabId, async () => {
+      try {
+        let convId = deps.getTabConvId(tabId)
+        if (convId == null) {
+          const inFlight = inFlightCreates.get(tabId)
+          if (inFlight) convId = await inFlight
+        }
+        if (convId == null) return
+        const api = await deps.getApi()
+        await api.addTurn(convId, "assistant", replyText)
+      } catch {
+        /* fire-and-forget */
       }
-      if (convId == null) return
-      const api = await deps.getApi()
-      await api.addTurn(convId, "assistant", replyText)
-    } catch {
-      /* fire-and-forget */
-    }
+    })
   }
 
   /**
