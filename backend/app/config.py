@@ -140,9 +140,13 @@ class Settings(BaseSettings):
     staff_admin_id: str = ""
     staff_admin_password_hash: str = ""
     # Internal transcript viewer (/v1/transcripts + the obscure review page) —
-    # a single shared access code (argon2id hash), SEPARATE from the staff
-    # credential so read-only transcript access doesn't also grant entitlement
-    # edits. Unset ⇒ the whole surface, login included, 404s (fail closed).
+    # a single shared access code, SEPARATE from the staff credential so
+    # read-only transcript access doesn't also grant entitlement edits. Either
+    # form works: the plaintext code (no argon2 tooling needed to set it) or the
+    # argon2id hash. Both unset ⇒ auth falls back to app.auth's hardcoded
+    # TRANSCRIPTS_DEFAULT_CODE, which is currently non-empty, so the surface is
+    # NOT fail-closed right now — see the comment on that constant.
+    transcripts_access_code: str = ""
     transcripts_access_code_hash: str = ""
     # Design Agent bundle staging. Supabase Storage is the PRIMARY
     # destination (bucket named by the SUPABASE_STORAGE_BUCKET env var, read
