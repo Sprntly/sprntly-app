@@ -166,6 +166,14 @@ describe("ChatScreen — PRD panel restore after reload", () => {
     expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 
+  // NOT COVERED HERE: refocusing a tab whose PRD is still GENERATING must open
+  // the rail (handleOpenPrd used to bail out early on `prdGenerating`, leaving a
+  // tab that said "Generating PRD…" beside a closed panel). It cannot be seeded
+  // through this file's harness — `prdGenerating` is deliberately stripped from
+  // sessionStorage, so a RESTORED tab always comes back with it false. The state
+  // only exists in memory, mid-run, which needs a live generation held open and
+  // a tab switch — see ChatScreen.import-command's pending-import pattern.
+
   it("restores when the PRD tab becomes active AFTER mount (async company/tab re-seed)", async () => {
     // The panel restore must key on the active tab, not a tab captured at first
     // render — because `activeCompany` resolves asynchronously and re-seeds the

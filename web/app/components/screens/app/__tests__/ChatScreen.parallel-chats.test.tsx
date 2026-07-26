@@ -72,6 +72,76 @@ beforeEach(() => {
   addTurnCalls = []
 })
 
+describe("turn ordering", () => {
+  // A user turn and its reply are pushed back to back. They used to issue two
+  // independent requests, so the server could insert them either way round —
+  // and the restore pairs a user turn with the row IMMEDIATELY after it, so an
+  // inverted pair comes back as a question with no answer.
+  //
+  // Reported: leaving a generating-PRD chat and reopening it from history
+  // showed "No response was generated for this message." exactly where the
+  // acknowledgment had been, on a tab still visibly generating.
+  it("writes a turn and its reply in order even when the reply's write is faster", async () => {
+    const api = makeApi()
+    const tabs: TabStore = new Map()
+    // Make the USER write slow and the assistant write instant — the exact
+    // shape that inverted the pair. With independent requests the assistant
+    // lands first; queued, it cannot.
+    const realAddTurn = api.addTurn
+    api.addTurn = vi.fn(async (convId: number, role: "user" | "assistant", content: string, atts?: unknown) => {
+      if (role === "user") await new Promise((r) => setTimeout(r, 30))
+      return (realAddTurn as unknown as (...a: unknown[]) => Promise<unknown>)(
+        convId, role, content, atts,
+      )
+    }) as typeof api.addTurn
+
+    const persistence = createChatPersistence({
+      getApi: async () => api,
+      getTabConvId: (tabId) => tabs.get(tabId) ?? null,
+      setTabConvId: (tabId, convId) => tabs.set(tabId, convId),
+    })
+    tabs.set("tab-A", null)
+
+    // Exactly how ChatScreen seeds a command turn: both calls, back to back.
+    const u = persistence.pushUserTurn("tab-A", {
+      turnId: "t1", title: "generate a prd", query: "generate a prd",
+    })
+    const a = persistence.pushAssistantTurn("tab-A", "Importing your document as a PRD…")
+    await Promise.all([u, a])
+
+    expect(addTurnCalls.map((c) => c.role)).toEqual(["user", "assistant"])
+  })
+
+  it("keeps ordering per TAB, so a slow chat cannot block another", async () => {
+    const h = makeHarness()
+    h.openTab("tab-A")
+    h.openTab("tab-B")
+    await Promise.all([
+      h.persistence.pushUserTurn("tab-A", { turnId: "a1", title: "A", query: "A" }),
+      h.persistence.pushUserTurn("tab-B", { turnId: "b1", title: "B", query: "B" }),
+    ])
+    // Two conversations, one turn each — the queue is per tab, not global.
+    expect(new Set(addTurnCalls.map((c) => c.convId)).size).toBe(2)
+  })
+
+  it("a failed write does not wedge later turns on that tab", async () => {
+    const h = makeHarness()
+    h.openTab("tab-A")
+    const original = h.api.addTurn
+    let first = true
+    h.api.addTurn = vi.fn(async (...args: Parameters<typeof original>) => {
+      if (first) { first = false; throw new Error("network blip") }
+      return original(...args)
+    }) as typeof original
+
+    await h.persistence.pushUserTurn("tab-A", { turnId: "t1", title: "x", query: "x" })
+    await h.persistence.pushAssistantTurn("tab-A", "reply")
+    // The reply still landed despite the user write failing — one bad request
+    // must not silently stop a chat persisting for the rest of its life.
+    expect(addTurnCalls.map((c) => c.role)).toEqual(["assistant"])
+  })
+})
+
 describe("ChatScreen parallel-chats DB persistence", () => {
   // Assertion 1 + 2: two tabs -> two distinct conversations, no cross-contamination.
   it("opens two parallel chats as two distinct conversations and routes each user turn to its own conv", async () => {
