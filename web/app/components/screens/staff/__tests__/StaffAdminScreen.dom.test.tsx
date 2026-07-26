@@ -238,7 +238,7 @@ describe("StaffAdminScreen organizations", () => {
     expect(screen.getByText("Agents, Weekly Brief")).toBeTruthy()
   })
 
-  it("offers exactly the three modules — Agents, Prototype, Weekly Brief — in the editor", async () => {
+  it("offers exactly the four modules — Agents, Prototype, Weekly Brief, Chat Intent Envelope — in the editor", async () => {
     listCompanies.mockResolvedValue({ companies: [ACME] })
     listInvites.mockResolvedValue({ invites: [] })
     await mount()
@@ -249,10 +249,13 @@ describe("StaffAdminScreen organizations", () => {
     const labels = Array.from(modules.querySelectorAll("label")).map(
       (l) => l.textContent ?? "",
     )
-    expect(labels).toHaveLength(3)
+    expect(labels).toHaveLength(4)
     expect(labels[0]).toBe("Agents")
     expect(labels[1]).toMatch(/^Prototype/)
     expect(labels[2]).toBe("Weekly Brief")
+    // Staged-rollout flag for the action-envelope chat dispatch: default OFF
+    // (no resolver — a missing key does NOT fail open, unlike Agents/Brief).
+    expect(labels[3]).toBe("Chat Intent Envelope (beta)")
     // The retired modules leave no dead UI behind.
     expect(screen.queryByText("On-call Agent")).toBeNull()
     expect(screen.queryByText("Claude Code Handoff")).toBeNull()
@@ -466,8 +469,12 @@ describe("StaffAdminScreen invites", () => {
 })
 
 describe("MODULES + agentsEnabled", () => {
-  it("keeps exactly the two flag-backed modules (Prototype is column-backed)", () => {
-    expect(MODULES.map((m) => m.key)).toEqual(["agents", "weekly_brief"])
+  it("keeps exactly the flag-backed modules (Prototype is column-backed)", () => {
+    expect(MODULES.map((m) => m.key)).toEqual([
+      "agents",
+      "weekly_brief",
+      "chat_intent_envelope",
+    ])
   })
 
   it("prefers an explicit agents key over the legacy fallback", () => {

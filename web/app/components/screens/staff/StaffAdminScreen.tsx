@@ -43,6 +43,10 @@ import {
 export const MODULES: { key: string; label: string }[] = [
   { key: "agents", label: "Agents" },
   { key: "weekly_brief", label: "Weekly Brief" },
+  // Staged rollout of the action-envelope chat dispatch (backend intent
+  // routing instead of the client regex ladder). No resolver: a missing key
+  // is OFF — this one does NOT fail open.
+  { key: "chat_intent_envelope", label: "Chat Intent Envelope (beta)" },
 ]
 
 /** Whether the Agents module is on, mirroring backend
@@ -194,9 +198,9 @@ function EntitlementFields({
         </span>
       </label>
 
-      {/* Exactly three modules, in this order: Agents, Prototype, Weekly
-          Brief. Prototype sits in the middle but writes prototype_enabled
-          (the column), not featureFlags. */}
+      {/* Module order: Agents, Prototype, Weekly Brief, then rollout flags.
+          Prototype sits second but writes prototype_enabled (the column),
+          not featureFlags. */}
       <fieldset className="sadm-modules">
         <legend>Modules</legend>
         {flagCheckbox(MODULES[0], state, onChange)}
@@ -213,7 +217,7 @@ function EntitlementFields({
             <span className="sadm-field-hint"> — design agent</span>
           </span>
         </label>
-        {flagCheckbox(MODULES[1], state, onChange)}
+        {MODULES.slice(1).map((m) => flagCheckbox(m, state, onChange))}
       </fieldset>
     </div>
   )

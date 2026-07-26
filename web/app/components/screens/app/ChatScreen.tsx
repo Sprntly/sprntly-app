@@ -664,8 +664,13 @@ export function ChatScreen() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const auth = useAuth()
-  const { profile } = useWorkspace()
+  const { profile, workspace } = useWorkspace()
   const { content, setContent } = useContent()
+  // Action-envelope dispatch (staged rollout, staff-panel flag): when ON, one
+  // backend call (POST /v1/chat/intent — history-aware, sees the open PRD)
+  // decides what each message asks for, replacing the client regex/classifier
+  // ladder in submitAsk. Missing key = OFF.
+  const envelopeDispatchEnabled = workspace?.feature_flags?.chat_intent_envelope === true
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
@@ -2299,6 +2304,70 @@ export function ChatScreen() {
         runClarifiedGeneration(prdApi, activeTab.id, combined, sourceDocs, trimmed)
         return
       }
+      // ── Action-envelope dispatch (flag: chat_intent_envelope) ─────────────
+      // ONE backend decision per message (POST /v1/chat/intent): the resolver
+      // sees the conversation history and the open PRD, so keyword-free and
+      // deictic phrasings ("draft it up", "break this into work items", "make
+      // it shorter") resolve to the right executor — the regex ladder below
+      // judges only the newest message and cannot. Each intent maps onto the
+      // SAME flows the ladder drives today; `answer` (and any unhandled case)
+      // falls through to the grounded ask path. Fail-open: a network/HTTP
+      // failure falls back to the full legacy ladder, so command dispatch
+      // never degrades below today's behavior.
+      let envelopeDecided = false
+      // A "/skill …" message is EXPLICIT intent with its own backend fast-path
+      // (qa_agent's slash route) — never spend an envelope call reinterpreting
+      // it.
+      if (envelopeDispatchEnabled && !trimmed.startsWith("/")) {
+        const tabPrdId = (activeTab?.prd?.prd_id ?? activeTab?.prdId) ?? null
+        const envelope = await import("../../../lib/api")
+          .then(({ chatIntentApi }) =>
+            chatIntentApi.resolve(trimmed, {
+              conversationId: activeTab?.dbConvId ?? null,
+              prdId: tabPrdId,
+              hasAttachments: attachments.length > 0,
+            }),
+          )
+          .catch(() => null)
+        if (envelope) {
+          envelopeDecided = true
+          if (envelope.intent === "generate_tickets") {
+            if (docFile) {
+              setAttachments([])
+              importPrdCommandFlow(docFile, { openTickets: true, seedQuery: trimmed })
+              return
+            }
+            if (activeTab?.prd) {
+              setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
+              openContentPanel("tickets")
+              return
+            }
+            // No PRD on this tab → the ask path answers (user-stories skill in
+            // markdown), same as the ladder's fall-through.
+          } else if (envelope.intent === "edit_prd") {
+            const targetPrd = envelope.prd_id ?? tabPrdId
+            if (!docFile && activeTab && targetPrd != null && envelope.instruction) {
+              void prdChatEditFlow(envelope.instruction, activeTab.id, targetPrd)
+              return
+            }
+            // No resolvable target/instruction → grounded ask (it can at least
+            // answer about the document).
+          } else if (envelope.intent === "generate_prd") {
+            if (docFile) {
+              setAttachments([])
+              importPrdCommandFlow(docFile, { openTickets: false, seedQuery: trimmed })
+              return
+            }
+            prdCommandFlow(trimmed, envelope.task)
+            return
+          }
+          // generate_prototype: ChatScreen has no chat prototype flow (parity
+          // with the ladder, which never intercepted prototype phrasings here);
+          // answer / unhandled → the ask path below.
+        }
+      }
+      // ── Legacy ladder (flag off, or envelope fetch failed) ────────────────
+      if (!envelopeDecided) {
       if (isTicketsCommand(trimmed) && !(!docFile && deicticTicket && isPrdTab)) {
         if (docFile) {
           setAttachments([])
@@ -2357,6 +2426,7 @@ export function ChatScreen() {
           prdCommandFlow(trimmed, verdict.task)
           return
         }
+      }
       }
       // Attached file content is folded into the ask as context. Text
       // attachments inline directly; document attachments (.pdf/.pptx/.docx/.doc)
@@ -2594,7 +2664,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
