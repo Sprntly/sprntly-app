@@ -48,6 +48,7 @@ from app.routes import (
     ask,
     brief,
     business_context as business_context_routes,
+    chat,
     company,
     connectors,
     conversations,
@@ -301,6 +302,7 @@ app.include_router(brief.router)
 app.include_router(artifacts.router)
 app.include_router(ideation.router)
 app.include_router(ask.router)
+app.include_router(chat.router)
 app.include_router(agent_chat.router)
 app.include_router(prd.router)
 app.include_router(stories.router)

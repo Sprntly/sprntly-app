@@ -61,3 +61,38 @@ def bind_conversation_to_prd(
             exc_info=True,
         )
         return False
+
+
+def get_conversation_prd_id(
+    conversation_id: int,
+    company_id: str,
+    user_id: str | None,
+) -> int | None:
+    """The PRD this conversation is bound to, or None.
+
+    The read half of bind_conversation_to_prd, with the same ownership scoping
+    (per-user chats within a company). Used by the chat intent dispatcher to
+    resolve "make it shorter" to the PRD this thread produced when the client
+    didn't send an explicit prd_id (e.g. a resumed chat whose tab lost its
+    local state). Best-effort: any error → None."""
+    try:
+        c = require_client()
+        q = (
+            c.table("conversations")
+            .select("prd_id")
+            .eq("id", conversation_id)
+            .eq("company_id", company_id)
+            .limit(1)
+        )
+        if user_id:
+            q = q.eq("user_id", user_id)
+        rows: Any = q.execute()
+        if rows.data:
+            return rows.data[0].get("prd_id")
+        return None
+    except Exception:  # pragma: no cover - defensive
+        logger.warning(
+            "Failed to read PRD binding for conversation %s", conversation_id,
+            exc_info=True,
+        )
+        return None
