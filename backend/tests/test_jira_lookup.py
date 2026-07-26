@@ -50,15 +50,90 @@ def test_is_jira_lookup_negative():
         "what's our churn rate?",
         "we shipped in the UTF-8 encoding update",   # lowercase false friend, no jira/PM context
         "summarize this document",
-        "create a ticket for the login bug",         # create → user-stories, not a read
-        "push these stories to jira",                # write → veto
-        "update PROJ-142 to done",                   # write cmd, no PM-noun/verb → no match
+        "create a ticket for the login bug",         # create → user-stories, not this path
+        "push these stories to jira",                # push flow → veto
+        "delete PROJ-142",                           # unimplemented → veto, not a silent no-op
         # Merely NAMING Jira (as a competitor) is not a lookup — must not hijack
         # a competitive-intelligence request.
         "do a competitive analysis of Linear, Jira and Asana",
         "how does our roadmap compare to Jira and Asana?",
     ]:
         assert not is_jira_lookup(q), q
+
+
+def test_is_jira_lookup_routes_changes_to_an_existing_issue():
+    """Changing an issue is this path's job now — it can propose an edit that the
+    user confirms. These used to be vetoed and answered as prose by a skill with
+    no ability to touch Jira."""
+    for q in [
+        "update PROJ-142 to done",
+        "update the duedate on PROJ-142 to august 31 2028",
+        "move DEV-88 to In Review",
+        "assign the login bug to Ada",
+        "set the priority on ABC-7 to High",
+        "add a comment on PROJ-1 saying we're blocked",
+    ]:
+        assert is_jira_lookup(q), q
+
+
+def test_is_jira_lookup_change_needs_an_issue_in_sight():
+    """A mutation verb alone is not a tracker command — without a key or a PM
+    noun it is someone talking about something else entirely."""
+    for q in [
+        "update the roadmap",
+        "change our pricing page",
+        "move the launch date",
+    ]:
+        assert not is_jira_lookup(q), q
+
+
+def test_is_jira_lookup_bare_this_followup():
+    """"give me full details on this" — the most natural follow-up there is.
+
+    Reported live: the previous turn had just fetched KAN-1033, and this message
+    dropped to the generic agent, which replied that it had no details for that
+    ticket. The anaphora rule only matched "this/that <noun>", so a bare "this"
+    as the object of a preposition was invisible to it.
+    """
+    thread = [
+        {"role": "user", "content": "get me the ticket about cars"},
+        {"role": "assistant", "content": "KAN-1033 — Build a car driving feature (In Review)."},
+    ]
+    for q in [
+        "give me full details on this",
+        "more about this",
+        "can you tell me more about that",
+        "what's the description for this",
+        "give me the details for this?",
+    ]:
+        assert is_jira_lookup(q, thread), q
+
+
+def test_bare_this_does_not_hijack_a_pivot():
+    """A bare this/that is only referential in the two positions the rule allows;
+    it must not turn every sentence containing "that" into a tracker read."""
+    thread = [
+        {"role": "user", "content": "get me the ticket about cars"},
+        {"role": "assistant", "content": "KAN-1033 — Build a car driving feature."},
+    ]
+    for q in [
+        "i think that we should ship next week",
+        "prioritize these features",          # pivot veto still wins
+        "generate a PRD for this",            # PRD command, not a tracker read
+    ]:
+        assert not is_jira_lookup(q, thread), q
+
+
+def test_is_jira_lookup_sticky_change_followup_in_thread():
+    """"move it to In Review" names no issue at all — only the thread makes it
+    resolvable, which is exactly how people talk once a ticket is on screen."""
+    thread = [
+        {"role": "user", "content": "get me the ticket about cars"},
+        {"role": "assistant", "content": "KAN-1033 — Build a car driving feature (In Review)."},
+    ]
+    for q in ["move it to Done", "set its due date to august 31 2028",
+              "assign it to me", "change the priority to High"]:
+        assert is_jira_lookup(q, thread), q
 
 
 def test_is_jira_lookup_sticky_followup_in_thread():
@@ -298,6 +373,225 @@ def test_get_issue_missing_returns_none(monkeypatch):
     assert jf.get_issue(_session(), "NOPE-1") is None
 
 
+# ── every pullable field ─────────────────────────────────────────────────────
+
+def test_get_issue_requests_all_fields_with_names(monkeypatch):
+    """The fetch asks Jira for EVERYTHING plus the field-name map.
+
+    It used to send a fixed 14-field list, which by construction could not name
+    a customer's custom fields — start date, story points and sprint were simply
+    absent from the request, so no amount of prompting could surface them.
+    """
+    seen = {}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/comment"):
+            return _Resp({"comments": []})
+        seen["params"] = params
+        return _Resp(_issue_payload("Task"))
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+    jf.get_issue(_session(), "PROJ-5")
+    assert seen["params"]["fields"] == "*all"
+    # Without expand=names a custom field can only be shown as customfield_10031.
+    assert seen["params"]["expand"] == "names"
+
+
+def test_get_issue_surfaces_custom_and_date_fields_under_human_names(monkeypatch):
+    """Fields outside the curated set ride along under their display names."""
+    payload = _issue_payload("Task")
+    payload["fields"].update({
+        "customfield_10015": "2028-01-05",          # Start date
+        "customfield_10031": 8,                      # Story Points
+        "components": [{"name": "Checkout"}, {"name": "API"}],
+        "resolution": None,                          # empty → must not render
+        "timetracking": {"originalEstimate": "3d"},  # composite → JSON fallback
+    })
+    payload["names"] = {
+        "customfield_10015": "Start date",
+        "customfield_10031": "Story Points",
+        "components": "Components",
+        "timetracking": "Time tracking",
+    }
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/comment"):
+            return _Resp({"comments": []})
+        return _Resp(payload)
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+    issue = jf.get_issue(_session(), "PROJ-5")
+    by_name = {f["name"]: f["value"] for f in issue["other_fields"]}
+
+    assert by_name["Start date"] == "2028-01-05"
+    assert by_name["Story Points"] == "8"
+    assert by_name["Components"] == "Checkout, API"          # list flattened
+    assert "3d" in by_name["Time tracking"]                  # composite kept
+    # Empty values are dropped: *all returns the whole catalogue, and most of it
+    # is null for any one issue.
+    assert "Resolution" not in by_name
+    # Curated fields are NOT duplicated into the catch-all block.
+    assert "Summary" not in by_name and "summary" not in by_name
+
+    text = jf.render_issue(issue)
+    assert "other fields:" in text
+    assert "Start date: 2028-01-05" in text
+    # `created` was fetched but never rendered before — a dead field in the request.
+    assert "created:" in text
+
+
+# ── editmeta: what is actually writable ──────────────────────────────────────
+
+_EDITMETA_PAYLOAD = {
+    "fields": {
+        "duedate": {"name": "Due date", "required": False,
+                    "schema": {"type": "date"}, "operations": ["set"]},
+        "priority": {"name": "Priority", "required": False,
+                     "schema": {"type": "priority"}, "operations": ["set"],
+                     "allowedValues": [{"name": "High"}, {"name": "Low"}]},
+        "labels": {"name": "Labels", "required": False,
+                   "schema": {"type": "array", "items": "string"},
+                   "operations": ["add", "set", "remove"]},
+    }
+}
+
+
+def test_get_editmeta_parses_types_and_allowed_values(monkeypatch):
+    monkeypatch.setattr(jf.requests, "get",
+                        lambda *a, **k: _Resp(_EDITMETA_PAYLOAD))
+    meta = jf.get_editmeta(_session(), "PROJ-5")
+    by_id = {f["id"]: f for f in meta["fields"]}
+
+    # The date type is what lets "august 31 2028" become a legal write without a
+    # date parser on our side — the model shapes the value to the schema.
+    assert by_id["duedate"]["type"] == "date"
+    # A closed set of options is what stops a priority being invented that this
+    # site's scheme has never had.
+    assert by_id["priority"]["allowed_values"] == ["High", "Low"]
+    assert by_id["labels"]["items"] == "string"
+
+
+def test_get_editmeta_missing_returns_none(monkeypatch):
+    monkeypatch.setattr(jf.requests, "get",
+                        lambda *a, **k: _Resp({}, status=404))
+    assert jf.get_editmeta(_session(), "NOPE-1") is None
+
+
+def test_render_editmeta_states_that_status_is_not_a_field():
+    text = jf.render_editmeta({"key": "PROJ-5", "fields": [
+        {"id": "duedate", "name": "Due date", "type": "date", "items": "",
+         "required": False, "operations": ["set"], "allowed_values": [],
+         "allowed_truncated": False},
+    ]})
+    assert "Due date (id: duedate)" in text and "type: date" in text
+    # Jira does not edit status as a field; it moves through a transition. Saying
+    # so in the tool result is what stops the agent attempting a field write that
+    # silently does nothing.
+    assert "not a field edit" in text
+
+
+# ── proposing a change (still no write) ──────────────────────────────────────
+
+def _propose_env(monkeypatch, *, editmeta=None, transitions=None):
+    """Patch the reads a preview does: the issue, its editmeta, its transitions."""
+    def fake_get(url, params=None, headers=None, timeout=None):
+        if url.endswith("/comment"):
+            return _Resp({"comments": []})
+        if url.endswith("/editmeta"):
+            return _Resp(editmeta if editmeta is not None else _EDITMETA_PAYLOAD)
+        return _Resp(_issue_payload("Task"))
+
+    monkeypatch.setattr(jf.requests, "get", fake_get)
+    monkeypatch.setattr(jf, "list_transitions",
+                        lambda s, k: transitions if transitions is not None else
+                        [{"id": "31", "name": "Review", "to_status_name": "In Review"}])
+
+
+def test_preview_change_describes_before_and_after(monkeypatch):
+    _propose_env(monkeypatch)
+    out = jf.preview_change(_session(), "PROJ-5", fields={"duedate": "2028-08-31"})
+    assert out["ok"]
+    assert "Due date" in out["text"] and "2028-08-31" in out["text"]
+    # The user must be able to tell nothing has happened yet.
+    assert "NOT applied yet" in out["text"]
+    # The change handed back is exactly what the confirm endpoint will execute.
+    assert out["change"]["issue_key"] == "PROJ-5"
+    assert out["change"]["fields"] == {"duedate": "2028-08-31"}
+
+
+def test_preview_change_rejects_a_field_the_user_cannot_edit(monkeypatch):
+    _propose_env(monkeypatch)
+    out = jf.preview_change(_session(), "PROJ-5", fields={"customfield_99": "x"})
+    # Caught at preview, where the user can see it — not as a raw Jira 400 after
+    # they have already confirmed.
+    assert not out["ok"]
+    assert "not editable" in out["text"]
+
+
+def test_preview_change_rejects_an_illegal_option(monkeypatch):
+    _propose_env(monkeypatch)
+    out = jf.preview_change(_session(), "PROJ-5", fields={"priority": "Critical"})
+    assert not out["ok"]
+    assert "not a legal value" in out["text"] and "High" in out["text"]
+
+
+def test_preview_change_rejects_an_unreachable_status(monkeypatch):
+    _propose_env(monkeypatch)
+    out = jf.preview_change(_session(), "PROJ-5", to_status="Released")
+    # Status moves along a workflow transition; one that is not legal from here
+    # must fail loudly with the options, or the user is told it worked.
+    assert not out["ok"]
+    assert "not reachable" in out["text"] and "In Review" in out["text"]
+
+
+def test_propose_tool_never_writes(monkeypatch):
+    """The tool validates and describes. Any HTTP verb other than GET would be a
+    write, and none is reachable from the agent's loop."""
+    _propose_env(monkeypatch)
+    called = {"put": 0, "post": 0}
+    monkeypatch.setattr(jf.requests, "put", lambda *a, **k: called.__setitem__("put", 1))
+    monkeypatch.setattr(jf.requests, "post", lambda *a, **k: called.__setitem__("post", 1))
+
+    proposal: dict = {}
+    dispatch = jl._make_dispatch(_session(), proposal)
+    out = dispatch("jira_propose_change", {"issue_key": "PROJ-5",
+                                           "fields": {"duedate": "2028-08-31"}})
+    assert "NOT applied yet" in out
+    assert called == {"put": 0, "post": 0}
+    # The proposal is handed out for the UI to confirm.
+    assert proposal["fields"] == {"duedate": "2028-08-31"}
+
+
+def test_propose_tool_requires_something_to_change(monkeypatch):
+    _propose_env(monkeypatch)
+    dispatch = jl._make_dispatch(_session(), {})
+    assert "at least one of" in dispatch("jira_propose_change", {"issue_key": "PROJ-5"})
+
+
+def test_encode_for_editmeta_shapes_values_by_schema():
+    """Jira rejects a mis-encoded field with a 400 naming only the field id, so
+    the shape is driven by the schema rather than the field's name."""
+    assert jf.encode_for_editmeta({"type": "date"}, "2028-08-31") == "2028-08-31"
+    assert jf.encode_for_editmeta({"type": "number"}, "8") == 8.0
+    assert jf.encode_for_editmeta({"type": "priority"}, "High") == {"name": "High"}
+    assert jf.encode_for_editmeta({"type": "user"}, "acc-1") == {"accountId": "acc-1"}
+    # Labels are a bare list of strings; components are objects matched by name.
+    assert jf.encode_for_editmeta({"type": "array", "items": "string"}, "urgent") == ["urgent"]
+    assert jf.encode_for_editmeta(
+        {"type": "array", "items": "component"}, ["API"]) == [{"name": "API"}]
+
+
+def test_editmeta_tool_is_offered_and_dispatched(monkeypatch):
+    assert any(t["name"] == "jira_editmeta" for t in
+               [jl._SEARCH_TOOL, jl._GET_ISSUE_TOOL, jl._EDITMETA_TOOL])
+    monkeypatch.setattr(jf.requests, "get",
+                        lambda *a, **k: _Resp(_EDITMETA_PAYLOAD))
+    dispatch = jl._make_dispatch(_session())
+    out = dispatch("jira_editmeta", {"issue_key": "PROJ-5"})
+    assert "Editable fields on PROJ-5" in out
+    assert dispatch("jira_editmeta", {}) == "(jira_editmeta: 'issue_key' is required)"
+
+
 def test_render_issue_includes_sections(monkeypatch):
     issue = {
         "key": "PROJ-5", "summary": "Checkout broken", "type": "Bug",
@@ -392,9 +686,12 @@ def test_answer_runs_tool_loop_and_wraps(monkeypatch):
     assert p["answer"] == "PROJ-142 is In Progress, assigned to Ada."
     assert p["_skill_source"] == "jira-lookup"
     assert p["key_points"] == [] and p["citations"] == []
-    # Both read-only tools were offered; the question rode in the user turn.
+    # Every tool was offered; the question rode in the user turn. None of them
+    # can mutate Jira: the three reads read, and jira_propose_change only
+    # validates and describes a change for the user to confirm.
     names = {t["name"] for t in captured["tools"]}
-    assert names == {"jira_search", "jira_get_issue"}
+    assert names == {"jira_search", "jira_get_issue", "jira_editmeta",
+                     "jira_propose_change"}
     assert "PROJ-142" in captured["user"]
 
 
