@@ -131,8 +131,17 @@ def compute_convergence(
             tc.source_types.add(sig.source_type)
             if sig.source_type in CONNECTED_SOURCE_TYPES:
                 tc.connected_signal_count += 1
-            origin = (sig.provenance or {}).get("origin")
-            if origin == "upload":
+            prov = sig.provenance or {}
+            origin = prov.get("origin")
+            # Connector-category uploads carry origin="connector" (they ARE
+            # that connector's data for scoring/source_type purposes) plus
+            # channel="upload" (the bytes came from a manual upload). For the
+            # upload-only relaxation they count as uploads: a tenant whose only
+            # "connector" evidence is categorized uploads still deserves the
+            # loosened single-source brief path.
+            if origin == "upload" or (
+                origin == "connector" and prov.get("channel") == "upload"
+            ):
                 tc.upload_signal_count += 1
             elif origin == "connector":
                 tc.connector_signal_count += 1

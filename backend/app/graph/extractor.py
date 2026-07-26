@@ -18,9 +18,15 @@ from app.graph.config_layers import resolve_config
 from app.graph.embeddings import embed_texts
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
-from app.graph.types import Entity, Relationship, Signal
+from app.graph.types import SIGNAL_SOURCE_TYPES, Entity, Relationship, Signal
 
 logger = logging.getLogger(__name__)
+
+# Seeded / non-evidence source types eligible for the ``source_type_default``
+# re-stamp — the same set has_sufficient_evidence treats as non-connected.
+_SEEDED_SOURCE_TYPES: frozenset[str] = frozenset({
+    "verbal_claim", "pm_manual", "agent_inferred",
+})
 
 PROMPT_VERSION = "extract-doc-v1"
 
@@ -73,6 +79,8 @@ def extract_document(
     agent: str = "extractor",
     source_hint: str | None = None,
     origin: str | None = None,
+    source_type_default: str | None = None,
+    provenance_extra: dict[str, str] | None = None,
 ) -> dict:
     """Extract one document into the KG. Returns {signals, themes, skipped}.
 
@@ -85,7 +93,17 @@ def extract_document(
     which the gate treats as neither upload nor connector. The gate uses this to
     detect an UPLOAD-ONLY tenant (no connector-origin signals anywhere) so it can
     surface a brief from a single uploaded file instead of an empty one — see
-    convergence.has_sufficient_evidence."""
+    convergence.has_sufficient_evidence.
+
+    ``source_type_default`` re-stamps signals whose LLM-chosen source_type is a
+    seeded/non-evidence type (verbal_claim / pm_manual / agent_inferred) or not
+    in the SIGNAL_SOURCE_TYPES vocabulary at all. Used by connector-category
+    uploads: a doc dropped into "Customer Voice & Support" must count as
+    customer_voice evidence deterministically, while an evidence type the LLM
+    picked on merit (e.g. a revenue fact inside a call transcript) is kept.
+
+    ``provenance_extra`` is merged into each signal's provenance verbatim
+    (e.g. {"channel": "upload", "category": "voice"} for category uploads)."""
     cfg = resolve_config(enterprise_id)
     tau_high = cfg["resolution"]["tau_high"]
 
@@ -136,10 +154,16 @@ def extract_document(
         # Content-keyed (not doc-keyed): re-syncs + shifting ingest batches
         # cannot duplicate the same fact under a different doc name.
         sig_id = str(uuid.uuid5(_NS, f"{enterprise_id}|{item['content']}"))
+        source_type = item["source_type"]
+        if source_type_default and (
+            source_type in _SEEDED_SOURCE_TYPES
+            or source_type not in SIGNAL_SOURCE_TYPES
+        ):
+            source_type = source_type_default
         signal = Signal(
             id=sig_id,
             enterprise_id=enterprise_id,
-            source_type=item["source_type"],
+            source_type=source_type,
             kind=item["kind"],
             content=item["content"],
             properties=item.get("properties") or {},
@@ -147,7 +171,8 @@ def extract_document(
             confidence=float(item.get("confidence", 0.8)),
             provenance={"source": "extractor", "doc": doc_name,
                         "prompt_version": PROMPT_VERSION,
-                        **({"origin": origin} if origin else {})},
+                        **({"origin": origin} if origin else {}),
+                        **(provenance_extra or {})},
         )
         try:
             facade.write_signal(enterprise_id, signal)

@@ -30,6 +30,8 @@ import hashlib
 import logging
 import uuid
 
+from app import datasets
+from app.connectors.catalog import EVIDENCE_UPLOAD_CATEGORIES
 from app.corpus import load_corpus
 from app.db.briefs import get_current_brief
 from app.db.companies import company_id_for_slug, slug_for_company_id
@@ -142,6 +144,15 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
         if s.config
     }
 
+    # Connector-category attribution: a doc uploaded into an evidence-bearing
+    # connector category (voice/analytics/revenue/crm/monitoring) is that kind
+    # of connector data, not plain documentation — extract it with the
+    # category's source hint, a deterministic default source_type, and
+    # origin="connector" (channel="upload" keeps the brief gate's upload-only
+    # relaxation intact — see convergence.is_upload_only). Uncategorized docs
+    # and non-evidence categories keep the plain origin="upload" path.
+    doc_categories = datasets.md_file_categories(slug)
+
     extracted = 0
     for doc in corpus.docs:
         sha = hashlib.sha256(f"{company_id}|{doc.text}".encode()).hexdigest()
@@ -151,11 +162,22 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
         # Cap NEW extractions per run; keep cheaply skipping unchanged docs.
         if extracted >= MAX_SEED_DOCS:
             continue
+        category = doc_categories.get(f"{doc.name}.md", "")
+        evidence = EVIDENCE_UPLOAD_CATEGORIES.get(category)
         try:
-            r = extract_document(
-                facade, company_id, doc_name=doc.name, text=doc.text,
-                origin="upload",
-            )
+            if evidence:
+                source_type, hint = evidence
+                r = extract_document(
+                    facade, company_id, doc_name=doc.name, text=doc.text,
+                    origin="connector", source_hint=hint,
+                    source_type_default=source_type,
+                    provenance_extra={"channel": "upload", "category": category},
+                )
+            else:
+                r = extract_document(
+                    facade, company_id, doc_name=doc.name, text=doc.text,
+                    origin="upload",
+                )
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]
             totals["docs"] += 1

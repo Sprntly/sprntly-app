@@ -125,6 +125,20 @@ def forget_file_category(slug: str, filename: str) -> None:
         _write_file_categories(slug, current)
 
 
+def md_file_categories(slug: str) -> dict[str, str]:
+    """The category map keyed by CONVERTED markdown basename instead of the
+    stored raw basename — what corpus-level consumers (KG seeding) see.
+
+    Derived via md_filename(raw). Collision-suffixed siblings (`name.1.md`)
+    can't be attributed (the raw→md mapping isn't stored — same limitation as
+    list_files' md_chars lookup) and stay uncategorized, which is the safe
+    fallback: uncategorized docs get the plain-upload treatment."""
+    return {
+        md_filename(raw): category
+        for raw, category in read_file_categories(slug).items()
+    }
+
+
 def _write_file_categories(slug: str, mapping: dict[str, str]) -> None:
     p = _categories_path(slug)
     p.parent.mkdir(parents=True, exist_ok=True)

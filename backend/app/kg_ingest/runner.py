@@ -97,6 +97,14 @@ def sync_provider(
                 agent=f"ingest:{provider}",
                 source_hint=hint,
                 origin="connector",
+                # The uploads "connector" is the user's own documents — the
+                # same evidentiary class as manual uploads, so it keeps the
+                # brief gate's upload-only relaxation (convergence counts
+                # channel="upload" as upload evidence, mirroring #868's Drive
+                # rationale).
+                provenance_extra=(
+                    {"channel": "upload"} if provider == "uploads" else None
+                ),
             )
             totals["batches"] += 1
             for k in ("signals", "themes", "skipped"):

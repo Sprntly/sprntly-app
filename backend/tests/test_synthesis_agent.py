@@ -546,6 +546,65 @@ def test_is_upload_only_false_when_no_origin_metadata(facade):
     assert is_upload_only(conv) is False
 
 
+def test_is_upload_only_true_for_category_upload_channel(facade):
+    """Connector-category uploads (origin="connector" + channel="upload") count
+    as UPLOAD evidence: a tenant whose only signals came from categorized
+    uploads keeps the upload-only relaxation."""
+    from datetime import datetime, timezone
+
+    from app.graph.types import Entity, Relationship, Signal
+    from app.synthesis.convergence import compute_convergence, is_upload_only
+
+    ent = "ent-cat-up"
+    theme = Entity(enterprise_id=ent, type="theme", canonical_label="search")
+    facade.create_entity(ent, theme)
+    for i in range(2):
+        sig = Signal(
+            enterprise_id=ent, source_type="customer_voice",
+            kind="feature_request", content=f"cat upload fact {i}",
+            valid_at=datetime.now(timezone.utc),
+            provenance={"source": "extractor", "origin": "connector",
+                        "channel": "upload", "category": "voice"})
+        facade.write_signal(ent, sig)
+        facade.write_relationship(ent, Relationship(
+            enterprise_id=ent, type="REQUESTS", source_kind="signal",
+            source_id=sig.id, target_kind="entity", target_id=theme.id))
+
+    conv = compute_convergence(facade, ent)
+    assert is_upload_only(conv) is True
+    assert sum(t.upload_signal_count for t in conv) == 2
+    assert sum(t.connector_signal_count for t in conv) == 0
+
+
+def test_is_upload_only_false_when_real_connector_beside_category_upload(facade):
+    """A live connector sync (origin="connector", no upload channel) beside
+    category uploads still switches the tenant OFF the upload-only path."""
+    from datetime import datetime, timezone
+
+    from app.graph.types import Entity, Relationship, Signal
+    from app.synthesis.convergence import compute_convergence, is_upload_only
+
+    ent = "ent-cat-mix"
+    theme = Entity(enterprise_id=ent, type="theme", canonical_label="search")
+    facade.create_entity(ent, theme)
+    for content, prov in [
+        ("cat upload fact", {"origin": "connector", "channel": "upload"}),
+        ("live sync fact", {"origin": "connector"}),
+    ]:
+        sig = Signal(
+            enterprise_id=ent, source_type="customer_voice",
+            kind="feature_request", content=content,
+            valid_at=datetime.now(timezone.utc),
+            provenance={"source": "extractor", **prov})
+        facade.write_signal(ent, sig)
+        facade.write_relationship(ent, Relationship(
+            enterprise_id=ent, type="REQUESTS", source_kind="signal",
+            source_id=sig.id, target_kind="entity", target_id=theme.id))
+
+    conv = compute_convergence(facade, ent)
+    assert is_upload_only(conv) is False
+
+
 def test_upload_only_thin_single_source_is_sufficient(facade):
     """THE FIX: an upload-only tenant with one single-source theme but >= 2
     uploaded-doc signals now CLEARS the gate (was insufficient before)."""
