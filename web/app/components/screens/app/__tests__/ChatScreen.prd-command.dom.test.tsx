@@ -347,6 +347,43 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
     expect(runAskGeneration).not.toHaveBeenCalled()
   })
 
+  // The acknowledgment used to be written the instant the command was seen, and
+  // only THEN did the gate discover the task was too thin — so "Generating a PRD
+  // for that — it'll open in the panel on the right…" sat above the questions
+  // that contradicted it. It is now deferred until the gate settles.
+  describe("the deferred acknowledgment", () => {
+    it("shows no acknowledgment when the answer turns out to be questions", async () => {
+      clarifyTask.mockResolvedValueOnce(QUESTIONS)
+      renderChat()
+      await typeAndSend("generate a PRD for dark mode on mobile")
+      await waitFor(() => expect(document.body.textContent).toContain("Who are the target users?"))
+
+      expect(document.body.textContent).not.toContain("Generating a PRD for that")
+      expect(document.body.textContent).not.toContain("View PRD button")
+    })
+
+    it("DOES acknowledge once generation actually starts — deferred, not deleted", async () => {
+      renderChat() // default clarifyTask mock: sufficient
+      await typeAndSend("generate a PRD for dark mode on mobile")
+
+      await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+      expect(document.body.textContent).toContain("Generating a PRD for that")
+    })
+
+    it("never leaves the command turn with no reply when the generate call fails", async () => {
+      // Deferring the reply creates a way for the turn to end up with none at
+      // all. The gate passed, so the ack was settled before the POST went out —
+      // a later failure must not regress the turn to "No response was generated".
+      generateFromTask.mockRejectedValueOnce(new Error("gateway down"))
+      renderChat()
+      await typeAndSend("generate a PRD for dark mode on mobile")
+
+      await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(document.body.textContent).toContain("Generating a PRD for that"))
+      expect(document.body.textContent).not.toContain("No response was generated for this message.")
+    })
+  })
+
   it("'generate now' skips the questions and generates from the ORIGINAL task", async () => {
     clarifyTask.mockResolvedValueOnce(QUESTIONS)
     renderChat()
@@ -373,8 +410,11 @@ describe("ChatScreen — clarify-first sufficiency gate", () => {
       renderChat()
       await typeAndSend("generate a PRD for dark mode on mobile")
 
-      // Acknowledged AND visibly working. Silence here is the bug.
-      expect(document.body.textContent).toContain("Generating a PRD for that")
+      // Visibly working — but NOT acknowledged, because this may resolve to
+      // QUESTIONS rather than a document. Silence here is one bug; "Generating a
+      // PRD for that…" sitting above the questions that follow it is the other,
+      // so the window is carried by the indicator alone.
+      expect(document.body.textContent).not.toContain("Generating a PRD for that")
       expect(document.querySelector('[data-testid="prd-command-thinking"]')).toBeTruthy()
       // The rail stays shut: this may resolve to questions, not a document, and
       // an empty PRD panel next to a question is worse than no panel.
