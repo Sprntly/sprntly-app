@@ -513,7 +513,11 @@ def run_synthesis(
     labels_by_theme = {c.theme_id: c.theme_label for c in convergence}
     backlog_entries = [
         {"theme_id": tid, "theme_label": labels_by_theme.get(tid, ""),
-         "reason": reason}
+         "reason": reason,
+         # For deferred themes, when they come back — the backlog surface shows
+         # "back on <date>" instead of a bare reason.
+         **({"deferred_until": (states.get(tid) or {}).get("deferred_until")}
+            if reason == "deferred" else {})}
         for tid, reason in ledger_backlog
     ]
     if not brief_pool:

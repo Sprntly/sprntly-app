@@ -433,6 +433,13 @@ function BriefFindingCard({
           <span className="fc-dot" aria-hidden />
           {finding.skillLabel}
         </span>
+        {/* Ledger freshness: an updated finding is back because it changed —
+            the chip says so, and the body's first beat states the change. */}
+        {finding.skillState === "updated" ? (
+          <span className="fc-pill fc-pill--updated" title="Back because it materially changed since it last surfaced">
+            Updated
+          </span>
+        ) : null}
         <div className="fc-top-right">
           <button type="button" className="fc-iconbtn" title="Ask about this finding" aria-label="Ask about this finding" onClick={onAsk}>
             <IconSparkle size={13} />
@@ -1441,6 +1448,14 @@ export function BriefChat() {
                   <div className="fc-sources">
                     <span className="fc-sources-label">Sources this week</span>
                     <span>{v2.sourcesLine}</span>
+                  </div>
+                ) : null}
+                {/* Ledger transparency: what was held back this cycle and why —
+                    "what am I not seeing" always has an answer. Counts only;
+                    anything worth acting on is a card above. */}
+                {v2?.heldBackLine ? (
+                  <div className="fc-sources fc-heldback">
+                    <span>{v2.heldBackLine}</span>
                   </div>
                 ) : null}
                 </>

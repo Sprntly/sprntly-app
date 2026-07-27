@@ -188,6 +188,10 @@ export type BriefSkillCard = {
   body?: string
   sources?: string[]
   ctas?: BriefSkillCta[]
+  /** Freshness state from the ledger ('new' | 'updated'). An updated card's
+   *  body opens with what changed; the render shows a quiet "Updated" chip.
+   *  Absent on briefs composed before the ledger wiring. */
+  state?: "new" | "updated" | string
   /** The finding this card phrases (== the insight theme_id). Cards persisted
    *  before the top-insights rename spell it `signal_id`. */
   finding_id?: string
@@ -252,6 +256,17 @@ export type Brief = {
    *  insight-type filter, falling back to `insights`. Absent on briefs generated
    *  before the pool existed — treat `insights` as the pool in that case. */
   _pool?: Insight[]
+  /** Phase 2A ledger: candidates held back from this brief with a reason
+   *  (carried | dismissed | deferred | in_progress | rotation_exhausted).
+   *  `deferred_until` accompanies reason 'deferred'. Feeds the quiet
+   *  "held back this cycle" line under the cards — "what am I not seeing"
+   *  always has an answer. Absent on pre-ledger briefs. */
+  _backlog?: {
+    theme_id: string
+    theme_label: string
+    reason: "carried" | "dismissed" | "deferred" | "in_progress" | "rotation_exhausted" | string
+    deferred_until?: string | null
+  }[]
   /** Backend evidence-gate flag: set when the brief was saved EMPTY because the
    *  KG lacked enough connected-source evidence (vs. a brand-new account with no
    *  data at all). Lets the UI tell "we got your upload, but need more connected
