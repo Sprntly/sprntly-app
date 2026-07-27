@@ -414,11 +414,10 @@ export function WorkspaceStep() {
 /**
  * "Ran our prompt in your LLM? Upload the .md" — the banner from the v7
  * workspace screenshot. The SAME import the dedicated step-2 screen runs, so
- * both entry points behave identically: it applies the deterministic parse
- * across the flow AND kicks the background LLM pass (Reader 2), so a file that
- * doesn't follow our heading contract still extracts and prefills rather than
- * reading as empty here. `applyImportFields` writes the fields; the backend
- * files the upload to the knowledge graph either way.
+ * both entry points behave identically: the upload files the .md and kicks the
+ * background LLM extraction, which is the only reader of it, and its fields
+ * prefill the flow when the job lands. `applyImportFields` writes them; the
+ * backend files the upload to the knowledge graph either way.
  */
 function LlmContextUploadBanner({
   workspace,
@@ -439,9 +438,9 @@ function LlmContextUploadBanner({
     setNotice(null)
     try {
       const res = await llmContextApi.importFile(file)
-      // Kick the background LLM pass so a reworded / free-form document still
-      // extracts. Without this a file our heading walk can't read (res.ok is
-      // false) would prefill nothing here — the whole reason step 2 does it too.
+      // Kick the background LLM pass — the only reader of the file. Without
+      // this the upload prefills nothing at all, which is why step 2 does it
+      // too.
       if (res.job_id && workspace) startContextImport(res.job_id, workspace.id)
       if (res.ok) {
         await applyImportFields(res.fields)
@@ -449,8 +448,8 @@ function LlmContextUploadBanner({
           `Read "${file.name}" — we filled in what was still blank. Check it over before continuing.`,
         )
       } else if (res.job_id) {
-        // Heading walk found nothing, but the LLM pass is now reading it and
-        // will fill the fields in when it lands (typically within a minute).
+        // The normal path: the upload carries no fields, and the extraction
+        // fills them in when it lands (typically within a minute).
         setNotice(
           `Reading "${file.name}" — we'll fill in what we find in a moment.`,
         )

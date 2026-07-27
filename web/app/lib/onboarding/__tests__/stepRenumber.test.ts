@@ -1,8 +1,9 @@
 // Slug-routing integrity for the semantic-routes onboarding flow. The flow is
 // the v7 redesign (screenshot spec 2026-07-21), keeping the optional api-key
 // step the spec omits and adding the optional import-context step from client
-// feedback 2026-07-22, reordered so the import leads and the two steps it can't
-// prefill cover its background extraction: import-context → company →
+// feedback 2026-07-22, ordered so the company step leads (its name + website
+// fill the prompt the import hands out) and the two steps an import can't
+// prefill cover its background extraction: company → import-context →
 // connectors → api-key →
 // workspace → product → metrics → invite → review → personalize, then the UNNUMBERED
 // define-metrics sub-flow completes onboarding. `workspace` here is the merged
@@ -22,10 +23,11 @@ describe("onboarding slug routing", () => {
     expect(ONBOARDING_STEP_COUNT).toBe(10)
     expect(ONBOARDING_SCREENS).toHaveLength(10)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
-      // import-context leads (2026-07-25) so an uploaded .md prefills every
-      // step behind it, the company one included.
-      "import-context",
+      // `company` leads again (2026-07-27) and `import-context` sits behind it:
+      // the name + website it collects are written into the prompt the import
+      // step hands out, so the assistant searches for the right company.
       "company",
+      "import-context",
       "connectors",
       "api-key",
       "workspace",

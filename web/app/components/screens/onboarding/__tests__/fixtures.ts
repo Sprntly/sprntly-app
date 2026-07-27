@@ -4,8 +4,32 @@
 import type {
   UserProfile,
   WorkspaceCompany,
+  WorkspaceProduct,
 } from "../../../../lib/onboarding/types"
 import type { AnalyzeWebsiteResponse } from "../../../../lib/api"
+
+/** The primary product row hanging off a workspace. The company step writes
+ *  the COMPANY website here (`product.website`), which is where the import
+ *  step reads it from to fill the prompt. */
+export function makeProduct(
+  over: Partial<WorkspaceProduct> = {},
+): WorkspaceProduct {
+  return {
+    id: "p-1",
+    company_id: "ws-1",
+    name: "Acme",
+    website: null,
+    description: null,
+    is_primary: true,
+    surfaces: [],
+    personas: [],
+    positioning: null,
+    monetization: [],
+    users_description: null,
+    maturity: null,
+    ...over,
+  }
+}
 
 export function makeWorkspace(
   over: Partial<WorkspaceCompany> = {},
@@ -50,6 +74,8 @@ export function makeWorkspace(
     feature_flags: {
       agents: true,
       top_insights: true,
+      // Default ON (2026-07-26), same as a real row missing the key.
+      chat_intent_envelope: true,
       on_demand_analysis: true,
       auto_prd_generation: true,
       engineer_agent: false,
@@ -118,6 +144,7 @@ export function makeOnboardingCtx(over: Record<string, unknown> = {}) {
     setWebsiteAnalysis: () => {},
     startWebsiteAnalysis: () => {},
     contextImport: "idle" as const,
+    contextImportFields: null,
     startContextImport: () => {},
     ...over,
   }

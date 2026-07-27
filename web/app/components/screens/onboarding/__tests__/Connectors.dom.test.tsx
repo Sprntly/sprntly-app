@@ -20,7 +20,8 @@
 //   - connectable cards open the connect modal with the right provider
 //   - connectors are OPTIONAL: leaving with none stamps skipped_fields
 //   - leaving advances to step 4 and routes to /onboarding/api-key; Back goes
-//     to /onboarding/company
+//     to /onboarding/import-context (the step directly ahead of this one since
+//     the 2026-07-27 company/import swap)
 //   - the no-workspace redirect happens in an EFFECT, never during render
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
@@ -462,10 +463,14 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
 
-  it("Back routes to the company step", () => {
+  it("Back routes to the import step — the one directly ahead of this", () => {
+    // Each step's Back target is hand-written, so a flow reorder can silently
+    // leave it pointing at the step that USED to precede this one and skip a
+    // step on the way back. That is exactly what the 2026-07-27 company/import
+    // swap did here.
     mountLoaded()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/company")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

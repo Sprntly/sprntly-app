@@ -24,8 +24,8 @@ import { Check } from "../../auth/icons"
 const DRAFT_KEY = "company-step"
 
 /**
- * Onboarding step 02 — "Tell us about your company" (v6 screenshot spec
- * 2026-07-17; moved behind the import step 2026-07-25).
+ * Onboarding step 01 — "Tell us about your company" (v6 screenshot spec
+ * 2026-07-17; back at the front of the flow 2026-07-27).
  *
  * Fields: company name* (the only mandatory one), company website, mission &
  * vision, and strategy / OKRs (typed, or a doc upload alongside), plus an
@@ -33,13 +33,19 @@ const DRAFT_KEY = "company-step"
  *
  * On Continue we persist the company (+ product website seed), kick the
  * website analysis in the BACKGROUND (no interstitial — the result lands on
- * the onboarding context for later steps/settings), and advance to connectors.
+ * the onboarding context for later steps/settings), and advance to the import
+ * step.
  *
- * The workspace may already exist when this loads — the import step creates it
- * (unnamed) when a file is uploaded there, and the heading parse has already
- * written whatever the export said about the company. So the fields here seed
- * FILL-ONLY from `workspace`, both to show those imported values and so the
- * background extraction landing mid-step can't overwrite what is being typed.
+ * IT RUNS FIRST SO THE IMPORT STEP CAN USE WHAT IT COLLECTS. The prompt that
+ * step hands out opens by asking which company the file is about; the name and
+ * website typed here are written into it, so the assistant starts with the
+ * entity locked instead of inferring it. That is also why the two fields are
+ * saved before we navigate rather than on the far side of the flow.
+ *
+ * The workspace may already exist when this loads — a returning user, or one
+ * who went back a step — so the fields seed FILL-ONLY from `workspace`, both to
+ * show what was saved and so the import's background extraction landing while
+ * this step is open can't overwrite what is being typed.
  */
 export function CompanyStep() {
   const auth = useAuth()
@@ -133,7 +139,7 @@ export function CompanyStep() {
     }
     const normalizedSite = normalizeProductWebsite(website)
     setSaving(true)
-    const nextStep = stepForSlug("connectors") ?? 3
+    const nextStep = stepForSlug("import-context") ?? 2
     try {
       let ws = workspace
       if (workspace) {
@@ -182,7 +188,7 @@ export function CompanyStep() {
       // runs server-side; the provider outlives this navigation.
       const analysisSite = ws?.product?.website ?? normalizedSite
       if (ws && analysisSite) startWebsiteAnalysis(analysisSite, ws.id)
-      router.push("/onboarding/connectors")
+      router.push("/onboarding/import-context")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your company.")
       setSaving(false)
@@ -193,7 +199,7 @@ export function CompanyStep() {
 
   return (
     <OnboardingChrome
-      step={2}
+      step={1}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -202,7 +208,6 @@ export function CompanyStep() {
       }
       subtitle="Add what you can — expand the optional sections to make it sharper."
       footerMeta="Company"
-      onBack={() => router.push("/onboarding/import-context")}
       onContinue={() => void save()}
       continueLabel="Next"
       continueDisabled={saving}
@@ -244,8 +249,8 @@ export function CompanyStep() {
               autoComplete="url"
             />
             <p className="onb-field-hint">
-              We&apos;ll read this to draft your business context in the
-              background.
+              We&apos;ll read this in the background to draft your business
+              context, and fill it into the prompt on the next step.
             </p>
           </div>
 

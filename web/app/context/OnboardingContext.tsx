@@ -74,14 +74,22 @@ type OnboardingCtx = {
    * State of the background LLM extraction kicked off by the import-context
    * step. "idle" when nothing was uploaded, "running" while the job is in
    * flight, "done" once its fields have been merged onto the workspace, and
-   * "failed" when it errored or timed out (the deterministic parse applied at
-   * upload time still stands in that case).
+   * "failed" when it errored or timed out (nothing is prefilled in that case —
+   * the extraction is the only reader of an uploaded file).
    *
    * Read by the steps the import prefills so they can say "we filled this in
    * from your file" rather than leaving the user guessing why a form they
    * never touched has values in it.
    */
   contextImport: ContextImportState
+  /**
+   * What the extraction actually read, once `contextImport` is "done" — the
+   * same field bag that was merged onto the workspace. The import step names
+   * these back to the user ("we pre-filled your mission, competitors…"), which
+   * it can no longer do from the upload response: since the v3 prompt the POST
+   * carries no fields at all and this job is the only read of the file.
+   */
+  contextImportFields: LlmContextFields | null
   /**
    * Fire-and-forget the background extraction poll for a just-uploaded context
    * file, applying whatever it returns onto the workspace as a prefill.
@@ -143,6 +151,10 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
 
   // ---- Background LLM context extraction (the import-context step) ----------
   const [contextImport, setContextImport] = useState<ContextImportState>("idle")
+  // What the extraction read, kept so the import step can name the fields back
+  // to the user once the job lands — the upload response no longer carries any.
+  const [contextImportFields, setContextImportFields] =
+    useState<LlmContextFields | null>(null)
   // One extraction per provider lifetime, so a re-render, a second
   // `startContextImport` call, and the re-attach effect below can't double-poll.
   const contextImportStartedRef = useRef(false)
@@ -163,6 +175,7 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
       const next = await applyImportedContext(current, fields)
       // Identity is the "nothing to write" signal — see applyImportedContext.
       if (next !== current) setWorkspace(next)
+      setContextImportFields(fields)
       setContextImport("done")
     } catch {
       // The extraction succeeded but the write didn't. Report it rather than
@@ -287,6 +300,7 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
       setWebsiteAnalysis,
       startWebsiteAnalysis,
       contextImport,
+      contextImportFields,
       startContextImport,
     }),
     [
@@ -298,6 +312,7 @@ export function OnboardingProvider({ children }: { children: ReactNode }) {
       websiteAnalysis,
       startWebsiteAnalysis,
       contextImport,
+      contextImportFields,
       startContextImport,
     ],
   )

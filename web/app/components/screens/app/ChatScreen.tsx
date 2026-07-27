@@ -22,7 +22,7 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
-import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
+import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
 import { ApiError, askApi, attachmentsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -63,6 +63,13 @@ type ThreadTurn = {
    *  command still awaiting its deferred reply; see deferredAckRef). Renders an
    *  honest "send it again" note instead of "No response was generated". */
   interrupted?: boolean
+  /** The artifact chat summary for this turn is still being written (the
+   *  panel's artifact is done; the summary call is in flight). Renders a
+   *  "Summarizing…" indicator instead of appearing out of nowhere seconds
+   *  later. Transient: resolved turns drop the flag, failed/empty summaries
+   *  remove the whole turn, and the persist effect never saves a still-pending
+   *  one (a reload cannot restore a skeleton nothing will ever fill). */
+  summaryPending?: boolean
   /** The clarify gate's questions, STRUCTURED — rendered as an answerable card
    *  (options as buttons, one submit for the batch) instead of the flattened
    *  numbered list that `reply.answer` carries. Both live on the same turn: the
@@ -281,6 +288,12 @@ const PRD_TRANSCRIPT_DOC_NAME = "Conversation (this chat)"
 // ids and reconstructs replies as plain answers).
 const PRD_ACK_ANSWER_RE = /View PRD button/
 const PRD_CLARIFY_ANSWER_RE = /^Before I write this PRD/
+// Artifact summaries end with a per-kind pointer line ("…View Evidence button…",
+// "…View Prototype button…") precisely so this text-based filter can strip them
+// here: a summary OF an artifact fed back as grounding would read as fresh
+// requirements. PRD summaries are already covered by PRD_ACK_ANSWER_RE.
+const EVIDENCE_SUMMARY_ANSWER_RE = /View Evidence button/
+const PROTOTYPE_SUMMARY_ANSWER_RE = /View Prototype button/
 export function conversationTranscriptDoc(
   thread: ThreadTurn[],
 ): { name: string; content: string } | null {
@@ -289,7 +302,13 @@ export function conversationTranscriptDoc(
     const q = t.query?.trim()
     if (q) parts.push(`User: ${q}`)
     const a = typeof t.reply?.answer === "string" ? t.reply.answer.trim() : ""
-    if (a && !PRD_ACK_ANSWER_RE.test(a) && !PRD_CLARIFY_ANSWER_RE.test(a)) {
+    if (
+      a &&
+      !PRD_ACK_ANSWER_RE.test(a) &&
+      !PRD_CLARIFY_ANSWER_RE.test(a) &&
+      !EVIDENCE_SUMMARY_ANSWER_RE.test(a) &&
+      !PROTOTYPE_SUMMARY_ANSWER_RE.test(a)
+    ) {
       parts.push(`Sprntly: ${a}`)
     }
   }
@@ -649,6 +668,7 @@ function ChatArtifactActions({
   prototypePrdId,
   prototypeReady,
   onViewPrototype,
+  onPrototypeSettled,
 }: {
   evidenceExists: boolean
   prdExists: boolean
@@ -660,6 +680,9 @@ function ChatArtifactActions({
   prototypePrdId: number | null
   prototypeReady: boolean
   onViewPrototype: () => void
+  /** A chat-kicked prototype build finished (success or failure) — the host
+   *  posts the artifact chat summary from here. */
+  onPrototypeSettled?: (result?: import("../../../lib/runDesignAgentGeneration").DesignAgentGenResult) => void
 }) {
   // Order matters: GENERATING (a document is being written) outranks LOADING
   // (one exists and is being fetched), which outranks the settled View/Generate
@@ -690,6 +713,7 @@ function ChatArtifactActions({
       <GeneratePrototypeCTA
         prdId={prototypePrdId}
         skipExistenceCheck
+        onGenerationSettled={onPrototypeSettled}
         render={({ onClick }) => (
           <button
             type="button"
@@ -855,9 +879,16 @@ export function ChatScreen() {
       // `partial` (live streamed answer text) is stripped for the same reason —
       // the resume path re-attaches the stream and rebuilds it from replay.
       const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => {
+        // A still-pending summary indicator is dropped from the SAVED copy:
+        // its in-flight call dies with the page, so restoring it would strand
+        // a "Summarizing…" skeleton nothing will ever fill. The summary itself
+        // persists (as the turn's reply, and as a conversation row) only once
+        // it actually lands.
         const stripped = {
           ...rest,
-          thread: rest.thread.map(({ partial: _partial, ...turn }) => turn),
+          thread: rest.thread
+            .filter((tn) => !(tn.summaryPending && !tn.reply))
+            .map(({ partial: _partial, ...turn }) => turn),
         }
         // A PRD command awaiting its deferred reply (the clarify gate is still
         // deciding — see deferredAckRef) has a reply-less seed turn, and the
@@ -884,6 +915,18 @@ export function ChatScreen() {
   const isBriefTab = activeTabId === BRIEF_TAB_ID
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const thread = activeTab?.thread ?? []
+  // The last turn a REPLY could still land on. A pending artifact-summary
+  // placeholder is transparent here: it is appended the moment the artifact
+  // lands, which would otherwise steal "last" from a genuinely in-flight ask
+  // (flipping it to "No response was generated" mid-answer) and move the
+  // artifact-action row onto a turn that has nothing to act on. Equals
+  // `thread.length - 1` whenever no summary is pending.
+  const lastLiveTurnIdx = (() => {
+    for (let i = thread.length - 1; i >= 0; i--) {
+      if (!(thread[i].summaryPending && !thread[i].reply)) return i
+    }
+    return thread.length - 1
+  })()
 
   // ── Prototype map for the active tab's brief (one fetch per briefId) ───────
   const chatBriefId = activeTab?.briefMeta?.briefId ?? null
@@ -1141,6 +1184,15 @@ export function ChatScreen() {
             ...(t.attachments?.length ? { attachments: t.attachments } : {}),
           })
           if (reply) i++
+        } else if (t.role === "assistant" && t.content.trim()) {
+          // Unconsumed assistant row (the artifact summary posted after the
+          // ack) → agent-only turn, mirroring buildRestored. Dropping it made
+          // the summary vanish from every reopened PRD chat.
+          restored.push({
+            id: `prdhist-${conversation.id}-${i}`,
+            query: "",
+            reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+          })
         }
       }
       if (restored.length === 0) return
@@ -1210,6 +1262,13 @@ export function ChatScreen() {
   // ref rather than a closure it cannot legally capture at render time.
   const finalizeTurnRef = useRef<
     ((turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string) => void) | null
+  >(null)
+  // postArtifactSummary is likewise declared after the generation flows that
+  // call it (it depends on `persistence`), so completion sites reach it through
+  // this ref — assigned right after its definition, consumed only in async
+  // completion handlers, so it is never read before assignment.
+  const postSummaryRef = useRef<
+    ((tabId: string, kind: "prd" | "evidence" | "prototype", artifactId: number) => void) | null
   >(null)
   /** Write the reply the clarify gate settled on — the ack, or the questions —
    *  onto the command turn's thread entry AND its conversation row. No-op when
@@ -1538,6 +1597,18 @@ export function ChatScreen() {
           // conversation (no-op); an existing one restores the user's prior turns.
           // The upfront ready/load path already hydrated, so skip those here.
           if (knownPrdId == null) void hydratePrdThread(tabId, result.prd.prd_id)
+          // Chat summary of what got built — only for kinds that carry EXPLICIT
+          // generation intent (a typed command, a doc conversion, an ideation
+          // framing). Bare `generate` is excluded: its find-or-create regularly
+          // resolves an existing PRD on a "View PRD" click, and a reopen must
+          // never re-summarize. resume/ready/load are reopens by definition.
+          if (
+            source.kind === "generateTask" ||
+            source.kind === "importDoc" ||
+            source.kind === "generateIdeation"
+          ) {
+            postSummaryRef.current?.(tabId, "prd", result.prd.prd_id)
+          }
         } else if (!(result as { clarify?: boolean }).clarify) {
           // (The clarify outcome already cleared its own spinner and posted the
           // questions — it is a handled stop, not a failure.)
@@ -1666,6 +1737,9 @@ export function ChatScreen() {
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
           setContent({ prd: result.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
+          // The Generate button on a PRD-less tab is explicit generation intent
+          // — same summary the typed command gets.
+          postSummaryRef.current?.(activeTabId, "prd", result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
           setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -1690,6 +1764,10 @@ export function ChatScreen() {
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
         setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+        // Reached only when neither the tab nor the insight map knows a PRD
+        // (savedPrdId was null) — the CTA read "Generate PRD", so this is a
+        // fresh build, not a View reopen.
+        postSummaryRef.current?.(activeTabId, "prd", result.prd.prd_id)
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
         setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -1732,6 +1810,9 @@ export function ChatScreen() {
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
         setContent({ evidence: result.evidence, evidenceGenerating: false, evidencePartialHtml: null, prdMeta: meta })
+        // Chat summary only when something was BUILT — the read-first path
+        // marks a mere reopen of already-ready evidence with `existing`.
+        if (!result.existing) postSummaryRef.current?.(tabId, "evidence", result.evidenceId)
       } else {
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false } : t))
         setContent({ evidenceGenerating: false, evidencePartialHtml: null })
@@ -1803,6 +1884,9 @@ export function ChatScreen() {
             if (result.ok) {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
               setContent({ evidencePartialHtml: null })
+              // This path only exists because a FRESH generation was in flight
+              // when the screen unmounted (pending-job marker) — summarize it.
+              postSummaryRef.current?.(activeTabId, "evidence", result.evidenceId)
             } else {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
               setContent({ evidencePartialHtml: null })
@@ -2049,6 +2133,18 @@ export function ChatScreen() {
               ...(t.attachments?.length ? { attachments: t.attachments } : {}),
             })
             if (reply) i++
+          } else if (t.role === "assistant" && t.content.trim()) {
+            // An assistant row NOT consumed as some user turn's reply — e.g.
+            // the artifact summary posted after a generation's ack. These used
+            // to be silently dropped, so a persisted summary survived in the
+            // DB but vanished from every restored thread. Restore it as an
+            // agent-only turn (empty `query` renders no user bubble — the
+            // same convention the clarify gate's orphan turn uses live).
+            restored.push({
+              id: `${keyPrefix}-${i}`,
+              query: "",
+              reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+            })
           }
         }
         return restored
@@ -2366,6 +2462,9 @@ export function ChatScreen() {
           if (activeTabIdRef.current === targetTabId) {
             setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
           }
+          // Always a fresh generation here (the clarify gate only parks NEW
+          // tasks) — post the chat summary of what got built.
+          postSummaryRef.current?.(targetTabId, "prd", result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
           if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -2401,6 +2500,116 @@ export function ChatScreen() {
   // every question left to its stated default. Both paths converge on
   // runClarifiedGeneration, so the card is an affordance over the existing flow
   // rather than a second one to keep in sync.
+  // ── Artifact chat summaries ────────────────────────────────────────────────
+  // When a PRD / evidence report / prototype finishes generating in the panel,
+  // the chat posts a short LLM summary of what got built — the thread's record
+  // of the outcome, instead of going quiet after the acknowledgment. Posted as
+  // an agent-only turn (empty query) and persisted via pushAssistantTurn, so it
+  // survives reload AND reopening from history (the restore paths rebuild
+  // unconsumed assistant rows as agent-only turns — see buildRestored).
+  //
+  // Fresh generations only: every caller sits on a path that just RAN a
+  // generation, never on a reopen/load path, and the per-artifact guard below
+  // makes even a double-fired completion idempotent. Best-effort throughout —
+  // a failed summary changes nothing about the artifact flow.
+  const postedSummariesRef = useRef<Set<string>>(new Set())
+  const postArtifactSummary = useCallback(
+    (tabId: string, kind: "prd" | "evidence" | "prototype", artifactId: number) => {
+      const key = `${tabId}:${kind}:${artifactId}`
+      if (postedSummariesRef.current.has(key)) return
+      postedSummariesRef.current.add(key)
+      // The pointer line doubles as the transcript-filter marker (see
+      // *_SUMMARY_ANSWER_RE / PRD_ACK_ANSWER_RE): it is what keeps the summary
+      // out of the next PRD's grounding.
+      const pointer =
+        kind === "prd"
+          ? "Use the View PRD button in this chat to reopen it anytime."
+          : kind === "evidence"
+            ? "Use the View Evidence button in this chat to reopen it anytime."
+            : "Use the View Prototype button in this chat to reopen it anytime."
+      // The turn appears NOW, in a "Summarizing…" state — the summary call is
+      // its own model round-trip, and an answer materializing out of nowhere
+      // seconds after the panel settled read as unrelated. Resolved → the same
+      // turn takes the reply (typing reveal included); empty/failed → the turn
+      // is removed outright, never left as a skeleton nothing will fill.
+      const turnId = `summary-${kind}-${artifactId}-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`
+      setTabs((prev) => prev.map((t) =>
+        t.id === tabId
+          ? { ...t, thread: [...t.thread, { id: turnId, query: "", summaryPending: true }] }
+          : t))
+      const dropPendingTurn = () =>
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId ? { ...t, thread: t.thread.filter((tn) => tn.id !== turnId) } : t))
+      void (async () => {
+        try {
+          const { artifactsApi } = await import("../../../lib/api")
+          const { summary } = await artifactsApi.chatSummary(kind, artifactId)
+          if (!summary?.trim()) {
+            dropPendingTurn()
+            return
+          }
+          const text = `${summary.trim()}\n\n${pointer}`
+          setTabs((prev) => prev.map((t) =>
+            t.id === tabId
+              ? {
+                  ...t,
+                  thread: t.thread.map((tn) =>
+                    tn.id === turnId
+                      ? {
+                          ...tn,
+                          summaryPending: undefined,
+                          reply: {
+                            answer: text,
+                            sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+                          } as AskResponse,
+                        }
+                      : tn),
+                }
+              : t))
+          // Hold the WRITE (not the render) until any ask in flight on this
+          // tab has landed its own reply. chatPersistence's per-tab queue
+          // preserves ENQUEUE order, so persisting mid-ask would slot the
+          // summary between a user turn and its answer — the history restore
+          // pairs strictly user→next-assistant, so it would show the summary
+          // as the answer to that question and orphan the real reply. Capped
+          // so a wedged ask can never strand the summary entirely.
+          for (let waited = 0; askingTabsRef.current.has(tabId) && waited < 60_000; waited += 250) {
+            await new Promise((r) => setTimeout(r, 250))
+          }
+          // Persist directly — an agent-only message has no rail turn to
+          // finalize. No-ops harmlessly on tabs without a conversation (those
+          // never appear in Chat history, so nothing the user could reopen is
+          // missing it).
+          void persistence.pushAssistantTurn(tabId, text)
+        } catch {
+          // Best-effort: the artifact flow already succeeded — just retire the
+          // indicator.
+          dropPendingTurn()
+        }
+      })()
+    },
+    [persistence],
+  )
+  postSummaryRef.current = postArtifactSummary
+
+  // A chat-kicked prototype build settled. Resolve the owning tab AT SETTLE
+  // TIME from the prototype's own prd_id — the build outlives renders (and the
+  // user may have switched tabs mid-build), so any render-time closure could
+  // name the wrong tab. Failure results post nothing: the overlay/toast already
+  // reports those, and a summary of a failed build would be noise.
+  const handlePrototypeSettled = useCallback(
+    (result?: import("../../../lib/runDesignAgentGeneration").DesignAgentGenResult) => {
+      if (!result?.ok) return
+      const prdId = result.prototype.prd_id
+      const tab = prdId != null
+        ? tabsRef.current.find((t) => t.prdId === prdId)
+        : tabsRef.current.find((t) => t.id === activeTabIdRef.current)
+      if (!tab) return
+      postArtifactSummary(tab.id, "prototype", result.prototype.id)
+    },
+    [postArtifactSummary],
+  )
+
   const submitClarifyAnswers = useCallback(async (answers: ClarifyAnswer[]) => {
     const tabId = activeTabIdRef.current
     if (!tabId) return
@@ -3627,6 +3836,7 @@ export function ChatScreen() {
         prototypePrdId={chatProtoPrdId}
         prototypeReady={chatPrototypeReady}
         onViewPrototype={handleViewPrototype}
+        onPrototypeSettled={handlePrototypeSettled}
       />
     </div>
   ) : null
@@ -3661,6 +3871,34 @@ export function ChatScreen() {
     return 0
   }, [inlinePrdCards, activeTab?.prdFlowTurnId, thread])
 
+  // ── Reopen the artifact panel from the tab strip ────────────────────────────
+  // Closing the panel (its × or the overlay) used to be one-way: the only route
+  // back was the View PRD button on the insight card, which sits at the TOP of
+  // the thread — buried by any long conversation, and parked mid-thread on a
+  // command-opened tab. This puts the SAME action (handleOpenPrd — sync the
+  // cached doc or DB-load this tab's own id; never a regeneration) at the top
+  // right of the tab strip, which is chrome: it holds still while the thread
+  // scrolls. The in-thread button stays where it is; this is an additional way
+  // in, not a replacement.
+  //
+  // Prefers the PRD when the tab has one — it's the artifact the panel is
+  // named for — and falls back to Evidence for an insight tab that only ever
+  // generated a brief. Null (hidden) when the panel is already open, on the
+  // brief tab (BriefChat owns its own panel wiring, and handleOpenPrd no-ops
+  // there since BRIEF_TAB_ID isn't in `tabs`), or when the tab has no artifact
+  // to reopen.
+  const reopenArtifact = useMemo(() => {
+    if (isBriefTab || contentPanelTab || !activeTabId) return null
+    if (chatPrdExists || activeTab?.prdGenerating || activeTab?.prdLoading) {
+      return { label: "View PRD", onClick: handleOpenPrd }
+    }
+    if (chatEvidenceExists) return { label: "View Evidence", onClick: handleOpenEvidence }
+    return null
+  }, [
+    isBriefTab, contentPanelTab, activeTabId, chatPrdExists, chatEvidenceExists,
+    activeTab?.prdGenerating, activeTab?.prdLoading, handleOpenPrd, handleOpenEvidence,
+  ])
+
   return (
     <AppLayout
       mainClassName="main--home-chat"
@@ -3679,92 +3917,115 @@ export function ChatScreen() {
           {/* Tab bar — always visible. Browser-style: grey strip, the ACTIVE tab
               is a white card (side+top borders, rounded top corners) that merges
               with the white content area below by overlapping the strip's bottom
-              border; inactive tabs are plain grey labels on the strip. */}
-          <div data-testid="chat-tab-bar" style={{
-            display: "flex", alignItems: "stretch", gap: 0,
-            borderBottom: "1px solid var(--line, #E8E6E0)", background: "var(--surface-2, #F7F5F0)",
-            height: 44, paddingLeft: 8, overflowX: "auto", overflowY: "visible", flexShrink: 0,
-          }}>
-            {/* Pinned brief tab — always first, never closable (synthesized, not
-                in `tabs`/localStorage). Selecting it renders <BriefChat/> below. */}
-            <div
-              key={BRIEF_TAB_ID}
-              onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
-              style={{
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "0 14px", fontSize: 13, cursor: "pointer",
-                color: isBriefTab ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
-                fontWeight: isBriefTab ? 500 : 400,
-                background: isBriefTab ? "var(--surface, #fff)" : "transparent",
-                borderTop: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                borderLeft: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                borderRight: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                borderRadius: "8px 8px 0 0",
-                marginTop: 8, marginBottom: -1,
-                whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
-                userSelect: "none", flexShrink: 0,
-              }}
-            >
-              <span style={{ lineHeight: "1.3" }}>Top Insights</span>
-            </div>
-            {tabs.map((tab) => {
-              const isActive = activeTabId === tab.id
-              return (
-                <div
-                  key={tab.id}
-                  onClick={() => { setActiveTabId(tab.id); setDraft("") }}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 6,
-                    padding: "0 10px 0 14px", fontSize: 13, cursor: "pointer",
-                    color: isActive ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
-                    fontWeight: isActive ? 500 : 400,
-                    background: isActive ? "var(--surface, #fff)" : "transparent",
-                    borderTop: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                    borderLeft: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                    borderRight: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                    borderRadius: "8px 8px 0 0",
-                    marginTop: 8, marginBottom: -1,
-                    whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
-                    userSelect: "none", flexShrink: 0,
-                  }}
-                >
-                  <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", lineHeight: "1.3" }}>
-                    {tab.title}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}
+              border; inactive tabs are plain grey labels on the strip.
+              The strip is two parts: the tab list, which SCROLLS once enough
+              tabs are open, and the artifact button pinned to its right end,
+              which must not — so the strip's chrome (border, background,
+              height) sits on this wrapper and only the list scrolls. */}
+          <div className="chat-tab-strip">
+            <div data-testid="chat-tab-bar" style={{
+              display: "flex", alignItems: "stretch", gap: 0,
+              flex: "1 1 auto", minWidth: 0,
+              paddingLeft: 8, overflowX: "auto", overflowY: "visible",
+            }}>
+              {/* Pinned brief tab — always first, never closable (synthesized, not
+                  in `tabs`/localStorage). Selecting it renders <BriefChat/> below. */}
+              <div
+                key={BRIEF_TAB_ID}
+                onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "0 14px", fontSize: 13, cursor: "pointer",
+                  color: isBriefTab ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
+                  fontWeight: isBriefTab ? 500 : 400,
+                  background: isBriefTab ? "var(--surface, #fff)" : "transparent",
+                  borderTop: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                  borderLeft: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                  borderRight: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                  borderRadius: "8px 8px 0 0",
+                  marginTop: 8, marginBottom: -1,
+                  whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
+                  userSelect: "none", flexShrink: 0,
+                }}
+              >
+                <span style={{ lineHeight: "1.3" }}>Top Insights</span>
+              </div>
+              {tabs.map((tab) => {
+                const isActive = activeTabId === tab.id
+                return (
+                  <div
+                    key={tab.id}
+                    onClick={() => { setActiveTabId(tab.id); setDraft("") }}
                     style={{
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      width: 16, height: 16, flexShrink: 0,
-                      background: "none", border: "none", cursor: "pointer",
-                      fontSize: 13, color: "var(--ink-4, #B0AEA6)", padding: 0, lineHeight: 1,
-                      borderRadius: 3,
+                      display: "flex", alignItems: "center", gap: 6,
+                      padding: "0 10px 0 14px", fontSize: 13, cursor: "pointer",
+                      color: isActive ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
+                      fontWeight: isActive ? 500 : 400,
+                      background: isActive ? "var(--surface, #fff)" : "transparent",
+                      borderTop: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                      borderLeft: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                      borderRight: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                      borderRadius: "8px 8px 0 0",
+                      marginTop: 8, marginBottom: -1,
+                      whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
+                      userSelect: "none", flexShrink: 0,
                     }}
-                    title="Close tab"
-                  >×</button>
-                </div>
-              )
-            })}
-            {/* New-tab button — styled like Chrome's: a small rounded control
-                just to the right of the last tab, vertically centered in the
-                strip, with a subtle circular highlight on hover. */}
-            <button
-              type="button"
-              onClick={startNewThread}
-              aria-label="New chat"
-              title="New chat"
-              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--line, #E8E6E0)" }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent" }}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 28, margin: "8px 4px 0 6px", padding: 0,
-                background: "transparent", border: "none", cursor: "pointer",
-                borderRadius: "50%", fontSize: 18, lineHeight: 1,
-                color: "var(--ink-3, #8C8A84)", flexShrink: 0,
-                transition: "background 0.12s",
-              }}
-            >+</button>
+                  >
+                    <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", lineHeight: "1.3" }}>
+                      {tab.title}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        width: 16, height: 16, flexShrink: 0,
+                        background: "none", border: "none", cursor: "pointer",
+                        fontSize: 13, color: "var(--ink-4, #B0AEA6)", padding: 0, lineHeight: 1,
+                        borderRadius: 3,
+                      }}
+                      title="Close tab"
+                    >×</button>
+                  </div>
+                )
+              })}
+              {/* New-tab button — styled like Chrome's: a small rounded control
+                  just to the right of the last tab, vertically centered in the
+                  strip, with a subtle circular highlight on hover. */}
+              <button
+                type="button"
+                onClick={startNewThread}
+                aria-label="New chat"
+                title="New chat"
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--line, #E8E6E0)" }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent" }}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 28, height: 28, margin: "8px 4px 0 6px", padding: 0,
+                  background: "transparent", border: "none", cursor: "pointer",
+                  borderRadius: "50%", fontSize: 18, lineHeight: 1,
+                  color: "var(--ink-3, #8C8A84)", flexShrink: 0,
+                  transition: "background 0.12s",
+                }}
+              >+</button>
+            </div>
+            {/* The way back to a closed artifact panel. Pinned to the strip's
+                right end — outside the scrolling list — so no number of open
+                tabs and no scroll position can put it out of reach. Hidden
+                while the panel is open (it has its own close) and on tabs with
+                no artifact to reopen. */}
+            {reopenArtifact ? (
+              <button
+                type="button"
+                className="chat-artifact-reopen"
+                data-testid="chat-reopen-artifact"
+                title={`${reopenArtifact.label} — reopen the panel`}
+                onClick={() => { void reopenArtifact.onClick() }}
+              >
+                <IconDocument size={13} />
+                {reopenArtifact.label}
+              </button>
+            ) : null}
           </div>
 
           {isBriefTab ? (
@@ -3907,7 +4168,16 @@ export function ChatScreen() {
                       </div>
                     ) : null}
                     {thread.map((turn, idx) => {
-                      const isLast = idx === thread.length - 1
+                      // "Last" for the purposes of in-flight state and the
+                      // artifact-action row means the last turn a REPLY could
+                      // still land on — a pending artifact-summary placeholder
+                      // is transparent to both. Without this, appending that
+                      // placeholder while an ask is in flight stole `isLast`
+                      // from the real in-flight turn, flipping it to "No
+                      // response was generated" mid-answer and yanking the
+                      // View PRD row off screen. Identical to `isLast` whenever
+                      // no summary is pending.
+                      const isLast = idx === lastLiveTurnIdx
                       // A turn shows the "thinking" skeleton ONLY while its ask is
                       // genuinely in flight — the active tab is busy AND this is the
                       // last (in-flight) turn. Any other reply-less turn is terminal:
@@ -3981,7 +4251,15 @@ export function ChatScreen() {
                                 and this indicator carries the window — the same
                                 anti-dead-air guarantee, minus the false claim. */}
                             {!turn.reply && !turn.error && !turn.stopped ? (
-                              isGenerating ? (
+                              turn.summaryPending ? (
+                                // The artifact is done; its chat summary is one
+                                // model call behind. Say so — a bare skeleton
+                                // here read as another full answer coming.
+                                <div data-testid="summary-pending">
+                                  <div className="bc-agent-status">Summarizing what got built…</div>
+                                  <AssistantThinkingSkeleton compact />
+                                </div>
+                              ) : isGenerating ? (
                                 turn.partial ? (
                                   // Live token stream: render the accumulating
                                   // answer markdown as the model writes it. No
@@ -4061,12 +4339,13 @@ export function ChatScreen() {
                               prdExists={chatPrdExists}
                               prdWaiting={chatPrdCtaWaiting}
                               prdGenerating={!!activeTab?.prdGenerating}
-        prdLoading={!!activeTab?.prdLoading}
+                              prdLoading={!!activeTab?.prdLoading}
                               onViewEvidence={handleOpenEvidence}
                               onOpenPrd={handleOpenPrd}
                               prototypePrdId={chatProtoPrdId}
                               prototypeReady={chatPrototypeReady}
                               onViewPrototype={handleViewPrototype}
+                              onPrototypeSettled={handlePrototypeSettled}
                             />
                           ) : null}
                         </div>

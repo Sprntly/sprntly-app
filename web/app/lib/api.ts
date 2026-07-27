@@ -1321,24 +1321,25 @@ export type LlmContextFields = {
 }
 
 export type LlmContextImportResponse = {
-  /** False when we recognised none of the expected sections — the caller must
-   *  surface `note` rather than claiming a successful import. Note this is the
-   *  DETERMINISTIC read only; a false here with a live `job_id` is not yet a
-   *  failed import, because the LLM pass may still find fields. */
+  /** False when the read produced no fields — the caller must surface `note`
+   *  rather than claiming a successful import. On the UPLOAD response this is
+   *  always false: the LLM extraction is the only reader and it has not run
+   *  yet, so a false here with a live `job_id` is not a failed import. On a
+   *  job result it is the verdict. */
   ok: boolean
   fields: LlmContextFields
-  /** Sections we read but had nowhere to put, kept so nothing is lost. */
+  /** Kept for shape compatibility; always empty since the v3 prompt. The whole
+   *  .md is filed as a document source, so nothing needs a second home. */
   unmapped: Record<string, string>
   format_version: string | null
   note: string | null
   /** The background LLM extraction kicked off by this upload, or null when it
-   *  couldn't start. The heading parse above only understands files our own
-   *  prompt produced; this pass reads context documents of any shape, so it
-   *  runs server-side while the user works through the connectors step. */
+   *  couldn't start — in which case the upload prefills nothing at all, since
+   *  this pass is the only read of the file. */
   job_id?: number | null
   /** True when the raw .md was actually filed as a document source AND handed
-   *  to the knowledge-graph ingest. Distinct from `ok` (whether the heading
-   *  walk read structured fields): a caller that only cares about grounding the
+   *  to the knowledge-graph ingest. Distinct from `ok` (whether the extraction
+   *  read structured fields): a caller that only cares about grounding the
    *  agents — e.g. the Business Context import, which never prefills — keys its
    *  success message off this, not `ok`. Absent on background-job results. */
   filed?: boolean
@@ -1355,11 +1356,22 @@ export type LlmContextJobStatus = {
 export const llmContextApi = {
   /** The prompt the user pastes into Claude / ChatGPT / Gemini. Fetched rather
    *  than duplicated in the UI so the copy can never drift from what the
-   *  backend parser expects to read back. */
-  prompt: () =>
-    api.get<{ prompt: string; format_version: string }>(
-      "/v1/connectors/llm-context/prompt",
-    ),
+   *  backend extraction expects to read back.
+   *
+   *  Pass what you already know about the company and the backend writes it
+   *  into the prompt's confirmed-values block, so the assistant starts with the
+   *  entity locked instead of inferring it. Onboarding always has both by this
+   *  point — the company step runs first. Omitting them serves the prompt with
+   *  that block empty for the user to fill in by hand. */
+  prompt: (about?: { companyName?: string; companyWebsite?: string }) => {
+    const q = new URLSearchParams()
+    if (about?.companyName) q.set("company_name", about.companyName)
+    if (about?.companyWebsite) q.set("company_website", about.companyWebsite)
+    const qs = q.toString()
+    return api.get<{ prompt: string; format_version: string }>(
+      `/v1/connectors/llm-context/prompt${qs ? `?${qs}` : ""}`,
+    )
+  },
   /** Upload the .md the assistant produced (multipart). */
   importFile: (file: File) => {
     const form = new FormData()
@@ -3763,6 +3775,11 @@ export const artifactsApi = {
         `/v1/artifacts?dataset=${encodeURIComponent(company)}`,
       )
       .then((r) => r.artifacts),
+  /** LLM chat summary of a freshly generated artifact. Best-effort by
+   *  contract: the backend returns {summary: null} on any summarizer failure
+   *  (never an error), and callers skip posting in that case. */
+  chatSummary: (kind: "prd" | "evidence" | "prototype", id: number) =>
+    api.post<{ summary: string | null }>("/v1/artifacts/chat-summary", { kind, id }),
 }
 
 // ── MCP tokens (customer-facing Model Context Protocol access) ──

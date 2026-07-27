@@ -20,6 +20,7 @@ import { GenerateModal } from "./GenerateModal"
 import { GenerationLoadingScreen } from "./GenerationLoadingScreen"
 import { useGeneratePrototype, type GeneratePrototypeCtaState } from "./useGeneratePrototype"
 import type { PrototypeRecord } from "../../lib/api"
+import type { DesignAgentGenResult } from "../../lib/runDesignAgentGeneration"
 
 export function GeneratePrototypeCTA({
   prdId,
@@ -30,6 +31,7 @@ export function GeneratePrototypeCTA({
   listenForCrossSurfaceGenerating,
   onSuccess,
   onNotifyWhenReady,
+  onGenerationSettled,
   render,
 }: {
   prdId: number | null
@@ -44,6 +46,9 @@ export function GeneratePrototypeCTA({
   listenForCrossSurfaceGenerating?: boolean
   onSuccess?: (prototype: PrototypeRecord) => void
   onNotifyWhenReady?: () => void
+  /** Fires once per generation run, success AND failure, before overlay
+   *  dismiss/navigation (useGeneratePrototype's settle hook, pass-through). */
+  onGenerationSettled?: (result?: DesignAgentGenResult) => void
   /** Host supplies its own trigger markup — every existing site renders a
    *  visually different button/card, so this component owns state + the
    *  GenerateModal/GenerationLoadingScreen mounts only, never the trigger's
@@ -64,6 +69,7 @@ export function GeneratePrototypeCTA({
     listenForCrossSurfaceGenerating,
     onSuccess,
     onNotifyWhenReady,
+    onGenerationSettled,
   })
 
   return (

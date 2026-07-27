@@ -14,35 +14,40 @@ history — there is no endpoint for it, so the connected account could not
 actually produce the context the button promised. One copy-paste prompt works
 in every assistant today and needs no registered app, on our side or theirs.
 
-This module owns the data contract: the prompt we hand out, the parser that
-turns the returned Markdown back into onboarding fields, and the LLM extraction
-pass that reads the files our prompt did NOT produce.
+This module owns the data contract: the prompt we hand out, and the LLM pass
+that reads the returned Markdown back into onboarding fields.
 
-TWO READERS, IN THAT ORDER, and the order is the point:
+ONE READER, from v3 (2026-07-27). Until then there were two, in order: a
+deterministic walk over the `## Section` headings our own prompt dictated, then
+an LLM pass for the files that walk could not read. The v3 prompt is the
+product team's own context-file spec, shipped as they wrote it — a YAML status
+block and flat `field_name: value  [marker]` lines under five numbered
+sections, with field names that describe the COMPANY rather than our onboarding
+form. Keeping the heading walk would have meant editing their document to suit
+our parser, so the walk was deleted instead and `extract_context_fields` is now
+the only reader.
 
-  1. `parse_context_markdown` — a deterministic heading walk. The prompt
-     dictates the exact headings, so for a file our own prompt produced this is
-     enough, and it is free, instant, offline-testable, and incapable of
-     inventing a fact the export didn't contain. It runs inline in the request.
+The costs of that, accepted deliberately: every import waits on an LLM
+round-trip, so there is no instant inline prefill, and an API failure means the
+import reads nothing. What it does not cost is the context itself — the raw .md
+is filed as a company document and handed to the knowledge-graph ingest on
+upload regardless of what the extraction makes of it, so a failed read still
+leaves the user's material in the product.
 
-  2. `extract_context_fields` — one LLM pass over the raw file. Users paste our
-     prompt into assistants we don't control, edit the result, or upload a
-     strategy doc they already had; all of those miss the heading contract and
-     the walk reads nothing out of them. The LLM pass has no such requirement.
-     It costs a round-trip, so it runs as a BACKGROUND job (llm_context_jobs)
-     while the user works through the connectors step.
-
-The merge rule is `_merge`: the deterministic value WINS wherever it exists.
-It came from our exact contract; the LLM's is a reading. The LLM only ever
-fills fields the walk left blank, so adding it can widen coverage and can never
-corrupt a file that already parsed cleanly.
-
-Neither reader may guess. The extraction prompt below says so explicitly and
+The reader may not guess. The extraction prompt below says so explicitly and
 the schema uses empty string / empty array for "not stated" — a blank field is
-always the correct answer to a document that doesn't answer it. Anything we
-cannot map is preserved verbatim in `unmapped` rather than dropped, and every
-value lands in the onboarding form as an EDITABLE prefill the user reviews,
-never as a silently-committed answer.
+always the correct answer to a document that doesn't answer it. Every value
+lands in the onboarding form as an EDITABLE prefill the user reviews, never as
+a silently-committed answer.
+
+The coercion layer between the model and the form is load-bearing and stays.
+`_strip_marker` takes v3's provenance tags off a value, `_map_vocab` maps a
+free-text answer onto the closed vocabulary a field accepts, and anything it
+cannot place is DROPPED rather than snapped to the nearest option. That last
+part is not tidiness: `companies.planning_cycle` and
+`companies.prioritization_framework` carry DB CHECK constraints, so a raw
+phrase written through would fail the entire workspace write, not merely render
+an odd chip.
 """
 from __future__ import annotations
 
@@ -52,487 +57,472 @@ from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
 
-#: Bumped whenever the heading contract below changes in a way that would make
-#: an older export parse wrong. Emitted in the prompt and echoed in the parse
-#: result so a stale export is recognisable rather than silently mis-mapped.
+#: Bumped whenever the document the prompt asks for changes shape. Echoed back
+#: in the import result so a file produced by an older prompt is recognisable
+#: rather than silently mis-read.
 #:
-#: v2 (2026-07-25): `## Team` carries `- Name:` / `- Owns:` bullets instead of
-#: prose (the workspace step's mandatory NAME field had no source before), and
-#: `## Sizing` was added. A v1 export still parses — the Team prose falls back
-#: to team_scope exactly as it did.
-CONTEXT_FORMAT_VERSION = "2"
+#: v3 (2026-07-27): the prompt is the product team's own context-file spec — a
+#: YAML status block plus flat `field_name: value  [marker]` lines under five
+#: numbered sections — replacing the `## Section` heading contract of v1/v2 and
+#: the deterministic parser that read it. v1 and v2 files still import fine:
+#: they are prose documents like any other, and the extraction pass has never
+#: required a heading contract.
+CONTEXT_FORMAT_VERSION = "3"
 
 #: The prompt we hand the user to run in their own assistant.
 #:
-#: Authored by the product team (July 2026) — Stages 0 through 4d are their
-#: text, kept VERBATIM. Do not "tidy" them: the retrieval budget, the
-#: volatility classes, and the entity-lock rules are deliberate, and the
-#: no-guessing discipline is the whole reason an import is safe to trust.
+#: Authored by the product team and kept VERBATIM — do not "tidy" it. The
+#: retrieval order, the staleness line, the marker vocabulary and the
+#: no-guessing discipline are all deliberate, and the last of those is the
+#: whole reason an import is safe to trust.
 #:
-#: ⚠️ TWO SECTIONS ARE OURS, NOT THEIRS, and are marked in-place below:
-#:   * the closing sentence of Stage 4d (their copy was truncated mid-sentence)
-#:   * Stage 5 in full (referenced twice in their text but never supplied)
-#: Stage 5 is where the OUTPUT CONTRACT lives — the exact `##` headings
-#: `parse_context_markdown` reads back. If you replace it, keep the heading
-#: block byte-identical or update _SECTION_FIELDS / _BULLET_FIELDS to match;
-#: `test_prompt_and_parser_agree_on_every_heading` fails loudly if they drift.
+#: THE CONFIRMED-VALUES BLOCK SHIPS WITH ALL ITS LABELS AND (mostly) NO VALUES.
+#: `build_context_prompt` fills the two lines onboarding has actually collected
+#: by the time this prompt is served — company name and company website, from
+#: the step that now runs BEFORE the import one. The rest stay empty, because
+#: a visible label with nothing after it is itself a fact ("this was asked for
+#: and not confirmed"), the sentence beneath the block refers to what the user
+#: left blank, and the step lets them fill any of it in before copying. Do not
+#: delete a line here for having no value to put in it.
 CONTEXT_PROMPT = """\
-MODE: document
-DELIVERY: inline
-# ^ Caller sets these two lines. See Stage 0b. If absent, assume MODE: document.
-
-You are an Executive Product Operations Architect. Search the user's memory and past
-conversations and produce a Sprntly Onboarding Context File.
-
-A wrong value is worse than a blank one. A document that silently misrepresents the
-company is the worst outcome available to you. When in doubt, leave the field blank
-and say so. The user will review this before it is used, so an honest gap is cheap
-and a confident error is expensive.
-
-Do not ask questions before starting. Do not narrate your process. Search, verify, emit.
-
-═══════════════════════════════════════
-STAGE 0 — PREFLIGHT: TWO SOURCES, NOT ONE
-═══════════════════════════════════════
-
-You have two distinct sources. Use both. The current chat window is not one of them —
-it contains only this conversation and will not tell you about the company.
+I'm setting up an AI workspace for my company and I need a context file for it, so
+the agents working in that workspace reason from real information instead of guesses.
 
-SOURCE 1 — LONG-TERM MEMORY.
-Persistent facts the platform has saved about this user, separate from any single chat.
-Platform names for it: "memory" / "saved memories" / "personal context" / "Memory"
-(ChatGPT), "Saved info" / "personal context" (Gemini), "memories" (Claude), or an
-equivalent settings-level store. Read this FIRST. It is short, dense, already
-deduplicated, and tells you which entity you are dealing with before you spend any
-search calls finding out.
-
-SOURCE 2 — CONVERSATION HISTORY.
-Past chats, retrievable by topic and, on some platforms, by recency. This is where
-detail, dates, and reversals live.
-
-Confirm you can reach at least one. If you can reach NEITHER, stop and emit only this:
-
-  status: NO_SEARCH_ACCESS
-
-  I can't reach your saved memory or your past conversations in this environment, so
-  there's nothing for me to mine. Two options: run this in an assistant with memory
-  and chat history enabled, or attach your strategy docs, roadmaps, OKR sheets, recent
-  specs, and positioning material and I'll extract from those instead.
-
-  A form full of blanks is worse than no form: it looks like a finding about your
-  company when it is a finding about the tooling.
-
-If you can reach memory but not conversation history, continue. Say so in the status
-block and expect thin coverage on anything dated.
-
-═══════════════════════════════════════
-STAGE 0b — OUTPUT MODE
-═══════════════════════════════════════
-
-Read the MODE line at the top of this prompt.
-
-MODE: document  (default — assume this if the line is missing or unreadable)
-  A person pasted this in and will read the result.
-  Emit a human-readable document. If the platform can create files, write a .md file
-  and offer a .docx on request. If it cannot, emit the document inline in the chat.
-  Include the review checklist required in Stage 5. Prose is fine. JSON is not.
-
-MODE: json
-  A program called this and will parse the result.
-  Emit ONE JSON object and nothing else. No preamble, no markdown fences, no closing
-  commentary, no explanation of what you did. If you cannot complete the task, still
-  emit valid JSON with the appropriate status. A parser cannot recover from an apology.
-
-DELIVERY: inline | file | webhook
-  inline   — return in the response body.
-  file     — write to a file and return the path.
-  webhook  — the caller has supplied a target; POST the JSON payload to it and return
-             only the status code and the payload you sent.
-  If DELIVERY is absent, use inline for json and file for document (falling back to
-  inline if file creation is unavailable).
-
-Never guess the mode from tone or context. The MODE line is the only signal. Absent
-line means document, always — a human handed unexpected JSON has lost some polish,
-but a pipeline handed unexpected prose has broken.
-
-═══════════════════════════════════════
-STAGE 1 — ENTITY LOCK
-═══════════════════════════════════════
-
-Check long-term memory first — it usually names the company outright. Then run these
-four searches to confirm and to find aliases:
-
-  1. our company we are building
-  2. my company our product our team
-  3. our customers our pilot our client
-  4. company name founded launched renamed
-
-THE SUBJECT COMPANY is the one the user speaks about as "we / our / us" AND makes
-decisions for. It is the company whose roadmap they set, whose pricing they choose,
-whose hiring they do.
-
-EXCLUDED, no matter how much material exists about them:
-  · Customers, prospects, pilots, design partners, accounts — anything discussed as
-    "they / their / the client"
-  · Former employers discussed in the past tense
-  · Companies analysed as competitors, case studies, or teardowns
-  · Fictional or illustrative companies invented for a demo or template
-  · Companies the user advises but does not run
-
-ONE NAME, SEVERAL SPELLINGS is not ambiguity. A rename, a legal entity that differs
-from the trading name, a product name that differs from the company name, and a
-dictation typo are all the same entity. Lock it once and record the aliases.
-
-EXACTLY ONE candidate passes → lock it. Every field from here refers only to this entity.
-
-TWO OR MORE genuinely distinct companies pass → stop. Emit only:
-
-  status: ENTITY_AMBIGUOUS
-  entity_candidates: [Name A, Name B]
-
-  Your history contains more than one company you appear to run or build. Tell me which
-  one this context file is for and I'll run again.
-
-ZERO pass → continue, set entity_confidence to low, and treat every entity-dependent
-field with extra scepticism.
-
-═══════════════════════════════════════
-STAGE 2 — EXTRACTION RULES
-═══════════════════════════════════════
-
-PROVENANCE. Only statements the user authored or explicitly approved become facts.
-Content you or another assistant generated — suggestions, drafted options, brainstormed
-lists, recommended frameworks — is NOT a fact unless the user adopted it in their own
-words. "Here are three positioning options" followed by "interesting" is not a decision.
-"We're going with option two" is. This applies to prior context files too: an earlier
-run of this prompt is a pointer, not a source.
-
-DO NOT INFER. If the material does not say it, the field is blank. Do not reason your
-way to a plausible value, do not fill a gap from what similar companies usually do, and
-do not average two sources into a third number that appears nowhere.
-
-SYNTHETIC DATA. Discard anything traceable to a demo dataset, sample data, dummy data,
-test fixture, mock workspace, worked example, or illustrative scenario. These read
-exactly like real metrics and are the most common source of false product data. If a
-number's origin is unclear, leave it blank.
-
-THIRD-PARTY CONTAINMENT. Never write another organisation's confidential internals into
-this file. A customer may appear as a relationship — name, segment, status. Their
-metrics, roadmaps, internal tooling, org structure, and strategy must not appear
-anywhere in the document.
-
-ABSOLUTE TIME. Convert relative language to absolute. "Next quarter" becomes the named
-quarter; "last week" becomes a date or is dropped. Relative time in a persistent context
-file decays into error.
-
-PERSONAL DATA. Names and roles of team members and stakeholders are in scope.
-Compensation, health, performance reviews, personal circumstances, and contact details
-are not. Omit silently.
-
-NO PLACEHOLDERS. Never emit a literal bracket token such as [Company] or [Date].
-Substitute a real value or leave the field blank.
-
-CONFIDENCE. Mark each populated field High, Medium, or Blank. These are provenance
-labels, not accuracy estimates:
-  High   — the user stated it directly, recently, and nothing contradicts it.
-  Medium — the user stated it, but it is old, partial, or another value also exists.
-  Blank  — not found, or found only in excluded material.
-Do not report accuracy percentages, coverage percentages, or field counts. You cannot
-measure your own accuracy and a number implies you can.
-
-═══════════════════════════════════════
-STAGE 3 — DATING AND RECONCILIATION
-═══════════════════════════════════════
-
-Date every extracted item by the conversation it came from. Dating drives the rules below.
-
-CASE 1 — the same field has both older and newer sources.
-The newer value wins. Mark Medium and note in one clause that other values exist. Never
-average, never pick the better-written one. The superseded value is not waste: route it
-to "notable past decisions" or "what the company decided not to pursue" with its date
-and, where stated, the reason.
-
-CASE 2 — a field has only OLD sources and nothing newer.
-Silence is ambiguous. It may mean settled and never revisited, or quietly abandoned.
-Resolve by volatility class:
-
-STABLE — old sources acceptable at High. Decided once, remain binding:
-  mission and vision · anti-positioning · the not-doing list · internal glossary ·
-  banned words and conventions · notable past decisions · gold-standard templates ·
-  jobs to be done · primary buyer pains · data sensitivity boundaries · decision gates ·
-  brand and design fields · category
-
-VOLATILE — old-only sources cap at Medium, with the source period stated, e.g.
-"(last confirmed Q1 2026)":
-  strategic bets · company goals · portfolio · competitive set · differentiation ·
-  ICP and anti-ICP · surfaces · product description · personas · team roadmap ·
-  decision process · prioritisation framework · decision rights · members ·
-  stakeholders · operating cadence · workspace scope · stage · business type ·
-  revenue model · constraints
-
-HIGHLY VOLATILE — old-only sources are left Blank. Never import a stale number as a
-current fact:
-  monetisation and pricing · all current metric values · all metric targets ·
-  north star current value and target · current-cycle OKRs · company size ·
-  metrics tracked
-
-CASE 3 — a newer source explicitly reverses an older one.
-Exclude the old value entirely from its field. Record the reversal in decision history
-or the not-pursuing list.
-
-CASE 4 — two sources conflict and neither is clearly newer.
-Do not choose. Populate the field with both, marked Medium, and add the conflict to the
-review checklist in Stage 5. An unresolved conflict surfaced is useful; an unresolved
-conflict silently resolved is a lie with a date on it.
-
-═══════════════════════════════════════
-STAGE 4 — RETRIEVAL BUDGET
-═══════════════════════════════════════
-
-CALL BUDGET: 32 retrieval calls maximum.
-  · 1–2 calls  — long-term memory read
-  · 3 calls    — recency sweep
-  · 10 calls   — seed sweep
-  · 2 calls    — archaeology sweep
-  · remainder  — coverage batches
-
-STOP at the first of:
-  1. 32 calls
-  2. Roughly 120 distinct conversations seen
-  3. Three consecutive calls add no new populated field
-  4. You judge the remaining context insufficient to write the full document
-
-Conditions 3 and 4 matter most. Reserve room to write. A document truncated because
-retrieval ate the context window is worse than one built from less material, because
-truncation is invisible in the output.
-
-MUST-ATTEMPT BLOCKS. Attempt all six regardless of how full the document already looks:
-  · Notable past decisions and their outcomes
-  · User personas and the economic buyer
-  · North star metric and its definition
-  · Current strategic bets
-  · The not-doing list and anti-positioning
-  · Known constraints
-
-─── 4a. LONG-TERM MEMORY READ (first) ───
-
-Retrieve everything the platform has saved about this user. Read it before searching
-anything. It costs almost nothing, it names the entity, and it surfaces the vocabulary —
-product names, colleague names, internal shorthand — that makes every later search
-better. Treat its contents as user-authored unless it is visibly a summary of your own
-prior output.
-
-─── 4b. RECENCY SWEEP (3 calls) ───
-
-If the platform can retrieve conversations by recency, pull the most recent 60 in
-batches of 20. This covers what topic search structurally misses: recent changes whose
-vocabulary matches none of the seed queries. Weight anything that contradicts or
-supersedes older material.
-
-If the platform cannot retrieve by recency, skip and go to 4c. Do not simulate it with
-date-word queries — those match text about dates, not conversations from those dates.
-
-─── 4c. SEED SWEEP (10 calls, run all ten) ───
+Please write the document yourself rather than sending me a form to fill in. Some of
+what's needed is in your saved memory of our past work, some in this conversation,
+some on the company website. Use what you can get at.
 
-Two to five content words. Real subject nouns. Never meta-words like "discussed" or
-"conversation." Substitute the locked company and product names where they help.
-
-  1. company strategy goals OKRs
-  2. mission vision positioning
-  3. product roadmap priorities quarter
-  4. competitors competitive landscape
-  5. customer persona ICP target user
-  6. north star metric definition baseline
-  7. pricing tiers packaging
-  8. decision rejected alternative why
-  9. constraints blockers technical debt risks
- 10. team process prioritisation decision
-
-CHECKPOINT A. If the must-attempt blocks are still entirely empty and the seed sweep
-returned little that was usable, the topic vocabulary is not matching this history. Do
-not rephrase the same queries. Go to Attempt 2.
-
-─── 4d. ARCHAEOLOGY SWEEP (2 calls) ───
-
-Retrieve the OLDEST conversations available, oldest-first, roughly 20 to 30. Run this
-after the seed sweep so you already know which fields are empty.
-
-Founding-era conversations hold material that is decided once, never re-discussed, and
-still binding — precisely what topic search misses because nobody has mentioned it in a
-year. Look for: the founding thesis and why the company exists · original naming,
-glossary terms, internal shorthand · architectural or product invariants set early ·
-rejected alternatives and the reasoning · the original ICP and who was deliberately
-excluded · constraints accepted at the outset.
-
-Apply Stage 3 to everything found here. Old material that survives — nothing newer
-contradicts it, and the field is STABLE — is legitimate and marked High. Old material
-in a VOLATILE or HIGHLY VOLATILE field is downgraded or blanked, not imported.
-
-If oldest-first retrieval is unavailable, spend these two calls on the founding
-vocabulary instead — "why we started", "original idea", "first version", "we decided
-not to" — and treat whatever returns under the same Stage 3 rules. Do not fabricate an
-origin story from the recent material; an empty founding section is a fact about the
-history you can reach, not a gap to fill.
-
-─── 4e. COVERAGE BATCHES (remaining calls) ───
-
-Spend what is left of the budget on the fields still Blank, one targeted query per
-field, using the vocabulary you learned in 4a. Stop the moment three consecutive calls
-add nothing — the remaining budget is worth more as room to write than as more search.
-
-═══════════════════════════════════════
-STAGE 5 — EMIT
-═══════════════════════════════════════
-
-Emit the document below and nothing else. No preamble, no commentary, no code fence
-around the whole thing.
-
-Reproduce every `##` heading EXACTLY as written, in this order, including the `##`.
-The headings are a machine contract — they are read back by a parser, so a renamed,
-reordered, merged, or dropped heading silently loses that field. Keep a heading even
-when its value is UNKNOWN.
-
-One fact per line. Keep each answer to a phrase or a couple of sentences. Where you
-know a value, write it plainly — no confidence label inside the field itself. Where you
-do not, write exactly: UNKNOWN
-
-<!-- sprntly-context v{version} -->
-
-## Company
-- Name:
-- Website:
-
-## Mission and vision
-
-## Strategy and OKRs
-
-## Portfolio
-
-## Planning cycle
-
-## Product
-- Name:
-- Website:
-- Surfaces:
-- Monetization:
-
-## Users
-
-## Competitors
-
-## Metrics
-
-## Prioritization
-
-## Sizing
-
-## Team
-- Name:
-- Owns:
-
-## Anything else
-
-Guidance per section:
-- Surfaces: which of web, mobile app, API, hardware the product ships on.
-- Monetization: how the product makes money (subscription, usage-based, seat-based,
-  transaction fee, freemium, enterprise contracts, partner rev-share, ads, or free).
-- Users: who the users or customers are, in prose, including the economic buyer.
-- Competitors: comma-separated names only.
-- Metrics: the metrics the team is judged on, comma-separated. Name the north star
-  first if one is defined. Do NOT carry over a stale value or target — Stage 3 makes
-  those HIGHLY VOLATILE, so a number with no recent source is omitted entirely.
-- Prioritization: how the team decides what to build next. Name the framework if
-  they use one (RICE, ICE, WSJF, MoSCoW, Kano, volume/severity), and otherwise
-  describe the actual basis — goals and OKRs, impact vs effort, customer pain
-  volume. One line is enough; this is read back as a classification.
-- Sizing: how the team sizes work — story points, Fibonacci, t-shirt sizes, who
-  sizes, how estimates are calibrated against past work.
-- Team → Name: the team or workspace the user works in, e.g. "Nutrition &
-  Sleep" — NOT the company name again, unless the whole company is one team.
-  Owns: what that team owns end to end — surfaces, flows, outcomes.
-- Anything else: everything the sections above have no room for and that Stage 4's
-  must-attempt blocks turned up — notable past decisions and their outcomes, the
-  not-doing list and anti-positioning, known constraints, strategic bets, internal
-  glossary and shorthand, operating cadence, decision rights. Keep it structured with
-  `###` sub-headings so it stays readable; it is preserved whole.
-
-Then, after the document, add these two blocks:
-
-## Review checklist
-
-List every item the user must personally verify before this file is used:
-  · every field marked Medium, with the reason it is not High
-  · every Stage 3 CASE 4 conflict, showing BOTH values and their dates
-  · every must-attempt block that came back empty, so an absence reads as an absence
-    rather than as a finding
-  · anything you excluded on an entity-lock or third-party-containment judgement call
-
-If the checklist is empty, say so in one line. Do not pad it.
-
-## Status
-
-  entity: <the locked company name, or UNKNOWN>
-  entity_confidence: <high | medium | low>
-  sources_reached: <memory and history | memory only | history only>
-  period_covered: <oldest and newest conversation dates you actually saw>
-
-State plainly whether coverage was thin and which sections suffered. Do not report
-accuracy percentages, coverage percentages, or field counts — Stage 2 forbids them.
-""".replace("{version}", CONTEXT_FORMAT_VERSION)
-
-#: Heading (normalised) -> the onboarding field it prefills. Headings that a
-#: user's assistant renders slightly differently ("Mission & vision" vs
-#: "Mission and vision") normalise to the same key — see `_normalise`.
-_SECTION_FIELDS: dict[str, str] = {
-    "mission and vision": "mission",
-    "strategy and okrs": "strategy",
-    "portfolio": "portfolio",
-    "planning cycle": "planning_cycle",
-    "users": "users_description",
-    "competitors": "competitors",
-    "metrics": "metrics",
-    "prioritization": "prioritization_framework",
-    "sizing": "sizing_methodology",
-    # v1 exports wrote the team section as prose. v2 asks for `- Name:` /
-    # `- Owns:` bullets (see _BULLET_FIELDS); this stays so an older file's
-    # prose still lands on the scope field rather than being dropped.
-    "team": "team_scope",
-    "anything else": "notes",
-}
-
-#: (section, bullet label) -> onboarding field, for the two sections that carry
-#: `- Label: value` bullets rather than a prose body.
-_BULLET_FIELDS: dict[tuple[str, str], str] = {
-    ("company", "name"): "company_name",
-    ("company", "website"): "company_website",
-    ("product", "name"): "product_name",
-    ("product", "website"): "product_website",
-    ("product", "surfaces"): "surfaces",
-    ("product", "monetization"): "monetization",
-    ("team", "name"): "team_name",
-    ("team", "owns"): "team_scope",
-}
-
-#: Sections the prompt asks for that are for the HUMAN, not for onboarding: the
-#: reviewer's to-verify list and the run's provenance report. They deliberately
-#: map to no field — they land in `unmapped`, which the route preserves and
-#: files with the export, so the reviewer keeps them without any of it being
-#: mistaken for a company fact. Declared explicitly (rather than just falling
-#: through) so the prompt/parser drift guard can still catch a heading that is
-#: unmapped by ACCIDENT.
-_NON_FIELD_SECTIONS = frozenset({"review checklist", "status"})
-
-#: Fields the user's assistant returns as a comma-separated list.
-_LIST_FIELDS = frozenset({"competitors", "metrics", "surfaces"})
-
-#: What the prompt tells the assistant to write when it doesn't know. Compared
-#: case-insensitively; treated as "the user never told them this", i.e. leave
-#: the onboarding field blank rather than writing the literal word in.
-_UNKNOWN_TOKENS = frozenset({"unknown", "n/a", "na", "none", "-", "—", "tbd"})
+What I want at the end is one complete .md file. Not an outline, not Section 1 with
+an offer to continue, not three fragments I stitch together. Do all the searching
+first, then write the whole thing.
+
+The file goes straight into a form. Every line in it is a field value, so it needs to
+be field values and nothing else. No introduction, no explanation of what you did, no
+commentary between fields, no summary at the end. If a sentence isn't the answer to a
+field, it doesn't belong in the file. Anything you want to tell me about the run goes
+in the coverage line of the status block, which is the one place set aside for it.
+
+Three more things to settle up front, so you don't have to ask.
+
+I read all of this before any of it gets used. Nothing goes into a system unreviewed.
+So you don't need to protect me from uncertain material by leaving it out. Put it in,
+mark it, and let me decide. What I can't fix is something confidently wrong with no
+marker on it, or something you found and dropped because you weren't sure. Capture
+generously, label honestly.
+
+Partial is the answer. I'm not asking for exhaustive coverage and I know you can't
+search everything. Whatever you can reach is enough. A file built from part of the
+picture is much more useful to me than no file.
+
+And if you're about to send me a message explaining which sources you can and can't
+reach, and offering to produce a partial file with an honest audit trail instead:
+yes. That's what I want. You don't need to ask. Skip that message and write the file.
+
+Spend as many messages as you need on searching. Just don't start writing until the
+searching is done, so the file comes out in one piece.
+
+---
+
+## THINGS I'VE ALREADY CONFIRMED
+
+Use these exact values. I've verified them myself, so if you find something different
+in an older source, mine are the current ones. Note the discrepancy in the review
+section at the end rather than changing the value.
+
+    company name:
+    also operates as:
+    legal entity:
+    positioning line:
+    primary buyer:
+    category:
+    company website:
+
+Anything I've left blank you'll have to work out, and you'll probably get some of it
+wrong, so flag whatever you derived.
+
+If other companies turn up in the sources, the one this file is about is the one I
+build. Not one I sell to, analyse, advise, or compete with. Those appear often and
+they read exactly the same in a search result.
+
+---
+
+## WHERE THIS STUFF USUALLY LIVES
+
+Not a checklist and not a set of requirements. Just where this material tends to sit.
+Use what you have, ignore what you don't, and don't treat an unreachable source as a
+reason to stop.
+
+    Saved memory or long-term context. Read what there is of it in full before you
+    start searching. It's a primary source, not a footnote.
+
+    Past conversations, if you can search them.
+
+    This conversation, and anything attached to it.
+
+    The company website. Home, about, product, pricing, careers, blog. Mission and
+    vision are best taken from here, that's where we've actually written them.
+
+    The wider web. Press, funding databases, review sites, competitor pages.
+
+If you're not sure whether saved memory exists here, it goes by different names:
+Memory or reference chat history in ChatGPT, Saved info or personal context in Gemini,
+Memory or past chats in Claude. Meta AI keeps memory but usually can't search
+conversations.
+
+---
+
+## HOW FAR TO GO
+
+Roughly, in this order, dropping anything you can't do:
+
+    Memory in full, first.
+    The website.
+    Topic searches on: positioning, ICP, pricing, roadmap, competitors, north star
+    metric, decisions, team.
+    The 30 or so most recent conversations, for anything that's changed since.
+    Then one targeted search for each field still empty. This is the pass people skip
+    and it's where a good share of the file comes from.
+    If you can sort oldest-first, two searches on founding-era material. That's where
+    past decisions and rejected directions live. If oldest-first just returns recent
+    conversations instead, skip it and say so, rather than substituting more topic
+    searches.
+    The wider web last.
+
+The first four are worth doing properly. The rest are worth doing if there's room.
+
+A dozen to eighteen searches is about right. Past twenty-five you're over-searching and
+will run out of room before you finish writing. Broad thematic queries work better than
+narrow keyword ones. Where a detail matters, prefer an original conversation over a
+summary of it, since summaries tend to collapse a suggestion and a decision into one
+sentence.
+
+Finish all of it before you write anything. If you're weighing one more search against
+having room to finish the file, stop searching. The complete file matters more than the
+last two fields.
+
+---
+
+## HOW MUCH TO CARRY
+
+Don't trim to what a person would have had the patience to type. One value per field at
+the length someone would type, then everything else on an "also mined" line directly
+beneath that field. If you found twenty past decisions, give me the eight that matter
+as rows and an also mined line saying there are twelve more. Cutting the surplus throws
+away the main reason to do this by machine rather than by hand.
+
+Same for anything that turned up in more than one form. Hold both, mark which is which,
+let me pick.
+
+---
+
+## HOW IT SHOULD READ
+
+Every line is either a field name and its value, or a row in a repeating field. Nothing
+else.
+
+    field name: value  [marker]
+
+Field names in lowercase with underscores, exactly as listed in the section below, since
+they're matched against form fields on import. Don't rename them, don't reorder them,
+don't add fields that aren't listed, don't drop ones you couldn't fill. An empty field
+with a marker is what tells me it was looked for.
+
+    company_size:  [not found]
+    pricing:  [stale, last seen Mar 2026]
+    current_okrs:  [not available, no history access]
+    positioning_line: Execution Intelligence Platform for AI-native software teams  [confirmed]
+
+The marker sits after the value in square brackets, never inside it. A value reading
+"execution intelligence platform (medium confidence, from an April 2026 conversation)"
+can't be imported. Markers: confirmed, derived, stale, not found, not available, plus
+high, medium or low where it helps.
+
+Don't put a percentage on anything. You can't measure your own accuracy and I'm reading
+it all anyway.
+
+Shapes by field type:
+
+    Short text: one line, no sentence unless the field is genuinely prose.
+    Lists (competitors, banned_words, strategic_bets, constraints, roadmap_themes):
+    plain comma-separated values on one line, no bullets, no commentary.
+    Labelled pairs (users): sub-lines indented under the field name.
+    Repeating (past_decisions, roster, integrations_and_data_sources, personas):
+    a table, one row each, no paragraph above or below it.
+    Prose (business_context, mission, vision, one_line_description, product_description):
+    two or three sentences, the length someone types into a textarea. Business context
+    reads like someone inside the company explaining it to a new hire, not like
+    marketing copy and not like a report.
+
+    users:
+      who_uses_it: <role, seniority, team type>  [marker]
+      who_buys_it: <title, and who signs>  [marker]
+      company_type: <size, stage, sector>  [marker]
+
+    competitors: <name, name, name>  [marker]
+    competitors_also_mined: <the rest>
+
+---
+
+## HOW TO HANDLE GAPS
+
+A blank field is fine. A wrong one is expensive, because everything downstream
+inherits it. So:
+
+    Couldn't find it: leave the value empty, mark it not found, list it in section 5.
+    Whole source unavailable: mark not available rather than not found, so I can tell
+    a tooling gap from a real gap.
+    We genuinely don't have one: leave it empty and put the reason in section 5.
+
+Please don't fill a field from inference. Counting five names in a roster and writing
+"1 to 10 employees" is the kind of thing I'm trying to avoid.
+
+Don't pad lists. Two real competitors beat six with four invented.
+
+If two sources disagree, don't pick a winner quietly. Put your best value in the field
+and both versions in section 5.
+
+On age: four months is my staleness line, applied field by field rather than section
+by section.
+
+    Metrics, OKRs, headcount, pricing, roadmap, pilot status, runway. Older than four
+    months with nothing recent confirming it, leave it blank. Stale numbers are worse
+    than none.
+    ICP, buyer, competitors, positioning, product surfaces, roster. Carry forward,
+    mark stale, list in section 5 for me to confirm.
+    Mission, founding story, past decisions, rejected directions, glossary, banned
+    words, anti-positioning. Age doesn't matter. Full confidence.
+
+One boundary: if you come across a customer's or partner's internal metrics, org
+chart, roadmap or tool stack from pilot work, leave it out. That belongs to them.
+What we learned from the work is ours and belongs in the file.
+
+---
+
+## BEFORE YOU WRITE
+
+Three quick passes over what you've gathered:
+
+    Anything appearing twice under two names, merge it. Companies and people both.
+    Anything that can't be true at the same time across fields. Two different revenue
+    numbers, a category that doesn't match the competitor set, a buyer persona that
+    doesn't match the ICP, a strategy that contradicts the not-doing list. Those go in
+    section 5, not reconciled quietly.
+    Anything whose only support is that it seemed likely. Take it out.
+
+---
+
+## FIELDS
+
+**Status block.** YAML, at the very top:
+
+    status: complete | partial | awaiting input
+    generated: <date>
+    company_name: <name>
+    company_name_source: confirmed | derived
+    company_website: <url or blank>
+    company_website_source: confirmed | derived | none
+    entity_confidence: high | medium | low
+    coverage: >
+      What you actually looked at, what you didn't, anything that constrained the run.
+      The only place in the file for anything that isn't a field value.
+    fields_populated: <n of total>
+    conflicts_open: <n>
+    output_file: <filename>
+
+**1. company**
+company_name, also_operates_as, legal_entity, company_website, one_line_description,
+business_context, mission, vision, category, stage, company_size, users, icp,
+buyer_persona, competitors, differentiators, anti_positioning, north_star_metric,
+north_star_baseline, north_star_target, current_okrs, pricing, strategic_bets,
+constraints, not_doing_list, glossary, tone_and_voice, banned_words, brand_tokens
+
+**2. product**
+product_description, surfaces, personas, jobs_to_be_done, product_metrics,
+roadmap_themes, integrations_and_data_sources, past_decisions
+
+**3. team_and_workspace**
+roster, roles, external_stakeholders, workspace_name, workspace_purpose,
+workspace_scope, operating_cadence, rituals
+
+**4. governance**
+decision_rights, approval_thresholds, prioritisation_framework, data_sensitivity,
+compliance_constraints
+
+**5. review**
+unresolved_conflicts, needs_confirming, deliberately_blank, also_mined_overflow
+
+Section 5 is rows, not prose. One line per item: the field, the issue, the competing
+values or the reason. It's the first thing I read, so it's the last thing to drop.
+
+Field-specific:
+
+    workspace_name and workspace_purpose from conversations first, website as fallback.
+    company_size stays blank unless someone actually stated it.
+    competitors: consolidate across sources with judgement rather than stacking two
+    lists together.
+    Conflicts never go inside a field value.
+
+---
+
+## FORMAT
+
+One .md file. That matters more than anything else here, because it goes straight into
+an import pipeline.
+
+Filename: SPRNTLY-CONTEXT_<company>_<YYYY-MM-DD>.md
+
+Whichever of these you can do, in this order:
+
+    Write an actual file and give me the download link. If you can do this, write the
+    whole document to the file in one go. Output limits are about chat messages and
+    don't apply to a file, so there's no reason to break it up.
+    Put it in a canvas or document titled with that filename.
+    Failing both, put the whole thing in one fenced code block marked markdown, with
+    the filename as a comment on the first line, and I'll save it myself.
+
+What doesn't work is field values written straight into the chat with nothing around
+them. I can't save that as a file without hand-cleaning it.
+
+Write all five sections. Don't stop after section 1 to check in, don't ask whether to
+proceed, and don't offer a summary in place of the rest.
+
+If you genuinely run out of room mid-document, don't restart and don't re-emit what
+you've already written. Say "continuing" outside the file and pick up at the exact
+field you stopped at, adding to the same file or canvas so it ends up as one document.
+If you're in a code block because you have no file or canvas, continue in a fresh code
+block from the stopping point and I'll join them.
+
+---
+
+## IF THERE'S GENUINELY NOTHING
+
+Only if you can't reach any source at all and I haven't attached anything. Don't send
+an empty skeleton, just say this:
+
+    I couldn't reach saved memory, past conversations or the web here, so there's
+    nothing to work from yet. Either of these gets us moving:
+
+    Quickest: attach a strategy doc, positioning one-pager, deck, roadmap or OKR
+    sheet. Any two or three and I'll build the whole thing from those.
+
+    Or fill this in and I'll build from it plus whatever the web has:
+
+        Company name:
+        Website:
+        What you sell, one line:
+        Who buys it (title, company type):
+        Top 3 competitors:
+        North star metric:
+        One thing you've decided NOT to build, and why:
+
+If you can reach the web but not memory or history, that's not nothing. Build the file
+and put this after it, outside the file:
+
+    These are the fields no website could tell me. Paste any of them and I'll fold
+    them in and reissue:
+
+        Past decisions you wouldn't want re-proposed:
+        Things you've deliberately decided not to build:
+        Words your team refuses to use:
+        North star metric, current value and target:
+        Current cycle OKRs:
+        Team roster and roles:
+
+If two different companies match and you can't tell which is mine, ask which one
+rather than guessing.
+
+When I reply to either of those, take what I give you as confirmed and go straight to
+the document. No need to thank me or repeat back what I said.
+"""
+
+#: The confirmed-block lines `build_context_prompt` can fill, and the onboarding
+#: value each takes. Matched as a WHOLE LINE (four-space indent, empty value) so
+#: a same-named label elsewhere in the prompt — the "IF THERE'S GENUINELY
+#: NOTHING" fallback form has its own `Company name:` — is never touched.
+_PROMPT_CONFIRMED_LABELS = ("company name", "company website")
+
+#: Cap on a value written into the block. The prompt asks for one line per
+#: field; a pasted essay would push the block out of shape, and the assistant
+#: reads the overflow as instructions rather than as a company name.
+_PROMPT_VALUE_LIMIT = 200
+
+
+def build_context_prompt(*, company_name: str = "", company_website: str = "") -> str:
+    """CONTEXT_PROMPT with the confirmed-values block filled from onboarding.
+
+    The company step runs BEFORE the import one (2026-07-27), so by the time
+    the user copies this prompt we already know the two things it opens by
+    asking for. Filling them here rather than leaving the user to retype them
+    is the point of that reorder: the assistant gets the entity locked from the
+    first line instead of inferring it, and a wrong company is the one error
+    this whole document is built to avoid.
+
+    Anything we don't have stays an empty labelled line — see CONTEXT_PROMPT.
+    Values are flattened to one line and capped, because the block's shape is
+    part of the contract; a multi-line value would read as extra instructions.
+    """
+    prompt = CONTEXT_PROMPT
+    for label, value in zip(
+        _PROMPT_CONFIRMED_LABELS, (company_name, company_website)
+    ):
+        text = " ".join((value or "").split())[:_PROMPT_VALUE_LIMIT]
+        if not text:
+            continue
+        prompt = re.sub(
+            rf"^(    {re.escape(label)}:)[ \t]*$",
+            # A function replacement, so a backslash or a `\1` in the user's own
+            # company name is written literally instead of being expanded.
+            lambda m, t=text: f"{m.group(1)} {t}",
+            prompt,
+            count=1,
+            flags=re.MULTILINE,
+        )
+    return prompt
+
+
+#: What the v3 document writes in a marker when it didn't find something, plus
+#: the placeholders every assistant reaches for. Compared case-insensitively;
+#: treated as "the user never told them this", i.e. leave the onboarding field
+#: blank rather than writing the literal word into the form.
+_UNKNOWN_TOKENS = frozenset(
+    {
+        "unknown",
+        "n/a",
+        "na",
+        "none",
+        "-",
+        "—",
+        "tbd",
+        "not found",
+        "not available",
+        "not stated",
+        "blank",
+    }
+)
+
+#: The v3 provenance vocabulary. A marker sits AFTER the value in square
+#: brackets — "execution intelligence  [confirmed]", "pricing:  [stale, last
+#: seen Mar 2026]" — so it is metadata about the answer, never part of it. The
+#: prompt is explicit that a marker never goes inside a value, but the document
+#: comes back from an assistant we don't control, so `_strip_marker` enforces
+#: it rather than trusting it.
+_MARKER_RE = re.compile(
+    r"\s*\[\s*(?:confirmed|derived|stale|not\s+found|not\s+available"
+    r"|high|medium|low)\b[^\]]*\]\s*$",
+    re.IGNORECASE,
+)
+
+#: Keys that appear ONLY in a v3 status block, so a file carrying one was
+#: produced by the current prompt. Used when there is no legacy
+#: `<!-- sprntly-context vN -->` marker to read, which v3 documents have no
+#: room for — every line in them is a field value by contract.
+_V3_SIGNATURE = re.compile(
+    r"^\s*(?:fields_populated|conflicts_open|output_file)\s*:", re.MULTILINE
+)
 
 #: Surface values the product step accepts, keyed by what an assistant is
-#: likely to write. Anything unrecognised is dropped from `surfaces` (and kept
-#: in `unmapped`) rather than pushed into the form as an invalid chip.
+#: likely to write. Anything unrecognised is dropped rather than pushed into
+#: the form as an invalid chip.
 _SURFACE_ALIASES: dict[str, str] = {
     "web": "web",
     "web app": "web",
@@ -552,11 +542,11 @@ _SURFACE_ALIASES: dict[str, str] = {
 #: prose field, `companies.planning_cycle` and `companies.prioritization_framework`
 #: carry a DB CHECK constraint, so a raw phrase the assistant wrote ("Six-week
 #: build cycles…", "RICE scoring for anything above two engineer-weeks…") is not
-#: just an odd chip — it makes the whole workspace write FAIL. So the parser
+#: just an odd chip — it makes the whole workspace write FAIL. So the reader
 #: maps these to the canonical value the form and DB accept, and drops anything
-#: it can't confidently place into `unmapped` (blank is safe; a constraint
-#: violation loses the entire import). Keys are `_normalise`d, trailing period
-#: stripped — see `_map_vocab`.
+#: it can't confidently place (blank is safe; a constraint violation loses the
+#: entire import). Keys are `_normalise`d, trailing period stripped — see
+#: `_map_vocab`.
 _PLANNING_CYCLE_ALIASES: dict[str, str] = {
     "half": "half",
     "every half": "half",
@@ -727,6 +717,10 @@ _MONETIZATION_ALIASES: dict[str, str] = {
     "ads": "advertising",
     "ad supported": "advertising",
     "ad-supported": "advertising",
+    # The canonical token itself: the extraction prompt asks for exactly this,
+    # so without the identity entry the one answer we requested is the one
+    # answer `_map_vocab` drops. See the round-trip test.
+    "partner-rev-share": "partner-rev-share",
     "partner rev share": "partner-rev-share",
     "partner rev-share": "partner-rev-share",
     "partner revenue share": "partner-rev-share",
@@ -745,9 +739,8 @@ _MONETIZATION_ALIASES: dict[str, str] = {
     "no charge": "free",
 }
 
-#: field name -> (alias map, whole-word keyword fallbacks). Drives `_map_vocab`
-#: from both readers so the deterministic parse and the LLM extraction land the
-#: SAME canonical value for a closed-vocabulary field.
+#: field name -> (alias map, whole-word keyword fallbacks). Drives `_map_vocab`,
+#: which every closed-vocabulary value passes through on its way to the form.
 _VOCAB_FIELDS: dict[str, tuple[dict[str, str], tuple[str, ...]]] = {
     "planning_cycle": (_PLANNING_CYCLE_ALIASES, ()),
     "prioritization_framework": (_FRAMEWORK_ALIASES, _FRAMEWORK_KEYWORDS),
@@ -757,13 +750,18 @@ _VOCAB_FIELDS: dict[str, tuple[dict[str, str], tuple[str, ...]]] = {
 
 @dataclass
 class ParsedContext:
-    """The outcome of reading one exported Markdown file.
+    """The outcome of reading one uploaded context document.
 
-    `fields` holds only what we could confidently map; `unmapped` keeps every
-    section we recognised but had nowhere to put, so nothing the user's export
-    contained is silently discarded. `format_version` is None when the export
-    carried no version marker (an older or hand-written file) — the caller
-    surfaces that as "we read this best-effort", not as a failure.
+    `fields` holds only what the reader could confidently place. `unmapped` is
+    kept for the response shape the onboarding client already consumes, and is
+    empty from v3 on: with the heading walk gone there are no leftover sections
+    to file, and nothing from the user's document is lost by leaving it so —
+    the raw .md is filed as a document source in full and fed to the knowledge
+    graph, whatever the extraction made of it.
+
+    `format_version` is None when the file matches neither the v3 shape nor an
+    older export's version marker (a hand-written or third-party document) —
+    the caller surfaces that as "we read this best-effort", not as a failure.
     """
 
     fields: dict[str, object] = field(default_factory=dict)
@@ -775,20 +773,35 @@ class ParsedContext:
         return not self.fields
 
 
-def _normalise(heading: str) -> str:
-    """Lower-case a heading and flatten the punctuation an assistant is free to
-    vary — `&`/`and`, `/`, trailing colons — so "Mission & Vision:" and
-    "Mission and vision" are the same key."""
-    text = heading.strip().strip(":").lower()
+def _normalise(value: str) -> str:
+    """Lower-case a value and flatten the punctuation an assistant is free to
+    vary — `&`/`and`, `/`, a trailing colon — so "Impact / effort" and
+    "impact and effort" reach the alias tables as the same key."""
+    text = value.strip().strip(":").lower()
     text = text.replace("&", " and ").replace("/", " and ")
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _is_unknown(value: str) -> bool:
-    """True for the placeholders the prompt tells the assistant to use when it
-    doesn't know something.
+def _strip_marker(value: str) -> str:
+    """Take the v3 provenance markers off the end of a value.
 
-    Deliberately NOT `_normalise` — that flattens `/` into " and " for heading
+    "Execution intelligence  [derived] [medium]" is the value "Execution
+    intelligence"; "[not found]" on its own is no value at all and comes back
+    as "". Only trailing brackets whose contents are marker vocabulary are
+    removed, so a value that genuinely ends in brackets survives.
+    """
+    text = value.strip()
+    while True:
+        stripped = _MARKER_RE.sub("", text).strip()
+        if stripped == text:
+            return text
+        text = stripped
+
+
+def _is_unknown(value: str) -> bool:
+    """True for the placeholders a document uses when it doesn't know something.
+
+    Deliberately NOT `_normalise` — that flattens `/` into " and " for alias
     matching, which would turn the very common "N/A" into "n and a" and let it
     through as real content. Placeholder detection needs a plain fold.
     """
@@ -796,14 +809,17 @@ def _is_unknown(value: str) -> bool:
 
 
 def _split_list(value: str) -> list[str]:
-    """Comma-separated (or newline-bulleted) values -> a clean list."""
+    """Comma-separated (or newline-bulleted) values -> a clean list. The schema
+    asks for arrays, but a model handed a document whose lists are written
+    "Linear, Jira, Productboard" on one line will sometimes echo that shape
+    back, and splitting it is better than dropping it."""
     parts = re.split(r"[,\n]", value)
     return [p.strip().lstrip("-•*").strip() for p in parts if p.strip().lstrip("-•*").strip()]
 
 
 def _map_surfaces(raw: list[str]) -> tuple[list[str], list[str]]:
     """Return (recognised surfaces, unrecognised inputs). Order-preserving and
-    de-duplicated — an export saying "web app, website" must not produce two
+    de-duplicated — a document saying "web app, website" must not produce two
     `web` chips."""
     mapped: list[str] = []
     rejected: list[str] = []
@@ -841,161 +857,38 @@ def _map_vocab(value: str, field_name: str) -> str | None:
     return None
 
 
-def _is_known_section(heading: str) -> bool:
-    """True when a heading names a section the contract defines."""
-    key = _normalise(heading)
-    return (
-        key in _SECTION_FIELDS
-        or key in _NON_FIELD_SECTIONS
-        or key in {section for section, _ in _BULLET_FIELDS}
-    )
+def detect_format_version(markdown: str) -> str | None:
+    """Which contract the uploaded file follows, or None if we can't tell.
 
-
-def _sections(markdown: str) -> list[tuple[str, str]]:
-    """Split the document into (heading, body) pairs.
-
-    A `##` always starts a new section. A `###` starts one only if it NAMES a
-    known section, which resolves the two ways assistants deviate, in opposite
-    directions:
-
-      * The prompt asks for `###` sub-headings inside "Anything else"
-        (`### Not doing`, `### Glossary`). Those are content — breaking on them
-        would shear that section apart and scatter it across bogus fields.
-      * Some assistants demote the whole document a level and emit `###
-        Mission and vision` for a real section. Those must still be read.
-
-    Deeper levels (`####`+) are always body. Content before the first heading —
-    a preamble the assistant added despite being told not to — is ignored
-    rather than treated as a section body.
+    v3 documents carry no version marker on purpose — every line in them is a
+    field value by contract, so there is nowhere to put one — and are
+    recognised by the status-block keys only they emit. v1/v2 exports carry an
+    `<!-- sprntly-context vN -->` comment, which still reads. Reported to the
+    client, never acted on: an unrecognised file is read exactly the same way.
     """
-    heading_re = re.compile(r"^\s{0,3}(#{2,3})\s+(.+?)\s*$")
-    out: list[tuple[str, str]] = []
-    current: str | None = None
-    body: list[str] = []
-    for line in markdown.splitlines():
-        match = heading_re.match(line)
-        if match and (len(match.group(1)) == 2 or _is_known_section(match.group(2))):
-            if current is not None:
-                out.append((current, "\n".join(body).strip()))
-            current = match.group(2)
-            body = []
-        elif current is not None:
-            body.append(line)
-    if current is not None:
-        out.append((current, "\n".join(body).strip()))
-    return out
-
-
-def _bullets(body: str) -> tuple[dict[str, str], str]:
-    """Pull `- Label: value` lines out of a section body.
-
-    Returns (bullets, leftover prose). A bullet whose value is empty is kept
-    with an empty string so the caller can tell "the assistant left the field
-    blank" from "the assistant never emitted that bullet".
-    """
-    bullets: dict[str, str] = {}
-    prose: list[str] = []
-    for line in body.splitlines():
-        match = re.match(r"^\s*[-•*]\s*([^:]{1,60}):\s*(.*)$", line)
-        if match:
-            bullets[_normalise(match.group(1))] = match.group(2).strip()
-        elif line.strip():
-            prose.append(line)
-    return bullets, "\n".join(prose).strip()
-
-
-def parse_context_markdown(markdown: str) -> ParsedContext:
-    """Read an exported context document into onboarding prefill fields.
-
-    Tolerant by design: the file comes back from a third-party assistant we do
-    not control, so unknown headings, missing sections, `##` vs `###`, and
-    "UNKNOWN" placeholders all degrade to "we got less" rather than an error.
-    A file we recognise nothing in yields an empty ParsedContext, which the
-    route reports honestly instead of pretending the import worked.
-    """
-    result = ParsedContext()
-    if not markdown or not markdown.strip():
-        return result
-
-    version = re.search(r"<!--\s*sprntly-context\s+v(\S+)\s*-->", markdown)
-    if version:
-        result.format_version = version.group(1)
-
-    for heading, body in _sections(markdown):
-        key = _normalise(heading)
-        bullets, prose = _bullets(body)
-
-        # Sections that carry `- Label: value` bullets (company, product).
-        for label, value in bullets.items():
-            target = _BULLET_FIELDS.get((key, label))
-            if target is None:
-                result.unmapped[f"{heading} / {label}"] = value
-                continue
-            if not value or _is_unknown(value):
-                continue
-            if target == "surfaces":
-                mapped, rejected = _map_surfaces(_split_list(value))
-                if mapped:
-                    result.fields[target] = mapped
-                if rejected:
-                    result.unmapped[f"{heading} / {label} (unrecognised)"] = ", ".join(rejected)
-            elif target in _VOCAB_FIELDS:
-                # A closed-vocabulary field (monetization): canonicalise it, and
-                # keep an unmappable value in `unmapped` rather than writing a
-                # raw phrase the form can't select / the DB can reject.
-                canonical = _map_vocab(value, target)
-                if canonical is not None:
-                    result.fields[target] = canonical
-                else:
-                    result.unmapped[f"{heading} / {label}"] = value
-            else:
-                result.fields[target] = value
-
-        if not prose:
-            continue
-
-        target = _SECTION_FIELDS.get(key)
-        if target is None:
-            result.unmapped[heading] = prose
-            continue
-        if _is_unknown(prose):
-            continue
-        # A section can carry BOTH bullets and leftover prose — `## Team` does
-        # from v2 on, and assistants like to add a sentence under a bullet list.
-        # The bullets are the contract, so keep what they set and file the prose
-        # instead of letting it overwrite the parsed value.
-        if target in result.fields:
-            result.unmapped[heading] = prose
-            continue
-        if target in _VOCAB_FIELDS:
-            # planning_cycle / prioritization_framework carry a DB CHECK, so a
-            # raw phrase here would fail the workspace write, not just render an
-            # odd chip — map to the canonical value or drop it to `unmapped`.
-            canonical = _map_vocab(prose, target)
-            if canonical is not None:
-                result.fields[target] = canonical
-            else:
-                result.unmapped[heading] = prose
-            continue
-        result.fields[target] = _split_list(prose) if target in _LIST_FIELDS else prose
-
-    return result
+    if not markdown:
+        return None
+    marker = re.search(r"<!--\s*sprntly-context\s+v(\S+)\s*-->", markdown)
+    if marker:
+        return marker.group(1)
+    if _V3_SIGNATURE.search(markdown):
+        return "3"
+    return None
 
 
 # ───────────────────────── LLM extraction pass ─────────────────────────
 #
-# Reads the files the heading walk above cannot: an export from an assistant
-# that reworded our headings, a document the user edited by hand, or a strategy
-# doc they already had and uploaded instead. Runs as a background job because
-# it costs an LLM round-trip; the deterministic parse has already returned by
-# the time this starts.
+# The only reader since v3. It has to cope with the document our prompt asks
+# for, an older `## Section` export, one the user reworded or hand-edited, and
+# a strategy doc they already had and uploaded instead — so it reads meaning
+# rather than structure, and everything it returns is validated below before it
+# can reach the form.
 
 #: The surfaces the product step accepts. The model is given these verbatim
 #: and anything outside them is dropped on the way back — a chip the form
 #: cannot render is worse than a blank field. The other three closed-vocabulary
 #: fields (monetization, planning_cycle, prioritization_framework) are mapped
-#: through the SAME `_VOCAB_FIELDS` alias tables the deterministic parser uses,
-#: so both readers land the identical canonical value.
+#: through the `_VOCAB_FIELDS` alias tables.
 _ALLOWED_SURFACES = ("web", "mobile", "api", "hardware")
 
 #: Free-text fields, and the cap we truncate them to. The caps match the
@@ -1048,10 +941,10 @@ THE RULES, IN PRIORITY ORDER:
    drafted, or alternatives it floated, those are not facts about the company
    unless the document says they were adopted.
 
-3. TREAT "UNKNOWN" AS BLANK. Documents produced by our own prompt write the
-   literal word UNKNOWN for fields the user never covered. Return "" for those,
-   never the word itself. The same goes for N/A, TBD, and bracketed
-   placeholders like [Company Name].
+3. TREAT A MARKED-EMPTY FIELD AS BLANK. Documents produced by our own prompt
+   write a field with no value when the user never covered it. Return "" for
+   those. The same goes for UNKNOWN, N/A, TBD, "not found", "not available",
+   and bracketed placeholders like [Company Name].
 
 4. NO STALE NUMBERS. Extract metric NAMES, not their values or targets. "MAU"
    is a metric; "77M MAU by Q4" is a metric plus a number whose freshness you
@@ -1061,6 +954,64 @@ THE RULES, IN PRIORITY ORDER:
    employers alongside the subject company, extract only the subject — the one
    it speaks about as "we"/"our". Competitors go in the competitors list and
    nowhere else.
+
+THE SHAPE OUR OWN PROMPT PRODUCES. Many of these documents are a YAML `status:`
+block followed by flat `field_name: value  [marker]` lines under five numbered
+sections (company, product, team_and_workspace, governance, review). When you
+see that shape:
+
+  · The square-bracket marker is PROVENANCE, not part of the value.
+    "execution intelligence  [confirmed]" is the value "execution
+    intelligence". The vocabulary is confirmed, derived, stale, not found, not
+    available, high, medium, low. Never write a marker into a field.
+  · A field with a marker and no value — "company_size:  [not found]" — was
+    looked for and not found. Return "" for it.
+  · The `status:` block describes the RUN, not the company: coverage, field
+    counts, open conflicts. Take company_name and company_website from it if
+    they are there and nowhere else; ignore the rest of it.
+  · Section 5 (review) lists unresolved conflicts, values still to be
+    confirmed, and fields left deliberately blank. Those are NOT facts and
+    must never be promoted into a field. Keep them in `notes` so the user
+    still sees them.
+  · A line ending `_also_mined` is overflow for the field above it. Treat it
+    the same way you treat that field.
+
+WHERE THOSE FIELDS GO. Their names describe the company; ours name the
+onboarding form. Map like this, and return "" for anything the document
+doesn't carry:
+
+  company_name, company_website        → the same
+  mission, vision                      → mission
+  current_okrs, strategic_bets         → strategy
+  surfaces                             → surfaces
+  pricing                              → monetization
+  users, icp, buyer_persona, personas  → users_description
+  competitors                          → competitors
+  north_star_metric, then product_metrics → metrics, north star first, NAMES
+      only (north_star_baseline and north_star_target are values — leave them
+      out entirely)
+  prioritisation_framework             → prioritization_framework (note the
+      British spelling in the source)
+  operating_cadence, rituals           → planning_cycle when they name a
+      planning cadence, and sizing_methodology when they describe how work is
+      estimated or sized
+  workspace_name                       → team_name
+  workspace_scope, workspace_purpose   → team_scope
+  everything else worth keeping        → notes: business_context,
+      one_line_description, product_description, category, stage,
+      differentiators, anti_positioning, not_doing_list, constraints,
+      glossary, tone_and_voice, banned_words, brand_tokens, past_decisions,
+      roadmap_themes, jobs_to_be_done, integrations_and_data_sources, roster,
+      roles, external_stakeholders, decision_rights, approval_thresholds,
+      data_sensitivity, compliance_constraints, and the section 5 rows.
+
+product_name and product_website are filled only when the document names the
+product SEPARATELY from the company, and portfolio only when it names other
+products the company also ships. Neither is a place to repeat the company name.
+
+Documents that follow none of this — a strategy deck's notes, a reworded
+export, a file the user edited by hand — are read the same way: report what
+they state, blank what they don't.
 
 Closed vocabularies — return ONLY these exact values, or "" / []:
   surfaces:                 web, mobile, api, hardware
@@ -1109,7 +1060,7 @@ _EXTRACT_SCHEMA: dict = {
         },
         "strategy": {
             "type": "string",
-            "description": 'Strategy, OKRs, or current goals. "" if not stated.',
+            "description": 'Strategy, OKRs, strategic bets, or current goals. "" if not stated.',
         },
         "portfolio": {
             "type": "string",
@@ -1121,7 +1072,10 @@ _EXTRACT_SCHEMA: dict = {
         },
         "product_name": {
             "type": "string",
-            "description": 'The primary product\'s name. "" if not stated.',
+            "description": (
+                "The primary product's name, only when the document names it "
+                'separately from the company. "" if not stated.'
+            ),
         },
         "product_website": {
             "type": "string",
@@ -1141,7 +1095,10 @@ _EXTRACT_SCHEMA: dict = {
         },
         "users_description": {
             "type": "string",
-            "description": 'Who the users and the economic buyer are, in prose. "" if not stated.',
+            "description": (
+                "Who the users, the ICP and the economic buyer are, in prose. "
+                '"" if not stated.'
+            ),
         },
         "competitors": {
             "type": "array",
@@ -1153,7 +1110,7 @@ _EXTRACT_SCHEMA: dict = {
             "items": {"type": "string"},
             "description": (
                 "Metric NAMES the team is judged on, north star first. "
-                "No values or targets. [] if not stated."
+                "No values, baselines or targets. [] if not stated."
             ),
         },
         "prioritization_framework": {
@@ -1166,14 +1123,14 @@ _EXTRACT_SCHEMA: dict = {
         "team_name": {
             "type": "string",
             "description": (
-                "The name of the team or workspace the user works in (e.g. "
-                '"Nutrition & Sleep"), NOT the company name unless the whole '
-                'company is one team. "" if not stated.'
+                "The name of the team or workspace the user works in (the "
+                'document\'s workspace_name), NOT the company name unless the '
+                'whole company is one team. "" if not stated.'
             ),
         },
         "team_scope": {
             "type": "string",
-            "description": 'What that team owns end to end. "" if not stated.',
+            "description": 'What that team or workspace owns end to end. "" if not stated.',
         },
         "sizing_methodology": {
             "type": "string",
@@ -1185,8 +1142,9 @@ _EXTRACT_SCHEMA: dict = {
         "notes": {
             "type": "string",
             "description": (
-                "Everything else worth keeping: past decisions, the not-doing list, "
-                'constraints, glossary, cadence. "" if there is none.'
+                "Everything else worth keeping: business context, past decisions, "
+                "the not-doing list, anti-positioning, constraints, glossary, "
+                'banned words, cadence, roster, governance, review rows. "" if none.'
             ),
         },
     },
@@ -1203,13 +1161,14 @@ _EXTRACT_SCHEMA: dict = {
 def _clean_text(value: object, limit: int) -> str | None:
     """A model-returned string -> a usable value, or None to leave blank.
 
-    Rejects the placeholder tokens the extraction prompt tells the model to
-    avoid but which it can still echo from the source document, so an
-    "UNKNOWN" in the user's export never reaches the form as literal text.
+    Strips the v3 provenance marker, then rejects the placeholder tokens the
+    extraction prompt tells the model to avoid but which it can still echo from
+    the source document — so neither a "[not found]" nor an "UNKNOWN" in the
+    user's file ever reaches the form as literal text.
     """
     if not isinstance(value, str):
         return None
-    text = value.strip()
+    text = _strip_marker(value)
     if not text or _is_unknown(text):
         return None
     # A bracketed placeholder ("[Company Name]") is a template artefact, not an
@@ -1220,7 +1179,14 @@ def _clean_text(value: object, limit: int) -> str | None:
 
 
 def _clean_list(value: object, limit: int) -> list[str] | None:
-    """A model-returned array -> a de-duplicated clean list, or None if empty."""
+    """A model-returned array -> a de-duplicated clean list, or None if empty.
+
+    A comma-separated string is accepted too: the source document writes its
+    lists that way, and a model echoing the source's shape should widen the
+    import rather than lose the field.
+    """
+    if isinstance(value, str):
+        value = _split_list(_strip_marker(value))
     if not isinstance(value, list):
         return None
     out: list[str] = []
@@ -1237,8 +1203,8 @@ def _coerce_extracted(raw: dict) -> dict[str, object]:
     Everything the model may have got wrong is caught here rather than in the
     form: unknown enum values are DROPPED (not snapped to the nearest option —
     a wrong pick reads as the user's own answer), unrecognised surfaces are
-    dropped, blanks and placeholders never make it through, and free text is
-    capped to what the matching input accepts.
+    dropped, markers, blanks and placeholders never make it through, and free
+    text is capped to what the matching input accepts.
     """
     fields: dict[str, object] = {}
 
@@ -1251,10 +1217,9 @@ def _coerce_extracted(raw: dict) -> dict[str, object]:
         text = _clean_text(raw.get(key), 200)
         if text is None:
             continue
-        # Same alias tables as the deterministic parser: an out-of-vocabulary
-        # value is dropped (never snapped to the nearest option — a wrong pick
-        # reads as the user's own answer), and a raw phrase never reaches a
-        # CHECK-constrained column.
+        # An out-of-vocabulary value is dropped, never snapped to the nearest
+        # option — a wrong pick reads as the user's own answer — and a raw
+        # phrase never reaches a CHECK-constrained column.
         canonical = _map_vocab(text, key)
         if canonical is not None:
             fields[key] = canonical
@@ -1264,8 +1229,6 @@ def _coerce_extracted(raw: dict) -> dict[str, object]:
         if items is None:
             continue
         if key == "surfaces":
-            # Reuse the same alias table the heading parser uses, so "web app"
-            # and "iOS" land on the form's chips from either reader.
             mapped, _rejected = _map_surfaces(items)
             items = mapped
         if items:
@@ -1274,41 +1237,19 @@ def _coerce_extracted(raw: dict) -> dict[str, object]:
     return fields
 
 
-def _merge(base: ParsedContext, extracted: dict[str, object]) -> ParsedContext:
-    """Fold an LLM extraction into a deterministic parse.
+def extract_context_fields(markdown: str) -> ParsedContext:
+    """Read an uploaded context document into onboarding prefill fields.
 
-    The deterministic value always wins: it came from the exact heading
-    contract, while the extraction is a reading of prose. The LLM therefore only
-    fills fields the walk left blank — widening coverage on files our parser
-    doesn't understand, without ever being able to overwrite one it does.
-    """
-    merged = ParsedContext(
-        fields=dict(base.fields),
-        unmapped=dict(base.unmapped),
-        format_version=base.format_version,
-    )
-    for key, value in extracted.items():
-        if key not in merged.fields:
-            merged.fields[key] = value
-    return merged
-
-
-def extract_context_fields(
-    markdown: str, base: ParsedContext | None = None
-) -> ParsedContext:
-    """Read a context document with the LLM and merge over the heading parse.
-
-    `base` is the deterministic parse the caller already ran (re-run here when
-    omitted). Returns a ParsedContext holding the union of both readings — see
-    `_merge` for who wins.
+    The only reader since v3, and a background job because it costs an LLM
+    round-trip.
 
     NEVER raises. Every failure mode — no API key, a timeout, a malformed
-    response — degrades to returning `base` unchanged, because the caller is a
-    background job whose only purpose is to widen a prefill the user has
-    already been given. A failed extraction costs them the fields the heading
-    walk missed and nothing else; one that raised would strand the job row.
+    response — degrades to an empty ParsedContext, which the caller reports
+    honestly as "we couldn't read anything out of that file". The user's
+    material is not lost either way: the raw .md was filed as a document source
+    before this ran. A raise would strand the job row.
     """
-    parsed = base if base is not None else parse_context_markdown(markdown)
+    parsed = ParsedContext(format_version=detect_format_version(markdown))
     if not markdown or not markdown.strip():
         return parsed
 
@@ -1329,8 +1270,8 @@ def extract_context_fields(
             # Extraction, not authoring — there is nothing to sample for.
             temperature=0,
         )
-    except Exception:  # noqa: BLE001 — degrade to the deterministic parse
-        logger.exception("llm-context: extraction failed; keeping the heading parse")
+    except Exception:  # noqa: BLE001 — an unread import beats a stranded job
+        logger.exception("llm-context: extraction failed; the import reads nothing")
         return parsed
 
     if not isinstance(raw, dict):
@@ -1339,4 +1280,5 @@ def extract_context_fields(
         )
         return parsed
 
-    return _merge(parsed, _coerce_extracted(raw))
+    parsed.fields = _coerce_extracted(raw)
+    return parsed

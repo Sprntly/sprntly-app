@@ -49,6 +49,7 @@ from fastapi import (
     Form,
     Header,
     HTTPException,
+    Query,
     Request,
     UploadFile,
 )
@@ -2983,19 +2984,19 @@ async def github_webhook(
 # conversation history, so a "connect your account" flow could not actually
 # produce the context it promised. One prompt works everywhere instead.
 #
-# TWO READS, ONE UPLOAD. The POST runs the deterministic heading parse inline
-# and returns those fields immediately, so the user can move on the instant the
-# file lands. It ALSO kicks a background LLM extraction over the same file,
-# because the heading walk only understands documents our own prompt produced —
-# an edited export, a reworded one, or a strategy doc the user already had
-# reads as empty to it and reads fine to the LLM.
+# ONE READ, IN THE BACKGROUND. The POST files the .md as a company document,
+# hands it to the knowledge-graph ingest and kicks an LLM extraction, then
+# returns a job id — no fields. Until v3 a deterministic heading walk also ran
+# inline, but the v3 prompt is the product team's own document rather than our
+# heading contract, so that reader was deleted (see app/llm_context.py). The
+# extraction reads documents of any shape, which is what the walk never could.
 #
 # That background pass is why the import step hands off to CONNECTORS rather
 # than product: connecting tools is the one step in the flow the import cannot
 # prefill, so it is the step worth spending the extraction's latency on. By the
 # time the user reaches metrics and product, the job has landed.
 #
-# Neither path writes to the workspace: both return `fields` for the onboarding
+# It does not write to the workspace: it returns `fields` for the onboarding
 # form to prefill and the user to confirm. An import must never silently
 # overwrite something the user already typed.
 #
@@ -3032,8 +3033,8 @@ def _context_result(parsed, *, note: str | None = None) -> dict:
         or (
             None
             if not parsed.is_empty
-            else "We couldn't find any of the expected sections in that file. "
-            "Check it was produced by our prompt, or fill the steps in manually."
+            else "We couldn't read anything usable out of that file. Check it's "
+            "the .md your assistant produced, or fill the steps in manually."
         ),
     }
 
@@ -3041,10 +3042,10 @@ def _context_result(parsed, *, note: str | None = None) -> dict:
 async def _run_context_extraction(job_id: int, markdown: str) -> None:
     """Background worker: run the LLM extraction and complete the job row.
 
-    Never raises — `extract_context_fields` already degrades to the
-    deterministic parse on any LLM failure, and anything left (a DB blip while
-    writing the row) is logged and marked `error` so the client's poll
-    terminates instead of spinning on 'generating' forever.
+    Never raises — `extract_context_fields` already degrades to an empty read
+    on any LLM failure, and anything left (a DB blip while writing the row) is
+    logged and marked `error` so the client's poll terminates instead of
+    spinning on 'generating' forever.
     """
     from app.db.llm_context_jobs import complete_context_job, fail_context_job
     from app.llm_context import extract_context_fields
@@ -3062,8 +3063,9 @@ async def _run_context_extraction(job_id: int, markdown: str) -> None:
 
 async def _start_context_extraction(company_id: str, markdown: str) -> int | None:
     """Kick the background LLM pass, returning its job id (None if it couldn't
-    start). Best-effort: the deterministic parse is already in the caller's
-    response, so a job that never starts costs coverage, not the import."""
+    start). It is the ONLY reader (see app/llm_context.py), so a job that never
+    starts means the upload prefills nothing — the caller says so in `note`
+    rather than leaving the client polling an id it never got."""
     from app.db.llm_context_jobs import start_context_job
 
     try:
@@ -3087,23 +3089,24 @@ async def _start_context_extraction(company_id: str, markdown: str) -> int | Non
 
 
 async def _import_context_markdown(company, markdown: str) -> dict:
-    """Parse an export, kick the LLM pass, and file the raw document.
+    """File the raw document, kick the LLM pass, and hand back its job id.
 
-    Returns the DETERMINISTIC parse plus a `job_id` for the background LLM
-    extraction, so the user gets whatever we can read instantly and the wider
-    reading catches up while they work through connectors.
+    Since v3 there is no deterministic reader (see app/llm_context.py), so this
+    response carries no fields — only the version we recognised the file as and
+    the `job_id` the client polls. The shape is unchanged so the onboarding form
+    applies a POST result and a poll result through one code path.
 
-    Filing is best-effort and never fails the import: the prefill is the thing
-    the user is waiting on, and a storage hiccup should not cost them the
-    parse. The failure is logged and reported in `note` rather than swallowed.
+    Filing is best-effort and never fails the import: it is the half of the
+    upload that does not depend on an LLM, so a storage hiccup is reported in
+    `note` rather than swallowed, and never blocks the extraction.
     """
-    from app.llm_context import parse_context_markdown
+    from app.llm_context import ParsedContext, detect_format_version
 
-    parsed = parse_context_markdown(markdown)
+    parsed = ParsedContext(format_version=detect_format_version(markdown))
     note = None
     # Whether the raw .md was actually filed as a document source AND handed to
     # the KG ingest. This is the real "your context reached the knowledge graph"
-    # signal — distinct from `ok` (did the heading walk read structured fields).
+    # signal — distinct from `ok` (did the extraction read structured fields).
     # The Settings/Business-Context card leans on it: it never prefills, so
     # filing IS the whole outcome there, and it must not claim a KG feed that a
     # storage hiccup silently swallowed.
@@ -3137,27 +3140,48 @@ async def _import_context_markdown(company, markdown: str) -> dict:
     job_id = await _start_context_extraction(company.company_id, markdown)
     result = _context_result(parsed, note=note)
     # `ok` is about whether the USER's upload produced anything usable, and the
-    # LLM pass may yet find fields the heading walk missed. So a file the walk
-    # read nothing from is not a failure while a job is still running — the
-    # client shows "reading…" and the poll settles it either way. Preserve a
-    # FILING-failure note though (filed is False): that isn't the "found nothing"
-    # verdict the job can overturn, it's the KG feed the user needs to know about.
+    # only reader runs in that job. So this response is never the verdict while
+    # a job is live — the client shows "reading…" and the poll settles it either
+    # way. Preserve a FILING-failure note though (filed is False): that isn't
+    # the "found nothing" verdict the job can overturn, it's the KG feed the
+    # user needs to know about.
     if job_id is not None and not result["ok"] and filed:
         result["note"] = None
     return {**result, "job_id": job_id, "filed": filed}
 
 
 @router.get("/llm-context/prompt")
-def llm_context_prompt():
+def llm_context_prompt(
+    company_name: str = Query(default="", max_length=500),
+    company_website: str = Query(default="", max_length=500),
+):
     """The prompt the user pastes into Claude / ChatGPT / Gemini.
 
-    It contains nothing about this company, but it lives on the connectors
-    router so the frontend has one place to fetch it and the copy shown in the
-    UI can never drift from what the parser expects to read back.
-    """
-    from app.llm_context import CONTEXT_FORMAT_VERSION, CONTEXT_PROMPT
+    The caller passes what it already knows about the company and gets those
+    values written into the prompt's confirmed-values block. Since 2026-07-27
+    the company step runs BEFORE the import step, so onboarding always has the
+    name and website by the time it asks for this — and the assistant starts
+    with the entity locked rather than inferring it from a search.
 
-    return {"prompt": CONTEXT_PROMPT, "format_version": CONTEXT_FORMAT_VERSION}
+    Both are optional and unauthenticated on purpose: the values come from the
+    caller's own form, they are written into a prompt returned to that same
+    caller (who can edit it in the textarea anyway), and a caller that has
+    neither still gets a usable prompt with an empty block. Making this
+    tenant-scoped would buy nothing and would break the fetch for anyone who
+    reaches the step without a company row yet.
+
+    It lives on the connectors router so the frontend has one place to fetch it
+    and the copy shown in the UI can never drift from what the extraction
+    expects to read back.
+    """
+    from app.llm_context import CONTEXT_FORMAT_VERSION, build_context_prompt
+
+    return {
+        "prompt": build_context_prompt(
+            company_name=company_name, company_website=company_website
+        ),
+        "format_version": CONTEXT_FORMAT_VERSION,
+    }
 
 
 @router.post("/llm-context/import")
