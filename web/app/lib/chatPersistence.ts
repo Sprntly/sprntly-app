@@ -52,6 +52,23 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
   // Per-tab in-flight create promises. Keyed by tabId; resolves to the new conv id.
   const inFlightCreates = new Map<string, Promise<number>>()
 
+  // Conversation ids this module has already created, remembered independently
+  // of React.
+  //
+  // `deps.getTabConvId` reads the tab's `dbConvId` out of a ref that only
+  // refreshes on RENDER, and the in-flight entry is dropped the moment the
+  // create settles. Between those two points a tab has a real conversation that
+  // neither source can name — and a write landing in that window was silently
+  // discarded (`convId == null` → return). Turns pushed back-to-back never hit
+  // it; a reply written a network round-trip after its user turn does, which is
+  // exactly what the deferred PRD-command acknowledgment is.
+  const knownConvIds = new Map<string, number>()
+
+  /** The tab's conversation id from any source that can currently name it. */
+  function currentConvId(tabId: string): number | null {
+    return deps.getTabConvId(tabId) ?? knownConvIds.get(tabId) ?? null
+  }
+
   // Per-tab APPEND QUEUE — turns reach the DB in the order they were written.
   //
   // A user turn and its reply are pushed back to back, and each used to issue
@@ -87,7 +104,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
     tabId: string,
     create: { turnId: string; title: string; query: string },
   ): Promise<number | null> {
-    const existing = deps.getTabConvId(tabId)
+    const existing = currentConvId(tabId)
     if (existing != null) return Promise.resolve(existing)
 
     const inFlight = inFlightCreates.get(tabId)
@@ -112,6 +129,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
         agent_type: "ask",
         ...(prdId != null ? { prd_id: prdId } : {}),
       })
+      knownConvIds.set(tabId, conv.id)
       deps.setTabConvId(tabId, conv.id)
       deps.onConversationCreated?.(create.turnId, conv.id)
       return conv.id
@@ -169,7 +187,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
   function pushAssistantTurn(tabId: string, replyText: string): Promise<void> {
     return enqueueAppend(tabId, async () => {
       try {
-        let convId = deps.getTabConvId(tabId)
+        let convId = currentConvId(tabId)
         if (convId == null) {
           const inFlight = inFlightCreates.get(tabId)
           if (inFlight) convId = await inFlight

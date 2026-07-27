@@ -124,6 +124,37 @@ describe("turn ordering", () => {
     expect(new Set(addTurnCalls.map((c) => c.convId)).size).toBe(2)
   })
 
+  // A reply written LONG after its user turn — the clarify-first PRD command
+  // acknowledgment, which is deliberately held back until the sufficiency gate
+  // says whether the user is getting a document or questions.
+  //
+  // By then the create has settled (so `inFlightCreates` has dropped it) but the
+  // host's `getTabConvId` still reads a React ref that only refreshes on RENDER.
+  // In that window neither source could name the tab's conversation and the
+  // write was silently discarded — the reply never reached the DB, and the chat
+  // came back from history as a command with no answer.
+  it("writes a reply issued after the create settled but before the host sees the id", async () => {
+    const api = makeApi()
+    // A host that NEVER reports the id back — the extreme of a ref that hasn't
+    // re-rendered yet. Persistence must still know the conversation it created.
+    const persistence = createChatPersistence({
+      getApi: async () => api,
+      getTabConvId: () => null,
+      setTabConvId: () => {},
+    })
+
+    await persistence.pushUserTurn("tab-A", {
+      turnId: "t1", title: "generate a prd", query: "generate a prd",
+    })
+    // …a network round-trip later (the clarify gate), the reply is settled.
+    await persistence.pushAssistantTurn("tab-A", "Generating a PRD for that…")
+
+    expect(addTurnCalls.map((c) => c.role)).toEqual(["user", "assistant"])
+    // Both landed in the SAME conversation — no second create, no orphan.
+    expect(new Set(addTurnCalls.map((c) => c.convId)).size).toBe(1)
+    expect(createCalls).toHaveLength(1)
+  })
+
   it("a failed write does not wedge later turns on that tab", async () => {
     const h = makeHarness()
     h.openTab("tab-A")

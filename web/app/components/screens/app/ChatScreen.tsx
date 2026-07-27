@@ -16,6 +16,12 @@ import { EmptyPane } from "../../shared/EmptyPane"
 import { AssistantThinkingSkeleton } from "../../shared/AssistantThinkingSkeleton"
 import { AskReplyBody } from "../../shared/AskReplyBody"
 import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
+import {
+  ClarifyQuestionsCard,
+  type ClarifyAnswer,
+  type ClarifyQuestion,
+  type ClarifyResolution,
+} from "../../shared/ClarifyQuestionsCard"
 import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
 import { ApiError, askApi, attachmentsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
@@ -52,6 +58,25 @@ type ThreadTurn = {
   /** The user stopped this ask before it answered (composer Stop button). Renders
    *  a muted "stopped" note instead of the thinking skeleton or an error bubble. */
   stopped?: boolean
+  /** A reload killed this turn's in-flight work before its reply landed — set
+   *  only by the sessionStorage RESTORE path (the persist effect marks a PRD
+   *  command still awaiting its deferred reply; see deferredAckRef). Renders an
+   *  honest "send it again" note instead of "No response was generated". */
+  interrupted?: boolean
+  /** The clarify gate's questions, STRUCTURED — rendered as an answerable card
+   *  (options as buttons, one submit for the batch) instead of the flattened
+   *  numbered list that `reply.answer` carries. Both live on the same turn: the
+   *  card is what the user sees while the gate is open, and `reply.answer` is
+   *  the durable form that persists, rehydrates and feeds the transcript filter.
+   *  The card renders while the tab's `pendingClarify` is live and, once
+   *  settled, as the read-only record below; only a full history rehydration
+   *  (which rebuilds turns from text alone) falls back to `reply.answer`. */
+  clarify?: ClarifyQuestion[]
+  /** How the batch above was settled — answers given, or the assumptions each
+   *  unanswered question fell back to. Its presence is what flips the card from
+   *  input to record, so the structure the user answered in SURVIVES answering
+   *  instead of collapsing back to an undifferentiated wall of text. */
+  clarifyResolved?: ClarifyResolution
 }
 
 type BriefMeta = { briefId: number; insightIndex: number }
@@ -110,7 +135,14 @@ type ChatTab = {
    *  message in this tab is treated as the answers (or a "generate now" skip)
    *  and generation runs with the combined task. Transient — never persisted;
    *  a reload simply drops back to a fresh command. */
-  pendingClarify?: { task: string; sourceDocs?: { name: string; content: string }[] }
+  pendingClarify?: {
+    task: string
+    sourceDocs?: { name: string; content: string }[]
+    /** The thread turn carrying the questions, so whichever path answers them —
+     *  the card's submit or a prose reply in the composer — can stamp its
+     *  resolution back onto the right turn. */
+    turnId: string
+  }
   /** True from the moment a PRD command is acknowledged until the agent's NEXT
    *  visible response — the clarifying questions, or the generation starting.
    *  Drives a live thinking indicator under the acknowledgment.
@@ -122,31 +154,44 @@ type ChatTab = {
   prdCommandThinking?: boolean
 }
 
-// The questions turn the clarify gate posts into the tab's thread — an
-// agent-style message (empty `query` renders no user bubble) listing 3–5
-// targeted questions plus the "generate now" escape hatch.
-function clarifyQuestionsTurn(
-  questions: { prompt: string; options: string[]; skip_default?: string | null }[],
-): ThreadTurn {
+// The DURABLE form of the clarify gate's questions: a flattened numbered list.
+//
+// What the user actually sees is `ClarifyQuestionsCard` (options as buttons, one
+// submit for the batch) — this text is what gets PERSISTED as the assistant turn
+// and what a reloaded thread falls back to, since the card's answering machinery
+// (`pendingClarify`) is transient. It is also what `PRD_CLARIFY_ANSWER_RE`
+// matches to keep the questions out of the PRD's grounding transcript, so the
+// leading sentence must keep its "Before I write this PRD" opening.
+export function clarifyQuestionsText(questions: ClarifyQuestion[]): string {
   const lines = questions.map((q, i) => {
     const opts = q.options.length ? ` (e.g. ${q.options.join(" / ")})` : ""
     // Skips are informed, not silent: each question states the assumption the
     // author proceeds with when it goes unanswered.
     const skip = q.skip_default ? ` — if skipped, I'll assume: ${q.skip_default}` : ""
+    // Blank-line separated: single newlines are soft-wrapped away by the
+    // markdown renderer, which ran the whole list together on one line.
     return `${i + 1}. ${q.prompt}${opts}${skip}`
   })
+  return (
+    "Before I write this PRD, a few details would make it much stronger. " +
+    "Answer what you can in one message — or say \"generate now\" and I'll " +
+    "proceed with what I have:\n\n" +
+    lines.join("\n\n")
+  )
+}
+
+function clarifyQuestionsReply(questions: ClarifyQuestion[]): AskResponse {
   return {
-    id: `clarify-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`,
-    query: "",
-    reply: {
-      answer:
-        "Before I write this PRD, a few details would make it much stronger. " +
-        "Answer what you can in one message — or say \"generate now\" and I'll " +
-        "proceed with what I have:\n\n" +
-        lines.join("\n"),
-      sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
-    } as AskResponse,
-  }
+    answer: clarifyQuestionsText(questions),
+    sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+  } as AskResponse
+}
+
+// The user's card answers, rendered as the message they'd otherwise have typed.
+// Q/A pairs (not bare answers) so the generator can tell which question each one
+// settles — the composer path sends prose, and this must be at least as legible.
+export function clarifyAnswersText(answers: ClarifyAnswer[]): string {
+  return answers.map((a) => `${a.prompt}\n${a.answer}`).join("\n\n")
 }
 
 // "generate now" / "just proceed" — the user declines the clarify questions
@@ -801,7 +846,19 @@ export function ChatScreen() {
       // prdCommandThinking is stripped with the rest: the in-flight call it
       // tracks does not survive a reload, so restoring it would leave a
       // thinking indicator spinning forever with nothing behind it.
-      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => rest)
+      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => {
+        // A PRD command awaiting its deferred reply (the clarify gate is still
+        // deciding — see deferredAckRef) has a reply-less seed turn, and the
+        // in-flight promise that would fill it dies with the page. Persisted
+        // as-is, a reload restored it into "No response was generated for this
+        // message." — false and a dead end. Mark it in the SAVED copy only, so
+        // a restore can say what actually happened; a normal settle re-runs
+        // this effect with the ref cleared and the mark comes straight off.
+        if (!deferredAckRef.current.has(rest.id)) return rest
+        const last = rest.thread[rest.thread.length - 1]
+        if (!last || last.reply || last.error || last.stopped) return rest
+        return { ...rest, thread: [...rest.thread.slice(0, -1), { ...last, interrupted: true }] }
+      })
       sessionStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
   }, [tabs, tabsKey])
@@ -1119,6 +1176,66 @@ export function ChatScreen() {
   // a slow create) just falls back to the client back-patch below.
   const seedConvIdRef = useRef<Map<string, Promise<number | null>>>(new Map())
 
+  // ── Deferred command acknowledgment (clarify-first) ────────────────────────
+  // "Generate a PRD for X" may be answered with QUESTIONS instead of a document,
+  // so its acknowledgment ("Generating a PRD for that — it'll open in the panel
+  // on the right…") can't be written when the command is seeded: half the time
+  // it turns out to be false, and it sat above the questions claiming a PRD was
+  // on its way while the agent was still asking what to build. The seed now
+  // leaves the reply EMPTY (the thinking indicator carries that window) and the
+  // gate's outcome decides what lands on the turn — the ack, or the questions.
+  //
+  // This holds the rail/DB turn id the deferred write needs. Keyed by tab;
+  // seeded synchronously by seedCommandTurn, consumed one network round-trip
+  // later inside openPrdInTab's async block, so the race is never live.
+  // ONE entry per tab is an invariant, not an accident: every generateTask
+  // command enters through submitAsk, whose prdCommandThinking guard holds any
+  // send on this tab until the gate settles — so a second command can never
+  // overwrite a live entry and cross-wire the two replies.
+  const deferredAckRef = useRef<Map<string, { turnId: string; req: LocalPrdTabRequest }>>(new Map())
+  // finalizeConversationTurn is declared further down (it depends on state
+  // helpers defined after openPrdInTab), so openPrdInTab reaches it through a
+  // ref rather than a closure it cannot legally capture at render time.
+  const finalizeTurnRef = useRef<
+    ((turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string) => void) | null
+  >(null)
+  /** Write the reply the clarify gate settled on — the ack, or the questions —
+   *  onto the command turn's thread entry AND its conversation row. No-op when
+   *  the command wasn't seeded (a header open, or a re-issued command with no
+   *  seed query), which is exactly when there's no turn to answer. */
+  const settleCommandAck = useCallback((tabId: string, seedTurnId: string, reply: AskResponse, clarify?: ClarifyQuestion[]) => {
+    setTabs((prev) => prev.map((t) => t.id === tabId
+      ? {
+          ...t,
+          thread: t.thread.map((tn) =>
+            tn.id === seedTurnId ? { ...tn, reply, ...(clarify ? { clarify } : {}) } : tn),
+        }
+      : t))
+    const deferred = deferredAckRef.current.get(tabId)
+    if (!deferred) return
+    deferredAckRef.current.delete(tabId)
+    finalizeTurnRef.current?.(deferred.turnId, { reply }, tabId)
+  }, [])
+  /** The command died before the gate could settle it (generate POST failed, or
+   *  came back unavailable). A deferred ack that is never written leaves the turn
+   *  reading "No response was generated for this message." — so say what actually
+   *  happened instead. No-op once the ack or the questions have already landed. */
+  const failDeferredAck = useCallback((tabId: string, seedTurnId: string | undefined, message: string) => {
+    if (!seedTurnId || !deferredAckRef.current.has(tabId)) return
+    const turnId = deferredAckRef.current.get(tabId)!.turnId
+    deferredAckRef.current.delete(tabId)
+    const detail = message.trim().slice(0, 200)
+    setTabs((prev) => prev.map((t) => t.id === tabId
+      ? {
+          ...t,
+          thread: t.thread.map((tn) => tn.id === seedTurnId
+            ? { ...tn, error: detail ? `I couldn't start that PRD — ${detail}` : "I couldn't start that PRD." }
+            : tn),
+        }
+      : t))
+    finalizeTurnRef.current?.(turnId, { error: detail }, tabId)
+  }, [])
+
   // Bind a tab's chat conversation to the PRD it just started, for the case the
   // conversation didn't exist yet when the generate call went out (a brand-new
   // command tab). Runs inside the generate promise chain — NOT a React effect —
@@ -1163,11 +1280,16 @@ export function ChatScreen() {
     // "generate a PRD"): seed the thread with the user's message + an
     // acknowledgment, so the chat shows WHY a generation is running instead of
     // sitting empty next to the spinning panel.
+    // …EXCEPT for "generate a PRD for X", where the acknowledgment is deferred
+    // until the clarify gate says which response the user is actually getting
+    // (see deferredAckRef). Its reply-less turn shows the thinking indicator for
+    // that window and is filled in by settleCommandAck.
+    const deferAck = source.kind === "generateTask"
     const seedTurn: ThreadTurn | null = req.seedQuery
       ? {
           id: `seed-${Date.now()}`,
           query: req.seedQuery,
-          reply: commandAckReply(req),
+          ...(deferAck ? {} : { reply: commandAckReply(req) }),
           // "convert this document into a PRD": the attached file IS the subject
           // of the command, so show it as a chip on the user's turn (matching a
           // plain attachment send) rather than only inside the panel.
@@ -1303,16 +1425,35 @@ export function ChatScreen() {
                   .then(() => prdApi.clarifyTask(source.task, source.sourceDocs))
                   .catch(() => ({ sufficient: true, questions: [], missing: [] }))
                 if (!verdict.sufficient && verdict.questions.length) {
+                  // A command with no seed turn (opened from a button rather
+                  // than typed) has nothing to answer, so the questions arrive
+                  // as their own agent-only turn. Either way ONE turn carries
+                  // them, and `pendingClarify` names it.
+                  const orphanTurnId = `clarify-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`
+                  const clarifyTurnId = seedTurn?.id ?? orphanTurnId
                   setTabs((prev) => prev.map((t) => t.id === tabId
                     ? {
                         ...t,
                         prdGenerating: false,
                         // The questions ARE the response — indicator off.
                         prdCommandThinking: false,
-                        pendingClarify: { task: source.task, sourceDocs: source.sourceDocs },
-                        thread: [...t.thread, clarifyQuestionsTurn(verdict.questions)],
+                        pendingClarify: { task: source.task, sourceDocs: source.sourceDocs, turnId: clarifyTurnId },
+                        // The questions ANSWER the command turn — they are not a
+                        // second message under a stale "generating…" ack. Landing
+                        // them on that turn is also what makes the pair survive a
+                        // reload: history rebuilds as user→assistant, and the
+                        // orphaned agent-only turn had nowhere to go.
+                        ...(seedTurn ? {} : { thread: [...t.thread, {
+                          id: orphanTurnId,
+                          query: "",
+                          reply: clarifyQuestionsReply(verdict.questions),
+                          clarify: verdict.questions,
+                        }] }),
                       }
                     : t))
+                  if (seedTurn) {
+                    settleCommandAck(tabId, seedTurn.id, clarifyQuestionsReply(verdict.questions), verdict.questions)
+                  }
                   if (activeTabIdRef.current === tabId) {
                     setContent({ prdGenerating: false, prdPartialHtml: null })
                   }
@@ -1326,6 +1467,9 @@ export function ChatScreen() {
                 // so the chat indicator hands off rather than stacking.
                 setTabs((prev) => prev.map((t) => t.id === tabId
                   ? { ...t, prdGenerating: true, prdCommandThinking: false } : t))
+                // …and NOW the acknowledgment is true, so it lands on the command
+                // turn (thread + conversation row) — the write the seed deferred.
+                if (seedTurn) settleCommandAck(tabId, seedTurn.id, commandAckReply(req))
                 if (activeTabIdRef.current === tabId) {
                   setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
                   setPrdPanelPending(true)
@@ -1387,6 +1531,7 @@ export function ChatScreen() {
           // questions — it is a handled stop, not a failure.)
           setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false, prdCommandThinking: false } : t))
           if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+          failDeferredAck(tabId, seedTurn?.id, result.message)
           showToast("PRD unavailable", result.message.slice(0, 200))
         }
       } catch (e) {
@@ -1394,11 +1539,12 @@ export function ChatScreen() {
         // than the dead air it was added to fix.
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prdGenerating: false, prdCommandThinking: false } : t))
         if (activeTabIdRef.current === tabId) setContent({ prdGenerating: false, prdPartialHtml: null })
+        failDeferredAck(tabId, seedTurn?.id, e instanceof Error ? e.message : String(e))
         showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
       }
     })()
     return tabId
-  }, [setContent, showToast, hydratePrdThread, openContentPanel, bindConvToPrd])
+  }, [setContent, showToast, hydratePrdThread, openContentPanel, bindConvToPrd, settleCommandAck, failDeferredAck])
 
   // ── Per-tab artifact generation ──────────────────────────────────────────
   const handleOpenPrd = useCallback(async () => {
@@ -2066,6 +2212,9 @@ export function ChatScreen() {
     },
     [setContent, persistence],
   )
+  // Published for openPrdInTab, which is declared above this and settles the
+  // clarify-first ack a network round-trip later (see deferredAckRef).
+  finalizeTurnRef.current = finalizeConversationTurn
 
   // Persist a command-seeded turn (the user's command + the agent's ack) to the
   // conversations rail + Supabase, mirroring the pendingPrdTab effect below — the
@@ -2111,6 +2260,15 @@ export function ChatScreen() {
       return
     }
     pushPendingConversation(turnId, seedQuery, tabId)
+    // "generate a PRD for X": the reply isn't known yet — the clarify gate may
+    // answer with QUESTIONS, and persisting "Generating a PRD for that…" here
+    // wrote a promise the agent then didn't keep, sitting in the thread (and in
+    // the conversation history) above the questions it contradicted. Register
+    // the turn instead; settleCommandAck writes whichever reply actually wins.
+    if (req.source.kind === "generateTask") {
+      deferredAckRef.current.set(tabId, { turnId, req })
+      return
+    }
     finalizeConversationTurn(turnId, { reply: commandAckReply(req) }, tabId)
   }, [pushPendingConversation, finalizeConversationTurn, persistence])
 
@@ -2135,10 +2293,17 @@ export function ChatScreen() {
   const runClarifiedGeneration = useCallback((
     prdApi: Pick<typeof import("../../../lib/api").prdApi, "generateFromTask">,
     targetTabId: string,
-    task: string,
+    rawTask: string,
     sourceDocs: { name: string; content: string }[] | undefined,
     userMessage: string,
   ) => {
+    // The combined task (original command + the user's clarify answers, which
+    // echo each question's prompt for legibility) can outgrow the backend's
+    // 4000-char `task` cap — a 422 AFTER the "Generating a PRD…" ack is on
+    // screen. Trim the tail to fit: losing the last answer's tail beats losing
+    // the whole generation.
+    const TASK_MAX = 4000
+    const task = rawTask.length > TASK_MAX ? `${rawTask.slice(0, TASK_MAX - 1)}…` : rawTask
     const id =
       typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
     const ack: AskResponse = {
@@ -2201,6 +2366,48 @@ export function ChatScreen() {
       }
     })()
   }, [finalizeConversationTurn, pushPendingConversation, setContent, showToast, bindConvToPrd])
+
+  /** Freeze the questions turn into its settled, read-only form. Both answering
+   *  paths call this — the card's submit and a prose reply in the composer — so
+   *  the batch never reverts to the flattened text the moment it's answered. */
+  const markClarifyResolved = useCallback(
+    (tabId: string, turnId: string, resolution: ClarifyResolution) => {
+      setTabs((prev) => prev.map((t) => t.id === tabId
+        ? {
+            ...t,
+            thread: t.thread.map((tn) =>
+              tn.id === turnId ? { ...tn, clarifyResolved: resolution } : tn),
+          }
+        : t))
+    },
+    [],
+  )
+
+  // The clarify CARD's submit — the same landing point as answering in the
+  // composer (submitAsk's pendingClarify intercept), reached from the buttons
+  // instead of prose. An empty answer set is a "generate now": the original task,
+  // every question left to its stated default. Both paths converge on
+  // runClarifiedGeneration, so the card is an affordance over the existing flow
+  // rather than a second one to keep in sync.
+  const submitClarifyAnswers = useCallback(async (answers: ClarifyAnswer[]) => {
+    const tabId = activeTabIdRef.current
+    if (!tabId) return
+    const tab = tabsRef.current.find((t) => t.id === tabId)
+    if (!tab?.pendingClarify) return
+    const { task, sourceDocs, turnId } = tab.pendingClarify
+    const detail = clarifyAnswersText(answers)
+    const combined = detail ? `${task}\n\nAdditional details from the user:\n${detail}` : task
+    // Stamp the outcome onto the questions turn BEFORE generation starts, so the
+    // card flips straight from input to record with no frame of flattened text
+    // in between. `clarifyResolved` (not `pendingClarify`) is what holds the
+    // structure open from here on.
+    markClarifyResolved(tabId, turnId, {
+      answers,
+      mode: answers.length ? "card" : "skip",
+    })
+    const { prdApi } = await import("../../../lib/api")
+    runClarifiedGeneration(prdApi, tabId, combined, sourceDocs, detail || "Generate now")
+  }, [runClarifiedGeneration, markClarifyResolved])
 
   // An edit-phrased message on a PRD tab ("make this PRD shorter", "add a
   // rollout section to the PRD") routes to the scoped chat-edit endpoint: the
@@ -2372,6 +2579,21 @@ export function ChatScreen() {
       // With an attachment, "this PRD"/"this document" names the FILE, so the
       // import flows below still run unchanged.
       const activeTab = activeTabId ? tabsRef.current.find((t) => t.id === activeTabId) : undefined
+      // The clarify gate is mid-decision on this tab (a PRD command's reply is
+      // deferred — see deferredAckRef). A send landing INSIDE that window broke
+      // two invariants at once: its user turn queued ahead of the deferred
+      // assistant write (inverting the persisted user→assistant pairing the
+      // history restore depends on), and a second PRD command would overwrite
+      // the tab's deferred-ack entry, persisting one command's reply against
+      // the other's turn. The window is a single clarify round-trip (~seconds,
+      // under a visible thinking indicator), so hold the message and hand it
+      // back rather than letting it corrupt the record.
+      if (activeTab?.prdCommandThinking) {
+        settlePendingSend()
+        setDraft(rawQuery)
+        showToast("One moment", "Still working out that PRD request — I'll take your next message in a second.")
+        return
+      }
       const isPrdTab = !!(activeTab && (activeTab.prd || activeTab.prdId != null || activeTab.prdGenerating))
       const deicticPrd = /\b(this|that|the current|my)\s+prd\b/i.test(trimmed)
       const deicticTicket = /\b(this|that|the current|my)\s+tickets?\b/i.test(trimmed)
@@ -2381,10 +2603,16 @@ export function ChatScreen() {
       // other branch so an answer like "make it for enterprise admins" can't
       // be misread as an edit or command phrasing.
       if (activeTab?.pendingClarify && !docFile) {
-        const { task, sourceDocs } = activeTab.pendingClarify
-        const combined = CLARIFY_SKIP_RE.test(trimmed)
+        const { task, sourceDocs, turnId } = activeTab.pendingClarify
+        const skipped = CLARIFY_SKIP_RE.test(trimmed)
+        const combined = skipped
           ? task
           : `${task}\n\nAdditional details from the user:\n${trimmed}`
+        // The prose path settles the batch too, so answering in the composer
+        // keeps the same formatted record the card leaves behind. There's no
+        // per-question mapping in free text, so it resolves as "chat" (or
+        // "skip" for a bare "generate now") rather than inventing one.
+        markClarifyResolved(activeTab.id, turnId, { answers: [], mode: skipped ? "skip" : "chat" })
         const { prdApi } = await import("../../../lib/api")
         runClarifiedGeneration(prdApi, activeTab.id, combined, sourceDocs, trimmed)
         settlePendingSend()
@@ -2766,7 +2994,7 @@ export function ChatScreen() {
         },
       })
     },
-    [activeCompany, activeTabId, attachments, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
+    [activeCompany, activeTabId, attachments, envelopeDispatchEnabled, finalizeConversationTurn, importPrdCommandFlow, markClarifyResolved, openContentPanel, openTab, prdChatEditFlow, prdCommandFlow, pushPendingConversation, runClarifiedGeneration, setContent, showToast],
   )
 
   // ── Stop an in-flight ask ─────────────────────────────────────────────────
@@ -3701,26 +3929,59 @@ export function ChatScreen() {
                             {turn.stopped && !turn.reply ? (
                               <div className="bc-stopped">You stopped this response.</div>
                             ) : null}
+                            {/* A "generate a PRD" command gets NO instant
+                                acknowledgment: half the time the real answer is
+                                questions, and "Generating a PRD…" above them was
+                                a promise the agent didn't keep. The reply is
+                                deferred until the gate settles (settleCommandAck)
+                                and this indicator carries the window — the same
+                                anti-dead-air guarantee, minus the false claim. */}
                             {!turn.reply && !turn.error && !turn.stopped ? (
                               isGenerating ? (
-                                <AssistantThinkingSkeleton compact />
+                                <div {...(activeTab?.prdCommandThinking ? { "data-testid": "prd-command-thinking" } : {})}>
+                                  <AssistantThinkingSkeleton compact />
+                                </div>
+                              ) : turn.interrupted ? (
+                                // A reload killed the clarify gate mid-decision
+                                // (see the persist effect) — the truthful state,
+                                // with the way out.
+                                <div className="bc-stopped" data-testid="turn-interrupted">
+                                  That request was interrupted before I could respond — send it again and I&apos;ll pick it up.
+                                </div>
                               ) : (
                                 <div className="bc-stopped">No response was generated for this message.</div>
                               )
                             ) : null}
-                            {turn.reply ? (
+                            {/* Clarify-first questions render as a CARD — options
+                                as buttons, one submit for the batch — in place of
+                                the flattened numbered list that `reply.answer`
+                                carries for persistence. It stays a card after
+                                answering, as a read-only record of what was
+                                decided (and what each blank fell back to):
+                                collapsing it back to text at the moment it became
+                                an audit trail threw the structure away exactly
+                                when it was worth the most.
+
+                                The interactive form is still gated on the tab's
+                                live `pendingClarify`, so a card with no answering
+                                machinery behind it (a thread rehydrated from
+                                history) can never take a dead answer — it falls
+                                through to the plain text instead. */}
+                            {turn.clarify?.length && (turn.clarifyResolved || activeTab?.pendingClarify) ? (
+                              <ClarifyQuestionsCard
+                                questions={turn.clarify}
+                                resolved={turn.clarifyResolved}
+                                busy={busy || !!activeTab?.prdGenerating}
+                                onSubmit={(answers) => submitClarifyAnswers(answers)}
+                                onSkip={() => submitClarifyAnswers([])}
+                              />
+                            ) : turn.reply ? (
                               <AskReplyBody
                                 reply={turn.reply}
                                 animateIn={hasFreshReply}
                                 simulateTyping={hasFreshReply}
                               />
                             ) : null}
-                            {/* A PRD command is acknowledged instantly, but the
-                                agent's real response — clarifying questions, or
-                                the generation starting — is a network call away.
-                                Keep something moving under the acknowledgment for
-                                that whole window; it stops the moment either one
-                                lands (see prdCommandThinking). */}
                             {isLast && turn.reply && activeTab?.prdCommandThinking ? (
                               <div data-testid="prd-command-thinking">
                                 <AssistantThinkingSkeleton compact />
