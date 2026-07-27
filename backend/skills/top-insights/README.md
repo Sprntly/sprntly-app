@@ -27,7 +27,7 @@ It does **not** run analysis or compute metrics. It fetches, merges, gates, rank
 
 | Category | Fed by | Refreshes |
 |---|---|---|
-| `customer_problems` | `voice-of-customer` + `feedback-synthesis` + `interview-synthesis` | weekly |
+| `customer_problems` | `voice-of-customer-report` + `public-feedback-report` + `interview-synthesis` | weekly |
 | `competitive` | competitive intelligence skill | monthly |
 | `reliability` | monitoring analysis *(planned)* | daily |
 | `core_metric` | metric movement *(planned)* | daily |

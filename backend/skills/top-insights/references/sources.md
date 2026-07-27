@@ -12,7 +12,7 @@ Most of these produce a **report** containing several findings, not a single ins
 
 | Category | Upstream skill(s) | Runs | Output location | Status |
 |---|---|---|---|---|
-| `customer_problems` | `voice-of-customer-report` ⟨unconfirmed⟩, `interview-synthesis` ✓, public-channel skill ⟨unresolved⟩ | weekly / ad hoc / weekly | ⟨TBC⟩ | live |
+| `customer_problems` | `voice-of-customer-report` ✓, `interview-synthesis` ✓, `public-feedback-report` ✓ | weekly / ad hoc / weekly | ⟨TBC⟩ | live |
 | `competitive` | `competitive-intelligence-review` ✓ | monthly | ⟨TBC⟩ | live |
 | `reliability` | monitoring-analysis | daily (target) | ⟨TBC⟩ | **planned** |
 | `core_metric` | metric-movement | daily (target) | ⟨TBC⟩ | **planned** |
@@ -30,7 +30,7 @@ The only category with multiple upstream skills. Each channel is authoritative f
 | Channel | Skill | Surfaces | Authoritative for | Never used for |
 |---|---|---|---|---|
 | `internal` | `voice-of-customer-report` ⟨unconfirmed⟩ · **weekly** | support tickets, Slack, sales/support calls | the pain stat, reach, account-level impact | — |
-| `public` | ⟨unresolved — see below⟩ · **monthly** | Reddit, social, review sites, forums | breadth, velocity, spread beyond your base | a headline stat about *your* customers |
+| `public` | `public-feedback-report` ✓ · **monthly** | Reddit, social, review sites, forums | breadth, velocity, spread beyond your base | a headline stat about *your* customers |
 | `direct` | `interview-synthesis` ✓ · **ad hoc** | user interviews | the cause — the *why* beat of the body | volume or reach claims (n is too small) |
 
 **Clustering.** Findings from different channels merge into one when they describe the same underlying problem — same surface plus same failure, not same wording. Prefer matching on a `theme_key` from the upstream skill; fall back to semantic clustering and record every member id in `cluster_members` so the merge is auditable.
@@ -138,14 +138,10 @@ Every adapter, live or planned, returns:
    |---|---|---|
    | Competitive | `competitive-intelligence-review` | ✓ confirmed |
    | Direct channel | `interview-synthesis` | ✓ confirmed |
-   | Internal channel | `voice-of-customer-report` *vs* `voc-volume-severity` | unresolved |
-   | Public channel | `feedback-synthesis` *vs* `third-party-feedback` *vs* `public-feedback-report` | unresolved |
+   | Internal channel | `voice-of-customer-report` | ✓ confirmed (2026-07-26) |
+   | Public channel | `public-feedback-report` | ✓ confirmed (Apurva, 2026-07-26) |
 
-   **Resolve on behavior, not name.** A source belongs to the `internal` channel if it reads the company's own customer data, and to the `public` channel if it reads external surfaces. That distinction is what governs whether it may supply a headline stat, so it is the only test that matters here.
-
-   Two specific risks:
-   - **Duplicate public readers.** If more than one of the three public candidates reads the same external surfaces, the adapter will ingest the same complaint twice and award a corroboration boost that was never earned. Pick one; the others must not be registered as `customer_problems` sources.
-   - **Pipeline stages mistaken for rival skills.** `voc-volume-severity` reads as a prioritization stage rather than a finding source. If it sits downstream of `voice-of-customer-report`, the adapter should probably read *its* output, since volume and severity are exactly the reach and pain-stat fields the internal channel is authoritative for.
+   **Resolved:** `public-feedback-report` is the one public-channel source. `feedback-synthesis` (which also exists as a vendored skill) must NOT be registered as a `customer_problems` source — a second reader of the same external surfaces would ingest the same complaint twice and award a corroboration boost that was never earned.
 
 2. **Where each skill saves its output** — path, table, or API, and the shape it saves in. Specifically: does each report expose its individual findings as separate addressable items, or only as prose? Decomposition depends on the former.
 

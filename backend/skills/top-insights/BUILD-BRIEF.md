@@ -213,7 +213,7 @@ Reports get decomposed and released across their interval. If findings only exis
 **3. Two skill names are ambiguous.**
 Confirmed: `competitive-intelligence-review`, `interview-synthesis`.
 - Internal channel: `voice-of-customer-report` or `voc-volume-severity`? The second sounds like a prioritisation stage rather than a source — if it runs downstream, we probably want *its* output, since volume and severity are exactly the fields we need.
-- Public channel: `feedback-synthesis`, `third-party-feedback`, or `public-feedback-report`? Pick based on which one reads external surfaces. **If two of them read Reddit, we have a problem** — the same complaint arrives twice and gets counted as two independent sources agreeing, inflating confidence on a finding that only had one source.
+- Public channel: **RESOLVED — `public-feedback-report`** (Apurva, 2026-07-26). `feedback-synthesis` also exists as a vendored skill and must NOT be registered as a `customer_problems` source — two readers of the same external surfaces would count one complaint as two independent sources agreeing.
 
 **4. Where does each skill save its output, in what shape?**
 Path, table, or API. **One real sample output from any single skill unblocks more than anything else on this list** — I can replace the invented field mapping with a real one and tell you within minutes whether ids are stable, whether findings are addressable, and whether figures come with a basis attached.

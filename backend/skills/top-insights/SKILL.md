@@ -27,7 +27,7 @@ The recipient subscribes to any subset. Each category has its own upstream sourc
 
 | Category | Section label | Fed by | Refreshes | Status |
 |---|---|---|---|---|
-| `customer_problems` | Top customer problems | `voice-of-customer-report` (weekly) + public-channel skill (monthly) + `interview-synthesis` (ad hoc) | mixed | live |
+| `customer_problems` | Top customer problems | `voice-of-customer-report` (weekly) + `public-feedback-report` (monthly) + `interview-synthesis` (ad hoc) | mixed | live |
 | `competitive` | Competitor & market moves | `competitive-intelligence-review` | monthly | live |
 | `reliability` | Reliability & incidents | monitoring-analysis adapter | daily | planned |
 | `core_metric` | *the recipient's metric name* | metric-movement adapter | daily | planned |
@@ -83,7 +83,7 @@ The three feedback skills are good at different things, so each supplies a diffe
 
 - **`voice-of-customer-report`** (internal: support, Slack, calls) → the **pain stat and reach.** These are your own paying customers, so this is the only channel allowed to supply a headline number about your customer base.
 - **`interview-synthesis`** (direct conversations) → the ***why***. Low volume, high depth. It supplies the story beat — the cause the other two channels can only guess at.
-- **the public-channel skill** (Reddit, social, review sites) → **breadth and velocity.** How loud, how fast-growing, whether it's spreading beyond your own base. It must never supply the primary pain stat about your customers — a public forum is not your customer list.
+- **`public-feedback-report`** (Reddit, social, review sites) → **breadth and velocity.** How loud, how fast-growing, whether it's spreading beyond your own base. It must never supply the primary pain stat about your customers — a public forum is not your customer list.
 
 Rules for the merge:
 - **Never average figures across channels.** If two channels give different numbers, use the one whose population matches the claim being made, and name that population in the body ("among your enterprise accounts…").
