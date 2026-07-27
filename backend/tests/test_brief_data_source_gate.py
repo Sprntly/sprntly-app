@@ -193,3 +193,93 @@ def test_regenerate_starts_with_evidence_connector(
         r = app_client.post("/v1/brief/regenerate?dataset=acme")
     assert r.status_code == 200
     assert r.json() == {"started": True, "dataset": "acme"}
+
+
+# ── generate_brief_for — the scheduler/startup/pipeline-path gate ────────────
+#
+# The endpoint 409s above only cover user-triggered surfaces. The weekly
+# scheduler, the startup pass, and pipeline stage 5 call
+# synthesis_brief.generate_brief_for directly — which must apply the SAME rule
+# itself (raising NoBriefDataSourceError), AFTER seeding so non-evidence
+# connectors still reach the KG for PRDs/chat.
+
+import app.synthesis_brief as sb
+from app.brief_gate import NoBriefDataSourceError
+from app.synthesis.agent import EmptyKnowledgeGraphError
+
+
+def _seed_company(db, *, company_id: str, slug: str) -> None:
+    existing = db.table("companies").select("id").eq("id", company_id).execute().data
+    if not existing:
+        db.table("companies").insert(
+            {"id": company_id, "slug": slug, "display_name": slug.title()}
+        ).execute()
+
+
+def test_generate_brief_for_refuses_jira_only_after_seeding(
+    isolated_settings, monkeypatch
+):
+    """The reported bug (2026-07-27): a Jira-only company got a weekly brief.
+    Seeding must still run (Jira → KG), but synthesis must be refused."""
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    _patch_connections(monkeypatch, isolated_settings, [_conn("jira")])
+    with patch.object(sb, "seed_incremental", return_value={"corpus": {}}) as seed, \
+         patch.object(sb, "run_synthesis") as run:
+        with pytest.raises(NoBriefDataSourceError, match="No data to generate"):
+            sb.generate_brief_for("acme")
+    seed.assert_called_once()   # Jira still landed in the KG
+    run.assert_not_called()     # but no brief came out of it
+
+
+def test_generate_brief_for_refuses_cached_brief_without_source(
+    isolated_settings, monkeypatch
+):
+    """An evidence-less company with a leftover brief (e.g. generated before
+    this gate) gets a refusal, not the stale cached brief re-served."""
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    _patch_connections(monkeypatch, isolated_settings, [_conn("jira")])
+    prior = {"id": 42, "generated_at": "2026-06-10T00:00:00+00:00"}
+    with patch.object(sb, "get_current_brief", return_value=prior), \
+         patch.object(sb, "seed_incremental", return_value={"corpus": {}}), \
+         patch.object(sb, "run_synthesis") as run:
+        with pytest.raises(NoBriefDataSourceError):
+            sb.generate_brief_for("acme")
+    run.assert_not_called()
+
+
+def test_generate_brief_for_proceeds_with_evidence_connector(
+    isolated_settings, monkeypatch
+):
+    _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
+    _patch_connections(
+        monkeypatch, isolated_settings, [_conn("jira"), _conn("hubspot")]
+    )
+    with patch.object(sb, "seed_incremental", return_value={"corpus": {}}), \
+         patch.object(sb, "run_synthesis",
+                      return_value={"summary_headline": "ok"}) as run:
+        out = sb.generate_brief_for("acme")
+    assert out["summary_headline"] == "ok"
+    run.assert_called_once()
+
+
+def test_no_brief_data_source_error_is_benign_to_existing_handlers():
+    """Every caller (pipeline `skipped` status, startup INFO skip, routes'
+    needs-more-data 409) keys off EmptyKnowledgeGraphError / ValueError —
+    the refusal must stay inside that hierarchy."""
+    err = NoBriefDataSourceError("x")
+    assert isinstance(err, EmptyKnowledgeGraphError)
+    assert isinstance(err, ValueError)
+
+
+def test_startup_pass_skips_no_source_company(isolated_settings, monkeypatch):
+    """generate_all_synthesis_briefs treats the refusal as the benign
+    empty-KG case: logged and skipped, never raised."""
+    monkeypatch.setattr(
+        "app.db.companies.list_companies",
+        lambda: [{"id": "co-1", "slug": "acme"}],
+    )
+    with patch.object(sb, "generate_brief_for",
+                      side_effect=NoBriefDataSourceError("no source")), \
+         patch("app.brief_runner.warm_synthesis_drilldowns") as warm:
+        sb.generate_all_synthesis_briefs()  # must not raise
+    warm.assert_not_called()

@@ -31,6 +31,11 @@ import logging
 import uuid
 
 from app import datasets
+from app.brief_gate import (
+    NO_DATA_SOURCE_MESSAGE,
+    NoBriefDataSourceError,
+    has_brief_data_source,
+)
 from app.connectors.catalog import EVIDENCE_UPLOAD_CATEGORIES
 from app.corpus import load_corpus
 from app.db.briefs import get_current_brief
@@ -316,6 +321,16 @@ def generate_brief_for(company_id_or_slug: str, *, deliver: bool = True) -> dict
     ValueError if the identifier is unknown or if the KG is still empty after
     seeding (run_synthesis raises on no themes).
 
+    Data-source gate: after seeding (so non-evidence connectors like Jira still
+    reach the KG for PRDs/chat), generation is refused with
+    NoBriefDataSourceError unless the company has an evidence-bearing source
+    (brief_gate.has_brief_data_source — same rule as the 409ing endpoints).
+    This closes the scheduler/startup/pipeline paths, which are not endpoint-
+    gated: a company whose only connections are pm/code/design/comms/docs must
+    never get a Top Insights brief, even though those connectors DO seed the
+    KG. The check runs before the cache-return too, so an evidence-less company
+    yields nothing from this path rather than re-serving a stale brief.
+
     Refresh-gating: if a current brief already exists AND no new signal has
     entered the KG since it was generated, synthesis is skipped and the
     existing brief is returned unchanged (an unchanged company keeps its brief
@@ -336,6 +351,16 @@ def generate_brief_for(company_id_or_slug: str, *, deliver: bool = True) -> dict
     prior_ts = prior.get("generated_at") if prior else None
 
     seed_incremental(facade, company_id, slug)
+
+    # Evidence gate (see docstring): seeding above already ran, so Jira/GitHub/…
+    # signals are in the KG — but without an evidence source there is no brief.
+    if not has_brief_data_source(company_id, slug):
+        logger.info(
+            "no evidence-bearing data source for company=%s (slug=%s) — "
+            "refusing brief generation (KG seeding still ran)",
+            company_id, slug,
+        )
+        raise NoBriefDataSourceError(NO_DATA_SOURCE_MESSAGE)
 
     # Skip the expensive synthesis when nothing new has entered the KG since the
     # current brief was generated.
