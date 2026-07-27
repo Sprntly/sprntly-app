@@ -12,9 +12,12 @@ import type { AskResponse, AskStatusResponse } from "./api"
 import { pollUntil } from "./poll"
 import { clearPendingJob, getPendingJob, setPendingJob, type PendingJob } from "./jobResume"
 
-// Wall-clock budget; matches the evidence/PRD pollers. Date.now()-measured
-// inside pollUntil so a throttled background tab still times out correctly.
-const MAX_MS = 6 * 60 * 1000
+// Wall-clock budget. Date.now()-measured inside pollUntil so a throttled
+// background tab still times out correctly. 12 min (not the evidence/PRD
+// pollers' 6): the public-feedback report legitimately runs ~8 minutes
+// (a web-search capture sweep plus a document-scale synthesis) on the same
+// ask job as every other chat answer.
+const MAX_MS = 12 * 60 * 1000
 const POLL_INTERVAL_MS = 1500
 
 // A dropped/blipped connection (a dev-server reload, a moment offline, a reset
@@ -125,6 +128,13 @@ async function pollAskToResult(
   }
   // Unmounted mid-poll → do NOT clear the marker; a remount re-attaches by id.
   if (isCancelled?.()) throw new AskCancelledError("Ask poll cancelled (UI unmounted)")
+  // Wall-clock timeout while the job is still generating: the server job may
+  // yet finish, so LEAVE the marker in place — a reload/remount re-attaches by
+  // id and picks the answer up (this is what the timeout message promises).
+  // Clearing here used to orphan every answer that outlived the budget.
+  if (final.status === "generating") {
+    throw new AskFailedError("Timed out waiting for the answer")
+  }
   clearPendingJob("ask", company, scope)
   if (final.status === "ready") return toAskResponse(final)
   // The job was cancelled server-side (a Stop from this or another tab/device
@@ -136,9 +146,9 @@ async function pollAskToResult(
   if (final.status === "error") {
     throw new AskFailedError(final.error || "Ask failed on the backend")
   }
-  // Loop exited still 'generating' → wall-clock timeout (the server job may
-  // still finish; a later remount re-attaches via the persisted id if any).
-  throw new AskFailedError("Timed out waiting for the answer")
+  // Unreachable: generating (timeout) throws above; ready/cancelled/error all
+  // returned or threw.
+  throw new AskFailedError("Ask ended in an unexpected state")
 }
 
 /**

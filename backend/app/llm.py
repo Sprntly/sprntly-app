@@ -606,6 +606,14 @@ def call_with_web_search(
     "## METHOD (skill: <id> @<hash>)" delimiter — the caller's own system
     prompt stays as the agent-specific layer after it. The web-search path has
     no cacheable-prefix mechanism, so the method rides the system prompt here.
+
+    The request STREAMS on the long read timeout: a search-heavy call (the
+    server runs up to `max_searches` web searches before composing the answer)
+    routinely outlives the default non-streaming read timeout — the
+    public-feedback capture pass hit exactly that httpx.ReadTimeout on staging.
+    Streaming is the SDK's required pattern for slow/large requests; the
+    accumulated final Message keeps `_capture_meta` and content extraction
+    unchanged.
     """
     if skill is not None:
         # Imported lazily to avoid a module-load cycle (loader -> config -> ...).
@@ -619,6 +627,7 @@ def call_with_web_search(
         system = f"{method}\n{system}"
     msg = _create_with_retries(
         get_client(),
+        stream=True,
         model=model,
         max_tokens=max_tokens,
         system=system,
@@ -628,6 +637,7 @@ def call_with_web_search(
             "name": "web_search",
             "max_uses": max_searches,
         }],
+        timeout=LONG_REQUEST_TIMEOUT_S,
     )
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()
