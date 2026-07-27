@@ -7,7 +7,7 @@ import { useNavigation } from "../../../context/NavigationContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { runPrdGenerationFromIdeation } from "../../../lib/runPrdGeneration"
 import { prototypePath } from "../../../lib/routes"
-import { ideationApi, type IdeationItem, type IdeationTag, type IdeationDetail, type CompletedItem } from "../../../lib/api"
+import { briefApi, ideationApi, type Brief, type IdeationItem, type IdeationTag, type IdeationDetail, type CompletedItem } from "../../../lib/api"
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -635,6 +635,79 @@ function CompletedContent({ onCountChange }: { onCountChange?: (count: number) =
   )
 }
 
+// ── Held-back strip ───────────────────────────────────────────────────────────
+// A quiet, best-effort answer to "what am I not seeing" — the current brief's
+// ledger of themes it held back this cycle (Phase 2A `_backlog`). Fetched
+// independently of the ideation shortlist (it comes off the brief, not the
+// ideation route) and renders nothing on any error or when the field is
+// absent/empty — this is a bonus surface, never a source of noise or spinners.
+
+type BacklogEntry = NonNullable<Brief["_backlog"]>[number]
+
+const HELDBACK_REASON_COPY: Record<string, (entry: BacklogEntry) => string> = {
+  carried: () => "Unchanged since last surfaced",
+  deferred: (entry) => {
+    const back = entry.deferred_until
+      ? new Date(entry.deferred_until).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+      : null
+    return back ? `Not now — back ${back}` : "Not now"
+  },
+  dismissed: () => "Dismissed",
+  in_progress: () => "Already in progress",
+  rotation_exhausted: () => "Retired after repeated surfacing",
+  sibling_deferred: () => "Held with a deferred finding on the same topic",
+  sibling_dismissed: () => "Held with a dismissed finding on the same topic",
+}
+
+const HELDBACK_MAX_ROWS = 8
+
+function heldBackReasonCopy(entry: BacklogEntry): string {
+  return (HELDBACK_REASON_COPY[entry.reason] ?? (() => "Held back"))(entry)
+}
+
+function HeldBackStrip() {
+  const { activeCompany } = useCompany()
+  const [backlog, setBacklog] = useState<BacklogEntry[]>([])
+
+  // Best-effort: pull the current brief just for `_backlog`. Any failure (no
+  // brief yet, network error, pre-ledger brief with no `_backlog`) just leaves
+  // the strip empty — no error state, no spinner, no retry.
+  useEffect(() => {
+    let cancelled = false
+    briefApi
+      .current(activeCompany)
+      .then((brief) => {
+        if (cancelled) return
+        setBacklog(Array.isArray(brief._backlog) ? brief._backlog : [])
+      })
+      .catch(() => {
+        if (cancelled) return
+        setBacklog([])
+      })
+    return () => { cancelled = true }
+  }, [activeCompany])
+
+  if (backlog.length === 0) return null
+
+  const visible = backlog.slice(0, HELDBACK_MAX_ROWS)
+  const extra = backlog.length - visible.length
+
+  return (
+    <div className="idn-heldback-strip">
+      <span className="idn-heldback-title">Held back from your brief this cycle</span>
+      <div className="idn-heldback-rows">
+        {visible.map((entry) => (
+          <div key={entry.theme_id} className="idn-heldback-row">
+            <span className="idn-heldback-label">{entry.theme_label}</span>
+            <span className="idn-heldback-chip">{heldBackReasonCopy(entry)}</span>
+          </div>
+        ))}
+      </div>
+      {extra > 0 && <span className="idn-heldback-more">+{extra} more</span>}
+    </div>
+  )
+}
+
 // ── Idea detail modal ─────────────────────────────────────────────────────────
 
 // How we FRAME the problem, per triage tag. Ideation's job is not to restate
@@ -963,6 +1036,7 @@ export function IdeationScreen() {
         {/* ── Scrollable content ── */}
         <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
           <div className="bl-body" style={{ flex: 1, overflow: "auto" }}>
+            {tab === "proposed" && <HeldBackStrip />}
             {tab === "proposed"
               ? <ProposedContent addHandlerRef={addHandlerRef} resequenceHandlerRef={resequenceHandlerRef} reloadKey={reloadKey} onSelectIdea={handleSelectIdea} selectedIdeaId={selectedIdea?.id ?? null} onCountChange={setProposedCount} />
               : <CompletedContent onCountChange={setCompletedCount} />}
