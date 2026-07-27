@@ -213,14 +213,22 @@ def test_followup_query_shapes():
         "how many complained about crashes?",
         "is the login problem getting worse?",
         "what's new since last time?",
+        # "report" as a REFERENCE (not a request) stays a follow-up
+        "what did the report say about pricing?",
     ]:
         assert pf.is_followup_query(q), q
 
 
 def test_report_shaped_asks_never_query_mode():
+    # Every phrasing the router treats as a canonical report ask must re-run
+    # the pipeline — a stale stored run must never quietly answer these.
     for q in [
         "what are people saying about us online?",
+        "what do people say about us online?",
+        "what's the public feedback on our product?",
+        "how is our public sentiment trending?",
         "run a public feedback report",
+        "generate a report on our reviews",
         "give me a fresh report on our online reputation",
         "review mining on the app store please",
         "what's our public standing?",
@@ -259,7 +267,7 @@ def test_followup_answers_from_stored_run(monkeypatch):
 def test_followup_without_run_falls_to_full_pipeline(monkeypatch):
     _patch_profile(monkeypatch)
     _patch_latest_run(monkeypatch, None)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: [])
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
     out = pf.answer(enterprise_id="e1", question="what did the App Store say?")
     # no stored run → the full pipeline ran (and found nothing, in this stub)
     assert "couldn't find enough feedback" in out["answer"]
@@ -271,7 +279,7 @@ def test_followup_query_failure_falls_back_to_full_run(monkeypatch):
 
     def boom(**kw): raise RuntimeError("model error")
     monkeypatch.setattr(pf, "llm_call", boom)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: [])
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
     out = pf.answer(enterprise_id="e1", question="what did the App Store say?")
     assert "couldn't find enough feedback" in out["answer"]
 
@@ -286,7 +294,7 @@ def test_report_shaped_ask_ignores_stored_run(monkeypatch):
         return dict(RUN)
 
     monkeypatch.setattr(db, "latest_public_feedback_run", fake_latest)
-    monkeypatch.setattr(pf, "_capture", lambda *a, **k: [])
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
     pf.answer(enterprise_id="e1", question="what are people saying about us online?")
     assert called["latest"] is False  # report-shaped → straight to the pipeline
 
