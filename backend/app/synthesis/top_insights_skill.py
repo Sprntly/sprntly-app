@@ -284,6 +284,10 @@ def cards_to_insights(
                 "sources": card.get("sources") or [],
                 "ctas": card.get("ctas") or [],
                 "finding_id": card.get("finding_id") or card.get("signal_id"),
+                # Freshness state ('new' | 'updated') — the render shows a quiet
+                # "Updated" chip on updated cards, whose body opens with what
+                # changed. Absent on briefs composed before the ledger wiring.
+                "state": card.get("state"),
             }
         out.append(merged)
     return out

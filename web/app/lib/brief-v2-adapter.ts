@@ -65,6 +65,9 @@ interface BriefV2CardBase {
   skillType: BriefSkillType
   skillAccent: string
   skillLabel: string
+  /** Ledger freshness ('updated' renders a quiet chip — the body opens with
+   *  what changed). Null for new findings and pre-ledger briefs. */
+  skillState: "updated" | null
   // The user-facing insight-type categories this finding belongs to (from the
   // backend's `insight_types`). Drives the per-user filter on the Top Insights
   // tab — a member sees the findings whose types intersect their Settings
@@ -118,7 +121,7 @@ export interface BriefV2State {
   headline: string | null
   weekOf: string | null
   /** Raw ISO timestamp of when the brief was generated — drives the
-   *  "Monday brief · 7:01 AM" line in the chat head. Optional so test
+   *  "Top Insights · 7:01 AM" line in the chat head. Optional so test
    *  fixtures built before it existed stay valid. */
   generatedAt?: string | null
   company: string
@@ -127,6 +130,11 @@ export interface BriefV2State {
   hero: BriefV2HeroFinding | null
   supporting: BriefV2CompactFinding[]
   sourcesLine: string
+  /** Quiet one-liner under the cards summarizing what the ledger held back
+   *  this cycle ("Also tracked: 2 unchanged · 1 deferred (back 3 Aug) · 1 in
+   *  progress"). Null when nothing was held back or on pre-ledger briefs —
+   *  the line simply doesn't render. */
+  heldBackLine?: string | null
   /** Backend evidence-gate flag (mirrors Brief._insufficient_evidence): the
    *  brief is empty because the KG lacked enough connected-source evidence, NOT
    *  because the account is brand-new with no data. Lets the greeting copy
@@ -392,6 +400,7 @@ function buildCardBase(
     skillType: resolveSkillType(insight),
     skillAccent: accentForInsight(insight),
     skillLabel: labelForInsight(insight),
+    skillState: insight._card?.state === "updated" ? "updated" : null,
     insightTypes: Array.isArray(insight.insight_types) ? insight.insight_types : [],
     ctas: Array.isArray(insight._card?.ctas) ? insight._card!.ctas : [],
     category: categoryFor(insight, m.actionAccent),
@@ -535,6 +544,7 @@ export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []):
     hero: null,
     supporting: [],
     sourcesLine: "",
+    heldBackLine: buildHeldBackLine(brief),
     insufficientEvidence,
     emptyReason,
   }
@@ -570,7 +580,46 @@ export function briefToBriefV2State(brief: Brief, selectedTypes: string[] = []):
     hero,
     supporting,
     sourcesLine: buildSourcesLine(insights),
+    heldBackLine: buildHeldBackLine(brief),
     insufficientEvidence,
     emptyReason,
   }
+}
+
+/** Compress `_backlog` into one honest, figure-light line. Counts only —
+ *  anything worth acting on should have been a card; this is the "what am I
+ *  not seeing" answer, not a second card list. */
+function buildHeldBackLine(brief: Brief): string | null {
+  const backlog = brief._backlog
+  if (!Array.isArray(backlog) || backlog.length === 0) return null
+  const counts = new Map<string, number>()
+  let deferredUntil: string | null = null
+  for (const item of backlog) {
+    counts.set(item.reason, (counts.get(item.reason) ?? 0) + 1)
+    if (item.reason === "deferred" && item.deferred_until && !deferredUntil) {
+      deferredUntil = item.deferred_until
+    }
+  }
+  const label = (reason: string, n: number): string => {
+    switch (reason) {
+      case "carried":
+        return `${n} unchanged since last surfaced`
+      case "dismissed":
+        return `${n} dismissed`
+      case "deferred": {
+        const back = deferredUntil
+          ? new Date(deferredUntil).toLocaleDateString(undefined, { month: "short", day: "numeric" })
+          : null
+        return back ? `${n} deferred (back ${back})` : `${n} deferred`
+      }
+      case "in_progress":
+        return `${n} already in progress`
+      case "rotation_exhausted":
+        return `${n} retired after repeated surfacing`
+      default:
+        return `${n} held back`
+    }
+  }
+  const parts = [...counts.entries()].map(([reason, n]) => label(reason, n))
+  return `Also tracked this cycle: ${parts.join(" · ")}`
 }

@@ -371,3 +371,40 @@ describe("briefToBriefV2State — top-insights skill taxonomy", () => {
     expect(state.supporting[0].fromSources).toEqual([])
   })
 })
+
+describe("briefToBriefV2State — ledger held-back line + updated chip (phase 2B)", () => {
+  it("compresses _backlog into one figure-light line with per-reason counts", () => {
+    const brief: Brief = {
+      ...makeBrief([makeInsight({ tag: "something_broken" })]),
+      _backlog: [
+        { theme_id: "t1", theme_label: "Billing outage cluster", reason: "carried" },
+        { theme_id: "t2", theme_label: "B", reason: "carried" },
+        { theme_id: "t3", theme_label: "C", reason: "deferred", deferred_until: "2026-08-03T06:00:00Z" },
+        { theme_id: "t4", theme_label: "D", reason: "in_progress" },
+      ],
+    }
+    const line = briefToBriefV2State(brief).heldBackLine!
+    expect(line).toContain("2 unchanged since last surfaced")
+    // Local-timezone rendering of 2026-08-03T06:00Z: Aug 2 or 3.
+    expect(line).toMatch(/1 deferred \(back Aug [23]\)/)
+    expect(line).toContain("1 already in progress")
+    // Counts only — no theme labels leak into the line.
+    expect(line).not.toContain("Billing outage cluster")
+  })
+
+  it("renders no line when _backlog is absent or empty (pre-ledger briefs)", () => {
+    expect(briefToBriefV2State(makeBrief([makeInsight({ tag: "something_broken" })])).heldBackLine).toBeNull()
+    expect(
+      briefToBriefV2State({ ...makeBrief([makeInsight({ tag: "something_broken" })]), _backlog: [] }).heldBackLine,
+    ).toBeNull()
+  })
+
+  it("threads _card.state onto the finding as skillState ('updated' only)", () => {
+    const updated = makeInsight({ tag: "something_broken", _card: { type: "reliability", state: "updated" } })
+    const fresh = makeInsight({ tag: "something_better", _card: { type: "growth", state: "new" } })
+    const out = briefToBriefV2State(makeBrief([updated, fresh]))
+    const all = [out.hero!, ...out.supporting]
+    expect(all.some((f) => f.skillState === "updated")).toBe(true)
+    expect(all.filter((f) => f.skillState === "updated")).toHaveLength(1)
+  })
+})

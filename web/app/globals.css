@@ -19677,6 +19677,13 @@
   color: var(--card-accent, var(--accent));
   background: color-mix(in srgb, var(--card-accent, var(--accent)) 13%, transparent);
 }
+/* Ledger freshness chip — quiet, neutral; sits after the type pill on findings
+   that re-carded because they materially changed. */
+.fc-pill--updated {
+  color: var(--ink-3);
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  margin-left: 6px;
+}
 .fc-pill--skill .fc-dot { background: var(--card-accent, var(--accent)); }
 .fc--skill .fc-title {
   font-family: var(--font-serif);
