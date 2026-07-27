@@ -927,7 +927,7 @@ export function PrototypeRoute() {
   useDesignAgentLiveTerminal(genProtoId, handleLiveTerminal)
 
   // No PRD context (bare /prototype): there is nothing to generate from. Send the
-  // user to the weekly brief, where a PRD opens in the right-rail card and offers
+  // user to the Top Insights brief, where a PRD opens in the right-rail card and offers
   // "Generate Prototype". EXCEPT when a resolved prototype exists — a pid-only
   // deep link (the prototype-ready notification) selects a ready prototype with
   // no `?prd=` in the URL, so the ready branch below must win over this one.

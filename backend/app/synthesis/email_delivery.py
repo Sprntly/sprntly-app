@@ -3,7 +3,7 @@
 The email path mirrors the Slack one (app/synthesis/delivery.py) but routes
 through Resend's transactional-email API (https://api.resend.com/emails) FROM
 the verified `mail.sprntly.ai` sender. It is the second delivery channel for
-the Weekly Brief (v0 checklist 2.4); Slack remains independent.
+the Top Insights (v0 checklist 2.4); Slack remains independent.
 
 Per-company config lives in `companies.notification_settings` (JSONB):
     {
@@ -28,7 +28,7 @@ import httpx
 from app.config import settings
 from app.db import companies as companies_db
 from app.db import team as team_db
-from app.synthesis.weekly_brief_skill import accent_for_skill_type
+from app.synthesis.top_insights_skill import accent_for_skill_type
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ def _type_label(skill_type: str) -> str:
 def render_brief_email(brief: dict) -> tuple[str, str, str]:
     """Render (subject, html_body, text_body) for a brief payload.
 
-    Rebuilt to mirror the weekly-brief skill's card design: a PM-coworker
+    Rebuilt to mirror the top-insights skill's card design: a PM-coworker
     header, a greeting, then one card per insight with a type pill (in the
     type's accent), a serif headline, body, source chips, and two CTA buttons.
     The accent for every card is DERIVED FROM THE TYPE via
@@ -110,16 +110,16 @@ def render_brief_email(brief: dict) -> tuple[str, str, str]:
     deterministic — unit-tested directly.
     """
     greeting = (brief.get("greeting") or "").strip()
-    headline = brief.get("summary_headline") or "Your weekly brief is ready"
+    headline = brief.get("summary_headline") or "Your Top Insights brief is ready"
     intro = greeting or headline
     week = brief.get("week_label", "")
     insights = (brief.get("insights") or [])[:MAX_INSIGHTS_IN_EMAIL]
     url = _app_brief_url()
 
-    subject = f"Weekly Brief — {week}: {headline}" if week else f"Weekly Brief: {headline}"
+    subject = f"Top Insights — {week}: {headline}" if week else f"Top Insights: {headline}"
 
     # ── plain-text body ──────────────────────────────────────────────────────
-    text_lines = [f"Weekly Brief — {week}".rstrip(" —"), "", intro, ""]
+    text_lines = [f"Top Insights — {week}".rstrip(" —"), "", intro, ""]
     if insights:
         for i, ins in enumerate(insights):
             card = ins.get("_card") if isinstance(ins.get("_card"), dict) else None
@@ -180,7 +180,7 @@ def render_brief_email(brief: dict) -> tuple[str, str, str]:
         f'background:{_GREEN_SOFT};padding:4px 10px;border-radius:999px;">'
         '&#10022; PM COWORKER</span>'
         f'<span style="font-family:{_SANS};font-size:13px;color:{_INK_SOFT};'
-        f'margin-left:10px;">Weekly brief{meta}</span>'
+        f'margin-left:10px;">Top Insights{meta}</span>'
         '</div>'
         # ── greeting ─────────────────────────────────────────────────────────
         f'<div style="font-family:{_SANS};font-size:16px;line-height:1.6;'
@@ -348,7 +348,7 @@ def _resolve_recipients(company_id: str, notif: dict) -> list[str]:
 
 def render_brief_ready_ping_email() -> tuple[str, str, str]:
     """Render (subject, html_body, text_body) for the short regenerate ping —
-    one line of copy plus the same primary CTA button the weekly brief email
+    one line of copy plus the same primary CTA button the Top Insights brief email
     uses, NOT the full card layout. Pure + deterministic."""
     from app.synthesis.delivery import READY_PING_CTA_LABEL, READY_PING_TEXT
 

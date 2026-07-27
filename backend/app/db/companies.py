@@ -23,7 +23,7 @@ def list_companies() -> list[dict]:
 
     Used by the scheduler to iterate every tenant for the KG-synthesis cycle and
     to read each company owner's timezone (profiles.timezone, resolved via the
-    company's `owner`-role member) so the weekly brief fires Monday 06:00 in the
+    company's `owner`-role member) so the Top Insights brief fires Monday 06:00 in the
     owner's local time.
 
     notification_settings is selected best-effort: the fake test Supabase + any

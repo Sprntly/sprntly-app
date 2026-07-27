@@ -1,4 +1,4 @@
-"""Tests for the weekly brief on KG synthesis — the only engine.
+"""Tests for the Top Insights brief on KG synthesis — the only engine.
 
 Covers the synthesis write path (/generate, /regenerate), the seed-if-empty
 trigger, the scheduler synthesis cycle with per-company error isolation, and
@@ -519,7 +519,7 @@ def test_resolve_company_resolves_nondefault_workspace_dataset_slug(isolated_set
     the `datasets` table, not `companies` — resolve_company must still map it to
     the parent company via the datasets→workspaces binding.
 
-    Regression: the weekly brief tick fans out per workspace and passed each
+    Regression: the Top Insights brief tick fans out per workspace and passed each
     workspace's dataset slug to generate_brief_for → resolve_company, which only
     consulted the companies table and raised 'No company for slug ...' for every
     non-default workspace, so those workspaces never got a brief.

@@ -1,6 +1,6 @@
-// Canonical weekly-brief skill taxonomy — the single source of truth for the
+// Canonical top-insights skill taxonomy — the single source of truth for the
 // 7 finding types, their accent hexes, and display labels. Mirrors
-// backend/skills/weekly-brief/SKILL.md step 3 (and weekly_brief_skill.py's
+// backend/skills/top-insights/SKILL.md step 3 (and top_insights_skill.py's
 // SKILL_TYPE_ACCENTS). Every brief surface (BriefChat, BriefV2, email) resolves
 // type/accent through here so colors stay consistent and correct.
 //
@@ -18,6 +18,7 @@ export const SKILL_TYPE_ACCENTS: Record<BriefSkillType, string> = {
   demand: "#5f57a6", // iris
   engagement: "#3f63a0", // slate blue
   compliance: "#4f5675", // deep slate
+  momentum: "#0f7d70", // teal — a win worth celebrating / favorable movement
 }
 
 export const SKILL_TYPE_LABELS: Record<BriefSkillType, string> = {
@@ -28,12 +29,13 @@ export const SKILL_TYPE_LABELS: Record<BriefSkillType, string> = {
   demand: "Demand",
   engagement: "Engagement",
   compliance: "Compliance",
+  momentum: "Momentum",
 }
 
 const SKILL_TYPES = Object.keys(SKILL_TYPE_ACCENTS) as BriefSkillType[]
 
 // Legacy 3-tag → skill type fallback, for briefs generated before the skill
-// sweep (no `_card`/`type`). Matches weekly_brief_skill._TAG_TO_TYPE.
+// sweep (no `_card`/`type`). Matches top_insights_skill._TAG_TO_TYPE.
 const TAG_TO_TYPE: Record<string, BriefSkillType> = {
   something_broken: "reliability",
   something_new: "demand",
@@ -46,7 +48,7 @@ function isSkillType(v: unknown): v is BriefSkillType {
 
 /** Resolve an insight's skill type, preferring the backend card, then the
  *  hoisted top-level field, then a derivation from the legacy tag. Always
- *  returns one of the 7 canonical types. */
+ *  returns one of the 8 canonical types. */
 export function resolveSkillType(insight: Pick<Insight, "type" | "tag" | "_card">): BriefSkillType {
   const raw = insight._card?.type ?? insight.type
   if (isSkillType(raw)) return raw

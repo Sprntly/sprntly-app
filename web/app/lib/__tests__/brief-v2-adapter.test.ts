@@ -316,7 +316,7 @@ describe("briefToBriefV2State — card body (bodyFor)", () => {
   })
 })
 
-describe("briefToBriefV2State — weekly-brief skill taxonomy", () => {
+describe("briefToBriefV2State — top-insights skill taxonomy", () => {
   it("maps each card's skill type/label and derives accent from TYPE (not the card's accent)", () => {
     // _card.accent is deliberately the wrong (retention rose) hex for a
     // competitive card — the adapter must derive the ochre from the type.

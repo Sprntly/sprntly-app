@@ -101,7 +101,7 @@ def put_coworkers(
 
 # ── Roadmap doc — the workspace's uploaded roadmap (priorities anchor) ───────
 # Backs the onboarding strategy step's roadmap upload (design scene onbstrat) +
-# the read-only `roadmapdoc` artifact view. The stored roadmap feeds weekly-brief
+# the read-only `roadmapdoc` artifact view. The stored roadmap feeds top-insights
 # composition as a high-weight priorities signal (see app.synthesis.agent). One
 # roadmap per WORKSPACE; the latest upload wins.
 def _roadmap_payload(company_id: str, workspace_id: str | None = None) -> dict | None:
@@ -129,7 +129,7 @@ async def post_roadmap_doc(
     (multipart `file`).
 
     Reuses the shared ingest converter (the same one the dataset upload path
-    uses) to extract text, which then feeds the weekly brief as a priorities
+    uses) to extract text, which then feeds the Top Insights brief as a priorities
     anchor. Any member may set the roadmap during onboarding.
     """
     filename = file.filename or "roadmap"

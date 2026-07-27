@@ -1,4 +1,4 @@
-"""Model tiering: the deep-reasoning work (KG extraction + weekly-brief
+"""Model tiering: the deep-reasoning work (KG extraction + top-insights
 synthesis) runs on DEEP_MODEL (opus); the PRD composes off that already-analysed
 material and stays on the default (sonnet).
 
@@ -86,8 +86,8 @@ def test_kg_extraction_stays_on_default(facade):
     assert captured.get("model") is None   # → gateway uses DEFAULT_MODEL (sonnet)
 
 
-def test_weekly_brief_synthesis_uses_deep_model(facade, isolated_settings):
-    """compose_weekly_brief is the weekly brief → opus."""
+def test_top_insights_synthesis_uses_deep_model(facade, isolated_settings):
+    """compose_top_insights is the Top Insights brief → opus."""
     from app.synthesis import agent as synth
 
     theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
@@ -115,7 +115,7 @@ def test_weekly_brief_synthesis_uses_deep_model(facade, isolated_settings):
     with patch.object(synth, "llm_call", side_effect=_spy):
         synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
 
-    assert captured["purpose"] == "compose_weekly_brief"
+    assert captured["purpose"] == "compose_top_insights"
     assert captured["model"] == DEEP_MODEL
 
 

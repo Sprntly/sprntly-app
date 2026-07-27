@@ -3,7 +3,7 @@
 The legacy path (app.evidence_runner) builds the evidence doc by handing the
 brief insight + the whole corpus to one Claude call — corpus-only, KG-blind,
 no provenance, no decision-log. This module repoints evidence at the
-knowledge graph so the doc becomes the PROVENANCE TRAIL for a weekly-brief
+knowledge graph so the doc becomes the PROVENANCE TRAIL for a top-insights
 insight: the actual data-source signals + KG reasoning that produced it.
 
 THE LINKAGE (written by synthesis.agent.run_synthesis):

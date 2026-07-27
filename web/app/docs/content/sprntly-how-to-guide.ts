@@ -21,7 +21,7 @@ export const sprntlyHowToGuide: Doc = {
 
 By the end, you will know how to:
 
-- Turn your weekly brief, or an uploaded file, into a PRD
+- Turn your Top Insights brief, or an uploaded file, into a PRD
 - Generate and assign tickets that sync to your project management tool
 - Generate, edit, and finalize a prototype
 - Pull all of that context into your code environment using MCP`,
@@ -45,7 +45,7 @@ By the end, you will know how to:
       title: "Before you start",
       body: `You will get the most out of Sprntly if you have:
 
-- **Your data sources connected.** This is what powers signals and your weekly brief. To do this, go to **Settings → Connectors**.
+- **Your data sources connected.** This is what powers signals and your Top Insights brief. To do this, go to **Settings → Connectors**.
 - **Your project management tool connected**, so tickets sync automatically. Connect it in **Settings → Connectors**.
 - **Your team invited to the workspace.** Invite them in **Settings → Team and Roles**.`,
     },
@@ -56,15 +56,15 @@ By the end, you will know how to:
 
 There are two ways to start. Pick whichever fits your situation.
 
-#### Option A — From your weekly brief (recommended)
+#### Option A — From your Top Insights brief (recommended)
 
-1. Go to your **Weekly Brief**, which is the home page. If your team has connected data sources, Sprntly pulls that information in and generates the brief for you automatically.
-2. On the weekly brief page, click **View or Generate PRD**.
+1. Go to your **Top Insights**, which is the home page. If your team has connected data sources, Sprntly pulls that information in and generates the brief for you automatically.
+2. On the Top Insights brief page, click **View or Generate PRD**.
 3. Your PRD opens, already grounded in your team's signals.
 
 #### Option B — From a file you upload
 
-1. Go to your **Weekly Brief** (the home page).
+1. Go to your **Top Insights** (the home page).
 2. Click the **+ icon in the navigation bar** to open a new workspace.
 3. In the text field, click **Attach a File** and upload your document.
 4. Type a prompt such as: *"Create a PRD based on this document."*
@@ -153,7 +153,7 @@ It works over the Model Context Protocol. You connect once with a token you crea
 2. Under **New token**, give it a name you will recognize (e.g. "Claude Code" or "Cursor").
 3. Pick a role:
    - **Developer (tickets & PRDs)** — the ticket tools, plus the PRDs, prototypes, and evidence behind your tickets. This is the right choice for engineers.
-   - **PM (full access)** — everything a developer token has, plus workspace-level surfaces: datasets, the weekly brief, the ranked backlog, and the latest PRD.
+   - **PM (full access)** — everything a developer token has, plus workspace-level surfaces: datasets, the Top Insights brief, the ranked backlog, and the latest PRD.
 4. Click **Create token**.
 
 > **Copy the connector URL now — it is shown only once.** Sprntly displays a single URL that looks like \`https://api.sprntly.ai/mcp?token=…\` with your secret token embedded. Copy it immediately. If you lose it, you cannot recover it — just revoke the token and create a new one.

@@ -4,7 +4,7 @@ import type { AskResponse } from "../lib/api"
 
 export type BriefTagType = "double" | "new" | "fix"
 
-/** Weekly brief template action accent (maps from API insight tags in the adapter). */
+/** Top Insights template action accent (maps from API insight tags in the adapter). */
 export type BriefActionAccent = "build" | "fix" | "decide" | "optimize" | "investigate" | "monitor"
 
 export type BriefSecondaryCtaBehavior =
@@ -33,7 +33,7 @@ export interface BriefFindingRow {
   /** Template: BUILD / FIX / OPTIMIZE — left rail color + secondary CTA. */
   actionAccent: BriefActionAccent
   actionLabel: string
-  /** Weekly-brief skill taxonomy: the finding type (one of the 7), its accent
+  /** Top-insights skill taxonomy: the finding type (one of the 8), its accent
    *  hex (derived from the type — not the model's mismatchable accent), and the
    *  type-name pill label (no P0/P1). Drives the card accent bar + category pill
    *  in the skill design. */

@@ -90,14 +90,14 @@ def test_modules_and_templates_loaded():
 
 
 def test_references_and_assets_loaded():
-    """The weekly-brief skill's `references/*` (schema, rubric, examples) and
+    """The top-insights skill's `references/*` (schema, rubric, examples) and
     `assets/*` (the render template) are read into the SkillSpec so the gateway
     can fold the references into the cacheable METHOD prefix."""
-    wb = get_skill("weekly-brief")
+    wb = get_skill("top-insights")
     assert set(wb.references) == {
-        "signal-schema.json", "rubric.md", "examples.md"
+        "signal-schema.json", "rubric.md", "examples.md", "sources.md"
     }
-    assert "signal-brief-composer schemas" in wb.references["signal-schema.json"]
+    assert "top-insights schemas" in wb.references["signal-schema.json"]
     assert "Deterministic linters" in wb.references["rubric.md"]
     assert "golden reference" in wb.references["examples.md"]
     # assets are loaded (for fingerprinting/inspection) but stay OUT of the prompt.
@@ -210,22 +210,22 @@ def test_gateway_method_prefix_includes_skill_references(isolated_settings):
     self-critique against the rubric). The `assets/*` render template stays OUT."""
     from app.graph.gateway import _build_method_prefix
 
-    block, suffix = _build_method_prefix("weekly-brief", None)
-    spec = get_skill("weekly-brief")
-    assert block.startswith(f"## METHOD (skill: weekly-brief @{spec.content_hash})")
+    block, suffix = _build_method_prefix("top-insights", None)
+    spec = get_skill("top-insights")
+    assert block.startswith(f"## METHOD (skill: top-insights @{spec.content_hash})")
     # all three reference docs are folded in, each under its own header.
     assert "### REFERENCE: signal-schema.json" in block
     assert "### REFERENCE: rubric.md" in block
     assert "### REFERENCE: examples.md" in block
     # ...and their actual content (not just the header) is present.
-    assert "signal-brief-composer schemas" in block      # schema
+    assert "top-insights schemas" in block      # schema
     assert "Deterministic linters" in block               # rubric hard gates
     assert "golden reference" in block                    # examples
     # the 247-line HTML render template is NOT injected (app renders from the
     # structured payload; the template is a downstream view, not a prompt input).
     assert "<!DOCTYPE html>" not in block
     assert "### REFERENCE: brief-template.html" not in block
-    assert suffix == f"+weekly-brief@{spec.content_hash}"
+    assert suffix == f"+top-insights@{spec.content_hash}"
 
 
 def test_gateway_method_prefix_no_references_unchanged(isolated_settings):
@@ -304,8 +304,8 @@ def test_gateway_md_path_routes_method_to_cacheable_prefix(isolated_settings, mo
 
 # ---------- agent bindings ----------
 
-def test_synthesis_binds_weekly_brief(isolated_settings, monkeypatch):
-    """The synthesis brief COMPOSITION call binds the `weekly-brief` skill — its
+def test_synthesis_binds_top_insights(isolated_settings, monkeypatch):
+    """The synthesis brief COMPOSITION call binds the `top-insights` skill — its
     METHOD is prepended to the cacheable prefix (re-platformed off `prioritize`,
     which only ever scored the candidates upstream)."""
     from app import llm
@@ -327,7 +327,7 @@ def test_synthesis_binds_weekly_brief(isolated_settings, monkeypatch):
     monkeypatch.setattr(synth, "compute_convergence", lambda f, e: [cand])
     monkeypatch.setattr(synth, "load_kpi_tree", lambda e: None)
 
-    spec = get_skill("weekly-brief")
+    spec = get_skill("top-insights")
     with patch.object(synth, "save_brief"), \
          patch.object(synth, "deliver_brief", return_value={
              "slack": {"delivered": False, "reason": "slack_not_connected"},
@@ -342,13 +342,13 @@ def test_synthesis_binds_weekly_brief(isolated_settings, monkeypatch):
             pass
 
     prefix_text = captured["messages"][0]["content"][0]["text"]
-    assert prefix_text.startswith(f"## METHOD (skill: weekly-brief @{spec.content_hash})")
+    assert prefix_text.startswith(f"## METHOD (skill: top-insights @{spec.content_hash})")
     # The skill's reference doc set is now in the compose prompt (cacheable
     # prefix), so the skill can run its full documented workflow: the input/
     # output schema, the rubric's hard gates (step-6 self-critique), and the
     # golden/counter examples are all grounding the single compose generation.
     assert "### REFERENCE: signal-schema.json" in prefix_text
-    assert "signal-brief-composer schemas" in prefix_text
+    assert "top-insights schemas" in prefix_text
     assert "### REFERENCE: rubric.md" in prefix_text
     assert "Deterministic linters" in prefix_text
     assert "### REFERENCE: examples.md" in prefix_text

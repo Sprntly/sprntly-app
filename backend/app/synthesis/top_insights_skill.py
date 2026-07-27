@@ -1,15 +1,20 @@
-"""Adapters between the synthesis pipeline and the `weekly-brief` skill.
+"""Adapters between the synthesis pipeline and the `top-insights` skill
+(formerly `weekly-brief` — the digest is now cadence-agnostic "Top Insights").
 
 The synthesis pipeline (`app/synthesis/agent.py`) computes ranked
 `ThemeConvergence` candidates UPSTREAM (convergence → evidence gate → dedup →
 goal-aligned scoring). The brief COMPOSITION step then binds the LLM to the
-vendored `weekly-brief` skill (see `skills/weekly-brief/SKILL.md`) to phrase
-those candidates into a brief. This module is the two-way contract:
+vendored `top-insights` skill (see `skills/top-insights/SKILL.md`) to phrase
+those candidates into a brief. In the skill's own vocabulary this pipeline is
+the `customer_problems` internal-channel adapter: it hands the skill
+already-analyzed findings; the skill's fetch/ledger machinery (subscriptions,
+freshness states, report shelf) is NOT wired yet and arrives as separate work.
+This module is the two-way contract:
 
-  to_signal_payload(...)   ThemeConvergence candidates → the skill's `signal`
+  to_signal_payload(...)   ThemeConvergence candidates → the skill's `finding`
                            schema (references/signal-schema.json) + light
                            context (recipient name, company scale), rendered as
-                           the `brief_request` the skill reads. The skill PHRASES
+                           the request the skill reads. The skill PHRASES
                            these — it never recomputes the numbers, so every
                            figure it surfaces traces back to a candidate field.
 
@@ -23,6 +28,11 @@ those candidates into a brief. This module is the two-way contract:
                            render keeps working unchanged. Fields the skill does
                            not carry (e.g. inline chart_hints) keep being derived
                            by the agent as today.
+
+The skill's CTA posture (v2, "the skill reports; the PM decides"): primary CTA
+is the evidence ("View the evidence" / "View the full report"), the PRD sits in
+the ghost slot ("Generate PRD" when none exists, "View PRD" when one does).
+Card titles size the problem; they never promise the reward of a fix.
 
 Keeping this mapping in one module means the skill's schema and the frontend
 contract are reconciled in exactly one place.
@@ -45,11 +55,13 @@ SKILL_TYPE_ACCENTS: dict[str, str] = {
     "demand": "#5f57a6",
     "engagement": "#3f63a0",
     "compliance": "#4f5675",
+    "momentum": "#0f7d70",
 }
 
 # skill `type` → existing brief `tag` (the FIX/BUILD/OPTIMIZE buckets the
 # frontend's TAG_META keys off). Loss/problem types map to FIX, opportunity
-# types to BUILD, behavior/optimization types to OPTIMIZE.
+# types to BUILD, behavior/optimization types to OPTIMIZE. `momentum` (a win /
+# favorable movement) is a gain, so it buckets with OPTIMIZE.
 _TYPE_TO_TAG: dict[str, str] = {
     "reliability": "something_broken",
     "retention": "something_broken",
@@ -58,6 +70,7 @@ _TYPE_TO_TAG: dict[str, str] = {
     "demand": "something_new",
     "growth": "something_better",
     "engagement": "something_better",
+    "momentum": "something_better",
 }
 
 # existing brief `tag` → a sensible skill `type` (used when we hand the model a
@@ -124,9 +137,9 @@ def to_signal_payload(
     the model reads it as grounding, not as a parsed contract.
     """
     lines: list[str] = [
-        "BRIEF_REQUEST — compose the weekly brief from these already-analyzed "
-        "signals. Every number below is an INPUT; phrase it, never recompute or "
-        "invent one.",
+        "BRIEF_REQUEST — compose the Top Insights brief from these "
+        "already-analyzed findings. Every number below is an INPUT; phrase it, "
+        "never recompute or invent one.",
         f"recipient: {recipient or 'there'}",
         f"company_scale: {company_scale or '(unknown — rank within the brief)'}",
         "",
@@ -147,8 +160,10 @@ def to_signal_payload(
             f"      - [{e['source_type']}/{e['kind']}] {e['content']}"
             for e in c.evidence
         )
+        category = "competitive" if c.competitor_pressure else "customer_problems"
         lines.append(
             f"  - id: {c.theme_id}\n"
+            f"    category: {category}\n"
             f"    type: {skill_type}\n"
             f"    pain: {{ metric: \"revenue at stake / converging sources\", "
             f"value: \"{amount if rev > 0 else f'{c.breadth} sources converging'}\", "
@@ -207,12 +222,14 @@ def cards_to_insights(
     untouched. This function layers the skill card's phrasing on top, by
     matching a card to its insight via `signal_id` == insight `theme_id`:
 
-      - title : the card's pain-then-value title (the skill's signature line)
+      - title : the card's finding-then-stake title (the skill's signature line)
                 replaces the insight title when present.
       - tag   : if the insight lacks a tag, derive it from the card `type`.
       - _card : the full skill card (type, accent, body, sources, ctas,
-                signal_id) is threaded onto the insight as `_card` so downstream
+                finding_id) is threaded onto the insight as `_card` so downstream
                 consumers / the HTML render can use the skill's native object.
+                Cards from the pre-rename skill carried `signal_id`; both spell
+                the insight's `theme_id` and both are accepted.
 
     Insight fields the skill does not carry (chart_hints, metrics, convergence,
     prototypeable) are left exactly as the agent derived them. An insight with
@@ -221,7 +238,7 @@ def cards_to_insights(
     """
     cards_by_id: dict[str, dict] = {}
     for card in cards or []:
-        sid = str(card.get("signal_id") or "").strip()
+        sid = str(card.get("finding_id") or card.get("signal_id") or "").strip()
         if sid and sid not in cards_by_id:
             cards_by_id[sid] = card
 
@@ -243,7 +260,7 @@ def cards_to_insights(
                 "body": card.get("body"),
                 "sources": card.get("sources") or [],
                 "ctas": card.get("ctas") or [],
-                "signal_id": card.get("signal_id"),
+                "finding_id": card.get("finding_id") or card.get("signal_id"),
             }
         out.append(merged)
     return out

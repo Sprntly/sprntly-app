@@ -151,8 +151,8 @@ export type ChartHint = {
   title: string
   data: { label: string; value: number }[]
 }
-/** The weekly-brief skill's closed type taxonomy (drives accent + the category
- *  pill). See backend/skills/weekly-brief/SKILL.md step 3. */
+/** The top-insights skill's closed type taxonomy (drives accent + the category
+ *  pill). See backend/skills/top-insights/SKILL.md step 3. */
 export type BriefSkillType =
   | "reliability"
   | "retention"
@@ -161,14 +161,24 @@ export type BriefSkillType =
   | "demand"
   | "engagement"
   | "compliance"
+  | "momentum"
 
 export type BriefSkillCta = {
-  label: "View PRD" | "Draft PRD" | "View prototype" | "Generate prototype" | string
+  label:
+    | "View the evidence"
+    | "View the full report"
+    | "Generate PRD"
+    | "View PRD"
+    // pre-rename labels, still present on persisted briefs
+    | "Draft PRD"
+    | "View prototype"
+    | "Generate prototype"
+    | string
   style: "primary" | "ghost" | string
 }
 
 /** The skill's native card, attached to each insight by the backend as `_card`
- *  (weekly_brief_skill.cards_to_insights). The render layer prefers this over
+ *  (top_insights_skill.cards_to_insights). The render layer prefers this over
  *  the legacy tag fields. `accent` may be mismatched to `type` by the model —
  *  derive accent from `type` instead (see lib/brief-skill-taxonomy). */
 export type BriefSkillCard = {
@@ -178,6 +188,9 @@ export type BriefSkillCard = {
   body?: string
   sources?: string[]
   ctas?: BriefSkillCta[]
+  /** The finding this card phrases (== the insight theme_id). Cards persisted
+   *  before the top-insights rename spell it `signal_id`. */
+  finding_id?: string
   signal_id?: string
 }
 
@@ -291,7 +304,7 @@ export const briefApi = {
       .then((r) => ({ started: r.started, company: r.dataset })),
   /**
    * Kick off the FULL regeneration pipeline: KG ingestion of the latest
-   * sources/connectors/uploads → weekly-brief synthesis → PRD generation →
+   * sources/connectors/uploads → top-insights synthesis → PRD generation →
    * evidence generation. Fire-and-forget; poll `status()` for the brief stage.
    * Backs the "Regenerate brief" button on the Connectors settings page.
    */
@@ -1106,7 +1119,7 @@ export type RoadmapDoc = {
  * the read-only `roadmapdoc` artifact view.
  *
  * `upload` POSTs the multipart file to `POST /v1/company/roadmap-doc`, which
- * stores the doc + its extracted text against the company so the weekly brief
+ * stores the doc + its extracted text against the company so the Top Insights brief
  * can pressure-test findings against the roadmap. `get` reads the stored
  * roadmap (404 → null) for the artifact view.
  */
@@ -3708,7 +3721,7 @@ export const artifactsApi = {
 /**
  * What the token was minted for — picked at creation, immutable after.
  * developer = ticket + PRD tools only; pm = the full MCP tool set
- * (adds datasets, backlog, weekly brief).
+ * (adds datasets, backlog, Top Insights brief).
  */
 export type McpTokenRole = "developer" | "pm"
 

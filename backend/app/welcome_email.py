@@ -6,7 +6,7 @@ from the drip cadence in app/drip_email.py — that is a scheduler-driven day-1/
 3/7 nudge sequence; this is an instant, completion-triggered transactional
 email signed by the founder.
 
-Reuses the same transport and branding as the drip / weekly-brief emails:
+Reuses the same transport and branding as the drip / top-insights emails:
   - Resend HTTPS API over httpx (env RESEND_API_KEY; no SMTP, no SDK).
   - Config resolved at CALL TIME (config_mod.settings.*) so the test suite's
     config reload + monkeypatched client win.

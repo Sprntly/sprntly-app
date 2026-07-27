@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
 from app.brief_gate import NO_DATA_SOURCE_MESSAGE, has_brief_data_source
-from app.entitlements import require_weekly_brief_module
+from app.entitlements import require_top_insights_module
 from app.brief_runner import get_status, set_status, warm_synthesis_drilldowns
 from app.db import (
     find_existing_evidence,
@@ -63,7 +63,7 @@ def _with_company_name(brief: dict) -> dict:
 
 def _notify_brief_ready(dataset: str, brief: dict | None) -> None:
     """Send the short "Hey, your brief is generated." ping (Slack + email) after
-    a USER-TRIGGERED regenerate — not the full weekly brief message, which stays
+    a USER-TRIGGERED regenerate — not the full Top Insights brief message, which stays
     reserved for the scheduled delivery time. Only fires for a FRESH brief; a
     cache-returned run (`_from_cache`, KG unchanged) produced nothing new to
     announce. Best-effort: blocking HTTP, never raises."""
@@ -264,8 +264,8 @@ def status(
 @router.post("/regenerate")
 async def regenerate(
     dataset: str,
-    # On-demand brief generation → Weekly Brief module gate.
-    company: CompanyContext = Depends(require_weekly_brief_module),
+    # On-demand brief generation → Top Insights module gate.
+    company: CompanyContext = Depends(require_top_insights_module),
 ):
     """Force a fresh brief generation in the background. Returns immediately.
 
@@ -288,15 +288,15 @@ async def regenerate(
 @router.post("/regenerate-all")
 async def regenerate_all(
     dataset: str,
-    # The "Regenerate brief" full-pipeline button → Weekly Brief module gate.
+    # The "Regenerate brief" full-pipeline button → Top Insights module gate.
     # (Scheduled KG ingestion via connector sync is NOT affected — see
     # app.entitlements module docstring.)
-    company: CompanyContext = Depends(require_weekly_brief_module),
+    company: CompanyContext = Depends(require_top_insights_module),
 ):
     """Run the FULL regeneration pipeline in the background. Returns immediately.
 
     Chains, in order: KG ingestion of the latest sources/connectors/uploads →
-    weekly-brief synthesis → PRD generation for each insight → evidence
+    top-insights synthesis → PRD generation for each insight → evidence
     generation for each insight. Used by the "Regenerate brief" button on the
     Connectors settings page, where the user has just connected a tool or
     uploaded files and wants the whole workspace rebuilt from the new data.
@@ -389,8 +389,8 @@ def by_id(
 @router.post("/generate")
 def generate(
     dataset: str,
-    # On-demand brief generation → Weekly Brief module gate.
-    company: CompanyContext = Depends(require_weekly_brief_module),
+    # On-demand brief generation → Top Insights module gate.
+    company: CompanyContext = Depends(require_top_insights_module),
 ):
     """Synchronously generate a fresh brief and return it.
 

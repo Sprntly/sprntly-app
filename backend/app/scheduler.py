@@ -2,8 +2,8 @@
 
 Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
 
-  weekly_brief_tick  — fires every WEEKLY_BRIEF_TICK_MINUTES and, for each
-                       company, drives the two-phase weekly brief:
+  brief_tick  — fires every WEEKLY_BRIEF_TICK_MINUTES and, for each
+                       company, drives the two-phase Top Insights brief:
                        GENERATION starts GENERATION_LEAD (3h) before the
                        company's configured local day/time so synthesis has
                        time to finish; DELIVERY (Slack + email) happens exactly
@@ -36,12 +36,12 @@ from app.brief_schedule import (
     resolve_frequency,
     resolve_schedule,
     resolve_user_timezone,
-    should_generate_weekly_brief,
-    should_run_weekly_brief,
+    should_generate_brief,
+    should_run_brief,
 )
 from app.config import settings
 from app.db.companies import list_companies
-from app.entitlements import weekly_brief_enabled
+from app.entitlements import top_insights_enabled
 from app.kg_ingest.auto_sync import kickoff_sync
 from app.kg_ingest.runner import PULLERS
 
@@ -180,14 +180,14 @@ async def _run_synthesis_for_all_companies() -> None:
 
     for company in companies:
         slug = company.get("slug") or company.get("id")
-        # Weekly Brief module gate (staff panel): the synthesis cycle GENERATES
+        # Top Insights module gate (staff panel): the synthesis cycle GENERATES
         # briefs (run_synthesis save_brief()s + mid-week delivery), so a company
-        # with weekly_brief explicitly off is skipped. KG ingestion is NOT
+        # with top_insights explicitly off is skipped. KG ingestion is NOT
         # affected — connector sync/seeding run elsewhere (owner decision:
         # the KG also grounds PRDs and chat).
-        if not weekly_brief_enabled(company.get("feature_flags") or {}):
+        if not top_insights_enabled(company.get("feature_flags") or {}):
             logger.info(
-                "Scheduler: weekly_brief module off for %s — skipping synthesis",
+                "Scheduler: top_insights module off for %s — skipping synthesis",
                 slug,
             )
             continue
@@ -233,8 +233,8 @@ def _resolve_company_schedule(company: dict) -> tuple[object, dict]:
     }
 
 
-async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
-    """Drive the two-phase weekly brief for every company (v0 checklist 2.4).
+async def _run_brief_tick(now: datetime | None = None) -> None:
+    """Drive the two-phase Top Insights brief for every company (v0 checklist 2.4).
 
     Ticks every WEEKLY_BRIEF_TICK_MINUTES. For each company it resolves the
     timezone + configured day/time (Comms & Brief settings, defaults Monday
@@ -260,7 +260,7 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
     try:
         companies = list_companies()
     except Exception as exc:  # noqa: BLE001
-        logger.error("Weekly brief tick: failed to list companies: %s", exc)
+        logger.error("Top Insights tick: failed to list companies: %s", exc)
         return
 
     if not companies:
@@ -271,12 +271,12 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
         slug = company.get("slug") or company_id
         if not slug:
             continue
-        # Weekly Brief module gate (staff panel): explicitly-off companies get
+        # Top Insights module gate (staff panel): explicitly-off companies get
         # neither generation nor Slack/email delivery from the weekly tick.
         # Missing key / empty flags ⇒ ON (grandfathering — app.entitlements).
-        if not weekly_brief_enabled(company.get("feature_flags") or {}):
+        if not top_insights_enabled(company.get("feature_flags") or {}):
             logger.info(
-                "Weekly brief tick: weekly_brief module off for %s — skipping",
+                "Brief tick: top_insights module off for %s — skipping",
                 slug,
             )
             continue
@@ -290,26 +290,26 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
         for ledger_key, ws_slug in _company_workspace_slugs(company_id, slug):
             # Phase 1 — GENERATION, GENERATION_LEAD before the fire time.
             last_gen = _last_brief_generation.get(ledger_key)
-            if should_generate_weekly_brief(now, tz, last_gen, **schedule):
+            if should_generate_brief(now, tz, last_gen, **schedule):
                 # The delivery instant this generation is for: the fire time
                 # whose lead window we are inside (still up to GENERATION_LEAD
                 # away).
                 fire_utc = previous_fire_time(now + GENERATION_LEAD, tz, **schedule)
                 logger.info(
-                    "Weekly brief tick: company=%s (dataset=%s, tz=%s) generation due — "
+                    "Top Insights tick: company=%s (dataset=%s, tz=%s) generation due — "
                     "generating for delivery at %s",
                     company_id, ws_slug, tz.key, fire_utc.isoformat(),
                 )
                 try:
-                    await _generate_weekly_brief_for_company(ws_slug)
+                    await _generate_brief_for_company(ws_slug)
                     if company_id:
                         _last_brief_generation[ledger_key] = now.astimezone(timezone.utc)
                         _schedule_exact_delivery(
                             company_id, ws_slug, fire_utc, ledger_key=ledger_key
                         )
-                    logger.info("Weekly brief tick: brief for %s → generated", ws_slug)
+                    logger.info("Top Insights tick: brief for %s → generated", ws_slug)
                 except Exception as exc:  # noqa: BLE001 — per-workspace isolation
-                    logger.error("Weekly brief tick: brief failed for %s: %s", ws_slug, exc)
+                    logger.error("Top Insights tick: brief failed for %s: %s", ws_slug, exc)
 
             # Phase 2 — DELIVERY catch-up fallback, at/after the fire time only.
             # The normal path is the exact-time one-shot job registered above;
@@ -319,31 +319,31 @@ async def _run_weekly_brief_tick(now: datetime | None = None) -> None:
                 continue
             if _delivery_job_pending(ledger_key):
                 continue
-            if not should_run_weekly_brief(
+            if not should_run_brief(
                 now, tz, _last_brief_delivery.get(ledger_key), **schedule
             ):
                 continue
             logger.info(
-                "Weekly brief tick: company=%s (dataset=%s) delivery fallback — "
+                "Top Insights tick: company=%s (dataset=%s) delivery fallback — "
                 "catch-up generate + deliver", company_id, ws_slug,
             )
             try:
-                await _generate_weekly_brief_for_company(ws_slug)
+                await _generate_brief_for_company(ws_slug)
             except Exception as exc:  # noqa: BLE001 — deliver the prior brief anyway
                 logger.error(
-                    "Weekly brief tick: catch-up generation failed for %s: %s",
+                    "Top Insights tick: catch-up generation failed for %s: %s",
                     ws_slug, exc,
                 )
             try:
-                if await _deliver_weekly_brief_for_company(company_id, ws_slug):
+                if await _deliver_brief_for_company(company_id, ws_slug):
                     _last_brief_delivery[ledger_key] = now.astimezone(timezone.utc)
             except Exception as exc:  # noqa: BLE001 — per-workspace isolation
                 logger.error(
-                    "Weekly brief tick: delivery failed for %s: %s", ws_slug, exc)
+                    "Top Insights tick: delivery failed for %s: %s", ws_slug, exc)
 
 
-async def _generate_weekly_brief_for_company(slug: str) -> None:
-    """Generate one company's weekly brief off the event loop (LLM + Supabase
+async def _generate_brief_for_company(slug: str) -> None:
+    """Generate one company's Top Insights brief off the event loop (LLM + Supabase
     are blocking) WITHOUT delivering it — the scheduled push happens exactly at
     the configured fire time (see _schedule_exact_delivery / the tick's delivery
     fallback), never at generation time. Synthesis is the only path since the
@@ -358,7 +358,7 @@ async def _generate_weekly_brief_for_company(slug: str) -> None:
     warm_synthesis_drilldowns(slug)
 
 
-async def _deliver_weekly_brief_for_company(company_id: str, slug: str) -> bool:
+async def _deliver_brief_for_company(company_id: str, slug: str) -> bool:
     """Deliver the company's CURRENT brief (Slack + email) off the event loop.
     Returns True when a delivery attempt was made (deliver_brief is itself
     best-effort per channel/recipient and never raises), False when there is no
@@ -369,7 +369,7 @@ async def _deliver_weekly_brief_for_company(company_id: str, slug: str) -> bool:
     brief = await asyncio.to_thread(get_current_brief, slug)
     if not brief:
         logger.warning(
-            "Weekly brief delivery: no current brief for %s — skipping", slug)
+            "Top Insights delivery: no current brief for %s — skipping", slug)
         return False
     await asyncio.to_thread(deliver_brief, company_id, brief)
     return True
@@ -379,7 +379,7 @@ def _delivery_job_id(key: str) -> str:
     """`key` is the per-workspace ledger key (workspace id, or company id when
     the workspaces lookup degraded) — one one-shot job per workspace, so one
     workspace's re-generation can't replace a sibling's pending delivery."""
-    return f"weekly_brief_delivery_{key}"
+    return f"brief_delivery_{key}"
 
 
 def _delivery_job_pending(key: str) -> bool:
@@ -411,7 +411,7 @@ def _schedule_exact_delivery(
             trigger=DateTrigger(run_date=fire_utc),
             args=[company_id, slug, fire_utc, key],
             id=_delivery_job_id(key),
-            name=f"Weekly brief delivery for {slug} at {fire_utc.isoformat()}",
+            name=f"Top Insights delivery for {slug} at {fire_utc.isoformat()}",
             replace_existing=True,
             # A busy event loop must delay the send (still exactly-once), not
             # drop it; anything later than this is the tick fallback's job.
@@ -419,7 +419,7 @@ def _schedule_exact_delivery(
         )
     except Exception:  # noqa: BLE001 — the tick fallback still delivers
         logger.exception(
-            "Weekly brief: failed to schedule exact delivery for %s", slug)
+            "Top Insights: failed to schedule exact delivery for %s", slug)
 
 
 async def _run_exact_delivery(
@@ -428,14 +428,14 @@ async def _run_exact_delivery(
     """One-shot job body: push the current brief at the exact fire instant and
     record the cycle in the delivery ledger so the tick fallback stands down."""
     try:
-        delivered = await _deliver_weekly_brief_for_company(company_id, slug)
+        delivered = await _deliver_brief_for_company(company_id, slug)
     except Exception:  # noqa: BLE001 — leave the ledger unset; fallback retries
-        logger.exception("Weekly brief: exact-time delivery failed for %s", slug)
+        logger.exception("Top Insights: exact-time delivery failed for %s", slug)
         return
     if delivered:
         _last_brief_delivery[ledger_key or company_id] = datetime.now(timezone.utc)
         logger.info(
-            "Weekly brief: delivered for %s at scheduled time %s",
+            "Top Insights: delivered for %s at scheduled time %s",
             slug, fire_utc.isoformat(),
         )
 
@@ -571,18 +571,18 @@ def start_scheduler() -> None:
     tick_minutes = getattr(settings, "weekly_brief_tick_minutes", 15)
 
     _scheduler = AsyncIOScheduler()
-    # Weekly brief: tick frequently; per company, START GENERATION when the
+    # Top Insights: tick frequently; per company, START GENERATION when the
     # (configured fire time − GENERATION_LEAD) window opens and DELIVER exactly
     # at the fire time via a one-shot DateTrigger (plus a post-fire catch-up
     # fallback in the tick). The day/time/tz decisions are the pure
     # app.brief_schedule functions, so the cadence here just has to be finer
     # than the firing window — it does NOT set the send time.
     _scheduler.add_job(
-        _run_weekly_brief_tick,
+        _run_brief_tick,
         trigger=IntervalTrigger(minutes=tick_minutes),
-        id="weekly_brief_tick",
+        id="brief_tick",
         name=(
-            f"Weekly brief — generate {GENERATION_LEAD} before each company's "
+            f"Top Insights — generate {GENERATION_LEAD} before each company's "
             f"configured time, deliver at it (tick every {tick_minutes}m)"
         ),
         replace_existing=True,
@@ -717,7 +717,7 @@ def start_scheduler() -> None:
 
     _scheduler.start()
     logger.info(
-        "Scheduler started: weekly brief tick every %dm "
+        "Scheduler started: Top Insights brief tick every %dm "
         "(generate 3h ahead, deliver at each company's configured time) "
         "+ connector refresh every %dh%s%s",
         tick_minutes, interval_hours,

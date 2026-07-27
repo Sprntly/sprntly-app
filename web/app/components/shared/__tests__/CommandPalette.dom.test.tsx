@@ -138,7 +138,7 @@ describe("CommandPalette", () => {
     expect(input()).not.toBeNull()
     expect(screen.getByRole("listbox")).not.toBeNull()
     // Pages group shows the app's surfaces with their URLs.
-    expect(screen.getByText("Weekly brief")).not.toBeNull()
+    expect(screen.getByText("Top Insights")).not.toBeNull()
     expect(screen.getByText("/brief")).not.toBeNull()
     expect(screen.getByText("New chat")).not.toBeNull()
   })
@@ -190,7 +190,7 @@ describe("CommandPalette", () => {
 
   it("navigates with ArrowDown + Enter", async () => {
     await openPalette()
-    // Empty query: flat list starts [New chat, Weekly brief, …].
+    // Empty query: flat list starts [New chat, Top Insights, …].
     fireEvent.keyDown(input(), { key: "ArrowDown" })
     fireEvent.keyDown(input(), { key: "Enter" })
     expect(goToMock).toHaveBeenCalledWith("brief")

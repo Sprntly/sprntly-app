@@ -311,7 +311,7 @@ def resolve_insight_hypothesis(
     insight title into `canonical_label`):
       1. Primary key: `properties.theme_id == theme_id`. Among matches, prefer
          the one whose `canonical_label` matches the insight title, then the most
-         recently written (a theme can recur across weekly briefs).
+         recently written (a theme can recur across Top Insights briefs).
       2. No `theme_id` on the insight: fall back to a `canonical_label` match on
          the insight title (the safer behavior — a title-keyed hypothesis is the
          right grounding when the theme link is absent). With neither a theme_id

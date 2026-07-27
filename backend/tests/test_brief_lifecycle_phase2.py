@@ -1,4 +1,4 @@
-"""Phase 2 weekly-brief lifecycle — route-level behavior.
+"""Phase 2 top-insights lifecycle — route-level behavior.
 
   - POST /v1/prd/generate records the insight's theme as 'prd_created'
   - POST /v1/brief/dismiss records the finding as 'dismissed'

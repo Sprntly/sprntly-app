@@ -2,7 +2,7 @@
 findings they want as their Top Insights.
 
 Single source of truth on the backend for:
-  * the weekly-brief compose prompt (each composed finding is classified into
+  * the top-insights compose prompt (each composed finding is classified into
     one or more of these, so filtering matches the SAME vocabulary the user
     picked from — see synthesis/agent.py),
   * the per-user preference store and its validation,

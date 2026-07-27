@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-sonnet-4-6"
 # Deep-reasoning tier. Reserved for the handful of calls that are genuinely
-# open-ended AND infrequent AND high-stakes — the weekly-brief composition and
+# open-ended AND infrequent AND high-stakes — the top-insights composition and
 # the onboarding business-context inference (each runs ~once per brief / per
 # company and seeds everything downstream). Everything else — structured
 # extraction, ranking, PRD templating, the per-message/loop paths — stays on
@@ -370,7 +370,7 @@ def _unwrap_response_envelope(out, schema):
     structured object under a single ``response`` key — cued by the tool name
     ``submit_response`` — even though the tool's ``input_schema`` is flat. Callers
     then read their real fields (e.g. ``insights``) off the top level and get
-    nothing. This was silently emptying every regenerated weekly brief.
+    nothing. This was silently emptying every regenerated Top Insights brief.
 
     Safe + narrow: only unwraps when the result is EXACTLY ``{"response": <dict>}``
     AND the requested schema does not itself declare a top-level ``response``
