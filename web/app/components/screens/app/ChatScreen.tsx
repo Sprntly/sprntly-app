@@ -63,6 +63,13 @@ type ThreadTurn = {
    *  command still awaiting its deferred reply; see deferredAckRef). Renders an
    *  honest "send it again" note instead of "No response was generated". */
   interrupted?: boolean
+  /** The artifact chat summary for this turn is still being written (the
+   *  panel's artifact is done; the summary call is in flight). Renders a
+   *  "Summarizing…" indicator instead of appearing out of nowhere seconds
+   *  later. Transient: resolved turns drop the flag, failed/empty summaries
+   *  remove the whole turn, and the persist effect never saves a still-pending
+   *  one (a reload cannot restore a skeleton nothing will ever fill). */
+  summaryPending?: boolean
   /** The clarify gate's questions, STRUCTURED — rendered as an answerable card
    *  (options as buttons, one submit for the batch) instead of the flattened
    *  numbered list that `reply.answer` carries. Both live on the same turn: the
@@ -281,6 +288,12 @@ const PRD_TRANSCRIPT_DOC_NAME = "Conversation (this chat)"
 // ids and reconstructs replies as plain answers).
 const PRD_ACK_ANSWER_RE = /View PRD button/
 const PRD_CLARIFY_ANSWER_RE = /^Before I write this PRD/
+// Artifact summaries end with a per-kind pointer line ("…View Evidence button…",
+// "…View Prototype button…") precisely so this text-based filter can strip them
+// here: a summary OF an artifact fed back as grounding would read as fresh
+// requirements. PRD summaries are already covered by PRD_ACK_ANSWER_RE.
+const EVIDENCE_SUMMARY_ANSWER_RE = /View Evidence button/
+const PROTOTYPE_SUMMARY_ANSWER_RE = /View Prototype button/
 export function conversationTranscriptDoc(
   thread: ThreadTurn[],
 ): { name: string; content: string } | null {
@@ -289,7 +302,13 @@ export function conversationTranscriptDoc(
     const q = t.query?.trim()
     if (q) parts.push(`User: ${q}`)
     const a = typeof t.reply?.answer === "string" ? t.reply.answer.trim() : ""
-    if (a && !PRD_ACK_ANSWER_RE.test(a) && !PRD_CLARIFY_ANSWER_RE.test(a)) {
+    if (
+      a &&
+      !PRD_ACK_ANSWER_RE.test(a) &&
+      !PRD_CLARIFY_ANSWER_RE.test(a) &&
+      !EVIDENCE_SUMMARY_ANSWER_RE.test(a) &&
+      !PROTOTYPE_SUMMARY_ANSWER_RE.test(a)
+    ) {
       parts.push(`Sprntly: ${a}`)
     }
   }
@@ -649,6 +668,7 @@ function ChatArtifactActions({
   prototypePrdId,
   prototypeReady,
   onViewPrototype,
+  onPrototypeSettled,
 }: {
   evidenceExists: boolean
   prdExists: boolean
@@ -660,6 +680,9 @@ function ChatArtifactActions({
   prototypePrdId: number | null
   prototypeReady: boolean
   onViewPrototype: () => void
+  /** A chat-kicked prototype build finished (success or failure) — the host
+   *  posts the artifact chat summary from here. */
+  onPrototypeSettled?: (result?: import("../../../lib/runDesignAgentGeneration").DesignAgentGenResult) => void
 }) {
   // Order matters: GENERATING (a document is being written) outranks LOADING
   // (one exists and is being fetched), which outranks the settled View/Generate
@@ -690,6 +713,7 @@ function ChatArtifactActions({
       <GeneratePrototypeCTA
         prdId={prototypePrdId}
         skipExistenceCheck
+        onGenerationSettled={onPrototypeSettled}
         render={({ onClick }) => (
           <button
             type="button"
@@ -855,10 +879,15 @@ export function ChatScreen() {
       // `partial` (live streamed answer text) is stripped for the same reason —
       // the resume path re-attaches the stream and rebuilds it from replay.
       const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => {
-        const stripped = {
-          ...rest,
-          thread: rest.thread.map(({ partial: _partial, ...turn }) => turn),
-        }
+        // A still-pending summary indicator is dropped from the SAVED copy:
+        // its in-flight call dies with the page, so restoring it would strand
+        // a "Summarizing…" skeleton nothing will ever fill. The summary itself
+        // persists (as the turn's reply, and as a conversation row) only once
+        // it actually lands.
+        const withoutPendingSummaries = rest.thread.filter((tn) => !(tn.summaryPending && !tn.reply))
+        const slimTab = withoutPendingSummaries.length === rest.thread.length
+          ? rest
+          : { ...rest, thread: withoutPendingSummaries }
         // A PRD command awaiting its deferred reply (the clarify gate is still
         // deciding — see deferredAckRef) has a reply-less seed turn, and the
         // in-flight promise that would fill it dies with the page. Persisted
@@ -866,10 +895,10 @@ export function ChatScreen() {
         // message." — false and a dead end. Mark it in the SAVED copy only, so
         // a restore can say what actually happened; a normal settle re-runs
         // this effect with the ref cleared and the mark comes straight off.
-        if (!deferredAckRef.current.has(stripped.id)) return stripped
-        const last = stripped.thread[stripped.thread.length - 1]
-        if (!last || last.reply || last.error || last.stopped) return stripped
-        return { ...stripped, thread: [...stripped.thread.slice(0, -1), { ...last, interrupted: true }] }
+        if (!deferredAckRef.current.has(slimTab.id)) return slimTab
+        const last = slimTab.thread[slimTab.thread.length - 1]
+        if (!last || last.reply || last.error || last.stopped) return slimTab
+        return { ...slimTab, thread: [...slimTab.thread.slice(0, -1), { ...last, interrupted: true }] }
       })
       sessionStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
@@ -884,6 +913,18 @@ export function ChatScreen() {
   const isBriefTab = activeTabId === BRIEF_TAB_ID
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
   const thread = activeTab?.thread ?? []
+  // The last turn a REPLY could still land on. A pending artifact-summary
+  // placeholder is transparent here: it is appended the moment the artifact
+  // lands, which would otherwise steal "last" from a genuinely in-flight ask
+  // (flipping it to "No response was generated" mid-answer) and move the
+  // artifact-action row onto a turn that has nothing to act on. Equals
+  // `thread.length - 1` whenever no summary is pending.
+  const lastLiveTurnIdx = (() => {
+    for (let i = thread.length - 1; i >= 0; i--) {
+      if (!(thread[i].summaryPending && !thread[i].reply)) return i
+    }
+    return thread.length - 1
+  })()
 
   // ── Prototype map for the active tab's brief (one fetch per briefId) ───────
   const chatBriefId = activeTab?.briefMeta?.briefId ?? null
@@ -1141,6 +1182,15 @@ export function ChatScreen() {
             ...(t.attachments?.length ? { attachments: t.attachments } : {}),
           })
           if (reply) i++
+        } else if (t.role === "assistant" && t.content.trim()) {
+          // Unconsumed assistant row (the artifact summary posted after the
+          // ack) → agent-only turn, mirroring buildRestored. Dropping it made
+          // the summary vanish from every reopened PRD chat.
+          restored.push({
+            id: `prdhist-${conversation.id}-${i}`,
+            query: "",
+            reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+          })
         }
       }
       if (restored.length === 0) return
@@ -1210,6 +1260,13 @@ export function ChatScreen() {
   // ref rather than a closure it cannot legally capture at render time.
   const finalizeTurnRef = useRef<
     ((turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string) => void) | null
+  >(null)
+  // postArtifactSummary is likewise declared after the generation flows that
+  // call it (it depends on `persistence`), so completion sites reach it through
+  // this ref — assigned right after its definition, consumed only in async
+  // completion handlers, so it is never read before assignment.
+  const postSummaryRef = useRef<
+    ((tabId: string, kind: "prd" | "evidence" | "prototype", artifactId: number) => void) | null
   >(null)
   /** Write the reply the clarify gate settled on — the ack, or the questions —
    *  onto the command turn's thread entry AND its conversation row. No-op when
@@ -1538,6 +1595,18 @@ export function ChatScreen() {
           // conversation (no-op); an existing one restores the user's prior turns.
           // The upfront ready/load path already hydrated, so skip those here.
           if (knownPrdId == null) void hydratePrdThread(tabId, result.prd.prd_id)
+          // Chat summary of what got built — only for kinds that carry EXPLICIT
+          // generation intent (a typed command, a doc conversion, an ideation
+          // framing). Bare `generate` is excluded: its find-or-create regularly
+          // resolves an existing PRD on a "View PRD" click, and a reopen must
+          // never re-summarize. resume/ready/load are reopens by definition.
+          if (
+            source.kind === "generateTask" ||
+            source.kind === "importDoc" ||
+            source.kind === "generateIdeation"
+          ) {
+            postSummaryRef.current?.(tabId, "prd", result.prd.prd_id)
+          }
         } else if (!(result as { clarify?: boolean }).clarify) {
           // (The clarify outcome already cleared its own spinner and posted the
           // questions — it is a handled stop, not a failure.)
@@ -1666,6 +1735,9 @@ export function ChatScreen() {
         if (result.ok) {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
           setContent({ prd: result.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
+          // The Generate button on a PRD-less tab is explicit generation intent
+          // — same summary the typed command gets.
+          postSummaryRef.current?.(activeTabId, "prd", result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
           setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -1690,6 +1762,10 @@ export function ChatScreen() {
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false, prd: result.prd, prdId: result.prd.prd_id } : t))
         setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+        // Reached only when neither the tab nor the insight map knows a PRD
+        // (savedPrdId was null) — the CTA read "Generate PRD", so this is a
+        // fresh build, not a View reopen.
+        postSummaryRef.current?.(activeTabId, "prd", result.prd.prd_id)
       } else {
         setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
         setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -1732,6 +1808,9 @@ export function ChatScreen() {
       if (result.ok) {
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
         setContent({ evidence: result.evidence, evidenceGenerating: false, evidencePartialHtml: null, prdMeta: meta })
+        // Chat summary only when something was BUILT — the read-first path
+        // marks a mere reopen of already-ready evidence with `existing`.
+        if (!result.existing) postSummaryRef.current?.(tabId, "evidence", result.evidenceId)
       } else {
         setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, evidenceGenerating: false } : t))
         setContent({ evidenceGenerating: false, evidencePartialHtml: null })
@@ -1803,6 +1882,9 @@ export function ChatScreen() {
             if (result.ok) {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false, evidence: result.evidence } : t))
               setContent({ evidencePartialHtml: null })
+              // This path only exists because a FRESH generation was in flight
+              // when the screen unmounted (pending-job marker) — summarize it.
+              postSummaryRef.current?.(activeTabId, "evidence", result.evidenceId)
             } else {
               setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, evidenceGenerating: false } : t))
               setContent({ evidencePartialHtml: null })
@@ -2049,6 +2131,18 @@ export function ChatScreen() {
               ...(t.attachments?.length ? { attachments: t.attachments } : {}),
             })
             if (reply) i++
+          } else if (t.role === "assistant" && t.content.trim()) {
+            // An assistant row NOT consumed as some user turn's reply — e.g.
+            // the artifact summary posted after a generation's ack. These used
+            // to be silently dropped, so a persisted summary survived in the
+            // DB but vanished from every restored thread. Restore it as an
+            // agent-only turn (empty `query` renders no user bubble — the
+            // same convention the clarify gate's orphan turn uses live).
+            restored.push({
+              id: `${keyPrefix}-${i}`,
+              query: "",
+              reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+            })
           }
         }
         return restored
@@ -2366,6 +2460,9 @@ export function ChatScreen() {
           if (activeTabIdRef.current === targetTabId) {
             setContent({ prd: result.prd, prdGenerating: false, prdPartialHtml: null })
           }
+          // Always a fresh generation here (the clarify gate only parks NEW
+          // tasks) — post the chat summary of what got built.
+          postSummaryRef.current?.(targetTabId, "prd", result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))
           if (activeTabIdRef.current === targetTabId) setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -2401,6 +2498,116 @@ export function ChatScreen() {
   // every question left to its stated default. Both paths converge on
   // runClarifiedGeneration, so the card is an affordance over the existing flow
   // rather than a second one to keep in sync.
+  // ── Artifact chat summaries ────────────────────────────────────────────────
+  // When a PRD / evidence report / prototype finishes generating in the panel,
+  // the chat posts a short LLM summary of what got built — the thread's record
+  // of the outcome, instead of going quiet after the acknowledgment. Posted as
+  // an agent-only turn (empty query) and persisted via pushAssistantTurn, so it
+  // survives reload AND reopening from history (the restore paths rebuild
+  // unconsumed assistant rows as agent-only turns — see buildRestored).
+  //
+  // Fresh generations only: every caller sits on a path that just RAN a
+  // generation, never on a reopen/load path, and the per-artifact guard below
+  // makes even a double-fired completion idempotent. Best-effort throughout —
+  // a failed summary changes nothing about the artifact flow.
+  const postedSummariesRef = useRef<Set<string>>(new Set())
+  const postArtifactSummary = useCallback(
+    (tabId: string, kind: "prd" | "evidence" | "prototype", artifactId: number) => {
+      const key = `${tabId}:${kind}:${artifactId}`
+      if (postedSummariesRef.current.has(key)) return
+      postedSummariesRef.current.add(key)
+      // The pointer line doubles as the transcript-filter marker (see
+      // *_SUMMARY_ANSWER_RE / PRD_ACK_ANSWER_RE): it is what keeps the summary
+      // out of the next PRD's grounding.
+      const pointer =
+        kind === "prd"
+          ? "Use the View PRD button in this chat to reopen it anytime."
+          : kind === "evidence"
+            ? "Use the View Evidence button in this chat to reopen it anytime."
+            : "Use the View Prototype button in this chat to reopen it anytime."
+      // The turn appears NOW, in a "Summarizing…" state — the summary call is
+      // its own model round-trip, and an answer materializing out of nowhere
+      // seconds after the panel settled read as unrelated. Resolved → the same
+      // turn takes the reply (typing reveal included); empty/failed → the turn
+      // is removed outright, never left as a skeleton nothing will fill.
+      const turnId = `summary-${kind}-${artifactId}-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`
+      setTabs((prev) => prev.map((t) =>
+        t.id === tabId
+          ? { ...t, thread: [...t.thread, { id: turnId, query: "", summaryPending: true }] }
+          : t))
+      const dropPendingTurn = () =>
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId ? { ...t, thread: t.thread.filter((tn) => tn.id !== turnId) } : t))
+      void (async () => {
+        try {
+          const { artifactsApi } = await import("../../../lib/api")
+          const { summary } = await artifactsApi.chatSummary(kind, artifactId)
+          if (!summary?.trim()) {
+            dropPendingTurn()
+            return
+          }
+          const text = `${summary.trim()}\n\n${pointer}`
+          setTabs((prev) => prev.map((t) =>
+            t.id === tabId
+              ? {
+                  ...t,
+                  thread: t.thread.map((tn) =>
+                    tn.id === turnId
+                      ? {
+                          ...tn,
+                          summaryPending: undefined,
+                          reply: {
+                            answer: text,
+                            sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "",
+                          } as AskResponse,
+                        }
+                      : tn),
+                }
+              : t))
+          // Hold the WRITE (not the render) until any ask in flight on this
+          // tab has landed its own reply. chatPersistence's per-tab queue
+          // preserves ENQUEUE order, so persisting mid-ask would slot the
+          // summary between a user turn and its answer — the history restore
+          // pairs strictly user→next-assistant, so it would show the summary
+          // as the answer to that question and orphan the real reply. Capped
+          // so a wedged ask can never strand the summary entirely.
+          for (let waited = 0; askingTabsRef.current.has(tabId) && waited < 60_000; waited += 250) {
+            await new Promise((r) => setTimeout(r, 250))
+          }
+          // Persist directly — an agent-only message has no rail turn to
+          // finalize. No-ops harmlessly on tabs without a conversation (those
+          // never appear in Chat history, so nothing the user could reopen is
+          // missing it).
+          void persistence.pushAssistantTurn(tabId, text)
+        } catch {
+          // Best-effort: the artifact flow already succeeded — just retire the
+          // indicator.
+          dropPendingTurn()
+        }
+      })()
+    },
+    [persistence],
+  )
+  postSummaryRef.current = postArtifactSummary
+
+  // A chat-kicked prototype build settled. Resolve the owning tab AT SETTLE
+  // TIME from the prototype's own prd_id — the build outlives renders (and the
+  // user may have switched tabs mid-build), so any render-time closure could
+  // name the wrong tab. Failure results post nothing: the overlay/toast already
+  // reports those, and a summary of a failed build would be noise.
+  const handlePrototypeSettled = useCallback(
+    (result?: import("../../../lib/runDesignAgentGeneration").DesignAgentGenResult) => {
+      if (!result?.ok) return
+      const prdId = result.prototype.prd_id
+      const tab = prdId != null
+        ? tabsRef.current.find((t) => t.prdId === prdId)
+        : tabsRef.current.find((t) => t.id === activeTabIdRef.current)
+      if (!tab) return
+      postArtifactSummary(tab.id, "prototype", result.prototype.id)
+    },
+    [postArtifactSummary],
+  )
+
   const submitClarifyAnswers = useCallback(async (answers: ClarifyAnswer[]) => {
     const tabId = activeTabIdRef.current
     if (!tabId) return
@@ -3627,6 +3834,7 @@ export function ChatScreen() {
         prototypePrdId={chatProtoPrdId}
         prototypeReady={chatPrototypeReady}
         onViewPrototype={handleViewPrototype}
+        onPrototypeSettled={handlePrototypeSettled}
       />
     </div>
   ) : null
@@ -3907,7 +4115,16 @@ export function ChatScreen() {
                       </div>
                     ) : null}
                     {thread.map((turn, idx) => {
-                      const isLast = idx === thread.length - 1
+                      // "Last" for the purposes of in-flight state and the
+                      // artifact-action row means the last turn a REPLY could
+                      // still land on — a pending artifact-summary placeholder
+                      // is transparent to both. Without this, appending that
+                      // placeholder while an ask is in flight stole `isLast`
+                      // from the real in-flight turn, flipping it to "No
+                      // response was generated" mid-answer and yanking the
+                      // View PRD row off screen. Identical to `isLast` whenever
+                      // no summary is pending.
+                      const isLast = idx === lastLiveTurnIdx
                       // A turn shows the "thinking" skeleton ONLY while its ask is
                       // genuinely in flight — the active tab is busy AND this is the
                       // last (in-flight) turn. Any other reply-less turn is terminal:
@@ -3981,25 +4198,18 @@ export function ChatScreen() {
                                 and this indicator carries the window — the same
                                 anti-dead-air guarantee, minus the false claim. */}
                             {!turn.reply && !turn.error && !turn.stopped ? (
-                              isGenerating ? (
-                                turn.partial ? (
-                                  // Live token stream: render the accumulating
-                                  // answer markdown as the model writes it. No
-                                  // simulated typing — the stream IS the typing;
-                                  // the poll's authoritative reply replaces this.
-                                  <div data-testid="ask-streaming-partial">
-                                    <AskReplyBody
-                                      reply={{
-                                        answer: turn.partial, key_points: [], citations: [],
-                                        confidence: 0, unanswered: "",
-                                      } as unknown as AskResponse}
-                                    />
-                                  </div>
-                                ) : (
-                                  <div {...(activeTab?.prdCommandThinking ? { "data-testid": "prd-command-thinking" } : {})}>
-                                    <AssistantThinkingSkeleton compact />
-                                  </div>
-                                )
+                              turn.summaryPending ? (
+                                // The artifact is done; its chat summary is one
+                                // model call behind. Say so — a bare skeleton
+                                // here read as another full answer coming.
+                                <div data-testid="summary-pending">
+                                  <div className="bc-agent-status">Summarizing what got built…</div>
+                                  <AssistantThinkingSkeleton compact />
+                                </div>
+                              ) : isGenerating ? (
+                                <div {...(activeTab?.prdCommandThinking ? { "data-testid": "prd-command-thinking" } : {})}>
+                                  <AssistantThinkingSkeleton compact />
+                                </div>
                               ) : turn.interrupted ? (
                                 // A reload killed the clarify gate mid-decision
                                 // (see the persist effect) — the truthful state,
@@ -4061,12 +4271,13 @@ export function ChatScreen() {
                               prdExists={chatPrdExists}
                               prdWaiting={chatPrdCtaWaiting}
                               prdGenerating={!!activeTab?.prdGenerating}
-        prdLoading={!!activeTab?.prdLoading}
+                              prdLoading={!!activeTab?.prdLoading}
                               onViewEvidence={handleOpenEvidence}
                               onOpenPrd={handleOpenPrd}
                               prototypePrdId={chatProtoPrdId}
                               prototypeReady={chatPrototypeReady}
                               onViewPrototype={handleViewPrototype}
+                              onPrototypeSettled={handlePrototypeSettled}
                             />
                           ) : null}
                         </div>

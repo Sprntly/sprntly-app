@@ -3787,6 +3787,11 @@ export const artifactsApi = {
         `/v1/artifacts?dataset=${encodeURIComponent(company)}`,
       )
       .then((r) => r.artifacts),
+  /** LLM chat summary of a freshly generated artifact. Best-effort by
+   *  contract: the backend returns {summary: null} on any summarizer failure
+   *  (never an error), and callers skip posting in that case. */
+  chatSummary: (kind: "prd" | "evidence" | "prototype", id: number) =>
+    api.post<{ summary: string | null }>("/v1/artifacts/chat-summary", { kind, id }),
 }
 
 // ── MCP tokens (customer-facing Model Context Protocol access) ──

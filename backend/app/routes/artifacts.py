@@ -17,12 +17,19 @@ surface is scoped the way its own writers scoped it.
 from __future__ import annotations
 
 import logging
+from typing import Literal
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
+from app.artifact_summary import summarize_artifact
 from app.auth import CompanyContext, require_company
 from app.db.artifacts import list_artifacts_for_company
-from app.deps.ownership import require_owned_dataset
+from app.deps.ownership import (
+    require_owned_dataset,
+    require_owned_evidence,
+    require_owned_prd,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -55,3 +62,54 @@ def list_artifacts(
         dataset=dataset, company_id=company.company_id
     )
     return {"artifacts": items}
+
+
+class ChatSummaryIn(BaseModel):
+    kind: Literal["prd", "evidence", "prototype"]
+    id: int = Field(..., ge=1)
+
+
+@router.post("/chat-summary")
+def chat_summary(
+    body: ChatSummaryIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """LLM chat summary of a freshly generated artifact, for the chat thread.
+
+    The frontend calls this once when a generation completes in the panel and
+    posts the returned text as an assistant turn. Content is read server-side
+    behind the same per-kind ownership gates the artifact's own GET routes use
+    (404 on any id the caller's company does not own — existence is never
+    disclosed cross-tenant). Best-effort by contract: a summarizer failure
+    returns {"summary": null}, never an error — the chat simply goes without.
+    """
+    if body.kind == "prd":
+        row = require_owned_prd(body.id, company.company_id)
+        title, content, agent = row.get("title") or "", row.get("payload_md") or "", "prd"
+    elif body.kind == "evidence":
+        row = require_owned_evidence(body.id, company.company_id)
+        title, content, agent = row.get("title") or "", row.get("payload_md") or "", "evidence"
+    else:
+        # Prototypes are workspace-scoped directly (no brief chain) — same gate
+        # as GET /v1/design-agent/{id}: a foreign row 404s, never 403s.
+        from app.db.prds import get_prd
+        from app.db.prototypes import get_prototype
+
+        proto = get_prototype(prototype_id=body.id, workspace_id=company.company_id)
+        if not proto:
+            raise HTTPException(status_code=404, detail="Prototype not found")
+        # A prototype row has no document of its own — the substance is the
+        # parent PRD plus what the user asked the build to do. Summarize those.
+        prd = get_prd(proto["prd_id"]) if proto.get("prd_id") else None
+        title = (prd or {}).get("title") or "Prototype"
+        parts = [
+            f"Build instructions: {proto['instructions']}" if proto.get("instructions") else "",
+            f"Target platform: {proto['target_platform']}" if proto.get("target_platform") else "",
+            f"Parent PRD:\n{(prd or {}).get('payload_md') or ''}",
+        ]
+        content, agent = "\n\n".join(p for p in parts if p), "design_agent"
+
+    summary = summarize_artifact(
+        company.company_id, kind=body.kind, title=title, content=content, agent=agent
+    )
+    return {"summary": summary}
