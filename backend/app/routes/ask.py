@@ -6,10 +6,18 @@ import sys
 import time
 
 from fastapi import Depends, APIRouter, File, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.ask_job_runner import run_ask_job
-from app.auth import CompanyContext, WorkspaceContext, require_company, require_workspace  # noqa: F401 — re-exported for tests' dependency_overrides
+from app.ask_job_runner import ask_channel, run_ask_job
+from app.auth import (  # noqa: F401 — require_company re-exported for tests' dependency_overrides
+    CompanyContext,
+    WorkspaceContext,
+    require_company,
+    require_workspace,
+    require_workspace_from_query,
+)
+from app.graph import token_stream
 from app.ingest import convert
 from app.db import (
     cancel_ask_job,
@@ -395,3 +403,42 @@ def get_ask(
             }
         },
     }
+
+
+@router.get("/{ask_id}/stream")
+async def stream_ask_generation(
+    ask_id: int,
+    company: WorkspaceContext = Depends(require_workspace_from_query),
+) -> StreamingResponse:
+    """SSE token stream of a chat answer as it generates, so the reply renders
+    word-by-word instead of appearing whole (mirrors GET /v1/prd/{id}/stream).
+
+    EventSource can't send headers, so the bearer rides as `?token=`
+    (require_workspace_from_query). Frames: an optional `{"kind":"replay",…}`
+    catch-up (everything emitted before this client connected — a remounted tab
+    re-attaching mid-answer), `{"kind":"delta","text":…}` carrying decoded
+    answer markdown (the `answer` field only — key_points/citations/confidence
+    arrive with the poll), then a terminal `{"kind":"done"|"error"}`.
+
+    PROGRESSIVE DISPLAY ONLY — the client keeps polling GET /v1/ask/{id}, which
+    stays the authoritative source of the finished answer. Cache-hit and
+    non-streamable answers (HTML reports, script tool-loops) publish no deltas:
+    this stream stays silent and the poll delivers the whole reply, unchanged.
+    Single-worker transport (see app.graph.token_stream); on multi-worker this
+    yields nothing and the poll still carries the result. 404 on a foreign or
+    missing job (no cross-tenant existence disclosure — mirrors GET /{ask_id}).
+    """
+    row = get_ask_job(ask_id)
+    if not row or row.get("company_id") != company.company_id:
+        raise HTTPException(404, "Ask not found")
+    channel = ask_channel(ask_id)
+
+    async def _gen():
+        async for event in token_stream.subscribe(channel):
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

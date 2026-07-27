@@ -276,7 +276,8 @@ def _kg_grounding(enterprise_id, question) -> tuple[str, bool]:
 
 
 def _answer_single_shot(
-    decision: RouteDecision, enterprise_id, question, history, prd_context: str = ""
+    decision: RouteDecision, enterprise_id, question, history, prd_context: str = "",
+    on_delta=None,
 ) -> dict:
     """Skill answer via one gateway call (SKILL.md injected by the gateway),
     grounded on the KG when the tenant's graph has relevant signal — or, for a
@@ -314,6 +315,9 @@ def _answer_single_shot(
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=decision.skill_id,
         max_tokens=12000,
+        # Structured-call streaming: on_delta receives partial-JSON fragments
+        # of the tool input; the Ask worker's extractor turns them into text.
+        on_delta=on_delta,
     )
     payload = (
         result.output
@@ -450,12 +454,22 @@ def answer(
     pinned_skill: Optional[str] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
     prd_id: Optional[int] = None,
+    on_delta: Optional[Callable[[str], None]] = None,
 ) -> dict:
     """Answer a question via the best skill, or directly. `pinned_skill` skips
     routing (used when a confirm-gate follow-up has already chosen the skill).
     `prd_id` marks a PRD-tab ask: the open PRD (+ its insight/evidence/tickets/
     prototype) is assembled into a grounding block so "this PRD" questions
     actually see the document.
+
+    `on_delta`, when supplied, token-streams the answer as it generates: it
+    receives the PARTIAL-JSON fragments of the structured answer call (the Ask
+    worker wraps a token_stream sink in app.ask_stream.AnswerFieldExtractor,
+    which decodes just the `answer` field's text). Only the two schema-shaped
+    paths stream — the direct compose_ask_answer path and the single-shot skill
+    answer. The special paths (call digest, VoC/public-feedback HTML reports,
+    script tool-loops, DS analysis, Jira lookup) return non-streamable payloads
+    and are delivered whole via the job poll, exactly as before.
 
     `is_cancelled`, when supplied, is polled at cheap checkpoints between the
     routing and answer steps; if it returns True the pipeline raises
@@ -551,7 +565,8 @@ def answer(
         # Direct path — corpus + KG, unchanged. Fold history into the question.
         q = _render_history(history) + question if history else question
         return compose_ask_answer(
-            dataset, q, enterprise_id=enterprise_id, prd_context=prd_context
+            dataset, q, enterprise_id=enterprise_id, prd_context=prd_context,
+            on_delta=on_delta,
         )
 
     # Public-feedback routed: the report needs the public WEB (app stores,
@@ -582,6 +597,7 @@ def answer(
         )
     else:
         payload = _answer_single_shot(
-            decision, enterprise_id, question, history, prd_context=prd_context
+            decision, enterprise_id, question, history, prd_context=prd_context,
+            on_delta=on_delta,
         )
     return _maybe_verify(payload, enterprise_id)

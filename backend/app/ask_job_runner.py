@@ -15,10 +15,18 @@ import asyncio
 import logging
 
 from app import qa_agent
+from app.ask_stream import AnswerFieldExtractor
 from app.db import complete_ask_job, fail_ask_job, is_ask_cancelled
+from app.graph import token_stream
 from app.qa_agent import AskCancelled
 
 logger = logging.getLogger(__name__)
+
+
+def ask_channel(ask_id: int) -> str:
+    """The token_stream channel a running Ask publishes its answer text on
+    (subscribed by GET /v1/ask/{id}/stream)."""
+    return f"ask:{ask_id}"
 
 
 def _strip_citations(payload: dict) -> dict:
@@ -38,7 +46,17 @@ def _run_sync(
     history: list[dict],
     pinned_skill: str | None,
     prd_id: int | None,
+    loop: asyncio.AbstractEventLoop,
 ) -> None:
+    # Token-stream the answer text as it generates: the structured answer call
+    # forwards its partial-JSON fragments to this extractor, which decodes just
+    # the `answer` field and publishes it on the ask's SSE channel (subscribed
+    # by GET /v1/ask/{id}/stream). Display only — the persisted job row the
+    # client polls stays the authoritative answer, so the non-streamable paths
+    # (reports, tool loops) simply publish nothing.
+    extractor = AnswerFieldExtractor(
+        token_stream.delta_sink(loop, ask_channel(ask_id))
+    )
     payload = qa_agent.answer(
         enterprise_id=enterprise_id,
         question=question,
@@ -50,6 +68,7 @@ def _run_sync(
         # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
         # steps and raises AskCancelled to abort before the expensive answer call.
         is_cancelled=lambda: is_ask_cancelled(ask_id),
+        on_delta=extractor,
     )
     # Append-only analytics log, same as the old inline path.
     try:
@@ -78,6 +97,8 @@ async def run_ask_job(
     result. A failure marks the row `error` and is swallowed — the worker never
     crashes the event loop."""
     logger.info("Ask job starting ask_id=%s dataset=%s", ask_id, dataset)
+    loop = asyncio.get_running_loop()
+    channel = ask_channel(ask_id)
     try:
         await asyncio.to_thread(
             _run_sync,
@@ -88,13 +109,18 @@ async def run_ask_job(
             history or [],
             pinned_skill,
             prd_id,
+            loop,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)
+        # Terminal SSE frame AFTER complete_ask_job (inside _run_sync) so a
+        # client woken by `done` reads a `ready` row on its next poll.
+        token_stream.close(channel, kind="done")
     except AskCancelled:
         # The user stopped the ask; the row is already `cancelled` (set by the
         # cancel endpoint). Leave it as-is — this is NOT a failure, so must not
         # be marked `error`. The worker just abandons the answer.
         logger.info("Ask job cancelled ask_id=%s", ask_id)
+        token_stream.close(channel, kind="done")
     except Exception as exc:  # noqa: BLE001 — best-effort; never crash the worker
         msg = f"{type(exc).__name__}: {exc}"
         logger.exception("Ask job failed ask_id=%s", ask_id)
@@ -102,3 +128,4 @@ async def run_ask_job(
             fail_ask_job(ask_id, msg)
         except Exception:  # noqa: BLE001 — even the fail-marking is best-effort
             logger.exception("fail_ask_job failed ask_id=%s", ask_id)
+        token_stream.close(channel, kind="error")

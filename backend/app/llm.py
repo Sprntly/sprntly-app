@@ -220,7 +220,7 @@ def _attempt_delay(attempt: int) -> float:
 
 def _create_with_retries(
     client: Anthropic, *, stream: bool = False, background: bool = False,
-    on_delta=None, **kwargs
+    on_delta=None, on_json_delta=None, **kwargs
 ):
     """`messages.create` with exponential backoff on transient failures.
 
@@ -238,6 +238,13 @@ def _create_with_retries(
     the stream, so on_delta may re-emit from the beginning; the caller treats
     the persisted final result as authoritative and uses on_delta only for
     progressive display. Callback exceptions are swallowed.
+
+    `on_json_delta(partial_json)` — the tool-use counterpart of `on_delta`:
+    when given AND streaming, each `input_json` PARTIAL-JSON fragment of the
+    forced tool's input is forwarded as it arrives (a caller-side extractor —
+    e.g. app.ask_stream — turns those into display text). Same restart caveat
+    as on_delta; between attempts a callback exposing `reset()` is rewound so
+    its incremental parse restarts with the re-emitted stream.
 
     The whole call (including its retries) holds ONE process-wide concurrency
     slot (`_llm_gate`) for its full duration, so the box never runs more
@@ -264,13 +271,30 @@ def _create_with_retries(
         last: Exception | None = None
         for attempt in range(MAX_ATTEMPTS):
             try:
+                # A retry restarts the stream from zero — rewind a stateful
+                # incremental extractor so it re-parses the fresh emission
+                # instead of gluing two attempts together.
+                if attempt and on_json_delta is not None:
+                    reset = getattr(on_json_delta, "reset", None)
+                    if callable(reset):
+                        reset()
                 if stream:
                     with client.messages.stream(**kwargs) as s:
                         # Drain the stream so deltas are consumed, then return
                         # the assembled final message (same shape as create).
                         # With on_delta, forward each text delta as it lands
                         # (progressive display) before assembling the final.
-                        if on_delta is not None:
+                        if on_json_delta is not None:
+                            # Tool-use streaming: the payload arrives as
+                            # `input_json` partial fragments, not text events.
+                            for _event in s:
+                                if getattr(_event, "type", None) != "input_json":
+                                    continue
+                                try:
+                                    on_json_delta(getattr(_event, "partial_json", "") or "")
+                                except Exception:  # noqa: BLE001 — display only
+                                    logger.exception("on_json_delta callback failed (continuing)")
+                        elif on_delta is not None:
                             for _text in s.text_stream:
                                 try:
                                     on_delta(_text)
@@ -399,6 +423,7 @@ def call_json(
     timeout: float | None = None,
     background: bool = False,
     temperature: float | None = None,
+    on_json_delta=None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
 
@@ -406,6 +431,10 @@ def call_json(
     — the SDK validates the structured input and returns a real dict, which
     eliminates the JSON-string-escaping failures that happen when an LLM
     hand-writes JSON containing markdown tables, quoted text, etc.
+
+    `on_json_delta(partial_json)` — optional; with `stream=True` and a schema,
+    forwards each partial-JSON fragment of the tool input as it streams (see
+    _create_with_retries). Ignored on the schema-less text-parse path.
 
     If `schema` is None, falls back to parsing the model's text response as
     JSON (used by endpoints whose payload is simple enough to round-trip
@@ -439,6 +468,7 @@ def call_json(
             client,
             stream=stream,
             background=background,
+            on_json_delta=on_json_delta,
             **base_kwargs,
             tools=[tool],
             tool_choice={"type": "tool", "name": "submit_response"},
