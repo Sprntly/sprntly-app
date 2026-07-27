@@ -182,33 +182,9 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
                 },
             })
 
-    # ── Public-feedback reports (company_id = company UUID). The rendered
-    #    html stays OUT of the listing (it's document-sized); the viewer
-    #    fetches it by id via GET /v1/public-feedback/reports/{id}. ──────────
-    report_rows = (
-        c.table("public_feedback_runs")
-        .select("id, question, window_label, created_at")
-        .eq("company_id", company_id)
-        .order("id", desc=True)
-        .limit(_LIST_CAP)
-        .execute()
-        .data
-        or []
-    )
-    for r in report_rows:
-        items.append({
-            "type": "report",
-            "id": r["id"],
-            "title": r.get("window_label") or "Public feedback report",
-            "status": "ready",
-            "created_at": r.get("created_at"),
-            "source": {"question": r.get("question") or ""},
-            "open": {"report_id": r["id"]},
-        })
-
     # Recency sort (newest first). created_at is an ISO-8601 string; lexical
     # sort matches chronological order for same-format UTC timestamps. None
-    # timestamps (shouldn't happen — all source tables default the column) sort
+    # timestamps (shouldn't happen — all three tables default the column) sort
     # last via an empty-string fallback.
     items.sort(key=lambda it: it.get("created_at") or "", reverse=True)
     return items[:_LIST_CAP]

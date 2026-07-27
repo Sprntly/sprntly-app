@@ -80,7 +80,6 @@ from app.routes import (
     internal,
     pipeline,
     prd,
-    public_feedback as public_feedback_routes,
 )
 
 logging.basicConfig(level=logging.INFO,
@@ -301,7 +300,6 @@ app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(artifacts.router)
-app.include_router(public_feedback_routes.router)
 app.include_router(ideation.router)
 app.include_router(ask.router)
 app.include_router(chat.router)
