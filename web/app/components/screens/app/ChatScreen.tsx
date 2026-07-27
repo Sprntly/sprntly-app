@@ -77,6 +77,12 @@ type ThreadTurn = {
    *  input to record, so the structure the user answered in SURVIVES answering
    *  instead of collapsing back to an undifferentiated wall of text. */
   clarifyResolved?: ClarifyResolution
+  /** Live answer markdown streamed over SSE while this turn's ask generates —
+   *  rendered in place of the thinking skeleton so the reply appears
+   *  word-by-word. Display only: `reply` (from the poll) is authoritative and
+   *  replaces it. Transient — stripped from the persisted thread, because a
+   *  reload can't re-attach the stream that was feeding it. */
+  partial?: string
 }
 
 type BriefMeta = { briefId: number; insightIndex: number }
@@ -845,8 +851,14 @@ export function ChatScreen() {
     try {
       // prdCommandThinking is stripped with the rest: the in-flight call it
       // tracks does not survive a reload, so restoring it would leave a
-      // thinking indicator spinning forever with nothing behind it.
+      // thinking indicator spinning forever with nothing behind it. Turn-level
+      // `partial` (live streamed answer text) is stripped for the same reason —
+      // the resume path re-attaches the stream and rebuilds it from replay.
       const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => {
+        const stripped = {
+          ...rest,
+          thread: rest.thread.map(({ partial: _partial, ...turn }) => turn),
+        }
         // A PRD command awaiting its deferred reply (the clarify gate is still
         // deciding — see deferredAckRef) has a reply-less seed turn, and the
         // in-flight promise that would fill it dies with the page. Persisted
@@ -854,10 +866,10 @@ export function ChatScreen() {
         // message." — false and a dead end. Mark it in the SAVED copy only, so
         // a restore can say what actually happened; a normal settle re-runs
         // this effect with the ref cleared and the mark comes straight off.
-        if (!deferredAckRef.current.has(rest.id)) return rest
-        const last = rest.thread[rest.thread.length - 1]
-        if (!last || last.reply || last.error || last.stopped) return rest
-        return { ...rest, thread: [...rest.thread.slice(0, -1), { ...last, interrupted: true }] }
+        if (!deferredAckRef.current.has(stripped.id)) return stripped
+        const last = stripped.thread[stripped.thread.length - 1]
+        if (!last || last.reply || last.error || last.stopped) return stripped
+        return { ...stripped, thread: [...stripped.thread.slice(0, -1), { ...last, interrupted: true }] }
       })
       sessionStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
@@ -2940,6 +2952,17 @@ export function ChatScreen() {
           return runAskGeneration(sendQuery, activeCompany, targetTabId, {
             isCancelled: () => !mountedRef.current,
             isStopped: () => stoppedTabsRef.current.has(targetTabId),
+            // Live token stream: the accumulating answer markdown renders in
+            // place of the thinking skeleton as the model writes it. Display
+            // only — onResult's authoritative reply replaces it.
+            onPartial: (text) => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === id && !turn.reply && !turn.stopped ? { ...turn, partial: text } : turn),
+                }
+              ))
+            },
             // Replay this tab's conversation so the model sees the prior turns
             // (history) on EVERY follow-up, not just PRD-tab chats — the backend
             // loads history by conversation_id, so without this each ask is
@@ -2952,9 +2975,15 @@ export function ChatScreen() {
           })
         },
         onResult: (tabId, res) => {
+          // If the answer already streamed in live, replaying the simulated
+          // typewriter over the (identical) final text would type the whole
+          // reply out twice — mark it as already animated.
+          const streamedTurn = tabsRef.current
+            .find((t) => t.id === tabId)?.thread.find((turn) => turn.id === id)
+          if (streamedTurn?.partial) animatedTurnIds.current.add(id)
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res } : turn)
+              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res, partial: undefined } : turn)
             }
           ))
           finalizeConversationTurn(id, { reply: res }, tabId)
@@ -2986,7 +3015,9 @@ export function ChatScreen() {
                 : "Something went wrong"
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg } : turn)
+              // Drop any streamed partial too: a half-answer above an error
+              // bubble would read as the reply having (partly) succeeded.
+              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg, partial: undefined } : turn)
             }
           ))
           finalizeConversationTurn(id, { error: msg }, tabId)
@@ -3215,10 +3246,23 @@ export function ChatScreen() {
             targetTabId,
             () => !mountedRef.current,
             () => stoppedTabsRef.current.has(targetTabId),
+            // Re-attached mid-generation: the stream's replay frame catches the
+            // preview up with everything already written, then live deltas.
+            (text) => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === turnId && !turn.reply && !turn.stopped ? { ...turn, partial: text } : turn),
+                }
+              ))
+            },
           )
+          const streamedTurn = tabsRef.current
+            .find((t) => t.id === targetTabId)?.thread.find((turn) => turn.id === turnId)
+          if (streamedTurn?.partial) animatedTurnIds.current.add(turnId)
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, reply: res } : turn),
+              ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, reply: res, partial: undefined } : turn),
             }
           ))
           finalizeConversationTurn(turnId, { reply: res }, targetTabId)
@@ -3938,9 +3982,24 @@ export function ChatScreen() {
                                 anti-dead-air guarantee, minus the false claim. */}
                             {!turn.reply && !turn.error && !turn.stopped ? (
                               isGenerating ? (
-                                <div {...(activeTab?.prdCommandThinking ? { "data-testid": "prd-command-thinking" } : {})}>
-                                  <AssistantThinkingSkeleton compact />
-                                </div>
+                                turn.partial ? (
+                                  // Live token stream: render the accumulating
+                                  // answer markdown as the model writes it. No
+                                  // simulated typing — the stream IS the typing;
+                                  // the poll's authoritative reply replaces this.
+                                  <div data-testid="ask-streaming-partial">
+                                    <AskReplyBody
+                                      reply={{
+                                        answer: turn.partial, key_points: [], citations: [],
+                                        confidence: 0, unanswered: "",
+                                      } as unknown as AskResponse}
+                                    />
+                                  </div>
+                                ) : (
+                                  <div {...(activeTab?.prdCommandThinking ? { "data-testid": "prd-command-thinking" } : {})}>
+                                    <AssistantThinkingSkeleton compact />
+                                  </div>
+                                )
                               ) : turn.interrupted ? (
                                 // A reload killed the clarify gate mid-decision
                                 // (see the persist effect) — the truthful state,

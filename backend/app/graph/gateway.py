@@ -199,11 +199,16 @@ def llm_call(
             # The method (if any) is already merged into user_cacheable_prefix
             # above, so it stays cache-friendly across calls; the agent system
             # prompt is the layer after it.
+            #
+            # `on_delta` on a structured call receives the raw PARTIAL-JSON
+            # fragments of the tool input (the deltas a forced-tool stream
+            # actually emits) — the caller wraps it in an extractor (e.g.
+            # app.ask_stream.AnswerFieldExtractor) to turn them into text.
             output: Any = call_json(
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
                 meta_out=meta, stream=stream, timeout=timeout, background=background,
-                temperature=temperature,
+                temperature=temperature, on_json_delta=on_delta,
             )
         else:
             # call_md now supports the same cacheable prefix, so the method

@@ -17,7 +17,7 @@ from app.db import (
     find_cached_ask,
     start_cached_ask,
 )
-from app.llm import DEFAULT_MODEL, call_json
+from app.llm import DEFAULT_MODEL, LONG_REQUEST_TIMEOUT_S, call_json
 from app.usage_context import Feature, usage_scope
 from app.prompts import (
     ASK_CACHE_VERSION,
@@ -134,6 +134,7 @@ def compose_ask_answer(
     *,
     enterprise_id: str | None = None,
     prd_context: str = "",
+    on_delta=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
     graph (#18 — chat answers from the brain, not only the markdown corpus).
@@ -150,6 +151,13 @@ def compose_ask_answer(
         pre-#18 path, including the cache warmer's prompt.
       - Decision-log the ask (agent="ask", decision_type="answer") with
         kg_refs = the signal/entity ids that fed the answer.
+
+    `on_delta`, when given, receives the PARTIAL-JSON fragments of the streamed
+    tool input as the model writes them (the call switches to the streaming
+    transport + long read timeout, mirroring the gateway's long-output path).
+    The Ask worker wraps it in app.ask_stream.AnswerFieldExtractor to
+    token-stream just the answer text to the client — progressive display only;
+    the returned payload stays the authoritative answer.
 
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
@@ -203,6 +211,11 @@ def compose_ask_answer(
             user_cacheable_prefix=cacheable,
             schema=_ASK_RESPONSE_SCHEMA,
             max_tokens=12000,
+            # Token-streaming a chat answer implies the streaming transport
+            # (and its long read timeout) — same pattern as the gateway.
+            stream=on_delta is not None,
+            timeout=LONG_REQUEST_TIMEOUT_S if on_delta is not None else None,
+            on_json_delta=on_delta,
         )
 
     # Decision-log the ask onto the §4d audit spine. Best-effort + tenant-
