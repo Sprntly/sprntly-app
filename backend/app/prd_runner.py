@@ -69,9 +69,11 @@ from app.skills.loader import get_skill
 
 logger = logging.getLogger(__name__)
 
-# Part A is now an HTML page (prd-author v4.2), so the byline / visual system all
-# live in the prompt below. Bumped v3 → v4.
-PROMPT_VERSION = "prd-author-v4"
+# Part A is now an HTML page (prd-author v4.7), so the byline / visual system all
+# live in the prompt below. Bumped v4 → v4.7 with the skill's v4.7 method drop
+# (hard evidence cap, provenance rules, standard/detailed length modes, Risks in
+# the body, Appendix reduced to "User input needed").
+PROMPT_VERSION = "prd-author-v4.7"
 _SKILL = "prd-author"
 # The machine-readable Implementation Spec (Part B) is generated on demand by the
 # dedicated `implementation-spec` skill, fed the FINISHED human PRD (Part A) — its
@@ -86,7 +88,7 @@ _AGENT = "prd"
 # Byline fallback when the generating identity is unavailable (skill rule).
 _AUTHOR_FALLBACK = "[NEED: author]"
 
-# Agent-specific framing for the human PRD (Part A). The prd-author v4.2 METHOD
+# Agent-specific framing for the human PRD (Part A). The prd-author v4.7 METHOD
 # is supplied by the bound skill; this system prompt states the agent's job +
 # grounding rules, and the _PART_A_DIRECTIVE steers the output to a self-contained
 # HTML page per the skill's visual system (same pattern as the evidence HTML
@@ -97,7 +99,8 @@ You are Sprntly's PRD Page generator, running the **prd-author** skill's METHOD 
 (prepended above). Turn the supplied brief insight into Part A — a \
 decision-ready, human-readable Product Requirements Document for stakeholder \
 alignment — in the skill's normative section order: Context, Problem, Evidence, \
-Users, Goal, Hypothesis, Requirements, User input needed, Appendix. Tag every \
+Users, Goal, Hypothesis, Requirements, Risks, Appendix (User input needed \
+only). Tag every \
 Requirements row Happy path / Edge case / Failure so the downstream \
 Implementation Spec inherits the branches.
 
@@ -130,10 +133,13 @@ PART DIRECTIVE: Produce ONLY Part A — the human PRD — as ONE HTML \
 page built from the provided TEMPLATE (copy its skeleton; keep the `<style>` \
 block EMPTY — the server injects the canonical stylesheet). The METHOD governs \
 your REASONING and quality bar \
-(cold-reader Context, signal-linked Evidence with type labels + verbatim quotes, \
-one primary metric split from guardrails with a projected-impact slot, a \
-Hypothesis before Requirements, exactly one riskiest assumption with a \
-three-line pre-mortem in the Appendix); the TEMPLATE governs the OUTPUT MARKUP. \
+(informed-insider Context, signal-linked Evidence with type labels + verbatim \
+quotes — hard cap 3 items, every element sourced per the METHOD's provenance \
+rule, one primary metric split from guardrails with a projected-impact slot, a \
+Hypothesis before Requirements, a body Risks section holding exactly one \
+riskiest assumption with a three-line pre-mortem, and the METHOD's standard \
+length budget unless detailed was explicitly requested); the TEMPLATE governs \
+the OUTPUT MARKUP. \
 Render the Requirements table with a color-coded Type pill per row \
 (Happy path / Edge case / Failure). Fill EVERY {{placeholder}} with concrete, \
 grounded content; never leave a {{placeholder}} or a bracketed example in place; \

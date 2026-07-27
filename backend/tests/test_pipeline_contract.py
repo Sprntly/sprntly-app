@@ -159,20 +159,46 @@ def test_live_prd_template_is_lean_markdown(repo_root):
 # visual system, Part B as the derived Implementation Spec.
 
 def test_prd_skill_part_a_template_is_html_visual_system(repo_root):
-    """prd-author v4.2 Part A is a single-file, editable HTML page in the
-    normative visual system, in the v4.1 section order (Context → Problem →
-    Evidence → Users → Goal → Hypothesis → Requirements → User input needed →
-    Appendix) — not lean markdown. Guard the shape + section order so it can't
-    regress."""
+    """prd-author v4.7 Part A is a single-file, editable HTML page in the
+    normative visual system, in the v4.4 section order (Context → Problem →
+    Evidence → Users → Goal → Hypothesis → Requirements → Risks → Appendix,
+    which holds only User input needed) — not lean markdown. Guard the shape +
+    section order so it can't regress."""
     html = _skill_prd_template_part_a(repo_root)
     assert "<!DOCTYPE html>" in html
     assert 'contenteditable="true"' in html  # obviously editable
-    # v4.1 normative section order, top to bottom.
+    # v4.4 normative section order, top to bottom. Risks sits in the body
+    # (between Requirements and the Appendix); "User input needed" is the
+    # Appendix's only content.
     order = ["Context", "Problem", "Evidence", "Users", "Goal", "Hypothesis",
-             "Requirements", "User input needed", "Appendix"]
+             "Requirements", "Risks", "Appendix", "User input needed"]
     positions = [html.find(f">{label}") for label in order]
     assert all(p != -1 for p in positions), f"missing section: {order}, {positions}"
-    assert positions == sorted(positions), "sections out of v4.1 order"
+    assert positions == sorted(positions), "sections out of v4.4 order"
+
+
+def test_prd_skill_part_a_template_has_no_retired_sections(repo_root):
+    """v4.4 retired Non-goals, Alignment, Rollout, and Done-when from the house
+    format (the Appendix holds only "User input needed"). Guard the template so
+    they can't creep back in."""
+    html = _skill_prd_template_part_a(repo_root)
+    for retired in (">Non-goals", ">Alignment", ">Rollout", ">Done-when"):
+        assert retired not in html, f"retired section {retired!r} back in template"
+
+
+def test_prd_skill_part_a_template_style_block_is_empty(repo_root):
+    """The v4.7 output contract: the template ships an EMPTY `<style>` (comment
+    only, zero CSS rules) and the canonical stylesheet lives in assets/prd.css,
+    injected server-side at finalize (app.html_style). A rule inside the
+    template's `<style>` means the contract split regressed."""
+    html = _skill_prd_template_part_a(repo_root)
+    m = re.search(r"<style>(.*?)</style>", html, re.DOTALL)
+    assert m, "template has no <style> block"
+    assert "{" not in m.group(1), "template <style> must stay empty (CSS lives in assets/prd.css)"
+    css = (
+        repo_root / "skills" / "prd-author" / "assets" / "prd.css"
+    ).read_text(encoding="utf-8")
+    assert ":root" in css and ".page" in css  # canonical stylesheet present
 
 
 def test_prd_skill_has_no_scope_assumption_boilerplate(repo_root):
