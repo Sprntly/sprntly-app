@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel, Field
@@ -323,6 +324,29 @@ class DismissIn(BaseModel):
     insight_index: int | None = Field(default=None, ge=0)
 
 
+def _resolve_theme_id(body: "DismissIn", company: WorkspaceContext) -> str:
+    """theme_id from the request — direct, or resolved (with the tenant gate)
+    from an owned brief's payload via (brief_id, insight_index)."""
+    if body.theme_id:
+        return body.theme_id
+    if body.brief_id is None or body.insight_index is None:
+        raise HTTPException(
+            400, "Provide either theme_id or (brief_id and insight_index)"
+        )
+    brief = require_owned_brief(body.brief_id, company.company_id, company.workspace_id)
+    insights = brief.get("insights") or []
+    if not (0 <= body.insight_index < len(insights)):
+        raise HTTPException(
+            400,
+            f"insight_index={body.insight_index} out of range "
+            f"(0..{len(insights) - 1})",
+        )
+    theme_id = insights[body.insight_index].get("theme_id")
+    if not theme_id:
+        raise HTTPException(400, "Insight carries no theme_id; cannot act on it")
+    return theme_id
+
+
 @router.post("/dismiss")
 def dismiss(
     body: DismissIn,
@@ -337,27 +361,58 @@ def dismiss(
 
     Accepts either a raw `theme_id` or a (`brief_id`, `insight_index`) pair which
     is resolved to the theme_id from the owned brief's payload."""
-    theme_id = body.theme_id
-    if not theme_id:
-        if body.brief_id is None or body.insight_index is None:
-            raise HTTPException(
-                400, "Provide either theme_id or (brief_id and insight_index)"
-            )
-        # Tenant gate + resolve insight → theme_id from the brief payload.
-        brief = require_owned_brief(body.brief_id, company.company_id, company.workspace_id)
-        insights = brief.get("insights") or []
-        if not (0 <= body.insight_index < len(insights)):
-            raise HTTPException(
-                400,
-                f"insight_index={body.insight_index} out of range "
-                f"(0..{len(insights) - 1})",
-            )
-        theme_id = insights[body.insight_index].get("theme_id")
-        if not theme_id:
-            raise HTTPException(400, "Insight carries no theme_id; cannot dismiss")
-
+    theme_id = _resolve_theme_id(body, company)
     set_finding_action(company.company_id, theme_id, "dismissed")
     return {"dismissed": True, "theme_id": theme_id}
+
+
+# One source-refresh interval: the synthesis pipeline's sources refresh weekly,
+# so "not now" means "come back next cycle" (skills/top-insights/SKILL.md —
+# defer suppresses for one refresh interval of the source, then the finding
+# re-enters the pool at full rank).
+DEFER_DAYS_DEFAULT = 7
+
+
+class DeferIn(DismissIn):
+    """Same finding addressing as DismissIn, plus an optional deferral window."""
+
+    days: int = Field(default=DEFER_DAYS_DEFAULT, ge=1, le=90)
+
+
+@router.post("/defer")
+def defer(
+    body: DeferIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Record that the user deferred a brief finding ("not now").
+
+    Distinct from dismiss (skills/top-insights/SKILL.md, three reader actions):
+    a deferral means *interested, wrong moment*. The finding is suppressed from
+    brief candidacy until `deferred_until`, then re-enters at full rank even if
+    nothing changed — and it never counts toward a dismissal streak or rotation
+    exhaustion. Accepts `theme_id` or a (`brief_id`, `insight_index`) pair,
+    exactly like /dismiss."""
+    theme_id = _resolve_theme_id(body, company)
+    until = datetime.now(timezone.utc) + timedelta(days=body.days)
+    set_finding_action(
+        company.company_id, theme_id, "deferred",
+        deferred_until=until.isoformat(),
+    )
+    return {"deferred": True, "theme_id": theme_id,
+            "deferred_until": until.isoformat()}
+
+
+@router.post("/restore")
+def restore(
+    body: DismissIn,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Undo a dismiss/defer: return the finding to the normal lifecycle
+    (action='surfaced', deferral cleared). Backs the card's Undo affordance so
+    a visibly-restored card isn't suppressed again by the ledger next run."""
+    theme_id = _resolve_theme_id(body, company)
+    set_finding_action(company.company_id, theme_id, "surfaced")
+    return {"restored": True, "theme_id": theme_id}
 
 
 @router.post("/{brief_id}/opened")

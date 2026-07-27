@@ -84,3 +84,90 @@ def test_suppress_keeps_never_surfaced_and_changed_drops_unchanged():
     kept = suppress_unchanged([never, changed, unchanged], states)
     ids = [t.theme_id for t in kept]
     assert ids == ["new-theme", "worse-theme"]  # unchanged dropped, order preserved
+
+# ── Phase 2A: classify_candidates (ledger semantics) ─────────────────────────
+
+from app.synthesis.dedup import ROTATION_LIMIT, classify_candidates
+
+
+def _classify(cands, states):
+    return classify_candidates(cands, states, now=NOW)
+
+
+def test_classify_new_theme_is_new_and_eligible():
+    eligible, freshness, backlog = _classify([_tc("t-new")], {})
+    assert [t.theme_id for t in eligible] == ["t-new"]
+    assert freshness == {"t-new": "new"}
+    assert backlog == []
+
+
+def test_classify_changed_theme_is_updated():
+    eligible, freshness, backlog = _classify(
+        [_tc("t1", revenue=200000)], {"t1": _fp(revenue=100000)})
+    assert freshness == {"t1": "updated"}
+    assert backlog == []
+
+
+def test_classify_unchanged_theme_is_carried_to_backlog():
+    eligible, freshness, backlog = _classify([_tc("t1")], {"t1": _fp()})
+    assert eligible == []
+    assert backlog == [("t1", "carried")]
+
+
+def test_classify_dismissed_stays_out_unless_changed():
+    dismissed_row = {**_fp(), "action": "dismissed"}
+    eligible, _f, backlog = _classify([_tc("t1")], {"t1": dismissed_row})
+    assert eligible == [] and backlog == [("t1", "dismissed")]
+    # Materially worse → resurfaces as updated ("flagged again, now worse").
+    eligible, freshness, backlog = _classify(
+        [_tc("t1", revenue=250000)], {"t1": dismissed_row})
+    assert [t.theme_id for t in eligible] == ["t1"]
+    assert freshness["t1"] == "updated"
+    assert backlog == []
+
+
+def test_classify_active_deferral_suppresses_even_when_changed():
+    row = {**_fp(), "action": "deferred",
+           "deferred_until": (NOW + timedelta(days=3)).isoformat()}
+    eligible, _f, backlog = _classify([_tc("t1", revenue=999999)], {"t1": row})
+    assert eligible == [] and backlog == [("t1", "deferred")]
+
+
+def test_classify_expired_deferral_returns_at_full_rank_even_unchanged():
+    row = {**_fp(), "action": "deferred",
+           "deferred_until": (NOW - timedelta(days=1)).isoformat()}
+    eligible, freshness, backlog = _classify([_tc("t1")], {"t1": row})
+    assert [t.theme_id for t in eligible] == ["t1"]
+    assert freshness["t1"] == "updated"  # framed as a return, not news
+    assert backlog == []
+
+
+def test_classify_acted_on_theme_vacates_slot_even_when_changed():
+    for action in ("prd_created", "done"):
+        row = {**_fp(), "action": action}
+        eligible, _f, backlog = _classify([_tc("t1", revenue=999999)], {"t1": row})
+        assert eligible == [], action
+        assert backlog == [("t1", "in_progress")], action
+
+
+def test_classify_rotation_exhaustion_retires_no_action_theme():
+    # Shown ROTATION_LIMIT times with no action → retired even though changed.
+    row = {**_fp(revenue=100000), "action": "surfaced",
+           "times_shown": ROTATION_LIMIT}
+    eligible, _f, backlog = _classify([_tc("t1", revenue=500000)], {"t1": row})
+    assert eligible == [] and backlog == [("t1", "rotation_exhausted")]
+    # One show below the limit → still eligible.
+    row2 = {**row, "times_shown": ROTATION_LIMIT - 1}
+    eligible, freshness, backlog = _classify([_tc("t1", revenue=500000)], {"t1": row2})
+    assert [t.theme_id for t in eligible] == ["t1"]
+    assert freshness["t1"] == "updated"
+
+
+def test_classify_deferral_does_not_count_toward_rotation():
+    # A deferred theme at the rotation limit still returns after expiry —
+    # deferral is "interested, wrong moment", never a strike.
+    row = {**_fp(), "action": "deferred", "times_shown": ROTATION_LIMIT,
+           "deferred_until": (NOW - timedelta(days=1)).isoformat()}
+    eligible, _f, backlog = _classify([_tc("t1")], {"t1": row})
+    assert [t.theme_id for t in eligible] == ["t1"]
+    assert backlog == []

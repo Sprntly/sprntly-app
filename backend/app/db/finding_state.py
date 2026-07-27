@@ -51,15 +51,25 @@ def upsert_finding_state(
     breadth: int,
     latest_signal_at: Optional[str] = None,
     last_brief_id: Optional[int] = None,
+    state: Optional[str] = None,
     client=None,
 ) -> None:
     """Record/refresh the convergence fingerprint a theme had when surfaced.
 
     Idempotent on (enterprise_id, theme_id). `created_at` is omitted so the DB
     default sets it once; `id` is only used for the first insert (ON CONFLICT
-    keeps the existing row)."""
+    keeps the existing row).
+
+    Ledger semantics (phase 2A): surfacing a theme increments `times_shown`
+    (rotation-exhaustion counter), stamps `last_state` ('new' | 'updated'),
+    resets `action` to 'surfaced' and clears any expired `deferred_until` — a
+    deferred theme that re-cards is back in the normal lifecycle. The
+    read-modify-write on times_shown is fine at these volumes (≤ pool-size rows
+    per weekly run, keyed reads)."""
     cli = client or require_client()
     now = utc_now()
+    prev = get_finding_states(enterprise_id, [theme_id], client=cli).get(theme_id)
+    times_shown = int((prev or {}).get("times_shown") or 0) + 1
     cli.table("brief_finding_state").upsert(
         {
             "id": str(uuid.uuid4()),
@@ -72,6 +82,10 @@ def upsert_finding_state(
             "fp_revenue_at_stake": float(revenue_at_stake),
             "fp_breadth": int(breadth),
             "fp_latest_signal_at": latest_signal_at,
+            "times_shown": times_shown,
+            "last_state": state,
+            "action": "surfaced",
+            "deferred_until": None,
             "updated_at": now,
         },
         on_conflict="enterprise_id,theme_id",
@@ -82,9 +96,16 @@ def upsert_finding_state(
 #
 # The same per-(enterprise, theme) row also records what the user DID with a
 # finding once it was surfaced. `action` walks
-#   surfaced → prd_created | dismissed | done.
+#   surfaced → prd_created | dismissed | deferred | done.
 # "Completed" (the Backlog screen's Completed tab) = action in
 # ('prd_created', 'done'); see list_findings_by_action / the completed route.
+#
+# Dismiss vs defer (skills/top-insights/SKILL.md — three reader actions):
+#   dismissed — "not interested": stays out unless the issue materially worsens
+#               (dedup's is_materially_changed is what lets it back in).
+#   deferred  — "interested, wrong moment": stays out until `deferred_until`,
+#               then re-enters the pool at full rank even if unchanged. Never
+#               counts toward rotation exhaustion.
 
 COMPLETED_ACTIONS: tuple[str, ...] = ("prd_created", "done")
 
@@ -94,6 +115,7 @@ def set_finding_action(
     theme_id: str,
     action: str,
     *,
+    deferred_until: Optional[str] = None,
     client=None,
 ) -> None:
     """Record the user's action on a surfaced theme (upsert on enterprise+theme).
@@ -102,6 +124,10 @@ def set_finding_action(
     that was never fingerprinted (edge case) still records — the fingerprint
     columns fall back to their table defaults. Idempotent on
     (enterprise_id, theme_id): a repeat call just refreshes `action`/`updated_at`.
+
+    `deferred_until` accompanies action='deferred' (ISO instant the deferral
+    expires); it is cleared on every other action so a later dismiss/act ends
+    the deferral window.
     """
     cli = client or require_client()
     now = utc_now()
@@ -111,6 +137,7 @@ def set_finding_action(
             "enterprise_id": enterprise_id,
             "theme_id": theme_id,
             "action": action,
+            "deferred_until": deferred_until if action == "deferred" else None,
             "updated_at": now,
         },
         on_conflict="enterprise_id,theme_id",

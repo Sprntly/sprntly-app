@@ -32,7 +32,14 @@ vi.mock("../../../lib/api", () => {
   return {
     ApiError,
     askApi: { ask: vi.fn() },
-    briefApi: { current: vi.fn(), status: vi.fn(), regenerate: vi.fn() },
+    briefApi: {
+      current: vi.fn(),
+      status: vi.fn(),
+      regenerate: vi.fn(),
+      dismiss: vi.fn().mockResolvedValue({ dismissed: true, theme_id: "t" }),
+      defer: vi.fn().mockResolvedValue({ deferred: true, theme_id: "t", deferred_until: "2026-08-03" }),
+      restore: vi.fn().mockResolvedValue({ restored: true, theme_id: "t" }),
+    },
   }
 })
 

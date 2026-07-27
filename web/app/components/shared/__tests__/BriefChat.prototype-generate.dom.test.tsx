@@ -33,7 +33,12 @@ vi.mock("../../../lib/api", () => ({
     body: unknown = null
   },
   askApi: { ask: vi.fn() },
-  briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
+  briefApi: {
+    current: vi.fn().mockResolvedValue({ id: 1, insights: [] }),
+    dismiss: vi.fn().mockResolvedValue({ dismissed: true, theme_id: "t" }),
+    defer: vi.fn().mockResolvedValue({ deferred: true, theme_id: "t", deferred_until: "2026-08-03" }),
+    restore: vi.fn().mockResolvedValue({ restored: true, theme_id: "t" }),
+  },
 }))
 vi.mock("../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),

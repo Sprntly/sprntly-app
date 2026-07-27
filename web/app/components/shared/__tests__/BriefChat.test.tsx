@@ -83,7 +83,12 @@ vi.mock("../../../lib/api", () => ({
     body: unknown = null
   },
   askApi: { ask: vi.fn() },
-  briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
+  briefApi: {
+    current: vi.fn().mockResolvedValue({ id: 1, insights: [] }),
+    dismiss: vi.fn().mockResolvedValue({ dismissed: true, theme_id: "t" }),
+    defer: vi.fn().mockResolvedValue({ deferred: true, theme_id: "t", deferred_until: "2026-08-03" }),
+    restore: vi.fn().mockResolvedValue({ restored: true, theme_id: "t" }),
+  },
 }))
 vi.mock("../../../lib/runPrdGeneration", () => ({
   runPrdGeneration: vi.fn().mockResolvedValue({ ok: false, message: "noop" }),
@@ -414,6 +419,37 @@ describe("BriefChat finding card — dismiss / restore (Task A)", () => {
     expect(restored.className).not.toContain("fc--dismissed")
     expect(restored.querySelector(".fc-from")).not.toBeNull()
     expect(restored.querySelector(".fc-actions")).not.toBeNull()
+  })
+
+  it("test_defer_greys_card_with_not_now_hint: 'Not now' greys the card and records a deferral, not a dismissal", async () => {
+    const { briefApi } = await import("../../../lib/api")
+    await act(async () => {
+      renderBrief()
+    })
+
+    fireEvent.click(within(cardFor(HERO.title)).getByLabelText("Defer finding"))
+
+    const deferred = cardFor(HERO.title)
+    expect(deferred.className).toContain("fc--dismissed") // same grey treatment
+    expect(within(deferred).getByText(/Not now — back next cycle/i)).not.toBeNull()
+    // Server ledger: defer recorded, dismiss NOT.
+    expect(briefApi.defer).toHaveBeenCalledTimes(1)
+    expect(briefApi.dismiss).not.toHaveBeenCalled()
+
+    // Undo restores the full card and clears the deferral server-side.
+    fireEvent.click(deferred)
+    const restored = cardFor(HERO.title)
+    expect(restored.className).not.toContain("fc--dismissed")
+    expect(briefApi.restore).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_dismiss_records_server_ledger: clicking X posts the dismissal", async () => {
+    const { briefApi } = await import("../../../lib/api")
+    await act(async () => {
+      renderBrief()
+    })
+    fireEvent.click(within(cardFor(HERO.title)).getByLabelText("Dismiss finding"))
+    expect(briefApi.dismiss).toHaveBeenCalledTimes(1)
   })
 
   it("test_dismiss_is_per_card: dismissing one finding leaves the other untouched", async () => {

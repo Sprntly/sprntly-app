@@ -318,6 +318,29 @@ export const briefApi = {
     api
       .post<WireBrief & { brief_id: number }>("/v1/brief/generate")
       .then((b) => ({ ...briefFromWire(b), brief_id: b.brief_id })),
+  /** Record a card dismissal in the server ledger ("not interested" — stays
+   *  out unless the issue materially worsens). The card UI still greys out via
+   *  localStorage instantly; this makes the action durable + theme-keyed. */
+  dismiss: (briefId: number, insightIndex: number) =>
+    api.post<{ dismissed: boolean; theme_id: string }>("/v1/brief/dismiss", {
+      brief_id: briefId,
+      insight_index: insightIndex,
+    }),
+  /** Record a card deferral ("not now" — interested, wrong moment). The theme
+   *  is suppressed until deferred_until, then re-enters the next brief at full
+   *  rank even if unchanged. Never counts toward dismissal streaks. */
+  defer: (briefId: number, insightIndex: number) =>
+    api.post<{ deferred: boolean; theme_id: string; deferred_until: string }>(
+      "/v1/brief/defer",
+      { brief_id: briefId, insight_index: insightIndex },
+    ),
+  /** Undo a dismiss/defer server-side (action back to 'surfaced'), so a card
+   *  the reader visibly restored isn't suppressed again next run. */
+  restore: (briefId: number, insightIndex: number) =>
+    api.post<{ restored: boolean; theme_id: string }>("/v1/brief/restore", {
+      brief_id: briefId,
+      insight_index: insightIndex,
+    }),
 }
 
 // ---- ideation ---------------------------------------------------------------
