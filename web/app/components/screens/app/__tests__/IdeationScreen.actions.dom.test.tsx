@@ -38,11 +38,6 @@ vi.mock("../../../../lib/api", () => ({
     create: (title: string, tag: unknown) => createMock(title, tag),
     reorder: (ids: string[]) => reorderMock(ids),
   },
-  // briefApi.current backs the held-back strip (IdeationScreen.heldback.dom.test.tsx);
-  // resolve with no `_backlog` so the strip stays inert for these action tests.
-  briefApi: {
-    current: () => Promise.resolve({ id: 1, company: "acme", generated_at: "", week_label: "", summary_headline: "", insights: [] }),
-  },
 }))
 
 vi.mock("../../../../lib/runPrdGeneration", () => ({
