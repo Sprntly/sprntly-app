@@ -23,9 +23,7 @@ const completedMock = vi.fn<() => Promise<CompletedList>>()
 const detailMock = vi.fn<(id: string) => Promise<unknown>>()
 
 // Mock the API client — the screen reads the ideas through ideationApi.list()
-// and the Completed tab through ideationApi.completed(). briefApi.current backs
-// the held-back strip (see IdeationScreen.heldback.dom.test.tsx); it resolves
-// to a brief with no `_backlog` here so the strip stays inert for these tests.
+// and the Completed tab through ideationApi.completed().
 vi.mock("../../../../lib/api", () => ({
   ideationApi: {
     list: () => listMock(),
@@ -34,9 +32,6 @@ vi.mock("../../../../lib/api", () => ({
     detail: (id: string) => detailMock(id),
     create: vi.fn(),
     reorder: vi.fn(),
-  },
-  briefApi: {
-    current: () => Promise.resolve({ id: 1, company: "acme", generated_at: "", week_label: "", summary_headline: "", insights: [] }),
   },
 }))
 
