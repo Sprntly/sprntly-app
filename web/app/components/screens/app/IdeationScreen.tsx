@@ -1036,10 +1036,13 @@ export function IdeationScreen() {
         {/* ── Scrollable content ── */}
         <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
           <div className="bl-body" style={{ flex: 1, overflow: "auto" }}>
-            {tab === "proposed" && <HeldBackStrip />}
             {tab === "proposed"
               ? <ProposedContent addHandlerRef={addHandlerRef} resequenceHandlerRef={resequenceHandlerRef} reloadKey={reloadKey} onSelectIdea={handleSelectIdea} selectedIdeaId={selectedIdea?.id ?? null} onCountChange={setProposedCount} />
               : <CompletedContent onCountChange={setCompletedCount} />}
+            {/* Below the ideas, mirroring the brief page's "Also tracked"
+                footer: the strip answers "what am I not seeing" without
+                leading the page with held-back noise. */}
+            {tab === "proposed" && <HeldBackStrip />}
           </div>
 
           {/* ── Detail popup: problem framing + evidence + brief CTA ── */}
