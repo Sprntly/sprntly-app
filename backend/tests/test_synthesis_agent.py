@@ -398,6 +398,75 @@ def test_no_roadmap_block_when_unset(facade, isolated_settings):
     assert "Rank and justify findings against it" not in captured["input"]
 
 
+def test_reader_preferences_block_feeds_composition(facade, isolated_settings):
+    """The onboarding/settings selection (brief_insight_types +
+    brief_insight_note) is a real composition input: rendered as a ranking
+    preference in the compose prompt. Before 2026-07-27 nothing read it."""
+    from unittest.mock import patch
+
+    from app.synthesis import agent as synth
+
+    db = isolated_settings["supabase"]
+    if not db.table("companies").select("id").eq("id", "ent-A").execute().data:
+        db.table("companies").insert(
+            {"id": "ent-A", "slug": "acme", "display_name": "Acme"}
+        ).execute()
+    db.table("companies").update({
+        "notification_settings": {
+            "brief_insight_types": ["reliability_signals", "competitor_moves"],
+            "brief_insight_note": "Latency on enterprise accounts matters most",
+        }
+    }).eq("id", "ent-A").execute()
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    ranked = {**_RANKED, "insights": [
+        {**_RANKED["insights"][0], "theme_id": theme.id}]}
+
+    captured = {}
+
+    def _capture(*args, **kwargs):
+        captured["input"] = kwargs.get("input", "")
+        return _llm_result(ranked)
+
+    with patch.object(synth, "llm_call", side_effect=_capture):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    composed = captured["input"]
+    assert "READER PREFERENCES" in composed
+    assert "Reliability & incident signals" in composed
+    assert "Competitor & market moves" in composed
+    assert "Latency on enterprise accounts matters most" in composed
+    # Reorder-only contract stated in-prompt.
+    assert "NEVER exclude" in composed
+
+
+def test_no_reader_preferences_block_when_unset(facade, isolated_settings):
+    from unittest.mock import patch
+
+    from app.synthesis import agent as synth
+
+    theme = _seed_theme_with_signals(facade, "ent-A", "SSO", [
+        ("revenue", "deal_blocker", {"revenue_at_risk_usd": 1400000}, 1),
+        ("customer_voice", "feature_request", {}, 2),
+    ])
+    ranked = {**_RANKED, "insights": [
+        {**_RANKED["insights"][0], "theme_id": theme.id}]}
+
+    captured = {}
+
+    def _capture(*args, **kwargs):
+        captured["input"] = kwargs.get("input", "")
+        return _llm_result(ranked)
+
+    with patch.object(synth, "llm_call", side_effect=_capture):
+        synth.run_synthesis(facade, "ent-A", dataset_slug="acme")
+
+    assert "READER PREFERENCES" not in captured["input"]
+
+
 # ---------- evidence gate: has_sufficient_evidence (pure) ----------
 
 def test_sufficient_when_multi_source_connected_theme(facade):
