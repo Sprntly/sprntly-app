@@ -41,6 +41,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from app.brief_sources import display_source_types, source_label
+
 if TYPE_CHECKING:
     from app.synthesis.convergence import ThemeConvergence
 
@@ -117,6 +119,8 @@ def to_signal_payload(
     company_scale: Optional[str],
     freshness: Optional[dict[str, str]] = None,
     prior_states: Optional[dict[str, dict]] = None,
+    allowed_sources: Optional[set[str]] = None,
+    reader_preferences: str = "",
 ) -> str:
     """Render the ranked candidates as the skill's `brief_request` (a list of
     `signal` objects + context), as the user input for the bound composition
@@ -138,6 +142,12 @@ def to_signal_payload(
     pipeline already renders candidate payloads) rather than strict JSON, since
     the model reads it as grounding, not as a parsed contract.
 
+    `allowed_sources` is the company's REAL source set (app/brief_sources):
+    each finding's `sources:` list — and its evidence tags — are reduced to
+    channels the company actually has, falling back to the honest
+    'documents' pseudo-source, so neither chips nor prose can claim a channel
+    that doesn't exist. None ⇒ no filtering (fail-open).
+
     `freshness` (theme_id → 'new' | 'updated') and `prior_states` (theme_id →
     ledger row) come from the phase-2A classification: an 'updated' finding
     carries its state plus a `previously:` line rendered from the ledger
@@ -150,9 +160,13 @@ def to_signal_payload(
         "never recompute or invent one.",
         f"recipient: {recipient or 'there'}",
         f"company_scale: {company_scale or '(unknown — rank within the brief)'}",
-        "",
-        "signals:",
     ]
+    # The workspace's stated emphasis rides INSIDE the skill request — it is
+    # part of the skill's input contract (SKILL.md step 4: the selection
+    # profile), not ambient context.
+    if reader_preferences:
+        lines += ["", reader_preferences.rstrip()]
+    lines += ["", "signals:"]
     for c in candidates:
         skill_type = _candidate_skill_type(c)
         rev = c.revenue_at_stake_usd
@@ -164,8 +178,16 @@ def to_signal_payload(
             urgency = "medium"
         else:
             urgency = "low"
+        display_types = display_source_types(c.source_types, allowed_sources)
+        display_set = set(display_types)
+
+        def _ev_tag(ev_type: str) -> str:
+            # Evidence tags must not leak a filtered channel into the prose.
+            return ev_type if (allowed_sources is None or ev_type in display_set) \
+                else "documents"
+
         evidence_lines = "\n".join(
-            f"      - [{e['source_type']}/{e['kind']}] {e['content']}"
+            f"      - [{_ev_tag(e['source_type'])}/{e['kind']}] {e['content']}"
             for e in c.evidence
         )
         category = "competitive" if c.competitor_pressure else "customer_problems"
@@ -197,7 +219,7 @@ def to_signal_payload(
             f"{_norm_confidence(c):.2f} }}\n"
             f"    story: \"{c.theme_label}: {c.signal_count} signals across "
             f"{c.breadth} source types\"\n"
-            f"    sources: {sorted(c.source_types)}\n"
+            f"    sources: {display_types}\n"
             f"    confidence: {_norm_confidence(c):.2f}\n"
             f"    urgency: {urgency}\n"
             f"    reach: {{ unit: \"accounts\", count: {c.signal_count} }}\n"
@@ -236,6 +258,7 @@ def _norm_confidence(c: "ThemeConvergence") -> float:
 def cards_to_insights(
     cards: list[dict],
     insights: list[dict],
+    display_sources_by_theme: Optional[dict[str, list[str]]] = None,
 ) -> list[dict]:
     """Reconcile the skill's `brief.cards[]` onto the persisted `insights[]`.
 
@@ -281,7 +304,18 @@ def cards_to_insights(
                 or accent_for_skill_type(card.get("type")),
                 "title": card.get("title"),
                 "body": card.get("body"),
-                "sources": card.get("sources") or [],
+                # Chips are ENFORCED server-side when the real-source map is
+                # provided: the model's own strings are replaced with humanized
+                # labels of the finding's filtered source types, so a card can
+                # never display a channel the company doesn't have
+                # (app/brief_sources — Apurva ruling 2026-07-27).
+                "sources": (
+                    [source_label(t)
+                     for t in display_sources_by_theme[str(ins.get("theme_id") or "").strip()]]
+                    if display_sources_by_theme is not None
+                    and str(ins.get("theme_id") or "").strip() in display_sources_by_theme
+                    else card.get("sources") or []
+                ),
                 "ctas": card.get("ctas") or [],
                 "finding_id": card.get("finding_id") or card.get("signal_id"),
                 # Freshness state ('new' | 'updated') — the render shows a quiet

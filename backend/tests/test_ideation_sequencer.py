@@ -1,5 +1,5 @@
 """Tests for the ideation sequencer: the "sequence the rest into the ideation
-pool + shortlist the 25-30 worth showing" half of prioritization (synthesis
+pool + shortlist the 25-40 worth showing" half of prioritization (synthesis
 hook + store + routes)."""
 from __future__ import annotations
 
@@ -964,3 +964,41 @@ def test_get_ideation_returns_only_visible_rows(isolated_settings, _override_com
     body = client.get("/v1/ideation").json()
     assert {i["theme_id"] for i in body["items"]} == {"t-short", "t-wip", "manual:u1"}
     assert body["count"] == 3
+
+
+# ── Reader preferences reach the prioritization pass ─────────────────────────
+
+def test_reader_preferences_reach_ideation_prioritization(
+    facade, isolated_settings, monkeypatch
+):
+    """The same onboarding/settings selection that steers Top Insights ranking
+    is fed to the ideation shortlist pick (Apurva, 2026-07-27). Absent
+    preferences ⇒ no block (covered implicitly by every other test here)."""
+    from unittest.mock import patch
+
+    from app.synthesis import ideation as idn
+
+    db = isolated_settings["supabase"]
+    _seed_company(db, "ent-A")
+    db.table("companies").update({
+        "notification_settings": {
+            "brief_insight_types": ["reliability_signals"],
+            "brief_insight_note": "Latency above all",
+        }
+    }).eq("id", "ent-A").execute()
+
+    _seed_theme_with_signals(facade, "ent-A", "Latency", [
+        ("customer_voice", "complaint", {}, 1)])
+
+    captured = {}
+
+    def _capture(*args, **kwargs):
+        captured["input"] = kwargs.get("input", "")
+        raise RuntimeError("stop after capture — fallback path is fine")
+
+    with patch.object(idn, "llm_call", side_effect=_capture):
+        idn.sequence_ideation(facade, "ent-A", exclude_theme_ids=[])
+
+    assert "READER PREFERENCES" in captured["input"]
+    assert "Reliability & incident signals" in captured["input"]
+    assert "Latency above all" in captured["input"]

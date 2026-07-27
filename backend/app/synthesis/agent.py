@@ -36,7 +36,9 @@ from app.synthesis.convergence import (
 from app.synthesis.ideation import sequence_ideation
 from app.synthesis.delivery import deliver_brief
 from app.synthesis.dedup import classify_candidates
+from app.synthesis.reader_prefs import reader_preferences_block
 from app.synthesis.scoring import classify_theme_fit, score_candidates
+from app.brief_sources import allowed_source_types, display_source_types
 from app.synthesis.top_insights_skill import (
     cards_to_insights,
     company_scale_for,
@@ -267,7 +269,11 @@ Emit BOTH:
 
 Rules:
 - Ground every claim in the provided evidence — never invent numbers.
-- Cite convergence sources by source_type (e.g. "revenue", "customer_voice").
+- Cite convergence sources ONLY from each finding's `sources` list — never
+  name a channel, tool, or data type that is not in that list. The list is
+  already reduced to sources the company actually has; naming anything else
+  claims provenance that does not exist. This applies to the card source
+  chips AND to every sentence of prose.
 - Prefer themes where INDEPENDENT source types agree (breadth), weighted by
   revenue at stake, strategic importance, and competitive pressure.
 - Tag each insight: something_broken (FIX) | something_new (BUILD) |
@@ -604,9 +610,19 @@ def run_synthesis(
     # structured `insights` half stays as grounded as before.
     recipient = _recipient_name(enterprise_id)
     company_scale = company_scale_for(cands)
+    # Real-source provenance (app/brief_sources): a company's cards may only
+    # cite channels it actually has — active connectors + categorized uploads.
+    # Extractor-inferred types outside that set render as uploaded documents.
+    allowed_sources = allowed_source_types(enterprise_id, dataset_slug)
+    display_sources_by_theme = {
+        c.theme_id: display_source_types(c.source_types, allowed_sources)
+        for c in cands
+    }
     skill_request = to_signal_payload(
         cands, recipient=recipient, company_scale=company_scale,
-        freshness=freshness_by_theme, prior_states=states)
+        freshness=freshness_by_theme, prior_states=states,
+        allowed_sources=allowed_sources,
+        reader_preferences=reader_preferences_block(enterprise_id))
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="compose_top_insights",
         model=DEEP_MODEL,
@@ -628,7 +644,9 @@ def run_synthesis(
     # phrasing and the render fields the brief UI reads.
     skill_cards = payload.get("cards", []) or []
     if skill_cards:
-        pool = cards_to_insights(skill_cards, pool)
+        pool = cards_to_insights(
+            skill_cards, pool,
+            display_sources_by_theme=display_sources_by_theme)
     # Drop junk charts the model may still emit despite the prompt rules, so only
     # sensible graphs reach the brief (single-point/all-equal/empty charts carry
     # no information). Unit-mixing is steered by the prompt; this guard catches
