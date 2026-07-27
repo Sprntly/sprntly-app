@@ -793,9 +793,13 @@ CREATE TABLE brief_finding_state (
     fp_revenue_at_stake REAL NOT NULL DEFAULT 0,
     fp_breadth          INTEGER NOT NULL DEFAULT 0,
     fp_latest_signal_at TEXT,
-    -- Phase 2 user-action (mirrors 20260616140000_brief_finding_state_action.sql).
+    -- Phase 2 user-action (mirrors 20260616140000_brief_finding_state_action.sql
+    -- + 20260727100000_brief_ledger_defer_rotation.sql).
     action              TEXT NOT NULL DEFAULT 'surfaced'
-                        CHECK (action IN ('surfaced', 'prd_created', 'dismissed', 'done')),
+                        CHECK (action IN ('surfaced', 'prd_created', 'dismissed', 'deferred', 'done')),
+    times_shown         INTEGER NOT NULL DEFAULT 0,
+    deferred_until      TEXT,
+    last_state          TEXT CHECK (last_state IS NULL OR last_state IN ('new', 'updated')),
     created_at          TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at          TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (enterprise_id, theme_id)

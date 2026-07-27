@@ -1653,6 +1653,37 @@ def test_mapper_competitor_pressure_is_competitive_type():
     assert "urgency: high" in text               # competitor pressure → high urgency
 
 
+def test_mapper_freshness_state_and_previously_line():
+    """Phase 2A: an 'updated' finding carries its state plus a `previously:`
+    fingerprint line so the compose step can open the card with what changed;
+    a 'new' finding carries state: new and no previously line."""
+    from app.synthesis.top_insights_skill import to_signal_payload
+
+    cands = [_conv("t1", "SSO gap", revenue=2000000, signals=5),
+             _conv("t2", "Activation gap")]
+    prior = {"t1": {"last_surfaced_at": "2026-07-20T06:00:00+00:00",
+                    "fp_signal_count": 3, "fp_revenue_at_stake": 1400000.0,
+                    "fp_breadth": 2}}
+    text = to_signal_payload(
+        cands, recipient="Acme", company_scale=None,
+        freshness={"t1": "updated", "t2": "new"}, prior_states=prior)
+    assert "state: updated" in text
+    assert "state: new" in text
+    assert "previously:" in text
+    assert "signals: 3" in text
+    assert "$1,400,000" in text
+    # The new finding must NOT get a previously line (only one in the payload).
+    assert text.count("previously:") == 1
+
+
+def test_mapper_default_freshness_is_new():
+    from app.synthesis.top_insights_skill import to_signal_payload
+
+    text = to_signal_payload([_conv("t9", "X")], recipient="A", company_scale=None)
+    assert "state: new" in text
+    assert "previously:" not in text
+
+
 def test_mapper_cards_to_insights_layers_card_onto_insight():
     from app.synthesis.top_insights_skill import cards_to_insights
 

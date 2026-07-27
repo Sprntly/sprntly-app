@@ -35,7 +35,7 @@ from app.synthesis.convergence import (
 )
 from app.synthesis.ideation import sequence_ideation
 from app.synthesis.delivery import deliver_brief
-from app.synthesis.dedup import suppress_unchanged
+from app.synthesis.dedup import classify_candidates
 from app.synthesis.scoring import classify_theme_fit, score_candidates
 from app.synthesis.top_insights_skill import (
     cards_to_insights,
@@ -203,8 +203,10 @@ _BRIEF_SCHEMA = {
                     "accent": {"type": "string",
                                "description": "hex accent matching the type + valence"},
                     "state": {"type": "string",
-                              "description": "new|updated|carried_promoted (the ledger "
-                                             "is not wired yet — emit \"new\")"},
+                              "description": "new|updated — COPY the matching "
+                                             "finding's `state` from the request; "
+                                             "an updated card's body opens with "
+                                             "what changed"},
                     "title": {"type": "string",
                               "description": "the finding with its stat THEN what's at "
                                              "stake (sized, never promised as a fix)"},
@@ -235,10 +237,12 @@ FOLLOW THE METHOD above (the top-insights skill): you are handed a request \
 computed convergence evidence: multi-source weights, revenue at stake, \
 competitive pressure) plus context (recipient, company scale). The numbers are \
 INPUTS the analysis already produced; PHRASE them per the METHOD, never recompute \
-or invent one. (The skill's fetch/ledger machinery — subscriptions, freshness \
-states, the report shelf — is NOT wired in this deployment: the findings below \
-are your only input, every card takes state "new", and no report shelf is \
-emitted.) Select, rank, and FULLY compose the top {pool_size} findings a product \
+or invent one. (The skill's fetch machinery — subscriptions, cadence config, the report \
+shelf — is NOT wired in this deployment: the findings below are your only \
+input and no report shelf is emitted. The LEDGER IS wired: each finding \
+carries `state` (new | updated) and updated ones a `previously:` fingerprint — \
+copy the state onto the card, and open an updated card's body with what \
+changed.) Select, rank, and FULLY compose the top {pool_size} findings a product \
 manager should act on now, best first. The TOP 3 are the Top Insights brief — the \
 headline set. Ranks 4–{pool_size} are NOT filler: each PM filters this list down to \
 the insight types they care about, so a reader who only wants (say) competitive or \
@@ -494,15 +498,24 @@ def run_synthesis(
             ),
         )
 
-    # Brief de-dup: a theme already surfaced in a prior brief is dropped from
-    # brief candidacy unless its issue materially changed since (new evidence /
-    # ≥20% metric move — see synthesis/dedup.py). Suppressed themes are not lost:
-    # they still flow to the ideation pool via sequence_ideation (which excludes only
-    # the brief top-N, not these). If nothing previously-surfaced changed and no
-    # new themes exist, brief_pool may be smaller than convergence — that's the
-    # intended "nothing new to report" outcome.
+    # Ledger classification (phase 2A, synthesis/dedup.classify_candidates): a
+    # theme already surfaced in a prior brief is held back unless its issue
+    # materially changed (new evidence / ≥20% metric move), and the ledger's
+    # user actions apply — dismissed stays out unless worse, deferred stays out
+    # until its window expires (then returns at full rank), acted-on themes
+    # vacate their slot, and a theme shown ROTATION_LIMIT times with no action
+    # is retired. Everything held back is recorded with its reason and emitted
+    # onto the brief payload (`_backlog`) — nothing is silently lost, and the
+    # ideation pool still receives suppressed themes via sequence_ideation.
     states = get_finding_states(enterprise_id, [c.theme_id for c in convergence])
-    brief_pool = suppress_unchanged(convergence, states)
+    brief_pool, freshness_by_theme, ledger_backlog = classify_candidates(
+        convergence, states)
+    labels_by_theme = {c.theme_id: c.theme_label for c in convergence}
+    backlog_entries = [
+        {"theme_id": tid, "theme_label": labels_by_theme.get(tid, ""),
+         "reason": reason}
+        for tid, reason in ledger_backlog
+    ]
     if not brief_pool:
         # Everything still converging was already surfaced and nothing changed.
         # Don't ship a blank brief — fall back to the full ranking so the page
@@ -510,10 +523,13 @@ def run_synthesis(
         # refresh-gate only regenerates when new signals exist, which normally
         # changes at least one theme.
         logger.info(
-            "brief de-dup suppressed all candidates for %s; "
+            "brief ledger held back all candidates for %s; "
             "falling back to full ranking", enterprise_id,
         )
         brief_pool = convergence
+        # The fallback overrides the hold-backs, so their reasons no longer
+        # describe this brief; every candidate is composable again.
+        backlog_entries = []
     cands = brief_pool[:MAX_CANDIDATES]
 
     tree = load_kpi_tree(enterprise_id)
@@ -585,7 +601,8 @@ def run_synthesis(
     recipient = _recipient_name(enterprise_id)
     company_scale = company_scale_for(cands)
     skill_request = to_signal_payload(
-        cands, recipient=recipient, company_scale=company_scale)
+        cands, recipient=recipient, company_scale=company_scale,
+        freshness=freshness_by_theme, prior_states=states)
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="compose_top_insights",
         model=DEEP_MODEL,
@@ -732,6 +749,11 @@ def run_synthesis(
         "greeting": payload.get("greeting", ""),
         "_brief_cards": payload.get("cards", []) or [],
         "_composed_by_skill": _SKILL,
+        # Phase 2A ledger: everything held back from this brief, with its
+        # reason (carried | dismissed | deferred | in_progress |
+        # rotation_exhausted). "What am I not seeing" reads from here; nothing
+        # is silently dropped.
+        "_backlog": backlog_entries,
     }
     brief_id = save_brief(dataset_slug, week_label, brief, schema_version=BRIEF_SCHEMA_VERSION)
 
@@ -756,6 +778,12 @@ def run_synthesis(
                     tc.latest_signal_at.isoformat() if tc.latest_signal_at else None
                 ),
                 last_brief_id=brief_id,
+                state=freshness_by_theme.get(tc.theme_id, "new"),
+                # A theme absent from the freshness map was composed via the
+                # empty-brief fallback, NOT through the ledger gate — refresh
+                # its fingerprint but preserve the user's action (a dismissal
+                # must survive a fallback re-card).
+                reset_action=tc.theme_id in freshness_by_theme,
             )
         except Exception:  # noqa: BLE001 — never let de-dup bookkeeping break the brief
             logger.warning(

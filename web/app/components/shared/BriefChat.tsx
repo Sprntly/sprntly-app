@@ -21,7 +21,7 @@ import type {
 } from "../../lib/brief-v2-adapter"
 import { AssistantThinkingSkeleton } from "./AssistantThinkingSkeleton"
 import { AskReplyBody } from "./AskReplyBody"
-import { IconClose, IconSendUp, IconSparkle, IconTerminalPrompt, IconUndo } from "./app-icons"
+import { IconClock, IconClose, IconSendUp, IconSparkle, IconTerminalPrompt, IconUndo } from "./app-icons"
 import { useBriefPrototypeMap } from "../design-agent/useBriefPrototypeMap"
 import { prototypeStateForInsight } from "../design-agent/briefPrototypeMap.helpers"
 import { GenerateModal } from "../design-agent/GenerateModal"
@@ -334,12 +334,14 @@ function BriefFindingCard({
   busy,
   generating,
   dismissed,
+  deferred,
   showActions,
   onAsk,
   onGenerateAll,
   onViewPrd,
   onViewEvidence,
   onDismiss,
+  onDefer,
   onRestore,
   insightState,
   mapLoading,
@@ -348,6 +350,9 @@ function BriefFindingCard({
   busy: boolean
   generating: boolean
   dismissed: boolean
+  // "Not now": same grey-out treatment as dismissed, distinct hint — the
+  // finding comes back next cycle instead of staying out.
+  deferred: boolean
   // True while the brief-prototype map is still fetching — the PRD CTA shows a
   // neutral "Loading…" until we know whether this insight already has a PRD.
   mapLoading: boolean
@@ -360,6 +365,7 @@ function BriefFindingCard({
   onViewPrd: () => void
   onViewEvidence: () => void
   onDismiss: () => void
+  onDefer: () => void
   onRestore: () => void
   insightState?: {
     hasPrd: boolean
@@ -379,15 +385,18 @@ function BriefFindingCard({
   // Greys the card out in place — keeps the finding present (not deleted) and
   // hides the heavy detail/viz, exposing a "click to restore" affordance.
   // Clicking the card body (or the restore button) un-greys it.
-  if (dismissed) {
+  if (dismissed || deferred) {
+    const hint = deferred && !dismissed
+      ? "Not now — back next cycle · click to restore"
+      : "Dismissed · click to restore"
     return (
       <article
         className={`fc fc--${accent} fc--dismissed`}
         style={accentStyle}
         role="button"
         tabIndex={0}
-        title="Dismissed · click to restore"
-        aria-label={`Dismissed finding: ${finding.title}. Click to restore.`}
+        title={hint}
+        aria-label={`${deferred && !dismissed ? "Deferred" : "Dismissed"} finding: ${finding.title}. Click to restore.`}
         onClick={onRestore}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
@@ -411,7 +420,7 @@ function BriefFindingCard({
             <IconUndo size={13} />
           </button>
         </div>
-        <span className="fc-dismissed-hint">Dismissed · click to restore</span>
+        <span className="fc-dismissed-hint">{hint}</span>
       </article>
     )
   }
@@ -427,6 +436,9 @@ function BriefFindingCard({
         <div className="fc-top-right">
           <button type="button" className="fc-iconbtn" title="Ask about this finding" aria-label="Ask about this finding" onClick={onAsk}>
             <IconSparkle size={13} />
+          </button>
+          <button type="button" className="fc-iconbtn" title="Not now — bring this back next cycle" aria-label="Defer finding" onClick={onDefer}>
+            <IconClock size={13} />
           </button>
           <button type="button" className="fc-iconbtn" title="Dismiss" aria-label="Dismiss finding" onClick={onDismiss}>
             <IconClose size={13} />
@@ -630,6 +642,11 @@ export function BriefChat() {
   const [busy, setBusy] = useState(false)
   const [cardBusyKey, setCardBusyKey] = useState<string | null>(null)
   const [dismissed, setDismissed] = useState<Set<string>>(new Set())
+  // "Not now" (defer) — same grey-out mechanics as dismiss, separate meaning:
+  // the server ledger suppresses the theme until its deferral expires, then it
+  // returns at full rank. Kept in its own set/storage key so the two actions
+  // stay distinguishable in the UI and in the ledger.
+  const [deferredKeys, setDeferredKeys] = useState<Set<string>>(new Set())
   const busyRef = useRef(false)
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const endRef = useRef<HTMLDivElement>(null)
@@ -747,9 +764,20 @@ export function BriefChat() {
     } catch {
       /* ignore corrupt storage */
     }
+    let restoredDeferred = new Set<string>()
+    try {
+      const rawD = localStorage.getItem(`${dismissKey}:deferred`)
+      if (rawD) {
+        const parsedD = JSON.parse(rawD)
+        if (Array.isArray(parsedD)) restoredDeferred = new Set(parsedD.filter((k) => typeof k === "string"))
+      }
+    } catch {
+      /* ignore corrupt storage */
+    }
     skipDismissPersistRef.current = true
     dismissKeyRef.current = dismissKey
     setDismissed(restored)
+    setDeferredKeys(restoredDeferred)
   }, [dismissKey])
 
   // ── Persist dismissed set (skip the write a fresh restore triggers) ────────
@@ -762,10 +790,11 @@ export function BriefChat() {
     }
     try {
       localStorage.setItem(key, JSON.stringify([...dismissed]))
+      localStorage.setItem(`${key}:deferred`, JSON.stringify([...deferredKeys]))
     } catch {
       /* best effort */
     }
-  }, [dismissed])
+  }, [dismissed, deferredKeys])
 
   const scrollToEnd = useCallback(() => {
     requestAnimationFrame(() => endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }))
@@ -1156,7 +1185,9 @@ export function BriefChat() {
   )
 
   // Dismiss greys the card out in place (it stays in the list); restore un-greys
-  // it. Toggling the dismissed set drives both — and the persist effect writes it.
+  // it. Toggling the dismissed set drives both — and the persist effect writes
+  // it. The server ledger is updated fire-and-forget: dismissed = "not
+  // interested", stays out unless the issue materially worsens.
   const cardDismiss = useCallback((finding: Finding) => {
     const key = finding.detailKey
     if (!key) return
@@ -1166,7 +1197,25 @@ export function BriefChat() {
       next.add(key)
       return next
     })
-  }, [])
+    const meta = content.briefDetails?.[key]?.meta
+    if (meta) void briefApi.dismiss(meta.briefId, meta.insightIndex).catch(() => {})
+  }, [content.briefDetails])
+
+  // "Not now" (defer) — interested, wrong moment. Greys the card like dismiss;
+  // the server ledger suppresses it until the deferral expires, then it
+  // re-enters the next brief at full rank even if unchanged.
+  const cardDefer = useCallback((finding: Finding) => {
+    const key = finding.detailKey
+    if (!key) return
+    setDeferredKeys((s) => {
+      if (s.has(key)) return s
+      const next = new Set(s)
+      next.add(key)
+      return next
+    })
+    const meta = content.briefDetails?.[key]?.meta
+    if (meta) void briefApi.defer(meta.briefId, meta.insightIndex).catch(() => {})
+  }, [content.briefDetails])
 
   // Prototype-preview click — context-aware routing:
   //   case 1: ready prototype → open it
@@ -1228,7 +1277,17 @@ export function BriefChat() {
       next.delete(key)
       return next
     })
-  }, [])
+    setDeferredKeys((s) => {
+      if (!s.has(key)) return s
+      const next = new Set(s)
+      next.delete(key)
+      return next
+    })
+    // Undo returns the theme to the normal lifecycle server-side too, so the
+    // next run doesn't suppress a card the reader visibly brought back.
+    const meta = content.briefDetails?.[key]?.meta
+    if (meta) void briefApi.restore(meta.briefId, meta.insightIndex).catch(() => {})
+  }, [content.briefDetails])
 
   // ── Composer handlers ─────────────────────────────────────────────────────
   const onComposerKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1362,12 +1421,14 @@ export function BriefChat() {
                           busy={busy}
                           generating={cardBusyKey === f.detailKey}
                           dismissed={!!f.detailKey && dismissed.has(f.detailKey)}
+                          deferred={!!f.detailKey && deferredKeys.has(f.detailKey)}
                           showActions={hasRealData}
                           onAsk={() => cardAsk(f)}
                           onGenerateAll={() => cardGenerateAll(f)}
                           onViewPrd={() => cardViewPrd(f)}
                           onViewEvidence={() => cardViewEvidence(f)}
                           onDismiss={() => cardDismiss(f)}
+                          onDefer={() => cardDefer(f)}
                           onRestore={() => cardRestore(f)}
                           insightState={insightState}
                           mapLoading={prototypeMapLoading}

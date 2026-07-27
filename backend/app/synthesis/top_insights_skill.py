@@ -115,6 +115,8 @@ def to_signal_payload(
     *,
     recipient: str,
     company_scale: Optional[str],
+    freshness: Optional[dict[str, str]] = None,
+    prior_states: Optional[dict[str, dict]] = None,
 ) -> str:
     """Render the ranked candidates as the skill's `brief_request` (a list of
     `signal` objects + context), as the user input for the bound composition
@@ -135,6 +137,12 @@ def to_signal_payload(
     The rendered text is human-readable JSON-ish blocks (mirroring how the
     pipeline already renders candidate payloads) rather than strict JSON, since
     the model reads it as grounding, not as a parsed contract.
+
+    `freshness` (theme_id → 'new' | 'updated') and `prior_states` (theme_id →
+    ledger row) come from the phase-2A classification: an 'updated' finding
+    carries its state plus a `previously:` line rendered from the ledger
+    fingerprint, so the compose step can open the card with what changed
+    ("flagged last week at N signals / $X — now …") per SKILL.md step 8.
     """
     lines: list[str] = [
         "BRIEF_REQUEST — compose the Top Insights brief from these "
@@ -161,9 +169,24 @@ def to_signal_payload(
             for e in c.evidence
         )
         category = "competitive" if c.competitor_pressure else "customer_problems"
+        state = (freshness or {}).get(c.theme_id, "new")
+        prev = (prior_states or {}).get(c.theme_id) or {}
+        previously = ""
+        if state == "updated" and prev:
+            prev_rev = float(prev.get("fp_revenue_at_stake") or 0.0)
+            previously = (
+                f"    previously: {{ surfaced_at: "
+                f"\"{prev.get('last_surfaced_at') or 'earlier'}\", "
+                f"signals: {int(prev.get('fp_signal_count') or 0)}, "
+                f"revenue_at_stake: \"${prev_rev:,.0f}\", "
+                f"breadth: {int(prev.get('fp_breadth') or 0)} }}  "
+                f"# open the body with what CHANGED vs this\n"
+            )
         lines.append(
             f"  - id: {c.theme_id}\n"
             f"    category: {category}\n"
+            f"    state: {state}\n"
+            + previously +
             f"    type: {skill_type}\n"
             f"    pain: {{ metric: \"revenue at stake / converging sources\", "
             f"value: \"{amount if rev > 0 else f'{c.breadth} sources converging'}\", "
