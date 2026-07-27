@@ -79,6 +79,9 @@ from app.db.asks import (
     start_cached_ask,
 )
 
+# Public-feedback runs (captured record sets + rendered reports)
+from app.db.public_feedback_runs import save_public_feedback_run
+
 # Website-analysis jobs (onboarding, fire-and-forget)
 from app.db.website_analysis import (
     complete_analysis_job,

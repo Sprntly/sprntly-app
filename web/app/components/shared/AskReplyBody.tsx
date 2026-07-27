@@ -70,7 +70,9 @@ export function AskReplyBody({
   // escape the tags. The report is self-contained, so we skip the simulated-typing
   // stream and the citations chrome below it.
   if (looksLikeHtmlBrief(reply.answer)) {
-    const report = <HtmlReportView html={reply.answer} title="Voice of Customer report" />
+    const reportTitle =
+      reply._skill === "public-feedback-report" ? "Public Feedback report" : "Voice of Customer report"
+    const report = <HtmlReportView html={reply.answer} title={reportTitle} />
     return animateIn ? (
       <div className="ask-reply-body ask-reply-body--enter">{report}</div>
     ) : (
