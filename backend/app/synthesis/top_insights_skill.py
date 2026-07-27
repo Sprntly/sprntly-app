@@ -120,6 +120,7 @@ def to_signal_payload(
     freshness: Optional[dict[str, str]] = None,
     prior_states: Optional[dict[str, dict]] = None,
     allowed_sources: Optional[set[str]] = None,
+    reader_preferences: str = "",
 ) -> str:
     """Render the ranked candidates as the skill's `brief_request` (a list of
     `signal` objects + context), as the user input for the bound composition
@@ -159,9 +160,13 @@ def to_signal_payload(
         "never recompute or invent one.",
         f"recipient: {recipient or 'there'}",
         f"company_scale: {company_scale or '(unknown — rank within the brief)'}",
-        "",
-        "signals:",
     ]
+    # The workspace's stated emphasis rides INSIDE the skill request — it is
+    # part of the skill's input contract (SKILL.md step 4: the selection
+    # profile), not ambient context.
+    if reader_preferences:
+        lines += ["", reader_preferences.rstrip()]
+    lines += ["", "signals:"]
     for c in candidates:
         skill_type = _candidate_skill_type(c)
         rev = c.revenue_at_stake_usd

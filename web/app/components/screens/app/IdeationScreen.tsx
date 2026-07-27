@@ -46,7 +46,7 @@ const TYPE_STYLE: Record<IdeaType, { color: string; bg: string; border: string }
 
 // ── API → idea mapping ────────────────────────────────────────────────────────
 // Ideas come from the weekly analysis: ranks ≥ 4 (the top 3 go into the brief),
-// with the weekly prioritization pass shortlisting the 25-30 worth showing —
+// with the weekly prioritization pass shortlisting the 25-40 worth showing —
 // the backend returns only that visible set. It returns an empty list when no
 // brief exists for the company, so an empty page means "no analysis yet".
 
