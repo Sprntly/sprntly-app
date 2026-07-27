@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vitest"
 import type { Brief, Insight } from "../api"
-import { briefToBriefV2State, companyLabel, humanizeSource } from "../brief-v2-adapter"
+import {
+  briefToBriefV2State,
+  companyLabel,
+  humanizeSource,
+  orderPoolForTypes,
+  selectFindingsForTypes,
+} from "../brief-v2-adapter"
 
 function makeInsight(overrides: Partial<Insight> & { tag: Insight["tag"] }): Insight {
   return {
@@ -420,5 +426,82 @@ describe("briefToBriefV2State — ledger held-back line + updated chip (phase 2B
     const all = [out.hero!, ...out.supporting]
     expect(all.some((f) => f.skillState === "updated")).toBe(true)
     expect(all.filter((f) => f.skillState === "updated")).toHaveLength(1)
+  })
+})
+
+describe("orderPoolForTypes", () => {
+  // makeInsight doesn't thread insight_types (the filter tests use a leaner
+  // fixture for that); attach it after the fact so these tests still get the
+  // full card shape briefToBriefV2State-adjacent helpers expect.
+  const withTypes = (insight: Insight, types: string[]): Insight => ({
+    ...insight,
+    insight_types: types,
+  })
+
+  it("stable-partitions matches before non-matches, preserving relative order within each group", () => {
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["top_problems"])
+    const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["wins"])
+    const c = withTypes(makeInsight({ tag: "something_broken", title: "C" }), ["top_problems"])
+    const d = withTypes(makeInsight({ tag: "something_broken", title: "D" }), ["build_priorities"])
+    const e = withTypes(makeInsight({ tag: "something_broken", title: "E" }), ["top_problems"])
+    const ordered = orderPoolForTypes([a, b, c, d, e], ["top_problems"])
+    expect(ordered.map((i) => i.title)).toEqual(["A", "C", "E", "B", "D"])
+  })
+
+  it("matches on any intersecting type, not just an exact single-type match", () => {
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["wins"])
+    const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), [
+      "top_problems",
+      "wins",
+    ])
+    const c = withTypes(makeInsight({ tag: "something_broken", title: "C" }), ["top_problems"])
+    const ordered = orderPoolForTypes([a, b, c], ["top_problems"])
+    expect(ordered.map((i) => i.title)).toEqual(["B", "C", "A"])
+  })
+
+  it("returns the input unchanged (same order, same reference) when there is no selection", () => {
+    const insights = [
+      withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["top_problems"]),
+      withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["wins"]),
+    ]
+    expect(orderPoolForTypes(insights, [])).toBe(insights)
+  })
+
+  it("leaves order unchanged when nothing matches the selection", () => {
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A" }), ["wins"])
+    const b = withTypes(makeInsight({ tag: "something_broken", title: "B" }), ["build_priorities"])
+    expect(orderPoolForTypes([a, b], ["top_problems"]).map((i) => i.title)).toEqual(["A", "B"])
+  })
+
+  it("is wired into selectFindingsForTypes: matched pool findings render in the reordered sequence", () => {
+    // Multiple selected types spread across the pool — selectFindingsForTypes
+    // routes the matched-only result through orderPoolForTypes, so the picked
+    // findings come out in the same order the reorder would produce (best-first
+    // pool order, restricted to matches).
+    const a = withTypes(makeInsight({ tag: "something_broken", title: "A", confidence: 0.9 }), [
+      "top_problems",
+    ])
+    const b = withTypes(makeInsight({ tag: "something_broken", title: "B", confidence: 0.85 }), [
+      "wins",
+    ])
+    const c = withTypes(makeInsight({ tag: "something_broken", title: "C", confidence: 0.8 }), [
+      "top_problems",
+    ])
+    const d = withTypes(makeInsight({ tag: "something_broken", title: "D", confidence: 0.7 }), [
+      "competitor_moves",
+    ])
+    const brief: Brief = {
+      id: 1,
+      company: "acme",
+      generated_at: "2026-07-26T00:00:00Z",
+      week_label: "w",
+      summary_headline: "H",
+      insights: [a, b, c],
+      _pool: [a, b, c, d],
+    }
+    const picked = selectFindingsForTypes(brief, ["top_problems", "wins"]).map((i) => i.title)
+    // Matches A, B, C (pool order) — D (competitor_moves) never matched, so it
+    // never enters the reordered/matched result.
+    expect(picked).toEqual(["A", "B", "C"])
   })
 })

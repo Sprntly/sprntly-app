@@ -517,14 +517,39 @@ function buildSourcesLine(insights: Insight[]): string {
 // top 3 so the surface is never blank.
 const MAX_RENDERED_FINDINGS = 3
 
+// Stable partition: findings whose `insight_types` intersect `selectedTypes`
+// keep their relative order and lead; everything else keeps its relative
+// order behind them. No selection ⇒ input returned unchanged (same order,
+// same array) — this is the identity case callers rely on to skip reordering
+// entirely when the reader hasn't picked anything.
+export function orderPoolForTypes(insights: Insight[], selectedTypes: string[]): Insight[] {
+  if (!selectedTypes || selectedTypes.length === 0) return insights
+  const wanted = new Set(selectedTypes)
+  const matching: Insight[] = []
+  const rest: Insight[] = []
+  for (const ins of insights) {
+    if (Array.isArray(ins.insight_types) && ins.insight_types.some((t) => wanted.has(t))) {
+      matching.push(ins)
+    } else {
+      rest.push(ins)
+    }
+  }
+  return [...matching, ...rest]
+}
+
 export function selectFindingsForTypes(brief: Brief, selectedTypes: string[]): Insight[] {
   const topThree = (brief.insights || []).filter((i): i is Insight => Boolean(i))
   if (!selectedTypes || selectedTypes.length === 0) return topThree
-  const wanted = new Set(selectedTypes)
   const pool = ((brief._pool && brief._pool.length ? brief._pool : brief.insights) || []).filter(
     (i): i is Insight => Boolean(i),
   )
-  const matched = pool.filter(
+  // orderPoolForTypes's stable partition puts every matching finding first, in
+  // pool order — filtering it back down to just that leading group is
+  // equivalent to filtering `pool` directly (the matching bucket's relative
+  // order is untouched), but routes through the shared ordering helper so the
+  // two stay in lockstep if this matched-only rule ever grows fuzzier.
+  const wanted = new Set(selectedTypes)
+  const matched = orderPoolForTypes(pool, selectedTypes).filter(
     (i) => Array.isArray(i.insight_types) && i.insight_types.some((t) => wanted.has(t)),
   )
   return (matched.length ? matched : topThree).slice(0, MAX_RENDERED_FINDINGS)
