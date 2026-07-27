@@ -149,16 +149,40 @@ def _tool_msg(payload=None):
 
 
 def _capture_client(captured: dict):
-    """A fake Anthropic client that records the kwargs of messages.create.
+    """A fake Anthropic client that records the kwargs of messages.create AND
+    messages.stream (call_with_web_search streams on the long timeout).
 
     Returns a tool_use response when a schema/tools call is made (json_schema
     path), else a plain text response (call_md path)."""
+    def _reply(kw):
+        return _tool_msg() if kw.get("tools") else _msg("done")
+
     def _create(**kw):
         captured.update(kw)
-        if kw.get("tools"):
-            return _tool_msg()
-        return _msg("done")
-    return SimpleNamespace(messages=SimpleNamespace(create=_create))
+        return _reply(kw)
+
+    class _FakeStream:
+        def __init__(self, kw):
+            self._kw = kw
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        @property
+        def text_stream(self):
+            return iter(())
+
+        def get_final_message(self):
+            return _reply(self._kw)
+
+    def _stream(**kw):
+        captured.update(kw)
+        return _FakeStream(kw)
+
+    return SimpleNamespace(messages=SimpleNamespace(create=_create, stream=_stream))
 
 
 def test_gateway_skill_prepends_method_to_cacheable_prefix(isolated_settings, monkeypatch):
