@@ -3754,30 +3754,6 @@ export type ArtifactItem =
       is_complete: boolean
       preview_image_url: string | null
     }
-  | {
-      type: "report"
-      id: number
-      title: string
-      status: string
-      created_at: string
-      source: { question: string }
-      open: { report_id: number }
-    }
-
-/** A stored public-feedback report (rendered html + identity). */
-export type PublicFeedbackReport = {
-  id: number
-  window_label: string
-  question: string
-  html: string
-  created_at: string | null
-}
-
-export const publicFeedbackApi = {
-  /** One stored report by id (404s on foreign/unknown ids). */
-  getReport: (reportId: number) =>
-    api.get<PublicFeedbackReport>(`/v1/public-feedback/reports/${reportId}`),
-}
 
 export const artifactsApi = {
   /** Unified artifact list for a company slug, newest first. */

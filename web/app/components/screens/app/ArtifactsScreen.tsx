@@ -9,10 +9,8 @@ import {
   artifactsApi,
   prdApi,
   evidenceApi,
-  publicFeedbackApi,
   type ArtifactItem,
 } from "../../../lib/api"
-import { HtmlReportView } from "../../shared/HtmlReportView"
 import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
 import { prototypePath } from "../../../lib/routes"
 import { AppLayout } from "./AppLayout"
@@ -25,21 +23,19 @@ import { EmptyPane } from "../../shared/EmptyPane"
 // History holds only chats and Artifacts is the browsable library of durable
 // outputs (PRDs, prototypes, evidence).
 
-type ArtifactFilter = "all" | "prd" | "prototype" | "evidence" | "report"
+type ArtifactFilter = "all" | "prd" | "prototype" | "evidence"
 
 const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "all", label: "All" },
   { id: "prd", label: "PRDs" },
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
-  { id: "report", label: "Reports" },
 ]
 
 const ARTIFACT_BADGE: Record<ArtifactItem["type"], { label: string; bg: string; color: string }> = {
   prd:       { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
   prototype: { label: "PROTOTYPE", bg: "#DBEAFE", color: "#1E40AF" },
   evidence:  { label: "EVIDENCE",  bg: "#FEF0E6", color: "#B45309" },
-  report:    { label: "REPORT",    bg: "#F3E8FF", color: "#7E22CE" },
 }
 
 /** Compact relative time, e.g. "just now", "3h ago", "2d ago", "May 3". */
@@ -79,12 +75,6 @@ function artifactSourceLine(a: ArtifactItem): string {
     if (rel) parts.push(rel)
     return parts.join(" · ")
   }
-  if (a.type === "report") {
-    // Public-feedback report — produced by a chat ask, not a brief.
-    const parts = ["from chat"]
-    if (rel) parts.push(rel)
-    return parts.join(" · ")
-  }
   // prd | evidence
   const week = a.source.week_label || "brief"
   const parts = [`from Brief ${week}`]
@@ -113,18 +103,6 @@ function ArtifactTypeIcon({ type }: { type: ArtifactItem["type"] }) {
       <div style={wrap}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
           <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
-        </svg>
-      </div>
-    )
-  }
-  if (type === "report") {
-    // Globe — public-web feedback.
-    return (
-      <div style={wrap}>
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-          <circle cx="12" cy="12" r="9" />
-          <line x1="3" y1="12" x2="21" y2="12" />
-          <path d="M12 3a13.5 13.5 0 0 1 0 18a13.5 13.5 0 0 1 0-18" />
         </svg>
       </div>
     )
@@ -369,12 +347,6 @@ export function ArtifactsScreen() {
   const [importError, setImportError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  // Public-feedback report viewer (a full-screen overlay: reports have no
-  // content-panel tab — they're self-contained HTML documents rendered in the
-  // same sandboxed iframe the chat uses). null = closed; html === null while
-  // the stored report is loading.
-  const [reportView, setReportView] = useState<{ title: string; html: string | null } | null>(null)
-
   const refreshArtifacts = useCallback(() => {
     if (!activeCompany) return
     setArtifactsLoading(true)
@@ -425,22 +397,12 @@ export function ArtifactsScreen() {
         setContent({ evidence: markdownToEvidenceState(rec.payload_md), evidenceGenerating: false })
         return
       }
-      if (a.type === "report") {
-        // Stored public-feedback report → overlay viewer. Opens immediately in
-        // its loading state; the fetch fills the iframe in.
-        setActiveArtifactKey(`${a.type}-${a.id}`)
-        setReportView({ title: a.title, html: null })
-        const rec = await publicFeedbackApi.getReport(a.open.report_id)
-        setReportView({ title: a.title, html: rec.html })
-        return
-      }
       // prototype — open the in-tab canvas for its parent PRD.
       router.push(prototypePath(a.open.prd_id))
     } catch {
       // Failed load: drop the loading flag (the rail shows its empty state
       // rather than spinning forever) and say what happened.
       setContent({ evidenceGenerating: false })
-      setReportView(null)
       showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
   }, [setContent, openContentPanel, openPrdTab, router, showToast])
@@ -526,61 +488,6 @@ export function ArtifactsScreen() {
           onOpen={openArtifact}
         />
       </div>
-
-      {/* Stored public-feedback report viewer. */}
-      {reportView && (
-        <div
-          data-testid="report-viewer-overlay"
-          onClick={() => { setReportView(null); setActiveArtifactKey(null) }}
-          style={{
-            position: "fixed", inset: 0, zIndex: 60,
-            background: "rgba(26,26,23,0.45)",
-            display: "flex", alignItems: "stretch", justifyContent: "center",
-            padding: "28px 16px",
-          }}
-        >
-          <div
-            role="dialog"
-            aria-label={reportView.title}
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: "min(920px, 100%)", background: "#fff", borderRadius: 12,
-              display: "flex", flexDirection: "column", overflow: "hidden",
-              boxShadow: "0 24px 64px rgba(0,0,0,0.28)",
-            }}
-          >
-            <div style={{
-              display: "flex", alignItems: "center", justifyContent: "space-between",
-              padding: "12px 18px", borderBottom: "1px solid var(--line, #E8E6E0)",
-            }}>
-              <div style={{ fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {reportView.title}
-              </div>
-              <button
-                type="button"
-                data-testid="report-viewer-close"
-                onClick={() => { setReportView(null); setActiveArtifactKey(null) }}
-                aria-label="Close report"
-                style={{
-                  border: "none", background: "transparent", cursor: "pointer",
-                  fontSize: 18, lineHeight: 1, color: "var(--ink-3, #8C8A84)", padding: 6,
-                }}
-              >
-                ×
-              </button>
-            </div>
-            <div style={{ flex: 1, overflowY: "auto", background: "#fff" }}>
-              {reportView.html === null ? (
-                <div style={{ padding: 40, fontSize: 13, color: "var(--ink-3, #8C8A84)" }}>
-                  Loading report…
-                </div>
-              ) : (
-                <HtmlReportView html={reportView.html} title="Public Feedback report" />
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </AppLayout>
   )
 }

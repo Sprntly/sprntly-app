@@ -15,23 +15,6 @@ logger = logging.getLogger(__name__)
 
 
 @retry_on_disconnect
-def get_public_feedback_run(company_id: str, run_id: int) -> dict | None:
-    """One run WITH its stored html, company-scoped (None when the id doesn't
-    exist or belongs to another tenant — the route 404s either way, so
-    existence is never disclosed cross-tenant)."""
-    c = require_client()
-    resp = (
-        c.table("public_feedback_runs")
-        .select("id, question, window_label, html, created_at")
-        .eq("company_id", company_id)
-        .eq("id", run_id)
-        .limit(1)
-        .execute()
-    )
-    return resp.data[0] if resp.data else None
-
-
-@retry_on_disconnect
 def latest_public_feedback_run(company_id: str) -> dict | None:
     """The most recent run for a company (records + metadata + created_at), or
     None. What the skill's query mode answers follow-up questions from."""
