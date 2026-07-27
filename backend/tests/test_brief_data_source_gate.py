@@ -283,3 +283,38 @@ def test_startup_pass_skips_no_source_company(isolated_settings, monkeypatch):
          patch("app.brief_runner.warm_synthesis_drilldowns") as warm:
         sb.generate_all_synthesis_briefs()  # must not raise
     warm.assert_not_called()
+
+
+# ── scheduler delivery — the catch-up fallback must respect the same rule ────
+#
+# The weekly tick's phase-2 fallback delivers the CURRENT brief even when
+# generation was refused, so a leftover brief row (created before the
+# generation gate) would still be pushed to a Jira-only company every week.
+
+import app.scheduler as sched_mod
+
+
+async def test_delivery_suppressed_without_data_source(
+    isolated_settings, monkeypatch
+):
+    _patch_connections(monkeypatch, isolated_settings, [_conn("jira")])
+    with patch("app.db.briefs.get_current_brief",
+               return_value={"id": 1, "insights": []}), \
+         patch("app.synthesis.delivery.deliver_brief") as deliver:
+        delivered = await sched_mod._deliver_brief_for_company("co-1", "acme")
+    assert delivered is False
+    deliver.assert_not_called()
+
+
+async def test_delivery_proceeds_with_data_source(
+    isolated_settings, monkeypatch
+):
+    _patch_connections(
+        monkeypatch, isolated_settings, [_conn("jira"), _conn("hubspot")]
+    )
+    brief = {"id": 1, "insights": []}
+    with patch("app.db.briefs.get_current_brief", return_value=brief), \
+         patch("app.synthesis.delivery.deliver_brief") as deliver:
+        delivered = await sched_mod._deliver_brief_for_company("co-1", "acme")
+    assert delivered is True
+    deliver.assert_called_once_with("co-1", brief)

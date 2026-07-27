@@ -362,7 +362,15 @@ async def _deliver_brief_for_company(company_id: str, slug: str) -> bool:
     """Deliver the company's CURRENT brief (Slack + email) off the event loop.
     Returns True when a delivery attempt was made (deliver_brief is itself
     best-effort per channel/recipient and never raises), False when there is no
-    brief to deliver yet."""
+    brief to deliver yet.
+
+    Evidence gate: the tick's catch-up fallback reaches here even when
+    generation was refused (NoBriefDataSourceError is swallowed per-workspace),
+    so a leftover brief row from before the generation gate would still be
+    pushed weekly to a company with no evidence source. Apply the same rule
+    delivery-side: no evidence-bearing data source → nothing is announced.
+    has_brief_data_source fails open, so an infra hiccup never mutes delivery."""
+    from app.brief_gate import has_brief_data_source
     from app.db.briefs import get_current_brief
     from app.synthesis.delivery import deliver_brief
 
@@ -370,6 +378,12 @@ async def _deliver_brief_for_company(company_id: str, slug: str) -> bool:
     if not brief:
         logger.warning(
             "Top Insights delivery: no current brief for %s — skipping", slug)
+        return False
+    if not await asyncio.to_thread(has_brief_data_source, company_id, slug):
+        logger.info(
+            "Top Insights delivery: no evidence-bearing data source for %s "
+            "(slug=%s) — suppressing delivery of existing brief", company_id,
+            slug)
         return False
     await asyncio.to_thread(deliver_brief, company_id, brief)
     return True
