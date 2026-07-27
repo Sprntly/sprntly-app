@@ -81,14 +81,13 @@ export function LlmContextImportCard() {
       : `Added "${fileName}" to your Company documentation — it's feeding your knowledge graph.`
   }
 
-  /** Poll reader 2 — the background LLM pass — and upgrade the status once it
-   *  lands. Reader 1 (the deterministic heading parse) only understands files
-   *  our own prompt produced; an edited or reworded export reads as empty to it
-   *  and fine to the LLM, so this is what makes an arbitrary context document
-   *  count. Unlike onboarding we do NOT prefill any form from the result — we
+  /** Poll the background LLM pass — the only reader of the file (see
+   *  backend/app/llm_context.py) — and upgrade the status once it lands. It is
+   *  what makes an arbitrary context document count, edited or reworded exports
+   *  included. Unlike onboarding we do NOT prefill any form from the result — we
    *  only report what we understood. Runs in the background (the KG feed already
    *  happened at upload), never rejects, and no-ops if the card unmounts. */
-  async function refineWithReader2(jobId: number, fileName: string) {
+  async function refineWithExtraction(jobId: number, fileName: string) {
     let final: LlmContextJobStatus
     try {
       final = await pollUntil<LlmContextJobStatus>({
@@ -116,9 +115,9 @@ export function LlmContextImportCard() {
     setStatus(null)
     let res
     try {
-      // Reader 1 runs inline and returns here. The same call files the .md as a
-      // Company Document, ingests it into the knowledge graph, and kicks off
-      // reader 2 (the background LLM pass), handing back its job_id.
+      // The upload files the .md as a Company Document, ingests it into the
+      // knowledge graph, and kicks off the background LLM pass, handing back its
+      // job_id. It carries no fields itself — that pass is the only reader.
       res = await llmContextApi.importFile(file)
     } catch (e) {
       if (!unmounted.current) {
@@ -134,7 +133,7 @@ export function LlmContextImportCard() {
 
     // Filing the raw .md + the KG ingest is the whole outcome here (we never
     // prefill). If that failed server-side, say so plainly and don't claim a
-    // knowledge-graph feed that didn't happen — the readers are moot then.
+    // knowledge-graph feed that didn't happen — the extraction is moot then.
     if (res.filed === false) {
       setStatus(
         res.note ??
@@ -145,17 +144,18 @@ export function LlmContextImportCard() {
 
     const read = Object.keys(res.fields).length
     if (res.ok) {
-      // Reader 1 already understood the file — report it and we're done.
+      // The upload already carried fields (it doesn't today, but a replayed job
+      // result comes back in the same shape) — report it and we're done.
       setStatus(importedLine(file.name, read))
       return
     }
-    // Reader 1 read nothing. The file is already filed + feeding the KG, so
-    // confirm that now and let reader 2 upgrade the line if the LLM reads more.
+    // The normal path: no fields yet. The file is already filed + feeding the
+    // KG, so confirm that now and let the extraction upgrade the line.
     setStatus(
       `Added "${file.name}" to your Company documentation — it's feeding your knowledge graph. Reading it for a fuller picture…`,
     )
     if (res.job_id != null) {
-      void refineWithReader2(res.job_id, file.name)
+      void refineWithExtraction(res.job_id, file.name)
     } else {
       setStatus(importedLine(file.name, read))
     }
@@ -177,10 +177,24 @@ export function LlmContextImportCard() {
           {busy ? "Reading…" : "Upload .md"}
         </button>
       </span>
-      <span className="muted set-conn-llm-desc">
-        Copy the prompt, paste it into your AI tool to generate a .md file, then
-        upload that file here — we&apos;ll feed it into your knowledge graph.
-      </span>
+      {/* Same lead-in as the onboarding step, and for the same reason: the
+          card title doesn't tell you the prompt is for the assistant you
+          already use daily. The closing clause differs — onboarding sells a
+          shorter setup, which means nothing to someone already set up, so this
+          one names where the context lands instead. */}
+      <div className="ctx-import-lead">
+        <span className="ctx-import-lead-copy">
+          <strong className="ctx-import-lead-title">
+            Already use Claude or ChatGPT for work?
+          </strong>
+          <span className="ctx-import-lead-text">
+            Copy the prompt below and paste it into Claude or ChatGPT. It will
+            extract the context it already has about your business into a file
+            you can download and upload here — bringing that context into
+            Sprntly, where it feeds your knowledge graph.
+          </span>
+        </span>
+      </div>
       <span className="set-conn-llm-show">
         {/* Reveal-then-copy: show the prompt so the user sees (and can edit)
             what they're about to paste into their AI tool before taking it. */}

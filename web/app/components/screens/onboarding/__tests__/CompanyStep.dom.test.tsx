@@ -1,19 +1,20 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 02 — "Tell us about your company"
+// Container mount test for onboarding step 01 — "Tell us about your company"
 // (v6 screenshot spec 2026-07-17). Covers: the name/website/mission/strategy
 // fields render (seeded from the saved workspace) with only the name starred;
 // an empty name blocks Continue (field error, no persistence, no navigation);
 // the website is OPTIONAL for everyone — an empty one saves fine and simply
 // skips the background analysis; a successful save with a workspace present
-// goes updateWorkspace (incl. portfolio/planning_cycle/onboarding_step 3) +
+// goes updateWorkspace (incl. portfolio/planning_cycle/onboarding_step 2) +
 // upsertPrimaryProduct → background website analysis → push(/onboarding/
-// connectors); a first-time save (no workspace) creates one with account_type
-// "company" (the personal split is retired).
+// import-context); a first-time save (no workspace) creates one with
+// account_type "company" (the personal split is retired).
 //
-// The workspace may ALREADY exist here since 2026-07-25: the import step now
-// runs first and creates it when a file is uploaded there. Hence the seeding
-// is fill-only and the resume marker points at connectors, not at the import.
+// It leads the flow again since 2026-07-27, ahead of the import step, because
+// the name and website collected here are written into the prompt that step
+// hands out. The workspace may still already exist (a returning user, or one
+// who stepped back), so the seeding stays fill-only.
 //
 // product-helpers (validateProductWebsite / normalizeProductWebsite) run REAL
 // — they're pure and accept an empty website.
@@ -164,7 +165,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
@@ -172,7 +173,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
       strategy: null,
       portfolio: null,
       planning_cycle: null,
-      onboarding_step: 3,
+      onboarding_step: 2,
     })
     expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
       name: "Acme",
@@ -183,7 +184,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     expect(createWorkspaceMock).not.toHaveBeenCalled()
   })
 
-  it("a successful save with a workspace present goes updateWorkspace + upsertPrimaryProduct → analysis → product step", async () => {
+  it("a successful save with a workspace present goes updateWorkspace + upsertPrimaryProduct → analysis → import step", async () => {
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 2 }))
     upsertProductMock.mockResolvedValue(makeProduct({ website: "https://acme.com" }))
     mount()
@@ -202,7 +203,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
@@ -210,7 +211,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
       strategy: null,
       portfolio: null,
       planning_cycle: null,
-      onboarding_step: 3,
+      onboarding_step: 2,
     })
     // The typed website is normalized to https and seeded onto the product.
     expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
@@ -232,7 +233,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
     })
     expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
     const arg = createWorkspaceMock.mock.calls[0][0] as Record<string, unknown>
@@ -242,9 +243,9 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     // Sign-up always writes account_type "company" since v6.
     expect(arg.accountType).toBe("company")
     expect(arg.userId).toBe("u-1")
-    // The resume marker points at the step AFTER this one (connectors), not at
-    // the import step this one now sits behind.
-    expect(arg.onboardingStep).toBe(3)
+    // The resume marker points at the step AFTER this one — the import step,
+    // whose prompt is filled with the name just entered.
+    expect(arg.onboardingStep).toBe(2)
     // No portfolio/planning cycle typed → no follow-up patch.
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
   })

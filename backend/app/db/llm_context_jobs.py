@@ -1,10 +1,9 @@
 """Fire-and-forget LLM-context extraction jobs for onboarding.
 
-The "Import your context" step parses the uploaded Markdown twice. The
-deterministic heading walk runs inline and returns with the POST — it is
-instant and exact, but only understands files our own prompt produced. The LLM
-pass reads context documents of ANY shape, costs a real round-trip, and so runs
-here as a background job the client polls.
+The "Import your context" step reads the uploaded Markdown with an LLM — the
+only reader since the v3 prompt (see app/llm_context.py). It handles context
+documents of ANY shape, costs a real round-trip, and so runs here as a
+background job the client polls rather than blocking the upload.
 
 Status walks generating → ready (or error). `result` holds the same
 {fields, unmapped, format_version, note} dict the POST returns, so the frontend

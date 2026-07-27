@@ -130,10 +130,10 @@ export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
   {
     id: "home-prompt-customer-feedback",
     icon: "diamond",
-    title: "Give me feedback on last week's customer conversations",
+    title: "Give me summary on last week's customer conversations",
     desc: "Fills Ask so you can edit or send.",
     target: "ondemand",
-    prompt: "Give me feedback on last week's customer conversations.",
+    prompt: "Give me summary on last week's customer conversations.",
   },
 ]
 

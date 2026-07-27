@@ -11,17 +11,15 @@ import type { WorkspaceCompany } from "./types"
 /**
  * Write an imported context onto the workspace as a PREFILL.
  *
- * Shared by both readers of an uploaded context file — the deterministic
- * heading parse that returns with the upload, and the background LLM
- * extraction that lands while the user is on the connectors step — so an
- * imported value reaches the workspace through exactly one code path no matter
- * which pass found it.
+ * Shared by every entry point that can apply one — the onboarding import step,
+ * the workspace step's upload banner, and the background LLM extraction that
+ * lands while the user is on connectors — so an imported value reaches the
+ * workspace through exactly one code path no matter which produced it.
  *
  * THE ONE RULE: an import never overwrites the user. Every field is written
  * only when the workspace has left it empty, which is what makes it safe to
- * run this a second time when the LLM pass finishes — anything the user typed
- * on a step they have already passed stands, and anything the faster
- * deterministic parse already wrote stands too.
+ * run more than once — anything the user typed on a step they have already
+ * passed stands, and so does anything an earlier apply already wrote.
  *
  * THREE DESTINATIONS, one call: the company row (PostgREST), the primary
  * product row, and the default `workspaces` row — the last via the onboarding

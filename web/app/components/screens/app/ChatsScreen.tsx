@@ -436,7 +436,7 @@ const chatsListCache = new Map<string, ConversationRecord[]>()
 const briefEntryCache = new Map<string, BriefEntry | null>()
 
 export function ChatsScreen() {
-  const { goTo } = useNavigation()
+  const { goTo, goToNewChat } = useNavigation()
   const { content } = useContent()
   const { activeCompany } = useCompany()
   const auth = useAuth()
@@ -673,10 +673,13 @@ export function ChatsScreen() {
           </div>
         </div>
 
-        {/* New chat — green pill, far right. */}
+        {/* New chat — green pill, far right. `goToNewChat` (not `goTo("chat")`,
+            which resumes whatever tab was last open) so this always lands on a
+            fresh chat tab, same as the sidebar's `+`. */}
         <button
           type="button"
-          onClick={() => goTo("chat")}
+          aria-label="New chat"
+          onClick={goToNewChat}
           style={{
             fontSize: 13, padding: "8px 18px", borderRadius: 999,
             background: "var(--accent, #179463)", color: "#fff", border: "none",

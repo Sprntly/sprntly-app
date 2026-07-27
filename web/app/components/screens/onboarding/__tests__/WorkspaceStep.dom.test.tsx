@@ -291,7 +291,7 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     expect(setWorkspaceMock).toHaveBeenCalled()
   })
 
-  it("still kicks the LLM pass when the heading walk found nothing (a non-contract .md)", async () => {
+  it("kicks the LLM pass on an upload that carries no fields (the normal path)", async () => {
     const startImportMock = vi.fn()
     authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
     onboardingMock.mockReturnValue(
@@ -300,8 +300,8 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
         startContextImport: startImportMock,
       }),
     )
-    // ok:false is what a reworded / table-heavy doc returns from the heading
-    // walk — but a job_id means the LLM pass is now reading it.
+    // ok:false is what every upload returns now — the LLM pass is the only
+    // reader and hasn't run yet — and the job_id is how its fields arrive.
     importFileMock.mockResolvedValue({
       ok: false,
       fields: {},

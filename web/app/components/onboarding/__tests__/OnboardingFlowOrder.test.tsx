@@ -2,7 +2,7 @@
 //
 // Integrity tests for the semantic-slug onboarding flow (v6 screenshot spec
 // 2026-07-17 + the restored optional api-key step 2026-07-19, 10 steps):
-//   import-context -> company -> connectors -> api-key ->
+//   company -> import-context -> connectors -> api-key ->
 //   workspace -> product -> metrics -> invite -> review -> personalize
 // (api-key is an OPTIONAL/skippable step — also editable in Settings → Admin.
 //  Still retired: the closing workspace-naming step. The review step closes the
@@ -55,12 +55,13 @@ afterEach(() => {
 // The expected slug → screen order is exactly ONBOARDING_STEP_SLUGS (each slug
 // renders the screen with the same data-screen marker).
 const EXPECTED_ORDER = [
-  // Inserted 2026-07-22 (client feedback): bring your existing AI-assistant
-  // context in instead of retyping it. Optional. Moved to the FRONT 2026-07-25
-  // so it prefills every step there is — behind `company` it could fill
-  // everything except the step the user had just typed out by hand.
-  "import-context",
+  // `company` leads (back at the front 2026-07-27). The prompt the import step
+  // hands out opens by naming the company it is about, and this is the step
+  // that collects the name and website written into it.
   "company",
+  // Inserted 2026-07-22 (client feedback): bring your existing AI-assistant
+  // context in instead of retyping it. Optional.
+  "import-context",
   // Reordered 2026-07-22 (client feedback): connectors + api-key are pulled up
   // to sit right behind the import + company pair — they are the two steps an
   // import cannot prefill, so they cover its background LLM extraction.

@@ -389,11 +389,11 @@ export async function fetchWorkspaceForUser(
 }
 
 export async function createWorkspace(input: {
-  /** May be blank: the import-context step creates the row before the company
-   *  is known (the upload endpoint needs a tenant), and the company step then
-   *  collects the name into the same row. `companies.display_name` allows an
-   *  empty string; `products.name` does NOT, which is why the product below is
-   *  skipped rather than seeded blank. */
+  /** May be blank: the import-context step creates the row when someone
+   *  deep-links past the company step (the upload endpoint needs a tenant), and
+   *  the company step then collects the name into the same row.
+   *  `companies.display_name` allows an empty string; `products.name` does NOT,
+   *  which is why the product below is skipped rather than seeded blank. */
   companyName: string
   /** Blank → no primary product is created yet (products_name_nonempty). */
   productName: string

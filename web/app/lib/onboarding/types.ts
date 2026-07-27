@@ -287,16 +287,16 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  * one workspace step and added a personalize step) + the optional api-key step
  * the spec omits but we keep — 10 steps + the define-metrics sub-flow:
  *
- *   1. import-context → ImportContextStep (hand over the .md your own
- *                                         assistant already wrote — OPTIONAL.
- *                                         FIRST since 2026-07-25 so it can
- *                                         prefill EVERY step, the company one
- *                                         included; it creates the company row
- *                                         itself when a file is uploaded.)
- *   2. company     → CompanyStep         (name* + website + strategy/OKRs;
+ *   1. company     → CompanyStep         (name* + website + strategy/OKRs;
  *                                         mission, portfolio + planning cycle
  *                                         behind "Add more". Kicks the website
- *                                         analysis in the BACKGROUND.)
+ *                                         analysis in the BACKGROUND, and
+ *                                         creates the company row.)
+ *   2. import-context → ImportContextStep (hand over the .md your own
+ *                                         assistant already wrote — OPTIONAL.
+ *                                         Behind `company` since 2026-07-27 so
+ *                                         the name + website just entered are
+ *                                         written into the prompt it hands out.)
  *   3. connectors  → Connectors          (connect your tools — OPTIONAL,
  *                                         skippable; zero connectors is a
  *                                         supported finish)
@@ -343,17 +343,22 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  * persisted values (including stale ones from older flows) in range.
  */
 export const ONBOARDING_STEP_SLUGS = [
-  // Step 1 (client feedback, 2026-07-22; moved AHEAD of `company` 2026-07-25):
-  // hand over the context you have already explained to your own AI assistant
-  // instead of retyping it. It went first for one reason — behind `company` it
-  // could prefill every step EXCEPT the one the user had just typed by hand,
-  // which is the step the export answers most completely. Nothing in the flow
-  // now precedes it, so every field it can fill is a field the user never sees
-  // blank. It is OPTIONAL: "Fill it in manually" advances with nothing
-  // imported, and the company row is then created by `company` exactly as
-  // before (an upload here creates it early — see ImportContextStep).
-  "import-context",
+  // `company` leads again (2026-07-27), and `import-context` sits directly
+  // behind it. The two swapped because the prompt the import step hands out
+  // OPENS by asking which company the file is about: run it first and the user
+  // retypes their own name and URL into it, run it second and we write both
+  // into the prompt for them from what they just entered — the assistant starts
+  // with the entity locked instead of inferring it, and a wrong company is the
+  // one error that whole document is built to avoid. (It briefly led the flow
+  // 2026-07-25 so it could prefill the company step too; filling that one step
+  // by hand is the price of filling the prompt correctly.)
   "company",
+  // Client feedback 2026-07-22: hand over the context you have already
+  // explained to your own AI assistant instead of retyping it. OPTIONAL —
+  // "Fill it in manually" advances with nothing imported, and every step behind
+  // this one is seeded fill-only, so a late extraction pops into anything the
+  // user hasn't typed.
+  "import-context",
   // Reordered from the v7 spec (client feedback, 2026-07-22). `connectors` and
   // `api-key` are pulled up to sit right behind the import + company pair, and
   // `product` moved to the far side of `workspace`.
@@ -362,11 +367,8 @@ export const ONBOARDING_STEP_SLUGS = [
   // uploaded file, and connectors + api-key are the two steps in the flow that
   // extraction cannot prefill (one wires OAuth, the other takes a secret). So
   // they are the steps worth spending its latency on. Everything the import
-  // DOES prefill — metrics, workspace scope, product — now sits behind them,
-  // and opens with the extracted fields already in place. `company` sits ahead
-  // of them because it is where the workspace is created when the import was
-  // skipped; the deterministic heading parse has already landed by then, and
-  // its fields are seeded fill-only so a late extraction still pops in.
+  // DOES prefill — metrics, workspace scope, product — sits behind them, and
+  // opens with the extracted fields already in place.
   "connectors",
   "api-key",
   "workspace",

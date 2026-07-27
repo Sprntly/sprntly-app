@@ -1,9 +1,9 @@
 // Blur/remount-safe polling for the onboarding context-import extraction.
 //
-// POST /v1/connectors/llm-context/import returns the deterministic heading
-// parse immediately AND a `job_id` for a background LLM pass over the same
-// file. That pass is what makes an arbitrary context document usable — the
-// heading walk only understands files our own prompt produced.
+// POST /v1/connectors/llm-context/import files the .md and returns a `job_id`
+// for a background LLM pass over it. That pass is the ONLY reader of the file
+// (see backend/app/llm_context.py) and the reason an arbitrary context document
+// is usable at all, so the prefill lives or dies with this poll.
 //
 // The job runs while the user works through the connectors step, which is
 // exactly why connectors sits directly after the import in the flow. We persist
@@ -14,8 +14,8 @@
 //
 // Onboarding must never trap the user: a terminal `error`, an exhausted
 // wall-clock budget, or any transport failure all resolve to `{ result: null }`.
-// The user keeps whatever the deterministic parse already gave them and types
-// the rest, which is the same place they would have been without the import.
+// The user then types the steps as they would have without the import — and the
+// file itself still reached the knowledge graph at upload, so nothing is lost.
 
 import { llmContextApi } from "../api"
 import type { LlmContextImportResponse, LlmContextJobStatus } from "../api"
@@ -58,9 +58,9 @@ export function rememberContextImport(
   setPendingJob(KIND, company, contextImportScope(workspaceId), jobId)
 }
 
-/** Terminal outcome. `result` carries the merged extraction on success, null on
- *  error / timeout — in which case the deterministic parse already applied at
- *  upload time stands on its own. */
+/** Terminal outcome. `result` carries the extraction on success, null on error
+ *  / timeout — in which case the upload prefilled nothing and the user fills
+ *  the steps in by hand. */
 export type ContextImportOutcome = { result: LlmContextImportResponse | null }
 
 /**

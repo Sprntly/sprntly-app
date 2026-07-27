@@ -1,17 +1,18 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 01 — "Import your context" (client
-// feedback 2026-07-22; moved ahead of the company step 2026-07-25). Covers the
-// show-then-copy disclosure (the prompt is hidden until asked for, and Copy
-// lives inside the revealed panel), the .md upload path, and the three
-// properties that make an import safe:
+// Container mount test for onboarding step 02 — "Import your context" (client
+// feedback 2026-07-22; moved back behind the company step 2026-07-27). Covers
+// the show-then-copy disclosure (the prompt is hidden until asked for, and Copy
+// lives inside the revealed panel), the .md upload path, and the four
+// properties that make an import safe and useful:
 //
+//   * the prompt is requested WITH the company name + website step 1 collected,
+//     so the assistant it is pasted into searches for the right company;
 //   * a successful import prefills ONLY workspace fields that are still empty
 //     — it must never overwrite something the user already typed;
 //   * an unreadable export surfaces its `note` instead of claiming success;
-//   * running first, an upload creates the company row itself — the upload
-//     endpoint is tenant-scoped, so without it the very first thing a new user
-//     can do would 403.
+//   * a deep-link with no company row yet still creates one before uploading —
+//     the upload endpoint is tenant-scoped and would otherwise 403.
 //
 // There is deliberately no "Connect Claude" path to test: it was removed
 // because an Anthropic token cannot read claude.ai conversation history (see
@@ -61,7 +62,7 @@ vi.mock("../../../../lib/api", () => ({
 }))
 
 import { ImportContextStep } from "../ImportContextStep"
-import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
+import { makeWorkspace, makeOnboardingCtx, makeProduct } from "./fixtures"
 
 const PROMPT = "You are helping me export the context...\n\n## Company\n- Name:"
 
@@ -119,8 +120,8 @@ async function revealPrompt() {
   fireEvent.click(toggle)
 }
 
-describe("ImportContextStep (onboarding step 01 — import your context)", () => {
-  it("renders on step 1 of the dots, with no connect-an-account option", async () => {
+describe("ImportContextStep (onboarding step 02 — import your context)", () => {
+  it("renders on step 2 of the dots, with no connect-an-account option", async () => {
     const { container } = mount()
     await waitFor(() => expect(promptMock).toHaveBeenCalled())
 
@@ -128,10 +129,61 @@ describe("ImportContextStep (onboarding step 01 — import your context)", () =>
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute(
         "data-step",
       ),
-    ).toBe("1")
+    ).toBe("2")
     expect(container.textContent).toContain("Copy a prompt for your own AI")
     // The OAuth path is gone — it must not reappear as dead UI.
     expect(container.textContent).not.toContain("Connect Claude")
+  })
+
+  it("asks for the prompt with the company step's name and website", async () => {
+    // The whole reason `company` runs first: the backend writes these into the
+    // prompt's confirmed-values block, so the assistant starts with the entity
+    // locked instead of guessing which company the file is about.
+    const workspace = makeWorkspace({
+      onboarding_step: 2,
+      display_name: "Samsung Health",
+      product: makeProduct({ website: "https://www.samsung.com/health" }),
+    })
+    const { container } = mount(workspace)
+
+    await waitFor(() =>
+      expect(promptMock).toHaveBeenCalledWith({
+        companyName: "Samsung Health",
+        companyWebsite: "https://www.samsung.com/health",
+      }),
+    )
+    // …and the card says so, so the user knows what they're about to paste.
+    expect(container.textContent).toContain("It already names")
+    expect(container.textContent).toContain("Samsung Health")
+  })
+
+  it("still serves a prompt when there is no company row to fill it from", async () => {
+    // A deep-link straight to step 2. The block ships empty rather than the
+    // fetch failing — the user can type their own name into the textarea.
+    mount(null)
+    await waitFor(() =>
+      expect(promptMock).toHaveBeenCalledWith({
+        companyName: "",
+        companyWebsite: "",
+      }),
+    )
+  })
+
+  it("leads with the plain-language pitch, above the card and always visible", async () => {
+    // The whole step turns on the user realising the prompt is for the
+    // assistant they already use. That has to land before the buttons do, and
+    // without a click — so it sits in the step body, not inside the collapsed
+    // prompt panel.
+    const { container } = mount()
+    await waitFor(() => expect(promptMock).toHaveBeenCalled())
+
+    const lead = container.querySelector(".ctx-import-lead") as HTMLElement
+    expect(lead).not.toBeNull()
+    expect(lead.textContent).toContain("Already use Claude or ChatGPT for work?")
+    expect(lead.textContent).toContain("Copy the prompt below")
+    // Above the card it introduces, not below it.
+    const card = container.querySelector(".onb-import-options") as HTMLElement
+    expect(lead.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it("hides the prompt until asked, then reveals it with Copy inside", async () => {
@@ -264,26 +316,34 @@ describe("ImportContextStep (onboarding step 01 — import your context)", () =>
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
   })
 
-  it("lets the user skip to the company step without importing", async () => {
+  it("lets the user skip on to connectors without importing", async () => {
     mount()
     await waitFor(() => expect(promptMock).toHaveBeenCalled())
 
     fireEvent.click(screen.getByRole("button", { name: "Fill it in manually" }))
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/company")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
-  it("skipping the step creates nothing — the company step still owns that", async () => {
+  it("skipping the step creates nothing — the company step already owns that", async () => {
     mount(null)
     await waitFor(() => expect(promptMock).toHaveBeenCalled())
 
     fireEvent.click(screen.getByRole("button", { name: "Fill it in manually" }))
     expect(createWorkspaceMock).not.toHaveBeenCalled()
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+  })
+
+  it("goes back to the company step", async () => {
+    mount()
+    await waitFor(() => expect(promptMock).toHaveBeenCalled())
+
+    fireEvent.click(screen.getByRole("button", { name: "Back" }))
     expect(routerMock.push).toHaveBeenCalledWith("/onboarding/company")
   })
 
   it("creates the company row before uploading when there isn't one yet", async () => {
-    // Running first, this is the flow's first write. `/llm-context/import` is
-    // tenant-scoped, so uploading without a company row 403s — and the row is
+    // The deep-link safety net: normally step 1 made this row. `/llm-context/
+    // import` is tenant-scoped, so uploading without one 403s — and the row is
     // created UNNAMED, because a guessed name would reach the company step
     // looking like the user's own answer.
     createWorkspaceMock.mockResolvedValue(makeWorkspace({ id: "ws-new", display_name: "" }))
@@ -306,11 +366,54 @@ describe("ImportContextStep (onboarding step 01 — import your context)", () =>
     expect(arg.companyName).toBe("")
     // Blank name → no product row (products_name_nonempty).
     expect(arg.productName).toBe("")
-    // The resume marker points at the company step, which collects the name.
-    expect(arg.onboardingStep).toBe(2)
+    // The resume marker points BACK at the company step, which collects the
+    // name this row is missing.
+    expect(arg.onboardingStep).toBe(1)
     // The import lands on the row we just created, not on a stale null.
     await waitFor(() => expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-new", expect.anything()))
     expect(startContextImport).toHaveBeenCalledWith(7, "ws-new")
+  })
+
+  it("names the fields back once the background extraction lands", async () => {
+    // The normal path since the v3 prompt: the upload carries no fields at all
+    // (the LLM pass is the only reader), so the confirmation has to come from
+    // the extraction result the provider hands back — not from the POST.
+    importFileMock.mockResolvedValue({
+      ok: false,
+      fields: {},
+      unmapped: {},
+      format_version: "3",
+      note: null,
+      job_id: 9,
+      filed: true,
+    })
+
+    const { container } = mount(makeWorkspace({ onboarding_step: 1 }), {
+      contextImport: "done",
+      contextImportFields: {
+        company_name: "Samsung Health",
+        competitors: ["Apple Health", "Oura"],
+      },
+    })
+    await waitFor(() => expect(promptMock).toHaveBeenCalled())
+
+    expect(container.textContent).toContain("Context imported.")
+    expect(container.textContent).toContain("company, competitors")
+  })
+
+  it("says so plainly when the extraction read nothing", async () => {
+    // "Read it, found nothing for the form" is not the same as losing the file:
+    // it is already filed and feeding the knowledge graph, so the copy must not
+    // read as a failure.
+    const { container } = mount(makeWorkspace({ onboarding_step: 1 }), {
+      contextImport: "done",
+      contextImportFields: {},
+    })
+    await waitFor(() => expect(promptMock).toHaveBeenCalled())
+
+    expect(container.textContent).toContain("couldn't fill anything in")
+    expect(container.textContent).toContain("saved to your documents")
+    expect(container.textContent).not.toContain("Context imported.")
   })
 
   it("stays usable when the prompt fetch fails", async () => {

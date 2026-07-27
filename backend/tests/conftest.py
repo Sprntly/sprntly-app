@@ -297,9 +297,9 @@ CREATE TABLE website_analysis_jobs (
 CREATE INDEX website_analysis_jobs_company_idx ON website_analysis_jobs (company_id, id DESC);
 
 -- Fire-and-forget LLM-context extraction jobs (mirrors
--- 20260723130000_llm_context_jobs.sql). The onboarding import step parses the
--- uploaded Markdown inline with the deterministic heading walk and ALSO kicks
--- an LLM pass here, which reads context documents of any shape. Status walks
+-- 20260723130000_llm_context_jobs.sql). The onboarding import step reads the
+-- uploaded Markdown with an LLM pass here — the only reader since the v3
+-- prompt — which handles context documents of any shape. Status walks
 -- generating → ready (or error); `result` holds the same
 -- {ok, fields, unmapped, format_version, note} dict the POST returns.
 CREATE TABLE llm_context_jobs (
