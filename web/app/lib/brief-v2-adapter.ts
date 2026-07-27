@@ -66,8 +66,9 @@ interface BriefV2CardBase {
   skillAccent: string
   skillLabel: string
   /** Ledger freshness ('updated' renders a quiet chip — the body opens with
-   *  what changed). Null for new findings and pre-ledger briefs. */
-  skillState: "updated" | null
+   *  what changed). Null/absent for new findings, pre-ledger briefs, and
+   *  fixtures built before the field existed. */
+  skillState?: "updated" | null
   // The user-facing insight-type categories this finding belongs to (from the
   // backend's `insight_types`). Drives the per-user filter on the Top Insights
   // tab — a member sees the findings whose types intersect their Settings
