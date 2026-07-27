@@ -616,6 +616,10 @@ function buildHeldBackLine(brief: Brief): string | null {
         return `${n} already in progress`
       case "rotation_exhausted":
         return `${n} retired after repeated surfacing`
+      case "sibling_deferred":
+        return `${n} held with a deferred finding on the same topic`
+      case "sibling_dismissed":
+        return `${n} held with a dismissed finding on the same topic`
       default:
         return `${n} held back`
     }

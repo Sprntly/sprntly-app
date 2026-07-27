@@ -264,7 +264,7 @@ export type Brief = {
   _backlog?: {
     theme_id: string
     theme_label: string
-    reason: "carried" | "dismissed" | "deferred" | "in_progress" | "rotation_exhausted" | string
+    reason: "carried" | "dismissed" | "deferred" | "in_progress" | "rotation_exhausted" | "sibling_deferred" | "sibling_dismissed" | string
     deferred_until?: string | null
   }[]
   /** Backend evidence-gate flag: set when the brief was saved EMPTY because the
