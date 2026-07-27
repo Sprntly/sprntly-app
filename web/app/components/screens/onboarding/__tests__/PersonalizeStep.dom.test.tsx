@@ -117,8 +117,24 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     expect(
       (container.querySelector(".onb-card .onb-h") as HTMLElement).textContent,
     ).toBe("Personalize your workspace.")
-    expect(chip("Top user problems & opportunities")).not.toBeNull()
-    expect(chip("Wins to celebrate")).not.toBeNull()
+    expect(chip("Top Customer Problem")).not.toBeNull()
+    expect(chip("Competitor & market moves")).not.toBeNull()
+    await waitFor(() => expect(continueBtn().disabled).toBe(false))
+  })
+
+  it("offers only the insight types that have a skill behind them, in the specified order", async () => {
+    analyticsConnected()
+    const { container } = mount()
+    const labels = Array.from(
+      container.querySelectorAll('[data-field="surfaces"] button'),
+    ).map((b) => (b.textContent ?? "").trim())
+    expect(labels).toEqual([
+      "Top Customer Problem",
+      "Competitor & market moves",
+      "What to build next",
+    ])
+    // The free-text override is gone with them.
+    expect(container.querySelector("textarea")).toBeNull()
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 
@@ -140,8 +156,8 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
 
     // Toggle one chip off and another on so the saved array isn't just defaults.
-    fireEvent.click(chip("Top user problems & opportunities"))
-    fireEvent.click(chip("Wins to celebrate"))
+    fireEvent.click(chip("Top Customer Problem"))
+    fireEvent.click(chip("Competitor & market moves"))
 
     await act(async () => {
       continueBtn().click()
@@ -153,8 +169,9 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     // The insight-type selection is WORKSPACE-level, persisted on
     // companies.notification_settings.brief_insight_types.
     const ns = updateWorkspaceMock.mock.calls[0][1].notification_settings
-    // default ["top_problems","build_priorities"], toggled top_problems off + wins on
-    expect(ns.brief_insight_types).toEqual(["build_priorities", "wins"])
+    // default ["top_problems","build_priorities"], toggled top_problems off +
+    // competitor_moves on
+    expect(ns.brief_insight_types).toEqual(["build_priorities", "competitor_moves"])
     // The closer belongs to define-metrics on this branch.
     expect(finishMock).not.toHaveBeenCalled()
   })

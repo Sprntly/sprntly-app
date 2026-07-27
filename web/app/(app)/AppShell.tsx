@@ -29,7 +29,7 @@ import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
 import { useAuth } from "../lib/auth"
 import { connectorsApi, teamApi, type TeamMemberRecord } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
-import { cleanInsightTypes } from "../lib/insight-types"
+import { selectableInsightTypes } from "../lib/insight-types"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
 import { useGenerationNotify } from "./hooks/useGenerationNotify"
 
@@ -99,9 +99,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // companies.notification_settings.brief_insight_types, and every member sees
   // the same filtered brief. Empty = surface everything. Mirrored into
   // ContentContext so BriefChat reads it without taking on workspace deps.
+  //
+  // Narrowed to the types the pickers still offer: a workspace that saved a
+  // since-retired type would otherwise keep filtering by it with no chip to
+  // clear, and (if that was its only pick) the narrowed [] correctly falls back
+  // to surfacing everything.
   useEffect(() => {
     if (!workspace) return
-    const types = cleanInsightTypes(workspace.notification_settings?.brief_insight_types)
+    const types = selectableInsightTypes(workspace.notification_settings?.brief_insight_types)
     setContent({ insightTypeFilter: types })
   }, [setContent, workspace])
 
