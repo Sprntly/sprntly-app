@@ -4,13 +4,23 @@ Generic across providers: a puller yields RawRecords; the runner batches them
 (by char budget) and routes each batch through the generic extractor. Signal
 idempotency is content-keyed (uuid5), so re-syncs and shifting batches can't
 duplicate. Error-isolated per batch — one bad batch never kills the sync.
+
+COST GATE: pullers re-fetch everything on every sync, and the uuid5 dedup
+only fires at the signal WRITE — after the LLM call was paid for. The runner
+therefore keeps a per-record content-hash ledger (db.kg_ingest_ledger) and
+extracts ONLY records not seen before; hashes are recorded per batch that
+extracted successfully, so a failed batch is retried on the next sync. The
+ledger is advisory and fails open — any ledger error degrades to extracting
+everything, never to skipping unextracted data.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from typing import Callable, Iterable
 
+from app.db.kg_ingest_ledger import record_hashes, seen_hashes
 from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
 from app.kg_ingest.pullers import (
@@ -84,10 +94,19 @@ def sync_provider(
     if records is None:
         records = list(puller(token))
 
-    totals = {"records": len(records), "batches": 0,
-              "signals": 0, "themes": 0, "skipped": 0}
+    # Ledger gate: drop records whose exact rendering was already extracted
+    # for this enterprise, BEFORE any model call. A changed record renders
+    # differently → new hash → extracted again. Fail-open by construction:
+    # seen_hashes returns {} on any error, so the sync degrades to extracting
+    # everything (pre-ledger behavior) rather than skipping data.
+    hashes = {id(r): _content_hash(r.render()) for r in records}
+    seen = seen_hashes(enterprise_id, list(set(hashes.values())))
+    fresh = [r for r in records if hashes[id(r)] not in seen]
+
+    totals = {"records": len(records), "deduped": len(records) - len(fresh),
+              "batches": 0, "signals": 0, "themes": 0, "skipped": 0}
     errors: list[str] = []
-    for i, batch in enumerate(_batches(records)):
+    for i, batch in enumerate(_batches(fresh)):
         text = "\n\n".join(r.render() for r in batch)
         try:
             r = extract_document(
@@ -109,7 +128,18 @@ def sync_provider(
             totals["batches"] += 1
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]
+            # Only a batch that made it through extraction is recorded — a
+            # failed batch keeps its hashes out of the ledger and is simply
+            # re-extracted on the next sync.
+            record_hashes(
+                enterprise_id, provider, [hashes[id(rec)] for rec in batch]
+            )
         except Exception as e:  # noqa: BLE001 — error-isolation per batch
             logger.exception("extraction failed: %s batch %d", provider, i)
             errors.append(f"batch {i}: {e}")
     return {**totals, "errors": errors}
+
+
+def _content_hash(rendered: str) -> str:
+    """Stable ledger key for one RawRecord rendering."""
+    return hashlib.sha256(rendered.encode("utf-8", "replace")).hexdigest()
