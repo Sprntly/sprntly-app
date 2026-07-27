@@ -280,6 +280,21 @@ CREATE TABLE ask_jobs (
 );
 CREATE INDEX ask_jobs_company_idx ON ask_jobs (company_id, id DESC);
 
+-- Public-feedback runs (mirrors 20260726160000_public_feedback_runs.sql): the
+-- captured record set + rendered report per run. Read by the artifacts
+-- listing aggregator and the report re-serve route.
+CREATE TABLE public_feedback_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id   TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    question     TEXT NOT NULL,
+    window_label TEXT NOT NULL DEFAULT '',
+    records      TEXT NOT NULL DEFAULT '[]',
+    metadata     TEXT NOT NULL DEFAULT '{}',
+    html         TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX public_feedback_runs_company_idx ON public_feedback_runs (company_id, id DESC);
+
 -- Fire-and-forget onboarding website-analysis job rows (mirrors
 -- 20260618120000_website_analysis_jobs.sql). Status walks generating → ready
 -- (or error); `result` holds the full analyze_website() dict. Per-request +
