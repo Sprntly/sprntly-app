@@ -229,8 +229,11 @@ Rules:
 Hypothesis, Users, Appendix). Leave every unaffected section — and the document's \
 `<style>`, byline, structure, and section order — BYTE-FOR-BYTE unchanged.
 - Remove the answered item from the "User input needed" list. If that list \
-becomes empty, remove the whole "User input needed" section (its `<div \
-class="eyebrow">` and the `<ul class="inputs">`) — the section is self-clearing.
+becomes empty, remove the whole "User input needed" block — the section is \
+self-clearing. In older PRDs that is its `<div class="eyebrow">` + the `<ul \
+class="inputs">`; in newer PRDs (v4.7 layout) it is the `<h3>` + `<ul \
+class="inputs">` inside the Appendix, and if the Appendix then holds nothing \
+else, remove the whole `<div class="appendix">` too.
 - Do NOT restyle, reorder, rename, or re-author anything else. Do NOT touch \
 unrelated `[NEED]`/`[ESCALATE]` items. Invent no new numbers — fold in exactly \
 what the answer states.
