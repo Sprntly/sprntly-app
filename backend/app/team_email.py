@@ -16,7 +16,7 @@ Two paths by whether the email already has a Supabase auth account:
     hook converts the pending workspace_invites row into a company_members row.
 
   - EXISTING user → a plain notification email (Resend, same sender as the
-    weekly brief) linking to `<FRONTEND_URL>/sign-in`. Deliberately NOT a
+    Top Insights brief) linking to `<FRONTEND_URL>/sign-in`. Deliberately NOT a
     magic link: an existing account must never be logged in by an email
     click — with a live session the sign-in page forwards them straight in
     (postLoginPath, which auto-accepts the invite); without one they sign in
@@ -99,7 +99,7 @@ def _render_invite_html(
     footnote: str = "",
 ) -> str:
     """Branded invite HTML (paper background, white card, serif headline, green
-    CTA) matching the drip / weekly-brief shell. `heading` + `paragraphs` are
+    CTA) matching the drip / top-insights shell. `heading` + `paragraphs` are
     assumed already HTML-escaped by the caller (they interpolate names)."""
     base = (config_mod.settings.frontend_url or "").rstrip("/") or (
         "https://app.sprntly.ai"

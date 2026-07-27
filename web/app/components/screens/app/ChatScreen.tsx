@@ -154,7 +154,7 @@ function clarifyQuestionsTurn(
 const CLARIFY_SKIP_RE =
   /^\s*(?:just\s+)?(?:generate|proceed|go\s+ahead|skip|continue)(?:\s+(?:it|now|anyway|as\s+is|without|the\s+prd))?\s*[.!]*\s*$/i
 
-// The Weekly Brief is a pinned, non-closable FIRST tab on this surface.
+// The Top Insights brief is a pinned, non-closable FIRST tab on this surface.
 // It is synthesized in the render — never stored in the `tabs` state or
 // localStorage — and is identified by this sentinel id. `activeTabId ===
 // BRIEF_TAB_ID` means the brief tab is active (so we render <BriefChat/> instead
@@ -571,7 +571,7 @@ function SlashSkillMenu({ skills, activeIndex, onSelect, onHover, inset = false 
 }
 
 const DEFAULT_HOME_CHIPS: HomeChipItem[] = [
-  { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View weekly brief", desc: "", target: "brief" } },
+  { kind: "home", card: { id: "def-brief", icon: "sparkle", title: "View Top Insights brief", desc: "", target: "brief" } },
   { kind: "starter", card: { id: "def-analyze", icon: "chart", title: "Analyze data", desc: "", target: "ondemand", prompt: "Analyze our key product metrics and identify the top opportunities." } },
   { kind: "starter", card: { id: "def-draft", icon: "document", title: "Draft quarterly report", desc: "", target: "ondemand", prompt: "Draft a quarterly product report with key metrics, wins, and next steps." } },
   { kind: "starter", card: { id: "def-proto", icon: "rocket", title: "Prototype", desc: "", target: "ondemand", prompt: "Help me prototype the top feature in our product roadmap." } },
@@ -693,7 +693,7 @@ export function ChatScreen() {
   const [activeConv, setActiveConv] = useState<number | null>(null)
   // Per-tab chat state is SESSION-scoped: it lives in sessionStorage, not
   // localStorage. So a fresh open (new browser tab/window, or reopening the app
-  // after closing it) starts with ONLY the pinned Weekly-brief tab — never last
+  // after closing it) starts with ONLY the pinned Top Insights tab — never last
   // session's accumulated chat tabs. It still survives an in-session reload or a
   // navigate-away-and-back, so clicking around the app never nukes open chats.
   // Keys are ALSO user+company scoped so neither a different tenant nor a
@@ -1032,7 +1032,7 @@ export function ChatScreen() {
     const next = tabsRef.current.filter((t) => t.id !== tabId)
     setTabs(next)
     // Closing the ACTIVE tab hands focus to the last surviving chat tab; when
-    // none remain, the pinned Weekly-brief tab becomes active — never the
+    // none remain, the pinned Top Insights tab becomes active — never the
     // tab-less landing (which left NO tab looking active in the strip).
     if (activeTabIdRef.current === tabId) {
       setActiveTabId(next.length > 0 ? next[next.length - 1].id : BRIEF_TAB_ID)
@@ -1967,7 +1967,7 @@ export function ChatScreen() {
   }, [currentScreen, checkResume])
 
   // The brief is the pinned first tab of this surface. When the route lands on
-  // the brief screen (sidebar "Weekly brief" → goTo("brief") → /brief, which
+  // the brief screen (sidebar "Top Insights" → goTo("brief") → /brief, which
   // also renders ChatScreen), activate the pinned brief tab — even if the surface
   // was already mounted on a chat tab.
   useEffect(() => {
@@ -2578,7 +2578,7 @@ export function ChatScreen() {
         : tabsRef.current.find((t) => t.id === activeTabId)?.title ?? null
       // No active tab, OR the active "tab" is the synthetic, thread-less brief
       // tab → spawn a FRESH chat tab seeded with the query. A chat started from
-      // the weekly brief must never thread inline into it (the brief tab carries
+      // the Top Insights brief must never thread inline into it (the brief tab carries
       // no `tabs` entry, so appending would silently no-op anyway).
       if (spawnedNewTab) {
         const title = handle.length > 40 ? `${handle.slice(0, 37)}…` : handle
@@ -2808,7 +2808,7 @@ export function ChatScreen() {
   }, [activeTabId, activeCompany, setBusyTabs])
 
   // ── Brief → new chat tab hand-off ─────────────────────────────────────────
-  // A question typed on the weekly-brief surface must open its OWN chat tab, not
+  // A question typed on the top-insights surface must open its OWN chat tab, not
   // thread inline into the brief. BriefChat sets pendingChatHandoff; we consume
   // it once here by running it through submitAsk. With the brief tab active (the
   // only place this fires), submitAsk spawns a fresh tab seeded with the query —
@@ -3496,7 +3496,7 @@ export function ChatScreen() {
           </div>
 
           {isBriefTab ? (
-            // Pinned brief tab → the full weekly-brief surface. ChatScreen already
+            // Pinned brief tab → the full top-insights surface. ChatScreen already
             // provides AppLayout, so BriefChat renders bare (it owns its own
             // header + finding cards + composer + content-panel wiring).
             <BriefChat />

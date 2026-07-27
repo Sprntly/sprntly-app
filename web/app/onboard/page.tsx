@@ -213,7 +213,7 @@ export default function OnboardPage() {
           <form onSubmit={onCreateCompany}>
             <h1 className="title">Onboard a company</h1>
             <p className="blurb">
-              Sprntly turns your sources into a weekly brief. Start with a name; we&apos;ll ingest your files in the next step.
+              Sprntly turns your sources into a Top Insights brief. Start with a name; we&apos;ll ingest your files in the next step.
             </p>
             <label className="label">
               Company / product name

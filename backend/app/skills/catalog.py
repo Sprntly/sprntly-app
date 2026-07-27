@@ -98,20 +98,20 @@ SKILL_CATEGORY: dict[str, str] = {
     "stakeholder-map": "Stakeholder & Communication",
     "stakeholder-update": "Stakeholder & Communication",
     "fact-check": "Verification",
-    "weekly-brief": "Stakeholder & Communication",
+    "top-insights": "Stakeholder & Communication",
 }
 
 # Skills the Q&A router must never select (still installed + callable by name).
 #   - business-context is an ingestion/onboarding process, not a chat answer.
 #   - fact-check is an internal verification pass over other outputs.
-#   - weekly-brief is the synthesis-agent's brief composer (bound by name from
-#     app/synthesis/agent.py); it composes the weekly brief from already-computed
+#   - top-insights is the synthesis-agent's brief composer (bound by name from
+#     app/synthesis/agent.py); it composes the Top Insights brief from already-computed
 #     signals, it is not something the Q&A router should pick for a chat turn.
 #   - evidence-brief is the Evidence Page method, bound by name from
 #     app/evidence_kg.py; it synthesizes a single brief insight's KG signal
 #     trail into the provenance doc, not a chat answer.
 NON_ROUTABLE: frozenset[str] = frozenset(
-    {"business-context", "fact-check", "weekly-brief", "evidence-brief"}
+    {"business-context", "fact-check", "top-insights", "evidence-brief"}
 )
 
 # Acronyms to upper-case when humanising an id into a display label.

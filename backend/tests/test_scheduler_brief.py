@@ -1,6 +1,6 @@
-"""Tests for the timezone-aware weekly-brief scheduler tick (v0 checklist 2.4).
+"""Tests for the timezone-aware top-insights scheduler tick (v0 checklist 2.4).
 
-These exercise the impure shell `app.scheduler._run_weekly_brief_tick` and its
+These exercise the impure shell `app.scheduler._run_brief_tick` and its
 two-phase design: GENERATION starts GENERATION_LEAD (3h) before each company's
 configured local day/time (Comms & Brief settings, default Monday 06:00) so
 synthesis has time to finish; DELIVERY (Slack + email) happens exactly AT the
@@ -34,7 +34,7 @@ def _reset_ledgers():
 
 
 def _run_tick(now, companies):
-    """Drive _run_weekly_brief_tick at `now` with a fixed company list,
+    """Drive _run_brief_tick at `now` with a fixed company list,
     capturing which slugs got a brief generated / delivered and which exact
     delivery instants were scheduled. Returns (generated, delivered, exact)."""
     from app import scheduler as sched_mod
@@ -51,14 +51,14 @@ def _run_tick(now, companies):
         return True
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
-         patch.object(sched_mod, "_generate_weekly_brief_for_company",
+         patch.object(sched_mod, "_generate_brief_for_company",
                       side_effect=_fake_gen), \
-         patch.object(sched_mod, "_deliver_weekly_brief_for_company",
+         patch.object(sched_mod, "_deliver_brief_for_company",
                       side_effect=_fake_deliver), \
          patch.object(sched_mod, "_schedule_exact_delivery",
                       side_effect=lambda cid, slug, fire, ledger_key=None:
                       exact.append((slug, fire))):
-        asyncio.run(sched_mod._run_weekly_brief_tick(now=now))
+        asyncio.run(sched_mod._run_brief_tick(now=now))
     return generated, delivered, exact
 
 
@@ -121,14 +121,14 @@ def test_tick_generation_is_idempotent_within_the_window():
         generated.append(slug)
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
-         patch.object(sched_mod, "_generate_weekly_brief_for_company",
+         patch.object(sched_mod, "_generate_brief_for_company",
                       side_effect=_fake_gen), \
-         patch.object(sched_mod, "_deliver_weekly_brief_for_company"), \
+         patch.object(sched_mod, "_deliver_brief_for_company"), \
          patch.object(sched_mod, "_schedule_exact_delivery"):
         # 03:00 then 03:30 UTC, same Monday lead window (fire 06:00 UTC).
-        asyncio.run(sched_mod._run_weekly_brief_tick(
+        asyncio.run(sched_mod._run_brief_tick(
             now=datetime(2026, 6, 8, 3, 0, tzinfo=UTC)))
-        asyncio.run(sched_mod._run_weekly_brief_tick(
+        asyncio.run(sched_mod._run_brief_tick(
             now=datetime(2026, 6, 8, 3, 30, tzinfo=UTC)))
 
     assert generated == ["acme"]  # exactly once
@@ -264,11 +264,11 @@ def test_tick_isolates_per_company_failure():
         seen.append(slug)
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
-         patch.object(sched_mod, "_generate_weekly_brief_for_company",
+         patch.object(sched_mod, "_generate_brief_for_company",
                       side_effect=_gen), \
-         patch.object(sched_mod, "_deliver_weekly_brief_for_company"), \
+         patch.object(sched_mod, "_deliver_brief_for_company"), \
          patch.object(sched_mod, "_schedule_exact_delivery"):
-        asyncio.run(sched_mod._run_weekly_brief_tick(
+        asyncio.run(sched_mod._run_brief_tick(
             now=datetime(2026, 6, 8, 3, 0, tzinfo=UTC)))  # no raise
 
     assert seen == ["globex"]
@@ -278,8 +278,8 @@ def test_tick_no_companies_is_a_clean_noop():
     from app import scheduler as sched_mod
 
     with patch.object(sched_mod, "list_companies", return_value=[]), \
-         patch.object(sched_mod, "_generate_weekly_brief_for_company") as gen:
-        asyncio.run(sched_mod._run_weekly_brief_tick(
+         patch.object(sched_mod, "_generate_brief_for_company") as gen:
+        asyncio.run(sched_mod._run_brief_tick(
             now=datetime(2026, 6, 8, 3, 0, tzinfo=UTC)))
     gen.assert_not_called()
 
@@ -311,13 +311,13 @@ def test_delivery_fallback_is_idempotent_within_the_window():
         return True
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
-         patch.object(sched_mod, "_generate_weekly_brief_for_company"), \
-         patch.object(sched_mod, "_deliver_weekly_brief_for_company",
+         patch.object(sched_mod, "_generate_brief_for_company"), \
+         patch.object(sched_mod, "_deliver_brief_for_company",
                       side_effect=_fake_deliver), \
          patch.object(sched_mod, "_schedule_exact_delivery"):
-        asyncio.run(sched_mod._run_weekly_brief_tick(
+        asyncio.run(sched_mod._run_brief_tick(
             now=datetime(2026, 6, 8, 6, 0, tzinfo=UTC)))
-        asyncio.run(sched_mod._run_weekly_brief_tick(
+        asyncio.run(sched_mod._run_brief_tick(
             now=datetime(2026, 6, 8, 6, 30, tzinfo=UTC)))
 
     assert delivered == ["acme"]  # exactly once
@@ -336,11 +336,11 @@ def test_delivery_fallback_stands_down_while_one_shot_job_pending():
         return True
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
-         patch.object(sched_mod, "_generate_weekly_brief_for_company"), \
-         patch.object(sched_mod, "_deliver_weekly_brief_for_company",
+         patch.object(sched_mod, "_generate_brief_for_company"), \
+         patch.object(sched_mod, "_deliver_brief_for_company",
                       side_effect=_fake_deliver), \
          patch.object(sched_mod, "_delivery_job_pending", return_value=True):
-        asyncio.run(sched_mod._run_weekly_brief_tick(
+        asyncio.run(sched_mod._run_brief_tick(
             now=datetime(2026, 6, 8, 6, 0, tzinfo=UTC)))
 
     assert delivered == []
@@ -357,7 +357,7 @@ def test_exact_delivery_job_body_delivers_and_records_the_cycle():
         delivered.append((company_id, slug))
         return True
 
-    with patch.object(sched_mod, "_deliver_weekly_brief_for_company",
+    with patch.object(sched_mod, "_deliver_brief_for_company",
                       side_effect=_fake_deliver):
         asyncio.run(sched_mod._run_exact_delivery(
             "co-1", "acme", datetime(2026, 6, 8, 6, 0, tzinfo=UTC)))
@@ -373,7 +373,7 @@ def test_exact_delivery_job_body_leaves_ledger_unset_when_no_brief():
     async def _fake_deliver(company_id, slug):
         return False
 
-    with patch.object(sched_mod, "_deliver_weekly_brief_for_company",
+    with patch.object(sched_mod, "_deliver_brief_for_company",
                       side_effect=_fake_deliver):
         asyncio.run(sched_mod._run_exact_delivery(
             "co-1", "acme", datetime(2026, 6, 8, 6, 0, tzinfo=UTC)))
@@ -385,7 +385,7 @@ def test_exact_delivery_job_body_leaves_ledger_unset_when_no_brief():
 
 
 def test_scheduled_generation_suppresses_inline_delivery():
-    """_generate_weekly_brief_for_company generates with deliver=False — the
+    """_generate_brief_for_company generates with deliver=False — the
     scheduled push happens at the fire time, never at generation time."""
     from app import scheduler as sched_mod
 
@@ -393,12 +393,12 @@ def test_scheduled_generation_suppresses_inline_delivery():
     with patch("app.synthesis_brief.generate_brief_for",
                side_effect=lambda slug, **kw: calls.append((slug, kw)) or {"id": 1}), \
          patch("app.brief_runner.warm_synthesis_drilldowns"):
-        asyncio.run(sched_mod._generate_weekly_brief_for_company("acme"))
+        asyncio.run(sched_mod._generate_brief_for_company("acme"))
     assert calls == [("acme", {"deliver": False})]
 
 
-def test_deliver_weekly_brief_pushes_current_brief():
-    """_deliver_weekly_brief_for_company reads the CURRENT brief and hands it to
+def test_deliver_top_insights_pushes_current_brief():
+    """_deliver_brief_for_company reads the CURRENT brief and hands it to
     deliver_brief; returns False (no attempt) when there is no brief yet."""
     from app import scheduler as sched_mod
 
@@ -408,14 +408,14 @@ def test_deliver_weekly_brief_pushes_current_brief():
          patch("app.synthesis.delivery.deliver_brief",
                side_effect=lambda cid, brief: pushed.append((cid, brief)) or {}):
         ok = asyncio.run(
-            sched_mod._deliver_weekly_brief_for_company("co-1", "acme"))
+            sched_mod._deliver_brief_for_company("co-1", "acme"))
     assert ok is True
     assert pushed == [("co-1", {"id": 7})]
 
     with patch("app.db.briefs.get_current_brief", return_value=None), \
          patch("app.synthesis.delivery.deliver_brief") as push:
         ok = asyncio.run(
-            sched_mod._deliver_weekly_brief_for_company("co-1", "acme"))
+            sched_mod._deliver_brief_for_company("co-1", "acme"))
     assert ok is False
     push.assert_not_called()
 
@@ -454,7 +454,7 @@ async def test_schedule_exact_delivery_registers_one_shot_on_real_apscheduler():
         sched_mod._schedule_exact_delivery(
             "co-1", "acme", fire1, ledger_key="ws-1")
 
-        job = s.get_job("weekly_brief_delivery_ws-1")
+        job = s.get_job("brief_delivery_ws-1")
         assert job is not None
         assert job.trigger.run_date == fire1  # exactly AT the fire instant
         assert job.misfire_grace_time == 3600  # busy loop delays, never drops
@@ -467,7 +467,7 @@ async def test_schedule_exact_delivery_registers_one_shot_on_real_apscheduler():
         sched_mod._schedule_exact_delivery(
             "co-1", "acme", fire2, ledger_key="ws-1")
         jobs = s.get_jobs()
-        assert [j.id for j in jobs] == ["weekly_brief_delivery_ws-1"]
+        assert [j.id for j in jobs] == ["brief_delivery_ws-1"]
         assert jobs[0].trigger.run_date == fire2
     finally:
         sched_mod._scheduler = None  # every other test assumes no scheduler

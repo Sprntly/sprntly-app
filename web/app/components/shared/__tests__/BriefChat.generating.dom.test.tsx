@@ -6,7 +6,7 @@
 // once in AppShell) reports kind === "generating" and mirrors it into
 // ContentContext as `content.briefHydration`. BriefChat reads that flag and, as
 // long as there's no brief to show yet, renders a distinct spinner + "Generating
-// your Weekly brief…" WIP block IN PLACE OF the empty greeting / finding cards.
+// your Top Insights…" WIP block IN PLACE OF the empty greeting / finding cards.
 //
 // These tests mount the real BriefChat inside the real Navigation + Content
 // providers and drive `content` through a small harness, proving:
@@ -227,7 +227,7 @@ function mountHarness() {
   )
 }
 
-const WIP_TITLE = "Generating your Weekly brief…"
+const WIP_TITLE = "Generating your Top Insights…"
 const EMPTY_GREETING = "add and connect more sources"
 
 afterEach(() => {

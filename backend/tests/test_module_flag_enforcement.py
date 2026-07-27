@@ -4,7 +4,7 @@ companies.feature_flags (written by /v1/staff) is now ENFORCED:
 
   * `agents` off      → the chat surface 403s: POST /v1/ask, POST
                         /v1/ask/extract-file, POST /v1/agent/chat-with-tools.
-  * `weekly_brief` off → the scheduler skips the company (weekly tick AND the
+  * `top_insights` off → the scheduler skips the company (weekly tick AND the
                         brief-generating synthesis cycle) and the on-demand
                         generation endpoints 403 (/v1/brief/generate,
                         /regenerate, /regenerate-all, /v1/synthesis/brief).
@@ -26,7 +26,7 @@ import pytest
 
 from app.entitlements import (
     AGENTS_DISABLED_DETAIL,
-    WEEKLY_BRIEF_DISABLED_DETAIL,
+    TOP_INSIGHTS_DISABLED_DETAIL,
 )
 
 UTC = timezone.utc
@@ -89,7 +89,7 @@ def test_ask_allowed_when_agents_key_missing(
     t = tenant_client.make(slug="acme")
     _seed_corpus(isolated_settings["data_dir"], dataset="acme")
     fake_llm["payload"] = dict(_ASK_PAYLOAD)
-    _set_flags(t.company_id, {"weekly_brief": False, "on_demand_analysis": True})
+    _set_flags(t.company_id, {"top_insights": False, "on_demand_analysis": True})
     resp = t.client.post(
         "/v1/ask", json={"question": "What drives churn?", "dataset": "acme"}
     )
@@ -146,34 +146,34 @@ def test_agent_chat_with_tools_passes_gate_when_agents_on(
     assert resp.status_code == 404
 
 
-# ---- weekly_brief module: on-demand endpoints --------------------------------
+# ---- top_insights module: on-demand endpoints --------------------------------
 
 @pytest.mark.parametrize(
     "path",
     ["/v1/brief/generate", "/v1/brief/regenerate", "/v1/brief/regenerate-all"],
 )
-def test_brief_generation_endpoints_403_when_weekly_brief_off(
+def test_brief_generation_endpoints_403_when_top_insights_off(
     tenant_client, isolated_settings, path
 ):
     t = tenant_client.make(slug="acme")
-    _set_flags(t.company_id, {"weekly_brief": False})
+    _set_flags(t.company_id, {"top_insights": False})
     resp = t.client.post(path, params={"dataset": "acme"})
     assert resp.status_code == 403
-    assert resp.json()["detail"] == WEEKLY_BRIEF_DISABLED_DETAIL
+    assert resp.json()["detail"] == TOP_INSIGHTS_DISABLED_DETAIL
 
 
-def test_synthesis_brief_403_when_weekly_brief_off(tenant_client, isolated_settings):
+def test_synthesis_brief_403_when_top_insights_off(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
-    _set_flags(t.company_id, {"weekly_brief": False})
+    _set_flags(t.company_id, {"top_insights": False})
     resp = t.client.post("/v1/synthesis/brief")
     assert resp.status_code == 403
-    assert resp.json()["detail"] == WEEKLY_BRIEF_DISABLED_DETAIL
+    assert resp.json()["detail"] == TOP_INSIGHTS_DISABLED_DETAIL
 
 
 def test_brief_regenerate_allowed_when_flag_missing(
     tenant_client, isolated_settings, monkeypatch
 ):
-    """Missing weekly_brief key (agents-off is irrelevant here) → the
+    """Missing top_insights key (agents-off is irrelevant here) → the
     fire-and-forget regenerate kicks off normally."""
     from app.routes import brief as brief_route
 
@@ -190,20 +190,20 @@ def test_brief_regenerate_allowed_when_flag_missing(
     assert resp.json()["started"] is True
 
 
-def test_brief_reads_stay_open_when_weekly_brief_off(
+def test_brief_reads_stay_open_when_top_insights_off(
     tenant_client, isolated_settings
 ):
     """Toggling the module off must not hide existing briefs — only new
     generation/delivery stops. (404 'no brief yet' here, never the module 403.)"""
     t = tenant_client.make(slug="acme")
-    _set_flags(t.company_id, {"weekly_brief": False})
+    _set_flags(t.company_id, {"top_insights": False})
     resp = t.client.get("/v1/brief/current", params={"dataset": "acme"})
     assert resp.status_code == 404  # no brief seeded — but NOT a 403
     status = t.client.get("/v1/brief/status", params={"dataset": "acme"})
     assert status.status_code == 200
 
 
-# ---- weekly_brief module: scheduler skips -------------------------------------
+# ---- top_insights module: scheduler skips -------------------------------------
 
 @pytest.fixture(autouse=True)
 def _reset_ledger():
@@ -217,8 +217,8 @@ def _reset_ledger():
 
 
 def _run_weekly_tick(now, companies):
-    """Drive _run_weekly_brief_tick with a fixed company list; return the slugs
-    that got a brief generated (mirrors test_scheduler_weekly_brief.py)."""
+    """Drive _run_brief_tick with a fixed company list; return the slugs
+    that got a brief generated (mirrors test_scheduler_top_insights.py)."""
     from app import scheduler as sched_mod
 
     generated: list[str] = []
@@ -227,20 +227,20 @@ def _run_weekly_tick(now, companies):
         generated.append(slug)
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
-         patch.object(sched_mod, "_generate_weekly_brief_for_company",
+         patch.object(sched_mod, "_generate_brief_for_company",
                       side_effect=_fake_gen), \
-         patch.object(sched_mod, "_deliver_weekly_brief_for_company"), \
+         patch.object(sched_mod, "_deliver_brief_for_company"), \
          patch.object(sched_mod, "_schedule_exact_delivery"):
-        asyncio.run(sched_mod._run_weekly_brief_tick(now=now))
+        asyncio.run(sched_mod._run_brief_tick(now=now))
     return generated
 
 
-def test_weekly_tick_skips_company_with_weekly_brief_off():
+def test_weekly_tick_skips_company_with_top_insights_off():
     """Two UTC companies inside the Monday generation lead window (fire 06:00
     UTC − 3h): the explicitly-off one is skipped, the missing-key one still
     fires (grandfathered ON)."""
     companies = [
-        {"id": "co-off", "slug": "gated", "feature_flags": {"weekly_brief": False}},
+        {"id": "co-off", "slug": "gated", "feature_flags": {"top_insights": False}},
         {"id": "co-on", "slug": "open", "feature_flags": {}},
     ]
     # Monday 2026-06-08 03:00 UTC — both companies' (default-UTC) generation
@@ -250,7 +250,7 @@ def test_weekly_tick_skips_company_with_weekly_brief_off():
 
 
 def test_weekly_tick_agents_flag_is_irrelevant_to_brief():
-    """agents:false alone must not stop the weekly brief."""
+    """agents:false alone must not stop the Top Insights brief."""
     companies = [
         {"id": "co-1", "slug": "chatless", "feature_flags": {"agents": False}},
     ]
@@ -258,13 +258,13 @@ def test_weekly_tick_agents_flag_is_irrelevant_to_brief():
     assert generated == ["chatless"]
 
 
-def test_synthesis_cycle_skips_company_with_weekly_brief_off():
+def test_synthesis_cycle_skips_company_with_top_insights_off():
     """The scheduled synthesis cycle GENERATES briefs, so it honors the flag
     too. (KG ingestion runs in the connector-refresh job, untouched here.)"""
     from app import scheduler as sched_mod
 
     companies = [
-        {"id": "co-off", "slug": "gated", "feature_flags": {"weekly_brief": False}},
+        {"id": "co-off", "slug": "gated", "feature_flags": {"top_insights": False}},
         {"id": "co-on", "slug": "open", "feature_flags": {"agents": False}},
     ]
     generated: list[str] = []
@@ -289,7 +289,7 @@ def test_staff_routes_unaffected_by_module_flags(isolated_settings, monkeypatch)
     from tests._company_helpers import company_client
 
     ctx = company_client(monkeypatch)
-    _set_flags(ctx.company_id, {"agents": False, "weekly_brief": False})
+    _set_flags(ctx.company_id, {"agents": False, "top_insights": False})
 
     # Configure the staff credential AFTER company_client (it reloads
     # app.config/app.auth — mirrors test_staff_admin._enable_staff_surface).
@@ -312,7 +312,7 @@ def test_staff_routes_unaffected_by_module_flags(isolated_settings, monkeypatch)
     row = next(
         c for c in listed.json()["companies"] if c["id"] == ctx.company_id
     )
-    assert row["feature_flags"] == {"agents": False, "weekly_brief": False}
+    assert row["feature_flags"] == {"agents": False, "top_insights": False}
 
     patched = ctx.client.patch(
         f"/v1/staff/companies/{ctx.company_id}",

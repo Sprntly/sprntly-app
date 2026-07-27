@@ -389,7 +389,7 @@ def test_start_scheduler_registers_drip_job_when_enabled(monkeypatch):
     fake = _run_start_scheduler(monkeypatch, drip_enabled=True)
     ids = sorted(j["id"] for j in fake.jobs)
     assert "drip_emails" in ids
-    assert "weekly_brief_tick" in ids
+    assert "brief_tick" in ids
     assert fake.started is True
 
 
@@ -397,4 +397,4 @@ def test_start_scheduler_omits_drip_job_when_disabled(monkeypatch):
     fake = _run_start_scheduler(monkeypatch, drip_enabled=False)
     ids = sorted(j["id"] for j in fake.jobs)
     assert "drip_emails" not in ids
-    assert "weekly_brief_tick" in ids
+    assert "brief_tick" in ids

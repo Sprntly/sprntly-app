@@ -16,7 +16,7 @@ import type { SearchItem } from "./types"
 /** Extra matchable aliases per settings pane, beyond its nav label. */
 const SETTINGS_KEYWORDS: Partial<Record<SettingsSectionId, string[]>> = {
   profile: ["account", "name", "avatar", "role"],
-  "comms-brief": ["email", "notifications", "weekly brief", "slack"],
+  "comms-brief": ["email", "notifications", "top insights", "slack"],
   "product-category": ["product", "category"],
   "company-profile": ["mission", "icp", "tone", "voice", "company"],
   process: ["planning", "sprint", "cadence"],
@@ -45,7 +45,7 @@ export const STATIC_PAGE_ITEMS: SearchItem[] = [
   {
     id: "page:/brief",
     group: "pages",
-    title: "Weekly brief",
+    title: "Top Insights",
     subtitle: "This week's findings and insights",
     breadcrumb: ["Pages"],
     url: "/brief",

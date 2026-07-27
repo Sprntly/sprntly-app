@@ -84,7 +84,7 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
 
 # ── Evidence-bearing providers (the brief data-source rule) ──────────────────
 #
-# The weekly brief is synthesized from connectors that BRING IN evidence about
+# The Top Insights brief is synthesized from connectors that BRING IN evidence about
 # the product and its customers. Five kinds of tool don't do that, so they can
 # never satisfy brief generation on their own (mirrors NON_EVIDENCE_CATEGORIES
 # in web/app/lib/connectorsCatalog.ts — the two lists must agree):

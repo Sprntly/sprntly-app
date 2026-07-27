@@ -1,12 +1,12 @@
 ---
 name: brief-nudge
-description: Generate the multi-channel notification + reminder sequence that drives a user to open a brief (e.g. the weekly-brief) — Slack and email, a day-0 announcement plus day-1/2/3 reminders sent only if it's still unopened — each leading with the headline impact, a short "what we're seeing" teaser, and ONE strong deep-link CTA into the right workspace and the brief page. Use when the user says "notify users about the brief", "reminder sequence", "nudge users to open X", "Slack + email announcement", "drip reminders", or wants delivery comms that escalate honestly. Channel-aware (compact Slack vs titled, branded email) and day-aware (announce → gentle → focused → final). Never fabricates figures — every number traces to the brief — and never manufactures urgency.
+description: Generate the multi-channel notification + reminder sequence that drives a user to open a brief (e.g. the Top Insights brief) — Slack and email, a day-0 announcement plus day-1/2/3 reminders sent only if it's still unopened — each leading with the headline impact, a short "what we're seeing" teaser, and ONE strong deep-link CTA into the right workspace and the brief page. Use when the user says "notify users about the brief", "reminder sequence", "nudge users to open X", "Slack + email announcement", "drip reminders", or wants delivery comms that escalate honestly. Channel-aware (compact Slack vs titled, branded email) and day-aware (announce → gentle → focused → final). Never fabricates figures — every number traces to the brief — and never manufactures urgency.
 triggers:
   - "notify users about the brief" / "announce the brief"
   - "reminder sequence" / "drip reminders" / "day 1/2/3 reminders"
   - "nudge users to open X" / "drive opens" / "Slack + email for the brief"
 when_not_to_use:
-  - Writing the brief itself                              -> weekly-brief
+  - Writing the brief itself                              -> top-insights
   - Briefing leadership on an external event              -> market-event-brief
   - General customer comms / incident / outage messaging  -> customer-comms
 inputs:
@@ -30,7 +30,7 @@ guardrails:
 
 # Brief Nudge — drive users to the brief
 
-Delivery/activation comms that get a surfaced brief actually opened. **One nudge = one brief = one primary action.** This skill writes the messages; it does not write the brief (`weekly-brief`) or run any analysis.
+Delivery/activation comms that get a surfaced brief actually opened. **One nudge = one brief = one primary action.** This skill writes the messages; it does not write the brief (`top-insights`) or run any analysis.
 
 ## What it produces
 A Day-0 announcement plus up to three escalating reminders (Day 1/2/3, **sent only if the brief is still unopened**), each rendered for two channels:
@@ -39,7 +39,7 @@ A Day-0 announcement plus up to three escalating reminders (Day 1/2/3, **sent on
 
 ## When to use / when NOT to use
 - **Use** to announce and remind about a brief, digest, or any surfaced artifact across Slack + email with a day-based cadence.
-- **Do NOT use** to write the brief (`weekly-brief`), to brief leadership on an external event (`market-event-brief`), or for general/incident customer comms (`customer-comms`).
+- **Do NOT use** to write the brief (`top-insights`), to brief leadership on an external event (`market-event-brief`), or for general/incident customer comms (`customer-comms`).
 
 ## Method
 1. **Pull the rollup + top items** from the brief; select the 1–3 with the highest impact (pain → what it's worth).
@@ -78,8 +78,8 @@ A Day-0 announcement plus up to three escalating reminders (Day 1/2/3, **sent on
 - It is only as truthful as the brief it cites — it surfaces figures, it does not validate them.
 
 ## Worked example (abridged)
-**Input:** `weekly-brief` rollup ~$60M; top items — competitive ($1.6M renewals), expansion ($8.4M), checkout ($2.2M); deep link `/w/acme/brief/jun-23`.
-**Output:** Day-0 email subject *"Your weekly brief: ~$60M in upside is on the table"* + Slack one-liner with the three teaser items and a single **Open this week's brief** button; Day-2 narrows to the $8.4M expansion play; Day-3 email *"Last reminder — your weekly brief closes Friday"* with the pause-reminders note. Every CTA deep-links to the Acme workspace → this week's brief.
+**Input:** `top-insights` rollup ~$60M; top items — competitive ($1.6M renewals), expansion ($8.4M), checkout ($2.2M); deep link `/w/acme/brief/jun-23`.
+**Output:** Day-0 email subject *"Your Top Insights brief: ~$60M in upside is on the table"* + Slack one-liner with the three teaser items and a single **Open this week's brief** button; Day-2 narrows to the $8.4M expansion play; Day-3 email *"Last reminder — your Top Insights brief closes Friday"* with the pause-reminders note. Every CTA deep-links to the Acme workspace → this week's brief.
 
 ## Files in this skill
 ```

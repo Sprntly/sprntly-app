@@ -338,9 +338,9 @@ function BriefFindingCard({
   onAsk,
   onGenerateAll,
   onViewPrd,
+  onViewEvidence,
   onDismiss,
   onRestore,
-  onPreview,
   insightState,
   mapLoading,
 }: {
@@ -358,9 +358,9 @@ function BriefFindingCard({
   onAsk: () => void
   onGenerateAll: () => void
   onViewPrd: () => void
+  onViewEvidence: () => void
   onDismiss: () => void
   onRestore: () => void
-  onPreview: () => void
   insightState?: {
     hasPrd: boolean
     prdId: number | null
@@ -370,7 +370,7 @@ function BriefFindingCard({
   } | null
 }) {
   const accent = finding.actionAccent
-  // Weekly-brief skill design: the card accent is the finding type's canonical
+  // Top-insights skill design: the card accent is the finding type's canonical
   // hex (derived from type, set as a CSS var the pill / left bar / PRD button
   // read), and the category pill shows the type name only (no P0/P1).
   const accentStyle = { ["--card-accent"]: finding.skillAccent } as React.CSSProperties
@@ -447,7 +447,7 @@ function BriefFindingCard({
             </div>
           ) : null}
 
-          {/* "From" source-chip row — the weekly-brief skill's honest provenance
+          {/* "From" source-chip row — the top-insights skill's honest provenance
               row (assets/brief-template.html). Replaces the legacy mini-chart +
               KPI stat columns: the skill puts numbers in the title/body, and a
               quiet source row under it (never implies convergence that didn't
@@ -462,16 +462,32 @@ function BriefFindingCard({
           ) : null}
 
           {/* Action buttons — hidden entirely when the brief has no real data
-              behind it (insufficient-evidence / empty case): a Generate PRD /
-              prototype affordance makes no sense without findings to act on. */}
+              behind it (insufficient-evidence / empty case): evidence / PRD
+              affordances make no sense without findings to act on.
+
+              Top-insights skill CTA posture ("the skill reports; the PM
+              decides", SKILL.md step 8): the PRIMARY action is the evidence —
+              the reader investigates the basis for the claim first. The PRD
+              sits in the ghost slot: "Generate PRD" until one exists, then
+              "View PRD". The prototype no longer appears on cards — it stays
+              reachable from the PRD flow. */}
           {showActions ? (
           <div className="fc-actions">
+            <button
+              type="button"
+              className="fc-btn-prd fc-btn-prd--skill"
+              onClick={onViewEvidence}
+              title="See what this finding rests on — the signals, quotes, and datapoints behind it"
+            >
+              <IconFileText size={14} />
+              View Evidence
+            </button>
             {(() => {
               const cta = prdCtaState(insightState, generating, mapLoading)
               return (
                 <button
                   type="button"
-                  className="fc-btn-prd fc-btn-prd--skill"
+                  className="fc-btn-secondary"
                   onClick={cta.isView ? onViewPrd : onGenerateAll}
                   // View is a cheap read — allowed while another job is busy;
                   // Generate is gated on `busy` as before. While the map is still
@@ -483,23 +499,11 @@ function BriefFindingCard({
                       : "Generates the full system: PRD + Evidence + Technical Design + QA Test Cases + Risk Analysis + Traceability Matrix"
                   }
                 >
-                  <IconFileText size={14} />
+                  <IconTerminalPrompt size={13} />
                   {cta.label}
                 </button>
               )
             })()}
-            {/* View-only prototype affordance. The weekly brief no longer
-                offers GENERATE prototype on finding cards — prototypes are
-                generated from the PRD flow. A prototype that already exists
-                (built earlier, e.g. from the PRD chat) stays reachable here as
-                "View prototype": prototypeReady is only true once one is
-                actually built and saved. */}
-            {insightState?.prototypeReady ? (
-              <button type="button" className="fc-btn-secondary" onClick={onPreview}>
-                <IconTerminalPrompt size={13} />
-                View prototype
-              </button>
-            ) : null}
           </div>
           ) : null}
         </div>
@@ -527,7 +531,7 @@ function BriefGeneratingState() {
     <div className="bc-generating" role="status" aria-live="polite">
       <span className="bc-generating-spinner" aria-hidden />
       <div className="bc-generating-copy">
-        <p className="bc-generating-title">Generating your Weekly brief…</p>
+        <p className="bc-generating-title">Generating your Top Insights…</p>
         <p className="bc-generating-sub">
           Analyzing your sources — this usually takes a minute.
         </p>
@@ -822,7 +826,7 @@ export function BriefChat() {
         return
       }
       openPrdTab({
-        title: "PRD · Weekly brief",
+        title: "PRD · Top Insights",
         source: { kind: "generate", meta: { briefId: brief.id, insightIndex: 0 } },
       })
     } catch (e) {
@@ -1135,6 +1139,22 @@ export function BriefChat() {
     [content.briefDetails, activeCompany, openContentPanel, setContent, showToast, refetchPrototypeMap],
   )
 
+  // Primary card CTA (top-insights skill posture): open the evidence behind
+  // this finding. Setting `content.detail` to the card's DetailState scopes the
+  // Evidence tab to this insight — ContentPanel's EvidenceTab then loads (or
+  // generates, deduped server-side) that insight's evidence and streams it in.
+  const cardViewEvidence = useCallback(
+    (finding: Finding) => {
+      const key = finding.detailKey
+      const detail = key ? content.briefDetails?.[key] : null
+      if (detail?.meta) setContent({ detail })
+      // No meta (legacy brief shape) — still open the panel; the tab shows its
+      // own empty/generate state rather than the button dead-ending.
+      openContentPanel("evidence")
+    },
+    [content.briefDetails, openContentPanel, setContent],
+  )
+
   // Dismiss greys the card out in place (it stays in the list); restore un-greys
   // it. Toggling the dismissed set drives both — and the persist effect writes it.
   const cardDismiss = useCallback((finding: Finding) => {
@@ -1152,37 +1172,10 @@ export function BriefChat() {
   //   case 1: ready prototype → open it
   //   case 2: PRD exists, no prototype → open generate modal
   //   case 3: no PRD → PRD-first flow
-  const cardPreview = useCallback(
-    (finding: Finding) => {
-      const key = finding.detailKey
-      const detail = key ? content.briefDetails?.[key] : null
-      const meta = detail?.meta
-      if (!meta) {
-        // case 3: no detail meta — fall back to PRD-first flow
-        void runGate(() => prototypeFlow())
-        return
-      }
-      const state = prototypeStateForInsight(entriesByInsight, meta.insightIndex)
-      if (state.hasPrd && state.prototypeReady && state.prdId != null) {
-        // case 1: prototype ready → open it in the in-tab canvas at
-        // /prototype?prd=<id>, matching the PRD-drawer preview card's nav
-        // (ApproveModal / DesignAgentLauncher use router.push(prototypePath(prdId))).
-        // goTo("prototype") alone navigates the screen WITHOUT the ?prd= param, so
-        // PrototypeRoute has no PRD to resolve and the editor never loads.
-        // prototypePrdId: the PRD the prototype is actually attached to (may be
-        // an older PRD than the insight's newest after a PRD regeneration).
-        router.push(prototypePath(state.prototypePrdId ?? state.prdId))
-      } else if (state.hasPrd && !state.prototypeReady && state.prdId != null) {
-        // case 2: PRD exists but no prototype → open generate modal
-        setGenPrdId(state.prdId)
-        gen.openGenerateModal()
-      } else {
-        // case 3: no PRD → PRD-first flow
-        void runGate(() => cardGeneratePrd(finding))
-      }
-    },
-    [content.briefDetails, entriesByInsight, router, prototypeFlow, runGate, cardGeneratePrd, gen.openGenerateModal],
-  )
+  // (The old per-card prototype-preview routing lived here as `cardPreview`.
+  // The top-insights CTA posture removed the prototype affordance from cards —
+  // prototypes stay reachable from the PRD flow — so the card no longer wires
+  // it; handleChatPrototype still owns the chat surface's prototype flow.)
 
   // "View PRD" — open the insight's EXISTING PRD at /prd?prd=<id> (mirrors the
   // "View prototype" router.push(prototypePath(prdId)) nav). Safety fallback to
@@ -1295,7 +1288,7 @@ export function BriefChat() {
 
   const userInitials = content.userInitials ?? (content.userName ? content.userName.slice(0, 2).toUpperCase() : "You")
   const userName = content.userName ?? "You"
-  // "Monday brief · 7:01 AM" line in the agent head, from the brief's
+  // "Top Insights · 7:01 AM" line in the agent head, from the brief's
   // generated_at. Hidden when there's no brief (or no timestamp on it).
   const briefTimeLabel = useMemo(() => {
     if (!v2?.generatedAt) return null
@@ -1323,7 +1316,7 @@ export function BriefChat() {
     && !hasEvidenceConnector(content.connectedConnectorIds)
 
   return (
-    <section className="briefx" aria-label="Weekly brief">
+    <section className="briefx" aria-label="Top Insights">
         <div className="bc-scroll">
           <div className="bc-thread">
             {/* PM coworker brief message — greeting + stacked finding cards */}
@@ -1338,7 +1331,7 @@ export function BriefChat() {
                   Product Coworker
                 </span>
                 {briefTimeLabel ? (
-                  <span className="bc-agent-status">Monday brief · {briefTimeLabel}</span>
+                  <span className="bc-agent-status">Top Insights · {briefTimeLabel}</span>
                 ) : null}
               </div>
               <div className="bc-agent-body">
@@ -1373,9 +1366,9 @@ export function BriefChat() {
                           onAsk={() => cardAsk(f)}
                           onGenerateAll={() => cardGenerateAll(f)}
                           onViewPrd={() => cardViewPrd(f)}
+                          onViewEvidence={() => cardViewEvidence(f)}
                           onDismiss={() => cardDismiss(f)}
                           onRestore={() => cardRestore(f)}
-                          onPreview={() => cardPreview(f)}
                           insightState={insightState}
                           mapLoading={prototypeMapLoading}
                         />
@@ -1415,7 +1408,7 @@ export function BriefChat() {
 
         {/* The brief's own chat box (composer/dock) was removed: chatting now
             happens in each PRD's own chat tab, which carries the chat box. The
-            weekly brief is a read surface — greeting + finding cards whose
+            Top Insights brief is a read surface — greeting + finding cards whose
             action buttons (Generate PRD / View prototype) drive the work. */}
       {gen.generateModalProps.open && genPrdId != null && (
         <GenerateModal {...gen.generateModalProps} />

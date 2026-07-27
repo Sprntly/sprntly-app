@@ -3,7 +3,7 @@
 // Sidebar nav-wiring DOM tests.
 //
 // After the brief/chat unification, the home surface (`/`, ChatScreen) defaults
-// to the pinned Weekly-brief tab on a fresh load. So the sidebar "New chat" `+`
+// to the pinned Top Insights tab on a fresh load. So the sidebar "New chat" `+`
 // must NOT use the plain goTo("chat") nav (that would land on the brief) — it
 // uses goToNewChat() (→ `/?new=1`, consumed by ChatScreen to start a fresh chat).
 // The "Top Insights" and "All chats" rail items keep their plain goTo() nav.

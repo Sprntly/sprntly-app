@@ -391,7 +391,7 @@ export function CompanyShapeSettingsView(props: CompanyShapeSettingsViewProps) {
   return (
     <SettingsSection
       title="Company shape"
-      sub="Industry, business type, and tech stack — the structured signal that grounds metric suggestions, the weekly brief, and research."
+      sub="Industry, business type, and tech stack — the structured signal that grounds metric suggestions, the Top Insights brief, and research."
     >
       <form onSubmit={onSave} data-bc-company-shape>
         <div className="field" data-field="industry">

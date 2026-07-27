@@ -1192,7 +1192,7 @@
        but WITHOUT this its overflow leaked up to .main-column (overflow-y:auto),
        so the whole page scrolled — dragging the pinned composer up with it once
        a thread grew past the viewport. Clipping here keeps the scroll INSIDE the
-       thread and pins the composer, exactly as the Weekly-brief tab already does. */
+       thread and pins the composer, exactly as the Top Insights tab already does. */
     overflow: hidden;
   }
 
@@ -2151,7 +2151,7 @@
     width: 100%;
   }
 
-  /** Weekly brief, Evidence, PRD — same max width as hub screens, less outer gutter + bottom pad. */
+  /** Top Insights, Evidence, PRD — same max width as hub screens, less outer gutter + bottom pad. */
   .main.main--reading {
     max-width: 1120px;
     padding: 12px 24px 56px;
@@ -2212,7 +2212,7 @@
     margin-right: 0;
   }
 
-  /** Weekly brief only — extra vertical rhythm (headline · company row · cards). */
+  /** Top Insights only — extra vertical rhythm (headline · company row · cards). */
   .main.main--brief .main-header {
     margin-bottom: 30px;
   }
@@ -5779,7 +5779,7 @@
     background: var(--accent-hover);
   }
 
-  /* -------- Weekly Brief chat surface (reference image 2) -------- */
+  /* -------- Top Insights chat surface (reference image 2) -------- */
   /* Fill the main column: fixed header on top, scrolling thread in the middle,
      floating composer pinned at the bottom. The inner .bc-scroll is the scroll
      container (not .main-column), so the header + composer stay put while the
@@ -7229,7 +7229,7 @@
     font-weight: 600;
   }
 
-  /* Per-card "From · source · source" provenance row — the weekly-brief skill's
+  /* Per-card "From · source · source" provenance row — the top-insights skill's
      honest source chips (replaces the legacy mini-chart + KPI stat columns). */
   .fc-from {
     display: flex;
@@ -17712,7 +17712,7 @@
     line-height: 1.45;
   }
 
-  /* Recurring weekly-brief cadence note, set off from the line above it. */
+  /* Recurring top-insights cadence note, set off from the line above it. */
   .onb-card .gen-ready .s.brief-cadence {
     margin-top: 8px;
   }
@@ -19652,13 +19652,14 @@
   color: var(--ink-3);
 }
 .skl-by svg { color: var(--accent); }
-/* ── Weekly-brief skill design — 7-type taxonomy accents ──────────────────────
+/* ── Top-insights skill design — 8-type taxonomy accents ──────────────────────
    Each finding card sets `--card-accent` inline (lib/brief-skill-taxonomy,
    derived from the finding type, NOT the model's mismatchable accent). The left
-   accent bar, the type pill, and its dot read it. The PRD CTA stays brand-green
-   (`--accent`) — the skill specifies View PRD as a green primary regardless of
-   type. Titles go serif (Spectral/Inter is the skill's stack; we use the app's
-   serif var as the closest loaded face). */
+   accent bar, the type pill, and its dot read it. The primary CTA (View the
+   evidence) stays brand-green (`--accent`) — the skill specifies the primary
+   as green regardless of type; the PRD sits in the ghost slot. Titles go serif
+   (Spectral/Inter is the skill's stack; we use the app's serif var as the
+   closest loaded face). */
 
 /* BriefChat (.fc) cards */
 .fc--skill { position: relative; }

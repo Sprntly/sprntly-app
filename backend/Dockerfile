@@ -35,7 +35,7 @@ RUN cd /prototype-runtime && npm ci --no-audit --no-fund
 COPY backend/app ./app
 # Vendored PM skills (app/skills/loader.py resolves them at REPO_ROOT/skills =
 # /app/skills). Without them /v1/ask/skills is empty and every skill-bound
-# agent call (prd-author, weekly-brief, …) raises UnknownSkillError.
+# agent call (prd-author, top-insights, …) raises UnknownSkillError.
 COPY backend/skills ./skills
 
 EXPOSE 8000

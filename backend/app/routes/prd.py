@@ -188,7 +188,7 @@ async def generate_from_ideation(
     company: WorkspaceContext = Depends(require_workspace),
 ):
     """Kick off PRD generation for an IDEATION item (a theme ranked ≥ 4 that
-    never made the weekly brief's top-3).
+    never made the Top Insights brief's top-3).
 
     Ideation themes aren't in brief.insights, so we synthesize an insight from
     the ideation row ({theme_id, title, summary}) — the same shape the KG

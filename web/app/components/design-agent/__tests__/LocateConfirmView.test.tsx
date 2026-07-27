@@ -237,7 +237,7 @@ describe("label derived from entry component with route fallback", () => {
           route: "/briefing",
           entry_component: "BriefingPage",
           component_count: 4,
-          rationale: "Read the weekly briefing.",
+          rationale: "Read the Top Insights briefing.",
           is_top: false,
         },
       ],

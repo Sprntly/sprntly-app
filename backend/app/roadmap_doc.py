@@ -2,7 +2,7 @@
 
 A PM uploads their current roadmap (spreadsheet, deck, or doc) during the
 onboarding strategy step. Sprntly stores the original file + the extracted
-text and feeds it into weekly-brief composition as a HIGH-WEIGHT priorities
+text and feeds it into top-insights composition as a HIGH-WEIGHT priorities
 signal, so findings are ranked/justified against the stated roadmap (e.g.
 "aligns with your Q3 self-serve onboarding goal"). It also renders read-only
 as the `roadmapdoc` artifact view.
@@ -51,7 +51,7 @@ class RoadmapDoc(BaseModel):
     version: int = 1
 
     def render_for_prompt(self, *, max_chars: int = ROADMAP_PROMPT_MAX_CHARS) -> str:
-        """Compact text block the weekly-brief skill reads as the company's
+        """Compact text block the top-insights skill reads as the company's
         stated priorities. Empty string when there is no usable text."""
         text = (self.extracted_text or "").strip()
         if not text:

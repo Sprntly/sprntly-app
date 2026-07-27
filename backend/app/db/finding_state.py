@@ -1,7 +1,7 @@
 """brief_finding_state store — per-theme memory for brief de-duplication.
 
 One row = the convergence FINGERPRINT a theme had the last time it was surfaced
-as a weekly-brief finding. `synthesis/dedup.py` reads these to decide whether a
+as a top-insights finding. `synthesis/dedup.py` reads these to decide whether a
 previously-surfaced theme has changed enough to resurface; `run_synthesis`
 upserts one per surfaced theme after a brief is saved.
 

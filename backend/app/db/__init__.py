@@ -8,7 +8,7 @@ to work because every function is re-exported here.
 Submodule layout:
   client.py       — sqlite3 conn() context manager + utc_now timestamp
   schema.py       — CREATE TABLE DDL + idempotent ALTERs in init_db()
-  briefs.py       — weekly briefs (is_current row per dataset)
+  briefs.py       — Top Insights briefs (is_current row per dataset)
   prds.py         — PRDs (generating → ready, variant-scoped)
   evidences.py    — evidence pages (same shape, different lifecycle)
   asks.py         — ask_log (append-only) + cached_asks

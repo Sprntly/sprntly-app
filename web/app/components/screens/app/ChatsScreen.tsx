@@ -135,7 +135,7 @@ const GROUP_ORDER = ["Pinned", "Today", "Yesterday", "This week", "Earlier"] as 
 
 // ── Brief de-duplication ──
 //
-// The weekly brief is surfaced EXACTLY ONCE, via the synthetic always-pinned
+// The Top Insights brief is surfaced EXACTLY ONCE, via the synthetic always-pinned
 // `BriefPinRow` (see below). A persisted conversation can sometimes MIRROR that
 // brief (e.g. a brief chat that was saved to history, or seed/demo data titled
 // "Monday Brief"), which would render the brief a SECOND time as an ordinary
@@ -151,8 +151,16 @@ const GROUP_ORDER = ["Pinned", "Today", "Yesterday", "This week", "Earlier"] as 
 //      titles ("this week's brief", "monday brief") or the live brief's own
 //      week label / headline. Exact equality, never a substring contains.
 
-/** Canonical brief titles the synthetic pin can render under. Lowercased. */
-const BRIEF_PIN_TITLES = ["this week's brief", "monday brief", "weekly brief"]
+/** Canonical brief titles the synthetic pin can render under. Lowercased —
+ *  compared against normalizeTitle(row.title). "weekly brief" stays for
+ *  conversations persisted before the Top Insights rename. */
+const BRIEF_PIN_TITLES = [
+  "this week's brief",
+  "monday brief",
+  "weekly brief",
+  "top insights",
+  "top insights brief",
+]
 
 function normalizeTitle(s: string): string {
   return s.trim().toLowerCase()
@@ -180,9 +188,9 @@ export function isMirroredBrief(
   return false
 }
 
-// ── Weekly-brief pin ──
+// ── Top Insights pin ──
 //
-// The current weekly brief is surfaced as a synthetic, always-pinned entry at
+// The current Top Insights brief is surfaced as a synthetic, always-pinned entry at
 // the very top of the chats list (above per-conversation pins). It is NOT a
 // conversation row — it links to the brief surface (`goTo("brief")`). It stays
 // at the top for the entire week: `/v1/brief/current` always returns this
@@ -272,7 +280,7 @@ export function ChatsListView({
   onOpenBrief,
 }: {
   rows: ConversationRow[]
-  /** The current weekly brief, pinned to the top; null when there's none. */
+  /** The current Top Insights brief, pinned to the top; null when there's none. */
   briefEntry: BriefEntry | null
   onRowClick: (row: ConversationRow) => void
   onPin: (row: ConversationRow) => void
@@ -317,7 +325,7 @@ export function ChatsListView({
               <div style={{ flex: 1, height: 1, background: "var(--line, #E8E6E0)" }} />
             </div>
 
-            {/* Always-pinned weekly brief, at the very top of Pinned. */}
+            {/* Always-pinned Top Insights brief, at the very top of Pinned. */}
             {showBriefPin && briefEntry && (
               <BriefPinRow entry={briefEntry} onOpen={onOpenBrief} />
             )}
@@ -440,7 +448,7 @@ export function ChatsScreen() {
   )
   const [loaded, setLoaded] = useState(() => chatsListCache.has(cacheKey))
 
-  // ── Current weekly brief (drives the always-pinned top entry) ──
+  // ── Current Top Insights brief (drives the always-pinned top entry) ──
   // The brief is a workspace-shared artifact (unlike chats), so its cache
   // stays keyed by company only — matching the effect below.
   const [briefEntry, setBriefEntry] = useState<BriefEntry | null>(
@@ -465,7 +473,7 @@ export function ChatsScreen() {
     return () => { cancelled = true }
   }, [cacheKey])
 
-  // Fetch the latest weekly brief and pin it to the top of the list. We always
+  // Fetch the latest Top Insights brief and pin it to the top of the list. We always
   // surface the most recent brief regardless of how old it is — it holds the
   // pinned top slot until a newer one is generated. `/v1/brief/current` returns
   // the latest `is_current` brief; a 404 (no brief yet) leaves it unpinned, so
@@ -483,8 +491,8 @@ export function ChatsScreen() {
         if (cancelled) return
         const entry: BriefEntry = {
           id: brief.id,
-          weekLabel: brief.week_label || "Weekly brief",
-          headline: brief.summary_headline || "Your weekly brief is ready.",
+          weekLabel: brief.week_label || "Top Insights",
+          headline: brief.summary_headline || "Your Top Insights brief is ready.",
           generatedAt: brief.generated_at,
         }
         briefEntryCache.set(activeCompany, entry)
@@ -514,7 +522,7 @@ export function ChatsScreen() {
   [dbChats])
 
   // Merge DB chats + in-memory chats (dedup by title), fallback to mock.
-  // The weekly brief is rendered EXACTLY ONCE via the synthetic `BriefPinRow`;
+  // The Top Insights brief is rendered EXACTLY ONCE via the synthetic `BriefPinRow`;
   // any conversation that mirrors it (`isMirroredBrief`) is dropped here so it
   // never appears a second time as an ordinary row.
   const allChats = useMemo(() => {
@@ -575,7 +583,7 @@ export function ChatsScreen() {
     )
   }, [allChats, search])
 
-  // Opening the pinned weekly-brief entry → the brief surface (`/brief`).
+  // Opening the pinned top-insights entry → the brief surface (`/brief`).
   const openBrief = useCallback(() => { goTo("brief") }, [goTo])
 
   const handleRowClick = (row: ConversationRow) => {
@@ -721,7 +729,7 @@ export function ChatsScreen() {
           </div>
         )}
 
-        {/* Grouped list — Pinned (incl. the weekly brief) first, then by date */}
+        {/* Grouped list — Pinned (incl. the Top Insights brief) first, then by date */}
         {loaded && (
           <ChatsListView
             rows={filtered}

@@ -195,7 +195,7 @@ def _seed_prd(db_mod, title: str = "Checkout Flow") -> int:
 def _seed_slack_connection(env, *, user_id: str, authed_user_id: str) -> None:
     """One per-user Slack connection row. The stored config points at a CHANNEL
     target so the DM-override assertion below is load-bearing (the notifier
-    must NOT honor the stored weekly-brief preference)."""
+    must NOT honor the stored top-insights preference)."""
     from app.connectors.tokens import encrypt_token_json
 
     enc = encrypt_token_json(json.dumps({

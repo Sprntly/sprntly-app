@@ -96,7 +96,7 @@ describe("ConnectorsSettingsView — Regenerate brief", () => {
     const html = render()
     expect(html).toContain("Regenerate brief")
     expect(html).toContain(
-      "Digest new sources and rebuild your weekly brief",
+      "Digest new sources and rebuild your Top Insights brief",
     )
     // Idle button is enabled and labeled "Regenerate brief".
     expect(html).toMatch(

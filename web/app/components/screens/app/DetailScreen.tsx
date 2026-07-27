@@ -108,7 +108,7 @@ export function DetailScreen() {
     return (
       <AppLayout mainClassName="main--reading" inlineChat>
         <a className="detail-back" onClick={() => goTo("brief")}>
-          ← Weekly brief
+          ← Top Insights
         </a>
         <EmptyPane
           title="No evidence loaded"

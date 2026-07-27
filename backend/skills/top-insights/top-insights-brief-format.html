@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Top Insights — specimen and specification</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Spectral:wght@400;500;600;700&family=Inter:wght@400;450;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#15171c; --ink-2:#41444f; --ink-soft:#80838d;
+    --line:#e9e8e4; --paper:#f6f5f1; --card:#ffffff;
+    --green:#1a8a52; --green-dark:#157045; --green-soft:#e6f3ec;
+    --chip:#f4f3ef; --chip-line:#e7e6e1;
+    --sans:'Inter',-apple-system,system-ui,sans-serif;
+    --serif:'Spectral',Georgia,serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--paper);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased;line-height:1.5;padding:40px 32px 90px;}
+  .wrap{max-width:960px;margin:0 auto;}
+
+  .brief-head{display:flex;align-items:center;gap:11px;margin-bottom:16px;flex-wrap:wrap;}
+  .agent-ic{width:30px;height:30px;border-radius:50%;background:var(--green-soft);display:flex;align-items:center;justify-content:center;color:var(--green);}
+  .brief-head .nm{font-weight:600;font-size:15px;}
+  .pm-pill{font-size:10.5px;font-weight:600;letter-spacing:.05em;color:var(--green-dark);background:var(--green-soft);padding:3px 9px;border-radius:999px;display:inline-flex;align-items:center;gap:5px;}
+  .brief-head .meta{font-size:13px;color:var(--ink-soft);}
+  .greeting{font-size:16.5px;color:var(--ink-2);line-height:1.6;max-width:86ch;margin-bottom:30px;}
+  .greeting b{color:var(--ink);font-weight:600;}
+
+  .t-reliability{--accent:#c0473c;--accent-soft:#fbece9;}
+  .t-competitive{--accent:#b07a2e;--accent-soft:#f6efe0;}
+  .t-growth{--accent:#1a8a52;--accent-soft:#e7f3ec;}
+  .t-demand{--accent:#5f57a6;--accent-soft:#eeecf7;}
+  .t-engagement{--accent:#3f63a0;--accent-soft:#e9eef7;}
+  .t-retention{--accent:#b23b52;--accent-soft:#f9eaee;}
+  .t-compliance{--accent:#4f5675;--accent-soft:#ecedf2;}
+  .t-momentum{--accent:#0f7d70;--accent-soft:#e3f1ef;}
+
+  .tlabel{font-family:var(--sans);font-size:11px;letter-spacing:.08em;text-transform:uppercase;font-weight:600;color:var(--accent);display:inline-flex;align-items:center;gap:7px;}
+  .tlabel .d{width:7px;height:7px;border-radius:50%;background:var(--accent);}
+  .tpill{font-family:var(--sans);font-size:11px;letter-spacing:.07em;text-transform:uppercase;font-weight:600;color:var(--accent);background:var(--accent-soft);padding:5px 11px;border-radius:999px;display:inline-flex;align-items:center;gap:7px;}
+  .tpill .d{width:7px;height:7px;border-radius:50%;background:var(--accent);}
+
+  .sources{display:flex;align-items:center;gap:6px;flex-wrap:wrap;}
+  .src{font-family:var(--sans);font-size:10.5px;color:var(--ink-2);background:var(--chip);border:1px solid var(--chip-line);padding:3px 8px;border-radius:6px;white-space:nowrap;}
+  .src-lead{font-family:var(--sans);font-size:10.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink-soft);margin-right:2px;}
+
+  .actions{display:flex;gap:10px;align-items:center;margin-top:18px;}
+  .btn{font-family:var(--sans);font-size:14px;font-weight:600;padding:10px 16px;border-radius:9px;border:1px solid transparent;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:8px;transition:transform .12s,box-shadow .12s,border-color .12s,background .12s;}
+  .btn:hover{transform:translateY(-1px);}
+  .btn:focus-visible{outline:2px solid var(--green);outline-offset:2px;}
+  .btn-primary{background:var(--green);color:#fff;}
+  .btn-primary:hover{background:var(--green-dark);box-shadow:0 6px 16px -7px rgba(26,138,82,.7);}
+  .btn-ghost{background:transparent;color:var(--green-dark);border-color:var(--line);}
+  .btn-ghost:hover{border-color:var(--green);background:var(--green-soft);}
+  .btn svg{flex-shrink:0;}
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;margin-bottom:18px;position:relative;transition:background .2s,border-color .2s;}
+  .head{font-family:var(--serif);font-weight:600;letter-spacing:-.005em;color:var(--ink);padding-right:64px;}
+  .head .k{color:var(--accent);}
+  .body{color:var(--ink-2);max-width:100ch;}
+  .body b{color:var(--ink);font-weight:600;}
+
+  /* top-right controls */
+  .controls{position:absolute;top:20px;right:20px;display:flex;gap:4px;z-index:2;}
+  .ic{width:28px;height:28px;border-radius:7px;display:flex;align-items:center;justify-content:center;color:var(--ink-soft);background:transparent;border:none;cursor:pointer;transition:background .12s,color .12s;}
+  .ic:hover{background:var(--chip);color:var(--ink);}
+  .ic:focus-visible{outline:2px solid var(--green);outline-offset:1px;}
+
+  /* dismissed state */
+  .content{transition:opacity .2s,filter .2s;}
+  .card.dismissed .content{opacity:.4;filter:grayscale(.8);pointer-events:none;}
+  .card.dismissed{background:#faf9f6;border-color:#efeee9;}
+  .card.dismissed::before{opacity:.35;}
+  .card.dismissed .controls{display:none;}
+  .dismissed-bar{position:absolute;top:16px;right:18px;display:none;align-items:center;gap:10px;z-index:3;}
+  .card.dismissed .dismissed-bar{display:flex;}
+  .dismissed-bar .lab{font-size:12.5px;color:var(--ink-soft);letter-spacing:.02em;}
+  .dismissed-bar .undo{font-size:13px;font-weight:600;color:var(--green-dark);background:transparent;border:1px solid var(--line);padding:5px 13px;border-radius:8px;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:background .12s,border-color .12s;}
+  .dismissed-bar .undo:hover{background:var(--green-soft);border-color:var(--green);}
+
+  .cA{padding:24px 30px 24px 32px;overflow:hidden;}
+  .cA::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--accent);transition:opacity .2s;}
+  .cA .tlabel{margin-bottom:12px;}
+  .cA .head{font-size:23px;line-height:1.24;margin-bottom:12px;}
+  .cA .body{font-size:15px;line-height:1.6;}
+  .cA .sources{margin-top:15px;}
+
+  .cB{padding:24px 30px;}
+  .cB .tpill{margin-bottom:14px;}
+  .cB .head{font-size:25px;line-height:1.2;margin-bottom:13px;}
+  .cB .body{font-size:15px;line-height:1.6;}
+  .cB .sources{margin-top:16px;}
+
+  .cC{padding:24px 30px;}
+  .cC .head{font-size:23px;line-height:1.24;margin-bottom:12px;}
+  .cC .body{font-size:15px;line-height:1.6;}
+  .cC .tlabel{margin-bottom:13px;}
+  .cC .setup{font-size:15.5px;color:var(--ink-2);line-height:1.58;margin-bottom:9px;max-width:100ch;}
+  .cC .setup b{color:var(--ink);font-weight:600;}
+  .cC .payoff{font-family:var(--serif);font-weight:600;font-size:25px;line-height:1.2;letter-spacing:-.01em;color:var(--accent);margin-bottom:10px;}
+  .cC .lead{font-size:15px;color:var(--ink-2);line-height:1.58;max-width:100ch;}
+  .cC .sources{margin-top:16px;}
+
+  .cD{padding:22px 30px;}
+  .cD .toprow{display:flex;align-items:center;gap:11px;flex-wrap:wrap;margin-bottom:12px;padding-right:64px;}
+  .cD .toprow .sep{width:1px;height:13px;background:var(--line);}
+  .cD .head{font-size:21px;line-height:1.28;margin-bottom:10px;}
+  .cD .body{font-size:14.5px;line-height:1.58;}
+
+  .cE{padding:24px 30px;}
+  .cE .tlabel{margin-bottom:13px;}
+  .cE .head{font-size:23px;line-height:1.24;margin-bottom:12px;}
+  .cE .head .hl{background:var(--accent-soft);color:var(--accent);padding:0 4px;border-radius:3px;}
+  .cE .body{font-size:15px;line-height:1.6;}
+  .cE .sources{margin-top:15px;}
+
+  /* ---- Report shelf ----------------------------------------------------
+     One tile per standing report, carrying that report's OWN one-sentence
+     takeaway. Deliberately not cards: static between runs by design, so
+     they read as a shelf. Run date on every tile makes the age explicit.
+     --------------------------------------------------------------------- */
+  .reports{margin-top:34px;padding-top:22px;border-top:1px solid var(--line);}
+  .reports-lead{font-size:11px;letter-spacing:.09em;text-transform:uppercase;font-weight:600;color:var(--ink-soft);margin-bottom:12px;}
+  .rgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(272px,1fr));gap:10px;}
+  .report{display:block;padding:15px 17px 14px;background:var(--card);border:1px solid var(--line);border-radius:12px;text-decoration:none;transition:border-color .12s,transform .12s;}
+  .report:hover{border-color:var(--green);transform:translateY(-1px);}
+  .report:focus-visible{outline:2px solid var(--green);outline-offset:2px;}
+  .report .rhead{display:flex;align-items:center;gap:8px;margin-bottom:7px;}
+  .report .rd{width:7px;height:7px;border-radius:50%;background:var(--accent);flex-shrink:0;}
+  .report .rn{font-size:13.5px;font-weight:600;color:var(--ink);letter-spacing:-.002em;}
+  .report .rs{font-size:13px;line-height:1.52;color:var(--ink-2);margin-bottom:12px;}
+  .report .rfoot{display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  .report .rmeta{font-size:11.5px;color:var(--ink-soft);white-space:nowrap;}
+  .report .rgo{font-size:12.5px;font-weight:600;color:var(--green-dark);display:inline-flex;align-items:center;gap:5px;white-space:nowrap;}
+  .report:hover .rgo{text-decoration:underline;}
+
+  @media (max-width:640px){
+    body{padding:26px 14px 70px;}
+    .cB .head,.cC .payoff{font-size:21px;}
+    .cA .head,.cE .head{font-size:20px;}
+    .cD .head{font-size:19px;}
+  }
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="brief-head">
+    <div class="agent-ic"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M3 12h4M17 12h4M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/></svg></div>
+    <span class="nm">PM Agent</span>
+    <span class="pm-pill">&#10022; PM COWORKER</span>
+    <span class="meta">Monday insights &middot; 06:17 AM</span>
+  </div>
+
+  <div class="greeting">Good day, David &mdash; I've been through everything across your tools, and roughly <b>$66M is riding on what surfaced this week</b>. The clearest signals are a rival move now showing up in your lost-deal notes, <b>$12.6M</b> sitting with accounts that have outgrown their plan, and an export failure that three separate channels are raising at once. Five ranked below; the top three carry the most.</div>
+
+  <div class="card cA t-reliability">
+    <div class="controls"><button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button><button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div><div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>Reliability</span>
+      <div class="head">A login bug is failing <span class="k">1 in 6 iOS checkouts</span> &mdash; roughly $2.2M a year is going with them.</div>
+      <div class="body">A silent failure at the final checkout step has been crashing the iOS app for three weeks, with no error shown to the customer. Roughly one in six iOS checkouts now fail there, and at current volume that's about <b>$2.2M in revenue a year</b>. Based on 4,100 logged exceptions, drop-off isolated to the final step, and a matching gap in billing volume.</div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Sentry</span><span class="src">Analytics</span><span class="src">Billing</span></div>
+      <div class="actions"><a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg> View the evidence</a><a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> Generate PRD</a></div>
+    </div>
+  </div>
+
+  <div class="card cB t-competitive">
+    <div class="controls"><button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button><button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div><div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <span class="tpill"><span class="d"></span>Competitive</span>
+      <div class="head">A rival's new search has cost 3 deals this quarter &mdash; with ~$1.6M in renewals raising the same gap.</div>
+      <div class="body">Since Togal shipped natural-language search last month, it has become a deciding factor in three deals you've lost this quarter, and two more renewals have raised it unprompted. This month's competitive review covers four more moves across pricing and onboarding; this is the one with a number attached.</div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Competitor intel</span><span class="src">Sales calls</span><span class="src">CRM</span></div>
+      <div class="actions"><a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg> View the full report</a><a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> Generate PRD</a></div>
+    </div>
+  </div>
+
+  <div class="card cA t-retention">
+    <div class="controls"><button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button><button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div><div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>Retention</span>
+      <div class="head">Export failures are now your <span class="k">most-raised issue</span> &mdash; and $4.1M in renewals sit with the accounts hitting them.</div>
+      <div class="body">Large CSV exports have been timing out silently since the June storage migration. It's the most-raised issue among your enterprise accounts this month, and the 38 accounts affected hold <b>$4.1M in renewals</b>. Interviews suggest why it lands so hard: teams schedule these for month-end close, so a silent failure isn't caught for days. Drawn from 340 support tickets, three interviews, and a public thread.</div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Support</span><span class="src">Reddit</span><span class="src">User interviews</span></div>
+      <div class="actions"><a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg> View the evidence</a><a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> Generate PRD</a></div>
+    </div>
+  </div>
+
+  <div class="card cC t-growth">
+    <div class="controls"><button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button><button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div><div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>Growth</span>
+      <div class="setup">Flagged three weeks ago at 40 accounts, the number of Team-plan customers past every Enterprise seat and usage limit has <b>more than doubled to 96</b>.</div>
+      <div class="payoff">$12.6M in expansion, up from $8.4M</div>
+      <div class="lead">The jump traces to a single onboarding cohort that landed in June and grew faster than any before it. Based on billing thresholds crossed and seat counts as of yesterday.</div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Billing</span><span class="src">Analytics</span><span class="src">CRM</span></div>
+      <div class="actions"><a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg> View the evidence</a><a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> View PRD</a></div>
+    </div>
+  </div>
+
+  <div class="card cD t-demand">
+    <div class="controls"><button class="ic regen" title="Regenerate" aria-label="Regenerate"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v3M12 17v3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M4 12h3M17 12h3M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></button><button class="ic dismiss" title="Dismiss" aria-label="Dismiss"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div><div class="dismissed-bar"><span class="lab">Dismissed</span><button class="undo"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v6h6"/><path d="M3.5 13a9 9 0 1 0 2.6-5.7L3 10"/></svg> Undo</button></div>
+    <div class="content">
+      <div class="toprow">
+        <span class="tlabel"><span class="d"></span>Customer demand</span>
+        <span class="sep"></span>
+        <div class="sources"><span class="src">Sales calls</span><span class="src">Support</span></div>
+      </div>
+      <div class="head">Your top accounts keep asking for real-time collaboration &mdash; $50M in renewals sits with them.</div>
+      <div class="body">Your highest-paying accounts have raised real-time collaboration in every quarterly review this year, and the requests sharpened once two competitors shipped it. Those accounts carry roughly <b>$50M in renewals</b>. Drawn from 14 sales calls and a recurring theme across enterprise support threads.</div>
+      <div class="actions"><a class="btn btn-primary" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg> View the evidence</a><a class="btn btn-ghost" href="#"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg> Generate PRD</a></div>
+    </div>
+  </div>
+
+  <div class="reports">
+    <div class="reports-lead">Your reports</div>
+    <div class="rgrid">
+      <a class="report t-competitive" href="#" target="_blank" rel="noopener">
+        <span class="rhead"><span class="rd"></span><span class="rn">Competitive review</span></span>
+        <span class="rs">Two rivals moved on pricing this month, and the sharpest gap is now in enterprise tiers.</span>
+        <span class="rfoot"><span class="rmeta">Ran 1 Jul &middot; next 1 Aug</span><span class="rgo">View more <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></span></span>
+      </a>
+      <a class="report t-retention" href="#" target="_blank" rel="noopener">
+        <span class="rhead"><span class="rd"></span><span class="rn">Voice of customer</span></span>
+        <span class="rs">Export reliability displaced billing as the top theme across your support queue.</span>
+        <span class="rfoot"><span class="rmeta">Ran 21 Jul &middot; next 28 Jul</span><span class="rgo">View more <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></span></span>
+      </a>
+      <a class="report t-demand" href="#" target="_blank" rel="noopener">
+        <span class="rhead"><span class="rd"></span><span class="rn">Public feedback</span></span>
+        <span class="rs">Sentiment is steady overall, with one sharp spike around the June migration.</span>
+        <span class="rfoot"><span class="rmeta">Ran 1 Jul &middot; next 1 Aug</span><span class="rgo">View more <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></span></span>
+      </a>
+      <a class="report t-engagement" href="#" target="_blank" rel="noopener">
+        <span class="rhead"><span class="rd"></span><span class="rn">Interview synthesis</span></span>
+        <span class="rs">Six enterprise admins on month-end workflows; scheduling came up unprompted in five.</span>
+        <span class="rfoot"><span class="rmeta">Ran 14 Jul &middot; on demand</span><span class="rgo">View more <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></span></span>
+      </a>
+    </div>
+  </div>
+
+  <div class="specimen-note">
+    <b>That is the entire output.</b> Greeting, cards, chips, two CTAs, dismiss and undo, and the report shelf &mdash; the only addition to the template. The three cards from last week that haven't changed aren't here; they're on the backlog. Everything below is what had to happen upstream to produce this.
+  </div>
+
+  <div class="divider">
+    <div class="kicker">The specification</div>
+    <h2>What changed, and why</h2>
+    <p>Six subscribable categories fetched from your own analysis skills, merged across sources, and gated so nothing repeats until it changes. <b>The render is untouched</b> &mdash; the template differs from the original by exactly three CSS variables.</p>
+  </div>
+
+  <div class="card cA t-engagement">
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>Sources</span>
+      <div class="head">Six categories on four different clocks.</div>
+      <div class="body">Readers subscribe to any subset. The mismatch between each source's refresh rate and the reader's cadence creates every interesting problem in this skill &mdash; a daily reader would otherwise see the same monthly competitive card twenty-nine days running.
+        <div class="kv">
+          <div class="r"><span>Top customer problems &mdash; three feedback skills merged</span><span class="v">Weekly &middot; monthly &middot; ad hoc<i>Live</i></span></div>
+          <div class="r"><span>Competitor &amp; market moves &mdash; competitive-intelligence-review</span><span class="v">Monthly<i>Live</i></span></div>
+          <div class="r"><span>Reliability &amp; incidents &mdash; monitoring adapter</span><span class="v">Daily<i>Planned</i></span></div>
+          <div class="r"><span>Your core metric &mdash; metric movement adapter</span><span class="v">Daily<i>Planned</i></span></div>
+          <div class="r"><span>Worth celebrating &mdash; ship impact, plus resolved findings</span><span class="v">Weekly<i>Planned</i></span></div>
+          <div class="r"><span>What to build next &mdash; synthesis across the rest</span><span class="v">Per brief<i>Live</i></span></div>
+        </div>
+      </div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Adapter layer</span></div>
+    </div>
+  </div>
+
+  <div class="card cB t-competitive">
+    <div class="content">
+      <span class="tpill"><span class="d"></span>Reports decompose</span>
+      <div class="head">A monthly review isn't one insight &mdash; it's six, released across the month.</div>
+      <div class="body">The instinct is to give a report its own standing item on the brief. That's the trap: it's the stalest possible object, unchanging by construction for its whole interval. Instead the strongest finding cards the cycle the report lands and carries the report link, and the rest surface one at a time on their own merits, each linking back to the same parent.
+        <div class="form"><b>per_cycle</b> = ceil( findings &divide; (refresh_days &divide; brief_days) ), floor 1, cap 2<br><span class="c">6 findings, monthly report, daily brief &rarr; ~1 every 5 days</span><br><span class="c">6 findings, monthly report, weekly brief &rarr; 1&ndash;2 per week</span><br><span class="c">high urgency bypasses pacing entirely</span></div>
+      </div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Release pace</span></div>
+    </div>
+  </div>
+
+  <div class="card cD t-engagement">
+    <div class="content">
+      <div class="toprow">
+        <span class="tlabel"><span class="d"></span>The report shelf</span>
+      </div>
+      <div class="head">The one place a report is allowed to sit still.</div>
+      <div class="body">Decomposition governs cards. The shelf is navigation, and it works precisely because it isn't a card &mdash; a reader wondering "wasn't there something about pricing in the competitive review?" can get there from any brief, on any day of the month, without the brief re-surfacing the finding.
+        <ul>
+          <li><b>One line, with the report's own takeaway.</b> A bare link says a report exists; it doesn't say whether to bother. The sentence comes verbatim from the report &mdash; this skill never writes it.</li>
+          <li><b>Every row shows when it ran.</b> Stating the age is what makes a month-old link acceptable in a daily digest.</li>
+          <li><b>Below the cards, always.</b> Never competes for ranking, never counts toward the card budget or the greeting total.</li>
+          <li><b>Subscribed and available only.</b> An empty shelf renders nothing rather than a placeholder.</li>
+        </ul>
+      </div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Competitive</span><span class="src">Voice of customer</span><span class="src">Public feedback</span></div>
+    </div>
+  </div>
+
+  <div class="card cA t-reliability">
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>Anti-staleness</span>
+      <div class="head">A card slot must be earned by news.</div>
+      <div class="body">Every finding is compared against a ledger of what was shown before and assigned one state. Only two of them earn a card &mdash; anything unchanged stays ranked on the backlog rather than repeating.
+        <div class="kv">
+          <div class="r"><span><b>new</b> &mdash; never surfaced before</span><span class="v">Card</span></div>
+          <div class="r"><span><b>updated</b> &mdash; surfaced before and materially changed</span><span class="v">Card</span></div>
+          <div class="r"><span><b>carried</b> &mdash; surfaced before, nothing changed</span><span class="v">Backlog</span></div>
+          <div class="r"><span><b>in progress</b> &mdash; PRD approved or patch merged</span><span class="v">Backlog</span></div>
+          <div class="r"><span><b>resolved</b> &mdash; fixed, shipped, or recovered</span><span class="v">Celebrate</span></div>
+        </div>
+        <ul>
+          <li><b>Material change is numeric</b> &mdash; pain &plusmn;15%, reach &plusmn;25%, urgency tier, value &plusmn;20%, or status. A newly-added channel counts too: interviews landing mid-month move no number, but the reader genuinely knows more.</li>
+          <li><b>Rotation exhaustion</b> retires anything shown three times with no action and no change. It returns only if it worsens.</li>
+          <li><b>Resolution advances the queue</b> &mdash; acting on a card promotes the next backlog item in.</li>
+        </ul>
+      </div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Ledger</span><span class="src">Backlog</span></div>
+    </div>
+  </div>
+
+  <div class="card cD t-demand">
+    <div class="content">
+      <div class="toprow">
+        <span class="tlabel"><span class="d"></span>Cross-channel merge</span>
+        <span class="sep"></span>
+        <div class="sources"><span class="src">Internal</span><span class="src">Public</span><span class="src">Direct</span></div>
+      </div>
+      <div class="head">Each feedback source owns a different part of the card.</div>
+      <div class="body">Rather than averaging the three feedback skills, each is authoritative over one element &mdash; and barred from the others.
+        <div class="kv">
+          <div class="r"><span><b>Internal</b> &mdash; support, Slack, calls &middot; weekly</span><span class="v">The pain stat, reach</span></div>
+          <div class="r"><span><b>Direct</b> &mdash; user interviews &middot; ad hoc</span><span class="v">The cause, the why</span></div>
+          <div class="r"><span><b>Public</b> &mdash; Reddit, reviews, forums &middot; monthly</span><span class="v">Breadth, velocity</span></div>
+        </div>
+        <ul>
+          <li>A public forum is not your customer list. It can shape the ranking &mdash; being loud on Reddit is real information &mdash; but it can never supply the number in the headline.</li>
+          <li>Figures are never averaged across channels, and chips show only channels that actually carried it.</li>
+          <li>When channels disagree, the body narrates the tension instead of silently picking a winner.</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="card cE t-growth">
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>The reframe</span>
+      <div class="head">Report the finding &mdash; <span class="hl">don't prescribe the fix</span>.</div>
+      <div class="body">The old voice led with "we've drafted the PRD, review and approve it," which skips the step where the PM decides whether the problem is real. Readers experience that as being sold to. Three changes carry the new posture:
+        <ul>
+          <li><b>The title sizes the stake, not the reward.</b> Not "fixing them protects $4.1M" but "$4.1M in renewals sit with the accounts hitting them."</li>
+          <li><b>The body's third beat is the evidence base</b> &mdash; what the claim rests on, stated plainly. The CTA does the inviting.</li>
+          <li><b>Evidence takes the primary CTA</b>, or the parent report where one exists. The PRD moves to the ghost slot and reads Generate PRD until one exists.</li>
+        </ul>
+      </div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">User feedback</span></div>
+    </div>
+  </div>
+
+  <div class="card cA t-compliance">
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>Open questions</span>
+      <div class="head">Five things block running this against real data.<span class="flag">Needs your answer</span></div>
+      <div class="body">
+        <div class="kv">
+          <div class="r"><span><b>Stable finding IDs across runs?</b> The ledger keys off them. Without stable ids there's no freshness state, no dismissal memory, no rotation &mdash; everything above is inert.</span><span class="v">Blocking</span></div>
+          <div class="r"><span><b>Are report findings separately addressable</b>, or only prose? Decomposition needs all of them, not just the headline.</span><span class="v">Blocking</span></div>
+          <div class="r"><span><b>Two skill names unresolved</b> &mdash; internal channel and public channel. Resolve on what each reads, not what it's called.</span><span class="v">Blocking</span></div>
+          <div class="r"><span><b>Where outputs are saved</b>, and where the ledger persists between runs.</span><span class="v">Blocking</span></div>
+          <div class="r"><span><b>A stable report URL and an evidence view per finding</b> &mdash; both CTAs assume they exist.</span><span class="v">Blocking</span></div>
+          <div class="r"><span>What counts as "acted on" &mdash; can this read a PRD event?</span><span class="v">Soon</span></div>
+          <div class="r"><span>Does the competitive skill emit interim findings between reports?</span><span class="v">Soon</span></div>
+          <div class="r"><span>Severity bar and vendor scope for the reliability adapter.</span><span class="v">Soon</span></div>
+        </div>
+      </div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">Implementation</span></div>
+    </div>
+  </div>
+
+  <div class="card cA t-momentum">
+    <div class="content">
+      <span class="tlabel"><span class="d"></span>The palette</span>
+      <div class="head">Three colors added, nothing else touched.</div>
+      <div class="body">Type still drives both the accent and the pill, exactly as before. Category is routing metadata that governs fetching, capping, and the audit trail &mdash; it never appears on a card. Retention and compliance were always in the taxonomy but never defined in CSS; momentum is new, for celebrations and favorable metric movement.
+        <div class="sw-row">
+          <span class="s" style="--sc:#c0473c;--sb:#fbece9"><i></i>Reliability</span>
+          <span class="s" style="--sc:#b23b52;--sb:#f9eaee"><i></i>Retention</span>
+          <span class="s" style="--sc:#b07a2e;--sb:#f6efe0"><i></i>Competitive</span>
+          <span class="s" style="--sc:#4f5675;--sb:#ecedf2"><i></i>Compliance</span>
+          <span class="s" style="--sc:#5f57a6;--sb:#eeecf7"><i></i>Demand</span>
+          <span class="s" style="--sc:#3f63a0;--sb:#e9eef7"><i></i>Engagement</span>
+          <span class="s" style="--sc:#1a8a52;--sb:#e7f3ec"><i></i>Growth</span>
+          <span class="s" style="--sc:#0f7d70;--sb:#e3f1ef"><i></i>Momentum</span>
+        </div>
+      </div>
+      <div class="sources"><span class="src-lead">From</span><span class="src">brief-template.html</span></div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <b>Top Insights</b> &mdash; specimen brief and specification, July 2026. Renamed from weekly-brief. The runnable package ships as markdown; this page is the readable view. The thresholds throughout &mdash; 15% pain change, three-showing rotation limit, release-pace cap of two, daily default of three cards &mdash; are defaults chosen to be defensible, not measured. The ledger will record what you need to tune them.
+  </div>
+
+</div>
+
+<script>
+document.querySelectorAll('.card .dismiss').forEach(function(b){
+  b.addEventListener('click', function(){ b.closest('.card').classList.add('dismissed'); });
+});
+document.querySelectorAll('.card .undo').forEach(function(b){
+  b.addEventListener('click', function(){ b.closest('.card').classList.remove('dismissed'); });
+});
+</script>
+</body>
+</html>

@@ -74,7 +74,10 @@ const FEATURE_LABELS: Record<string, string> = {
   ask: "Ask",
   ideation: "Ideation",
   synthesis: "Synthesis",
-  weekly_brief: "Weekly brief",
+  top_insights: "Top Insights",
+  // Pre-rename rows persisted `weekly_brief`; keep them labeled under the
+  // product's current name rather than surfacing the legacy key.
+  weekly_brief: "Top Insights",
   evidence: "Evidence",
   research: "Research",
   documents: "PRD documents",

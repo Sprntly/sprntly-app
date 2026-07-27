@@ -139,7 +139,7 @@ def test_refresh_includes_google_drive():
 
 def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
     """When SCHEDULER_ENABLED=true, the connector-refresh job must be
-    wired alongside the weekly-brief tick — distinct IDs so they show up
+    wired alongside the top-insights tick — distinct IDs so they show up
     separately in logs."""
     from app import scheduler as sched_mod
 
@@ -167,9 +167,9 @@ def test_start_scheduler_registers_refresh_job_when_enabled(monkeypatch):
 
     sched_mod.start_scheduler()
 
-    # Both jobs registered: weekly brief tick + connector refresh
+    # Both jobs registered: Top Insights brief tick + connector refresh
     ids = sorted(j["id"] for j in fake.jobs)
-    assert "weekly_brief_tick" in ids
+    assert "brief_tick" in ids
     assert "refresh_connectors" in ids
     assert started == [True]
 

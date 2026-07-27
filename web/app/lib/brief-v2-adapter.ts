@@ -58,7 +58,7 @@ interface BriefV2CardBase {
   actionLabel: string
   tagType: BriefTagType
   tagLabel: string
-  // Weekly-brief skill taxonomy (the canonical design): the finding's type,
+  // Top-insights skill taxonomy (the canonical design): the finding's type,
   // its accent hex (derived from the type, not the model's mismatchable accent),
   // and the type-name pill label (no P0/P1, per the skill). Render layers prefer
   // these over category/priority for the card accent + pill.
@@ -84,7 +84,7 @@ interface BriefV2CardBase {
   title: string
   body: string
   metricHighlight: string
-  // The weekly-brief skill's honest "From" source chips (`_card.sources`) — the
+  // The top-insights skill's honest "From" source chips (`_card.sources`) — the
   // provenance row the skill specifies (e.g. From · Sentry · Analytics). Empty
   // for legacy briefs with no `_card`.
   fromSources: string[]

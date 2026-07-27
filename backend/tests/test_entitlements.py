@@ -18,7 +18,7 @@ import pytest
 from app.entitlements import (
     agents_enabled,
     feature_flags_for_company,
-    weekly_brief_enabled,
+    top_insights_enabled,
 )
 
 
@@ -32,9 +32,9 @@ from app.entitlements import (
         (None, True),
         ("not-a-dict", True),
         (["agents"], True),
-        # No relevant keys at all → ON (weekly_brief / unknown keys are not
+        # No relevant keys at all → ON (top_insights / unknown keys are not
         # the agents module's business).
-        ({"weekly_brief": False}, True),
+        ({"top_insights": False}, True),
         ({"engineer_agent": False, "research_agent": False}, True),
         # Legacy keys present → OR of on_demand_analysis/auto_prd_generation.
         ({"on_demand_analysis": True}, True),
@@ -58,7 +58,7 @@ def test_agents_enabled_matrix(flags, expected):
     assert agents_enabled(flags) is expected
 
 
-# ---- weekly_brief_enabled matrix ----------------------------------------------
+# ---- top_insights_enabled matrix ----------------------------------------------
 
 @pytest.mark.parametrize(
     ("flags", "expected"),
@@ -71,15 +71,22 @@ def test_agents_enabled_matrix(flags, expected):
         ({"agents": False}, True),
         ({"on_demand_analysis": False, "auto_prd_generation": False}, True),
         # Explicit key decides.
+        ({"top_insights": True}, True),
+        ({"top_insights": False}, False),
+        ({"top_insights": False, "agents": True}, False),
+        ({"top_insights": 0}, False),
+        ({"top_insights": None}, False),
+        # `weekly_brief` is the pre-rename spelling: honored as an alias when
+        # the modern key is absent (rows written before the rename migration,
+        # or restored from a backup), and ignored once the modern key exists.
         ({"weekly_brief": True}, True),
         ({"weekly_brief": False}, False),
-        ({"weekly_brief": False, "agents": True}, False),
-        ({"weekly_brief": 0}, False),
-        ({"weekly_brief": None}, False),
+        ({"weekly_brief": False, "top_insights": True}, True),
+        ({"weekly_brief": True, "top_insights": False}, False),
     ],
 )
-def test_weekly_brief_enabled_matrix(flags, expected):
-    assert weekly_brief_enabled(flags) is expected
+def test_top_insights_enabled_matrix(flags, expected):
+    assert top_insights_enabled(flags) is expected
 
 
 # ---- feature_flags_for_company (DB read, fail-open) ----------------------------
@@ -96,12 +103,12 @@ def test_feature_flags_for_company_reads_row(fake_llm):
             "id": cid,
             "slug": "flags-co",
             "display_name": "Flags Co",
-            "feature_flags": {"agents": False, "weekly_brief": True},
+            "feature_flags": {"agents": False, "top_insights": True},
         }
     ).execute()
     assert feature_flags_for_company(cid) == {
         "agents": False,
-        "weekly_brief": True,
+        "top_insights": True,
     }
 
 

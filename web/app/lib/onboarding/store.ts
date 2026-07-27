@@ -609,7 +609,7 @@ export async function saveFeatureFlags(
 }
 
 /**
- * Set only the weekly-brief weekday inside companies.notification_settings,
+ * Set only the top-insights weekday inside companies.notification_settings,
  * merge-writing over the CURRENT stored object so the other keys (brief_hour,
  * email_enabled, timezone, Slack config…) are never clobbered. Used by the
  * onboarding team step; the full schedule editor lives in Settings → Comms.
