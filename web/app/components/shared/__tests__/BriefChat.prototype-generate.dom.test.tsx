@@ -240,7 +240,7 @@ describe("BriefChat finding card — no prototype button even when one is built"
 
     for (const f of [HERO, SUPPORTING]) {
       expect(within(cardFor(f.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
-      expect(within(cardFor(f.title)).getByRole("button", { name: "View the evidence" })).toBeTruthy()
+      expect(within(cardFor(f.title)).getByRole("button", { name: "View Evidence" })).toBeTruthy()
     }
     // Clicking the built card's PRD ghost CTA views the PRD — never a modal.
     expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()

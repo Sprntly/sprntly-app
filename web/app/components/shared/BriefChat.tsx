@@ -480,7 +480,7 @@ function BriefFindingCard({
               title="See what this finding rests on — the signals, quotes, and datapoints behind it"
             >
               <IconFileText size={14} />
-              View the evidence
+              View Evidence
             </button>
             {(() => {
               const cta = prdCtaState(insightState, generating, mapLoading)

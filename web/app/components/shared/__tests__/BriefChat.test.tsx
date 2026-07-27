@@ -535,7 +535,7 @@ describe("BriefChat finding card — prototype option gated on prototypeable", (
     expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
     // The evidence CTA is the primary in its place.
     expect(
-      within(cardFor(HERO.title)).getByRole("button", { name: "View the evidence" }),
+      within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" }),
     ).toBeTruthy()
   })
 
@@ -695,7 +695,7 @@ describe("BriefChat finding card — no prototype preview thumbnail", () => {
     // CTA pair is evidence (primary) + PRD (ghost); prototypes live in the PRD
     // flow.
     expect(within(card).queryByText("View prototype")).toBeNull()
-    expect(within(card).queryByRole("button", { name: "View the evidence" })).not.toBeNull()
+    expect(within(card).queryByRole("button", { name: "View Evidence" })).not.toBeNull()
   })
 })
 
@@ -720,7 +720,7 @@ describe("BriefChat finding card — prototype affordance removed from cards", (
     } as never)
     await act(async () => { renderBrief() })
     expect(within(cardFor(HERO.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
-    expect(within(cardFor(HERO.title)).getByRole("button", { name: "View the evidence" })).toBeTruthy()
+    expect(within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" })).toBeTruthy()
   })
 })
 
