@@ -328,7 +328,7 @@ export function PrdPanelContent({ evidenceTabAvailable = true }: {
                 <span className="prd-loader" aria-hidden /> Generating PRD…
               </div>
             ) : (
-              <EmptyPane title="No PRD draft loaded" hint="Generate a PRD from the Weekly Brief by selecting an insight and clicking Generate PRD." placeholders={0} />
+              <EmptyPane title="No PRD draft loaded" hint="Generate a PRD from the Top Insights by selecting an insight and clicking Generate PRD." placeholders={0} />
             )}
           </div>
         )}

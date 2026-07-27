@@ -209,7 +209,7 @@ export function EvidenceScreen() {
         onClick={() => goTo("brief")}
         style={{ cursor: "pointer" }}
       >
-        ← Weekly brief
+        ← Top Insights
       </a>
 
       {/* Loading state */}

@@ -131,7 +131,7 @@ def test_nav_parser_railitem_custom_component():
 export function Rail() {
   return (
     <nav>
-      <RailItem screen="brief" icon={<IconMessageCircle/>} label="Weekly brief" />
+      <RailItem screen="brief" icon={<IconMessageCircle/>} label="Top Insights" />
       <RailItem screen="chats" icon={<IconChats/>} label="All chats" />
       <RailItem screen="backlog" icon={<IconList/>} label="Backlog Projects" />
       <RailItem screen="templates" icon={<IconStar/>} label="Templates · what good looks like" />
@@ -146,7 +146,7 @@ export function Rail() {
     items = _extract_nav_items(body)
     labels = [it.label for it in items]
     assert labels[:4] == [
-        "Weekly brief",
+        "Top Insights",
         "All chats",
         "Backlog Projects",
         "Templates · what good looks like",
@@ -178,7 +178,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
 export function Sidebar() {
   return (
     <nav>
-      <RailItem screen="brief" icon={<IconMessageCircle/>} label="Weekly brief" />
+      <RailItem screen="brief" icon={<IconMessageCircle/>} label="Top Insights" />
       <RailItem screen="chats" icon={<IconChats/>} label="All chats" />
       <RailItem screen="backlog" icon={<IconList/>} label="Backlog Projects" />
       <RailItem screen="templates" icon={<IconStar/>} label="Templates" />
@@ -198,7 +198,7 @@ export function Sidebar() {
     # …and the full pipeline therefore recovers the real labels (not n_nav=0).
     shell = extract_shell(snap)
     labels = [it.label for it in shell.nav_items]
-    assert "Weekly brief" in labels
+    assert "Top Insights" in labels
     assert "All chats" in labels
     assert "Backlog Projects" in labels
     assert "Templates" in labels
@@ -216,7 +216,7 @@ const NAV = [
 export function Rail() {
   return (
     <nav>
-      <RailItem label="Weekly brief" />
+      <RailItem label="Top Insights" />
       <RailItem label="All chats" />
     </nav>
   );
@@ -225,7 +225,7 @@ export function Rail() {
     items = _extract_nav_items(body)
     labels = [it.label for it in items]
     assert labels == ["Home", "Team"]
-    assert "Weekly brief" not in labels
+    assert "Top Insights" not in labels
 
 
 def test_nav_parser_strategy_c_does_not_fire_when_links_present():
@@ -237,7 +237,7 @@ export function Rail() {
     <nav>
       <Link href="/home">Home</Link>
       <Link href="/team">Team</Link>
-      <RailItem label="Weekly brief" />
+      <RailItem label="Top Insights" />
       <RailItem label="All chats" />
     </nav>
   );
@@ -246,7 +246,7 @@ export function Rail() {
     items = _extract_nav_items(body)
     labels = [it.label for it in items]
     assert labels == ["Home", "Team"]
-    assert "Weekly brief" not in labels
+    assert "Top Insights" not in labels
 
 
 def test_nav_parser_ignores_aria_label_and_expressions():
@@ -256,7 +256,7 @@ def test_nav_parser_ignores_aria_label_and_expressions():
 export function Rail() {
   return (
     <nav>
-      <RailItem aria-label="Weekly brief" />
+      <RailItem aria-label="Top Insights" />
       <RailItem aria-label="All chats" />
       <RailItem label={dynamicLabel} />
       <RailItem label={t('nav.sources')} />

@@ -206,7 +206,7 @@ def test_answer_heavy_skill_escalates_to_opus(monkeypatch):
 
 
 def test_answer_prd_author_stays_on_sonnet(monkeypatch):
-    # The deep reasoning happens upstream in the KG + weekly brief; the PRD
+    # The deep reasoning happens upstream in the KG + Top Insights brief; the PRD
     # composes off that material and answers on the default (sonnet) model.
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())

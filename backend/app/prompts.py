@@ -201,7 +201,7 @@ etc.) sourced from the corpus
 - have **at least one specific recommendation** that follows from the cause
 
 Tag each insight with EXACTLY ONE of these three categories. The frontend \
-maps these to the Weekly Brief action tags shown in parentheses — write the \
+maps these to the Top Insights action tags shown in parentheses — write the \
 card's content as if it were headed by that action tag:
 
 - **"something_new"** (BUILD) — a net-new opportunity worth pursuing
@@ -713,7 +713,7 @@ blocks, no commentary outside the document. Output the raw HTML document ONLY �
 do NOT wrap it in a Markdown code fence; the first characters of your response \
 must be the HTML itself (e.g. `<meta>`), never ``` ``` ```.
 
-This brief is the PROVENANCE TRAIL behind a single weekly-brief finding: it \
+This brief is the PROVENANCE TRAIL behind a single top-insights finding: it \
 shows a product manager HOW the insight was surfaced — the converging signals \
 across the company's connected sources and the strength of their agreement — \
 so the PM can trust and act on it, and it lands on the value-driven hypothesis \

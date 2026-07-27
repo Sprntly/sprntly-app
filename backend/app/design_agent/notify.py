@@ -11,7 +11,7 @@ The first (and default) provider is a Slack DM to the user who generated the
 prototype, reusing the existing per-user Slack delivery plumbing
 (`connections` rows + `slack_oauth.post_to_target`) — no new sender, no new
 OAuth scopes. The `{"target_type": "dm"}` override is the locked default:
-this is a personal, transactional ping, so the user's weekly-brief channel
+this is a personal, transactional ping, so the user's top-insights channel
 preference is deliberately NOT consulted.
 
 Side-effect discipline (mirrors brief_nudge._deliver_to_one): this module
@@ -90,7 +90,7 @@ def _deliver_slack(
     if not bot_token:
         return {"delivered": False, "provider": "slack", "reason": "no_bot_token"}
     # LOCKED default: force the DM target. The connection's stored config
-    # (the weekly-brief channel preference) is deliberately ignored here.
+    # (the top-insights channel preference) is deliberately ignored here.
     # An un-scoped workspace / Slack rejection raises HTTPException inside
     # post_to_target — caught by the entry point's never-raises guard.
     slack_oauth.post_to_target(

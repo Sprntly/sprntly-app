@@ -96,7 +96,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   chat: "Home",
   chats: "History",
   artifacts: "Artifacts",
-  brief: "Weekly brief",
+  brief: "Top Insights",
   detail: "Evidence",
   ondemand: "Home",
   past: "Past briefs",

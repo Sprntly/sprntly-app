@@ -2,7 +2,7 @@
 //
 // BriefChat finding-card prototype affordance — GENERATE REMOVED.
 //
-// The weekly brief no longer offers "Generate prototype" on finding cards
+// The Top Insights brief no longer offers "Generate prototype" on finding cards
 // (prototype generation lives in the PRD flow). The card renders a prototype
 // button ONLY when a prototype already exists for the insight (prototypeReady,
 // DB-backed via useBriefPrototypeMap), labeled "View prototype", and clicking
@@ -225,8 +225,10 @@ describe("BriefChat finding card — Generate prototype is removed", () => {
   })
 })
 
-describe("BriefChat finding card — View prototype (already built) stays reachable", () => {
-  it("renders 'View prototype' only for the insight with a built prototype, and clicking navigates to the canvas (no modal)", async () => {
+describe("BriefChat finding card — no prototype button even when one is built", () => {
+  it("renders no prototype button for a built prototype; the card pair is evidence (primary) + PRD (ghost)", async () => {
+    // Top-insights CTA posture: the prototype affordance left the cards
+    // entirely — a built prototype is reached from the PRD flow, never here.
     mapEntries.set(0, {
       insight_index: 0,
       prd_id: 42,
@@ -236,14 +238,12 @@ describe("BriefChat finding card — View prototype (already built) stays reacha
     mapEntries.set(1, { insight_index: 1, prd_id: 43, prd_title: "Onboarding PRD", prototype: null })
     await act(async () => { renderBrief() })
 
-    // Only the built insight offers the affordance, labeled View (never Generate).
-    const viewBtn = within(cardFor(HERO.title)).getByRole("button", { name: "View prototype" })
-    expect(within(cardFor(SUPPORTING.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
-
-    fireEvent.click(viewBtn)
-
-    // Straight to the in-tab canvas for THIS card's PRD — no generate modal.
-    expect(pushSpy).toHaveBeenCalledWith(prototypePath(42))
+    for (const f of [HERO, SUPPORTING]) {
+      expect(within(cardFor(f.title)).queryByRole("button", { name: /prototype/i })).toBeNull()
+      expect(within(cardFor(f.title)).getByRole("button", { name: "View Evidence" })).toBeTruthy()
+    }
+    // Clicking the built card's PRD ghost CTA views the PRD — never a modal.
     expect(screen.queryByRole("dialog", { name: "Generate prototype" })).toBeNull()
+    expect(pushSpy).not.toHaveBeenCalled()
   })
 })

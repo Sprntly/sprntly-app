@@ -84,7 +84,7 @@ const CATEGORY_DESCRIPTIONS: Record<string, string> = {
   code: "Repos & PRs — so the agent reads real code and ships fixes",
   monitoring: "Error tracking, APM, paging — powers the On-Call agent",
   design: "Design system & files — so prototypes match your brand",
-  comms: "Where your weekly brief lands — with a thread to ask follow-ups",
+  comms: "Where your Top Insights brief lands — with a thread to ask follow-ups",
 }
 
 /* Inline SVG category icons (tabler-style strokes) — the design kit's

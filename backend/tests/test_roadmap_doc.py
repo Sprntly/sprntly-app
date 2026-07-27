@@ -1,6 +1,6 @@
 """Tests for the roadmap doc — storage, the POST/GET /v1/company/roadmap-doc
 routes, and the brief-priorities ingestion path (roadmap context reaches the
-weekly-brief skill compose call)."""
+top-insights skill compose call)."""
 from __future__ import annotations
 
 import io

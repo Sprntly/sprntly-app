@@ -3,9 +3,9 @@
 // Tests for the chats list's presentational surface (`ChatsListView`), the pure
 // component extracted from ChatsScreen so it is testable without the app's
 // context stack — same View-export pattern as `ArtifactsView`, plus a jsdom
-// interaction pass for clicks (rows, pin/unpin, and the weekly-brief pin).
+// interaction pass for clicks (rows, pin/unpin, and the top-insights pin).
 //
-// Focus: the current weekly brief is surfaced as an always-pinned entry at the
+// Focus: the current Top Insights brief is surfaced as an always-pinned entry at the
 // very TOP of the list (above per-conversation pins and all dated groups), it
 // links to the brief surface when clicked, and it's absent when there's no
 // current brief — without breaking the existing per-conversation pin feature.
@@ -80,8 +80,8 @@ function markup(override: Partial<Props> = {}): string {
 
 afterEach(cleanup)
 
-describe("ChatsListView — weekly-brief pin (static render)", () => {
-  it("renders the weekly-brief entry with its week label + headline when a current brief exists", () => {
+describe("ChatsListView — top-insights pin (static render)", () => {
+  it("renders the top-insights entry with its week label + headline when a current brief exists", () => {
     const html = markup()
     // Static markup HTML-escapes the apostrophe ("This week&#x27;s brief"), so
     // match on a stable substring of the title.

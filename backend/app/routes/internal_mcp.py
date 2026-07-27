@@ -138,7 +138,7 @@ def ideation(company_id: str) -> dict[str, Any]:
     from app.db.briefs import get_current_brief
 
     # Empty-when-no-brief invariant, mirrored from routes/ideation.py: the
-    # ideation pool is the by-product of a weekly brief, so no brief -> no
+    # ideation pool is the by-product of a Top Insights brief, so no brief -> no
     # ideas. Returns the same visible set the page shows (the weekly shortlist
     # + user-pinned rows), not the hidden tail.
     slug = slug_for_company_id(company_id)

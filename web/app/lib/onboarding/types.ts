@@ -16,17 +16,20 @@ export type FeatureFlags = {
    *  legacy keys below. Old rows without it fall back to the legacy keys at
    *  display time (see StaffAdminScreen); stored data is never rewritten. */
   agents: boolean
-  weekly_brief: boolean
+  top_insights: boolean
   /** Action-envelope chat dispatch: when ON, every chat message is routed by
    *  POST /v1/chat/intent (backend, history-aware) instead of the client
    *  regex/classifier ladder. DEFAULT ON (decision 2026-07-26): a missing key
-   *  counts as ON — same grandfathering as agents/weekly_brief — so the staff
+   *  counts as ON — same grandfathering as agents/top_insights — so the staff
    *  toggle is a per-company kill switch, not an opt-in. */
   chat_intent_envelope: boolean
   // Legacy keys — superseded by `agents` but kept so old stored rows and the
   // dormant FeatureFlagsSettings surface still typecheck.
   on_demand_analysis: boolean
   auto_prd_generation: boolean
+  /** Pre-rename spelling of `top_insights` — kept so old stored rows still
+   *  typecheck; parseFeatureFlags folds it into the modern key. */
+  weekly_brief?: boolean
   engineer_agent: boolean
   research_agent: boolean
   on_call_agent: boolean
@@ -267,7 +270,7 @@ export const PLANNING_CYCLES = [
 
 export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
   agents: true,
-  weekly_brief: true,
+  top_insights: true,
   chat_intent_envelope: true,
   on_demand_analysis: true,
   auto_prd_generation: true,
@@ -460,7 +463,15 @@ export function parseKpiTree(raw: unknown): KpiTree {
 
 export function parseFeatureFlags(raw: unknown): FeatureFlags {
   if (!raw || typeof raw !== "object") return { ...DEFAULT_FEATURE_FLAGS }
-  return { ...DEFAULT_FEATURE_FLAGS, ...(raw as Partial<FeatureFlags>) }
+  const partial = raw as Partial<FeatureFlags>
+  const flags = { ...DEFAULT_FEATURE_FLAGS, ...partial }
+  // Rows written before the Weekly Brief → Top Insights rename carry only the
+  // legacy key; honor it when the modern key is absent (mirrors backend
+  // entitlements.top_insights_enabled).
+  if (!("top_insights" in partial) && "weekly_brief" in partial) {
+    flags.top_insights = !!partial.weekly_brief
+  }
+  return flags
 }
 
 export function parseCompanyIcp(raw: unknown): CompanyIcp {

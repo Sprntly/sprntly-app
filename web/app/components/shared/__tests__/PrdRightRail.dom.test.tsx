@@ -174,7 +174,7 @@ describe("PRD opens as a new chat tab — composer command path", () => {
     // BriefChat) drives the generation and opens the panel.
     await waitFor(() => expect(openPrdTab).toHaveBeenCalledTimes(1))
     expect(openPrdTab).toHaveBeenCalledWith({
-      title: "PRD · Weekly brief",
+      title: "PRD · Top Insights",
       source: { kind: "generate", meta: { briefId: 7, insightIndex: 0 } },
     })
 

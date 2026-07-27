@@ -411,7 +411,7 @@ export function ArtifactsScreen() {
   // our format. The endpoint parses the file and kicks off generation, returning
   // a 'generating' prd_id fast — so we open the chat window IMMEDIATELY and let
   // the PRD panel poll to ready in-tab (kind:"resume"), the same surface + feel
-  // as the weekly brief's "generate PRD" flow. No blocking wait behind the
+  // as the Top Insights brief's "generate PRD" flow. No blocking wait behind the
   // button, so a slow generation never looks like a hung upload.
   const handleImport = useCallback(async (file: File) => {
     if (!activeCompany || importing) return

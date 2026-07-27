@@ -1,4 +1,4 @@
-"""Weekly briefs — backed by the `briefs` table in Supabase.
+"""Top Insights briefs — backed by the `briefs` table in Supabase.
 
 Reads + writes go through the supabase-py PostgREST client. The
 returned dict shape stays the same as the prior SQLite implementation
@@ -72,7 +72,7 @@ def save_brief(
 
 
 # The fixed week_label that identifies the per-dataset anchor brief uploaded PRDs
-# hang off. Uploaded PRDs have no weekly brief / KG lineage, but prds.brief_id is
+# hang off. Uploaded PRDs have no Top Insights brief / KG lineage, but prds.brief_id is
 # NOT NULL — rather than make it nullable (a schema decoupling), every uploaded
 # PRD for a company anchors to ONE synthetic brief. payload._uploads_anchor also
 # marks it for humans reading the row; the get-or-create keys on the plain
@@ -86,7 +86,7 @@ _UPLOADS_ANCHOR_KEY = "_uploads_anchor"
 def ensure_uploads_brief(dataset: str) -> int:
     """Get-or-create the per-dataset placeholder brief that uploaded PRDs anchor to.
 
-    The anchor is `is_current=false` so it NEVER shadows the real weekly brief or
+    The anchor is `is_current=false` so it NEVER shadows the real Top Insights brief or
     shows in the brief UI. Idempotent: keyed on (dataset, week_label, is_current)
     so exactly one exists per dataset. Its `dataset` slug matches the company's so
     the uploaded PRD still lists under Artifacts (which scopes PRDs by the brief's

@@ -11,7 +11,7 @@ import { saveFeatureFlags } from "../../../../lib/onboarding/store"
 import { SettingsMessage, SettingsSection } from "./SettingsLayout"
 
 const FLAG_META: { key: keyof FeatureFlags; label: string; desc: string }[] = [
-  { key: "weekly_brief", label: "Weekly Brief", desc: "Monday-morning ranked priorities." },
+  { key: "top_insights", label: "Top Insights", desc: "Scheduled ranked priorities." },
   { key: "on_demand_analysis", label: "On-Demand Analysis", desc: "Ask Sprntly with cited evidence." },
   { key: "auto_prd_generation", label: "Auto-PRD generation", desc: "Draft PRDs from Brief findings." },
   { key: "engineer_agent", label: "Engineer Agent", desc: "Package context for Claude Code / Cursor." },

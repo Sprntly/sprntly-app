@@ -929,7 +929,7 @@ CREATE TABLE tracker_meta (
 
 -- Roadmap doc storage (mirrors 20260623120000_roadmap_doc.sql, SQLite-ized).
 -- One row per company (UNIQUE company_id) so a re-upload upserts in place. Holds
--- the original file (base64) + extracted text the weekly brief reads + the
+-- the original file (base64) + extracted text the Top Insights brief reads + the
 -- roadmapdoc artifact renders. bigint identity / timestamptz are INTEGER / TEXT
 -- under SQLite, matching the other seeded tables.
 CREATE TABLE roadmap_doc (

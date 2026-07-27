@@ -46,7 +46,7 @@ def _nudge_payload(pause: bool = False) -> dict:
         "cta_url": "http://localhost:3000/brief",
     }
     email = {
-        "subject": "Your weekly brief: ~$60M on the table",
+        "subject": "Your Top Insights brief: ~$60M on the table",
         "title": "~$60M is within reach",
         "intro": "Five plays ranked in your brief.",
         "items": [{"label": "Expansion", "detail": "42 accounts", "impact": "$8.4M"}],

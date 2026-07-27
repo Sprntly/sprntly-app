@@ -74,7 +74,7 @@ HEAVY_MODEL = "claude-opus-4-7"
 # Skills heavy enough (deep analysis / long output) to answer on opus rather
 # than sonnet. Tunable — keep small; most skills do fine on sonnet.
 # NB: prd-author is intentionally NOT here — the deep reasoning lives in the KG
-# build + weekly brief (both on DEEP_MODEL); the PRD composes off that already-
+# build + Top Insights brief (both on DEEP_MODEL); the PRD composes off that already-
 # analysed material and stays on sonnet, matching the product PRD pipeline
 # (prd_runner.py, which never passed an opus model override).
 HEAVY_SKILLS: frozenset[str] = frozenset(

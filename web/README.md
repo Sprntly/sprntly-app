@@ -20,7 +20,7 @@ module has its own URL (see **Routes** below).
 | Screen | URL |
 |--------|-----|
 | Home (Ask) | `/` |
-| Weekly brief | `/brief` |
+| Top Insights | `/brief` |
 | Evidence | `/evidence` |
 | PRD | `/prd` |
 | Past briefs | `/past` |

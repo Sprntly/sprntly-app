@@ -622,7 +622,7 @@ def _call_part_a(ctx: dict, author: str | None = None, background: bool = False,
     Steers the model to the HTML visual-system page via _PART_A_DIRECTIVE and
     keeps `skill=_SKILL` so the METHOD + its `+prd-author@<hash>` version pin are
     preserved. `author` fills the byline. When no logged-in author is supplied
-    (background / weekly-brief / warm / multi-agent generation) it falls back to
+    (background / top-insights / warm / multi-agent generation) it falls back to
     the account OWNER's name (then an admin's); only if none resolves does it
     render `[NEED: author]` per the skill rule.
     """

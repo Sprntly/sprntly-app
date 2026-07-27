@@ -1,7 +1,7 @@
 """SEQUENCE + PRIORITIZE — the ideation half of prioritization (design §4c).
 
 Synthesis ranks every candidate theme by goal_adjusted_score and selects the
-top-N for the weekly brief. The REST don't vanish: this module sequences them
+top-N for the Top Insights brief. The REST don't vanish: this module sequences them
 into the ideation pool, then a weekly prioritization pass picks the 25–30
 ideas actually worth showing. Everything is persisted (audit trail + a tail
 idea can climb back in on a later run); only the shortlist is visible.
@@ -25,7 +25,7 @@ Pipeline:
   3. PERSIST  — upsert into ideation_items, idempotent on (enterprise_id,
                  theme_id): shortlisted ideas get rank 1..K in shortlist order,
                  the hidden tail follows in deterministic score order. Runs on
-                 every weekly brief generation (called from synthesis), so the
+                 every Top Insights brief generation (called from synthesis), so the
                  shortlist repopulates exactly when new ideas appear.
                  Decision-logged (agent="ideation", decision_type="sequence").
 """
@@ -267,7 +267,7 @@ def sequence_ideation(
     """Sequence the non-brief convergence candidates into the ideation pool and
     pick the visible shortlist.
 
-    `exclude_theme_ids` is the set of theme_ids that made the weekly brief
+    `exclude_theme_ids` is the set of theme_ids that made the Top Insights brief
     top-N — they are dropped here so the brief and the ideation pool never
     overlap. Returns the list of upserted rows (rank-ascending, shortlist
     first). Self-contained (recomputes convergence + scoring) so it also runs
