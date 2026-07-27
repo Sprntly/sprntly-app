@@ -18939,6 +18939,60 @@
     opacity: 0.85;
   }
 
+  /* ── Held-back strip: quiet ledger transparency above the ideas list ──
+     "what am I not seeing" always has an answer, but it should never read
+     louder than the ideas themselves — muted text, no card chrome. */
+  .idn-heldback-strip {
+    padding: 10px 28px 14px;
+    flex-shrink: 0;
+  }
+
+  .idn-heldback-title {
+    display: block;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--ink-4);
+    margin-bottom: 6px;
+  }
+
+  .idn-heldback-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .idn-heldback-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--ink-3);
+    line-height: 1.5;
+  }
+
+  .idn-heldback-label {
+    color: var(--ink-2);
+  }
+
+  .idn-heldback-chip {
+    font-size: 10.5px;
+    color: var(--ink-4);
+    background: var(--surface-3);
+    border: 1px solid var(--line);
+    border-radius: 30px;
+    padding: 1px 8px;
+    white-space: nowrap;
+  }
+
+  .idn-heldback-more {
+    display: block;
+    margin-top: 4px;
+    font-size: 11px;
+    color: var(--ink-4);
+  }
+
   /* ── Responsive ── */
   @media (max-width: 900px) {
     .bl-thead,
