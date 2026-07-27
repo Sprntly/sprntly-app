@@ -20,6 +20,7 @@ from app.db import nudge as nudge_db
 from app.db.companies import display_name_for_slug
 from app.db.finding_state import set_finding_action
 from app.deps.ownership import require_owned_brief, require_owned_dataset
+from app.db import pipeline_runs as pipeline_runs_db
 from app.evidence_kg import generate_evidence_kg
 from app.kg_ingest.auto_sync import kickoff_corpus_seed
 from app.prd_runner import PRD_VARIANT, generate_prd
@@ -79,6 +80,38 @@ def _notify_brief_ready(dataset: str, brief: dict | None) -> None:
         logger.exception("brief ready ping failed for %s", dataset)
 
 
+def _start_durable_run(dataset: str, trigger: str) -> int | None:
+    """Open a pipeline_runs row for a regenerate, superseding any stale
+    'running' row for this dataset (a restart killed its owner — the in-memory
+    status died with the process, so this durable row is the only record that
+    an interruption happened). Best-effort: a DB hiccup must never block
+    generation."""
+    try:
+        superseded = pipeline_runs_db.supersede_running_runs(dataset)
+        if superseded:
+            logger.info(
+                "Marked %d stale running pipeline run(s) for %s as interrupted",
+                superseded, dataset,
+            )
+        return pipeline_runs_db.create_run(dataset, trigger=trigger)
+    except Exception:  # noqa: BLE001 — durable bookkeeping is best-effort
+        logger.exception("pipeline-run bookkeeping failed for %s", dataset)
+        return None
+
+
+def _finish_durable_run(run_id: int | None, error: str | None = None) -> None:
+    """Close the durable run row (complete, or failed with `error`)."""
+    if run_id is None:
+        return
+    try:
+        if error:
+            pipeline_runs_db.fail_run(run_id, error)
+        else:
+            pipeline_runs_db.complete_run(run_id)
+    except Exception:  # noqa: BLE001 — durable bookkeeping is best-effort
+        logger.exception("pipeline-run close failed for run %s", run_id)
+
+
 async def _synthesis_generate_bg(dataset: str) -> None:
     """Background body for /regenerate under the synthesis engine.
 
@@ -90,9 +123,11 @@ async def _synthesis_generate_bg(dataset: str) -> None:
     _notify_brief_ready), not the full scheduled brief message.
     """
     set_status(dataset, "generating")
+    run_id = _start_durable_run(dataset, "regenerate")
     try:
         brief = await asyncio.to_thread(generate_brief_for, dataset, deliver=False)
         set_status(dataset, "ready")
+        _finish_durable_run(run_id)
         logger.info("Synthesis brief generated for %s", dataset)
     except EmptyKnowledgeGraphError:
         # Benign: new company with no data yet. Mark failed with a helpful
@@ -100,11 +135,13 @@ async def _synthesis_generate_bg(dataset: str) -> None:
         set_status(dataset, "failed",
                    error="No data to generate a brief from yet — upload files "
                          "or connect a data source, then regenerate.")
+        _finish_durable_run(run_id, error="KG empty after seeding")
         logger.info("Synthesis brief skipped for %s — KG empty after seeding", dataset)
         return
     except Exception:  # noqa: BLE001 — fire-and-forget; prior brief stays
         set_status(dataset, "failed",
                    error="Brief generation failed — check server logs.")
+        _finish_durable_run(run_id, error="Brief generation failed — see server logs")
         logger.exception("Synthesis brief generation failed for %s", dataset)
         return
     # Tell the user their brief is ready (short ping, fresh briefs only).
@@ -185,6 +222,7 @@ async def _full_pipeline_bg(dataset: str) -> None:
     a failure leaves the prior cached brief/PRDs/evidence in place.
     """
     set_status(dataset, "generating")
+    run_id = _start_durable_run(dataset, "regenerate-all")
     # Step 1: digest the latest sources/connectors/uploads into the KG. This is
     # fire-and-forget (a daemon thread) and never raises; generate_brief_for below
     # re-seeds synchronously so the brief can't miss what this ingests.
@@ -203,11 +241,13 @@ async def _full_pipeline_bg(dataset: str) -> None:
         set_status(dataset, "failed",
                    error="No data to generate a brief from yet — upload files "
                          "or connect a data source, then regenerate.")
+        _finish_durable_run(run_id, error="KG empty after seeding")
         logger.info("Full-pipeline brief skipped for %s — KG empty after seeding", dataset)
         return
     except Exception:  # noqa: BLE001 — fire-and-forget; prior brief stays
         set_status(dataset, "failed",
                    error="Brief generation failed — check server logs.")
+        _finish_durable_run(run_id, error="Brief generation failed — see server logs")
         logger.exception("Full-pipeline brief generation failed for %s", dataset)
         return
 
@@ -219,6 +259,9 @@ async def _full_pipeline_bg(dataset: str) -> None:
     # warm the drill-downs. All error-isolated so they can't undo the brief.
     await _generate_downstream_docs(dataset)
     warm_synthesis_drilldowns(dataset)
+    # The durable run covers the whole chain — close it only once the fan-out
+    # is done, so a restart during PRD/evidence warming is also recorded.
+    _finish_durable_run(run_id)
 
 
 @router.get("/current")

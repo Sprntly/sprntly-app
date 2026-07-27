@@ -108,6 +108,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "conversation_turns":  {"attachments"},
     "design_agent_map_cache": {"payload"},
     "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
+    "pipeline_runs":          {"stages"},   # per-stage results JSONB
 }
 
 # Postgres bool columns surface as bool in supabase-py; SQLite stores 0/1.

@@ -143,9 +143,11 @@ from app.db.knowledge import (
 from app.db.pipeline_runs import (
     complete_run,
     create_run,
+    fail_orphan_running_runs,
     fail_run,
     get_latest_run,
     list_runs,
+    supersede_running_runs,
     update_run_stage,
 )
 
