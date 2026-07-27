@@ -11,6 +11,16 @@ import { askApi, ApiError } from "./api"
 import type { AskResponse, AskStatusResponse } from "./api"
 import { pollUntil } from "./poll"
 import { clearPendingJob, getPendingJob, setPendingJob, type PendingJob } from "./jobResume"
+import { throttlePartial } from "./runPrdGeneration"
+import { subscribeToGenerationStream } from "./streamGeneration"
+
+/** Live-preview callback: the accumulating answer markdown as it streams.
+ *  Progressive display only — the poll's final payload stays authoritative. */
+export type OnAskPartial = (markdown: string) => void
+
+// Answer deltas re-render a markdown bubble (much cheaper than the PRD's
+// iframe, but still a full remark parse) — cap preview updates to ~7/s.
+const PARTIAL_THROTTLE_MS = 150
 
 // Wall-clock budget. Date.now()-measured inside pollUntil so a throttled
 // background tab still times out correctly. 12 min (not the evidence/PRD
@@ -107,8 +117,36 @@ async function pollAskToResult(
   tabId: string,
   isCancelled?: () => boolean,
   isStopped?: () => boolean,
+  onPartial?: OnAskPartial,
 ): Promise<AskResponse> {
   const scope = askScope(tabId)
+  // `onPartial` opens an SSE token stream ALONGSIDE the poll and forwards the
+  // accumulating answer markdown (throttled) for a live word-by-word preview.
+  // The poll stays the authoritative source of the finished answer; any stream
+  // failure (transport drop, multi-worker box, non-streamable skill path that
+  // publishes nothing) just means no preview — never an error. Always torn
+  // down before returning, so a late frame can't touch a settled turn.
+  const throttled = onPartial ? throttlePartial(onPartial, PARTIAL_THROTTLE_MS) : null
+  const stopStream = throttled
+    ? subscribeToGenerationStream((t) => askApi.streamUrl(askId, t), {
+        onDelta: (full) => throttled.push(full),
+      })
+    : () => {}
+  try {
+    return await _pollAskLoop(askId, company, scope, isCancelled, isStopped)
+  } finally {
+    throttled?.cancel()
+    stopStream()
+  }
+}
+
+async function _pollAskLoop(
+  askId: number,
+  company: string,
+  scope: string,
+  isCancelled?: () => boolean,
+  isStopped?: () => boolean,
+): Promise<AskResponse> {
   const final = await pollUntil<AskStatusResponse>({
     // A single transient "Failed to fetch" during polling must not kill an ask
     // whose server-side job is still running fine — retry the status read.
@@ -166,6 +204,7 @@ export async function runAskGeneration(
     prd_id?: number
     isCancelled?: () => boolean
     isStopped?: () => boolean
+    onPartial?: OnAskPartial
   },
 ): Promise<AskResponse> {
   // A POST failure (4xx/5xx) propagates as-is so the route's error detail
@@ -174,7 +213,10 @@ export async function runAskGeneration(
   // kick-off must not fail on a momentary blip while the backend is healthy.
   const start = await withTransientRetry(() => askApi.start(question, company, opts))
   setPendingJob("ask", company, askScope(tabId), start.ask_id)
-  return pollAskToResult(start.ask_id, company, tabId, opts?.isCancelled, opts?.isStopped)
+  // A cache hit comes back immediately-`ready` — there is no generation to
+  // stream, so don't open an EventSource that would only ever see silence.
+  const onPartial = start.status === "generating" ? opts?.onPartial : undefined
+  return pollAskToResult(start.ask_id, company, tabId, opts?.isCancelled, opts?.isStopped, onPartial)
 }
 
 /**
@@ -188,6 +230,9 @@ export async function resumeAskGeneration(
   tabId: string,
   isCancelled?: () => boolean,
   isStopped?: () => boolean,
+  onPartial?: OnAskPartial,
 ): Promise<AskResponse> {
-  return pollAskToResult(askId, company, tabId, isCancelled, isStopped)
+  // A resume re-attaches mid-generation: the stream's replay frame catches the
+  // preview up with everything emitted before this mount, then live deltas.
+  return pollAskToResult(askId, company, tabId, isCancelled, isStopped, onPartial)
 }

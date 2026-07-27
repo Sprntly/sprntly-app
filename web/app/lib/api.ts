@@ -554,6 +554,17 @@ export const askApi = {
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
+  /** SSE URL to token-stream an answer as it generates. The bearer rides as
+   *  ?token= (EventSource can't set headers). Frames: an optional
+   *  {kind:'replay',text} catch-up, {kind:'delta',text} carrying answer
+   *  markdown, then a terminal {kind:'done'|'error'}. Progressive display
+   *  only — askApi.get(id) stays the authoritative finished answer (and the
+   *  only carrier of key_points / confidence / skill metadata). */
+  streamUrl: (askId: number, token: string): string =>
+    `${API_URL}/v1/ask/${askId}/stream?token=${encodeURIComponent(token)}` +
+    (activeWorkspaceId
+      ? `&workspace_id=${encodeURIComponent(activeWorkspaceId)}`
+      : ""),
   /** Stop an in-flight Ask (the user hit Stop). Flips the job to `cancelled`
    *  so the worker aborts before the next LLM step and a late answer is
    *  discarded. Idempotent — returns the job's resulting status. */

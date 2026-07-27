@@ -274,7 +274,7 @@ def test_answer_direct_path(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="": {
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
             "answer": "generic", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
@@ -531,7 +531,7 @@ def test_answer_prd_id_grounds_direct_answer(monkeypatch):
     )
     seen = {}
 
-    def _compose(dataset, q, *, enterprise_id, prd_context=""):
+    def _compose(dataset, q, *, enterprise_id, prd_context="", on_delta=None):
         seen.update(question=q, prd_context=prd_context)
         return {"answer": "generic", "key_points": [], "citations": [],
                 "confidence": 0.5, "unanswered": ""}
@@ -557,7 +557,7 @@ def test_answer_prd_context_failure_degrades_to_plain_ask(monkeypatch):
     monkeypatch.setattr(
         qa,
         "compose_ask_answer",
-        lambda dataset, q, *, enterprise_id, prd_context="": {
+        lambda dataset, q, *, enterprise_id, prd_context="", on_delta=None: {
             "answer": "plain", "key_points": [], "citations": [],
             "confidence": 0.5, "unanswered": "",
         },
