@@ -171,3 +171,69 @@ def test_classify_deferral_does_not_count_toward_rotation():
     eligible, _f, backlog = _classify([_tc("t1")], {"t1": row})
     assert [t.theme_id for t in eligible] == ["t1"]
     assert backlog == []
+
+
+# ── Sibling suppression (evidence overlap) ───────────────────────────────────
+
+from app.synthesis.dedup import is_evidence_sibling
+
+
+def _tc_ev(theme_id, signal_ids, **kw):
+    tc = _tc(theme_id, **kw)
+    tc.evidence = [
+        {"signal_id": sid, "source_type": "customer_voice", "kind": "s",
+         "content": "x"}
+        for sid in signal_ids
+    ]
+    return tc
+
+
+def test_evidence_sibling_requires_shared_and_overlap():
+    a = _tc_ev("a", ["s1", "s2", "s3"])
+    assert is_evidence_sibling(a, _tc_ev("b", ["s2", "s3", "s4"])) is True
+    # Only one shared signal → not a sibling (min-shared gate).
+    assert is_evidence_sibling(a, _tc_ev("c", ["s3", "s9", "s8", "s7"])) is False
+    # Two shared but a small fraction of the smaller set → not a sibling.
+    e = _tc_ev("e", ["s1", "s2", "x1", "x2", "x3", "x4"])
+    f = _tc_ev("f", ["s1", "s2", "y1", "y2", "y3", "y4"])
+    assert is_evidence_sibling(e, f) is False
+    # No evidence on either side → never a sibling.
+    assert is_evidence_sibling(_tc("g"), a) is False
+
+
+def test_classify_sibling_of_deferred_theme_is_held_back():
+    # t-deferred: user deferred it, window open. t-new: NEVER surfaced, but it
+    # rests on the same signals — the same issue wearing a fresh theme_id.
+    deferred_row = {**_fp(), "action": "deferred",
+                    "deferred_until": (NOW + timedelta(days=3)).isoformat()}
+    t_deferred = _tc_ev("t-deferred", ["s1", "s2", "s3"])
+    t_sibling = _tc_ev("t-sibling", ["s2", "s3", "s4"])
+    t_distinct = _tc_ev("t-distinct", ["z1", "z2"])
+    eligible, freshness, backlog = _classify(
+        [t_deferred, t_sibling, t_distinct], {"t-deferred": deferred_row})
+    assert [t.theme_id for t in eligible] == ["t-distinct"]
+    assert "t-sibling" not in freshness
+    assert ("t-deferred", "deferred") in backlog
+    assert ("t-sibling", "sibling_deferred") in backlog
+
+
+def test_classify_sibling_of_dismissed_theme_is_held_back():
+    dismissed_row = {**_fp(), "action": "dismissed"}
+    t_dismissed = _tc_ev("t-dismissed", ["s1", "s2", "s3"])
+    t_sibling = _tc_ev("t-sibling", ["s1", "s2"])
+    eligible, _f, backlog = _classify(
+        [t_dismissed, t_sibling], {"t-dismissed": dismissed_row})
+    assert eligible == []
+    assert ("t-sibling", "sibling_dismissed") in backlog
+
+
+def test_classify_sibling_of_carried_theme_still_cards():
+    # 'carried' is the system's hold-back, not the reader's — it must NOT
+    # propagate to siblings (a new theme over the same evidence IS the news).
+    t_carried = _tc_ev("t-carried", ["s1", "s2", "s3"])
+    t_new = _tc_ev("t-new", ["s2", "s3"])
+    eligible, freshness, backlog = _classify(
+        [t_carried, t_new], {"t-carried": _fp()})
+    assert [t.theme_id for t in eligible] == ["t-new"]
+    assert freshness["t-new"] == "new"
+    assert ("t-carried", "carried") in backlog

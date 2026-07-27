@@ -280,21 +280,6 @@ CREATE TABLE ask_jobs (
 );
 CREATE INDEX ask_jobs_company_idx ON ask_jobs (company_id, id DESC);
 
--- Public-feedback runs (mirrors 20260726160000_public_feedback_runs.sql): the
--- captured record set + rendered report per run. Read by the artifacts
--- listing aggregator and the report re-serve route.
-CREATE TABLE public_feedback_runs (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    company_id   TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
-    question     TEXT NOT NULL,
-    window_label TEXT NOT NULL DEFAULT '',
-    records      TEXT NOT NULL DEFAULT '[]',
-    metadata     TEXT NOT NULL DEFAULT '{}',
-    html         TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
-);
-CREATE INDEX public_feedback_runs_company_idx ON public_feedback_runs (company_id, id DESC);
-
 -- Fire-and-forget onboarding website-analysis job rows (mirrors
 -- 20260618120000_website_analysis_jobs.sql). Status walks generating → ready
 -- (or error); `result` holds the full analyze_website() dict. Per-request +
@@ -793,6 +778,24 @@ CREATE TABLE ideation_items (
     UNIQUE (enterprise_id, theme_id)
 );
 CREATE INDEX ideation_items_rank_idx ON ideation_items (enterprise_id, rank);
+
+-- Pipeline run audit rows (mirrors 20260605120000_pipeline_tables.sql).
+-- Durable record of regenerate / scheduled pipeline runs; phase-2 fix uses it
+-- to surface runs interrupted by a service restart.
+CREATE TABLE pipeline_runs (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset       TEXT NOT NULL,
+    "trigger"     TEXT NOT NULL DEFAULT 'scheduled',
+    status        TEXT NOT NULL DEFAULT 'running'
+                  CHECK (status IN ('running', 'completed', 'failed')),
+    stages        TEXT NOT NULL DEFAULT '{}',
+    -- ISO-8601 with 'T' (not sqlite's space-separated datetime('now')) so
+    -- lexical .lt() comparisons against isoformat() cutoffs behave like
+    -- Postgres timestamptz comparisons do.
+    started_at    TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%f+00:00', 'now')),
+    completed_at  TEXT,
+    error         TEXT
+);
 
 -- Per-theme brief de-dup fingerprint (mirrors 20260616130000_brief_finding_state.sql).
 -- One row per theme ever surfaced in a brief; carries the convergence state at

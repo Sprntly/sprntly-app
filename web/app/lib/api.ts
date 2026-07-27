@@ -264,7 +264,7 @@ export type Brief = {
   _backlog?: {
     theme_id: string
     theme_label: string
-    reason: "carried" | "dismissed" | "deferred" | "in_progress" | "rotation_exhausted" | string
+    reason: "carried" | "dismissed" | "deferred" | "in_progress" | "rotation_exhausted" | "sibling_deferred" | "sibling_dismissed" | string
     deferred_until?: string | null
   }[]
   /** Backend evidence-gate flag: set when the brief was saved EMPTY because the
@@ -554,6 +554,17 @@ export const askApi = {
     }),
   /** Read the status + result of an Ask job. */
   get: (askId: number) => api.get<AskStatusResponse>(`/v1/ask/${askId}`),
+  /** SSE URL to token-stream an answer as it generates. The bearer rides as
+   *  ?token= (EventSource can't set headers). Frames: an optional
+   *  {kind:'replay',text} catch-up, {kind:'delta',text} carrying answer
+   *  markdown, then a terminal {kind:'done'|'error'}. Progressive display
+   *  only — askApi.get(id) stays the authoritative finished answer (and the
+   *  only carrier of key_points / confidence / skill metadata). */
+  streamUrl: (askId: number, token: string): string =>
+    `${API_URL}/v1/ask/${askId}/stream?token=${encodeURIComponent(token)}` +
+    (activeWorkspaceId
+      ? `&workspace_id=${encodeURIComponent(activeWorkspaceId)}`
+      : ""),
   /** Stop an in-flight Ask (the user hit Stop). Flips the job to `cancelled`
    *  so the worker aborts before the next LLM step and a late answer is
    *  discarded. Idempotent — returns the job's resulting status. */
@@ -3743,30 +3754,6 @@ export type ArtifactItem =
       is_complete: boolean
       preview_image_url: string | null
     }
-  | {
-      type: "report"
-      id: number
-      title: string
-      status: string
-      created_at: string
-      source: { question: string }
-      open: { report_id: number }
-    }
-
-/** A stored public-feedback report (rendered html + identity). */
-export type PublicFeedbackReport = {
-  id: number
-  window_label: string
-  question: string
-  html: string
-  created_at: string | null
-}
-
-export const publicFeedbackApi = {
-  /** One stored report by id (404s on foreign/unknown ids). */
-  getReport: (reportId: number) =>
-    api.get<PublicFeedbackReport>(`/v1/public-feedback/reports/${reportId}`),
-}
 
 export const artifactsApi = {
   /** Unified artifact list for a company slug, newest first. */

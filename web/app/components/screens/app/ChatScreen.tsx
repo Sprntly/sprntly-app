@@ -22,7 +22,7 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
-import { ChatSuggestionIcon, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
+import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
 import { ApiError, askApi, attachmentsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -84,6 +84,12 @@ type ThreadTurn = {
    *  input to record, so the structure the user answered in SURVIVES answering
    *  instead of collapsing back to an undifferentiated wall of text. */
   clarifyResolved?: ClarifyResolution
+  /** Live answer markdown streamed over SSE while this turn's ask generates —
+   *  rendered in place of the thinking skeleton so the reply appears
+   *  word-by-word. Display only: `reply` (from the poll) is authoritative and
+   *  replaces it. Transient — stripped from the persisted thread, because a
+   *  reload can't re-attach the stream that was feeding it. */
+  partial?: string
 }
 
 type BriefMeta = { briefId: number; insightIndex: number }
@@ -869,17 +875,21 @@ export function ChatScreen() {
     try {
       // prdCommandThinking is stripped with the rest: the in-flight call it
       // tracks does not survive a reload, so restoring it would leave a
-      // thinking indicator spinning forever with nothing behind it.
+      // thinking indicator spinning forever with nothing behind it. Turn-level
+      // `partial` (live streamed answer text) is stripped for the same reason —
+      // the resume path re-attaches the stream and rebuilds it from replay.
       const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => {
         // A still-pending summary indicator is dropped from the SAVED copy:
         // its in-flight call dies with the page, so restoring it would strand
         // a "Summarizing…" skeleton nothing will ever fill. The summary itself
         // persists (as the turn's reply, and as a conversation row) only once
         // it actually lands.
-        const withoutPendingSummaries = rest.thread.filter((tn) => !(tn.summaryPending && !tn.reply))
-        const slimTab = withoutPendingSummaries.length === rest.thread.length
-          ? rest
-          : { ...rest, thread: withoutPendingSummaries }
+        const stripped = {
+          ...rest,
+          thread: rest.thread
+            .filter((tn) => !(tn.summaryPending && !tn.reply))
+            .map(({ partial: _partial, ...turn }) => turn),
+        }
         // A PRD command awaiting its deferred reply (the clarify gate is still
         // deciding — see deferredAckRef) has a reply-less seed turn, and the
         // in-flight promise that would fill it dies with the page. Persisted
@@ -887,10 +897,10 @@ export function ChatScreen() {
         // message." — false and a dead end. Mark it in the SAVED copy only, so
         // a restore can say what actually happened; a normal settle re-runs
         // this effect with the ref cleared and the mark comes straight off.
-        if (!deferredAckRef.current.has(slimTab.id)) return slimTab
-        const last = slimTab.thread[slimTab.thread.length - 1]
-        if (!last || last.reply || last.error || last.stopped) return slimTab
-        return { ...slimTab, thread: [...slimTab.thread.slice(0, -1), { ...last, interrupted: true }] }
+        if (!deferredAckRef.current.has(stripped.id)) return stripped
+        const last = stripped.thread[stripped.thread.length - 1]
+        if (!last || last.reply || last.error || last.stopped) return stripped
+        return { ...stripped, thread: [...stripped.thread.slice(0, -1), { ...last, interrupted: true }] }
       })
       sessionStorage.setItem(tabsKey, JSON.stringify(slim))
     } catch { /* ignore */ }
@@ -3151,6 +3161,17 @@ export function ChatScreen() {
           return runAskGeneration(sendQuery, activeCompany, targetTabId, {
             isCancelled: () => !mountedRef.current,
             isStopped: () => stoppedTabsRef.current.has(targetTabId),
+            // Live token stream: the accumulating answer markdown renders in
+            // place of the thinking skeleton as the model writes it. Display
+            // only — onResult's authoritative reply replaces it.
+            onPartial: (text) => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === id && !turn.reply && !turn.stopped ? { ...turn, partial: text } : turn),
+                }
+              ))
+            },
             // Replay this tab's conversation so the model sees the prior turns
             // (history) on EVERY follow-up, not just PRD-tab chats — the backend
             // loads history by conversation_id, so without this each ask is
@@ -3163,9 +3184,15 @@ export function ChatScreen() {
           })
         },
         onResult: (tabId, res) => {
+          // If the answer already streamed in live, replaying the simulated
+          // typewriter over the (identical) final text would type the whole
+          // reply out twice — mark it as already animated.
+          const streamedTurn = tabsRef.current
+            .find((t) => t.id === tabId)?.thread.find((turn) => turn.id === id)
+          if (streamedTurn?.partial) animatedTurnIds.current.add(id)
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res } : turn)
+              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, reply: res, partial: undefined } : turn)
             }
           ))
           finalizeConversationTurn(id, { reply: res }, tabId)
@@ -3197,7 +3224,9 @@ export function ChatScreen() {
                 : "Something went wrong"
           setTabs((prev) => prev.map((t) =>
             t.id !== tabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg } : turn)
+              // Drop any streamed partial too: a half-answer above an error
+              // bubble would read as the reply having (partly) succeeded.
+              ...t, thread: t.thread.map((turn) => turn.id === id ? { ...turn, error: msg, partial: undefined } : turn)
             }
           ))
           finalizeConversationTurn(id, { error: msg }, tabId)
@@ -3426,10 +3455,23 @@ export function ChatScreen() {
             targetTabId,
             () => !mountedRef.current,
             () => stoppedTabsRef.current.has(targetTabId),
+            // Re-attached mid-generation: the stream's replay frame catches the
+            // preview up with everything already written, then live deltas.
+            (text) => {
+              setTabs((prev) => prev.map((t) =>
+                t.id !== targetTabId ? t : {
+                  ...t, thread: t.thread.map((turn) =>
+                    turn.id === turnId && !turn.reply && !turn.stopped ? { ...turn, partial: text } : turn),
+                }
+              ))
+            },
           )
+          const streamedTurn = tabsRef.current
+            .find((t) => t.id === targetTabId)?.thread.find((turn) => turn.id === turnId)
+          if (streamedTurn?.partial) animatedTurnIds.current.add(turnId)
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
-              ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, reply: res } : turn),
+              ...t, thread: t.thread.map((turn) => turn.id === turnId ? { ...turn, reply: res, partial: undefined } : turn),
             }
           ))
           finalizeConversationTurn(turnId, { reply: res }, targetTabId)
@@ -3829,6 +3871,34 @@ export function ChatScreen() {
     return 0
   }, [inlinePrdCards, activeTab?.prdFlowTurnId, thread])
 
+  // ── Reopen the artifact panel from the tab strip ────────────────────────────
+  // Closing the panel (its × or the overlay) used to be one-way: the only route
+  // back was the View PRD button on the insight card, which sits at the TOP of
+  // the thread — buried by any long conversation, and parked mid-thread on a
+  // command-opened tab. This puts the SAME action (handleOpenPrd — sync the
+  // cached doc or DB-load this tab's own id; never a regeneration) at the top
+  // right of the tab strip, which is chrome: it holds still while the thread
+  // scrolls. The in-thread button stays where it is; this is an additional way
+  // in, not a replacement.
+  //
+  // Prefers the PRD when the tab has one — it's the artifact the panel is
+  // named for — and falls back to Evidence for an insight tab that only ever
+  // generated a brief. Null (hidden) when the panel is already open, on the
+  // brief tab (BriefChat owns its own panel wiring, and handleOpenPrd no-ops
+  // there since BRIEF_TAB_ID isn't in `tabs`), or when the tab has no artifact
+  // to reopen.
+  const reopenArtifact = useMemo(() => {
+    if (isBriefTab || contentPanelTab || !activeTabId) return null
+    if (chatPrdExists || activeTab?.prdGenerating || activeTab?.prdLoading) {
+      return { label: "View PRD", onClick: handleOpenPrd }
+    }
+    if (chatEvidenceExists) return { label: "View Evidence", onClick: handleOpenEvidence }
+    return null
+  }, [
+    isBriefTab, contentPanelTab, activeTabId, chatPrdExists, chatEvidenceExists,
+    activeTab?.prdGenerating, activeTab?.prdLoading, handleOpenPrd, handleOpenEvidence,
+  ])
+
   return (
     <AppLayout
       mainClassName="main--home-chat"
@@ -3847,92 +3917,115 @@ export function ChatScreen() {
           {/* Tab bar — always visible. Browser-style: grey strip, the ACTIVE tab
               is a white card (side+top borders, rounded top corners) that merges
               with the white content area below by overlapping the strip's bottom
-              border; inactive tabs are plain grey labels on the strip. */}
-          <div data-testid="chat-tab-bar" style={{
-            display: "flex", alignItems: "stretch", gap: 0,
-            borderBottom: "1px solid var(--line, #E8E6E0)", background: "var(--surface-2, #F7F5F0)",
-            height: 44, paddingLeft: 8, overflowX: "auto", overflowY: "visible", flexShrink: 0,
-          }}>
-            {/* Pinned brief tab — always first, never closable (synthesized, not
-                in `tabs`/localStorage). Selecting it renders <BriefChat/> below. */}
-            <div
-              key={BRIEF_TAB_ID}
-              onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
-              style={{
-                display: "flex", alignItems: "center", gap: 6,
-                padding: "0 14px", fontSize: 13, cursor: "pointer",
-                color: isBriefTab ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
-                fontWeight: isBriefTab ? 500 : 400,
-                background: isBriefTab ? "var(--surface, #fff)" : "transparent",
-                borderTop: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                borderLeft: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                borderRight: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                borderRadius: "8px 8px 0 0",
-                marginTop: 8, marginBottom: -1,
-                whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
-                userSelect: "none", flexShrink: 0,
-              }}
-            >
-              <span style={{ lineHeight: "1.3" }}>Top Insights</span>
-            </div>
-            {tabs.map((tab) => {
-              const isActive = activeTabId === tab.id
-              return (
-                <div
-                  key={tab.id}
-                  onClick={() => { setActiveTabId(tab.id); setDraft("") }}
-                  style={{
-                    display: "flex", alignItems: "center", gap: 6,
-                    padding: "0 10px 0 14px", fontSize: 13, cursor: "pointer",
-                    color: isActive ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
-                    fontWeight: isActive ? 500 : 400,
-                    background: isActive ? "var(--surface, #fff)" : "transparent",
-                    borderTop: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                    borderLeft: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                    borderRight: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
-                    borderRadius: "8px 8px 0 0",
-                    marginTop: 8, marginBottom: -1,
-                    whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
-                    userSelect: "none", flexShrink: 0,
-                  }}
-                >
-                  <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", lineHeight: "1.3" }}>
-                    {tab.title}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}
+              border; inactive tabs are plain grey labels on the strip.
+              The strip is two parts: the tab list, which SCROLLS once enough
+              tabs are open, and the artifact button pinned to its right end,
+              which must not — so the strip's chrome (border, background,
+              height) sits on this wrapper and only the list scrolls. */}
+          <div className="chat-tab-strip">
+            <div data-testid="chat-tab-bar" style={{
+              display: "flex", alignItems: "stretch", gap: 0,
+              flex: "1 1 auto", minWidth: 0,
+              paddingLeft: 8, overflowX: "auto", overflowY: "visible",
+            }}>
+              {/* Pinned brief tab — always first, never closable (synthesized, not
+                  in `tabs`/localStorage). Selecting it renders <BriefChat/> below. */}
+              <div
+                key={BRIEF_TAB_ID}
+                onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "0 14px", fontSize: 13, cursor: "pointer",
+                  color: isBriefTab ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
+                  fontWeight: isBriefTab ? 500 : 400,
+                  background: isBriefTab ? "var(--surface, #fff)" : "transparent",
+                  borderTop: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                  borderLeft: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                  borderRight: isBriefTab ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                  borderRadius: "8px 8px 0 0",
+                  marginTop: 8, marginBottom: -1,
+                  whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
+                  userSelect: "none", flexShrink: 0,
+                }}
+              >
+                <span style={{ lineHeight: "1.3" }}>Top Insights</span>
+              </div>
+              {tabs.map((tab) => {
+                const isActive = activeTabId === tab.id
+                return (
+                  <div
+                    key={tab.id}
+                    onClick={() => { setActiveTabId(tab.id); setDraft("") }}
                     style={{
-                      display: "flex", alignItems: "center", justifyContent: "center",
-                      width: 16, height: 16, flexShrink: 0,
-                      background: "none", border: "none", cursor: "pointer",
-                      fontSize: 13, color: "var(--ink-4, #B0AEA6)", padding: 0, lineHeight: 1,
-                      borderRadius: 3,
+                      display: "flex", alignItems: "center", gap: 6,
+                      padding: "0 10px 0 14px", fontSize: 13, cursor: "pointer",
+                      color: isActive ? "var(--ink, #1A1A17)" : "var(--ink-3, #8C8A84)",
+                      fontWeight: isActive ? 500 : 400,
+                      background: isActive ? "var(--surface, #fff)" : "transparent",
+                      borderTop: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                      borderLeft: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                      borderRight: isActive ? "1px solid var(--line, #E8E6E0)" : "1px solid transparent",
+                      borderRadius: "8px 8px 0 0",
+                      marginTop: 8, marginBottom: -1,
+                      whiteSpace: "nowrap", transition: "color 0.12s, background 0.12s, border-color 0.12s",
+                      userSelect: "none", flexShrink: 0,
                     }}
-                    title="Close tab"
-                  >×</button>
-                </div>
-              )
-            })}
-            {/* New-tab button — styled like Chrome's: a small rounded control
-                just to the right of the last tab, vertically centered in the
-                strip, with a subtle circular highlight on hover. */}
-            <button
-              type="button"
-              onClick={startNewThread}
-              aria-label="New chat"
-              title="New chat"
-              onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--line, #E8E6E0)" }}
-              onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent" }}
-              style={{
-                display: "flex", alignItems: "center", justifyContent: "center",
-                width: 28, height: 28, margin: "8px 4px 0 6px", padding: 0,
-                background: "transparent", border: "none", cursor: "pointer",
-                borderRadius: "50%", fontSize: 18, lineHeight: 1,
-                color: "var(--ink-3, #8C8A84)", flexShrink: 0,
-                transition: "background 0.12s",
-              }}
-            >+</button>
+                  >
+                    <span style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", lineHeight: "1.3" }}>
+                      {tab.title}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={(e) => { e.stopPropagation(); closeTab(tab.id) }}
+                      style={{
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        width: 16, height: 16, flexShrink: 0,
+                        background: "none", border: "none", cursor: "pointer",
+                        fontSize: 13, color: "var(--ink-4, #B0AEA6)", padding: 0, lineHeight: 1,
+                        borderRadius: 3,
+                      }}
+                      title="Close tab"
+                    >×</button>
+                  </div>
+                )
+              })}
+              {/* New-tab button — styled like Chrome's: a small rounded control
+                  just to the right of the last tab, vertically centered in the
+                  strip, with a subtle circular highlight on hover. */}
+              <button
+                type="button"
+                onClick={startNewThread}
+                aria-label="New chat"
+                title="New chat"
+                onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "var(--line, #E8E6E0)" }}
+                onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.background = "transparent" }}
+                style={{
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  width: 28, height: 28, margin: "8px 4px 0 6px", padding: 0,
+                  background: "transparent", border: "none", cursor: "pointer",
+                  borderRadius: "50%", fontSize: 18, lineHeight: 1,
+                  color: "var(--ink-3, #8C8A84)", flexShrink: 0,
+                  transition: "background 0.12s",
+                }}
+              >+</button>
+            </div>
+            {/* The way back to a closed artifact panel. Pinned to the strip's
+                right end — outside the scrolling list — so no number of open
+                tabs and no scroll position can put it out of reach. Hidden
+                while the panel is open (it has its own close) and on tabs with
+                no artifact to reopen. */}
+            {reopenArtifact ? (
+              <button
+                type="button"
+                className="chat-artifact-reopen"
+                data-testid="chat-reopen-artifact"
+                title={`${reopenArtifact.label} — reopen the panel`}
+                onClick={() => { void reopenArtifact.onClick() }}
+              >
+                <IconDocument size={13} />
+                {reopenArtifact.label}
+              </button>
+            ) : null}
           </div>
 
           {isBriefTab ? (
@@ -4167,9 +4260,24 @@ export function ChatScreen() {
                                   <AssistantThinkingSkeleton compact />
                                 </div>
                               ) : isGenerating ? (
-                                <div {...(activeTab?.prdCommandThinking ? { "data-testid": "prd-command-thinking" } : {})}>
-                                  <AssistantThinkingSkeleton compact />
-                                </div>
+                                turn.partial ? (
+                                  // Live token stream: render the accumulating
+                                  // answer markdown as the model writes it. No
+                                  // simulated typing — the stream IS the typing;
+                                  // the poll's authoritative reply replaces this.
+                                  <div data-testid="ask-streaming-partial">
+                                    <AskReplyBody
+                                      reply={{
+                                        answer: turn.partial, key_points: [], citations: [],
+                                        confidence: 0, unanswered: "",
+                                      } as unknown as AskResponse}
+                                    />
+                                  </div>
+                                ) : (
+                                  <div {...(activeTab?.prdCommandThinking ? { "data-testid": "prd-command-thinking" } : {})}>
+                                    <AssistantThinkingSkeleton compact />
+                                  </div>
+                                )
                               ) : turn.interrupted ? (
                                 // A reload killed the clarify gate mid-decision
                                 // (see the persist effect) — the truthful state,

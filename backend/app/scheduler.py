@@ -533,7 +533,10 @@ async def _run_ticket_sync_cycle() -> None:
 def _run_orphan_ask_job_sweep() -> None:
     """Fail `ask_jobs` rows abandoned in `generating` by a dead worker, so the
     chat UI stops polling a job nothing will ever finish. Fully isolated — a
-    failure here never affects other jobs."""
+    failure here never affects other jobs. Also sweeps `pipeline_runs` rows
+    abandoned in 'running' (a deploy restart mid-regenerate kills the owning
+    task silently — same shared-Supabase age-gating rationale, see
+    db/pipeline_runs.fail_orphan_running_runs)."""
     try:
         from app.db.asks import fail_orphan_generating_ask_jobs
 
@@ -542,6 +545,15 @@ def _run_orphan_ask_job_sweep() -> None:
             logger.info("Failed %d abandoned Ask job(s) stuck in generating", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan Ask job sweep failed")
+    try:
+        from app.db.pipeline_runs import fail_orphan_running_runs
+
+        n = fail_orphan_running_runs()
+        if n:
+            logger.info(
+                "Failed %d abandoned pipeline run(s) stuck in running", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan pipeline-run sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:

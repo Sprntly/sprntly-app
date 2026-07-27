@@ -121,6 +121,45 @@ ROTATION_LIMIT = 3  # cards shown with no action before a theme is retired
 #: a material change — compose frames it as a return, not news.
 _DEFER_RETURN = "updated"
 
+# ── Sibling suppression ──────────────────────────────────────────────────────
+# Convergence can mint DISTINCT theme_ids over the same underlying issue (e.g.
+# "Dashboard / build board latency" and "Dashboard load"), so a user's deferral
+# or dismissal keyed on one theme_id would not stop a sibling theme from
+# carding the very topic they said no to (observed live on staging
+# 2026-07-27). The discriminator is the EVIDENCE: sibling themes converge on
+# overlapping KG signals. A candidate sharing enough of its evidence signals
+# with a user-held theme is held back with it — with its own backlog reason,
+# so the transparency line stays honest ("held with a deferred finding").
+#
+# Thresholds: at least SIBLING_MIN_SHARED common signals AND the overlap
+# covering at least SIBLING_OVERLAP of the smaller evidence set. Both gates so
+# a single coincidentally-shared signal between two evidence-rich themes does
+# not couple them.
+SIBLING_MIN_SHARED = 2
+SIBLING_OVERLAP = 0.5
+
+
+def _evidence_signal_ids(tc) -> set:
+    """The candidate's contributing KG signal ids (empty set when unknown)."""
+    out = set()
+    for ev in getattr(tc, "evidence", None) or []:
+        sid = ev.get("signal_id") if isinstance(ev, dict) else None
+        if sid:
+            out.add(sid)
+    return out
+
+
+def is_evidence_sibling(a, b) -> bool:
+    """True when candidates `a` and `b` rest on substantially the same
+    evidence — the same underlying issue wearing two theme_ids."""
+    ev_a, ev_b = _evidence_signal_ids(a), _evidence_signal_ids(b)
+    if not ev_a or not ev_b:
+        return False
+    shared = len(ev_a & ev_b)
+    if shared < SIBLING_MIN_SHARED:
+        return False
+    return shared / min(len(ev_a), len(ev_b)) >= SIBLING_OVERLAP
+
 
 def _deferral_active(prev: dict, now: datetime | None = None) -> bool:
     until = _parse_ts(prev.get("deferred_until"))
@@ -142,12 +181,18 @@ def classify_candidates(
       freshness — theme_id → 'new' | 'updated' for every eligible candidate;
       backlog   — (theme_id, reason) for every candidate held back, reason ∈
                   {'carried', 'dismissed', 'deferred', 'in_progress',
-                   'rotation_exhausted'}. Emitted onto the brief payload so
+                   'rotation_exhausted', 'sibling_deferred',
+                   'sibling_dismissed'}. Emitted onto the brief payload so
                   "what am I not seeing" has a real answer.
     """
     eligible: list = []
     freshness: dict[str, str] = {}
     backlog: list[tuple[str, str]] = []
+    # Themes held back by an ACTIVE user decision this run — deferred (window
+    # open) or dismissed (unchanged). Eligible candidates resting on the same
+    # evidence are held with them below; carried/rotation hold-backs do NOT
+    # propagate (they are the system's call, not the reader's).
+    user_held: list = []
     for tc in convergence:
         prev = states.get(tc.theme_id)
         if prev is None:
@@ -162,6 +207,7 @@ def classify_candidates(
         if action == "deferred":
             if _deferral_active(prev, now):
                 backlog.append((tc.theme_id, "deferred"))
+                user_held.append((tc, "deferred"))
             else:
                 # Expired deferral: back at full rank even if unchanged.
                 eligible.append(tc)
@@ -173,6 +219,7 @@ def classify_candidates(
                 freshness[tc.theme_id] = "updated"
             else:
                 backlog.append((tc.theme_id, "dismissed"))
+                user_held.append((tc, "dismissed"))
             continue
         # action == 'surfaced' (no user action yet)
         if int(prev.get("times_shown") or 0) >= ROTATION_LIMIT:
@@ -183,4 +230,23 @@ def classify_candidates(
             freshness[tc.theme_id] = "updated"
         else:
             backlog.append((tc.theme_id, "carried"))
+
+    # Sibling pass: an eligible candidate resting on substantially the same
+    # evidence as an actively-deferred/dismissed theme is held back with it
+    # (reason 'sibling_deferred' / 'sibling_dismissed'). The user said no to
+    # this issue; a fresh theme_id over the same signals is the same issue.
+    if user_held:
+        kept: list = []
+        for tc in eligible:
+            held_as = next(
+                (reason for held_tc, reason in user_held
+                 if is_evidence_sibling(tc, held_tc)),
+                None,
+            )
+            if held_as is None:
+                kept.append(tc)
+            else:
+                freshness.pop(tc.theme_id, None)
+                backlog.append((tc.theme_id, f"sibling_{held_as}"))
+        eligible = kept
     return eligible, freshness, backlog

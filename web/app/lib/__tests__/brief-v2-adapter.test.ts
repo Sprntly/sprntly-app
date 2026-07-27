@@ -392,6 +392,20 @@ describe("briefToBriefV2State — ledger held-back line + updated chip (phase 2B
     expect(line).not.toContain("Billing outage cluster")
   })
 
+  it("labels sibling hold-backs distinctly from the user's own actions", () => {
+    const brief: Brief = {
+      ...makeBrief([makeInsight({ tag: "something_broken" })]),
+      _backlog: [
+        { theme_id: "t1", theme_label: "A", reason: "deferred", deferred_until: "2026-08-03T06:00:00Z" },
+        { theme_id: "t2", theme_label: "B", reason: "sibling_deferred" },
+        { theme_id: "t3", theme_label: "C", reason: "sibling_dismissed" },
+      ],
+    }
+    const line = briefToBriefV2State(brief).heldBackLine!
+    expect(line).toContain("1 held with a deferred finding on the same topic")
+    expect(line).toContain("1 held with a dismissed finding on the same topic")
+  })
+
   it("renders no line when _backlog is absent or empty (pre-ledger briefs)", () => {
     expect(briefToBriefV2State(makeBrief([makeInsight({ tag: "something_broken" })])).heldBackLine).toBeNull()
     expect(

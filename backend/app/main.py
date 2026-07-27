@@ -80,7 +80,6 @@ from app.routes import (
     internal,
     pipeline,
     prd,
-    public_feedback as public_feedback_routes,
 )
 
 logging.basicConfig(level=logging.INFO,
@@ -173,6 +172,20 @@ async def lifespan(app: FastAPI):
             "Failed %d orphan generating Ask job(s)",
             job_ask_orphans,
         )
+    # Same for pipeline_runs (the regenerate / regenerate-all durable run rows):
+    # a restart mid-run leaves the row 'running' forever with no owner. Age-
+    # gated for the same shared-Supabase reason as ask_jobs above; the
+    # scheduler's heal job repeats this every 5m, and a user retry supersedes
+    # the stale row immediately (routes/brief._start_durable_run).
+    try:
+        run_orphans = db.fail_orphan_running_runs()
+        if run_orphans:
+            logger.info(
+                "Failed %d orphan running pipeline run(s) (restart interrupt)",
+                run_orphans,
+            )
+    except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
+        logger.exception("Orphan pipeline-run sweep failed at startup")
     # Design Agent startup invalidation (prototypes + iterations).
     #
     # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
@@ -301,7 +314,6 @@ app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(artifacts.router)
-app.include_router(public_feedback_routes.router)
 app.include_router(ideation.router)
 app.include_router(ask.router)
 app.include_router(chat.router)
