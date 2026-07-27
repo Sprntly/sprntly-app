@@ -52,6 +52,7 @@ def upsert_finding_state(
     latest_signal_at: Optional[str] = None,
     last_brief_id: Optional[int] = None,
     state: Optional[str] = None,
+    reset_action: bool = True,
     client=None,
 ) -> None:
     """Record/refresh the convergence fingerprint a theme had when surfaced.
@@ -61,34 +62,38 @@ def upsert_finding_state(
     keeps the existing row).
 
     Ledger semantics (phase 2A): surfacing a theme increments `times_shown`
-    (rotation-exhaustion counter), stamps `last_state` ('new' | 'updated'),
-    resets `action` to 'surfaced' and clears any expired `deferred_until` — a
-    deferred theme that re-cards is back in the normal lifecycle. The
+    (rotation-exhaustion counter), stamps `last_state` ('new' | 'updated') and —
+    when `reset_action` is true — resets `action` to 'surfaced' and clears any
+    `deferred_until`, returning the theme to the normal lifecycle. Callers pass
+    `reset_action=False` when the surface did NOT go through the ledger gate
+    (the empty-brief fallback composes held-back themes too, and re-carding a
+    dismissed finding there must not erase the user's dismissal). The
     read-modify-write on times_shown is fine at these volumes (≤ pool-size rows
     per weekly run, keyed reads)."""
     cli = client or require_client()
     now = utc_now()
     prev = get_finding_states(enterprise_id, [theme_id], client=cli).get(theme_id)
     times_shown = int((prev or {}).get("times_shown") or 0) + 1
+    row = {
+        "id": str(uuid.uuid4()),
+        "enterprise_id": enterprise_id,
+        "theme_id": theme_id,
+        "last_brief_id": last_brief_id,
+        "last_surfaced_at": now,
+        "fp_signal_count": int(signal_count),
+        "fp_effective_weight": float(effective_weight),
+        "fp_revenue_at_stake": float(revenue_at_stake),
+        "fp_breadth": int(breadth),
+        "fp_latest_signal_at": latest_signal_at,
+        "times_shown": times_shown,
+        "last_state": state,
+        "updated_at": now,
+    }
+    if reset_action:
+        row["action"] = "surfaced"
+        row["deferred_until"] = None
     cli.table("brief_finding_state").upsert(
-        {
-            "id": str(uuid.uuid4()),
-            "enterprise_id": enterprise_id,
-            "theme_id": theme_id,
-            "last_brief_id": last_brief_id,
-            "last_surfaced_at": now,
-            "fp_signal_count": int(signal_count),
-            "fp_effective_weight": float(effective_weight),
-            "fp_revenue_at_stake": float(revenue_at_stake),
-            "fp_breadth": int(breadth),
-            "fp_latest_signal_at": latest_signal_at,
-            "times_shown": times_shown,
-            "last_state": state,
-            "action": "surfaced",
-            "deferred_until": None,
-            "updated_at": now,
-        },
-        on_conflict="enterprise_id,theme_id",
+        row, on_conflict="enterprise_id,theme_id",
     ).execute()
 
 

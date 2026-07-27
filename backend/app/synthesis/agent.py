@@ -779,6 +779,11 @@ def run_synthesis(
                 ),
                 last_brief_id=brief_id,
                 state=freshness_by_theme.get(tc.theme_id, "new"),
+                # A theme absent from the freshness map was composed via the
+                # empty-brief fallback, NOT through the ledger gate — refresh
+                # its fingerprint but preserve the user's action (a dismissal
+                # must survive a fallback re-card).
+                reset_action=tc.theme_id in freshness_by_theme,
             )
         except Exception:  # noqa: BLE001 — never let de-dup bookkeeping break the brief
             logger.warning(

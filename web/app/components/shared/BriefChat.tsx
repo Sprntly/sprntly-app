@@ -1271,17 +1271,14 @@ export function BriefChat() {
   const cardRestore = useCallback((finding: Finding) => {
     const key = finding.detailKey
     if (!key) return
-    let changed = false
     setDismissed((s) => {
       if (!s.has(key)) return s
-      changed = true
       const next = new Set(s)
       next.delete(key)
       return next
     })
     setDeferredKeys((s) => {
       if (!s.has(key)) return s
-      changed = true
       const next = new Set(s)
       next.delete(key)
       return next
@@ -1290,7 +1287,6 @@ export function BriefChat() {
     // next run doesn't suppress a card the reader visibly brought back.
     const meta = content.briefDetails?.[key]?.meta
     if (meta) void briefApi.restore(meta.briefId, meta.insightIndex).catch(() => {})
-    void changed
   }, [content.briefDetails])
 
   // ── Composer handlers ─────────────────────────────────────────────────────
