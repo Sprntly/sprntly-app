@@ -8,7 +8,10 @@ import { OptionalDisclosure } from "../../onboarding/OptionalDisclosure"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import { useContent } from "../../../context/ContentContext"
 import { updateWorkspace } from "../../../lib/onboarding/store"
-import { INSIGHT_TYPES, cleanInsightTypes } from "../../../lib/insight-types"
+import {
+  SELECTABLE_INSIGHT_TYPES,
+  selectableInsightTypes,
+} from "../../../lib/insight-types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { hasLiveAnalyticsConnection } from "../../../lib/onboarding/connectorsWizard"
@@ -38,11 +41,12 @@ import { Check } from "../../auth/icons"
 
 const DRAFT_KEY = "personalize-step"
 
-// The insight-type chips come from the shared canonical list
-// (lib/insight-types) so onboarding and Settings → Comms & Brief offer the same
-// six. The selection is WORKSPACE-level — persisted on
-// companies.notification_settings.brief_insight_types (+ brief_insight_note) —
-// so the whole workspace's brief is filtered to what the admin picks here.
+// The insight-type chips come from the shared list of SELECTABLE types
+// (lib/insight-types) so onboarding and Settings → Comms & Brief always offer
+// the same set — currently the three that have a skill behind them. The
+// selection is WORKSPACE-level — persisted on
+// companies.notification_settings.brief_insight_types — so the whole
+// workspace's brief is filtered to what the admin picks here.
 
 /** Where the brief lands. Teams has no backend delivery path yet. */
 const DESTINATIONS: { value: string; label: string; disabled?: boolean }[] = [
@@ -55,11 +59,10 @@ const DESTINATIONS: { value: string; label: string; disabled?: boolean }[] = [
  * Onboarding step 09 — "Personalize your workspace" (2026-07-21 spec).
  *
  * Two halves:
- *   - What the workspace should surface: insight-type chips plus a free-text
- *     override. Persisted as notification_settings.brief_insight_types (+
- *     brief_insight_note), NOT a new table — every other brief-delivery
- *     preference already lives in that blob and the schedule migration
- *     explicitly argues for keeping it that way.
+ *   - What the workspace should surface: the insight-type chips. Persisted as
+ *     notification_settings.brief_insight_types, NOT a new table — every other
+ *     brief-delivery preference already lives in that blob and the schedule
+ *     migration explicitly argues for keeping it that way.
  *   - Delivery, behind a disclosure: frequency / destination / day / time /
  *     timezone. These are the SAME keys Settings → Comms & Brief writes, and
  *     the option vocabularies come from the shared briefSchedule module, so the
@@ -81,7 +84,6 @@ export function PersonalizeStep() {
   const [surfaces, setSurfaces] = useState<string[]>(
     (draft?.surfaces as string[]) ?? ["top_problems", "build_priorities"],
   )
-  const [note, setNote] = useState((draft?.note as string) ?? "")
 
   const [frequency, setFrequency] = useState<BriefFrequency>("weekly")
   const [destination, setDestination] = useState("slack")
@@ -112,24 +114,22 @@ export function PersonalizeStep() {
   // (notification_settings.brief_insight_types), so returning to the step (or
   // having set it in Settings) doesn't reset it. A local draft wins; an empty
   // saved selection keeps the sensible defaults above rather than blanking the
-  // chips.
+  // chips. Narrowed to the offered types — a saved slug with no chip would be
+  // invisible state the PM can't see or clear.
   useEffect(() => {
     if (!workspace || draft) return
     const n = workspace.notification_settings ?? {}
-    const saved = cleanInsightTypes(n.brief_insight_types)
+    const saved = selectableInsightTypes(n.brief_insight_types)
     if (saved.length) setSurfaces(saved)
-    if (typeof n.brief_insight_note === "string" && n.brief_insight_note) {
-      setNote(n.brief_insight_note)
-    }
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const onHide = () => {
-      if (document.hidden) saveDraft(DRAFT_KEY, { surfaces, note })
+      if (document.hidden) saveDraft(DRAFT_KEY, { surfaces })
     }
     document.addEventListener("visibilitychange", onHide)
     return () => document.removeEventListener("visibilitychange", onHide)
-  }, [surfaces, note])
+  }, [surfaces])
 
   // Same fail-open rule as the old ReviewStep gate: a connector list we can't
   // confirm counts as "no analytics", because stranding the PM on a spinner at
@@ -195,10 +195,12 @@ export function PersonalizeStep() {
       const updated = await updateWorkspace(workspace.id, {
         notification_settings: {
           ...existing,
-          // Top Insights filter for the workspace. Cleaned to known slugs so a
-          // stale client can't violate the companies_brief_insight_types check.
-          brief_insight_types: cleanInsightTypes(surfaces),
-          brief_insight_note: note.trim() || null,
+          // Top Insights filter for the workspace. Cleaned to the offered slugs
+          // so a stale client can't violate the companies_brief_insight_types
+          // check. brief_insight_note is deliberately not written — the
+          // free-text override was removed from both pickers; any value already
+          // stored survives in `existing`.
+          brief_insight_types: selectableInsightTypes(surfaces),
           brief_channel: destination,
           email_enabled: destination === "email",
           brief_frequency: frequency,
@@ -260,12 +262,12 @@ export function PersonalizeStep() {
       <div className="onb-section">
         <div className="onb-section-h">
           What should your workspace surface?{" "}
-          <span className="opt">— pick any, or add your own</span>
+          <span className="opt">— pick any</span>
         </div>
       </div>
 
       <div className="metric-chips" data-field="surfaces">
-        {INSIGHT_TYPES.map((opt) => {
+        {SELECTABLE_INSIGHT_TYPES.map((opt) => {
           const isSel = surfaces.includes(opt.value)
           return (
             <button
@@ -284,20 +286,6 @@ export function PersonalizeStep() {
             </button>
           )
         })}
-      </div>
-
-      <div className="field full" style={{ marginTop: 12 }}>
-        <textarea
-          className="inp"
-          rows={3}
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          maxLength={1000}
-          placeholder={
-            'Or describe it in your words — e.g. "I want my workspace to show the top user problems and the one thing I should ship this week to move MAU."'
-          }
-          aria-label="Describe what your workspace should surface"
-        />
       </div>
 
       <OptionalDisclosure label="Delivery — when & where your brief lands (optional)">

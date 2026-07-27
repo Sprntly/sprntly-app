@@ -24,7 +24,10 @@ import {
   tzOptionLabel,
 } from "../../../../lib/briefSchedule"
 import { updateWorkspace } from "../../../../lib/onboarding/store"
-import { INSIGHT_TYPES, cleanInsightTypes } from "../../../../lib/insight-types"
+import {
+  SELECTABLE_INSIGHT_TYPES,
+  selectableInsightTypes,
+} from "../../../../lib/insight-types"
 import { SlackChannelPicker } from "../../../connectors/SlackChannelPicker"
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
@@ -37,9 +40,8 @@ type ScheduleFields = {
   timezone: string
   // Workspace-level Top Insights filter — which insight types the brief should
   // surface for everyone in the workspace (companies.notification_settings.
-  // brief_insight_types / brief_insight_note). Empty = surface everything.
+  // brief_insight_types). Empty = surface everything.
   insightTypes: string[]
-  insightNote: string
 }
 
 /** Stable order-insensitive key for comparing an insight-type selection. */
@@ -56,9 +58,8 @@ export function NotificationsSettings() {
   const [weekday, setWeekday] = useState(0)
   const [hour, setHour] = useState(6)
   const [timezone, setTimezone] = useState("UTC")
-  // Workspace-level insight-type filter + free-text note.
+  // Workspace-level insight-type filter.
   const [insightTypes, setInsightTypes] = useState<string[]>([])
-  const [insightNote, setInsightNote] = useState("")
   // The persisted "every other week" anchor. Kept out of ScheduleFields on
   // purpose: it is derived, never edited directly, so it must not arm Save.
   const [storedAnchor, setStoredAnchor] = useState<string | null>(null)
@@ -90,8 +91,9 @@ export function NotificationsSettings() {
       hour: typeof n.brief_hour === "number" ? n.brief_hour : 6,
       timezone:
         typeof n.timezone === "string" && n.timezone ? n.timezone : browserTimezone(),
-      insightTypes: cleanInsightTypes(n.brief_insight_types),
-      insightNote: typeof n.brief_insight_note === "string" ? n.brief_insight_note : "",
+      // Narrowed to the offered types: a stored slug with no chip would be
+      // invisible state the admin can neither see nor clear.
+      insightTypes: selectableInsightTypes(n.brief_insight_types),
     }
     setEmailDigest(loaded.emailDigest)
     setFrequency(loaded.frequency)
@@ -99,7 +101,6 @@ export function NotificationsSettings() {
     setHour(loaded.hour)
     setTimezone(loaded.timezone)
     setInsightTypes(loaded.insightTypes)
-    setInsightNote(loaded.insightNote)
     setStoredAnchor(typeof n.brief_anchor_date === "string" ? n.brief_anchor_date : null)
     setSnapshot(loaded)
   }, [workspace])
@@ -111,8 +112,7 @@ export function NotificationsSettings() {
       weekday !== snapshot.weekday ||
       hour !== snapshot.hour ||
       timezone !== snapshot.timezone ||
-      typesKey(insightTypes) !== typesKey(snapshot.insightTypes) ||
-      insightNote.trim() !== snapshot.insightNote.trim())
+      typesKey(insightTypes) !== typesKey(snapshot.insightTypes))
 
   function toggleInsightType(value: string) {
     setInsightTypes((prev) =>
@@ -202,15 +202,16 @@ export function NotificationsSettings() {
           brief_hour: hour,
           brief_minute: 0,
           timezone,
-          // Workspace-level Top Insights filter. Cleaned to known slugs so a
-          // stale client can't violate the companies_brief_insight_types check
-          // constraint; note is stored as null when blank.
-          brief_insight_types: cleanInsightTypes(insightTypes),
-          brief_insight_note: insightNote.trim() || null,
+          // Workspace-level Top Insights filter. Cleaned to the offered slugs so
+          // a stale client can't violate the companies_brief_insight_types check
+          // constraint. brief_insight_note is deliberately not written — the
+          // free-text override was removed from both pickers; any value already
+          // stored survives in `existing`.
+          brief_insight_types: selectableInsightTypes(insightTypes),
         },
       })
       setStoredAnchor(anchor)
-      setSnapshot({ emailDigest, frequency, weekday, hour, timezone, insightTypes, insightNote })
+      setSnapshot({ emailDigest, frequency, weekday, hour, timezone, insightTypes })
       setSaved(true)
       await refresh()
     } catch (e) {
@@ -218,7 +219,7 @@ export function NotificationsSettings() {
     } finally {
       setSaving(false)
     }
-  }, [workspace, emailDigest, frequency, weekday, hour, timezone, insightTypes, insightNote, refresh])
+  }, [workspace, emailDigest, frequency, weekday, hour, timezone, insightTypes, refresh])
 
   function onDiscard() {
     if (!snapshot) return
@@ -228,7 +229,6 @@ export function NotificationsSettings() {
     setHour(snapshot.hour)
     setTimezone(snapshot.timezone)
     setInsightTypes(snapshot.insightTypes)
-    setInsightNote(snapshot.insightNote)
     setError(null)
   }
 
@@ -303,7 +303,7 @@ export function NotificationsSettings() {
               </span>
             </div>
             <div className="metric-chips" data-field="insight-types">
-              {INSIGHT_TYPES.map((opt) => {
+              {SELECTABLE_INSIGHT_TYPES.map((opt) => {
                 const isSel = insightTypes.includes(opt.value)
                 return (
                   <button
@@ -318,23 +318,6 @@ export function NotificationsSettings() {
                   </button>
                 )
               })}
-            </div>
-            <div className="pset-field" style={{ marginTop: 14 }}>
-              <label className="pset-label" htmlFor="comms-insight-note">
-                Or describe it in your words (optional)
-              </label>
-              <textarea
-                id="comms-insight-note"
-                className="input"
-                rows={3}
-                value={insightNote}
-                maxLength={1000}
-                onChange={(e) => {
-                  setInsightNote(e.target.value)
-                  setSaved(false)
-                }}
-                placeholder='e.g. "Show the top user problems and the one thing we should ship this week to move activation."'
-              />
             </div>
           </section>
 
