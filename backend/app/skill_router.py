@@ -190,6 +190,28 @@ _VOC_CUSTOMER_FEEDBACK_RULE = re.compile(
 )
 
 
+# Superlative-complaint asks — "what is the number 1 user complaint from
+# today's customer conversations?", "top customer complaint this week",
+# "biggest pain point customers raised". They carry a ranking word + a
+# customer-noun + a complaint-noun but often neither "feedback" nor a literal
+# call-noun, so every rule above misses them (user-reported 2026-07-27). The
+# three-way requirement keeps precision: a bare "top complaints?" or an
+# incidental "customers raised an issue" doesn't divert.
+_VOC_COMPLAINT_RULE = re.compile(
+    r"(?:\b(?:top|number\s*(?:one|1)|no\.\s*1|biggest|main|most\s+common|"
+    r"most\s+frequent|loudest|worst)\b|#\s*1\b)"
+    r".{0,50}\b(?:customer|user|client)s?\b"
+    r".{0,50}\b(?:complain\w*|pain\s*points?|issues?|problems?|frustrations?|gripes?)"
+    r"|\b(?:customer|user|client)s?\b.{0,30}"
+    r"\b(?:complain\w*|pain\s*points?|frustrations?|gripes?)\b.{0,50}"
+    r"(?:\b(?:top|number\s*(?:one|1)|biggest|main|most\s+common|ranked)\b|#\s*1\b)"
+    r"|(?:\b(?:top|number\s*(?:one|1)|biggest|main|most\s+common|loudest|worst)\b|#\s*1\b)"
+    r".{0,30}\b(?:complain\w*|pain\s*points?|frustrations?|gripes?)\b"
+    r".{0,40}\b(?:customer|user|client)s?\b",
+    re.I | re.S,
+)
+
+
 def is_voc_report_request(question: str) -> bool:
     """True for a bare 'voice of customer' / 'VoC report' request, a
     feedback-from-customer-conversations phrasing, or a top/summarize-customer-
@@ -197,7 +219,8 @@ def is_voc_report_request(question: str) -> bool:
     used by qa_agent to route these to the live call digest when a call source
     is connected."""
     return bool(
-        _VOC_REPORT_RULE.search(question)
+        _VOC_COMPLAINT_RULE.search(question)
+        or _VOC_REPORT_RULE.search(question)
         or _VOC_FEEDBACK_CONVO_RULE.search(question)
         or _VOC_CUSTOMER_FEEDBACK_RULE.search(question)
     )

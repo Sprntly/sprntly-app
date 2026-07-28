@@ -583,10 +583,21 @@ def answer(
         if pf is not None:
             return _maybe_verify(pf, enterprise_id)
 
-    # VoC routed with no live call source (call_digest is handled upstream): render
-    # the pinned HTML report from KG signal when there is any; else fall through to
+    # VoC routed by ANY stage — including the haiku intent router. Prefer the
+    # SAME live call digest the phrase fast-paths use when a call source is
+    # connected, so a phrasing only the LLM router understands ("what is the
+    # number 1 user complaint from today's conversations?") gets the identical
+    # answer path as a regex-matched one. Intent decides; phrases are only a
+    # latency shortcut (decision 2026-07-27). Without a call source, render the
+    # pinned HTML report from KG signal when there is any; else fall through to
     # the generic answer (which explains what to connect).
     if decision.skill_id == "voice-of-customer-report":
+        from app import call_digest
+
+        if not pinned_skill and call_digest.has_call_source(enterprise_id):
+            return call_digest.answer(
+                enterprise_id=enterprise_id, question=question, history=history
+            )
         voc = _answer_voc_report(decision, enterprise_id, question, history)
         if voc is not None:
             return _maybe_verify(voc, enterprise_id)
