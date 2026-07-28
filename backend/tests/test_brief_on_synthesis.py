@@ -362,6 +362,7 @@ def test_seed_from_connectors_pulls_google_drive_inline(isolated_settings):
 def test_generate_brief_for_seeds_then_runs_synthesis(isolated_settings):
     _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
     with patch.object(sb, "seed_incremental", return_value={"corpus": {}}) as seed, \
+         patch.object(sb, "has_brief_data_source", return_value=True), \
          patch.object(sb, "run_synthesis", return_value={"summary_headline": "ok"}) as run:
         out = sb.generate_brief_for("acme")
     assert out["summary_headline"] == "ok"
@@ -380,6 +381,7 @@ def test_generate_brief_for_no_prior_brief_always_synthesizes(isolated_settings)
     _seed_company(isolated_settings["supabase"], company_id="co-1", slug="acme")
     with patch.object(sb, "get_current_brief", return_value=None), \
          patch.object(sb, "seed_incremental", return_value={"corpus": {}}), \
+         patch.object(sb, "has_brief_data_source", return_value=True), \
          patch.object(sb, "run_synthesis",
                       return_value={"summary_headline": "fresh"}) as run, \
          patch("app.graph.facade.GraphFacade.has_signals_since") as has:
@@ -397,6 +399,7 @@ def test_generate_brief_for_unchanged_kg_skips_synthesis(isolated_settings):
              "summary_headline": "existing"}
     with patch.object(sb, "get_current_brief", return_value=prior), \
          patch.object(sb, "seed_incremental", return_value={"corpus": {}}), \
+         patch.object(sb, "has_brief_data_source", return_value=True), \
          patch.object(sb, "run_synthesis") as run, \
          patch("app.graph.facade.GraphFacade.has_signals_since",
                return_value=False) as has:
@@ -415,6 +418,7 @@ def test_generate_brief_for_new_signals_runs_synthesis(isolated_settings):
              "summary_headline": "stale"}
     with patch.object(sb, "get_current_brief", return_value=prior), \
          patch.object(sb, "seed_incremental", return_value={"corpus": {"docs": 1}}), \
+         patch.object(sb, "has_brief_data_source", return_value=True), \
          patch.object(sb, "run_synthesis",
                       return_value={"summary_headline": "regenerated"}) as run, \
          patch("app.graph.facade.GraphFacade.has_signals_since",

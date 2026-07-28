@@ -231,6 +231,7 @@ def test_run_synthesis_deliver_false_skips_push(isolated_settings, monkeypatch):
     monkeypatch.setattr(sb, "resolve_company", lambda x: ("co-1", "acme"))
     monkeypatch.setattr(sb, "get_current_brief", lambda slug: None)
     monkeypatch.setattr(sb, "seed_incremental", lambda *a, **k: None)
+    monkeypatch.setattr(sb, "has_brief_data_source", lambda *a: True)
 
     out = sb.generate_brief_for("acme", deliver=False)
     assert out == {"id": 1}
