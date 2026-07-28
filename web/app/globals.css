@@ -103,10 +103,77 @@
     --app-shell-header-min: 82px;
     /* Sidebar: expanded width grows with nav content; collapsed rail width follows content */
     --sidebar-rail-expanded-min: 220px;
+
+    /* Scrollbars — see the quiet-scrollbar block below. The gutter is a fixed
+       width in BOTH states; only the thumb's colour changes. */
+    --scroll-gutter: 10px;
+    --scroll-thumb: rgba(18, 32, 26, 0.16);
+    --scroll-thumb-hover: rgba(18, 32, 26, 0.3);
+
+    /* Artifact-panel drawer timing. The panel slide, the main column's
+       padding, and ContentPanel's unmount timer all read these numbers —
+       keep CPANEL_IN_MS / CPANEL_OUT_MS in ContentPanel.tsx in step. */
+    --cpanel-in-ms: 260ms;
+    --cpanel-out-ms: 200ms;
   }
 
   * {
     box-sizing: border-box;
+  }
+
+  /* ── Quiet scrollbars (app-wide) ──────────────────────────────────────────
+     One treatment for every scrolling region: the track is invisible and the
+     thumb is fully TRANSPARENT at rest, tinting in only while the pointer is
+     inside that region. Reading surfaces (the artifact panel's document, the
+     chat thread) then carry no permanent grey rail down their edge, which is
+     what made stacked scroll containers — panel body + PRD scroller — read as
+     "two scrollbars" even when only one of them was scrollable.
+
+     The gutter width is IDENTICAL in both states on purpose. WebKit's styled
+     scrollbars are classic (they occupy layout width), not overlays, so a
+     scrollbar that appeared on hover would reflow the text under it every
+     time the pointer crossed the region. Only the colour changes.
+
+     Firefox has no ::-webkit pseudo-elements; `scrollbar-width` +
+     `scrollbar-color` give it the same rest/hover pair (it swaps the colour
+     without a transition, which is fine — the end states match). */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+
+  *:hover {
+    scrollbar-color: var(--scroll-thumb) transparent;
+  }
+
+  *::-webkit-scrollbar {
+    width: var(--scroll-gutter);
+    height: var(--scroll-gutter);
+    background: transparent;
+  }
+
+  *::-webkit-scrollbar-track,
+  *::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  /* 3px transparent border + padding-box clip = a ~4px thumb floating in a
+     10px gutter, so it never crowds the text it sits beside. */
+  *::-webkit-scrollbar-thumb {
+    background: transparent;
+    background-clip: padding-box;
+    border: 3px solid transparent;
+    border-radius: 8px;
+  }
+
+  *:hover::-webkit-scrollbar-thumb {
+    background: var(--scroll-thumb);
+    background-clip: padding-box;
+  }
+
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--scroll-thumb-hover);
+    background-clip: padding-box;
   }
 
   html,
@@ -1104,7 +1171,15 @@
     overflow-x: hidden;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    transition: padding-left 0.2s ease;
+    /* padding-right eases the column open and shut as the artifact panel
+       slides (see .app--cpanel-open). Declaring it here — the CLOSED state —
+       is what makes the closing direction animate at all: a transition
+       declared only on the open-state rule stops existing the moment that
+       class comes off, so the column used to snap shut. This copy carries the
+       EXIT timing; .app--cpanel-open carries the (longer) entry timing, which
+       is how the column matches the panel in both directions. */
+    transition: padding-left 0.2s ease,
+      padding-right var(--cpanel-out-ms, 200ms) var(--ease);
   }
 
   .main-column>.main {
@@ -1230,34 +1305,73 @@
     background: var(--surface-2, #f7f5f0);
   }
 
-  /* The strip's scrolling half. Now that the strip shrinks with the column
-     (min-width: 0 above), a few open tabs genuinely overflow it whenever the
-     artifact panel is open — and a native horizontal scrollbar inside a 44px
-     strip eats a third of the tab height. Same slim treatment as .bc-scroll,
-     laid over the bottom edge rather than reserving a row of its own. */
+  /* The strip's scrolling half, and the wrapper that carries its overflow
+     fades. Now that the strip shrinks with the column (min-width: 0 above), a
+     few open tabs genuinely overflow it whenever the artifact panel is open.
+     A scrollbar — even a slim one — is the wrong affordance inside a 44px
+     strip: it eats a third of the tab height and sits directly on the seam
+     where the active tab merges into the content below. So the bar is hidden
+     outright and the overflow is signalled by a fade at whichever edge still
+     has tabs beyond it (data-ov, set by ChatScreen). */
+  .chat-tab-scroller {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  .chat-tab-scroller::before,
+  .chat-tab-scroller::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 28px;
+    pointer-events: none;
+    z-index: 2;
+    opacity: 0;
+    transition: opacity 0.18s var(--ease, ease);
+  }
+
+  /* Same token the strip paints itself with, so the fade always resolves to the
+     strip's own colour. The far stop is bare `transparent` — gradients
+     interpolate premultiplied, so it fades to nothing rather than through a
+     white (or black) haze the way an explicit rgba(…, 0) would risk. */
+  .chat-tab-scroller::before {
+    left: 0;
+    background: linear-gradient(90deg, var(--surface-2, #f7f5f0) 15%, transparent 100%);
+  }
+
+  .chat-tab-scroller::after {
+    right: 0;
+    background: linear-gradient(270deg, var(--surface-2, #f7f5f0) 15%, transparent 100%);
+  }
+
+  .chat-tab-scroller[data-ov~="start"]::before,
+  .chat-tab-scroller[data-ov~="end"]::after {
+    opacity: 1;
+  }
+
   .chat-tab-list {
-    scrollbar-width: thin;
-    scrollbar-color: rgba(18, 32, 26, 0.16) transparent;
+    /* Bar hidden in every engine; the fades above carry the affordance. */
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+    /* Clicking a tab that's partly out of view (or opening a new one) glides
+       it in rather than jumping. */
+    scroll-behavior: smooth;
+    overscroll-behavior-x: contain;
   }
 
   .chat-tab-list::-webkit-scrollbar {
-    height: 6px;
+    width: 0;
+    height: 0;
+    display: none;
   }
 
-  .chat-tab-list::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .chat-tab-list::-webkit-scrollbar-thumb {
-    background: rgba(18, 32, 26, 0.16);
-    border-radius: 8px;
-    border: 2px solid transparent;
-    background-clip: padding-box;
-  }
-
-  .chat-tab-list::-webkit-scrollbar-thumb:hover {
-    background: rgba(18, 32, 26, 0.28);
-    background-clip: padding-box;
+  @media (prefers-reduced-motion: reduce) {
+    .chat-tab-list { scroll-behavior: auto; }
+    .chat-tab-scroller::before,
+    .chat-tab-scroller::after { transition: none; }
   }
 
   /* The way back to a closed artifact panel. An accent disc, because it's the
@@ -4706,10 +4820,16 @@
   /* Width driven by --cpanel-width on <html> (set by the resize handle).
      Both the panel and padding-right read the same var so they stay in sync.
      Hard-capped at 60vw — panel never takes more than 60% of the screen. */
+  /* Entry timing only. A transition applies with the value the element is
+     transitioning TO, so adding this class uses the duration below (matching
+     .cpanel--in) and removing it falls back to the base .main-column rule's
+     shorter one (matching .cpanel--out) — the column and the panel's edge
+     travel together in both directions. */
   .app--cpanel-open .main-column {
     padding-right: min(var(--cpanel-width, 60vw), 60vw);
     box-sizing: border-box;
-    transition: padding-right 0.22s ease;
+    transition: padding-left 0.2s ease,
+      padding-right var(--cpanel-in-ms, 260ms) var(--ease);
   }
 
   .cpanel-overlay {
@@ -4731,6 +4851,64 @@
     flex-direction: column;
     box-shadow: -4px 0 24px rgba(0, 0, 0, 0.08);
     transition: width 0.22s ease;
+  }
+
+  /* Enter/exit: a drawer slide on the compositor (transform + opacity), timed
+     and eased to match the main column's padding so the two edges travel
+     together instead of one chasing the other.
+
+     The transform is applied by a SHORT-LIVED class, not left on .cpanel —
+     ContentPanel drops `.cpanel--in` once the animation ends. A transform on
+     the panel makes it the containing block for `position: fixed` children,
+     and the panel has several (the ticket destination picker's click-away
+     backdrop, the Jira push modal): pinned to the panel instead of the
+     viewport, those stop covering the page. So the transform exists only for
+     the ~260ms it is actually animating. */
+  .cpanel--in {
+    animation: cpanel-in var(--cpanel-in-ms, 260ms) var(--ease) both;
+  }
+
+  .cpanel--out {
+    animation: cpanel-out var(--cpanel-out-ms, 200ms) var(--ease) both;
+    /* The panel is on its way out — don't let a click land on it mid-flight. */
+    pointer-events: none;
+  }
+
+  @keyframes cpanel-in {
+    from {
+      transform: translate3d(100%, 0, 0);
+      opacity: 0;
+    }
+    to {
+      transform: translate3d(0, 0, 0);
+      opacity: 1;
+    }
+  }
+
+  @keyframes cpanel-out {
+    from {
+      transform: translate3d(0, 0, 0);
+      opacity: 1;
+    }
+    to {
+      transform: translate3d(100%, 0, 0);
+      opacity: 0;
+    }
+  }
+
+  /* Reduced motion: the panel still opens and closes, it just doesn't travel.
+     Both .main-column selectors are listed because the open-state one outranks
+     a bare `.main-column` here and would otherwise keep its transition. */
+  @media (prefers-reduced-motion: reduce) {
+    .cpanel--in,
+    .cpanel--out {
+      animation: none;
+    }
+
+    .main-column,
+    .app--cpanel-open .main-column {
+      transition: none;
+    }
   }
 
   /* Left-edge drag handle */
@@ -5986,30 +6164,8 @@
     min-height: 0;
     overflow-y: auto;
     padding: 18px 0 10px;
-    /* Slim, light scrollbar (Firefox) */
-    scrollbar-width: thin;
-    scrollbar-color: rgba(18, 32, 26, 0.16) transparent;
-  }
-
-  /* Slim, light scrollbar (WebKit/Chromium) — ~6px visible thumb, padded */
-  .bc-scroll::-webkit-scrollbar {
-    width: 10px;
-  }
-
-  .bc-scroll::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .bc-scroll::-webkit-scrollbar-thumb {
-    background: rgba(18, 32, 26, 0.16);
-    border-radius: 8px;
-    border: 2px solid transparent;
-    background-clip: padding-box;
-  }
-
-  .bc-scroll::-webkit-scrollbar-thumb:hover {
-    background: rgba(18, 32, 26, 0.28);
-    background-clip: padding-box;
+    /* Scrollbar styling is the app-wide quiet treatment (top of this file) —
+       transparent at rest, tinting in while the pointer is over the thread. */
   }
 
   /* Persistent PM-agent intro — the always-on educational line above the

@@ -46,6 +46,12 @@ const CPANEL_WIDTH_KEY = "sprntly-cpanel-width"
 const CPANEL_WIDTH_MIN = 650   // min: content needs room to breathe
 const CPANEL_MAX_VW   = 0.6    // max: never more than 60% of the viewport
 
+// Drawer timings. MUST match --cpanel-in-ms / --cpanel-out-ms in globals.css:
+// the CSS animates the slide, these drive when the transform class comes off
+// (in) and when the panel actually unmounts (out).
+const CPANEL_IN_MS = 260
+const CPANEL_OUT_MS = 200
+
 function clampCpanelWidth(px: number): number {
   const max = Math.round(window.innerWidth * CPANEL_MAX_VW)
   return Math.min(max, Math.max(CPANEL_WIDTH_MIN, Math.round(px)))
@@ -212,9 +218,62 @@ function useResolvePrd() {
   return { meta, resolving, resolve }
 }
 
+/**
+ * Drives the panel's mount lifecycle so it can animate BOTH ways.
+ *
+ * `contentPanelTab` flipping to null used to unmount the panel on the spot —
+ * it vanished while the main column was still easing its padding shut. Here
+ * the panel stays mounted for the length of the exit animation and only then
+ * comes off the tree.
+ *
+ * Phases: "in" and "out" are the two animating states and each carries the
+ * matching class; "idle" is the settled, open panel with NO transform on it
+ * (see the .cpanel--in comment in globals.css for why that matters).
+ */
+function useCpanelPhase(open: boolean) {
+  const [mounted, setMounted] = useState(open)
+  const [phase, setPhase] = useState<"in" | "idle" | "out">(open ? "in" : "idle")
+  // Read inside the effect without re-running it: the effect reacts to `open`
+  // only, so a mount/unmount it performs itself can't restart the animation.
+  const mountedRef = useRef(mounted)
+  mountedRef.current = mounted
+
+  useEffect(() => {
+    if (open) {
+      setMounted(true)
+      setPhase("in")
+      const t = setTimeout(() => setPhase("idle"), CPANEL_IN_MS)
+      return () => clearTimeout(t)
+    }
+    // Never mounted (first render with the panel closed) — nothing to play out.
+    if (!mountedRef.current) return
+    setPhase("out")
+    const t = setTimeout(() => {
+      setMounted(false)
+      setPhase("idle")
+    }, CPANEL_OUT_MS)
+    return () => clearTimeout(t)
+  }, [open])
+
+  return { mounted, phase }
+}
+
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
   const { content } = useContent()
+
+  const { mounted, phase } = useCpanelPhase(contentPanelTab != null)
+
+  // The tab to RENDER. During the exit animation `contentPanelTab` is already
+  // null, and reading it directly would blank the panel's body for the 200ms
+  // it spends sliding out — the last open tab keeps rendering instead. The ref
+  // is written from an effect (never during render), so by the time a close
+  // renders it already holds the tab the previous commit was showing.
+  const lastTabRef = useRef<(typeof TABS)[number]["id"]>("prd")
+  useEffect(() => {
+    if (contentPanelTab) lastTabRef.current = contentPanelTab
+  }, [contentPanelTab])
+  const shownTab = contentPanelTab ?? lastTabRef.current
 
   const evidenceHidden = isEvidenceTabHidden(content)
   const visibleTabs = evidenceHidden ? TABS.filter((t) => t.id !== "evidence") : TABS
@@ -233,7 +292,7 @@ export function ContentPanel() {
 
   // If the panel is parked on Evidence but that tab just became hidden (a
   // backlog/upload PRD loaded), render the PRD tab instead of a stranded body.
-  const activeTab = evidenceHidden && contentPanelTab === "evidence" ? "prd" : contentPanelTab
+  const activeTab = evidenceHidden && shownTab === "evidence" ? "prd" : shownTab
 
   // Persist that fallback into navigation state so re-opens land on a real tab.
   useEffect(() => {
@@ -245,8 +304,14 @@ export function ContentPanel() {
 
   // On open: restore saved width, apply it, and keep it clamped on window resize.
   // On close: remove the CSS var so it resets to default.
+  //
+  // Keyed on `mounted`, not on the tab: clearing --cpanel-width the moment the
+  // tab went null would snap a user-widened panel back to the 60vw default in
+  // the first frame of the exit slide. Now the var lives exactly as long as the
+  // panel element does. (It also stops the effect re-running on every tab
+  // switch, which pointlessly removed and re-applied the same width.)
   useEffect(() => {
-    if (!contentPanelTab) return
+    if (!mounted) return
     const root = document.documentElement
 
     const saved = Number(window.localStorage.getItem(CPANEL_WIDTH_KEY))
@@ -268,7 +333,7 @@ export function ContentPanel() {
       window.removeEventListener("resize", apply)
       root.style.removeProperty("--cpanel-width")
     }
-  }, [contentPanelTab])
+  }, [mounted])
 
   // Pointer-down on the left-edge handle starts a drag session.
   const handleResizeStart = useCallback((e: React.MouseEvent) => {
@@ -297,12 +362,20 @@ export function ContentPanel() {
     window.addEventListener("mouseup", onUp)
   }, [])
 
-  if (!contentPanelTab) return null
+  if (!mounted) return null
+
+  const closing = phase === "out"
 
   return (
     <>
       <div className="cpanel-overlay" onClick={closeContentPanel} />
-      <aside className="cpanel">
+      <aside
+        className={`cpanel${phase === "in" ? " cpanel--in" : ""}${closing ? " cpanel--out" : ""}`}
+        // On the way out the panel is a departing visual only — take it out of
+        // the a11y tree and the tab order so it can't be reached mid-slide.
+        inert={closing || undefined}
+        aria-hidden={closing || undefined}
+      >
         {/* Draggable left edge — grab to resize */}
         <div
           className="cpanel-resize-handle"
