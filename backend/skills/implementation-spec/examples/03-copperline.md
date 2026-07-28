@@ -29,7 +29,7 @@ Medium-high. A false "parts available" is worse than no check. Verification dept
 ## B6. Cross-cutting checklist
 - [ ] Auth: availability scoped to tenant · [ ] Privacy: no supplier pricing to technician role · [ ] Telemetry: B-R5 + latency · [ ] i18n: status labels externalized · [ ] Accessibility: flag not color-only · [ ] Error states: all failure paths render "unknown," never "available" · [ ] Performance: check < 2s p95 or degrades to async badge [ASSUMPTION → T0].
 
-## B7. Tasks (dependency-ordered; [P] = parallel-safe)
+## B7. Tasks (dependency-ordered; [P] = parallel-safe) & release plan
 - T0 — Research gate: verify all [ASSUMPTION → T0] items.
 - T1 — Availability adapter layer.
 - T2 [P] — Structured parts array (if T0 confirms gap).
@@ -38,6 +38,11 @@ Medium-high. A false "parts available" is worse than no check. Verification dept
 - T5 — Earliest-available-date suggestion (only if lead-time data confirmed).
 - T6 [P] — Telemetry (B-R5).
 - T7 — Failure/staleness handling (B-R3).
+
+**Release plan:**
+- Release 1 — walking skeleton: T0, T1, T3, T7 (check availability → schedule with confidence states).
+- Release 2 — visibility: T4, T6.
+- Release 3 — data-gated extras: T2, T5 (ships only if T0 confirms the data).
 
 ## B8. Acceptance tests & Definition of Done (merged)
 | Req | Given | When | Then (expected) |

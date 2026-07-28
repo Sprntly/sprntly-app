@@ -27,13 +27,17 @@ Medium. Worst failure: R4 data loss when a workspace upgrades to collaborative m
 ## B6. Cross-cutting checklist
 - [ ] Auth on workspace mode transitions · [ ] Privacy: solo content not exposed on upgrade beyond invited members · [ ] Telemetry: events above · [ ] i18n on templates · [ ] Accessibility: invite CTA reachable by keyboard in quiet slot · [ ] Error states: B-R5 · [ ] Performance: template apply < 1.5s p95 [ASSUMPTION → T0].
 
-## B7. Tasks (dependency-ordered; [P] = parallel-safe)
+## B7. Tasks (dependency-ordered; [P] = parallel-safe) & release plan
 - T0 — Research gate: verify signup events, workspace mode flag, template storage.
 - T1 — Solo detection + routing (B-R1).
 - T2 [P] — Goal picker + template application (B-R2).
 - T3 — Deferred invite placement (B-R3).
 - T4 — Solo→collaborative upgrade path (B-R4).
 - T5 [P] — Template-failure fallback (B-R5).
+
+**Release plan:**
+- Release 1 — walking skeleton: T0, T1, T2 (solo signup lands in a working solo space).
+- Release 2 — growth path: T3, T4, T5.
 
 ## B8. Acceptance tests & Definition of Done (merged)
 | Req | Given | When | Then (expected) |

@@ -78,10 +78,12 @@ _SKILL = "prd-author"
 # The machine-readable Implementation Spec (Part B) is generated on demand by the
 # dedicated `implementation-spec` skill, fed the FINISHED human PRD (Part A) — its
 # method (B0–B9: derivation header, EARS requirements traced to Part A IDs,
-# contracts, dependency-ordered tasks, acceptance tests + DoD, independent
-# verification) consumes the whole human PRD.
+# contracts, dependency-ordered tasks + release plan, acceptance tests + DoD,
+# independent verification) consumes the whole human PRD.
 _SKILL_B = "implementation-spec"
-PROMPT_VERSION_B = "prd-impl-spec-v2"
+# v3: B7 gained the release plan (Release 1 = walking skeleton, scope-only
+# labels) — user-stories inherits it verbatim as story-map release slices.
+PROMPT_VERSION_B = "prd-impl-spec-v3"
 _AGENT = "prd"
 # PRD_VARIANT ("v3", the HTML PRD page) is imported from app.prompts above and
 # re-exported here so routes/prd.py and multi_agent keep importing it from here.
@@ -186,8 +188,10 @@ without ambiguity, in the skill's B0–B9 structure: a B0 derivation header nami
 the source Part A (its title + author byline), B1 context, B2 stakes gate, B3 \
 EARS requirements each traced to a Part A requirement ID, B4 interface \
 contracts, B5 escalations, B6 cross-cutting checklist, B7 dependency-ordered \
-tasks (T0 = research gate), B8 acceptance tests + Definition of Done (merged), \
-and B9 independent verification.
+tasks (T0 = research gate) closed by the release plan (Release 1 = walking \
+skeleton; scope-only labels, never invented dates/audiences; 'Single release' \
+when slicing isn't warranted), B8 acceptance tests + Definition of Done \
+(merged), and B9 independent verification.
 
 The Part A PRD is an HTML document — read its content, ignore the markup/CSS. \
 Consume ONLY the supplied PRD and evidence. Every B3 requirement traces to a \

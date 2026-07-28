@@ -229,6 +229,22 @@ def test_prd_skill_part_b_template_is_derived_impl_spec(repo_root):
     assert "traces to a Part A" in md  # the hard derivation rule
 
 
+def test_prd_skill_part_b_template_carries_the_release_plan(repo_root):
+    """B7 closes with a release plan (Release 1 = walking skeleton) — the
+    rollout phases retired from the human PRD (prd-author v4.4) live HERE, in
+    the machine-readable half, where user-stories inherits them verbatim as
+    story-map release slices. The Part B generation prompt must steer to the
+    same contract."""
+    md = _skill_prd_template_part_b(repo_root)
+    assert "Release plan" in md
+    assert "Release 1 — walking skeleton" in md
+
+    from app.prd_runner import _SYSTEM_B
+
+    assert "release plan" in _SYSTEM_B
+    assert "walking" in _SYSTEM_B
+
+
 # NOTE: the evidence-runner end-to-end `:::block` persistence test was removed
 # when evidence moved to the HTML visual brief. The HTML evidence path's
 # end-to-end behavior (skill binding + HTML payload + variant v3) is now covered
