@@ -548,6 +548,85 @@ def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
     )
 
 
+# ── Ticket-update intent (rewrite an existing ticket FROM a PRD) ─────────────
+# "update the ticket details with the PRD", "rewrite PROJ-142 from the spec",
+# "sync the ticket description to the PRD". Checked BEFORE is_jira_lookup, which
+# claims these sentences today (a write verb on a PM noun) and hands them to a
+# skill with no way to read a PRD — the reported failure. Routes to
+# app/ticket_update.py, which serves both Sprntly tickets and Jira issues.
+_TICKET_UPDATE_VERB = re.compile(
+    r"\b(updat(?:e|ing)|rewrit(?:e|ing)|revis(?:e|ing)|refresh(?:ing)?|"
+    r"sync(?:ing)?|synchroni[sz](?:e|ing)|align(?:ing)?|populat(?:e|ing)|"
+    r"fill\s+in|flesh(?:ing)?\s+out|expand(?:ing)?)\b",
+    re.I,
+)
+# The SOURCE document the ticket is rewritten from.
+_TICKET_UPDATE_SOURCE = re.compile(
+    r"\b(prd|product\s+requirements?(?:\s+doc\w*)?|spec(?:ification)?s?|"
+    r"product\s+brief|requirements?\s+doc\w*)\b",
+    re.I,
+)
+# The link between the two — "update the ticket WITH the PRD". Requiring one
+# keeps "update the ticket and the PRD" (two objects, not a rewrite) out.
+_TICKET_UPDATE_LINK = re.compile(
+    r"\b(with|from|using|based\s+on|per|against|to\s+match|to\s+reflect|"
+    r"to\s+align\s+with|in\s+line\s+with)\b",
+    re.I,
+)
+# Creation phrasings belong to the user-stories skill ("create tickets from the
+# PRD" makes new tickets; it does not rewrite one that exists). Deliberately
+# WITHOUT `sync` — which _vetoed_as_creation treats as creation because there it
+# means the push flow, while "sync the ticket with the PRD" is exactly this path.
+_TICKET_UPDATE_CREATE_VETO = re.compile(
+    r"\b(create|generate|draft|make|build|author|produce|compose|push|delete)\b",
+    re.I,
+)
+
+
+def is_ticket_update(question: str, history: list[dict] | None = None) -> bool:
+    """True when the message asks to rewrite an EXISTING ticket from a PRD.
+
+    Direction is what this test is really about, and it is the one thing a bag
+    of keywords gets wrong. "update the ticket with the PRD" and "update the PRD
+    with the ticket" carry the same words and mean opposite things — one
+    rewrites a ticket, the other edits a document. So the ticket must appear
+    BEFORE the source document: whichever noun the verb reaches first is the
+    thing being changed.
+
+    A follow-up inside a tracker thread may name no ticket at all ("update it
+    with the PRD") — there the thread supplies the target, so anaphora plus an
+    active tracker thread stands in for naming it.
+    """
+    q = question or ""
+    if not (
+        _TICKET_UPDATE_VERB.search(q)
+        and _TICKET_UPDATE_LINK.search(q)
+    ):
+        return False
+    m_source = _TICKET_UPDATE_SOURCE.search(q)
+    if m_source is None:
+        return False
+
+    m_key = _JIRA_ISSUE_KEY.search(q)
+    m_noun = _JIRA_PM_NOUN.search(q)
+    starts = [m.start() for m in (m_key, m_noun) if m is not None]
+    if not starts:
+        # No ticket named here. Only a live tracker thread can supply one.
+        return bool(history) and _in_tracker_thread(history) and bool(
+            _TRACKER_ANAPHORA.search(q)
+        )
+    target_at = min(starts)
+    # The document comes first → the DOCUMENT is what's being changed. Not ours.
+    if target_at > m_source.start():
+        return False
+    m_veto = _TICKET_UPDATE_CREATE_VETO.search(q)
+    # A creation verb governing the ticket ("create tickets from the PRD"), as
+    # opposed to one sitting inside what's being described.
+    if m_veto is not None and m_veto.start() < target_at:
+        return False
+    return True
+
+
 def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:
     """True when the message only means something as a continuation of the
     thread — its subject lives in an earlier turn, not in its own words ("can you
