@@ -115,7 +115,9 @@ PRD_VARIANT = "v3"
 #  1 — initial cache (the 4 home/ondemand starter prompts)
 #  3 — ASK_SYSTEM gained the out-of-scope refusal clause (canned message for
 #      questions outside product/PM/engineering/design)
-ASK_CACHE_VERSION = 3
+#  4 — Draft-a-PRD chip aligned to prd-author v4.7 (no more "rollout plan" —
+#      Rollout is retired from the house PRD format)
+ASK_CACHE_VERSION = 4
 
 
 # The deterministic prompts wired into the home + ondemand starter cards in
@@ -128,7 +130,7 @@ PREDEFINED_ASK_PROMPTS: tuple[str, ...] = (
     "What are the biggest cost drivers",
     # Ask Sprntly landing chips
     "Generate a Q3 strategy from our product memory — priorities, bets, measurable goals, and the main risks to watch.",
-    "Draft a PRD for team folder permissions: problem, users, requirements, rollout plan, metrics, and open questions for eng and design.",
+    "Draft a PRD for team folder permissions: problem, users, requirements, risks, and the input needed from eng and design.",
     "Compare retention across our top three customer segments — what differs, what might explain it, and what we should validate next.",
     "Given what we know in product memory, what should we ship next? Stack-rank a few options with impact, cost, and dependencies.",
 )

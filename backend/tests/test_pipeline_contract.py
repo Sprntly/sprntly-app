@@ -186,6 +186,21 @@ def test_prd_skill_part_a_template_has_no_retired_sections(repo_root):
         assert retired not in html, f"retired section {retired!r} back in template"
 
 
+def test_starter_chips_do_not_ask_for_retired_prd_sections():
+    """The Ask starter chips are canned user prompts (mirrored in
+    web/app/types/content.ts). A chip that asks for a "rollout plan" or
+    "non-goals" steers generation back toward sections v4.4 retired from the
+    house PRD format — keep the canned copy aligned with the live skill."""
+    from app.prompts import PREDEFINED_ASK_PROMPTS
+
+    for prompt in PREDEFINED_ASK_PROMPTS:
+        low = prompt.lower()
+        for retired in ("rollout", "non-goal", "done-when", "done when"):
+            assert retired not in low, (
+                f"starter chip asks for retired PRD section {retired!r}: {prompt}"
+            )
+
+
 def test_prd_skill_part_a_template_style_block_is_empty(repo_root):
     """The v4.7 output contract: the template ships an EMPTY `<style>` (comment
     only, zero CSS rules) and the canonical stylesheet lives in assets/prd.css,
