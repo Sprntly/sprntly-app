@@ -1214,8 +1214,50 @@
     gap: 0;
     height: 44px;
     flex-shrink: 0;
+    /* MUST stay. The strip is a grid item of .od-layout, whose single auto
+       column is floored by its items' min-content width — and a strip full of
+       nowrap tabs measures far wider than the column. Without this the track
+       inflates to the tabs' natural width, so the whole chat (thread, decision
+       cards, composer) is laid out wider than .main-column and clipped at its
+       edge — reading as "the artifact panel is covering the chat" the moment
+       the panel's padding-right narrows the column. .od-center carries the same
+       min-width: 0 for the same reason. The strip's own tab list scrolls
+       (overflow-x on the inner div), so nothing is lost by letting it shrink —
+       BEFORE this wrapper existed, that scrolling list WAS the grid item and
+       its scroll container gave it a 0 automatic minimum size for free. */
+    min-width: 0;
     border-bottom: 1px solid var(--line);
     background: var(--surface-2, #f7f5f0);
+  }
+
+  /* The strip's scrolling half. Now that the strip shrinks with the column
+     (min-width: 0 above), a few open tabs genuinely overflow it whenever the
+     artifact panel is open — and a native horizontal scrollbar inside a 44px
+     strip eats a third of the tab height. Same slim treatment as .bc-scroll,
+     laid over the bottom edge rather than reserving a row of its own. */
+  .chat-tab-list {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(18, 32, 26, 0.16) transparent;
+  }
+
+  .chat-tab-list::-webkit-scrollbar {
+    height: 6px;
+  }
+
+  .chat-tab-list::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .chat-tab-list::-webkit-scrollbar-thumb {
+    background: rgba(18, 32, 26, 0.16);
+    border-radius: 8px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .chat-tab-list::-webkit-scrollbar-thumb:hover {
+    background: rgba(18, 32, 26, 0.28);
+    background-clip: padding-box;
   }
 
   /* The way back to a closed artifact panel. An accent disc, because it's the

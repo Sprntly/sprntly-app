@@ -4059,7 +4059,7 @@ export function ChatScreen() {
               which must not — so the strip's chrome (border, background,
               height) sits on this wrapper and only the list scrolls. */}
           <div className="chat-tab-strip">
-            <div data-testid="chat-tab-bar" style={{
+            <div className="chat-tab-list" data-testid="chat-tab-bar" style={{
               display: "flex", alignItems: "stretch", gap: 0,
               flex: "1 1 auto", minWidth: 0,
               paddingLeft: 8, overflowX: "auto", overflowY: "visible",
