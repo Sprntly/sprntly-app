@@ -142,6 +142,80 @@ def test_generate_requires_exactly_one_source(isolated_settings):
         generate_user_stories("ent-A", prd_id=1, insight="x")
 
 
+# ── Story-map placement: synthesized rollout phases ──────────────────────────
+# prd-author v4.4 retired the Rollout section from the PRD, so the ticket skill
+# synthesizes release phases itself (Part B's release plan wins when present).
+# These guard the plumbing that carries the placement onto every ticket.
+
+def test_ticket_schemas_carry_story_map_placement():
+    """Both generation contracts (single + fanout plan) emit `activity` and
+    `release`, so the synthesized phases ride every ticket into the cache."""
+    from app.stories.generate import _PLAN_SCHEMA, _SCHEMA
+
+    story_props = _SCHEMA["properties"]["stories"]["items"]["properties"]
+    stub_props = _PLAN_SCHEMA["properties"]["stubs"]["items"]["properties"]
+    for props in (story_props, stub_props):
+        assert "activity" in props
+        assert "release" in props
+
+
+def test_generation_prompts_synthesize_phases_not_read_prd_rollout():
+    """The PRD carries no rollout section — both prompts must tell the model to
+    synthesize phases (walking skeleton = Release 1), never to look for §8."""
+    from app.stories.generate import _PLAN_SYSTEM, _SYSTEM
+
+    for prompt in (_SYSTEM, _PLAN_SYSTEM):
+        assert "SYNTHESIZE" in prompt
+        assert "walking skeleton" in prompt
+        assert "no rollout section" in prompt
+
+
+def test_stamp_placement_plan_is_authoritative():
+    """Fanout: the plan leg (only call that sees the whole set) owns placement.
+    Enrich-emitted values are overwritten by the stub's, matched by title
+    case-insensitively; a story with no matching stub keeps its own values."""
+    from app.stories.generate import _stamp_placement_from_stubs
+
+    stories = [
+        Story(title="Build export", activity="drift", release="Release 9 — drift"),
+        Story(title="Renamed by model", activity="kept", release="Release 2 — kept"),
+    ]
+    stubs = [
+        {"title": "  build EXPORT ", "activity": "Export data",
+         "release": "Release 1 — walking skeleton"},
+        {"title": "Original stub title"},
+    ]
+    out = _stamp_placement_from_stubs(stories, stubs)
+    assert out[0].activity == "Export data"
+    assert out[0].release == "Release 1 — walking skeleton"
+    assert out[1].activity == "kept" and out[1].release == "Release 2 — kept"
+
+
+def test_stamp_placement_flat_set_clears_enrich_hallucination():
+    """Tickets-only sizing: the stub carries no placement, so a slice label the
+    enrich model invented anyway is cleared back to empty."""
+    from app.stories.generate import _stamp_placement_from_stubs
+
+    stories = [Story(title="A", activity="Ghost", release="Release 2 — ghost")]
+    out = _stamp_placement_from_stubs(stories, [{"title": "A"}])
+    assert out[0].activity == "" and out[0].release == ""
+
+
+def test_story_placement_survives_the_persistence_roundtrip():
+    s = Story(title="T", activity="Act", release="Release 1 — walking skeleton")
+    back = Story.from_dict(s.to_dict())
+    assert back.activity == "Act"
+    assert back.release == "Release 1 — walking skeleton"
+
+
+def test_skill_method_synthesizes_rollout_phases():
+    """The vendored skill doc must carry the synthesis rule and no stale
+    reference to reading rollout phases from Part A §8 (retired in v4.4)."""
+    method = get_skill("user-stories").method
+    assert "SYNTHESIZED" in method
+    assert "§8" not in method
+
+
 def test_generate_passes_prd_part_b_to_model(isolated_settings, monkeypatch):
     """A PRD with Part B (llm_part) is fed into the model input (spec-aware)."""
     import app.stories.generate as gen
