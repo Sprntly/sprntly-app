@@ -4035,6 +4035,89 @@ export function ChatScreen() {
     activeTab?.prdGenerating, activeTab?.prdLoading, handleOpenPrd, handleOpenEvidence,
   ])
 
+  // ── Tab strip overflow ──────────────────────────────────────────────────────
+  // The strip has no scrollbar (a 6px rail inside a 44px strip sat right on the
+  // seam where the active tab merges into the content below, and read as grime
+  // rather than as chrome). What replaces it: a fade at whichever edge still
+  // has tabs past it, plain wheel scrolling, and keeping the active tab in
+  // view. Together those make the overflow legible without drawing a rail.
+  const tabListRef = useRef<HTMLDivElement | null>(null)
+  const tabScrollerRef = useRef<HTMLDivElement | null>(null)
+
+  // Which edges are overflowing → `data-ov="start end"` on the wrapper, which
+  // is what fades the pseudo-elements in. Recomputed on scroll, on resize (the
+  // artifact panel opening narrows the strip), and whenever the tab set changes.
+  const syncTabOverflow = useCallback(() => {
+    const list = tabListRef.current
+    const scroller = tabScrollerRef.current
+    if (!list || !scroller) return
+    // 1px of slack: fractional scroll positions otherwise leave a fade stuck on
+    // at a hard end.
+    const atStart = list.scrollLeft <= 1
+    const atEnd = list.scrollLeft + list.clientWidth >= list.scrollWidth - 1
+    const edges = [atStart ? null : "start", atEnd ? null : "end"].filter(Boolean).join(" ")
+    scroller.setAttribute("data-ov", edges)
+  }, [])
+
+  useEffect(() => {
+    const list = tabListRef.current
+    if (!list) return
+    syncTabOverflow()
+
+    // A vertical wheel/trackpad gesture over the strip scrolls it SIDEWAYS —
+    // there is nothing to scroll vertically in a 44px strip, so without this
+    // the event bubbles and scrolls the thread underneath instead, leaving an
+    // overflowed tab unreachable by plain mouse wheel.
+    //
+    // Wired natively rather than via React's onWheel: React registers wheel
+    // listeners at the root as PASSIVE, so preventDefault() there is ignored
+    // (and warns) and the thread would still scroll.
+    const onWheel = (e: WheelEvent) => {
+      if (list.scrollWidth <= list.clientWidth) return
+      // A genuine horizontal gesture (trackpad swipe, shift+wheel) already
+      // works natively — only redirect the vertical-dominant ones.
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return
+      e.preventDefault()
+      // Direct assignment, not scrollBy: `scroll-behavior: smooth` would queue
+      // an animation per wheel tick and the strip would lag the gesture.
+      list.scrollLeft += e.deltaY
+    }
+
+    list.addEventListener("scroll", syncTabOverflow, { passive: true })
+    list.addEventListener("wheel", onWheel, { passive: false })
+    window.addEventListener("resize", syncTabOverflow)
+    // The strip also resizes without a window resize — the artifact panel
+    // opening/closing re-lays the column out underneath it.
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(syncTabOverflow) : null
+    ro?.observe(list)
+    return () => {
+      list.removeEventListener("scroll", syncTabOverflow)
+      list.removeEventListener("wheel", onWheel)
+      window.removeEventListener("resize", syncTabOverflow)
+      ro?.disconnect()
+    }
+  }, [syncTabOverflow])
+
+  // Tab opened/closed/renamed → the overflow edges moved.
+  useEffect(() => { syncTabOverflow() }, [tabs, syncTabOverflow])
+
+  // Selecting a tab that's scrolled out of view (a command opening a new one,
+  // or the palette jumping to an old one) should bring it back, not leave the
+  // user hunting for a highlight they can't see. `scroll-behavior: smooth` on
+  // the list makes this a glide; `nearest` keeps an already-visible tab still.
+  useEffect(() => {
+    const list = tabListRef.current
+    if (!list) return
+    // rAF: on a just-opened tab the node lands in the same commit, so measuring
+    // before paint would scroll to a stale position.
+    const raf = requestAnimationFrame(() => {
+      const active = list.querySelector<HTMLElement>("[data-tab-active='true']")
+      active?.scrollIntoView({ block: "nearest", inline: "nearest" })
+      syncTabOverflow()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [activeTabId, syncTabOverflow])
+
   return (
     <AppLayout
       mainClassName="main--home-chat"
@@ -4059,15 +4142,26 @@ export function ChatScreen() {
               which must not — so the strip's chrome (border, background,
               height) sits on this wrapper and only the list scrolls. */}
           <div className="chat-tab-strip">
-            <div className="chat-tab-list" data-testid="chat-tab-bar" style={{
-              display: "flex", alignItems: "stretch", gap: 0,
-              flex: "1 1 auto", minWidth: 0,
-              paddingLeft: 8, overflowX: "auto", overflowY: "visible",
-            }}>
+            {/* The list scrolls; the wrapper carries the edge fades that say so
+                (the strip has no scrollbar — see .chat-tab-list in globals.css).
+                The fades must sit on a NON-scrolling box or they'd scroll away
+                with the tabs, hence the wrapper. */}
+            <div className="chat-tab-scroller" ref={tabScrollerRef}>
+            <div
+              className="chat-tab-list"
+              data-testid="chat-tab-bar"
+              ref={tabListRef}
+              style={{
+                display: "flex", alignItems: "stretch", gap: 0,
+                flex: "1 1 auto", minWidth: 0,
+                paddingLeft: 8, overflowX: "auto", overflowY: "visible",
+              }}
+            >
               {/* Pinned brief tab — always first, never closable (synthesized, not
                   in `tabs`/localStorage). Selecting it renders <BriefChat/> below. */}
               <div
                 key={BRIEF_TAB_ID}
+                data-tab-active={isBriefTab ? "true" : undefined}
                 onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
@@ -4091,6 +4185,7 @@ export function ChatScreen() {
                 return (
                   <div
                     key={tab.id}
+                    data-tab-active={isActive ? "true" : undefined}
                     onClick={() => { setActiveTabId(tab.id); setDraft("") }}
                     style={{
                       display: "flex", alignItems: "center", gap: 6,
@@ -4144,6 +4239,7 @@ export function ChatScreen() {
                   transition: "background 0.12s",
                 }}
               >+</button>
+            </div>
             </div>
             {/* The way back to a closed artifact panel. Pinned to the strip's
                 right end — outside the scrolling list — so no number of open

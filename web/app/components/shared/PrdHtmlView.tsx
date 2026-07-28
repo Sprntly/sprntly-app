@@ -29,7 +29,20 @@ const PANEL_OVERRIDE_CSS = `
   body { padding: 0 0 80px !important; }
   .frame { max-width: 990px !important; }
   .page { padding: 25px 25px !important; border-radius: 0 !important; }
+  /* The iframe is sized to its content and the PANEL scrolls it, so this
+     document must never grow a scrollbar of its own — one lagging measurement
+     (a font swapping in, an image landing) was enough to put a second bar
+     right beside the panel's. The ResizeObserver below keeps the height
+     honest; this makes sure a transient mismatch is invisible rather than a
+     stray rail. */
+  html, body { scrollbar-width: none !important; }
+  html::-webkit-scrollbar, body::-webkit-scrollbar { width: 0 !important; height: 0 !important; display: none !important; }
 `
+
+// Ceiling on how many times one load (or one edit) may re-size the frame to
+// its content — see `resizeBudget`. Generous for real reflow, finite against a
+// document that feeds its own height back.
+const RESIZE_BUDGET = 24
 
 const HTML_DRAFT_KEY = (prdId: number) => `sprntly_prd_html_draft_${prdId}`
 function loadHtmlDraft(prdId: number): string | null {
@@ -70,6 +83,9 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
   const frameRef = useRef<HTMLIFrameElement>(null)
   const [height, setHeight] = useState(720)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Watches the iframe document so the frame keeps matching its content (see
+  // onLoad). Held in a ref so a re-load replaces it and unmount disconnects it.
+  const observerRef = useRef<ResizeObserver | null>(null)
   const titleRef = useRef(title)
   titleRef.current = title
 
@@ -116,11 +132,26 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
 
   useImperativeHandle(ref, () => ({ save: persist }), [persist])
 
+  // How many more observer-driven height changes to accept. Normally a reflow
+  // converges in one or two (scrollHeight is max(content, viewport), so once
+  // the frame matches the content the next measurement is identical and React
+  // bails out). A document whose own CSS is viewport-relative — `min-height:
+  // 100vh` on a page wrapper, say — would instead grow by our injected padding
+  // on every pass, so the budget stops that at a bounded number of frames
+  // instead of running away. Refilled on load and on a user edit.
+  const resizeBudget = useRef(RESIZE_BUDGET)
+
   const resize = useCallback(() => {
     const cdoc = frameRef.current?.contentDocument
     if (!cdoc?.body) return
     const h = Math.max(cdoc.body.scrollHeight, cdoc.documentElement?.scrollHeight ?? 0)
-    if (h > 0) setHeight(h)
+    if (h <= 0) return
+    setHeight((prev) => {
+      if (Math.abs(h - prev) <= 1) return prev
+      if (resizeBudget.current <= 0) return prev
+      resizeBudget.current -= 1
+      return h
+    })
   }, [])
 
   // On load, wire an input listener on the (same-origin) iframe document so
@@ -146,9 +177,29 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
         /* non-fatal: fall back to rendering the full evidence list */
       }
     }
+    resizeBudget.current = RESIZE_BUDGET
     resize()
+    // Keep tracking the document's height after load. A single measurement on
+    // load is taken before web fonts swap in and before any image resolves, so
+    // it under-reports and the document overflows the iframe — which is what
+    // put a scrollbar INSIDE the frame next to the panel's own. Re-measuring on
+    // every reflow converges instead: scrollHeight is max(content, viewport),
+    // so once the iframe matches the content the observer settles.
+    observerRef.current?.disconnect()
+    if (typeof ResizeObserver !== "undefined" && cdoc.body) {
+      const ro = new ResizeObserver(() => resize())
+      ro.observe(cdoc.body)
+      if (cdoc.documentElement) ro.observe(cdoc.documentElement)
+      observerRef.current = ro
+    }
+    // Fonts land after load and shift line counts; ResizeObserver catches most
+    // of it, but this covers engines that don't reflow the observed box.
+    cdoc.fonts?.ready.then(() => resize()).catch(() => { /* best effort */ })
     const onInput = () => {
       onStatus?.("unsaved")
+      // Typing genuinely changes the document's height — refill the budget so a
+      // long editing session keeps tracking it.
+      resizeBudget.current = RESIZE_BUDGET
       resize()
       if (saveTimer.current) clearTimeout(saveTimer.current)
       saveTimer.current = setTimeout(persist, 2000)
@@ -156,7 +207,10 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
     cdoc.addEventListener("input", onInput)
   }, [resize, persist, onStatus, onViewMoreEvidence])
 
-  useEffect(() => () => { if (saveTimer.current) clearTimeout(saveTimer.current) }, [])
+  useEffect(() => () => {
+    if (saveTimer.current) clearTimeout(saveTimer.current)
+    observerRef.current?.disconnect()
+  }, [])
 
   if (!docReady) return null
 
