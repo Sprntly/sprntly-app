@@ -109,11 +109,11 @@ beforeEach(() => {
 afterEach(() => cleanup())
 
 describe("IdeationScreen — wired actions", () => {
-  it("Generate a brief opens the PRD as a new chat tab (openPrdTab handoff)", async () => {
+  it("Generate PRD opens the PRD as a new chat tab (openPrdTab handoff)", async () => {
     await renderWith([item({ id: "a", theme_id: "t4", title: "Bulk onboarding", rank: 4 })])
     await selectFirstIdea("Bulk onboarding")
 
-    await act(async () => { fireEvent.click(screen.getByText("Generate a brief")) })
+    await act(async () => { fireEvent.click(screen.getByText("Generate PRD")) })
 
     // An ideation PRD opens as a NEW chat tab (with the Evidence/PRD/Tickets
     // panel over it) — IdeationScreen hands the generation off via openPrdTab,

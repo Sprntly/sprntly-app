@@ -193,7 +193,7 @@ describe("IdeationScreen — Proposed tab", () => {
     expect(screen.getByText(/Not prioritized in the Top Insights brief/)).toBeTruthy()
 
     // CTA into the chat → PRD → tickets → prototype funnel.
-    expect(screen.getByText("Generate a brief")).toBeTruthy()
+    expect(screen.getByText("Generate PRD")).toBeTruthy()
   })
 
   it("shows the weekly-prioritization indicator, not the old framework dropdown", async () => {
