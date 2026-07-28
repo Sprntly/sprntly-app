@@ -31,7 +31,7 @@ from app.llm import (
     call_md,
 )
 from app.llm_telemetry import MODEL_PRICING
-from app.skills.loader import get_skill
+from app.skills.loader import SkillSpec, get_skill
 
 logger = logging.getLogger(__name__)
 
@@ -50,13 +50,22 @@ def _is_long_output(skill: Optional[str]) -> bool:
     return skill is not None and skill in _LONG_OUTPUT_SKILLS
 
 
-def _build_method_prefix(skill: str, skill_module: Optional[str]) -> tuple[str, str]:
+def _build_method_prefix(
+    skill: str, skill_module: Optional[str], spec: Optional["SkillSpec"] = None
+) -> tuple[str, str]:
     """Resolve a bound skill into (method_text_block, version_suffix).
 
     The method block is the skill's SKILL.md (plus the named module, if any)
     under a delimited header so the model reads it as the METHOD layer. The
     version suffix (`+<id>@<hash>`) is appended to prompt_version so the
     decision log records the exact method version behind the call.
+
+    `spec` lets a caller inject a spec that is NOT a vendored disk skill — a
+    company's uploaded custom skill (PRD 1854), resolved from the DB by
+    qa_agent via app.skills.resolver. When None (every built-in call site),
+    the id loads from disk exactly as before; the injected block and version
+    suffix are built identically either way, so custom and built-in skills
+    are indistinguishable downstream of this line.
 
     The skill's `references/*` docs are appended to the block under
     `### REFERENCE: <name>` headers. SKILL.md instructs the model to *read*
@@ -69,7 +78,7 @@ def _build_method_prefix(skill: str, skill_module: Optional[str]) -> tuple[str, 
     are deliberately NOT injected: the app renders from the structured payload,
     so the template is a downstream view, not a prompt input.
     """
-    spec = get_skill(skill)
+    spec = spec if spec is not None else get_skill(skill)
     header = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n"
     block = header + spec.method
     if skill_module:
@@ -130,6 +139,7 @@ def llm_call(
     user_cacheable_prefix: Optional[str] = None,
     skill: Optional[str] = None,
     skill_module: Optional[str] = None,
+    skill_spec: Optional["SkillSpec"] = None,
     long_output: bool = False,
     log: bool = True,
     background: bool = False,
@@ -151,7 +161,11 @@ def llm_call(
     chosen_model = model or DEFAULT_MODEL
     method_block = ""
     if skill is not None:
-        method_block, version_suffix = _build_method_prefix(skill, skill_module)
+        # `skill_spec` carries a DB-backed custom skill (PRD 1854); None means
+        # a vendored built-in, loaded from disk by id as always.
+        method_block, version_suffix = _build_method_prefix(
+            skill, skill_module, spec=skill_spec
+        )
         prompt_version = f"{prompt_version}{version_suffix}"
         # The bound skill's method is a large, byte-stable block — route it into
         # the cacheable prefix (BEFORE any caller-supplied prefix) so it is a
