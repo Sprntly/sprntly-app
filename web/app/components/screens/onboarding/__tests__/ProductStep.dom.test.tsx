@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 02 — "Your product" (v6 screenshot
+// Container mount test for onboarding step 05 — "Your product" (v6 screenshot
 // spec 2026-07-17). Covers: the product name/URL fields, the 4 surface chips
 // (Web / Mobile app / API / Hardware), the SINGLE monetization select and the
 // users textarea render; name + surfaces are required for EVERYONE (error, no
@@ -133,7 +133,7 @@ describe("parseCompetitors — comma-separated competitors field", () => {
   })
 })
 
-describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization + users)", () => {
+describe("ProductStep (onboarding step 05 — name* + surfaces* + monetization + users)", () => {
   it("renders name/URL, the 4 surface chips, the single monetization select and the users textarea", () => {
     const { container } = mount()
     expect(nameInput()).not.toBeNull()
@@ -187,7 +187,7 @@ describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization +
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("a valid Continue persists the product + competitors and routes to metrics", async () => {
+  it("a valid Continue persists the product + competitors and routes to workspace", async () => {
     upsertProductMock.mockResolvedValue(
       makeProduct({
         website: "https://acme.com",
@@ -217,7 +217,7 @@ describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization +
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/workspace")
     })
     // The single monetization pick is stored as a 1-element array.
     expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
@@ -230,7 +230,7 @@ describe("ProductStep (onboarding step 02 — name* + surfaces* + monetization +
     // Competitors are parsed/deduped onto the company row with the step bump.
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       competitors: ["Fitbit", "Oura"],
-      onboarding_step: 7,
+      onboarding_step: 6,
     })
     expect(advanceStepMock).not.toHaveBeenCalled()
   })

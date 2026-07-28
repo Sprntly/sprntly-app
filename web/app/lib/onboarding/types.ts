@@ -305,12 +305,12 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  *                                         the token-heavy knowledge-graph build
  *                                         runs on it, or later in Settings →
  *                                         Admin)
- *   5. workspace   → WorkspaceStep       (workspace name* + what it works on* +
- *                                         team strategy/roadmap; sizing +
- *                                         anything else behind "Add more")
- *   6. product     → ProductStep         (name* + website + surfaces* +
+ *   5. product     → ProductStep         (name* + website + surfaces* +
  *                                         monetization + users; competitors
  *                                         behind a disclosure)
+ *   6. workspace   → WorkspaceStep       (workspace name* + what it works on* +
+ *                                         team strategy/roadmap; sizing +
+ *                                         anything else behind "Add more")
  *   7. metrics     → MetricsStep         (pick up to 5 success metrics* +
  *                                         prioritization framework*)
  *   8. invite      → InviteStep          (teammates: email + job role +
@@ -360,8 +360,7 @@ export const ONBOARDING_STEP_SLUGS = [
   // user hasn't typed.
   "import-context",
   // Reordered from the v7 spec (client feedback, 2026-07-22). `connectors` and
-  // `api-key` are pulled up to sit right behind the import + company pair, and
-  // `product` moved to the far side of `workspace`.
+  // `api-key` are pulled up to sit right behind the import + company pair.
   //
   // The reason is the import: it kicks a background LLM extraction over the
   // uploaded file, and connectors + api-key are the two steps in the flow that
@@ -371,8 +370,13 @@ export const ONBOARDING_STEP_SLUGS = [
   // opens with the extracted fields already in place.
   "connectors",
   "api-key",
-  "workspace",
+  // `product` before `workspace` (2026-07-28). A workspace is defined as the
+  // slice of the product a team owns (see WorkspaceStep), so asking what the
+  // product IS before asking which part of it this team runs is the order the
+  // two steps actually read in — the reverse asked people to scope a thing they
+  // hadn't named yet. They swapped positions wholesale; neither screen changed.
   "product",
+  "workspace",
   "metrics",
   "invite",
   "review",

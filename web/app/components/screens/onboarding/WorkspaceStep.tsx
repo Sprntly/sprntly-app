@@ -13,6 +13,10 @@ import {
   updateWorkspace,
 } from "../../../lib/onboarding/store"
 import { applyImportedContext } from "../../../lib/onboarding/applyImportedContext"
+import {
+  hasUploadedContextFile,
+  markContextFileUploaded,
+} from "../../../lib/onboarding/contextUploadMarker"
 import { stepForSlug } from "../../../lib/onboarding/types"
 import type { WorkspaceCompany } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
@@ -42,8 +46,8 @@ const EMPTY_BLOCK: BlockState = {
 }
 
 /**
- * Onboarding step 05 — "Your workspace" (2026-07-21 screenshot spec,
- * reordered 2026-07-22).
+ * Onboarding step 06 — "Your workspace" (2026-07-21 screenshot spec,
+ * reordered 2026-07-22; swapped behind `product` 2026-07-28).
  *
  * Collapses the three former steps (team 06, strategy 07, decisions 08) into
  * one card, since they all describe the same thing: the slice of the product
@@ -74,7 +78,8 @@ const EMPTY_BLOCK: BlockState = {
  */
 export function WorkspaceStep() {
   const auth = useAuth()
-  const { workspace, setWorkspace, loading, startContextImport } = useOnboarding()
+  const { workspace, setWorkspace, loading, contextImport, startContextImport } =
+    useOnboarding()
   const router = useRouter()
 
   const draft = loadDraft(DRAFT_KEY)
@@ -99,6 +104,23 @@ export function WorkspaceStep() {
   // True once the textarea holds whatever companies.team_roadmap had, so the
   // save can retire that column instead of leaving the same prose in both.
   const roadmapAbsorbed = useRef(false)
+
+  // Whether to offer the .md upload here at all. Someone who already handed the
+  // file over on step 2 has answered this question, and asking a second time
+  // reads as the flow having forgotten — so the banner is only for the people
+  // who skipped that step (or whose upload never landed).
+  //
+  // Decided ONCE, on the first render the workspace is known, and deliberately
+  // never re-read: an upload made HERE sets the same marker, and re-evaluating
+  // would tear the banner — and the notice explaining what it just did — off
+  // the screen mid-step. The in-memory `contextImport` state is the second
+  // signal, covering a session where localStorage isn't writable and the marker
+  // never persisted.
+  const offerMdUpload = useRef<boolean | null>(null)
+  if (workspace && offerMdUpload.current === null) {
+    offerMdUpload.current =
+      !hasUploadedContextFile(workspace.id) && contextImport === "idle"
+  }
 
   // Seed from the saved workspace, filling only fields still empty — so the
   // context import that lands ~30-60s after upload pops its values in when it
@@ -237,11 +259,11 @@ export function WorkspaceStep() {
       // Company-owned, and it re-reads the workspaces row — so `updated` comes
       // back carrying what was just written above.
       const updated = await updateWorkspace(workspace.id, {
-        onboarding_step: stepForSlug("product") ?? 6,
+        onboarding_step: stepForSlug("metrics") ?? 7,
       })
       setWorkspace({ ...updated, product: workspace.product })
       clearDraft(DRAFT_KEY)
-      router.push("/onboarding/product")
+      router.push("/onboarding/metrics")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your workspace.")
       setSaving(false)
@@ -252,7 +274,7 @@ export function WorkspaceStep() {
 
   return (
     <OnboardingChrome
-      step={5}
+      step={6}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -261,7 +283,7 @@ export function WorkspaceStep() {
       }
       subtitle="A workspace is where you and your team collaborate — generate PRDs, prototypes and evidence, and get insights delivered to you."
       footerMeta="Team"
-      onBack={() => router.push("/onboarding/api-key")}
+      onBack={() => router.push("/onboarding/product")}
       onContinue={() => void save()}
       continueLabel="Next"
       continueDisabled={saving}
@@ -385,27 +407,30 @@ export function WorkspaceStep() {
           </div>
         </OptionalDisclosure>
 
-        {/* Second chance at the step-2 import, placed here because this step
-            asks for the most typing in the whole flow — an .md export can fill
-            the scope and strategy blocks above instead of the user writing
-            them out. Behaves EXACTLY like the dedicated import step: it applies
-            every extractable field across the flow (via applyImportedContext)
-            AND kicks the background LLM pass so a file that doesn't match our
-            heading contract still extracts. The fields land as editable values,
-            never a silent commit. */}
-        <LlmContextUploadBanner
-          workspace={workspace}
-          startContextImport={startContextImport}
-          applyImportFields={async (fields) => {
-            if (!workspace) return
-            // Prefill every step the same way the dedicated import step does.
-            // Everything this step owns — name, scope, strategy (from the
-            // company strategy), sizing, the catch-all notes — is written by
-            // applyImportedContext now, and the fill-only seed effect above
-            // pulls it into these inputs when the workspace updates.
-            setWorkspace(await applyImportedContext(workspace, fields))
-          }}
-        />
+        {/* Second chance at the step-2 import, for the people who didn't take
+            the first one — placed here because this step asks for the most
+            typing in the whole flow, so an .md export can fill the scope and
+            strategy blocks above instead of the user writing them out. Behaves
+            EXACTLY like the dedicated import step: it applies every extractable
+            field across the flow (via applyImportedContext) AND kicks the
+            background LLM pass so a file that doesn't match our heading
+            contract still extracts. The fields land as editable values, never a
+            silent commit. */}
+        {offerMdUpload.current && (
+          <LlmContextUploadBanner
+            workspace={workspace}
+            startContextImport={startContextImport}
+            applyImportFields={async (fields) => {
+              if (!workspace) return
+              // Prefill every step the same way the dedicated import step does.
+              // Everything this step owns — name, scope, strategy (from the
+              // company strategy), sizing, the catch-all notes — is written by
+              // applyImportedContext now, and the fill-only seed effect above
+              // pulls it into these inputs when the workspace updates.
+              setWorkspace(await applyImportedContext(workspace, fields))
+            }}
+          />
+        )}
       </div>
     </OnboardingChrome>
   )
@@ -438,6 +463,9 @@ function LlmContextUploadBanner({
     setNotice(null)
     try {
       const res = await llmContextApi.importFile(file)
+      // Same bookkeeping as step 2, so a reload of this step doesn't put the
+      // banner back in front of someone who has just used it.
+      if (res.filed || res.job_id) markContextFileUploaded(workspace?.id)
       // Kick the background LLM pass — the only reader of the file. Without
       // this the upload prefills nothing at all, which is why step 2 does it
       // too.

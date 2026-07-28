@@ -11,6 +11,7 @@ import {
   type LlmContextImportResponse,
 } from "../../../lib/api"
 import { applyImportedContext } from "../../../lib/onboarding/applyImportedContext"
+import { markContextFileUploaded } from "../../../lib/onboarding/contextUploadMarker"
 import { advanceOnboardingStep, createWorkspace } from "../../../lib/onboarding/store"
 import { stepForSlug } from "../../../lib/onboarding/types"
 import type { WorkspaceCompany } from "../../../lib/onboarding/types"
@@ -202,6 +203,13 @@ export function ImportContextStep() {
       }
       const response = await llmContextApi.importFile(file)
       setResult(response)
+      // Remember the handover so the workspace step's second-chance banner
+      // doesn't ask for the same file again. Gated on the upload actually
+      // landing SOMEWHERE — filed to documents, or picked up by the extraction.
+      // Neither is the degenerate case where the file reached us and then went
+      // nowhere, and that one deserves the offer again rather than a silent
+      // "you already did this".
+      if (response.filed || response.job_id) markContextFileUploaded(target.id)
       // `ok` is false on every upload now — the extraction is the only reader
       // and it has not run yet. Kept rather than dropped so a future
       // synchronous read, and an older job result replayed through the same

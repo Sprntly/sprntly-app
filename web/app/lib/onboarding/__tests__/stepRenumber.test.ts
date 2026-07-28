@@ -5,7 +5,7 @@
 // fill the prompt the import hands out) and the two steps an import can't
 // prefill cover its background extraction: company → import-context →
 // connectors → api-key →
-// workspace → product → metrics → invite → review → personalize, then the UNNUMBERED
+// product → workspace → metrics → invite → review → personalize, then the UNNUMBERED
 // define-metrics sub-flow completes onboarding. `workspace` here is the merged
 // team/strategy/decisions card, not the long-retired workspace-NAMING closer.
 // The old combined `business-info`, the `business-context` review, the
@@ -30,8 +30,10 @@ describe("onboarding slug routing", () => {
       "import-context",
       "connectors",
       "api-key",
-      "workspace",
+      // Swapped 2026-07-28: the product is named before the workspace that owns
+      // a slice of it.
       "product",
+      "workspace",
       "metrics",
       "invite",
       "review",

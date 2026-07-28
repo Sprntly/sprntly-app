@@ -41,8 +41,8 @@ export function parseCompetitors(raw: string): string[] {
 }
 
 /**
- * Onboarding step 06 — "Your product" (v6 screenshot spec 2026-07-17,
- * reordered 2026-07-22).
+ * Onboarding step 05 — "Your product" (v6 screenshot spec 2026-07-17,
+ * reordered 2026-07-22; swapped ahead of `workspace` 2026-07-28).
  *
  * Product name* and surfaces* are mandatory; website, monetization (single
  * dropdown), and the "tell us about your users" prose are optional, with
@@ -146,7 +146,7 @@ export function ProductStep() {
       })
       const updated = await updateWorkspace(workspace.id, {
         competitors: parseCompetitors(competitors),
-        onboarding_step: stepForSlug("metrics") ?? 7,
+        onboarding_step: stepForSlug("workspace") ?? 6,
       })
       setWorkspace({ ...updated, product })
       clearDraft(DRAFT_KEY)
@@ -159,14 +159,14 @@ export function ProductStep() {
   }
 
   async function save() {
-    if (await persist()) router.push("/onboarding/metrics")
+    if (await persist()) router.push("/onboarding/workspace")
   }
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
   return (
     <OnboardingChrome
-      step={6}
+      step={5}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -175,7 +175,7 @@ export function ProductStep() {
       }
       subtitle="Name, where it lives, and how it makes money. Product position and competitors live in Settings."
       footerMeta="Product"
-      onBack={() => router.push("/onboarding/workspace")}
+      onBack={() => router.push("/onboarding/api-key")}
       onContinue={() => void save()}
       continueLabel="Next"
       continueDisabled={saving}
