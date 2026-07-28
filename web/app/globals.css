@@ -19458,20 +19458,34 @@
   .bl-detail-msg--you .bl-detail-msg-from { color: var(--ink); }
   .bl-detail-msg--ai .bl-detail-msg-from { color: var(--accent-ink); }
 
+  /* Pinned action bar. Sits outside `.bl-detail-body` (the scroll container),
+     so the two CTAs stay visible however long the evidence list gets. */
+  .bl-detail-footer {
+    flex: none;
+    padding: 14px 18px;
+    border-top: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+
+  /* Both CTAs on one line, splitting the width evenly. */
   .bl-detail-actions {
     display: flex;
-    flex-direction: column;
+    flex-direction: row;
     gap: 8px;
   }
 
   .bl-detail-btn {
+    flex: 1 1 0;
+    min-width: 0;
     font-size: 13px;
     padding: 10px 16px;
     border-radius: var(--radius-sm);
     cursor: pointer;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 6px;
+    white-space: nowrap;
     transition: background 0.12s, border-color 0.12s;
   }
 

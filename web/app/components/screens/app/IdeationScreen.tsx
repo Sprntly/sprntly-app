@@ -784,9 +784,12 @@ function IdeaDetailModal({
               <cite>{sourceLabel(e.source_type)}</cite>
             </blockquote>
           ))}
+        </div>
 
-          {/* CTA — into the existing chat → PRD → tickets → prototype pipeline */}
-          <div className="bl-detail-label">Next steps</div>
+        {/* CTA — into the existing chat → PRD → tickets → prototype pipeline.
+            A sibling of the scrolling body, so the two actions stay pinned to
+            the modal footer however far down the evidence the user scrolls. */}
+        <div className="bl-detail-footer">
           <div className="bl-detail-actions">
             <button
               type="button"
@@ -795,7 +798,7 @@ function IdeaDetailModal({
               onClick={() => onGenerateBrief(idea, detail)}
             >
               <SparkleIcon size={13} />
-              Generate a brief
+              Generate PRD
             </button>
             <button
               type="button"
@@ -863,7 +866,7 @@ export function IdeationScreen() {
     }, 800)
   }
 
-  // Generate a brief from an Ideation idea: open it as a NEW CHAT TAB on the
+  // "Generate PRD" from an Ideation idea: open it as a NEW CHAT TAB on the
   // chat surface, with the Evidence / PRD / Tickets panel sliding over it.
   // openPrdTab routes to `/` and ChatScreen drives runPrdGenerationFromIdeation
   // in that tab — the same funnel the brief and command-palette paths use, so
