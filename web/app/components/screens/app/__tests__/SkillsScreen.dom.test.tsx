@@ -2,10 +2,11 @@
 //
 // Tests for the Skills gallery: it lists the routable skills from
 // askApi.skills grouped by catalog category (in display order, unknown
-// categories appended rather than dropped), and clicking a card hands off to
-// the chat — setPendingOndemandDraft("<trigger> ") + goTo("chat") — so the
-// composer opens pre-filled with the skill invoked. "Create or upload skill"
-// is a coming-soon toast, not a navigation.
+// categories appended rather than dropped), plus the company's CUSTOM skills
+// from skillsApi.list (own section, uploader byline). Clicking any card hands
+// off to the chat — setPendingOndemandDraft("<trigger> ") + goTo("chat") — so
+// the composer opens pre-filled with the skill invoked. "Create or upload
+// skill" opens the upload modal; a successful upload prepends the new skill.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -13,6 +14,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 const skillsMock = vi.fn()
+const customListMock = vi.fn()
+const customUploadMock = vi.fn()
 const goToMock = vi.fn()
 const setPendingOndemandDraftMock = vi.fn()
 const showToastMock = vi.fn()
@@ -20,6 +23,10 @@ const showToastMock = vi.fn()
 vi.mock("../../../../lib/api", () => ({
   askApi: {
     skills: (...a: unknown[]) => skillsMock(...a),
+  },
+  skillsApi: {
+    list: (...a: unknown[]) => customListMock(...a),
+    upload: (...a: unknown[]) => customUploadMock(...a),
   },
 }))
 
@@ -72,9 +79,21 @@ const POSITIONING: SkillInfo = {
   category: "Strategy & Vision",
 }
 
+const CUSTOM_SKILL = {
+  id: "b8f3a1c2-0000-0000-0000-000000000001",
+  slug: "estimation-helper",
+  trigger: "/estimation-helper",
+  name: "Estimation helper",
+  description: "Scores features by reach × confidence.",
+  uploader_name: "Fortune Tede",
+  created_at: "2026-07-28T18:00:00+00:00",
+  has_file: true,
+}
+
 beforeEach(() => {
   // Deliberately NOT in display order — the screen must impose it.
   skillsMock.mockResolvedValue({ skills: [STAKEHOLDER_MAP, POSITIONING, JOURNEY_MAP] })
+  customListMock.mockResolvedValue({ skills: [] })
   searchParamsMock = new URLSearchParams()
 })
 
@@ -128,7 +147,7 @@ describe("SkillsScreen", () => {
     expect(goToMock).toHaveBeenCalledWith("chat")
   })
 
-  it("shows a coming-soon toast for Create or upload skill (no navigation)", async () => {
+  it("opens the upload modal from Create or upload skill (no navigation)", async () => {
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
@@ -138,9 +157,74 @@ describe("SkillsScreen", () => {
       fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
     })
 
-    expect(showToastMock).toHaveBeenCalled()
+    expect(screen.getByRole("dialog", { name: /upload a custom skill/i })).toBeTruthy()
     expect(goToMock).not.toHaveBeenCalled()
     expect(setPendingOndemandDraftMock).not.toHaveBeenCalled()
+  })
+
+  it("renders custom skills in their own section with the uploader byline", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    expect(screen.getByRole("heading", { name: "Custom skills" })).toBeTruthy()
+    expect(screen.getByText("Fortune Tede")).toBeTruthy()
+    // Custom cards hand off to chat exactly like built-ins.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /estimation helper/i }))
+    })
+    expect(setPendingOndemandDraftMock).toHaveBeenCalledWith("/estimation-helper ")
+    expect(goToMock).toHaveBeenCalledWith("chat")
+  })
+
+  it("keeps built-ins rendering when the custom-skills fetch fails", async () => {
+    customListMock.mockRejectedValueOnce(new Error("custom down"))
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
+
+    expect(screen.getByText(/Custom skills couldn’t load/)).toBeTruthy()
+    expect(screen.getByText("Journey map")).toBeTruthy()
+  })
+
+  it("uploads a skill through the modal and prepends it to the library", async () => {
+    customUploadMock.mockResolvedValue(CUSTOM_SKILL)
+    const { container } = render(React.createElement(SkillsScreen))
+    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), {
+        target: { value: "Estimation helper" },
+      })
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Scores features by reach × confidence." },
+      })
+    })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^upload skill$/i }))
+    })
+
+    expect(customUploadMock).toHaveBeenCalledWith(
+      expect.any(File),
+      "Estimation helper",
+      "Scores features by reach × confidence.",
+    )
+    // Modal closes, toast fires, and the new skill is in the library.
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())
+    expect(showToastMock).toHaveBeenCalled()
+    expect(screen.getByText("Fortune Tede")).toBeTruthy()
   })
 
   it("surfaces an error when loading fails", async () => {
