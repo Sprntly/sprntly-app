@@ -62,6 +62,7 @@ vi.mock("../../../../lib/api", () => ({
 }))
 
 import { ImportContextStep } from "../ImportContextStep"
+import { hasUploadedContextFile } from "../../../../lib/onboarding/contextUploadMarker"
 import { makeWorkspace, makeOnboardingCtx, makeProduct } from "./fixtures"
 
 const PROMPT = "You are helping me export the context...\n\n## Company\n- Name:"
@@ -90,6 +91,9 @@ function uploadMd(container: HTMLElement, body = "## Portfolio\nOne app.\n") {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // The "already uploaded a .md" marker is real localStorage and app code never
+  // clears it, so each test starts from a workspace that hasn't uploaded one.
+  localStorage.clear()
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" } })
   promptMock.mockResolvedValue({ prompt: PROMPT, format_version: "2" })
   saveWorkspaceFieldsMock.mockResolvedValue(undefined)
@@ -432,5 +436,46 @@ describe("ImportContextStep (onboarding step 02 — import your context)", () =>
       (screen.getByRole("button", { name: "Upload .md" }) as HTMLButtonElement)
         .disabled,
     ).toBe(false)
+  })
+
+  // The workspace step offers this same upload a second time. Recording the
+  // handover here is what lets it stop doing that for people who already did it.
+  it("records the handover so later steps stop asking for the same file", async () => {
+    importFileMock.mockResolvedValue({
+      ok: false,
+      fields: {},
+      unmapped: {},
+      format_version: null,
+      note: null,
+      job_id: 12,
+      filed: true,
+    })
+
+    const { container } = mount()
+    await waitFor(() => expect(promptMock).toHaveBeenCalled())
+    uploadMd(container)
+
+    await waitFor(() => expect(hasUploadedContextFile("ws-1")).toBe(true))
+  })
+
+  it("records nothing when the upload landed nowhere — that deserves another go", async () => {
+    // Not filed and no job: the file reached us and then went nowhere, so the
+    // second-chance banner should still be offered downstream.
+    importFileMock.mockResolvedValue({
+      ok: false,
+      fields: {},
+      unmapped: {},
+      format_version: null,
+      note: "We couldn't read anything usable out of that file.",
+      job_id: null,
+      filed: false,
+    })
+
+    const { container } = mount()
+    await waitFor(() => expect(promptMock).toHaveBeenCalled())
+    uploadMd(container)
+
+    await waitFor(() => expect(importFileMock).toHaveBeenCalled())
+    expect(hasUploadedContextFile("ws-1")).toBe(false)
   })
 })

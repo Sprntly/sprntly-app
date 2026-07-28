@@ -8,8 +8,8 @@
 // Covers: name* + scope* are required (error, no persistence, no navigation);
 // strategy and roadmap are ONE field that persists to team_strategy and uploads
 // through roadmapDocApi; sizing + "anything else" sit behind the "Add more"
-// disclosure; a valid Continue writes all of it plus onboarding_step 6 and
-// routes to /onboarding/product.
+// disclosure; a valid Continue writes all of it plus onboarding_step 7 and
+// routes to /onboarding/metrics.
 //
 // WHERE it writes is load-bearing: the name and the five typed blocks live on
 // the default `workspaces` row (20260722120000), so they go through the
@@ -53,12 +53,13 @@ vi.mock("../../../../lib/api", () => ({
 }))
 
 import { WorkspaceStep } from "../WorkspaceStep"
+import { markContextFileUploaded } from "../../../../lib/onboarding/contextUploadMarker"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
-function mount(workspace = makeWorkspace({ onboarding_step: 5 })) {
+function mount(workspace = makeWorkspace({ onboarding_step: 6 })) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace }))
-  updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 6 }))
+  updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 7 }))
   saveWorkspaceFieldsMock.mockResolvedValue(undefined)
   companyDocUploadMock.mockResolvedValue({ ok: true })
   roadmapUploadMock.mockResolvedValue({ ok: true })
@@ -82,14 +83,18 @@ function openAddMore() {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  // The "already uploaded a .md" marker is real localStorage, and it is never
+  // cleared in app code — so it has to be reset between tests or an upload in
+  // one suppresses the banner in every test after it.
+  localStorage.clear()
 })
 
 describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)", () => {
-  it("renders on step 5 with name* + scope* visible and the extras behind a disclosure", () => {
+  it("renders on step 6 with name* + scope* visible and the extras behind a disclosure", () => {
     const { container } = mount()
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("5")
+    ).toBe("6")
     expect(
       (container.querySelector(".onb-card .onb-h") as HTMLElement).textContent,
     ).toBe("Your workspace.")
@@ -152,7 +157,7 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/product")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/metrics")
     })
     // The name + the five typed blocks live on the `workspaces` row, so they go
     // through the endpoint that owns it. A companies patch would write the
@@ -167,7 +172,7 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     })
     // Only the resume marker is company-owned.
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
-      onboarding_step: 6,
+      onboarding_step: 7,
     })
   })
 
@@ -234,10 +239,10 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     expect(companyDocUploadMock.mock.calls[0][1]).toBe("sizing_doc")
   })
 
-  it("Back routes to the api-key step", () => {
+  it("Back routes to the product step", () => {
     mount()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/product")
   })
 
   // The .md banner on this step must behave EXACTLY like the dedicated step-2
@@ -323,5 +328,63 @@ describe("WorkspaceStep (onboarding step 06 — merged team/strategy/decisions)"
     // No immediate apply (nothing to apply yet); it arrives via the poll.
     expect(applyImportedMock).not.toHaveBeenCalled()
     expect(screen.getByText(/we'll fill in what we find/)).not.toBeNull()
+  })
+
+  // The banner is a SECOND chance, so it is only for people who didn't take the
+  // first one. Showing it to someone who already handed their .md over on step 2
+  // asks for the same file twice and reads as the flow forgetting.
+  it("still offers the .md upload to someone who skipped the import step", () => {
+    mount()
+    expect(bannerInput()).not.toBeNull()
+  })
+
+  it("does NOT offer the .md upload once the workspace has already imported one", () => {
+    markContextFileUploaded("ws-1")
+    mount()
+    expect(bannerInput()).toBeNull()
+    expect(screen.queryByText(/Upload \.md/)).toBeNull()
+  })
+
+  it("does NOT offer it while this session's extraction is still running", () => {
+    // The marker covers a reload; the in-memory state covers the session where
+    // localStorage never took the write.
+    authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+    onboardingMock.mockReturnValue(
+      makeOnboardingCtx({
+        workspace: makeWorkspace({ onboarding_step: 6 }),
+        contextImport: "running",
+      }),
+    )
+    render(React.createElement(WorkspaceStep))
+    expect(bannerInput()).toBeNull()
+  })
+
+  it("keeps the banner up through an upload made HERE, then drops it on remount", async () => {
+    const { unmount } = mount()
+    importFileMock.mockResolvedValue({
+      ok: false,
+      fields: {},
+      unmapped: {},
+      format_version: null,
+      note: null,
+      job_id: 9,
+      filed: true,
+    })
+
+    await act(async () => {
+      fireEvent.change(bannerInput(), {
+        target: { files: [new File(["# ctx"], "ctx.md", { type: "text/markdown" })] },
+      })
+    })
+
+    // Still there, with its notice — yanking the banner mid-step would take the
+    // explanation of what just happened with it.
+    expect(bannerInput()).not.toBeNull()
+    expect(screen.getByText(/we'll fill in what we find/)).not.toBeNull()
+
+    // ...but the file is now on record, so coming back doesn't ask again.
+    unmount()
+    mount()
+    expect(bannerInput()).toBeNull()
   })
 })

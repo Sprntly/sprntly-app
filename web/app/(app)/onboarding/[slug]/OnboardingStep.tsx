@@ -42,10 +42,10 @@ import {
  *   prefill, so they cover its background extraction. Everything below opens
  *   with the extracted fields already in place.
  *
- *   5. workspace      → WorkspaceStep     (name* + scope*; strategy/roadmap;
- *                                        sizing + extras behind "Add more")
- *   6. product        → ProductStep       (name* + surfaces*; monetization/
+ *   5. product        → ProductStep       (name* + surfaces*; monetization/
  *                                        users/competitors optional)
+ *   6. workspace      → WorkspaceStep     (name* + scope*; strategy/roadmap;
+ *                                        sizing + extras behind "Add more")
  *   7. metrics        → MetricsStep       (pick up to 5 metrics* + framework*)
  *   8. invite         → InviteStep        (email + job role + permission, bulk
  *                                        paste, CSV)
@@ -66,8 +66,8 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   { slug: "import-context", Component: ImportContextStep },
   { slug: "connectors", Component: Connectors },
   { slug: "api-key", Component: ApiKey },
-  { slug: "workspace", Component: WorkspaceStep },
   { slug: "product", Component: ProductStep },
+  { slug: "workspace", Component: WorkspaceStep },
   { slug: "metrics", Component: MetricsStep },
   { slug: "invite", Component: InviteStep },
   { slug: "review", Component: ReviewStep },

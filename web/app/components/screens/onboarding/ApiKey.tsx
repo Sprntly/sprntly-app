@@ -63,7 +63,7 @@ export function ApiKey() {
   // Always continuable — an empty field just skips (the step is optional).
   const canContinue = true
 
-  // Next numbered step is workspace. Derived, not hardcoded: the flow order
+  // Next numbered step is product. Derived, not hardcoded: the flow order
   // has been renumbered twice and a stale literal silently resumes the user
   // onto the wrong step.
   async function toNextStep(skipped: boolean) {
@@ -71,10 +71,10 @@ export function ApiKey() {
     if (skipped) await markSkippedFields(auth.user.id, ["api_key"])
     const updated = await advanceOnboardingStep(
       workspace.id,
-      stepForSlug("workspace") ?? 5,
+      stepForSlug("product") ?? 5,
     )
     setWorkspace(updated)
-    router.push("/onboarding/workspace")
+    router.push("/onboarding/product")
   }
 
   async function onContinue() {

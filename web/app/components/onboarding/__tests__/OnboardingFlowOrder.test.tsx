@@ -3,7 +3,7 @@
 // Integrity tests for the semantic-slug onboarding flow (v6 screenshot spec
 // 2026-07-17 + the restored optional api-key step 2026-07-19, 10 steps):
 //   company -> import-context -> connectors -> api-key ->
-//   workspace -> product -> metrics -> invite -> review -> personalize
+//   product -> workspace -> metrics -> invite -> review -> personalize
 // (api-key is an OPTIONAL/skippable step — also editable in Settings → Admin.
 //  Still retired: the closing workspace-naming step. The review step closes the
 //  numbered flow, then the UNNUMBERED define-metrics sub-flow completes
@@ -69,8 +69,10 @@ const EXPECTED_ORDER = [
   // follows behind them.
   "connectors",
   "api-key",
-  "workspace",
+  // Swapped 2026-07-28 (client feedback): `product` now leads `workspace`, so
+  // the product is named before the team's slice of it is scoped.
   "product",
+  "workspace",
   "metrics",
   "invite",
   "review",

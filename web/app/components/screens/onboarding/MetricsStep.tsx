@@ -267,7 +267,7 @@ export function MetricsStep() {
       }
       subtitle="Pick up to 5 that matter most. Every brief is ranked by impact on these."
       footerMeta={`${selected.length} of ${METRIC_PICKS} metrics selected`}
-      onBack={() => router.push("/onboarding/product")}
+      onBack={() => router.push("/onboarding/workspace")}
       onContinue={() => void go()}
       continueDisabled={saving}
       loading={saving}
