@@ -1043,16 +1043,22 @@ export function ChatScreen() {
   const scrollThreadToBottom = useCallback((behavior: ScrollBehavior) => {
     const el = threadScrollRef.current
     if (!el) return
-    // Defer to the next frame so the just-added turn (and its thinking skeleton)
-    // is laid out before we measure scrollHeight.
-    requestAnimationFrame(() => {
+    const jump = () => {
+      const node = threadScrollRef.current
+      if (!node) return
       try {
-        el.scrollTo({ top: el.scrollHeight, behavior })
+        node.scrollTo({ top: node.scrollHeight, behavior })
       } catch {
         // jsdom / older engines without Element.scrollTo — set position directly.
-        el.scrollTop = el.scrollHeight
+        node.scrollTop = node.scrollHeight
       }
-    })
+    }
+    // An instant jump lands on THIS frame: a send has to be on screen on its own
+    // commit, not a frame later. The rAF pass then repeats it once the just-added
+    // turn (and its thinking skeleton) is laid out, catching the height the first
+    // call couldn't measure yet.
+    if (behavior !== "smooth") jump()
+    requestAnimationFrame(jump)
   }, [])
 
   // Track whether the user is pinned near the bottom of the thread. Auto-follow
@@ -1085,14 +1091,29 @@ export function ChatScreen() {
   }, [])
   useEffect(() => () => threadResizeObsRef.current?.disconnect(), [])
 
-  // A new turn (the user just asked) → re-pin and smooth-scroll so the question
-  // + the assistant's thinking sit in view; the ResizeObserver then follows the
-  // answer as it grows. Guard on a real length increase so a reply landing on an
-  // existing turn doesn't double-trigger (the observer already handles growth).
+  // The send itself is what has to move the viewport. `pendingSend` renders the
+  // user's message on the send's own commit — seconds before the real turn lands
+  // (the intent decision is a round-trip away), so a scroll keyed on thread
+  // growth left the message parked below the fold that whole time. Re-pin and
+  // JUMP: from far up a long thread a smooth animation both takes too long and
+  // un-pins the follow behavior on its own way down (the scroll handler samples
+  // it mid-animation, well short of the bottom), which is exactly how the answer
+  // then streamed in off-screen.
+  useEffect(() => {
+    if (!pendingSend || pendingSend.tabId !== activeTabId) return
+    threadPinnedRef.current = true
+    scrollThreadToBottom("auto")
+  }, [pendingSend, activeTabId, scrollThreadToBottom])
+
+  // A new turn (the user just asked, or a command seeded its own turn) → re-pin
+  // and jump so the question + the assistant's thinking sit in view; the
+  // ResizeObserver then follows the answer as it grows. Guard on a real length
+  // increase so a reply landing on an existing turn doesn't double-trigger (the
+  // observer already handles growth).
   useEffect(() => {
     if (thread.length > prevThreadLenRef.current) {
       threadPinnedRef.current = true
-      scrollThreadToBottom("smooth")
+      scrollThreadToBottom("auto")
     }
     prevThreadLenRef.current = thread.length
   }, [thread.length, scrollThreadToBottom])
