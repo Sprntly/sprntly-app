@@ -23,6 +23,10 @@ import {
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
 import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } from "../../shared/app-icons"
+// The strip's reopen button is icon-only, so the Evidence case needs an icon of
+// its own — the same one ContentPanel's Evidence tab wears, so the button reads
+// as "reopen that tab".
+import { IconMicroscope } from "@tabler/icons-react"
 import { ApiError, askApi, attachmentsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
@@ -33,7 +37,7 @@ import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight 
 import { runAskGeneration, resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError } from "../../../lib/runAskGeneration"
 import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
-import type { PrdState, PrdContent } from "../../../types/content"
+import type { DetailState, PrdState, PrdContent } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
 import { GeneratePrototypeCTA } from "../../design-agent/GeneratePrototypeCTA"
 import { prototypePath } from "../../../lib/routes"
@@ -115,6 +119,18 @@ type ChatTab = {
   prdId: number | null
   /** Per-tab cached evidence. */
   evidence: PrdContent | null
+  /** This tab was opened from a Top Insights card's "View Evidence" — the
+   *  finding's EVIDENCE is what it is about, so refocusing it restores the panel
+   *  on the Evidence tab rather than closing it (a tab with no PRD) or jumping to
+   *  a PRD that merely happens to exist for the same insight. Cleared in effect
+   *  once a PRD actually lands on the tab, which then takes precedence. PERSISTED
+   *  (small boolean) so the behaviour survives a reload. */
+  evidenceOnly?: boolean
+  /** The originating finding's drill-down state, which scopes ContentPanel's
+   *  Evidence tab to this insight (it loads/generates from `detail.meta`).
+   *  Transient — never persisted; after a reload an `evidenceOnly` tab falls back
+   *  to the read-only load keyed off `briefMeta`. */
+  evidenceDetail?: DetailState | null
   prdGenerating: boolean
   /** True while an EXISTING PRD is being fetched from the DB — distinct from
    *  `prdGenerating`, which means a document is being written.
@@ -793,6 +809,9 @@ export function ChatScreen() {
         prd: null,
         prdId: t.prdId ?? null,
         evidence: null,
+        // Persisted: an evidence tab reopens on its Evidence panel, not closed.
+        evidenceOnly: t.evidenceOnly ?? false,
+        evidenceDetail: null,
         prdGenerating: false,
         evidenceGenerating: false,
         // Persisted: preserves the inline-vs-header card ordering across reload.
@@ -831,10 +850,12 @@ export function ChatScreen() {
     mountedRef.current = true
     return () => { mountedRef.current = false }
   }, [])
-  // When set, ChatScreen slides the content panel (Evidence / PRD / Tickets) open
-  // on the NEXT commit — deferred one commit so the route-change panel-close (a
-  // PRD opened from another surface routes to `/`) can't swallow it.
-  const [prdPanelPending, setPrdPanelPending] = useState(false)
+  // When set, ChatScreen slides the content panel open on the NEXT commit, on
+  // THIS tab — deferred one commit so the route-change panel-close (an artifact
+  // opened from another surface routes to `/`) can't swallow it. The value is the
+  // tab to land on: "prd" for every PRD open, "evidence" for a Top Insights
+  // "View Evidence", which starts no PRD work.
+  const [prdPanelPending, setPrdPanelPending] = useState<"evidence" | "prd" | "tickets" | null>(null)
   // Tab id of a chat just re-opened from history that owns a PRD — consumed by
   // the effect that opens its panel once that tab is the active one.
   const [resumePanelTabId, setResumePanelTabId] = useState<string | null>(null)
@@ -854,6 +875,7 @@ export function ChatScreen() {
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
           insightBody: t.insightBody ?? null, prdId: t.prdId ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
+          evidenceOnly: t.evidenceOnly ?? false, evidenceDetail: null,
           prdInFlow: t.prdInFlow ?? false, prdFlowTurnId: t.prdFlowTurnId,
         })))
       } else {
@@ -878,7 +900,10 @@ export function ChatScreen() {
       // thinking indicator spinning forever with nothing behind it. Turn-level
       // `partial` (live streamed answer text) is stripped for the same reason —
       // the resume path re-attaches the stream and rebuilds it from replay.
-      const slim = tabs.map(({ prd: _p, evidence: _e, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => {
+      // `evidenceDetail` is stripped as a large field like `prd`/`evidence`; the
+      // small `evidenceOnly` flag beside it is what survives, and it's enough for
+      // a reloaded tab to reopen on its Evidence panel (read-loaded by briefMeta).
+      const slim = tabs.map(({ prd: _p, evidence: _e, evidenceDetail: _ed, prdGenerating: _pg, prdLoading: _pl, evidenceGenerating: _eg, hydrating: _h, prdCommandThinking: _pct, ...rest }) => {
         // A still-pending summary indicator is dropped from the SAVED copy:
         // its in-flight call dies with the page, so restoring it would strand
         // a "Summarizing…" skeleton nothing will ever fill. The summary itself
@@ -1217,6 +1242,12 @@ export function ChatScreen() {
     if (resolvedInsightPrdId == null || activeTabId == null) return
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
     if (!tab) return
+    // …but an EVIDENCE tab is not a PRD tab. It was opened for a finding, and the
+    // insight may well have a PRD in the DB — adopting that id here would make the
+    // tab claim a document it never opened, so refocusing it would restore that
+    // PRD instead of its evidence. It becomes a PRD tab only when one actually
+    // lands in it (the panel's PRD tab resolving one, which stamps `prdId`).
+    if (tab.evidenceOnly && tab.prd == null && tab.prdId == null) return
     if (tab.prdId == null) {
       setTabs((prev) => prev.map((t) =>
         t.id === activeTabId && t.prdId == null ? { ...t, prdId: resolvedInsightPrdId } : t))
@@ -1416,7 +1447,32 @@ export function ChatScreen() {
     // kind waits: the panel opens the moment generation actually starts, either
     // straight after the gate passes (below) or when the user answers.
     const clarifyFirst = source.kind === "generateTask"
-    if (!clarifyFirst) setPrdPanelPending(true)
+    if (!clarifyFirst) setPrdPanelPending(source.kind === "evidence" ? "evidence" : "prd")
+
+    // ── Evidence-first open ──────────────────────────────────────────────────
+    // A Top Insights card's "View Evidence" opens the finding as its own chat tab
+    // with the panel on Evidence — the same slide-in every PRD gets, just landed
+    // on a different tab. NO PRD work starts here: the PRD tab in that panel
+    // resolves one on demand (find-or-create) if the user asks for it.
+    //
+    // `detail` scopes ContentPanel's Evidence tab to this insight (that tab owns
+    // the load/generate). `prdMeta` is set alongside so the panel's PRD tab knows
+    // which insight to resolve, and `prd` is cleared unless this very tab already
+    // holds one — the panel is global, so another PRD tab's document must never
+    // linger over this finding.
+    if (source.kind === "evidence") {
+      setTabs((prev) => prev.map((t) => t.id === tabId
+        ? { ...t, evidenceOnly: true, evidenceDetail: source.detail }
+        : t))
+      setContent({
+        detail: source.detail,
+        prd: existing?.prd ?? null,
+        prdMeta: source.meta,
+        prdGenerating: false,
+        prdPartialHtml: null,
+      })
+      return tabId
+    }
 
     // Reopening an EXISTING PRD (ready | load)? Rehydrate its saved chat thread by
     // prd_id so the user's prior questions come back. New PRDs (generate*) have no
@@ -1543,7 +1599,7 @@ export function ChatScreen() {
                 if (seedTurn) settleCommandAck(tabId, seedTurn.id, commandAckReply(req))
                 if (activeTabIdRef.current === tabId) {
                   setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
-                  setPrdPanelPending(true)
+                  setPrdPanelPending("prd")
                 }
               }
               // This chat's DB conversation, IF it already has one (a command
@@ -2435,7 +2491,7 @@ export function ChatScreen() {
       // The rail was deliberately NOT opened while the questions were pending
       // (see `clarifyFirst` in openPrdInTab), so answering them is what opens
       // it — otherwise the generation would run with no panel to land in.
-      setPrdPanelPending(true)
+      setPrdPanelPending("prd")
     }
     pushPendingConversation(id, userMessage, targetTabId)
     finalizeConversationTurn(id, { reply: ack }, targetTabId)
@@ -3314,8 +3370,9 @@ export function ChatScreen() {
   // opening it here a commit later (route now settled) survives that close.
   useEffect(() => {
     if (!prdPanelPending) return
-    setPrdPanelPending(false)
-    openContentPanel("prd")
+    const landOn = prdPanelPending
+    setPrdPanelPending(null)
+    openContentPanel(landOn)
   }, [prdPanelPending, openContentPanel])
 
   // The content panel is a single global overlay, but it must FOLLOW the active
@@ -3326,6 +3383,8 @@ export function ChatScreen() {
   //     it (handleOpenPrd syncs the cached PRD or DB-loads by id). This is what
   //     makes REFOCUSING a PRD tab bring its panel back, instead of leaving it
   //     closed after you'd visited another tab.
+  //   • an evidence tab (Top Insights → View Evidence) that hasn't grown a PRD of
+  //     its own → reopen it on the Evidence tab, scoped to its finding.
   //   • the brief tab, or a plain (non-PRD) chat → close any lingering panel so it
   //     never hangs over the wrong surface.
   // Gated on an actual switch (prevTabForPanelRef) so a manual panel-close while
@@ -3353,8 +3412,28 @@ export function ChatScreen() {
     // Brief tab or the tab-less landing → no PRD to show; drop any lingering panel.
     if (isBriefTab || !activeTabId) { if (contentPanelTab) closeContentPanel(); return }
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
-    const ownsPrd = !!tab?.prd || !!tab?.prdGenerating || tab?.prdId != null
-      || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
+    // A PRD that landed IN THIS TAB, as opposed to one that merely exists in the
+    // DB for the same insight. The distinction only matters for evidence tabs
+    // (below), which must not be hijacked by a PRD they were never opened for.
+    const tabOwnsPrd = !!tab?.prd || !!tab?.prdGenerating || tab?.prdId != null
+    const ownsPrd = tabOwnsPrd || !!(chatInsightState?.hasPrd && chatInsightState.prdId != null)
+    // An evidence tab (Top Insights → View Evidence) restores ITS evidence: the
+    // finding is what the tab is about, so refocusing must neither close the panel
+    // (it holds no PRD) nor jump to the insight's PRD. Once a PRD does land in the
+    // tab — the panel's PRD tab resolves one on demand — that takes precedence.
+    // After a reload `evidenceDetail` is gone; `prdMeta` alone still populates the
+    // Evidence tab, via its read-only load-by-insight path.
+    if (tab?.evidenceOnly && !tabOwnsPrd) {
+      setContent({
+        detail: tab.evidenceDetail ?? null,
+        prd: null,
+        prdMeta: tab.briefMeta,
+        prdGenerating: false,
+        prdPartialHtml: null,
+      })
+      openContentPanel("evidence")
+      return
+    }
     if (ownsPrd) {
       // Sync the global panel to THIS tab's PRD — ALWAYS, even if it already reads
       // "prd", because another PRD tab may have left ITS doc in the shared panel
@@ -3366,7 +3445,31 @@ export function ChatScreen() {
     } else if (contentPanelTab) {
       closeContentPanel()
     }
-  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, chatInsightState, handleOpenPrd, closeContentPanel])
+  }, [activeTabId, isBriefTab, contentPanelTab, prdPanelPending, chatInsightState, handleOpenPrd, closeContentPanel, openContentPanel, setContent])
+
+  // ── Adopt a panel-resolved PRD onto the tab it belongs to ──────────────────
+  // ContentPanel can resolve a PRD by itself — the Evidence footer's "Generate
+  // PRD", and clicking the panel's PRD tab on an evidence tab — and it writes only
+  // to the SHARED content, since it knows nothing about chat tabs. Left there, the
+  // tab would still read as PRD-less: refocusing it would restore evidence (or
+  // close the panel) while another tab's document sat in the shared panel — the
+  // "wrong PRD on refocus" bug, from the other direction.
+  //
+  // So mirror it onto the active tab, gated on the PRD's own (briefId,
+  // insightIndex) matching that tab's insight, so a document belonging to some
+  // other tab is never adopted. Stamping `prdId` is also what lets a reload
+  // recover the PRD by id.
+  useEffect(() => {
+    const prd = content.prd
+    if (!prd || !activeTabId || isBriefTab) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab || tab.prd?.prd_id === prd.prd_id) return
+    const meta = tab.briefMeta
+    if (!meta || prd.briefId !== meta.briefId || prd.insightIndex !== meta.insightIndex) return
+    setTabs((prev) => prev.map((t) => t.id === activeTabId
+      ? { ...t, prd, prdId: prd.prd_id, prdGenerating: false }
+      : t))
+  }, [content.prd, activeTabId, isBriefTab])
 
   // ── Restore the PRD panel after a reload ───────────────────────────────────
   // Tabs persist across reloads (localStorage) but their cached `prd` does NOT —
@@ -3410,6 +3513,12 @@ export function ChatScreen() {
       void handleOpenPrd()
       return
     }
+    // An evidence tab holds a FINDING, not a PRD — there is nothing for this
+    // effect to restore. Its panel is opened by `prdPanelPending` on the open
+    // itself and by the switch reconcile on refocus. Without this guard the map
+    // branch below would drag the tab onto a PRD that merely exists for the same
+    // insight, which is not the document it was opened for.
+    if (tab.evidenceOnly) return
     // Otherwise it must be a brief-insight tab whose DB PRD the map confirms. A
     // not-yet-resolved map reads as hasPrd=false → treat as "wait", not "give up",
     // and re-check on the next render (the empty pre-fetch window latch bug).
@@ -3887,12 +3996,18 @@ export function ChatScreen() {
   // brief tab (BriefChat owns its own panel wiring, and handleOpenPrd no-ops
   // there since BRIEF_TAB_ID isn't in `tabs`), or when the tab has no artifact
   // to reopen.
+  //
+  // `kind` picks the icon: the button is icon-only (the strip is chrome, and a
+  // labelled pill competed with the tabs for attention), so the icon is the only
+  // thing distinguishing "reopen the PRD" from "reopen the evidence" at a glance.
+  // Each matches the panel tab it reopens — the label survives as the tooltip and
+  // the accessible name.
   const reopenArtifact = useMemo(() => {
     if (isBriefTab || contentPanelTab || !activeTabId) return null
     if (chatPrdExists || activeTab?.prdGenerating || activeTab?.prdLoading) {
-      return { label: "View PRD", onClick: handleOpenPrd }
+      return { label: "View PRD", kind: "prd" as const, onClick: handleOpenPrd }
     }
-    if (chatEvidenceExists) return { label: "View Evidence", onClick: handleOpenEvidence }
+    if (chatEvidenceExists) return { label: "View Evidence", kind: "evidence" as const, onClick: handleOpenEvidence }
     return null
   }, [
     isBriefTab, contentPanelTab, activeTabId, chatPrdExists, chatEvidenceExists,
@@ -4020,10 +4135,12 @@ export function ChatScreen() {
                 className="chat-artifact-reopen"
                 data-testid="chat-reopen-artifact"
                 title={`${reopenArtifact.label} — reopen the panel`}
+                aria-label={reopenArtifact.label}
                 onClick={() => { void reopenArtifact.onClick() }}
               >
-                <IconDocument size={13} />
-                {reopenArtifact.label}
+                {reopenArtifact.kind === "evidence"
+                  ? <IconMicroscope size={15} />
+                  : <IconDocument size={15} />}
               </button>
             ) : null}
           </div>

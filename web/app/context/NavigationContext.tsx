@@ -13,7 +13,7 @@ import {
 import { usePathname, useRouter } from "next/navigation"
 import type { ScreenId } from "../types"
 import type { AskResponse } from "../lib/api"
-import type { PrdState } from "../types/content"
+import type { DetailState, PrdState } from "../types/content"
 import { pathForScreen, screenIdFromPathname } from "../lib/routes"
 
 /** Top search hands off `/v1/ask` results to Ask Sprntly (in-page thread) without a second request. */
@@ -29,19 +29,22 @@ export type PendingChatHandoff = { query: string }
  *  an ideation PRD (no insight_index) — it renders from the PRD payload alone. */
 export type PrdTabMeta = { briefId: number; insightIndex: number }
 
-/** A request to open a PRD as a NEW CHAT TAB on the chat surface, with the
+/** A request to open a document as a NEW CHAT TAB on the chat surface, with the
  *  right-side content panel (Evidence / PRD / Tickets) sliding over it. Every
- *  "view PRD" / "generate PRD" affordance (brief finding cards, the brief
- *  composer, an ideation item) hands one of these off via `openPrdTab`; ChatScreen
- *  consumes it once, spawns a fresh chat tab, drives the source, and opens the
- *  panel. `title` labels the tab. The `source` discriminant says where the PRD
- *  comes from:
+ *  "view evidence" / "view PRD" / "generate PRD" affordance (brief finding cards,
+ *  the brief composer, an ideation item) hands one of these off via `openPrdTab`;
+ *  ChatScreen consumes it once, spawns a fresh chat tab, drives the source, and
+ *  opens the panel. `title` labels the tab. The `source` discriminant says which
+ *  document the tab is about and where it comes from:
  *   - `ready`          — the caller already holds the PrdState (just show it)
  *   - `generate`       — kick off brief-insight PRD generation (runPrdGeneration)
  *   - `generateIdeation`— kick off ideation PRD generation (runPrdGenerationFromIdeation)
  *   - `load`           — fetch an already-generated PRD by id (loadPrdById)
  *   - `resume`         — poll a PRD whose generation was already kicked off
- *                        elsewhere (Artifacts upload, chat PRD-import command) */
+ *                        elsewhere (Artifacts upload, chat PRD-import command)
+ *   - `evidence`       — the insight's EVIDENCE is the document: land the panel on
+ *                        its Evidence tab and start no PRD work at all. The PRD tab
+ *                        is one click away and resolves on demand (ContentPanel). */
 export type PrdTabRequest = {
   title: string
   /** The insight's body/description text (from the originating brief finding),
@@ -68,6 +71,10 @@ export type PrdTabRequest = {
     // `origin` picks the seeded acknowledgment wording: 'task' (a chat
     // "generate a PRD for <specific need>" command) vs the default doc-import.
     | { kind: "resume"; prdId: number; meta: PrdTabMeta | null; openTickets?: boolean; origin?: "import" | "task" }
+    // Evidence-first open (a Top Insights card's "View Evidence"). `detail` is the
+    // finding's drill-down state, which scopes ContentPanel's Evidence tab to this
+    // insight — that tab owns loading/generating the evidence itself.
+    | { kind: "evidence"; meta: PrdTabMeta; detail: DetailState | null }
 }
 
 const AI_PANEL_W_KEY = "sprntly-ai-panel-width"
@@ -141,14 +148,15 @@ interface NavigationContextType {
   pendingChatHandoff: PendingChatHandoff | null
   setPendingChatHandoff: (value: PendingChatHandoff | null) => void
 
-  /** Filled by any "view/generate PRD" affordance; consumed once by ChatScreen,
-   *  which opens a fresh chat tab and slides the content panel (Evidence / PRD /
-   *  Tickets) over it. */
+  /** Filled by any "view evidence" / "view-or-generate PRD" affordance; consumed
+   *  once by ChatScreen, which opens a fresh chat tab and slides the content panel
+   *  (Evidence / PRD / Tickets) over it. */
   pendingPrdTab: PrdTabRequest | null
   setPendingPrdTab: (value: PrdTabRequest | null) => void
-  /** Open a PRD as a new chat tab (with the right-side content panel over it):
-   *  store the request and route to the chat surface (`/`) so ChatScreen mounts
-   *  and consumes it. The single entry point for "PRD opens in a new chat". */
+  /** Open a PRD or a finding's evidence as a new chat tab (with the right-side
+   *  content panel over it): store the request and route to the chat surface (`/`)
+   *  so ChatScreen mounts and consumes it. The single entry point for "an artifact
+   *  opens in a new chat". */
   openPrdTab: (request: PrdTabRequest) => void
 
   /** Global search / command palette (⌘K). Rendered once by AppShell; the

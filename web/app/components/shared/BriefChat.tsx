@@ -913,9 +913,22 @@ export function BriefChat() {
     scrollToEnd()
   }, [content.prd, router, scrollToEnd])
 
+  // "View evidence" chip on an agent turn in the brief thread. Same destination
+  // as the card CTA — a chat tab with the Evidence panel over it — so evidence
+  // never slides in over Top Insights from either affordance. This path has no
+  // finding in hand, so it uses whichever one is currently in scope; with none
+  // (nothing opened yet) the panel opens in place, as before.
   const evidenceFlow = useCallback(() => {
-    openContentPanel("evidence")
-  }, [openContentPanel])
+    const detail = content.detail
+    if (!detail?.meta) {
+      openContentPanel("evidence")
+      return
+    }
+    openPrdTab({
+      title: `Evidence · ${detail.title || "Brief finding"}`,
+      source: { kind: "evidence", meta: detail.meta, detail },
+    })
+  }, [content.detail, openContentPanel, openPrdTab])
 
   const multiAgentFlow = useCallback(async () => {
     const aId = uid()
@@ -1175,20 +1188,32 @@ export function BriefChat() {
     [content.briefDetails, activeCompany, openContentPanel, setContent, showToast, refetchPrototypeMap],
   )
 
-  // Primary card CTA (top-insights skill posture): open the evidence behind
-  // this finding. Setting `content.detail` to the card's DetailState scopes the
-  // Evidence tab to this insight — ContentPanel's EvidenceTab then loads (or
-  // generates, deduped server-side) that insight's evidence and streams it in.
+  // Primary card CTA (top-insights skill posture): open the evidence behind this
+  // finding — as its OWN chat tab, the way "View PRD" already opens one, rather
+  // than sliding the panel over Top Insights itself. openPrdTab routes to `/` and
+  // ChatScreen spawns the tab, then slides the same Evidence / PRD / Tickets panel
+  // in over it, landed on Evidence. The card's DetailState rides along: it scopes
+  // ContentPanel's Evidence tab to this insight, which then loads (or generates,
+  // deduped server-side) that insight's evidence and streams it in.
   const cardViewEvidence = useCallback(
     (finding: Finding) => {
       const key = finding.detailKey
       const detail = key ? content.briefDetails?.[key] : null
-      if (detail?.meta) setContent({ detail })
-      // No meta (legacy brief shape) — still open the panel; the tab shows its
-      // own empty/generate state rather than the button dead-ending.
-      openContentPanel("evidence")
+      const meta = detail?.meta
+      // No meta (legacy brief shape) — there's no insight to scope a tab to, so
+      // fall back to opening the panel in place; the tab shows its own
+      // empty/generate state rather than the button dead-ending.
+      if (!meta) {
+        openContentPanel("evidence")
+        return
+      }
+      openPrdTab({
+        title: `Evidence · ${finding.title || "Brief finding"}`,
+        insightBody: finding.body,
+        source: { kind: "evidence", meta, detail: detail ?? null },
+      })
     },
-    [content.briefDetails, openContentPanel, setContent],
+    [content.briefDetails, openContentPanel, openPrdTab],
   )
 
   // Dismiss greys the card out in place (it stays in the list); restore un-greys

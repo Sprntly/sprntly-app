@@ -113,20 +113,28 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 }))
 
 import { NavigationProvider, useNavigation, type PrdTabRequest } from "../../../../context/NavigationContext"
-import { ContentProvider } from "../../../../context/ContentContext"
+import { ContentProvider, useContent } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 import { conversationsApi } from "../../../../lib/api"
 
 // Harness: openPrdTab as a button (the real handoff entry point any surface uses)
-// + a probe that surfaces the current content-panel tab, so tests can observe the
-// panel opening without mounting the heavy ContentPanel/PrdPanelContent tree.
+// + probes that surface the current content-panel tab and the insight the shared
+// content is scoped to, so tests can observe the panel opening (and what it would
+// render) without mounting the heavy ContentPanel/PrdPanelContent tree.
 function Harness({ request }: { request: PrdTabRequest }) {
   const { openPrdTab, contentPanelTab } = useNavigation()
+  const { content } = useContent()
+  const detail = content.detail?.meta
   return React.createElement(
     React.Fragment,
     null,
     React.createElement("button", { onClick: () => openPrdTab(request) }, "open-prd"),
     React.createElement("div", { "data-testid": "panel-probe" }, contentPanelTab ?? "none"),
+    React.createElement(
+      "div",
+      { "data-testid": "detail-probe" },
+      detail ? `${detail.briefId}:${detail.insightIndex}` : "none",
+    ),
     React.createElement(ChatScreen),
   )
 }
@@ -144,6 +152,7 @@ function renderWith(request: PrdTabRequest) {
 const tabBar = () => within(screen.getByTestId("chat-tab-bar"))
 const briefSection = () => document.querySelector("section.briefx")
 const panelProbe = () => screen.getByTestId("panel-probe").textContent
+const detailProbe = () => screen.getByTestId("detail-probe").textContent
 
 async function clickOpenPrd() {
   await act(async () => { fireEvent.click(screen.getByText("open-prd")) })
@@ -349,6 +358,71 @@ describe("ChatScreen — PRD opens as a new chat tab with the panel", () => {
     // Refocus the PRD tab → the panel comes back.
     await act(async () => { fireEvent.click(tabBar().getByText("PRD · Ready doc")) })
     await waitFor(() => expect(panelProbe()).toBe("prd"))
+  })
+})
+
+// ── Evidence opens the same way a PRD does ───────────────────────────────────
+// A Top Insights card's "View Evidence" used to slide the panel in OVER the
+// brief. It now takes the identical route as "View PRD" — openPrdTab, a new chat
+// tab, the panel over it — differing only in which tab it lands on and in
+// starting no PRD work. These tests lock the landing, the absence of generation,
+// and the refocus behaviour (an evidence tab must neither close its panel nor be
+// hijacked by a PRD that merely exists for the same insight).
+describe("ChatScreen — evidence opens as a new chat tab with the panel on Evidence", () => {
+  const EVIDENCE: PrdTabRequest = {
+    title: "Evidence · First-handoff completion is dropping",
+    insightBody: "Completion fell to 41% at three sites.",
+    source: {
+      kind: "evidence",
+      meta: { briefId: 7, insightIndex: 0 },
+      detail: { meta: { briefId: 7, insightIndex: 0 } } as never,
+    },
+  }
+
+  it("test_evidence_tab_lands_on_evidence: spawns the tab, opens the panel on Evidence, and generates NO PRD", async () => {
+    renderWith(EVIDENCE)
+    await clickOpenPrd()
+
+    await waitFor(() => expect(tabBar().getByText(EVIDENCE.title)).toBeTruthy())
+    expect(briefSection()).toBeNull()
+    await waitFor(() => expect(panelProbe()).toBe("evidence"))
+    // The whole point: evidence is not a PRD request.
+    expect(runPrdGeneration).not.toHaveBeenCalled()
+  })
+
+  it("scopes the shared content to the clicked finding, so the Evidence tab loads THAT insight", async () => {
+    renderWith(EVIDENCE)
+    await clickOpenPrd()
+
+    await waitFor(() => expect(detailProbe()).toBe("7:0"))
+  })
+
+  it("opens on its insight: the finding body rides along into the tab's opening card", async () => {
+    renderWith(EVIDENCE)
+    await clickOpenPrd()
+
+    const card = await screen.findByTestId("chat-insight-msg")
+    expect(within(card).getByText(/Completion fell to 41%/)).toBeTruthy()
+  })
+
+  it("test_evidence_tab_survives_refocus: switching away and back reopens Evidence, not a PRD that exists for the same insight", async () => {
+    // The insight HAS a PRD in the DB. That must not hijack an evidence tab —
+    // the tab was opened for the finding, and only a PRD landed IN THIS TAB
+    // outranks it.
+    mockPrototypeMap.entries = new Map([
+      [0, { insight_index: 0, prd_id: 42, prd_title: "Measurement Stack", prototype: null }],
+    ])
+    renderWith(EVIDENCE)
+    await clickOpenPrd()
+    await waitFor(() => expect(panelProbe()).toBe("evidence"))
+
+    await act(async () => { fireEvent.click(tabBar().getByText("Top Insights")) })
+    await waitFor(() => expect(panelProbe()).toBe("none"))
+
+    await act(async () => { fireEvent.click(tabBar().getByText(EVIDENCE.title)) })
+    await waitFor(() => expect(panelProbe()).toBe("evidence"))
+    expect(detailProbe()).toBe("7:0")
+    expect(runPrdGeneration).not.toHaveBeenCalled()
   })
 })
 

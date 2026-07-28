@@ -152,10 +152,15 @@ describe("ChatScreen — reopen the artifact panel from the tab strip", () => {
     await act(async () => { await Promise.resolve() })
     expect(panelProbe()).toBe("none")
 
-    // …and the way back is now in the tab strip.
+    // …and the way back is now in the tab strip. The button is icon-only — the
+    // strip is chrome, so it carries no visible label — and names itself through
+    // its accessible name / tooltip instead.
     const btn = reopenBtn()
     expect(btn).not.toBeNull()
-    expect(btn!.textContent).toContain("View PRD")
+    expect(btn!.textContent?.trim()).toBe("")
+    expect(btn!.getAttribute("aria-label")).toBe("View PRD")
+    expect(btn!.getAttribute("title")).toBe("View PRD — reopen the panel")
+    expect(btn!.querySelector("svg")).not.toBeNull()
 
     await act(async () => { fireEvent.click(btn!) })
     await waitFor(() => expect(panelProbe()).toBe("prd"))
