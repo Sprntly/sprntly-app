@@ -161,12 +161,75 @@ export function isEvidenceTabHidden(
   )
 }
 
+/**
+ * Resolve the PRD for the insight currently in the panel, streaming the draft in
+ * as it's written. Shared by the Evidence footer's "Generate PRD" button and the
+ * PRD tab's resolve-on-click, so there is ONE implementation of "get me this
+ * insight's PRD".
+ *
+ * `POST /v1/prd/generate` is find-or-create: an insight that already has a
+ * ready (or in-flight) PRD returns that row, so this is a plain load in that
+ * case and a click can never fork a duplicate document. Only a genuinely
+ * PRD-less insight is generated.
+ *
+ * The insight comes from the open finding (`detail.meta`) or, failing that, the
+ * PRD pointer already in the panel — with neither there is nothing to resolve
+ * and `meta` is null, which callers use to disable/skip.
+ */
+function useResolvePrd() {
+  const { openContentPanel, showToast } = useNavigation()
+  const { content, setContent } = useContent()
+  const meta = content.detail?.meta ?? content.prdMeta ?? null
+  const [resolving, setResolving] = useState(false)
+  // Guards a double-click on one button; `content.prdGenerating` is what keeps
+  // the two callers from starting the same run twice.
+  const busyRef = useRef(false)
+
+  const resolve = useCallback(async () => {
+    if (!meta || busyRef.current) return
+    busyRef.current = true
+    setResolving(true)
+    // Reveal the PRD tab right away — it live-renders the draft as it streams.
+    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
+    openContentPanel("prd")
+    try {
+      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
+      if (result.ok) {
+        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
+      } else {
+        setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("PRD generation failed", result.message)
+      }
+    } catch (e) {
+      setContent({ prdGenerating: false, prdPartialHtml: null })
+      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
+    } finally {
+      busyRef.current = false
+      setResolving(false)
+    }
+  }, [meta, setContent, openContentPanel, showToast])
+
+  return { meta, resolving, resolve }
+}
+
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
   const { content } = useContent()
 
   const evidenceHidden = isEvidenceTabHidden(content)
   const visibleTabs = evidenceHidden ? TABS.filter((t) => t.id !== "evidence") : TABS
+
+  // Clicking the PRD tab with no PRD in scope IS the request for one — parking on
+  // "No PRD draft loaded" makes the user hunt for a button to do the obvious next
+  // thing. So the click switches tabs AND resolves the insight's PRD: shows the
+  // existing document if there is one (find-or-create, see useResolvePrd), writes
+  // it if there isn't. Only on an actual click — a programmatic tab switch must
+  // never kick off a generation nobody asked for.
+  const { resolve: resolvePrd } = useResolvePrd()
+  const handleTabClick = useCallback((id: (typeof TABS)[number]["id"]) => {
+    openContentPanel(id)
+    if (id === "prd" && !content.prd && !content.prdGenerating) void resolvePrd()
+  }, [openContentPanel, content.prd, content.prdGenerating, resolvePrd])
 
   // If the panel is parked on Evidence but that tab just became hidden (a
   // backlog/upload PRD loaded), render the PRD tab instead of a stranded body.
@@ -256,7 +319,7 @@ export function ContentPanel() {
                   key={t.id}
                   type="button"
                   className={`cpanel-tab${activeTab === t.id ? " cpanel-tab--active" : ""}`}
-                  onClick={() => openContentPanel(t.id)}
+                  onClick={() => handleTabClick(t.id)}
                 >
                   {t.icon} {t.label}
                 </button>
@@ -294,33 +357,10 @@ export function ContentPanel() {
 // generation for the current insight, flips to the PRD tab, and lands the doc
 // there. Disabled when there's no insight meta to generate from.
 function EvidenceBottomBar() {
-  const { openContentPanel, showToast } = useNavigation()
-  const { content, setContent } = useContent()
+  const { openContentPanel } = useNavigation()
+  const { content } = useContent()
   const prd = content.prd
-  const meta = content.detail?.meta ?? content.prdMeta ?? null
-  const [generating, setGenerating] = useState(false)
-
-  const generate = useCallback(async () => {
-    if (!meta || generating) return
-    setGenerating(true)
-    // Reveal the PRD tab right away — it live-renders the draft as it streams.
-    setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
-    openContentPanel("prd")
-    try {
-      const result = await runPrdGeneration(meta, (html) => setContent({ prdPartialHtml: html }))
-      if (result.ok) {
-        setContent({ prd: result.prd, prdMeta: meta, prdGenerating: false, prdPartialHtml: null })
-      } else {
-        setContent({ prdGenerating: false, prdPartialHtml: null })
-        showToast("PRD generation failed", result.message)
-      }
-    } catch (e) {
-      setContent({ prdGenerating: false, prdPartialHtml: null })
-      showToast("PRD generation failed", (e instanceof Error ? e.message : String(e)).slice(0, 200))
-    } finally {
-      setGenerating(false)
-    }
-  }, [meta, generating, setContent, openContentPanel, showToast])
+  const { meta, resolving, resolve } = useResolvePrd()
 
   return (
     <div className="cpanel-bottom-bar">
@@ -333,10 +373,10 @@ function EvidenceBottomBar() {
           type="button"
           className="btn btn-primary btn-sm cpanel-next-btn"
           data-testid="evidence-footer-prd-cta"
-          disabled={generating || !meta}
-          onClick={generate}
+          disabled={resolving || !meta}
+          onClick={resolve}
         >
-          {generating ? "Generating PRD…" : "Generate PRD"}
+          {resolving ? "Generating PRD…" : "Generate PRD"}
         </button>
       )}
     </div>

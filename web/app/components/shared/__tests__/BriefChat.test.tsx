@@ -141,7 +141,7 @@ vi.mock("../../design-agent/useBriefPrototypeMap", () => ({
 }))
 
 import { ContentProvider, useContent } from "../../../context/ContentContext"
-import { NavigationProvider } from "../../../context/NavigationContext"
+import { NavigationProvider, useNavigation, type PrdTabRequest } from "../../../context/NavigationContext"
 import type {
   BriefV2CompactFinding,
   BriefV2HeroFinding,
@@ -784,5 +784,119 @@ describe("BriefChat finding card — PRD CTA neutral while map loads", () => {
     const card = cardFor(HERO.title)
     expect(within(card).getByRole("button", { name: "View PRD" })).toBeTruthy()
     expect(within(card).queryByRole("button", { name: "Loading…" })).toBeNull()
+  })
+})
+
+// ── "View Evidence" opens a chat tab, never a panel over Top Insights ─────────
+// Evidence used to slide the content panel in OVER the Top Insights surface,
+// while "View PRD" right beside it opened its own chat tab with the same panel
+// over that. Both cards' CTAs now take the same route: openPrdTab hands the
+// finding off, ChatScreen spawns the tab, and the panel slides in landed on
+// Evidence. These tests lock the hand-off (and its no-meta fallback).
+describe("BriefChat finding card — View Evidence opens its own chat tab", () => {
+  // openPrdTab stores the request in navigation state before routing; reading it
+  // from a probe is how we assert the hand-off itself rather than its aftermath.
+  let seenPendingPrdTab: PrdTabRequest | null = null
+  let seenPanelTab: string | null = null
+  function NavProbe() {
+    const { pendingPrdTab, contentPanelTab } = useNavigation()
+    seenPendingPrdTab = pendingPrdTab
+    seenPanelTab = contentPanelTab
+    return null
+  }
+
+  // openPrdTab scrolls the new surface to the top; jsdom has no scrollTo.
+  const scrollSpy = vi.fn()
+
+  function renderWithProbe(briefDetails?: Record<string, unknown>) {
+    window.scrollTo = scrollSpy as unknown as typeof window.scrollTo
+    function Inject() {
+      const { setContent } = useContent()
+      React.useEffect(() => {
+        setContent({
+          briefV2: BRIEF,
+          userName: "Apurva Jain",
+          briefDetails: (briefDetails ?? {
+            "something_wrong-0": { meta: { briefId: 1, insightIndex: 0 } },
+            "something_wrong-1": { meta: { briefId: 1, insightIndex: 1 } },
+          }) as never,
+        })
+      }, [setContent])
+      return null
+    }
+    return render(
+      React.createElement(
+        NavigationProvider,
+        null,
+        React.createElement(
+          ContentProvider,
+          null,
+          React.createElement(Inject),
+          React.createElement(NavProbe),
+          React.createElement(BriefChat),
+        ),
+      ),
+    )
+  }
+
+  afterEach(() => {
+    seenPendingPrdTab = null
+    seenPanelTab = null
+  })
+
+  it("test_evidence_opens_new_tab: hands the finding to openPrdTab as an `evidence` source and routes to the chat surface", async () => {
+    await act(async () => { renderWithProbe() })
+
+    await act(async () => {
+      fireEvent.click(within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" }))
+    })
+
+    expect(seenPendingPrdTab).toEqual({
+      title: `Evidence · ${HERO.title}`,
+      insightBody: HERO.body,
+      source: {
+        kind: "evidence",
+        meta: { briefId: 1, insightIndex: 0 },
+        detail: { meta: { briefId: 1, insightIndex: 0 } },
+      },
+    })
+    // Routed to the chat surface, where ChatScreen consumes the request.
+    expect(pushSpy).toHaveBeenCalledWith("/")
+  })
+
+  it("test_evidence_does_not_open_panel_in_place: the panel never opens over Top Insights itself", async () => {
+    await act(async () => { renderWithProbe() })
+
+    await act(async () => {
+      fireEvent.click(within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" }))
+    })
+
+    // The panel is opened by ChatScreen over the NEW tab — not here, which is
+    // exactly what used to bury the evidence under the brief.
+    expect(seenPanelTab).toBeNull()
+  })
+
+  it("carries the finding that was clicked, not the first one", async () => {
+    await act(async () => { renderWithProbe() })
+
+    await act(async () => {
+      fireEvent.click(within(cardFor(SUPPORTING.title)).getByRole("button", { name: "View Evidence" }))
+    })
+
+    expect(seenPendingPrdTab?.title).toBe(`Evidence · ${SUPPORTING.title}`)
+    expect(seenPendingPrdTab?.source).toMatchObject({ meta: { briefId: 1, insightIndex: 1 } })
+  })
+
+  it("falls back to opening the panel in place for a legacy finding with no insight pointer", async () => {
+    // No meta → nothing to scope a tab to. Opening the panel where we stand
+    // still shows the tab's own empty state, which beats a dead button.
+    await act(async () => { renderWithProbe({}) })
+
+    await act(async () => {
+      fireEvent.click(within(cardFor(HERO.title)).getByRole("button", { name: "View Evidence" }))
+    })
+
+    expect(seenPendingPrdTab).toBeNull()
+    expect(seenPanelTab).toBe("evidence")
   })
 })
