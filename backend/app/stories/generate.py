@@ -38,11 +38,11 @@ from app.graph.gateway import llm_call
 
 logger = logging.getLogger(__name__)
 
-PROMPT_VERSION = "user-stories-v4"
+PROMPT_VERSION = "user-stories-v5"
 # The fan-out path decomposes then enriches in parallel; version its two legs
 # distinctly so the decision log pins which method produced a given batch.
-PLAN_PROMPT_VERSION = "user-stories-plan-v2"
-ENRICH_PROMPT_VERSION = "user-stories-enrich-v2"
+PLAN_PROMPT_VERSION = "user-stories-plan-v3"
+ENRICH_PROMPT_VERSION = "user-stories-enrich-v3"
 
 # Fan-out defaults. A batch is one enrich call; batches run concurrently up to
 # max_parallel, itself bounded by the process-wide LLM concurrency gate
@@ -182,6 +182,24 @@ _SCHEMA: dict[str, Any] = {
                         "items": {"type": "string"},
                         "description": "Short labels/tags for the ticket.",
                     },
+                    # ── Story-map placement (empty for a flat/unsized set) ──
+                    "activity": {
+                        "type": "string",
+                        "description": (
+                            "The Part A §4 user activity this ticket serves "
+                            "(story-map backbone column). Empty when the sizing "
+                            "gate says tickets-only."
+                        ),
+                    },
+                    "release": {
+                        "type": "string",
+                        "description": (
+                            "Release-slice label from the SYNTHESIZED rollout "
+                            "phases (or Part B's release plan when present), "
+                            "e.g. 'Release 1 — walking skeleton'. Empty when "
+                            "the sizing gate says tickets-only."
+                        ),
+                    },
                     "data_gaps": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -227,7 +245,18 @@ _SYSTEM = (
     "ac_inherited=false.\n"
     "Every ticket is a BUILD ticket (a deliverable) — do NOT emit decision or "
     "spike tickets. Preserve [NEED] markers verbatim in data_gaps — never invent "
-    "numbers, owners, or criteria. Also mirror the user story into `body`. Return "
+    "numbers, owners, or criteria. Also mirror the user story into `body`. "
+    "STORY-MAP PLACEMENT: run the skill's sizing gate over the whole set. When "
+    "it says the map is warranted, SYNTHESIZE ordered rollout phases from the "
+    "PRD's requirements and Part B's dependency order (the PRD itself carries "
+    "no rollout section) — Release 1 is always the walking skeleton (the "
+    "minimal end-to-end path) — and stamp every ticket's `release` with its "
+    "phase label ('Release 1 — walking skeleton', 'Release 2 — <short scope "
+    "name>', …) and `activity` with the Part A §4 user activity it serves. "
+    "Phase labels name scope only — never invent dates, audiences, or exit "
+    "criteria. If a machine-readable Part B provides a release plan, use its "
+    "phases verbatim instead of synthesizing. When the gate says tickets-only, "
+    "leave `activity` and `release` empty on every ticket. Return "
     "only the structured tickets."
 )
 
@@ -274,6 +303,22 @@ _PLAN_SCHEMA: dict[str, Any] = {
                         "items": {"type": "string"},
                         "description": "Part B EARS ids this ticket traces to (e.g. ['E1']).",
                     },
+                    "activity": {
+                        "type": "string",
+                        "description": (
+                            "Part A §4 user activity this ticket serves (story-"
+                            "map backbone). Empty when the sizing gate says "
+                            "tickets-only."
+                        ),
+                    },
+                    "release": {
+                        "type": "string",
+                        "description": (
+                            "Release-slice label from the synthesized rollout "
+                            "phases (or Part B's release plan), e.g. 'Release 1 "
+                            "— walking skeleton'. Empty when tickets-only."
+                        ),
+                    },
                 },
                 "required": ["title"],
             },
@@ -291,7 +336,17 @@ _PLAN_SYSTEM = (
     "Do NOT write descriptions, acceptance criteria, scope, or subtasks yet — "
     "that happens in a later step. Be EXHAUSTIVE: every §5 requirement must be "
     "covered by at least one stub, and titles must be unique. Every ticket is a "
-    "BUILD ticket. Return only the stubs."
+    "BUILD ticket.\n"
+    "STORY-MAP PLACEMENT (decided HERE, where the whole set is visible): run "
+    "the skill's sizing gate. When the map is warranted, SYNTHESIZE ordered "
+    "rollout phases from the requirements and Part B's dependency order (the "
+    "PRD carries no rollout section) — Release 1 is always the walking "
+    "skeleton — and stamp every stub's `release` with its phase label "
+    "('Release 1 — walking skeleton', 'Release 2 — <short scope name>', …) "
+    "and `activity` with the Part A §4 user activity it serves. Phase labels "
+    "name scope only — never invent dates, audiences, or exit criteria. If "
+    "Part B provides a release plan, use its phases verbatim. When the gate "
+    "says tickets-only, leave both empty on every stub. Return only the stubs."
 )
 
 _ENRICH_SYSTEM = (
@@ -667,7 +722,18 @@ def _enrich_input(all_titles: list[str], batch: list[dict]) -> str:
         anchor = str(s.get("prd_section") or "").strip()
         ears = ", ".join(str(e) for e in (s.get("ears_ids") or []))
         summary = str(s.get("summary") or "").strip()
-        meta = " | ".join(x for x in (anchor, f"EARS: {ears}" if ears else "") if x)
+        activity = str(s.get("activity") or "").strip()
+        release = str(s.get("release") or "").strip()
+        meta = " | ".join(
+            x
+            for x in (
+                anchor,
+                f"EARS: {ears}" if ears else "",
+                f"activity: {activity}" if activity else "",
+                f"release: {release}" if release else "",
+            )
+            if x
+        )
         head = f"- {s.get('title')}"
         if summary:
             head += f" — {summary}"
@@ -750,21 +816,42 @@ def _enrich_batch(
         enterprise_id, prd_input=prd_input, all_titles=all_titles, batch=batch,
         purpose=purpose, model=model, temperature=0,
     )
-    if len(stories) >= expected:
-        return stories, result
+    if len(stories) < expected:
+        logger.warning(
+            "enrich batch returned %d/%d tickets — retrying once with a fresh sample",
+            len(stories), expected,
+        )
+        retry_stories, retry_result = _enrich_once(
+            enterprise_id, prd_input=prd_input, all_titles=all_titles, batch=batch,
+            purpose=purpose, model=model, temperature=_ENRICH_RETRY_TEMPERATURE,
+        )
+        # Keep the better attempt (more tickets); a tie keeps the first (temp-0) run.
+        if len(retry_stories) > len(stories):
+            stories, result = retry_stories, retry_result
+    return _stamp_placement_from_stubs(stories, batch), result
 
-    logger.warning(
-        "enrich batch returned %d/%d tickets — retrying once with a fresh sample",
-        len(stories), expected,
-    )
-    retry_stories, retry_result = _enrich_once(
-        enterprise_id, prd_input=prd_input, all_titles=all_titles, batch=batch,
-        purpose=purpose, model=model, temperature=_ENRICH_RETRY_TEMPERATURE,
-    )
-    # Keep the better attempt (more tickets); a tie keeps the first (temp-0) run.
-    if len(retry_stories) > len(stories):
-        return retry_stories, retry_result
-    return stories, result
+
+def _stamp_placement_from_stubs(stories: list[Story], stubs: list[dict]) -> list[Story]:
+    """Carry story-map placement (`activity`/`release`) from the plan stubs onto
+    the enriched tickets, matched by title.
+
+    The PLAN leg decides placement — it's the only call that sees the whole
+    ticket set, so its release slices are globally coherent. Enrich batches see
+    a few stubs each; trusting the enrich model to re-emit the placement risks
+    per-batch drift (one batch inventing 'Release 2' labels another batch
+    didn't). Stamping from the stub in code makes the plan authoritative. A
+    ticket whose title the model rewrote away from its stub keeps whatever the
+    enrich call emitted (additive fields — never fabricated in code)."""
+    by_title = {
+        str(s.get("title") or "").strip().casefold(): s for s in stubs
+    }
+    for story in stories:
+        stub = by_title.get(story.title.strip().casefold())
+        if stub is None:
+            continue
+        story.activity = str(stub.get("activity") or "").strip()
+        story.release = str(stub.get("release") or "").strip()
+    return stories
 
 
 def _generate_fanout(
