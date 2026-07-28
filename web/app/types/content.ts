@@ -152,10 +152,10 @@ export const DEFAULT_ONDEMAND_STARTERS: ChatHomeCard[] = [
     id: "od-default-prd",
     icon: "document",
     title: "PRD for team folders",
-    desc: "Draft scope, rollout, and open questions.",
+    desc: "Draft scope, risks, and open questions.",
     target: "ondemand",
     prompt:
-      "Draft a PRD for team folder permissions: problem, users, requirements, rollout plan, metrics, and open questions for eng and design.",
+      "Draft a PRD for team folder permissions: problem, users, requirements, risks, and the input needed from eng and design.",
   },
   {
     id: "od-default-retention",
