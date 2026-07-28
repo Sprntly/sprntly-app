@@ -27,13 +27,17 @@ Medium. Worst failure: reminding a client who already paid (relationship damage)
 ## B6. Cross-cutting checklist
 - [ ] Auth/tenancy on reminder data · [ ] Privacy: client emails not exposed cross-tenant · [ ] Telemetry: send/stop/bounce events · [ ] i18n on templates · [ ] Accessibility of status indicators · [ ] Error states: send failure retries then flags · [ ] Performance: schedule scan is a background job.
 
-## B7. Tasks (dependency-ordered; [P] = parallel-safe)
+## B7. Tasks (dependency-ordered; [P] = parallel-safe) & release plan
 - T0 — Research gate: verify payment events, email webhooks, invoice schema.
 - T1 — Reminder schedule model + scheduler job.
 - T2 [P] — Tone templates + setup flow.
 - T3 — Payment-halt listener (B-R3).
 - T4 [P] — Bounce/opt-out handling (B-R4).
 - T5 — Invoice-list status column (B-R5).
+
+**Release plan:**
+- Release 1 — walking skeleton: T0, T1, T3 (schedule → send → halt on payment).
+- Release 2 — tone + hygiene: T2, T4, T5.
 
 ## B8. Acceptance tests & Definition of Done (merged)
 | Req | Given | When | Then (expected) |

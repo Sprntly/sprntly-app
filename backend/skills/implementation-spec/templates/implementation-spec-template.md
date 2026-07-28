@@ -20,9 +20,13 @@ Derived ONLY from Part A: "{{Part A title}}" · Author: {{Part A byline}}. Every
 ## B6. Cross-cutting checklist
 - [ ] Auth · [ ] Privacy · [ ] Telemetry · [ ] i18n · [ ] Accessibility · [ ] Error states · [ ] Performance budget
 
-## B7. Tasks (dependency-ordered; [P] = parallel-safe)
+## B7. Tasks (dependency-ordered; [P] = parallel-safe) & release plan
 - T0 — Research gate: verify all [ASSUMPTION → T0] items before implementation.
 - T1 … Tn
+
+**Release plan** *(scope-only labels — no dates, audiences, or exit criteria; state `Single release` when slicing isn't warranted)*:
+- Release 1 — walking skeleton: {{task IDs — the minimal end-to-end path}}
+- Release 2 — {{short scope name}}: {{task IDs}}
 
 ## B8. Acceptance tests & Definition of Done (merged)
 *Tests derived from B3 BEFORE implementation — the agent implements to pass tests it did not author.*

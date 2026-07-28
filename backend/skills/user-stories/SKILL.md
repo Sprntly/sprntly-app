@@ -25,6 +25,7 @@ exactly. The mapping is fixed:
 | Part B · EARS requirements (traced to Part A IDs) | The trace spine: `ticket → Part A §5 R# → Part B EARS E# → spec-first tests → PRD goal` on every build ticket |
 | Part B · Spec-first tests (success + failure branches) | **Acceptance criteria, inherited verbatim** — never rewritten. Failure branches render as `[failure]`-tagged criteria. AC count is shown on the ticket card (`5 AC`) |
 | Part B · Tasks (dependency-ordered, `[P]`) | Ticket dependency order; `[P]` marks parallel-safe tickets; agent-shaped tasks are regrouped into vertically-sliced user-valued tickets and attached as subtasks |
+| Part B · Release plan (B7) | **Story-map release slices, inherited verbatim** — each ticket's `release` label comes from the phase shipping its task; only a Part B without one (or no Part B) triggers phase synthesis |
 | Part B · Stakes gate | Routing: `agent-ready → Claude Code` (reversible, fully specified) vs `needs-human` (stakes-gated or escalation-blocked) |
 | Part B · `[ESCALATE]` items | **Decision tickets** — the decision, an owner, decide-by, and the build tickets each blocks |
 | Part B · `[ASSUMPTION → T0]` contracts | A **spike ticket (T-0)**, timeboxed, whose exit condition is the contract's validation; result writes back to Part B |
