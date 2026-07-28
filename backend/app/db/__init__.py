@@ -103,6 +103,15 @@ from app.db.datasets import (
     list_datasets,
 )
 
+# Custom skills (workspace-scoped, user-uploaded — PRD 1854)
+from app.db.custom_skills import (
+    DuplicateSkillSlug,
+    get_custom_skill,
+    get_custom_skill_by_id,
+    insert_custom_skill,
+    list_custom_skills,
+)
+
 # Connections (OAuth)
 from app.db.connections import (
     delete_connection,
@@ -234,6 +243,12 @@ __all__ = [
     "insert_dataset",
     "list_dataset_slugs",
     "list_datasets",
+    # custom skills
+    "DuplicateSkillSlug",
+    "get_custom_skill",
+    "get_custom_skill_by_id",
+    "insert_custom_skill",
+    "list_custom_skills",
     # input sources
     "delete_input_source",
     "list_input_sources",
