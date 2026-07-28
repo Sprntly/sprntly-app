@@ -621,3 +621,21 @@ def test_query_mode_falls_back_to_report_on_failure(monkeypatch):
     out = cd.answer(enterprise_id="ent-A",
                     question="how many customers raised billing issues")
     assert rendered.get("called") or out.get("answer")  # report path reached
+
+
+def test_apurva_acceptance_phrases_mode_selection():
+    """The two acceptance phrases (Apurva, 2026-07-28): the summary ask
+    produces the REPORT; the number-1-complaint ask gets the pointed QUERY
+    answer — both on the VoC surface."""
+    from app.call_digest import is_voc_query
+    from app.skill_router import is_voc_report_request
+
+    summary_ask = "give me the summary of customer feedback from today"
+    complaint_ask = "what is the number 1 user complaint from todays customer conversation"
+
+    # Both reach the VoC surface without the LLM router.
+    assert is_voc_report_request(summary_ask)
+    assert is_voc_report_request(complaint_ask)
+    # Mode: summary → report artifact; pointed superlative → query answer.
+    assert not is_voc_query(summary_ask)
+    assert is_voc_query(complaint_ask)
