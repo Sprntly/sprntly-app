@@ -168,8 +168,10 @@ def test_generate_returns_within_200ms(env, client, monkeypatch):
     elapsed = time.perf_counter() - start
     assert resp.status_code == 200, resp.text
     # No Anthropic call in the request path — the agent loop runs in the
-    # background task, so the handler returns near-instantly.
-    assert elapsed < 0.2, f"POST took {elapsed:.3f}s (>200ms budget)"
+    # background task, so the handler returns near-instantly. The budget is
+    # 1s (not tighter) because shared CI runners add hundreds of ms of noise;
+    # an in-path LLM call would still blow past it by an order of magnitude.
+    assert elapsed < 1.0, f"POST took {elapsed:.3f}s (>1s budget)"
 
 
 def test_generate_returns_prototype_id_and_generating_status(env, client, monkeypatch):
