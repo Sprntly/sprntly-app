@@ -32,6 +32,36 @@ from app.db.client import require_client, retry_on_disconnect
 _LIST_CAP = 200
 
 
+def _prd_family_key(row: dict) -> tuple:
+    """Identity of the LOGICAL PRD a row belongs to (its regeneration family).
+
+    Every regeneration is a NEW prds row and this listing keeps only the newest
+    row per family, so the key has to match how each generation path actually
+    establishes identity (mirrors db/prds.list_prd_generations):
+
+      - chat / ideation PRDs have no brief insight: they anchor to the company's
+        brief with insight_index 0 as a STORAGE SENTINEL and are keyed by
+        `theme_id` ('chat:<hash>' from routes/prd._chat_task_theme_id, or the KG
+        theme). Keying them on insight_index collapsed every chat PRD under one
+        brief into a single entry — only the newest survived, and it shadowed
+        the brief's own insight-0 PRD too.
+      - uploaded PRDs have neither an insight nor a theme: they share the
+        per-company uploads-anchor brief at the same sentinel index, and each
+        import is its own document (there is no regenerate-in-place path for
+        them), so the row IS its own family.
+      - brief-insight PRDs keep (brief_id, insight_index) — theme_id is NULL and
+        `source` is 'brief', so they fall through unchanged.
+
+    A legacy row with a NULL `source` also falls through to the insight branch,
+    i.e. the historical behaviour.
+    """
+    if row.get("theme_id"):
+        return (row["brief_id"], "theme", row["theme_id"])
+    if row.get("source") == "upload":
+        return (row["brief_id"], "upload", row["id"])
+    return (row["brief_id"], "insight", row.get("insight_index"))
+
+
 @retry_on_disconnect
 def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
     """Unified, recency-sorted artifact list for one company.
@@ -65,19 +95,23 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
         # ── PRDs (brief_id IN brief_ids) ────────────────────────────────────
         prd_rows = (
             c.table("prds")
-            .select("id, brief_id, insight_index, title, status, generated_at")
+            .select(
+                "id, brief_id, insight_index, theme_id, source, "
+                "title, status, generated_at"
+            )
             .in_("brief_id", brief_ids)
             .execute()
             .data
             or []
         )
-        # A PRD is regenerated in place: each attempt is a new prds row sharing
-        # the same (brief_id, insight_index). The artifacts list shows only the
-        # LATEST generation per logical PRD; older generations are reachable from
-        # the PRD's Version History (see routes/prd.py /{prd_id}/generations).
+        # A PRD is regenerated in place: each attempt is a new prds row in the
+        # same family. The artifacts list shows only the LATEST generation per
+        # logical PRD; older generations are reachable from the PRD's Version
+        # History (see routes/prd.py /{prd_id}/generations). What counts as a
+        # family is per-source — see _prd_family_key.
         latest_by_key: dict[tuple, dict] = {}
         for r in prd_rows:
-            key = (r["brief_id"], r.get("insight_index"))
+            key = _prd_family_key(r)
             cur = latest_by_key.get(key)
             if cur is None or (r.get("generated_at") or "") > (cur.get("generated_at") or ""):
                 latest_by_key[key] = r

@@ -3,6 +3,9 @@
 Covers:
   - tenant scoping (caller sees only their own dataset; 404 on an unowned slug)
   - unified shape across all three artifact types (prd / prototype / evidence)
+  - per-source PRD dedupe: only the newest row per regeneration FAMILY lists,
+    where a family is theme_id (chat/ideation), the row itself (upload), or
+    insight_index (brief) — see db/artifacts._prd_family_key
   - recency sort (newest first)
   - prototype title derived from the parent PRD
   - empty result for a company with no artifacts
@@ -76,13 +79,20 @@ def _seed_brief(*, dataset: str, week_label: str) -> int:
 
 
 def _seed_prd(*, brief_id: int, title: str, insight_index: int = 0,
-              status: str = "ready", generated_at: str | None = None) -> int:
+              status: str = "ready", generated_at: str | None = None,
+              theme_id: str | None = None, source: str = "brief") -> int:
+    """Seed a prds row. `theme_id`/`source` mirror the real generation paths:
+    brief PRDs are (source='brief', theme_id=None) with a real insight_index;
+    chat/ideation PRDs carry a theme_id at the sentinel insight_index 0; uploads
+    are (source='upload', theme_id=None) on the uploads-anchor brief."""
     from app.db.client import require_client
     row = {
         "brief_id": brief_id,
         "insight_index": insight_index,
         "title": title,
         "status": status,
+        "source": source,
+        "theme_id": theme_id,
     }
     if generated_at is not None:
         row["generated_at"] = generated_at
@@ -199,6 +209,72 @@ def test_prd_list_dedups_to_latest_generation(artifacts_env, monkeypatch):
     kg = [a for a in prds if a["title"] == "KG Timeout PRD"]
     assert len(kg) == 1
     assert kg[0]["id"] == latest  # the newest generation wins
+
+
+def test_chat_prds_sharing_the_sentinel_insight_all_list(artifacts_env, monkeypatch):
+    # Chat/ideation PRDs have no brief insight: they anchor to the company's
+    # brief at insight_index 0 as a STORAGE SENTINEL and are identified by
+    # theme_id. Keying the dedupe on insight_index alone collapsed them all into
+    # one row, so every chat PRD but the newest silently vanished from the tab
+    # (and it shadowed the brief's own insight-0 PRD too).
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 30")
+    brief_prd = _seed_prd(brief_id=brief_id, title="Bulk onboarding is failing",
+                          insight_index=0, generated_at="2026-07-28T15:56:55+00:00")
+    chat_a = _seed_prd(brief_id=brief_id, title="Custom Skills", insight_index=0,
+                       theme_id="chat:c532ebe2365bc3c3", source="chat",
+                       generated_at="2026-07-28T16:18:18+00:00")
+    chat_b = _seed_prd(brief_id=brief_id, title="Invitation link expiry",
+                       insight_index=0, theme_id="chat:9c02be013e9e027a",
+                       source="chat", generated_at="2026-07-28T16:27:59+00:00")
+    chat_c = _seed_prd(brief_id=brief_id, title="Navbar update", insight_index=0,
+                       theme_id="chat:d781353f58d9bbfd", source="chat",
+                       generated_at="2026-07-28T16:35:42+00:00")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    assert r.status_code == 200
+    prds = [a for a in r.json()["artifacts"] if a["type"] == "prd"]
+    # Four distinct logical PRDs — three themes plus the brief insight.
+    assert {a["id"] for a in prds} == {brief_prd, chat_a, chat_b, chat_c}
+    # Newest first, and each opens by its OWN prd_id.
+    assert [a["id"] for a in prds] == [chat_c, chat_b, chat_a, brief_prd]
+    assert next(a for a in prds if a["id"] == chat_a)["open"]["prd_id"] == chat_a
+
+
+def test_chat_prd_regenerations_collapse_to_newest(artifacts_env, monkeypatch):
+    # Re-issuing the same chat ask reuses its theme_id (find-or-create), so those
+    # rows ARE one family and must still collapse to the newest generation.
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 30")
+    theme = "chat:c532ebe2365bc3c3"
+    _seed_prd(brief_id=brief_id, title="Custom Skills", insight_index=0,
+              theme_id=theme, source="chat", generated_at="2026-07-28T16:18:18+00:00")
+    _seed_prd(brief_id=brief_id, title="Custom Skills", insight_index=0,
+              theme_id=theme, source="chat", generated_at="2026-07-28T17:02:00+00:00")
+    latest = _seed_prd(brief_id=brief_id, title="Custom Skills", insight_index=0,
+                       theme_id=theme, source="chat",
+                       generated_at="2026-07-28T18:40:00+00:00")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    prds = [a for a in r.json()["artifacts"] if a["type"] == "prd"]
+    assert len(prds) == 1
+    assert prds[0]["id"] == latest
+
+
+def test_uploaded_prds_each_list_on_the_shared_anchor_brief(artifacts_env, monkeypatch):
+    # Uploads have no insight AND no theme: every import for a company lands on
+    # the SAME uploads-anchor brief at the sentinel index, so each row has to be
+    # its own family or only the newest upload would ever be listed.
+    ctx = _client(monkeypatch)
+    anchor = _seed_brief(dataset="acme", week_label="Uploaded PRDs")
+    first = _seed_prd(brief_id=anchor, title="Q3 Roadmap.pdf", insight_index=0,
+                      source="upload", generated_at="2026-07-20T09:00:00+00:00")
+    second = _seed_prd(brief_id=anchor, title="Payments Spec.docx", insight_index=0,
+                       source="upload", generated_at="2026-07-21T09:00:00+00:00")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    prds = [a for a in r.json()["artifacts"] if a["type"] == "prd"]
+    assert {a["id"] for a in prds} == {first, second}
 
 
 def test_unified_shape_all_three_types(artifacts_env, monkeypatch):
