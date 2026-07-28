@@ -362,10 +362,46 @@ def _rec(i: int, r: dict) -> str:
     )
 
 
+def _as_dict(value, text_key: str) -> dict:
+    """Coerce a possibly-mis-shaped extraction value to a dict. The model
+    occasionally emits a plain string where the template expects an object
+    (observed on a tiny single-document corpus: `tldr` came back as prose,
+    crashing render with 'str' has no attribute 'get'). A string becomes
+    {text_key: string}; anything else non-dict becomes {} — the template
+    renders blanks, never crashes."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        return {text_key: value}
+    return {}
+
+
+def _dict_items(values, text_key: str) -> list[dict]:
+    """Same coercion for list fields (glance/themes/recommendations/findings):
+    keep dicts, wrap bare strings, drop the rest."""
+    out: list[dict] = []
+    for v in values or []:
+        d = _as_dict(v, text_key)
+        if d:
+            out.append(d)
+    return out
+
+
 def render_html(data: dict) -> str:
     """Populate the pinned VoC v3 template from the model's report data. Returns
     a self-contained HTML document. The h1 is the literal skill-mandated title;
-    the radar is computed from the non-minor glance rows."""
+    the radar is computed from the non-minor glance rows.
+
+    Shape-tolerant: dict-shaped fields are coerced via _as_dict/_dict_items so
+    a mis-shaped extraction degrades to blanks instead of a crash."""
+    data = dict(data or {})
+    data["run_line"] = _as_dict(data.get("run_line"), "scope")
+    data["tldr"] = _as_dict(data.get("tldr"), "intro")
+    data["glance"] = _dict_items(data.get("glance"), "problem")
+    data["themes"] = _dict_items(data.get("themes"), "title")
+    data["recommendations"] = _dict_items(data.get("recommendations"), "title")
+    tldr_d = data["tldr"]
+    tldr_d["findings"] = _dict_items(tldr_d.get("findings"), "text")
     rl = data.get("run_line") or {}
     period_note = (
         f" <span>· {_e(data.get('period_note'))}</span>" if data.get("period_note") else ""
