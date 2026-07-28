@@ -244,3 +244,31 @@ def test_build_raises_on_non_dict_output(monkeypatch):
     with pytest.raises(ValueError):
         vr.build(enterprise_id="co", question="q", corpus_text="c",
                  source_line="s", model="m")
+
+
+def test_render_html_tolerates_mis_shaped_extraction():
+    """Observed on staging (2026-07-28, single tiny document in the window):
+    the model emitted `tldr` as prose and list fields as bare strings —
+    render crashed with 'str' has no attribute 'get'. Mis-shaped fields must
+    degrade to blanks/wrapped values, never a crash."""
+    from app.voc_report import render_html
+
+    html = render_html({
+        "period": "today (Jul 28)",
+        "tldr": "One account reported export failures.",
+        "run_line": "today only",
+        "glance": ["Exports failing", {"problem": "Slow dashboard"}],
+        "themes": ["Exports"],
+        "recommendations": ["Fix the export timeout"],
+    })
+    assert "Voice of Customer Report" in html
+    assert "One account reported export failures." in html
+    assert "Slow dashboard" in html
+    assert "Fix the export timeout" in html
+
+
+def test_render_html_all_fields_missing_still_renders():
+    from app.voc_report import render_html
+
+    html = render_html({})
+    assert "Voice of Customer Report" in html
