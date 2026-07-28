@@ -509,3 +509,115 @@ def test_staging_scenario_top_customer_feedback_over_category_upload(
     assert p["answer"].startswith("<!DOCTYPE html>")
     assert "latency complaint; mobile access ask" in captured["corpus_text"]
     assert "UPLOADED VOICE DOCUMENTS" in captured["source_line"]
+
+
+# ── Query mode: pointed questions answered FROM the corpus ───────────────────
+# "did complaints about exports increase this week" wants a computed answer
+# over the dated records, not the report artifact (Apurva, 2026-07-28).
+
+def test_is_voc_query_shapes():
+    from app.call_digest import is_voc_query
+
+    positives = [
+        "did complaints about exports increase this week",
+        "how many customers raised billing issues this month",
+        "which accounts complained about latency",
+        "who reported the export bug",
+        "what did Cascade Health say about the dashboard",
+        "show me quotes about onboarding",
+        "are export complaints getting worse compared to last week",
+    ]
+    # Report-shaped language ALWAYS wins — the artifact stays one ask away.
+    negatives = [
+        "give me the summary of customer feedback from today",
+        "summarize the customer calls from last week",
+        "voice of customer report for last month",
+        "what are the themes from this week's calls",
+        "recap yesterday's customer meetings",
+    ]
+    for q in positives:
+        assert is_voc_query(q), f"query mode missed: {q!r}"
+    for q in negatives:
+        assert not is_voc_query(q), f"report ask misdetected as query: {q!r}"
+
+
+def test_comparative_query_doubles_window_and_sets_boundary(monkeypatch):
+    """Trend questions fetch the prior period too, and record the boundary so
+    the answer can bucket records into asked-vs-prior by date."""
+    from app import call_digest as cd
+
+    captured = {}
+
+    def _fake_build(company_id, window):
+        captured["window"] = window
+        return cd.DigestCorpus(status="ok", window=window, text="=== CALLS ===")
+
+    def _fake_query(**kw):
+        captured["boundary"] = kw["compare_boundary"]
+        return {"answer": "counts", "_skill_source": "voc-query"}
+
+    monkeypatch.setattr(cd, "build_corpus", _fake_build)
+    monkeypatch.setattr(cd, "_answer_query", _fake_query)
+
+    from app.call_digest import parse_window
+
+    out = cd.answer(enterprise_id="ent-A",
+                    question="did complaints about exports increase this week?")
+    assert out["_skill_source"] == "voc-query"
+    w = captured["window"]
+    original = parse_window("did complaints about exports increase this week?")
+    # The fetch reaches back at least one full week before the asked period
+    # (a week-to-date window may span only a day — the prior period must
+    # still cover a real week, not last weekend).
+    assert (original.since - w.since).days >= 7
+    # `until` is "now" in both parses — allow the sub-second skew between calls.
+    assert abs((w.until - original.until).total_seconds()) < 5
+    # The boundary marks where the asked period begins.
+    assert captured["boundary"] == original.since.date().isoformat()
+
+
+def test_non_comparative_query_keeps_window(monkeypatch):
+    from app import call_digest as cd
+
+    captured = {}
+
+    def _fake_build(company_id, window):
+        captured["window"] = window
+        return cd.DigestCorpus(status="ok", window=window, text="=== CALLS ===")
+
+    monkeypatch.setattr(cd, "build_corpus", _fake_build)
+    monkeypatch.setattr(cd, "_answer_query",
+                        lambda **kw: {"answer": "a", "_skill_source": "voc-query"})
+
+    cd.answer(enterprise_id="ent-A",
+              question="which accounts complained about latency")
+    w = captured["window"]
+    assert (w.until - w.since).days <= 8  # default 7-day window, not doubled
+
+
+def test_query_mode_falls_back_to_report_on_failure(monkeypatch):
+    """A query-mode LLM failure degrades to the report path, never a dead end."""
+    from app import call_digest as cd
+
+    def _fake_build(company_id, window):
+        return cd.DigestCorpus(status="ok", window=window, text="=== CALLS ===")
+
+    def _boom(**kw):
+        raise RuntimeError("llm down")
+
+    rendered = {}
+
+    class _FakeVoc:
+        @staticmethod
+        def build(**kw):
+            rendered["called"] = True
+            return "<html>report</html>"
+
+    monkeypatch.setattr(cd, "build_corpus", _fake_build)
+    monkeypatch.setattr(cd, "_answer_query", _boom)
+    import sys
+    monkeypatch.setitem(sys.modules, "app.voc_report", _FakeVoc)
+
+    out = cd.answer(enterprise_id="ent-A",
+                    question="how many customers raised billing issues")
+    assert rendered.get("called") or out.get("answer")  # report path reached
