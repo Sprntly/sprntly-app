@@ -214,10 +214,10 @@ export function Sidebar(_props: SidebarProps = {}) {
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
         <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Ideation" />
         {/* <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates" /> */}
-        {/* Skills and Sources are both hidden from the rail (keep
-            functionality) — their screens, routes (/skills, /sources) and
-            backends remain intact and reachable; uncomment to restore. */}
-        {/* <RailItem screen="skills" icon={<IconWand size={18} />} label="Skills" /> */}
+        {/* Skills is back on the rail with Custom Skills (PRD 1854) — the
+            library is now a real user surface (upload + invoke), not just a
+            catalog. Sources stays hidden (screen/route/backends intact). */}
+        <RailItem screen="skills" icon={<IconWand size={18} />} label="Skills" />
         {/* <RailItem screen="sources" icon={<IconSources />} label="Sources" /> */}
         {/* <RailItem screen="prototype" icon={<IconPrompt size={18} />} label="Prototype" /> */}
         {/* <RailItem screen="tickets" icon={<IconLayoutKanban size={18} />} label="Project Management" /> */}

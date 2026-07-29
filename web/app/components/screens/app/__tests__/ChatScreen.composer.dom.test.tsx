@@ -55,7 +55,22 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
-    askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
+    askApi: {
+      ask: vi.fn(),
+      skills: vi.fn().mockResolvedValue({
+        skills: [
+          { id: "prioritize", label: "Prioritize", trigger: "/prioritize", description: "Rank ideas", category: "Prioritization & Decision" },
+        ],
+      }),
+    },
+    // Custom skills (PRD 1854) — merged into the slash palette, listed first.
+    skillsApi: {
+      list: vi.fn().mockResolvedValue({
+        skills: [
+          { id: "c1", slug: "my-estimator", trigger: "/my-estimator", name: "My Estimator", description: "Scores features", uploader_name: "Fortune", created_at: null, has_file: true },
+        ],
+      }),
+    },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
     conversationsApi: { create: vi.fn(), addTurn: vi.fn() },
   }
@@ -198,6 +213,32 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     const attach = screen.getByLabelText("Attach file")
     expect(attach.tagName).toBe("BUTTON")
     expect(attach.textContent).toMatch(/Attach/i)
+  })
+
+  // Custom skills (PRD 1854): typing "/" opens the slash palette with the
+  // company's uploaded skills listed FIRST, ahead of the built-in catalog,
+  // and filtering by slug narrows to them.
+  it("lists custom skills first in the slash palette and filters by slug", async () => {
+    searchString = "new=1"
+    renderScreen()
+    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "/" } })
+    })
+    const palette = await screen.findByRole("listbox", { name: "Skills" })
+    const rows = within(palette).getAllByRole("option")
+    expect(rows[0].textContent).toContain("/my-estimator")
+    expect(rows[0].textContent).toContain("My Estimator")
+    expect(palette.textContent).toContain("/prioritize")
+
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "/my-est" } })
+    })
+    const narrowed = within(screen.getByRole("listbox", { name: "Skills" })).getAllByRole("option")
+    expect(narrowed).toHaveLength(1)
+    expect(narrowed[0].textContent).toContain("/my-estimator")
   })
 
   // A1: firing a change on the landing file input adds the attachment, and the

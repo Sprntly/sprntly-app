@@ -27,7 +27,7 @@ import { ChatSuggestionIcon, IconDocument, IconSendUp, IconSparkle, IconStop } f
 // its own — the same one ContentPanel's Evidence tab wears, so the button reads
 // as "reopen that tab".
 import { IconMicroscope } from "@tabler/icons-react"
-import { ApiError, askApi, attachmentsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
+import { ApiError, askApi, attachmentsApi, skillsApi, storiesApi, type AskResponse, type SkillInfo } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet, runTabAsk } from "../../../lib/chatAskState"
 import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, loadPrdById } from "../../../lib/runPrdGeneration"
@@ -1011,6 +1011,9 @@ export function ChatScreen() {
   const busy = isComposerBusy(busyTabs, activeTabId)
   const [showSlash, setShowSlash] = useState(false)
   const [skills, setSkills] = useState<SkillInfo[]>([])
+  // The company's custom skills (PRD 1854), kept separate from built-ins so
+  // the two fetches can't race each other's setState; merged for the palette.
+  const [customSkills, setCustomSkills] = useState<SkillInfo[]>([])
   const [slashFilter, setSlashFilter] = useState("")
   // Highlighted row in the slash palette (↑/↓ navigation, Enter selects).
   const [slashActive, setSlashActive] = useState(0)
@@ -1165,6 +1168,24 @@ export function ChatScreen() {
         { id: "fact-check", label: "Fact-check", trigger: "/factcheck", description: "Verify claims against sources", category: "Verification" },
       ])
     })
+    // Custom skills join the same palette (mapped into the SkillInfo shape,
+    // category "Custom"). Optional-chained so suites that mock lib/api without
+    // skillsApi keep working; a fetch failure just leaves built-ins only —
+    // the palette must never blank because this list couldn't load.
+    Promise.resolve(skillsApi?.list?.())
+      .then((r) => {
+        if (!r) return
+        setCustomSkills(
+          r.skills.map((s) => ({
+            id: `custom-${s.id}`,
+            label: s.name,
+            trigger: s.trigger,
+            description: s.description,
+            category: "Custom",
+          })),
+        )
+      })
+      .catch(() => {})
   }, [])
 
   // Create a new tab or, if a tab with the same title already exists, switch to it
@@ -3654,13 +3675,14 @@ export function ChatScreen() {
 
   const filteredSkills = useMemo(
     () =>
-      skills.filter((s) =>
+      // Custom skills first — the user's own workflows outrank the catalog.
+      [...customSkills, ...skills].filter((s) =>
         slashFilter === "" ||
         s.trigger.toLowerCase().includes("/" + slashFilter) ||
         s.label.toLowerCase().includes(slashFilter) ||
         s.description.toLowerCase().includes(slashFilter),
       ),
-    [skills, slashFilter],
+    [customSkills, skills, slashFilter],
   )
   const slashOpen = showSlash && filteredSkills.length > 0
   // Keep the highlight in range as the filtered list shrinks/grows.

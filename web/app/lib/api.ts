@@ -584,6 +584,41 @@ export const askApi = {
   },
 }
 
+/** A user-uploaded custom skill (PRD 1854) — COMPANY-scoped: every workspace
+ *  in the company shares one library. Distinct from SkillInfo (the built-in
+ *  routable manifest): custom skills carry uploader attribution and no
+ *  category. `trigger` invokes exactly like a built-in's. */
+export type CustomSkillInfo = {
+  id: string
+  slug: string
+  trigger: string
+  name: string
+  description: string
+  uploader_name: string
+  created_at: string | null
+  has_file: boolean
+}
+
+export const skillsApi = {
+  /** The company's custom skills, newest first (metadata only). */
+  list: () => api.get<{ skills: CustomSkillInfo[] }>("/v1/skills"),
+  /** Upload a .md/.zip skill file (≤ 20 MB) with its name + description.
+   *  Server is the authoritative validator (422/400/413/409 with readable
+   *  `detail`); the modal mirrors the cheap checks client-side. */
+  upload: (file: File, name: string, description: string) => {
+    const form = new FormData()
+    form.append("file", file, file.name)
+    form.append("name", name)
+    form.append("description", description)
+    return api.post<CustomSkillInfo>("/v1/skills", form)
+  },
+  /** Fresh signed view/download URLs for the ORIGINAL uploaded file. */
+  fileLinks: (id: string) =>
+    api.get<{ name: string; view_url: string; download_url: string }>(
+      `/v1/skills/${encodeURIComponent(id)}/file`,
+    ),
+}
+
 /** The action envelope from POST /v1/chat/intent — the backend's history-aware
  *  verdict on what ONE chat message asks for. Shaped like a one-iteration
  *  tool-use turn: `intent` names the executor, the other fields are its

@@ -172,8 +172,21 @@ def _render_history(history: Optional[list[dict]]) -> str:
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 
 
-def _routable(skill_id: str) -> bool:
-    return skill_id in set(list_skills()) and skill_id not in NON_ROUTABLE
+def _routable(skill_id: str, enterprise_id: Optional[str] = None) -> bool:
+    """Can this id be invoked? Built-ins: vendored and not NON_ROUTABLE.
+    With an enterprise_id, the company's CUSTOM skills (PRD 1854) also count —
+    a fresh DB check, so a just-uploaded skill works and a just-deleted one
+    stops immediately. Custom skills reach here only via the slash fast-path
+    and pinned_skill; the regex rules and the LLM router menu stay built-in
+    only (the memoized menu is process-global — per-company entries there
+    would leak names across tenants)."""
+    if skill_id in set(list_skills()):
+        return skill_id not in NON_ROUTABLE
+    if enterprise_id:
+        from app.skills.resolver import has_custom_skill
+
+        return has_custom_skill(enterprise_id, skill_id)
+    return False
 
 
 def route(
@@ -186,10 +199,11 @@ def route(
     the LLM router; otherwise classify with haiku over the routable menu."""
     q = question.strip()
 
-    # 1) Explicit slash command: "/prioritize rank these"
+    # 1) Explicit slash command: "/prioritize rank these" — the one routing
+    # stage that also matches the company's custom skills.
     if q.startswith("/"):
         token = q[1:].split(None, 1)[0].lower()
-        if _routable(token):
+        if _routable(token, enterprise_id):
             return RouteDecision(token, 1.0, "slash", token)
 
     # 2) Regex fast-path (cheap, no LLM) — only for routable skills.
@@ -284,6 +298,14 @@ def _answer_single_shot(
     PRD-tab chat, on the open PRD alone (`prd_context` rides the cacheable
     prefix and the KG retrieval is skipped)."""
     model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
+    # Custom skill (PRD 1854): not a vendored dir, so the gateway can't load it
+    # by id — resolve the DB-backed spec here and hand it over. Built-ins pass
+    # spec=None and the gateway loads from disk exactly as before.
+    skill_spec = None
+    if decision.skill_id and decision.skill_id not in set(list_skills()):
+        from app.skills.resolver import custom_skill_spec
+
+        skill_spec = custom_skill_spec(enterprise_id, decision.skill_id)
     if prd_context:
         # PRD-grounded ask: the PRD context block (~26K tokens) IS the
         # grounding — skip the KG retrieval (embeddings HTTP call + pgvector
@@ -314,6 +336,7 @@ def _answer_single_shot(
         prompt_version="qa-skill-v1",
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=decision.skill_id,
+        skill_spec=skill_spec,
         max_tokens=12000,
         # Structured-call streaming: on_delta receives partial-JSON fragments
         # of the tool input; the Ask worker's extractor turns them into text.
@@ -530,7 +553,7 @@ def answer(
             enterprise_id=enterprise_id, question=question, history=history
         )
 
-    if pinned_skill and _routable(pinned_skill):
+    if pinned_skill and _routable(pinned_skill, enterprise_id):
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)
     else:
         decision = route(question, enterprise_id=enterprise_id, history=history)
