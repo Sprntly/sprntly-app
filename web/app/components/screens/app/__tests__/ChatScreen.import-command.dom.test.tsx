@@ -40,6 +40,7 @@ vi.mock("../../../../lib/api", () => {
   }
   return {
     ApiError,
+    skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: {
       ask: vi.fn(),
       skills: vi.fn().mockResolvedValue({ skills: [] }),

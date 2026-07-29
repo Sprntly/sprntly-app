@@ -33,6 +33,7 @@ vi.mock("../../../../lib/api", () => {
   class ApiError extends Error { status = 0; body: unknown = null }
   return {
     ApiError,
+    skillsApi: { list: vi.fn().mockResolvedValue({ skills: [] }) },
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
     conversationsApi: {
