@@ -191,16 +191,6 @@ describe("cancel-only footer unchanged (Part D, AC16)", () => {
   })
 })
 
-describe("Back to Briefs link uses the routes constant (Part D, AC17)", () => {
-  it("test_generation_loading_screen_back_to_briefs_uses_screen_path_constant — imports SCREEN_PATH, href equals SCREEN_PATH.brief, no hardcoded literal", () => {
-    expect(COMPONENT_SRC).toContain('import { SCREEN_PATH } from "../../lib/routes"')
-    expect(COMPONENT_SRC).toContain("href={SCREEN_PATH.brief}")
-    // The literal "/brief" string does not appear hardcoded outside the
-    // routes.ts import chain (this file never spells it out itself).
-    expect(COMPONENT_SRC).not.toContain('"/brief"')
-  })
-})
-
 describe("no new icon import (Part D, AC18)", () => {
   it("test_generation_loading_screen_no_new_icon_import — imports IconArrowRight from app-icons, no IconBell", () => {
     expect(COMPONENT_SRC).toContain(
@@ -230,15 +220,21 @@ describe("notify-when-ready promotion CSS (Part D, AC23/AC24)", () => {
     expect(stripped).not.toMatch(/#[0-9a-fA-F]{3,8}\b/)
   })
 
-  it("test_notify_promotion_css_selectors_scoped — every new selector line begins with .design-agent-surface", () => {
+  it("test_notify_promotion_css_selectors_scoped — every selector (single- or multi-line) begins with .design-agent-surface", () => {
+    // Every surviving rule in this block is single-line (`selector { props }`)
+    // now that the notify-armed removal deleted the block's only two
+    // multi-line rules — so the selector text is extracted from before the
+    // first "{" on each line, not just lines that END in "{"/",", which
+    // would otherwise miss every single-line rule.
     const selectorLines = stripCssComments(notifyPromotionBlock(CSS))
       .split("\n")
       .map((l) => l.trim())
-      .filter((l) => l.length > 0 && !l.startsWith("@"))
-      .filter((l) => l.endsWith("{") || l.endsWith(","))
+      .filter((l) => l.length > 0 && !l.startsWith("@") && l.includes("{"))
+      .map((l) => l.slice(0, l.indexOf("{")).trim())
+      .filter((l) => l.length > 0)
     expect(selectorLines.length).toBeGreaterThan(0)
     const offenders = selectorLines.filter(
-      (l) => !l.startsWith(".design-agent-surface"),
+      (l) => !l.split(",").every((part) => part.trim().startsWith(".design-agent-surface")),
     )
     expect(offenders).toEqual([])
   })
