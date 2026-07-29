@@ -1047,6 +1047,32 @@ CREATE TABLE document_source_file (
 CREATE INDEX document_source_file_source_idx ON document_source_file (source_id);
 CREATE INDEX document_source_file_company_idx ON document_source_file (company_id);
 
+-- Custom skills (mirrors 20260728180000_custom_skills.sql, SQLite-ized).
+-- COMPANY-scoped user-uploaded skill definitions (all workspaces in a company
+-- share one library; workspace_id records the uploading workspace only):
+-- `method` is the parsed SKILL.md text injected at invocation time;
+-- modules/refs are JSON-encoded TEXT maps. No company/workspace FKs, matching
+-- the workspaces-table note: route tests fabricate tenant ids that have no
+-- parent rows.
+CREATE TABLE custom_skills (
+    id            TEXT PRIMARY KEY,
+    company_id    TEXT NOT NULL,
+    workspace_id  TEXT NOT NULL,
+    slug          TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    method        TEXT NOT NULL,
+    modules       TEXT NOT NULL DEFAULT '{}',
+    refs          TEXT NOT NULL DEFAULT '{}',
+    content_hash  TEXT NOT NULL,
+    storage_key   TEXT,
+    uploader_id   TEXT NOT NULL,
+    uploader_name TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, slug)
+);
+CREATE INDEX custom_skills_company_id_idx ON custom_skills (company_id);
+
 -- Onboarding drip / nudge email tracking (mirrors
 -- 20260614100000_drip_email_sends.sql). One row per delivered (company ×
 -- member × step); UNIQUE is the de-dup guard so steps never double-send.

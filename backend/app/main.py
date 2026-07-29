@@ -52,6 +52,7 @@ from app.routes import (
     company,
     connectors,
     conversations,
+    custom_skills as custom_skills_routes,
     datasets as datasets_routes,
     design_agent,
     design_agent_bundle,
@@ -347,6 +348,7 @@ app.include_router(business_context_routes.router)
 app.include_router(onboarding.router)
 app.include_router(tickets.router)
 app.include_router(conversations.router)
+app.include_router(custom_skills_routes.router)
 app.include_router(team.router)
 app.include_router(team.accept_router)
 app.include_router(workspaces_routes.router)
