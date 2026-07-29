@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 ;(globalThis as Record<string, unknown>).React = React
 
 import { GenerationLoadingScreen } from "../GenerationLoadingScreen"
+import { SCREEN_PATH } from "../../../lib/routes"
 
 afterEach(cleanup)
 
@@ -44,7 +45,7 @@ describe("GenerationLoadingScreen — notify-when-ready armed confirmation", () 
 
     fireEvent.click(screen.getByText("Notify me when ready"))
 
-    const link = screen.getByText("Back to Ideation").closest("a")
+    const link = screen.getByText("Back to Top Insights").closest("a")
     expect(link).toBeTruthy()
     expect(document.activeElement).toBe(link)
   })
@@ -59,10 +60,26 @@ describe("GenerationLoadingScreen — notify-when-ready armed confirmation", () 
     )
 
     fireEvent.click(screen.getByText("Notify me when ready"))
-    const link = screen.getByText("Back to Ideation").closest("a")!
+    const link = screen.getByText("Back to Top Insights").closest("a")!
     fireEvent.click(link)
 
     expect(onNotifyWhenReady).toHaveBeenCalledTimes(1)
+  })
+
+  it("test_notify_armed_link_points_to_top_insights — the armed link's href resolves to Top Insights, not Ideation", () => {
+    const onNotifyWhenReady = vi.fn()
+    render(
+      React.createElement(GenerationLoadingScreen, {
+        open: true,
+        onNotifyWhenReady,
+      }),
+    )
+
+    fireEvent.click(screen.getByText("Notify me when ready"))
+    const link = screen.getByText("Back to Top Insights").closest("a")
+
+    expect(link).toBeTruthy()
+    expect(link?.getAttribute("href")).toBe(SCREEN_PATH.brief)
   })
 
   it("the armed confirmation's copy is present and the notify button/cancel are gone", () => {

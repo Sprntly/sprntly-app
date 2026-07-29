@@ -432,12 +432,12 @@ export function GenerationLoadingScreen({
                     this tab or carry on elsewhere.
                   </div>
                   <a
-                    href={SCREEN_PATH.ideation}
+                    href={SCREEN_PATH.brief}
                     ref={backToBriefsRef}
                     className="btn proto-gen-notify-back-link"
                     onClick={() => onNotifyWhenReady?.()}
                   >
-                    Back to Ideation
+                    Back to Top Insights
                     <IconArrowRight size={14} />
                   </a>
                 </div>
