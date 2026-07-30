@@ -539,10 +539,10 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
 
   it("puts the wired connectors in their categories (empty categories dropped)", () => {
     const keptCategories = connectableCatalog()
-    // One rail tab per surviving category. 12 connectors are wired, but the
+    // One rail tab per surviving category. 13 connectors are wired, but the
     // `uploads` provider is never shown as a row (it's the document-source
     // list) while dual-typed Slack renders a row on BOTH its shelves (voice
-    // + comms), so 12 connector rows render across the panels.
+    // + comms), so 13 connector rows render across the panels.
     const one = render({ categories: keptCategories })
     expect((one.match(/role="tab" id="conn-cat-tab-/g) ?? []).length).toBe(
       keptCategories.length,
@@ -553,7 +553,7 @@ describe("ConnectorsSettingsView — Settings tab uses the connectable-only cata
         n + countRows(render({ categories: keptCategories, selectedCategoryKey: c.key })),
       0,
     )
-    expect(rowsAcrossPanels).toBe(12)
+    expect(rowsAcrossPanels).toBe(13)
     // Each surviving category that allows manual upload shows its strip.
     expect(
       keptCategories.filter(

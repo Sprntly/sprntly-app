@@ -1752,6 +1752,15 @@ export const connectorsApi = {
   disconnectFireflies: () =>
     api.delete<{ deleted: true; provider: string }>(`/v1/connectors/fireflies`),
 
+  // ---- Gong (workspace Access Key + Secret; Basic auth, not OAuth) ---------
+  connectGongWithCredentials: (accessKey: string, accessKeySecret: string) =>
+    api.post<{ ok: true; provider: string; account_label: string }>(
+      `/v1/connectors/gong/credentials`,
+      { access_key: accessKey, access_key_secret: accessKeySecret },
+    ),
+  disconnectGong: () =>
+    api.delete<{ deleted: true; provider: string }>(`/v1/connectors/gong`),
+
   // ---- Superset (self-hosted; instance URL + service-account login) --------
   connectSupersetWithCredentials: (
     baseUrl: string, username: string, password: string,

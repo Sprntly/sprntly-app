@@ -30,6 +30,7 @@ from app.connectors import (
     figma_oauth,
     fireflies_apikey,
     github_app,
+    gong as gong_auth,
     google_oauth,
     hubspot_oauth,
     jira_oauth,
@@ -250,6 +251,17 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
     elif provider == fireflies_apikey.FIREFLIES_PROVIDER:
         api_key = token_json.get("api_key") or ""
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
+    elif provider == gong_auth.GONG_PROVIDER:
+        # Re-run the workspaces call the connect route validated with; a
+        # revoked key pair reads as a soft rejection ("reconnect required").
+        token = token_json.get(gong_auth.BASIC_TOKEN_KEY) or ""
+        try:
+            workspaces = gong_auth.fetch_workspaces(token)
+            user_obj = {
+                "name": gong_auth.account_label_from_workspaces(workspaces),
+            }
+        except gong_auth.GongAuthError:
+            user_obj = {}  # soft rejection → "reconnect required" below
     elif provider == superset_auth.SUPERSET_PROVIDER:
         # No stored tokens to validate — Superset consumers re-login on use
         # (instance-configured JWT lifetimes), so the probe IS a fresh login.

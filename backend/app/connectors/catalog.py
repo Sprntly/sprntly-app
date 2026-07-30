@@ -61,7 +61,10 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "zendesk": [CUSTOMER_VOICE],
     "sprinklr": [CUSTOMER_VOICE],
     "fireflies": [MEETINGS],
-    "gong": [MEETINGS],
+    # Gong is dual-typed (product decision 2026-07-30): a meetings tool AND a
+    # customer-voice source — its KG puller ingests Gong's distilled call
+    # briefs/key points as first-party voice-of-customer evidence.
+    "gong": [MEETINGS, CUSTOMER_VOICE],
     "dovetail": [CUSTOMER_VOICE],
     "salesforce": [CRM],
     # Analytics

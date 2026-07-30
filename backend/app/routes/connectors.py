@@ -2619,6 +2619,83 @@ def fireflies_disconnect(
     return {"deleted": True, "provider": fireflies_apikey.FIREFLIES_PROVIDER}
 
 
+# ─────────────────────── Gong (access key + secret) ───────────────────────
+#
+# Gong has no self-serve OAuth (OAuth is for listed partner apps) — auth is a
+# workspace-scoped Access Key + Secret pair created by a Gong technical
+# administrator (Company settings → Ecosystem → API), sent as Basic auth.
+# Company-scoped like Fireflies; the KG puller (kg_ingest/pullers/gong.py)
+# pulls DISTILLED call intelligence as voice-of-customer evidence.
+
+
+class GongCredentialsIn(BaseModel):
+    access_key: str = Field(..., min_length=1)
+    access_key_secret: str = Field(..., min_length=1)
+
+
+@router.post("/gong/credentials")
+def gong_connect_credentials(
+    body: GongCredentialsIn,
+    company: CompanyContext = Depends(require_company),
+):
+    from app.connectors import gong as gong_auth
+
+    _require_admin_for_org_connector(company, gong_auth.GONG_PROVIDER)
+    access_key = body.access_key.strip()
+    secret = body.access_key_secret.strip()
+    token = gong_auth.basic_token(access_key, secret)
+    try:
+        workspaces = gong_auth.fetch_workspaces(token)
+    except gong_auth.GongAuthError as e:
+        raise HTTPException(400, str(e)) from e
+
+    label = gong_auth.account_label_from_workspaces(workspaces)
+
+    try:
+        token_encrypted = encrypt_token_json(
+            gong_auth.token_payload_to_store(access_key, secret)
+        )
+    except TokenEncryptionError as e:
+        raise HTTPException(500, str(e)) from e
+
+    db.upsert_connection(
+        company_id=company.company_id,
+        provider=gong_auth.GONG_PROVIDER,
+        token_encrypted=token_encrypted,
+        scopes="",
+        account_label=label,
+        # Workspace names are non-secret and useful for the UI; the key pair
+        # stays exclusively in the encrypted token payload.
+        config_json=json.dumps({
+            "workspaces": [
+                {"id": w.get("id"), "name": w.get("name")} for w in workspaces
+            ],
+        }),
+    )
+
+    kickoff_sync(company.company_id, gong_auth.GONG_PROVIDER)
+
+    return {
+        "ok": True,
+        "provider": gong_auth.GONG_PROVIDER,
+        "account_label": label,
+    }
+
+
+@router.delete("/gong")
+def gong_disconnect(
+    company: CompanyContext = Depends(require_company),
+):
+    from app.connectors import gong as gong_auth
+
+    _require_admin_for_org_connector(company, gong_auth.GONG_PROVIDER)
+    row = db.get_connection(company.company_id, gong_auth.GONG_PROVIDER)
+    if not row:
+        raise HTTPException(404, "Gong is not connected")
+    db.delete_connection(company.company_id, gong_auth.GONG_PROVIDER)
+    return {"deleted": True, "provider": gong_auth.GONG_PROVIDER}
+
+
 # ─────────────────────── Superset (credentials, not OAuth) ───────────────────
 #
 # Self-hosted BI: the user supplies their instance URL + a service-account

@@ -246,3 +246,76 @@ describe("ConnectorConnectModalView — in-flight prompt", () => {
     expect(html.toLowerCase()).not.toContain("start over")
   })
 })
+
+const GONG_ITEM: ConnectorItemRow = {
+  id: "gong",
+  name: "Gong",
+  logo: "G",
+  logoText: "G",
+  logoColor: "#E74C3C",
+  authType: "credentials",
+}
+
+const SUPERSET_ITEM: ConnectorItemRow = {
+  id: "superset",
+  name: "Superset",
+  logo: "S",
+  logoText: "S",
+  logoColor: "#20A7C9",
+  authType: "credentials",
+}
+
+describe("ConnectorConnectModalView — credentials mode", () => {
+  it("Gong shows an Access key + Secret form, no instance URL", () => {
+    const html = render({ item: GONG_ITEM, authType: "credentials" })
+    expect(html).toContain("Access key")
+    expect(html).toContain("Access key secret")
+    // Gong is SaaS — an instance URL would be meaningless.
+    expect(html).not.toContain("Instance URL")
+    // The blurb points at who can mint the key.
+    expect(html).toContain("technical administrator")
+  })
+
+  it("Gong's Connect stays disabled until BOTH key and secret are filled", () => {
+    const onlyKey = render({
+      item: GONG_ITEM,
+      authType: "credentials",
+      credentials: { baseUrl: "", username: "AK", password: "" },
+    })
+    expect(onlyKey).toMatch(/<button[^>]*disabled[^>]*>Connect<\/button>/)
+
+    const both = render({
+      item: GONG_ITEM,
+      authType: "credentials",
+      credentials: { baseUrl: "", username: "AK", password: "SECRET" },
+    })
+    // Enabled without any base URL — the key-pair form has no URL field.
+    expect(both).not.toMatch(/<button[^>]*disabled[^>]*>Connect<\/button>/)
+  })
+
+  it("self-hosted (Superset) keeps the URL + username + password form", () => {
+    const html = render({ item: SUPERSET_ITEM, authType: "credentials" })
+    expect(html).toContain("Instance URL")
+    expect(html).toContain("Username")
+    expect(html).toContain("Password")
+    expect(html).not.toContain("Access key")
+  })
+
+  it("self-hosted Connect still requires the instance URL", () => {
+    const html = render({
+      item: SUPERSET_ITEM,
+      authType: "credentials",
+      credentials: { baseUrl: "", username: "svc", password: "pw" },
+    })
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Connect<\/button>/)
+  })
+
+  it("surfaces a credentials error inline (both shapes)", () => {
+    const html = render({
+      item: GONG_ITEM,
+      authType: "credentials",
+      credentialsError: "Gong rejected these credentials",
+    })
+    expect(html).toContain("Gong rejected these credentials")
+  })
+})
