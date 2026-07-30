@@ -17,11 +17,40 @@ import logging
 from app import qa_agent
 from app.ask_stream import AnswerFieldExtractor
 from app.db import complete_ask_job, fail_ask_job, is_ask_cancelled
+from app.db.asks import ORPHAN_ASK_JOB_HEARTBEAT_SECONDS, touch_ask_job
 from app.graph import token_stream
 from app.qa_agent import AskCancelled
 from app.report_capture import capture_report
 
 logger = logging.getLogger(__name__)
+
+
+async def _heartbeat(ask_id: int) -> None:
+    """Bump the job row's `updated_at` while this worker is alive.
+
+    The orphan sweep fails any `ask_jobs` row that has sat in `generating`
+    longer than ORPHAN_ASK_JOB_AFTER_MINUTES, because a row carries no owner
+    column and age is the only available "the worker died" signal. Without a
+    beat that window is a ceiling on how long an answer may TAKE: the
+    competitive-intelligence review runs ~20 minutes, so on staging its row was
+    failed at 15 minutes while the worker was still running, and the answer it
+    finally produced was then dropped by complete_ask_job's
+    `status == 'generating'` guard. Every attempt was lost, and every attempt
+    had already been paid for.
+
+    Beating turns the age gate back into what it was meant to be — a liveness
+    check. Cancelled early when the row leaves `generating`, so a finished or
+    stopped job stops being touched immediately.
+    """
+    try:
+        while True:
+            await asyncio.sleep(ORPHAN_ASK_JOB_HEARTBEAT_SECONDS)
+            if not await asyncio.to_thread(touch_ask_job, ask_id):
+                return          # no longer generating — nothing left to keep alive
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — a heartbeat failure must never fail the ask
+        logger.exception("ask heartbeat loop failed ask_id=%s", ask_id)
 
 
 def ask_channel(ask_id: int) -> str:
@@ -127,6 +156,9 @@ async def run_ask_job(
     logger.info("Ask job starting ask_id=%s dataset=%s", ask_id, dataset)
     loop = asyncio.get_running_loop()
     channel = ask_channel(ask_id)
+    # Keep the row's liveness fresh for as long as this worker runs, so the
+    # orphan sweep can't fail a long-but-healthy answer out from under us.
+    beat = asyncio.create_task(_heartbeat(ask_id))
     try:
         await asyncio.to_thread(
             _run_sync,
@@ -159,3 +191,5 @@ async def run_ask_job(
         except Exception:  # noqa: BLE001 — even the fail-marking is best-effort
             logger.exception("fail_ask_job failed ask_id=%s", ask_id)
         token_stream.close(channel, kind="error")
+    finally:
+        beat.cancel()

@@ -87,10 +87,27 @@ def _patch_set(monkeypatch, roster=("Globex", "Initech"), discovered=()):
     monkeypatch.setattr(comp, "discover_competitors", lambda _eid: list(discovered))
 
 
-def _patch_run_io(monkeypatch, latest=None, saves=None, save_error=False):
+def _patch_run_io(monkeypatch, latest=None, saves=None, save_error=False,
+                  claims=None, claim_error=False, claim_id=9):
+    """Patch the run row I/O. The pipeline CLAIMS a row before spending and
+    UPDATES it at the end, so both halves are stubbed; `saves` collects whichever
+    write carried the finished run so existing assertions keep reading one list."""
     import app.db as db
 
     monkeypatch.setattr(db, "latest_competitive_intel_run", lambda _eid: latest)
+
+    def _claim(company_id, **kw):
+        if claim_error:
+            raise RuntimeError("no such table: competitive_intel_runs")
+        if claims is not None:
+            claims.append({"company_id": company_id, **kw})
+        return claim_id
+
+    def _complete(run_id, **kw):
+        if save_error:
+            raise RuntimeError("no such table: competitive_intel_runs")
+        if saves is not None:
+            saves.append({"company_id": "e1", "run_id": run_id, **kw})
 
     def _save(company_id, **kw):
         if save_error:
@@ -99,6 +116,8 @@ def _patch_run_io(monkeypatch, latest=None, saves=None, save_error=False):
             saves.append({"company_id": company_id, **kw})
         return 9
 
+    monkeypatch.setattr(db, "claim_competitive_intel_run", _claim)
+    monkeypatch.setattr(db, "complete_competitive_intel_run", _complete)
     monkeypatch.setattr(db, "save_competitive_intel_run", _save)
 
 
@@ -131,7 +150,10 @@ def _full(monkeypatch, **kw):
                discovered=kw.pop("discovered", ()))
     _patch_run_io(monkeypatch, latest=kw.pop("latest", None),
                   saves=kw.pop("saves", None),
-                  save_error=kw.pop("save_error", False))
+                  save_error=kw.pop("save_error", False),
+                  claims=kw.pop("claims", None),
+                  claim_error=kw.pop("claim_error", False),
+                  claim_id=kw.pop("claim_id", 9))
     _patch_capture(monkeypatch, records=kw.pop("records", RECORDS),
                    unobserved=kw.pop("unobserved", ()),
                    capped=kw.pop("capped", ()),
@@ -982,3 +1004,250 @@ def test_qa_agent_falls_through_when_the_pipeline_returns_none(monkeypatch):
     out = qa.answer(enterprise_id="e1", question="competitive intelligence report",
                     dataset="d1")
     assert out["answer"] == "generic"
+
+
+# ── Delivery: the staging blocker (run never lands, money burned) ────────────
+#
+# Staging, 4/4 attempts: "run a competitive review for us" streamed stage labels
+# for ~13 minutes, the chat gave up, a reload did not resume, the pipeline kept
+# spending, and competitive_intel_runs had ZERO rows 20+ minutes later. Three
+# independent mechanisms had to be fixed; these pin all three.
+
+def test_run_row_is_claimed_before_any_spending(monkeypatch):
+    """Persistence must not depend on reaching the end. Every abandoned staging
+    attempt left no row at all, so a paid twenty-minute sweep was indistinguish-
+    able from a request that never happened."""
+    claims, order = [], []
+
+    _patch_profile(monkeypatch)
+    _patch_set(monkeypatch)
+    _patch_run_io(monkeypatch, claims=claims)
+    _patch_analyse(monkeypatch)
+
+    def _capture(*a, **k):
+        order.append("capture")
+        return ci.CaptureResult(records=list(RECORDS), unobserved=[], capped=[],
+                                skipped=[], truncated=False)
+
+    monkeypatch.setattr(ci, "_capture", _capture)
+    original_claim = ci._claim_run
+    monkeypatch.setattr(
+        ci, "_claim_run",
+        lambda *a, **k: order.append("claim") or original_claim(*a, **k),
+    )
+    ci.answer(enterprise_id="e1", question="run a competitive review for us")
+    assert order == ["claim", "capture"], "the row must be claimed BEFORE the sweep"
+    assert claims and claims[0]["question"] == "run a competitive review for us"
+    assert claims[0]["competitor_set"] == ["Globex", "Initech"]
+
+
+def test_completion_updates_the_claimed_row(monkeypatch):
+    claims, saves = [], []
+    _full(monkeypatch, claims=claims, saves=saves, claim_id=77)
+    out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
+    assert saves[0]["run_id"] == 77          # updated, not a second row
+    assert saves[0]["html"] == out["answer"]
+    assert saves[0]["state"] == REPORT_DATA["next_state"]
+
+
+def test_claim_failure_still_persists_the_finished_run(monkeypatch):
+    """The claim is best-effort: with the table absent (or the insert failing)
+    the completion path falls back to a plain insert, exactly as before."""
+    saves = []
+    _full(monkeypatch, claim_error=True, saves=saves)
+    out = ci.answer(enterprise_id="e1", question="competitive intelligence report")
+    assert out["answer"].startswith("<!DOCTYPE html>")
+    assert saves and "run_id" not in saves[0]      # fell back to the insert
+
+
+def test_a_running_row_is_not_treated_as_a_prior_run(monkeypatch):
+    """A claimed row has no state and no records. Reading one back as the prior
+    run would diff a Scan against an empty picture."""
+    from app.db.competitive_intel_runs import _is_complete
+
+    assert _is_complete({"metadata": {"status": "running"}}) is False
+    assert _is_complete({"metadata": {"status": "complete"}}) is True
+    # Rows written before the status existed carry no key and stay usable.
+    assert _is_complete({"metadata": {}}) is True
+    assert _is_complete({"metadata": None}) is True
+    assert _is_complete({}) is True
+
+
+def test_baseline_captures_at_scan_depth_with_review_structure(monkeypatch):
+    """The blocker's cost half. A baseline Review ran the full staged sweep —
+    ~19 multi-search calls for three competitors, ~20 minutes — which outlived
+    the chat poll AND the ask-job liveness window, so it was never delivered.
+    A baseline now captures at SCAN depth and still renders Review structure."""
+    seen = {}
+    _patch_profile(monkeypatch)
+    _patch_set(monkeypatch)
+    _patch_run_io(monkeypatch)
+    _patch_analyse(monkeypatch)
+
+    def _capture(_eid, **kw):
+        seen.update(kw)
+        return ci.CaptureResult(records=list(RECORDS), unobserved=[], capped=[],
+                                skipped=[], truncated=False)
+
+    monkeypatch.setattr(ci, "_capture", _capture)
+    out = ci.answer(enterprise_id="e1", question="run a competitive review for us")
+    assert out["_skill_mode"] == ci.MODE_REVIEW          # structure unchanged
+    assert seen["depth"] == ci.DEPTH_SCAN                # cost bounded
+    assert seen["mode"] == ci.MODE_REVIEW
+
+
+def test_baseline_caps_the_competitor_set(monkeypatch):
+    claims = []
+    _full(monkeypatch, roster=("A", "B", "C", "D", "E"), claims=claims)
+    ci.answer(enterprise_id="e1", question="competitive intelligence report")
+    assert claims[0]["competitor_set"] == ["A", "B", "C"]
+
+
+def test_a_deliberate_review_over_prior_state_keeps_staged_depth(monkeypatch):
+    seen = {}
+    _patch_profile(monkeypatch)
+    _patch_set(monkeypatch)
+    _patch_run_io(monkeypatch, latest=dict(PRIOR_RUN))
+    _patch_analyse(monkeypatch)
+
+    def _capture(_eid, **kw):
+        seen.update(kw)
+        return ci.CaptureResult(records=list(RECORDS), unobserved=[], capped=[],
+                                skipped=[], truncated=False)
+
+    monkeypatch.setattr(ci, "_capture", _capture)
+    ci.answer(enterprise_id="e1",
+              question="run the full quarterly competitive review")
+    assert seen["depth"] == ci.DEPTH_STAGED
+
+
+def test_scan_depth_is_one_pass_per_competitor(monkeypatch):
+    """The depth override actually changes the call count, not just a label."""
+    seen = []
+
+    def _web(*, system, user, **kw):
+        seen.append(kw.get("skill_module"))
+        return json.dumps([{"what": "x", "source": "s", "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    ci._capture("e1", scope="s", names=["Globex", "Initech"],
+                mode=ci.MODE_REVIEW, prior_state={}, depth=ci.DEPTH_SCAN)
+    assert seen == [None, None, None]      # us + 2 competitors, no modules
+
+
+# ── Cancellation: an abandoned run must stop spending ───────────────────────
+
+def test_cancellation_stops_before_the_next_competitor(monkeypatch):
+    from app.qa_agent import AskCancelled
+
+    calls = []
+
+    def _web(*, system, user, **kw):
+        calls.append(user)
+        return json.dumps([{"what": "x", "source": "s", "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    # Cancelled once the "us" pass is done.
+    with pytest.raises(AskCancelled):
+        ci._capture("e1", scope="s", names=["Globex", "Initech"],
+                    mode=ci.MODE_SCAN, prior_state={},
+                    is_cancelled=lambda: len(calls) >= 1)
+    assert len(calls) == 1, "cancellation did not stop the sweep"
+
+
+def test_cancellation_stops_between_staged_modules(monkeypatch):
+    from app.qa_agent import AskCancelled
+
+    calls = []
+
+    def _web(*, system, user, **kw):
+        calls.append(kw.get("skill_module"))
+        return json.dumps([{"what": "x", "source": "s", "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    with pytest.raises(AskCancelled):
+        ci._capture("e1", scope="s", names=["Globex"], mode=ci.MODE_REVIEW,
+                    prior_state=PRIOR_STATE, depth=ci.DEPTH_STAGED,
+                    is_cancelled=lambda: len(calls) >= 2)
+    # us + one module, then stopped — not the whole module sequence.
+    assert len(calls) == 2
+
+
+def test_cancellation_propagates_rather_than_reading_as_a_web_failure(monkeypatch):
+    """A Stop must not be reported to the user as "I couldn't reach the web"."""
+    from app.qa_agent import AskCancelled
+
+    _patch_profile(monkeypatch)
+    _patch_set(monkeypatch)
+    _patch_run_io(monkeypatch)
+    _patch_analyse(monkeypatch)
+    with pytest.raises(AskCancelled):
+        ci.answer(enterprise_id="e1", question="competitive intelligence report",
+                  is_cancelled=lambda: True)
+
+
+def test_qa_agent_passes_cancellation_into_the_pipeline(monkeypatch):
+    import app.qa_agent as qa
+
+    seen = {}
+    monkeypatch.setattr(
+        qa, "route",
+        lambda *a, **k: qa.RouteDecision(ci.CIR_SKILL, 0.85, "regex", "CIR"),
+    )
+    monkeypatch.setattr(
+        ci, "answer",
+        lambda **kw: seen.update(kw) or {"answer": "x", "_skill": ci.CIR_SKILL},
+    )
+    qa.answer(enterprise_id="e1", question="competitive intelligence report",
+              dataset="d1", is_cancelled=lambda: False)
+    assert callable(seen["is_cancelled"])
+
+
+# ── Usage attribution ───────────────────────────────────────────────────────
+
+def test_capture_calls_are_attributed_and_key_bound(monkeypatch):
+    """Every capture call used to log feature='unattributed', operation=None —
+    and run on the DEFAULT key — because call_with_web_search bypasses the
+    gateway, which is where both are normally applied. Capture is nearly all of
+    a run's cost, so this was most of the spend going unattributed."""
+    import contextlib
+
+    import app.llm_keys as llm_keys
+    import app.usage_context as uc
+
+    scopes, keys = [], []
+    monkeypatch.setattr(
+        ci, "usage_scope",
+        lambda **kw: scopes.append(kw) or contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        llm_keys, "company_llm_key",
+        lambda eid: keys.append(eid) or contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(
+        ci, "call_with_web_search",
+        lambda **kw: json.dumps([{"what": "x", "source": "s", "tier": "h"}]),
+    )
+    records, truncated = ci._capture_pass(
+        enterprise_id="e1", system_focus="f", user="u", max_searches=2,
+    )
+    assert records and truncated is False
+    assert keys == ["e1"], "the company key binding is missing on the web path"
+    assert scopes == [{"feature": uc.Feature.ASK,
+                       "operation": "competitive_intel_capture"}]
+
+
+def test_analyse_and_query_calls_carry_the_same_feature(monkeypatch):
+    import app.usage_context as uc
+
+    scopes = []
+    real = ci.usage_scope
+    monkeypatch.setattr(
+        ci, "usage_scope",
+        lambda **kw: scopes.append(kw) or real(**kw),
+    )
+    _full(monkeypatch)
+    ci.answer(enterprise_id="e1", question="competitive intelligence report")
+    labels = [(s.get("feature"), s.get("operation")) for s in scopes]
+    assert (uc.Feature.ASK, "competitive_intel_report") in labels
+    assert all(f == uc.Feature.ASK for f, _ in labels)
