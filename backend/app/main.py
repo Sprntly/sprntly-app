@@ -187,6 +187,19 @@ async def lifespan(app: FastAPI):
             )
     except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
         logger.exception("Orphan pipeline-run sweep failed at startup")
+    # Slack report runs interrupted mid-flight: the user was acknowledged ("~5-10
+    # minutes") and then the run died, so tell them to ask again rather than
+    # leaving the thread silent. KNOWN LIMIT: the markers are in-process, so this
+    # covers a run lost inside one process lifetime, not one lost to the restart
+    # itself — durable markers need a table (see routes/connectors).
+    try:
+        from app.routes.connectors import sweep_interrupted_slack_reports
+
+        swept = sweep_interrupted_slack_reports()
+        if swept:
+            logger.info("Swept %d interrupted Slack report run(s)", len(swept))
+    except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
+        logger.exception("Interrupted Slack report sweep failed at startup")
     # Design Agent startup invalidation (prototypes + iterations).
     #
     # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
