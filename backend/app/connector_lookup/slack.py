@@ -16,6 +16,13 @@ wrong produces a confidently wrong answer:
 2. VISIBILITY. Bot-token reads only see channels the bot was added to. "Not
    found in Slack" therefore means "not in the channels I can read" — the system
    block says so, so the model doesn't turn a permissions gap into a fact.
+3. PRIVACY. `search.messages` reads as the authorizing USER, so its raw results
+   include that person's DMs and private channels — while the answer goes to
+   whichever teammate asked. Every hit is therefore gated by
+   `is_shareable_match` to conversations the BOT could also read, and each result
+   carries `SEARCH_DISCLOSURE` saying so. Reporting the authorizing user's DMs to
+   their colleagues is not a feature we ship by accident; making it one would be
+   a product decision about who may read whose messages.
 
 Routing is explicit-name-only for now (skill_router.is_connector_lookup): a
 question has to actually name Slack or a #channel. False positives are the
@@ -57,6 +64,15 @@ SEARCH_UNAVAILABLE = (
     "specific channels rather than searching the whole workspace.)"
 )
 
+#: Appended to every search result, so the answer can state its own scope. The
+#: model is told the mode in the system block too; this makes it impossible to
+#: read a result set without seeing what it did and didn't cover.
+SEARCH_DISCLOSURE = (
+    "(searched PUBLIC / bot-readable Slack channels only — DMs, group DMs and "
+    "private channels the Sprntly bot isn't in are excluded. Describe it that "
+    "way; do not imply you searched anyone's private messages.)"
+)
+
 SYSTEM = (
     "Tools:\n"
     "- slack_list_channels: the channels this connection can read.\n"
@@ -64,15 +80,19 @@ SYSTEM = (
     "optionally limited to the last N days.\n"
     "- slack_get_thread: the replies under one message (pass the channel and the "
     "message's `ts`, which the history/search results give you).\n"
-    "- slack_search_messages: keyword search across the authorizing user's "
-    "Slack. Available ONLY when this install granted a user token; if it isn't, "
-    "the tool says so — read channels instead and say that's what you did.\n\n"
+    "- slack_search_messages: keyword search over PUBLIC / bot-readable "
+    "channels. Available ONLY when this install granted a user token; if it "
+    "isn't, the tool says so — read channels instead and say that's what you "
+    "did.\n\n"
     "Honest limits you MUST respect: these reads see the channels the Sprntly "
-    "bot was added to (plus, in search mode, what the authorizing user can "
-    "see). So an empty result means \"not in the Slack I can read\", NEVER \"it "
-    "was never said\" — say which channels you looked in. Quote messages with "
-    "their author and date, and don't paraphrase a decision into something "
-    "firmer than the message says.\n"
+    "bot was added to, plus public channels in search mode. DMs, group DMs and "
+    "private channels the bot isn't in are NEVER readable: search runs as the "
+    "authorizing user, but its results are FILTERED before you see them. So say "
+    "you \"searched public channels\", never that you searched someone's private "
+    "messages — even if asked to. And an empty result means \"not in the Slack I "
+    "can read\", NEVER \"it was never said\" — say which channels you looked in. "
+    "Quote messages with their author and date, and don't paraphrase a decision "
+    "into something firmer than the message says.\n"
     "This connection is READ-ONLY from chat: you cannot post, reply, DM, react "
     "or edit anything in Slack. If asked to, say so plainly."
 )
@@ -125,10 +145,11 @@ GET_THREAD_TOOL = {
 SEARCH_TOOL = {
     "name": "slack_search_messages",
     "description": (
-        "Keyword-search Slack messages (needs a user token; the tool tells you "
-        "when the workspace didn't grant one). `query` supports Slack's own "
-        "search syntax, e.g. 'pricing in:#product after:2026-07-01'. Returns "
-        "matches with channel, author, date, ts and text."
+        "Keyword-search Slack messages in PUBLIC / bot-readable channels (needs "
+        "a user token; the tool tells you when the workspace didn't grant one). "
+        "`query` supports Slack's own search syntax, e.g. 'pricing in:#product "
+        "after:2026-07-01'. Returns matches with channel, author, date, ts and "
+        "text. DM and private-channel matches are excluded before they reach you."
     ),
     "input_schema": {
         "type": "object",
@@ -152,12 +173,20 @@ class SlackHandle:
     re-fetch the directory three times.
     """
 
-    bot_token: str
-    user_token: str | None = None
-    users: dict[str, str] = field(default_factory=dict)
-    channels: list[dict] = field(default_factory=list)
+    # repr suppressed: these are live credentials, and a dataclass repr ends up in
+    # log lines, exception context and test failure output.
+    bot_token: str = field(repr=False)
+    user_token: str | None = field(default=None, repr=False)
+    users: dict[str, str] = field(default_factory=dict, repr=False)
+    channels: list[dict] = field(default_factory=list, repr=False)
     _users_loaded: bool = False
     _channels_loaded: bool = False
+
+    def bot_channel_ids(self) -> set[str]:
+        """Channel ids the BOT is a member of (fetch_channels filters on
+        is_member), i.e. the conversations a teammate reading this answer could
+        also have seen through Sprntly. Used to gate search results."""
+        return {c["id"] for c in self.channel_list() if c.get("id")}
 
     def user_map(self) -> dict[str, str]:
         if not self._users_loaded:
@@ -207,6 +236,12 @@ def _load_tokens(company_id: str) -> tuple[str | None, str | None]:
     row can search). Legacy NULL-user rows are covered by the company-scoped
     get_connection fallback.
 
+    Preferring a user-token row is safe ONLY because search results are filtered
+    by `is_shareable_match` down to what the bot could read as well. Without that
+    gate this preference would mean "answer any teammate's question out of
+    whichever colleague happened to grant user scopes, DMs included" — do not
+    loosen one without re-reading the other.
+
     Tenancy: every read is keyed by the authenticated company_id — the only
     company id in scope. Nothing here is derived from model input.
     """
@@ -246,6 +281,38 @@ def _load_tokens(company_id: str) -> tuple[str | None, str | None]:
     return best
 
 
+def is_shareable_match(match: dict, bot_channel_ids: set[str]) -> bool:
+    """True when a search hit may be quoted into a Sprntly chat answer.
+
+    `search.messages` reads as the AUTHORIZING USER, so its raw results span
+    everything that person can see — their DMs, their group DMs, and private
+    channels nobody else in the company is in. The answer, meanwhile, goes to
+    whichever teammate asked the question. Quoting a DM verbatim into that answer
+    would leak one employee's private messages to another, from a connector they
+    authorized for company search. So the gate is: a hit is shareable only if it
+    lives somewhere the Sprntly BOT could have read it too — which is exactly the
+    set any teammate's lookup can already reach.
+
+    Concretely:
+      - `D…` ids and `is_im` → direct messages: never shareable.
+      - `is_mpim` (group DM) → never shareable.
+      - `G…` ids / `is_private` → private channel or legacy group: shareable ONLY
+        if the bot is a member of it.
+      - anything else (`C…`, not flagged private) → public channel: shareable.
+
+    Full user-scope search (reporting the authorizing user's DMs) is deliberately
+    NOT a feature here; it would need a product decision about who may read whose
+    messages, not just a code change.
+    """
+    channel = match.get("channel") or {}
+    channel_id = str(channel.get("id") or match.get("channel_id") or "")
+    if channel_id.startswith("D") or channel.get("is_im") or channel.get("is_mpim"):
+        return False
+    if channel_id.startswith("G") or channel.get("is_private"):
+        return channel_id in bot_channel_ids
+    return True
+
+
 def _ts_line(msg: dict, users: dict[str, str]) -> str:
     """One rendered message: when, who, what, and its ts (so a thread can be
     followed) — mirrors the corpus renderer's shape."""
@@ -272,7 +339,13 @@ class SlackProvider:
         if not bot:
             return None
         notes = [
-            "search mode: message search IS available (user token granted)."
+            # The mode line is not decoration: the answer must be able to say
+            # WHICH Slack it read, and must never imply it read anyone's DMs.
+            "search mode: keyword search is available. It runs against the "
+            "authorizing user's Slack, but results are FILTERED to public / "
+            "bot-readable channels — DMs, group DMs and private channels the "
+            "Sprntly bot isn't in are dropped before you see them. Describe it "
+            "as \"searched public channels\", never as searching someone's DMs."
             if user else
             "search mode: NO user token was granted, so keyword search is "
             "unavailable — read specific channels and tell the user that is "
@@ -388,8 +461,20 @@ class SlackProvider:
         total = result.get("total") or 0
         if not matches:
             return f"(no Slack messages match {query!r})"
+        # PRIVACY GATE — see is_shareable_match. search.messages reads as the
+        # authorizing USER, so raw results can contain their DMs and private
+        # channels; this answer goes to whoever asked in Sprntly chat.
+        shareable = [m for m in matches if is_shareable_match(m, handle.bot_channel_ids())]
+        excluded = len(matches) - len(shareable)
+        if not shareable:
+            return (
+                f"(no Slack messages match {query!r} in channels I'm allowed to "
+                f"report. {excluded} match(es) were in DMs or private channels "
+                "and were excluded — say the search covered public channels "
+                "only, and never imply you read anyone's DMs.)"
+            ) if excluded else f"(no Slack messages match {query!r})"
         users = handle.user_map()
-        kept, marker = cap_items(matches, _MAX_SEARCH_HITS)
+        kept, marker = cap_items(shareable, _MAX_SEARCH_HITS)
         lines = []
         for m in kept:
             channel = ((m.get("channel") or {}) or {}).get("name") or "?"
@@ -399,10 +484,17 @@ class SlackProvider:
             lines.append(
                 f"- #{channel} [{when}] {who}: {text} (ts={m.get('ts')})"
             )
-        footer = marker or (
-            f"(showing {len(kept)} of {total} matches)" if total > len(kept) else ""
-        )
-        return "\n".join(lines) + (f"\n{footer}" if footer else "")
+        notes = [SEARCH_DISCLOSURE]
+        if excluded:
+            notes.append(
+                f"({excluded} further match(es) were in DMs or private channels "
+                "and were excluded from this result.)"
+            )
+        if marker:
+            notes.append(marker)
+        elif total > len(kept):
+            notes.append(f"(showing {len(kept)} of {total} matches Slack returned)")
+        return "\n".join(lines + notes)
 
 
 def _slack_error_text(tool: str, detail: str) -> str:

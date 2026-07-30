@@ -331,6 +331,76 @@ def test_tracker_none_when_no_tracker_connected(monkeypatch):
     assert tracker.pick("co", "show me my open tickets") is None
 
 
+def test_tracker_thread_keeps_a_dual_tracker_tenant_on_the_same_tracker(monkeypatch):
+    """A follow-up carries no tracker name of its own. Without reading the thread,
+    "yes" after a ClickUp answer falls back to the default (Jira) and answers out
+    of the wrong workspace while sounding certain."""
+    _connections(monkeypatch, {"jira", "clickup"})
+    thread = [
+        {"role": "user", "content": "what's in clickup right now"},
+        {"role": "assistant", "content": "abc1 — Fix checkout (in progress). Want the full task?"},
+    ]
+    for followup in ["yes", "more details on that", "and the comments"]:
+        assert tracker.pick("co", followup, thread) == "clickup", followup
+    # No thread → the default preference still applies.
+    assert tracker.pick("co", "yes") == "jira"
+
+
+def test_tracker_thread_scan_prefers_the_most_recent_tracker(monkeypatch):
+    _connections(monkeypatch, {"jira", "clickup"})
+    thread = [
+        {"role": "user", "content": "what's in clickup"},
+        {"role": "assistant", "content": "abc1 — Fix checkout."},
+        {"role": "user", "content": "now check jira"},
+        {"role": "assistant", "content": "PROJ-1 — Billing bug."},
+    ]
+    assert tracker.pick("co", "more details on that", thread) == "jira"
+
+
+def test_tracker_thread_ignores_a_tracker_that_is_not_connected(monkeypatch):
+    _connections(monkeypatch, {"jira"})
+    thread = [{"role": "user", "content": "anything in clickup?"}]
+    assert tracker.pick("co", "more details", thread) == "jira"
+
+
+def test_naming_an_unconnected_tracker_is_answered_honestly(monkeypatch):
+    """Serving Jira for a question about ClickUp would answer confidently out of
+    the wrong tracker — the exact failure mode this whole path exists to fix."""
+    _connections(monkeypatch, {"jira"})
+    from app import jira_lookup
+
+    called = []
+    monkeypatch.setattr(jira_lookup, "answer", lambda **k: called.append(k))
+    out = tracker.answer(enterprise_id="co", question="show me my open tickets in clickup")
+    assert called == []
+    assert "ClickUp isn't connected" in out["answer"]
+    assert "than answer about a different tracker" in out["answer"]
+    assert "Connected right now: Jira." in out["answer"]
+    assert out["_skill_action"] == "Tracker lookup"
+
+
+def test_naming_a_connected_tracker_still_serves_it(monkeypatch):
+    _connections(monkeypatch, {"jira", "clickup"})
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "clickup"})
+    out = tracker.answer(enterprise_id="co", question="my open tickets in clickup")
+    assert out == {"answer": "clickup"}
+    assert [p.provider for p in seen["providers"]] == ["clickup"]
+
+
+def test_naming_both_when_only_one_is_connected_serves_the_connected_one(monkeypatch):
+    _connections(monkeypatch, {"clickup"})
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "clickup"})
+    tracker.answer(enterprise_id="co", question="check jira or clickup for my tickets")
+    assert [p.provider for p in seen["providers"]] == ["clickup"]
+
+
+def test_token_is_not_in_the_session_repr():
+    assert "tok" not in repr(cf.ClickUpSession(access_token="tok-secret",
+                                               team_ids=["T1"]))
+
+
 def test_tracker_answer_delegates_to_jira_lookup_unchanged(monkeypatch):
     _connections(monkeypatch, {"jira"})
     from app import jira_lookup

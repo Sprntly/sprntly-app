@@ -113,7 +113,7 @@ def test_open_session_records_the_search_mode(monkeypatch):
     _tokens(monkeypatch, [_row(user="xoxp-1")])
     monkeypatch.setattr(sl, "decrypt_token_json", lambda enc: enc)
     session = sl.PROVIDER.open_session("co-a")
-    assert "search IS available" in session.notes[0]
+    assert "keyword search is available" in session.notes[0]
 
     _tokens(monkeypatch, [_row()])
     session = sl.PROVIDER.open_session("co-a")
@@ -145,6 +145,102 @@ def test_search_without_a_user_token_says_so_and_points_at_channel_reads():
     assert "unavailable for this workspace" in out
     assert "Do NOT report this as 'nothing found'" in out
     assert "slack_channel_history" in out
+
+
+# ── search privacy gate (user-token search must not leak DMs) ────────────────
+
+def _match(channel_id="C1", name="general", text="pricing v2", **channel_flags):
+    channel = {"id": channel_id, "name": name}
+    channel.update(channel_flags)
+    return {"channel": channel, "ts": "1750000000.1", "user": "U1", "text": text}
+
+
+def test_shareable_match_gate():
+    """Unit-level truth table. search.messages reads as the authorizing USER, so
+    the gate is "could the bot have read this too" — anything else would quote one
+    employee's private messages into another's answer."""
+    bot_channels = {"C1", "G-bot-is-in"}
+    # Public channel → shareable.
+    assert sl.is_shareable_match(_match("C1"), bot_channels)
+    assert sl.is_shareable_match(_match("C-not-joined"), bot_channels)
+    # DM by id, and by flag.
+    assert not sl.is_shareable_match(_match("D123", name="ada"), bot_channels)
+    assert not sl.is_shareable_match(_match("C9", is_im=True), bot_channels)
+    # Group DM.
+    assert not sl.is_shareable_match(_match("C9", is_mpim=True), bot_channels)
+    # Private: only when the bot is a member.
+    assert not sl.is_shareable_match(_match("G-secret", is_private=True), bot_channels)
+    assert sl.is_shareable_match(_match("G-bot-is-in", is_private=True), bot_channels)
+    assert not sl.is_shareable_match(_match("C9", is_private=True), bot_channels)
+
+
+def test_search_drops_dm_and_private_matches_before_the_model_sees_them(monkeypatch):
+    """THE privacy test: a user-token search returns the authorizing user's DMs and
+    private channels; none of it may reach the model, and the result must disclose
+    the scope it actually covered."""
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", lambda *a, **k: {
+        "matches": [
+            _match("D555", name="ada", text="SECRET dm about salary"),
+            _match("G777", name="founders", text="SECRET private channel plan",
+                   is_private=True),
+            _match("C9", name="mpdm-ada--bo", text="SECRET group dm", is_mpim=True),
+            _match("C1", name="general", text="public pricing chatter"),
+        ],
+        "total": 4,
+    })
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                               {"query": "pricing"})
+    assert "SECRET" not in out
+    assert "public pricing chatter" in out
+    assert "#general" in out and "#founders" not in out
+    # …and it says what it covered.
+    assert "searched PUBLIC / bot-readable Slack channels only" in out
+    assert "3 further match(es) were in DMs or private channels" in out
+
+
+def test_search_keeps_a_private_channel_the_bot_is_in(monkeypatch):
+    """A private channel the Sprntly bot was added to is already readable by any
+    teammate's lookup, so a search hit there is not a leak."""
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", lambda *a, **k: {
+        "matches": [_match("C2", name="product-eng", text="ship friday",
+                           is_private=True)],
+        "total": 1,
+    })
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                               {"query": "ship"})
+    assert "ship friday" in out and "#product-eng" in out
+
+
+def test_search_with_only_private_matches_reports_nothing_shareable(monkeypatch):
+    monkeypatch.setattr(sl.slack_oauth, "search_messages", lambda *a, **k: {
+        "matches": [_match("D1", text="SECRET"), _match("D2", text="SECRET")],
+        "total": 2,
+    })
+    out = sl.PROVIDER.dispatch(_session("xoxp-1"), "slack_search_messages",
+                               {"query": "x"})
+    assert "SECRET" not in out
+    assert "2 match(es) were in DMs or private channels and were excluded" in out
+    assert "never imply you read anyone's DMs" in out
+
+
+def test_search_mode_note_discloses_the_filtering(monkeypatch):
+    """The system block must carry the mode, not just the tool result."""
+    _tokens(monkeypatch, [_row(user="xoxp-1")])
+    monkeypatch.setattr(sl, "decrypt_token_json", lambda enc: enc)
+    note = sl.PROVIDER.open_session("co-a").notes[0]
+    assert "FILTERED to public / bot-readable channels" in note
+    assert "searched public channels" in note
+
+
+def test_system_block_forbids_claiming_a_private_search():
+    block = sl.PROVIDER.system_block()
+    assert "DMs, group DMs and private channels the bot isn't in are NEVER readable" in block
+    assert "never that you searched someone's private messages" in block
+
+
+def test_tokens_are_not_in_the_handle_repr():
+    handle = sl.SlackHandle(bot_token="xoxb-secret", user_token="xoxp-secret")
+    assert "secret" not in repr(handle)
 
 
 def test_search_with_a_user_token_renders_matches(monkeypatch):

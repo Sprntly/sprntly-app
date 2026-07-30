@@ -219,9 +219,17 @@ def answer_for_hints(
             not_supported_message(sorted(hints), enterprise_id),
             skill_action="Connector lookup",
         )
+    # The halves we are NOT reading: sources with no adapter, and supported ones
+    # dropped by the ≤2 cap. Threaded into the system block so an answer about
+    # Slack never reads as an answer about "Slack and HubSpot".
+    unavailable = [
+        display_name(h) for h in sorted(hints)
+        if h not in {p.provider for p in providers}
+    ]
     return connector_answer.answer(
         enterprise_id=enterprise_id,
         question=question,
         history=history,
         providers=providers,
+        unavailable_names=unavailable,
     )

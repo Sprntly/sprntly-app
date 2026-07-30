@@ -56,14 +56,26 @@ SYSTEM = (
     "which one they mean."
 )
 
-#: Verbatim pre-framework copy. Jira's connect message is user-facing text that
-#: predates this package and is asserted by the lookup's own tests; the framework
-#: composes its own (which also lists what IS connected) for new adapters.
+#: Verbatim pre-framework copy for all three deterministic branches. This is
+#: user-facing text that predates the package, and it is Jira-SPECIFIC in ways
+#: the generic copy cannot be ("double-check the issue key", "your Jira
+#: connection"). The framework composes its own — which also lists what IS
+#: connected, and speaks about channels/files/records — for new adapters; the
+#: shim passes these so a Jira user's wording does not change under a refactor.
 NOT_CONNECTED = (
     "I can pull live details from your Jira — tickets, epics, comments, "
     "and their status — but Jira isn't connected yet (or its access "
     "needs refreshing). Connect **Jira** in Settings → Connectors and "
     "I'll be able to read your issues."
+)
+EMPTY_RESULT = (
+    "I looked in Jira but couldn't find the issue(s) your question "
+    "refers to. Double-check the issue key or try naming the project."
+)
+UNREACHABLE = (
+    "I couldn't reach Jira to look that up just now. Please retry in a "
+    "moment — if it keeps failing, your Jira connection may need "
+    "reconnecting in Settings → Connectors."
 )
 
 SEARCH_TOOL = {

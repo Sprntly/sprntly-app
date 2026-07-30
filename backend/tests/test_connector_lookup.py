@@ -356,6 +356,129 @@ def test_decision_log_failure_never_breaks_the_answer(monkeypatch):
     assert out["answer"] == "x"
 
 
+# ── the Jira shim's copy is a CONTRACT, pinned exactly ───────────────────────
+#
+# tests/test_jira_lookup.py asserts these branches with substrings ("couldn't
+# find", "couldn't reach Jira"), which stayed green while the actual sentences
+# drifted to the framework's generic wording — a Jira user was being told to name
+# "the channel, ticket, file or person" and to reconnect "that connection". These
+# tests pin the full strings so the next refactor can't drift them silently.
+
+_JIRA_NOT_CONNECTED = (
+    "I can pull live details from your Jira — tickets, epics, comments, "
+    "and their status — but Jira isn't connected yet (or its access "
+    "needs refreshing). Connect **Jira** in Settings → Connectors and "
+    "I'll be able to read your issues."
+)
+_JIRA_EMPTY = (
+    "I looked in Jira but couldn't find the issue(s) your question "
+    "refers to. Double-check the issue key or try naming the project."
+)
+_JIRA_UNREACHABLE = (
+    "I couldn't reach Jira to look that up just now. Please retry in a "
+    "moment — if it keeps failing, your Jira connection may need "
+    "reconnecting in Settings → Connectors."
+)
+
+
+def _jira_session():
+    from app.connectors.jira_fetch import JiraSession
+
+    return JiraSession(access_token="tok", cloud_id="cid",
+                       site_url="https://acme.atlassian.net")
+
+
+def test_jira_not_connected_copy_is_verbatim(monkeypatch):
+    from app import jira_lookup
+    from app.connectors import jira_fetch
+
+    monkeypatch.setattr(jira_fetch, "open_session", lambda cid: None)
+    out = jira_lookup.answer(enterprise_id="co", question="status of PROJ-1")
+    assert out["answer"] == _JIRA_NOT_CONNECTED
+    # …and it does NOT pick up the framework's "connected right now" suffix.
+    assert "Connected right now" not in out["answer"]
+    assert out["_skill_source"] == "jira-lookup"
+    assert out["_skill_action"] == "Jira lookup"
+
+
+def test_jira_empty_result_copy_is_verbatim(monkeypatch):
+    from app import jira_lookup
+    from app.connectors import jira_fetch
+
+    monkeypatch.setattr(jira_fetch, "open_session", lambda cid: _jira_session())
+    monkeypatch.setattr(jira_lookup, "run_tool_loop", lambda **k: "  ")
+    monkeypatch.setattr(jira_lookup, "_log", lambda *a, **k: None)
+    out = jira_lookup.answer(enterprise_id="co", question="status of ZZZ-9")
+    assert out["answer"] == _JIRA_EMPTY
+    assert "channel" not in out["answer"] and "file" not in out["answer"]
+
+
+def test_jira_unreachable_copy_is_verbatim(monkeypatch):
+    from app import jira_lookup
+    from app.connectors import jira_fetch
+
+    monkeypatch.setattr(jira_fetch, "open_session", lambda cid: _jira_session())
+
+    def boom(**kwargs):
+        raise RuntimeError("api down")
+
+    monkeypatch.setattr(jira_lookup, "run_tool_loop", boom)
+    out = jira_lookup.answer(enterprise_id="co", question="status of PROJ-1")
+    assert out["answer"] == _JIRA_UNREACHABLE
+    assert "your Jira connection" in out["answer"]
+
+
+def test_jira_uses_its_own_system_prompt_not_the_framework_head(monkeypatch):
+    from app import jira_lookup
+    from app.connectors import jira_fetch
+
+    monkeypatch.setattr(jira_fetch, "open_session", lambda cid: _jira_session())
+    captured = {}
+    monkeypatch.setattr(jira_lookup, "run_tool_loop",
+                        lambda **k: captured.update(k) or "answered")
+    monkeypatch.setattr(jira_lookup, "_log", lambda *a, **k: None)
+    jira_lookup.answer(enterprise_id="co", question="status of PROJ-1")
+    assert captured["system"] == jira_lookup._SYSTEM
+    assert "Rules that hold for every source" not in captured["system"]
+
+
+def test_generic_adapters_still_get_the_framework_copy():
+    """The overrides are per-adapter, not a global change of default."""
+    out = ca.answer(enterprise_id="co-a", question="q",
+                    providers=[FakeProvider("slack")],
+                    run_loop=lambda **k: "   ", log=lambda *a: None)
+    assert "Try naming the channel, ticket, file or person more exactly" in out["answer"]
+
+
+# ── partial-connection honesty ───────────────────────────────────────────────
+
+def test_unreachable_sources_are_named_in_the_system_block():
+    """"check slack and hubspot" with only Slack connected: an answer from Slack
+    alone must not read as an answer about both."""
+    captured = {}
+    ca.answer(enterprise_id="co-a", question="check slack and clickup",
+              providers=[FakeProvider("slack"), FakeProvider("clickup", connected=False)],
+              run_loop=lambda **k: captured.update(k) or "x", log=lambda *a: None)
+    assert "## Not available for this question" in captured["system"]
+    assert "Clickup" in captured["system"].split("## Not available")[1]
+    assert "do not let an answer from the other source(s) imply" in captured["system"]
+
+
+def test_caller_supplied_unavailable_names_reach_the_system_block():
+    captured = {}
+    ca.answer(enterprise_id="co-a", question="check slack and zendesk",
+              providers=[FakeProvider("slack")], unavailable_names=["Zendesk"],
+              run_loop=lambda **k: captured.update(k) or "x", log=lambda *a: None)
+    assert "Zendesk" in captured["system"]
+
+
+def test_no_unavailable_section_when_everything_resolved():
+    captured = {}
+    ca.answer(enterprise_id="co-a", question="q", providers=[FakeProvider("slack")],
+              run_loop=lambda **k: captured.update(k) or "x", log=lambda *a: None)
+    assert "Not available for this question" not in captured["system"]
+
+
 # ── registry (which sources chat can read, and honest copy for the rest) ─────
 
 def test_registry_resolves_shipped_adapters():
@@ -433,3 +556,29 @@ def test_connected_providers_survives_a_db_failure(monkeypatch):
     monkeypatch.setattr(db, "list_connections", boom)
     monkeypatch.setattr(db, "list_slack_connections", boom)
     assert registry.connected_providers("co-a") == []
+
+
+def test_registry_tells_the_loop_which_half_it_is_not_reading(monkeypatch):
+    """"check slack and zendesk" — the loop must be told Zendesk went unread, or
+    a Slack-only answer sounds like it covered both."""
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "x"})
+    registry.answer_for_hints(enterprise_id="co-a", question="check slack and zendesk",
+                              history=None, hints={"slack", "zendesk"})
+    assert seen["unavailable_names"] == ["Zendesk"]
+
+
+def test_registry_reports_providers_dropped_by_the_two_cap(monkeypatch):
+    from app import db
+
+    monkeypatch.setattr(db, "list_connections",
+                        lambda cid: [{"provider": "clickup"}, {"provider": "jira"}])
+    monkeypatch.setattr(db, "list_slack_connections", lambda cid: [{"id": "1"}])
+    seen = {}
+    monkeypatch.setattr(ca, "answer", lambda **k: seen.update(k) or {"answer": "x"})
+    registry.answer_for_hints(enterprise_id="co-a",
+                              question="check slack, jira and clickup",
+                              history=None, hints={"slack", "jira", "clickup"})
+    # Whichever one the cap dropped is named as unread, not silently omitted.
+    assert len(seen["unavailable_names"]) == 1
+    assert seen["unavailable_names"][0] in {"Slack", "Jira", "ClickUp"}
