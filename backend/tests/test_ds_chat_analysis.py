@@ -150,6 +150,22 @@ def test_qa_agent_routes_to_ds(monkeypatch):
     assert out is sentinel
 
 
+def test_staging_is_the_shared_helper(workspace):
+    """`_stage_workspace` now lives in app.ds.staging so both DS engines stage
+    identically — the extraction must be behaviour-preserving, not a copy."""
+    from app.ds import staging
+
+    assert ca._stage_workspace is staging.stage_workspace
+    assert ca._MAX_FILE_BYTES == staging.MAX_FILE_BYTES == 20 * 1024 * 1024
+
+    _plant_users_csv(workspace, n=20)
+    (workspace / "notes.pdf").write_bytes(b"%PDF-1.4")
+    out = tmp = workspace.parent / "stage"
+    tmp.mkdir()
+    assert staging.stage_workspace(workspace, out) == ["users.csv"]
+    assert (out / "users.csv").is_file()
+
+
 def test_answer_unanalyzable_summary_sheet(workspace):
     """A tiny aggregated summary sheet yields no scans — the reply must say the
     data lacked analyzable structure, not claim 'no effect survived'."""

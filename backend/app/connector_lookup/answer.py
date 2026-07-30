@@ -28,6 +28,7 @@ from app.connector_lookup.base import (
     cap_text,
 )
 from app.llm import run_tool_loop as _default_run_loop
+from app.prompt_history import clamp_turn_text
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +64,30 @@ _SYSTEM_HEAD = (
 )
 
 
+#: Turns of history folded into a lookup prompt — 10 turns ≈ 5 exchanges, wide
+#: enough that the channel/issue/file a follow-up points back at is still in view.
+_HISTORY_TURNS = 10
+
+
 def _render_history(history: list[dict] | None) -> str:
-    """Recent turns as plain text (10 turns ≈ 5 exchanges) — wide enough that the
-    channel/issue/file a follow-up points back at is still in view."""
+    """Recent turns as plain text, each one clamped.
+
+    THE fold site for every connector adapter — Jira (via the jira_lookup shim),
+    Slack, ClickUp, Fireflies, GitHub, HubSpot, Drive — which is why the
+    per-turn clamp belongs here rather than in each caller. `clamp_turn_text`
+    (app/prompt_history.py) strips base64 `data:` payloads, reduces an HTML
+    report turn to its narrative and caps the rest: a chart-bearing report answer
+    persisted verbatim as a conversation turn is ~1 MB of data URI, which
+    replayed into the next prompt in the thread is a non-retryable 400. One site,
+    every adapter, including ones added later.
+    """
     if not history:
         return ""
-    recent = history[-10:]
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}" for t in recent]
+    recent = history[-_HISTORY_TURNS:]
+    rows = [
+        f"{t.get('role', 'user').capitalize()}: {clamp_turn_text(t.get('content', ''))}"
+        for t in recent
+    ]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 
 
