@@ -42,6 +42,13 @@ _ZIP_MAX_MEMBER_BYTES = 20 * 1024 * 1024         # per extracted .md
 MAX_NAME_CHARS = 64
 MAX_DESCRIPTION_CHARS = 1024
 
+# Cap on the PARSED skill text (method + modules + references, in characters).
+# The method block is injected into the prompt on every invocation, so this
+# bounds prompt cost; the largest vendored skill is ~32k chars, so 50k leaves
+# custom skills headroom above anything we ship. Distinct from the 20 MB byte
+# cap on the raw upload (skills_storage.MAX_SKILL_UPLOAD_BYTES).
+MAX_SKILL_CONTENT_CHARS = 50_000
+
 
 class SkillParseError(ValueError):
     """Upload problems that should surface as 4xx with the message verbatim."""
@@ -75,6 +82,16 @@ def parse_upload(filename: str, data: bytes) -> ParsedSkill:
     if ext == "zip":
         return _parse_zip(filename, data)
     raise SkillParseError("Only .md files and .zip archives are accepted.")
+
+
+def content_chars(parsed: ParsedSkill) -> int:
+    """Total characters of parsed skill text — what MAX_SKILL_CONTENT_CHARS
+    measures (every .md the archive contributed, not just the method)."""
+    return (
+        len(parsed.method)
+        + sum(len(t) for t in parsed.modules.values())
+        + sum(len(t) for t in parsed.references.values())
+    )
 
 
 def content_hash_for(parsed: ParsedSkill) -> str:

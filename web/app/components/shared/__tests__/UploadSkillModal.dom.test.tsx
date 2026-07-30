@@ -2,8 +2,9 @@
 //
 // UploadSkillModal: the custom-skill upload form (PRD 1854 happy path).
 // Client-side mirror of the server gates — required name/description with
-// touched-empty highlighting, .md/.zip-only file pick, 20 MB pre-check —
-// and the retry contract: a failed upload keeps every input intact.
+// touched-empty highlighting, .md/.zip-only file pick, 20 MB pre-check, the
+// 50,000-character content pre-check for bare .md files — and the retry
+// contract: a failed upload keeps every input intact.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
@@ -11,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import {
+  MAX_SKILL_CONTENT_CHARS,
   MAX_SKILL_FILE_BYTES,
   UploadSkillModal,
   skillFileError,
@@ -100,6 +102,60 @@ describe("UploadSkillModal", () => {
       pickFile(container, new File(["%PDF"], "skill.pdf"))
     })
     expect(screen.getByText(/Only \.md files and \.zip archives/)).toBeTruthy()
+  })
+
+  it("rejects a .md over the character cap on submit, without uploading", async () => {
+    const onUpload = vi.fn()
+    const { container } = render(
+      React.createElement(UploadSkillModal, { open: true, onUpload, onClose: vi.fn() }),
+    )
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "Big" } })
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Desc" },
+      })
+      pickFile(
+        container,
+        new File(["x".repeat(MAX_SKILL_CONTENT_CHARS + 1)], "big.md", {
+          type: "text/markdown",
+        }),
+      )
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
+    })
+
+    await waitFor(() =>
+      expect(screen.getByText(/50,000 character limit/)).toBeTruthy(),
+    )
+    expect(onUpload).not.toHaveBeenCalled()
+    // Inputs survive so the user can trim and retry (same retry contract as
+    // a server rejection).
+    expect((screen.getByLabelText(/skill name/i) as HTMLInputElement).value).toBe("Big")
+  })
+
+  it("accepts a .md exactly at the character cap (inclusive boundary)", async () => {
+    const onUpload = vi.fn().mockResolvedValue(undefined)
+    const { container } = render(
+      React.createElement(UploadSkillModal, { open: true, onUpload, onClose: vi.fn() }),
+    )
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), { target: { value: "At cap" } })
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Desc" },
+      })
+      pickFile(
+        container,
+        new File(["x".repeat(MAX_SKILL_CONTENT_CHARS)], "atcap.md", {
+          type: "text/markdown",
+        }),
+      )
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
+    })
+
+    await waitFor(() => expect(onUpload).toHaveBeenCalled())
   })
 
   it("keeps inputs intact when the upload fails, so the user can retry", async () => {

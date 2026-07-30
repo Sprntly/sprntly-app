@@ -7,7 +7,8 @@ Covered:
 - happy path: .md and .zip uploads create a company-scoped skill row and
   stage the original bytes (filesystem fallback in tests)
 - the server-side validation ladder: missing/over-limit metadata (422), bad
-  extension (422), empty file (400), oversize (413), unparseable content (400)
+  extension (422), empty file (400), oversize (413), unparseable content
+  (400), over-limit parsed content in characters (413)
 - slug conflicts: built-in shadowing and company duplicates (409), with the
   staged object rolled back on the duplicate path
 - list: newest-first metadata, company-isolated
@@ -150,10 +151,15 @@ def test_empty_file_400(tenant_client):
     assert _upload(t.client, data=b"").status_code == 400
 
 
-def test_oversize_413_and_boundary_accepted(tenant_client):
+def test_oversize_413_and_boundary_accepted(tenant_client, monkeypatch):
+    import app.routes.custom_skills as mod
     from app.skills_storage import MAX_SKILL_UPLOAD_BYTES
 
     t = tenant_client.make(slug="acme")
+    # Lift the CONTENT (character) cap so this test isolates the BYTE
+    # boundary — 20 MB of markdown is far over the character cap, which has
+    # its own boundary test below.
+    monkeypatch.setattr(mod, "MAX_SKILL_CONTENT_CHARS", 30 * 1024 * 1024)
     # Exactly 20 MB is accepted (inclusive boundary, per the PRD edge case)…
     at_limit = b"a" * MAX_SKILL_UPLOAD_BYTES
     assert _upload(t.client, name="At Limit", data=at_limit).status_code == 201
@@ -162,6 +168,36 @@ def test_oversize_413_and_boundary_accepted(tenant_client):
     resp = _upload(t.client, name="Over Limit", data=over)
     assert resp.status_code == 413
     assert "20 MB" in resp.json()["detail"]
+
+
+def test_content_cap_boundary_md(tenant_client):
+    from app.skills.custom import MAX_SKILL_CONTENT_CHARS
+
+    t = tenant_client.make(slug="acme")
+    # Exactly at the cap is accepted (inclusive, like the byte boundary)…
+    at_cap = b"a" * MAX_SKILL_CONTENT_CHARS
+    assert _upload(t.client, name="At Cap", data=at_cap).status_code == 201
+    assert len(_staged_files()) == 1
+    # …one character over is rejected, before anything is staged.
+    over = b"a" * (MAX_SKILL_CONTENT_CHARS + 1)
+    resp = _upload(t.client, name="Over Cap", data=over)
+    assert resp.status_code == 413
+    assert f"{MAX_SKILL_CONTENT_CHARS:,} character" in resp.json()["detail"]
+    assert len(_staged_files()) == 1
+
+
+def test_content_cap_counts_every_zip_member(tenant_client):
+    from app.skills.custom import MAX_SKILL_CONTENT_CHARS
+
+    t = tenant_client.make(slug="acme")
+    # Each member is under the cap; together they exceed it — the cap is on
+    # the TOTAL parsed text, not the method file alone.
+    half = b"a" * (MAX_SKILL_CONTENT_CHARS // 2 + 1)
+    data = _zip_bytes({"SKILL.md": half, "modules/big.md": half})
+    resp = _upload(t.client, name="Big Zip", filename="big.zip", data=data)
+    assert resp.status_code == 413
+    assert "character" in resp.json()["detail"]
+    assert _staged_files() == []
 
 
 def test_zip_without_md_400(tenant_client):

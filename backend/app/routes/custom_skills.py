@@ -16,8 +16,9 @@ check must hold against direct API calls.
 
 Error ladder (mirrors the attachments/dataset upload guards): missing or
 over-limit name/description → 422, unsupported extension → 422, empty file →
-400, oversize → 413, unparseable content → 400, slug conflict (company
-duplicate OR shadowing a built-in skill id) → 409.
+400, oversize → 413, unparseable content → 400, over-limit parsed content
+(characters) → 413, slug conflict (company duplicate OR shadowing a built-in
+skill id) → 409.
 """
 from __future__ import annotations
 
@@ -31,7 +32,9 @@ from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin
 from app.skills.custom import (
     MAX_DESCRIPTION_CHARS,
     MAX_NAME_CHARS,
+    MAX_SKILL_CONTENT_CHARS,
     SkillParseError,
+    content_chars,
     content_hash_for,
     parse_upload,
     slugify,
@@ -98,6 +101,15 @@ async def upload_skill(
         parsed = parse_upload(file.filename or f"skill.{ext}", data)
     except SkillParseError as e:
         raise HTTPException(400, str(e))
+    # Character cap on the PARSED text, after the byte cap on the raw file: a
+    # zip can pass 20 MB compressed yet expand into far more prompt text than
+    # any invocation should carry.
+    if content_chars(parsed) > MAX_SKILL_CONTENT_CHARS:
+        raise HTTPException(
+            413,
+            f"Skill content exceeds the {MAX_SKILL_CONTENT_CHARS:,} character "
+            "limit. Please trim the skill text and try again.",
+        )
 
     slug = slugify(name)
     if not slug:
