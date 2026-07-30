@@ -976,15 +976,27 @@ def test_regex_routes_company_research_phrasings(q):
 @pytest.mark.parametrize("q,expected", [
     # Competitive intelligence keeps every phrasing the regex layer owned.
     ("run a competitive analysis", "competitive-intelligence-review"),
-    ("what's our market position?", "competitive-intelligence-review"),
     ("competitor teardown for Acme", "competitive-intelligence-review"),
+    # AGREED ROUTING CHANGE (CIR-narrowing stack, both reviewers signed off):
+    # this used to be pinned to competitive-intelligence-review by the old broad
+    # rule `\b(competit|competitor|competitive analysis|market position)\b`. The
+    # CIR fast-path is now REPORT-INTENT only, so a bare positioning question
+    # with no report noun deliberately defers to the haiku intent stage (which
+    # reads it as `positioning`) instead of buying a multi-minute web-research
+    # review. `None` here means "no regex rule claims it", which is the new
+    # expected behaviour — and what this test actually guards is unchanged:
+    # the company-research rules sitting above CIR must not claim it either.
+    ("what's our market position?", None),
     # Public feedback still owns public sentiment.
     ("what are people saying about us online", "public-feedback-report"),
     ("check our app store reviews", "public-feedback-report"),
 ])
 def test_company_research_does_not_steal_neighbouring_intents(q, expected):
     m = detect_intent(q)
-    assert m is not None and m.skill_id == expected, q
+    if expected is None:
+        assert m is None, f"{q!r} was claimed by {getattr(m, 'skill_id', None)!r}"
+    else:
+        assert m is not None and m.skill_id == expected, q
 
 
 @pytest.mark.parametrize("q", [

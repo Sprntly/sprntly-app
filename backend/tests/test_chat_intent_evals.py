@@ -68,6 +68,16 @@ EVALS: list[tuple[str, str, list[dict], dict, str]] = [
     ("plain-question", "why are enterprise users asking for this?",
      _FEATURE_THREAD, {}, "answer"),
     ("greeting", "hey, what can you do?", [], {}, "answer"),
+    # Report asks are ANSWERS, not envelope actions. A competitive review is
+    # produced by the skill router on the answer path (app/competitive_intel.py);
+    # there is no report intent, and classifying one of these as generate_prd
+    # would open a PRD tab instead of running the review.
+    ("cir-report-ask", "run a competitive intelligence report", [], {}, "answer"),
+    ("cir-scan-ask", "monthly competitor scan please", [], {}, "answer"),
+    ("cir-standing-ask", "where do we stand vs our competitors right now?",
+     [], _PRD_OPEN_CTX, "answer"),
+    ("cir-shipping-ask", "what have our competitors shipped this month?",
+     _FEATURE_THREAD, {}, "answer"),
 ]
 
 

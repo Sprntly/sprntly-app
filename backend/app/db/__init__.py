@@ -79,6 +79,12 @@ from app.db.asks import (
     start_cached_ask,
 )
 
+# Competitive-intelligence runs (state + captured records + rendered reports)
+from app.db.competitive_intel_runs import (
+    latest_competitive_intel_run,
+    save_competitive_intel_run,
+)
+
 # Public-feedback runs (captured record sets + rendered reports)
 from app.db.public_feedback_runs import (
     latest_public_feedback_run,

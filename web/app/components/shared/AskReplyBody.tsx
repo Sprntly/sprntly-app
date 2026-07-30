@@ -25,10 +25,16 @@ function flattenText(node: ReactNode): string {
   return ""
 }
 
-/** iframe title per skill that answers with a self-contained HTML document. */
+/**
+ * Report title per skill, for the sandboxed-iframe header. Every skill that
+ * answers with a self-contained HTML document needs an entry; anything not
+ * listed falls back to the VoC label, which is where this surface started.
+ */
 const REPORT_TITLES: Record<string, string> = {
   "public-feedback-report": "Public Feedback report",
   "ds-agent": "Data analysis report",
+  "competitive-intelligence-review": "Competitive Intelligence report",
+  "voice-of-customer-report": "Voice of Customer report",
 }
 
 const askMarkdownComponents: Components = {

@@ -31,6 +31,7 @@ from app import public_feedback_report
 from app.prompt_history import clamp_turn_text
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
+from app.report_records import parse_records
 
 logger = logging.getLogger(__name__)
 
@@ -238,49 +239,10 @@ def _plain_payload(answer: str, *, confidence: float = 0.0) -> dict:
     }
 
 
-def _parse_records(text: str) -> list[dict]:
-    """Extract the JSON array of records from the capture output. The model is
-    instructed to emit only the array, but tolerate stray prose/fences around
-    it, and salvage the complete prefix of an array truncated by the output
-    budget — a multi-minute sweep must never be discarded over a cut-off tail.
-    Returns [] when nothing parseable is found."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    candidates = [text]
-    fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.S)
-    if fence:
-        candidates.append(fence.group(1).strip())
-    # First "[" can be prose ("we searched [several] sites"), so also anchor on
-    # the first "[{" — the actual start of an array of objects.
-    start, end = text.find("["), text.rfind("]")
-    if start != -1 and end > start:
-        candidates.append(text[start:end + 1])
-    arr = re.search(r"\[\s*\{", text)
-    if arr and end > arr.start():
-        candidates.append(text[arr.start():end + 1])
-    for cand in candidates:
-        try:
-            parsed = json.loads(cand)
-        except (ValueError, TypeError):
-            continue
-        if isinstance(parsed, list):
-            return [r for r in parsed if isinstance(r, dict)]
-    # Truncation salvage: from the array start, trim back to each closing
-    # brace until the prefix + "]" parses — keeps every complete record.
-    if arr:
-        body = text[arr.start():]
-        while True:
-            last = body.rfind("}")
-            if last == -1:
-                return []
-            try:
-                parsed = json.loads(body[:last + 1] + "]")
-            except ValueError:
-                body = body[:last]
-                continue
-            return [r for r in parsed if isinstance(r, dict)]
-    return []
+# The capture-output salvage now lives in app.report_records so the
+# competitive-intelligence capture reuses the identical parser. Kept bound here
+# under its original private name — it is this module's capture contract.
+_parse_records = parse_records
 
 
 def _scope_block(profile: dict, question: str) -> str:

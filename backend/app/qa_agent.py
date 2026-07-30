@@ -747,6 +747,23 @@ def answer(
         if cr is not None:
             return _maybe_verify(cr, enterprise_id)
 
+    # Competitive-intelligence routed: the review needs the public WEB (what a
+    # rival shipped, their pricing page, their app-store rating), which the
+    # generic skill answer can't reach — it would answer from the KG's
+    # first-party signal, and the skill's own integrity rule then forbids the
+    # numbers it would need. Run the dedicated staged web-research pipeline
+    # instead (Scan when prior state exists, Review otherwise). It returns None
+    # only when the company profile can't be read, falling through to the
+    # generic answer.
+    if decision.skill_id == "competitive-intelligence-review":
+        from app import competitive_intel
+
+        cir = competitive_intel.answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
+        if cir is not None:
+            return _maybe_verify(cir, enterprise_id)
+
     # VoC routed by ANY stage — including the haiku intent router. Prefer the
     # SAME live call digest the phrase fast-paths use when a call source is
     # connected, so a phrasing only the LLM router understands ("what is the
