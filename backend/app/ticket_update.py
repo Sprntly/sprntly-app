@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from app.prompt_history import clamp_turn_text
 from app.llm import run_tool_loop
 
 logger = logging.getLogger(__name__)
@@ -174,7 +175,7 @@ def _render_history(history: Optional[list[dict]]) -> str:
     if not history:
         return ""
     recent = history[-10:]
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}" for t in recent]
+    rows = [f"{t.get('role', 'user').capitalize()}: {clamp_turn_text(t.get('content', ''))}" for t in recent]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 
 
