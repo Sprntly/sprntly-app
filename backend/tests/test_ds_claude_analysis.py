@@ -931,11 +931,13 @@ def test_decision_log_failure_never_breaks_the_answer(workspace, monkeypatch):
 
 # ── 1. flag gate + fallback in qa_agent ──────────────────────────────────────
 
+def _flags(monkeypatch, flags) -> None:
+    """Patch the STRICT reader the gate uses. `None` = the read itself failed."""
+    monkeypatch.setattr("app.entitlements.read_feature_flags", lambda cid: flags)
+
+
 def _flag(monkeypatch, value: bool) -> None:
-    monkeypatch.setattr(
-        "app.entitlements.feature_flags_for_company",
-        lambda cid: {"ds_claude_analysis": value},
-    )
+    _flags(monkeypatch, {"ds_claude_analysis": value})
 
 
 LEGACY_SENTINEL = {"answer": "v5.8", "key_points": [], "citations": [],
@@ -946,26 +948,68 @@ CLAUDE_SENTINEL = {"answer": "<!doctype html><div>claude</div>", "key_points": [
                    "_skill": "ds-agent", "_skill_source": "ds-claude"}
 
 
-def test_flag_off_uses_the_deterministic_engine(monkeypatch):
+def test_explicit_false_uses_the_deterministic_engine(monkeypatch):
+    """The named opt-outs (Freezing Point LLC, Chaostrack Inc.) are stored as an
+    explicit false — the ONLY thing that turns the engine off now."""
     import app.qa_agent as qa
 
     _flag(monkeypatch, False)
     monkeypatch.setattr(legacy, "answer", lambda **kw: LEGACY_SENTINEL)
     monkeypatch.setattr(
-        ca, "answer", lambda **kw: pytest.fail("Claude path ran with the flag OFF")
+        ca, "answer", lambda **kw: pytest.fail("Claude path ran for an opted-out company")
     )
 
     out = qa.answer(enterprise_id=COMPANY, question="analyze my data", dataset="acme")
     assert out is LEGACY_SENTINEL
 
 
-def test_absent_flag_defaults_off(monkeypatch):
+def test_absent_flag_defaults_on(monkeypatch):
+    """DEFAULT ON (Apurva, 2026-07-30): a company whose flags never mention the
+    key — grandfathered or freshly onboarded — gets the Claude engine."""
     import app.qa_agent as qa
 
-    monkeypatch.setattr("app.entitlements.feature_flags_for_company", lambda cid: {})
+    _flags(monkeypatch, {})
+    monkeypatch.setattr(ca, "answer", lambda **kw: CLAUDE_SENTINEL)
+    monkeypatch.setattr(
+        legacy, "answer", lambda **kw: pytest.fail("legacy ran for a default-ON company")
+    )
+
+    assert qa.answer(
+        enterprise_id=COMPANY, question="analyze my data", dataset="acme"
+    ) is CLAUDE_SENTINEL
+
+
+def test_other_flags_present_but_ours_absent_still_defaults_on(monkeypatch):
+    """A real grandfathered row: full DEFAULT_FEATURE_FLAGS payload, no key of
+    ours. The onboarding insert writes exactly this shape."""
+    import app.qa_agent as qa
+
+    _flags(monkeypatch, {
+        "agents": True, "top_insights": True, "chat_intent_envelope": True,
+        "on_demand_analysis": True, "auto_prd_generation": True,
+        "engineer_agent": False, "research_agent": False,
+        "on_call_agent": False, "claude_code_handoff": False,
+    })
+    monkeypatch.setattr(ca, "answer", lambda **kw: CLAUDE_SENTINEL)
+    monkeypatch.setattr(
+        legacy, "answer", lambda **kw: pytest.fail("legacy ran for a default-ON company")
+    )
+
+    assert qa.answer(
+        enterprise_id=COMPANY, question="analyze my data", dataset="acme"
+    ) is CLAUDE_SENTINEL
+
+
+def test_flag_read_failure_still_defaults_off(monkeypatch):
+    """Deliberately NOT symmetric with the missing-key default. An unknown flag
+    state must not ship a tenant's CSVs to the Files API — unlike #893, which
+    fails open because it only picks a routing strategy."""
+    import app.qa_agent as qa
+
+    _flags(monkeypatch, None)  # read_feature_flags signals failure with None
     monkeypatch.setattr(legacy, "answer", lambda **kw: LEGACY_SENTINEL)
     monkeypatch.setattr(
-        ca, "answer", lambda **kw: pytest.fail("Claude path ran without an explicit flag")
+        ca, "answer", lambda **kw: pytest.fail("Claude path ran on an unknown flag state")
     )
 
     assert qa.answer(
@@ -973,13 +1017,15 @@ def test_absent_flag_defaults_off(monkeypatch):
     ) is LEGACY_SENTINEL
 
 
-def test_flag_read_failure_defaults_off(monkeypatch):
+def test_flag_read_raising_defaults_off(monkeypatch):
+    """Belt to the None braces: even if the reader raises instead of returning
+    None, the gate resolves OFF rather than propagating."""
     import app.qa_agent as qa
 
     def _boom(cid):  # noqa: ARG001
         raise RuntimeError("flags column missing")
 
-    monkeypatch.setattr("app.entitlements.feature_flags_for_company", _boom)
+    monkeypatch.setattr("app.entitlements.read_feature_flags", _boom)
     monkeypatch.setattr(legacy, "answer", lambda **kw: LEGACY_SENTINEL)
 
     assert qa.answer(
