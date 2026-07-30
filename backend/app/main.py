@@ -67,6 +67,8 @@ from app.routes import (
     multi_agent,
     onboarding,
     oncall,
+    reports,
+    reports_public,
     research,
     staff_admin,
     stories,
@@ -315,6 +317,10 @@ app.include_router(connectors.router)
 app.include_router(datasets_routes.router)
 app.include_router(brief.router)
 app.include_router(artifacts.router)
+app.include_router(reports.router)
+# No-auth share viewer for reports (`/r/<token>`). Registered separately from
+# reports.router so the unauthenticated surface stays visible in this list.
+app.include_router(reports_public.router)
 app.include_router(ideation.router)
 app.include_router(ask.router)
 app.include_router(chat.router)

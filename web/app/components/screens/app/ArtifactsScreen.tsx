@@ -7,14 +7,21 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import {
   artifactsApi,
+  askApi,
   prdApi,
   evidenceApi,
+  reportsApi,
   type ArtifactItem,
+  type ReportDoc,
+  type ReportKindOption,
 } from "../../../lib/api"
 import { markdownToEvidenceState } from "../../../lib/evidence-adapter"
 import { prototypePath } from "../../../lib/routes"
+import { reportKindLabel } from "../../../lib/reportKind"
 import { AppLayout } from "./AppLayout"
 import { EmptyPane } from "../../shared/EmptyPane"
+import { ReportPanel } from "../../shared/ReportPanel"
+import { NewReportMenu } from "./NewReportMenu"
 
 // ── Artifacts ──
 //
@@ -23,19 +30,25 @@ import { EmptyPane } from "../../shared/EmptyPane"
 // History holds only chats and Artifacts is the browsable library of durable
 // outputs (PRDs, prototypes, evidence).
 
-type ArtifactFilter = "all" | "prd" | "prototype" | "evidence"
+type ArtifactFilter = "all" | "prd" | "prototype" | "evidence" | "report"
 
 const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "all", label: "All" },
+  { id: "report", label: "Reports" },
   { id: "prd", label: "PRDs" },
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
 ]
 
+// Poll cadence for a panel-started report run. These skills read every source, so
+// a run is minutes long — a slow poll keeps the wait honest without hammering.
+const REPORT_POLL_MS = 4000
+
 const ARTIFACT_BADGE: Record<ArtifactItem["type"], { label: string; bg: string; color: string }> = {
   prd:       { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
   prototype: { label: "PROTOTYPE", bg: "#DBEAFE", color: "#1E40AF" },
   evidence:  { label: "EVIDENCE",  bg: "#FEF0E6", color: "#B45309" },
+  report:    { label: "REPORT",    bg: "#EDE9FE", color: "#6D28D9" },
 }
 
 /** Compact relative time, e.g. "just now", "3h ago", "2d ago", "May 3". */
@@ -75,6 +88,20 @@ function artifactSourceLine(a: ArtifactItem): string {
     if (rel) parts.push(rel)
     return parts.join(" · ")
   }
+  if (a.type === "report") {
+    // A report's provenance is its ATTACHMENT: the chat room and/or PRD it was
+    // generated in. Each part appears only when that attachment exists AND its
+    // title resolved — a deleted chat/PRD leaves the id but no name, and an
+    // unattached report simply reads as its kind. Never a fabricated label.
+    const parts = [`${reportKindLabel(a.skill)} report`]
+    if (a.source.conversation_title) parts.push(`from ${a.source.conversation_title}`)
+    if (a.source.prd_title) parts.push(`on PRD ${a.source.prd_title}`)
+    // A live share link is worth seeing without opening the report — this
+    // document is reachable by anyone holding the URL.
+    if (a.share_mode !== "private") parts.push("Shared")
+    if (rel) parts.push(rel)
+    return parts.join(" · ")
+  }
   // prd | evidence
   const week = a.source.week_label || "brief"
   const parts = [`from Brief ${week}`]
@@ -103,6 +130,20 @@ function ArtifactTypeIcon({ type }: { type: ArtifactItem["type"] }) {
       <div style={wrap}>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
           <circle cx="11" cy="11" r="7" /><line x1="21" y1="21" x2="16.65" y2="16.65" />
+        </svg>
+      </div>
+    )
+  }
+  if (type === "report") {
+    // A bar-chart glyph: these documents lead with charts and sized themes,
+    // which is what distinguishes them from the text-document PRD icon.
+    return (
+      <div style={wrap}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={cfg.color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+          <line x1="4" y1="20" x2="20" y2="20" />
+          <rect x="6" y="11" width="3.4" height="6" rx="1" />
+          <rect x="11.4" y="7" width="3.4" height="10" rx="1" />
+          <rect x="16.8" y="13" width="3.4" height="4" rx="1" />
         </svg>
       </div>
     )
@@ -194,6 +235,7 @@ export function ArtifactsView({
   filter,
   loading,
   activeKey = null,
+  generatingKind = null,
   onFilterChange,
   onOpen,
 }: {
@@ -203,10 +245,17 @@ export function ArtifactsView({
   /** `${type}-${id}` of the artifact whose panel is currently open — that row
    *  renders in its selected (green) state. Null = nothing selected. */
   activeKey?: string | null
+  /** Label of a report being generated from this panel, or null. A report row
+   *  only exists once the run completes, so this pending row is what makes a
+   *  multi-minute run visible — the prototype shimmer's role, held client-side
+   *  because there is no server row to poll yet. */
+  generatingKind?: string | null
   onFilterChange: (f: ArtifactFilter) => void
   onOpen: (a: ArtifactItem) => void
 }) {
   const filtered = filter === "all" ? items : items.filter((a) => a.type === filter)
+  // The pending row belongs to the report filters only.
+  const showPending = generatingKind != null && (filter === "all" || filter === "report")
 
   return (
     <div>
@@ -250,11 +299,40 @@ export function ArtifactsView({
         </div>
       )}
 
+      {/* Pending report run — the artifact does not exist server-side until the
+          run completes, so this row is the only sign the work is happening. */}
+      {showPending && (
+        <div
+          data-testid="report-pending-row"
+          style={{
+            display: "flex", alignItems: "center", gap: 14,
+            padding: "14px 10px", borderRadius: 10, cursor: "default",
+          }}
+        >
+          <div style={{
+            width: 38, height: 38, borderRadius: "50%", flexShrink: 0,
+            background: ARTIFACT_BADGE.report.bg,
+            animation: "chats-pulse 1.4s ease-in-out infinite",
+          }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{
+              fontSize: 14, fontWeight: 600, color: "var(--ink, #1A1A17)", marginBottom: 4,
+            }}>
+              {generatingKind} report
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--ink-3, #8C8A84)" }}>
+              Generating · this can take a few minutes
+            </div>
+          </div>
+          <style>{`@keyframes chats-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }`}</style>
+        </div>
+      )}
+
       {/* Empty state */}
-      {!loading && filtered.length === 0 && (
+      {!loading && !showPending && filtered.length === 0 && (
         <EmptyPane
           title="No artifacts yet"
-          hint="Upload a PRD, or generate a PRD, prototype, or evidence from a brief finding."
+          hint="Upload a PRD, generate a PRD, prototype, or evidence from a brief finding, or ask for a report in chat."
           placeholders={2}
         />
       )}
@@ -342,6 +420,28 @@ export function ArtifactsScreen() {
     if (contentPanelTab == null) setActiveArtifactKey(null)
   }, [contentPanelTab])
 
+  // Report viewer state. Reports open in their OWN drawer (ReportPanel), not in
+  // the PRD-pipeline ContentPanel — so the open row is tracked here rather than
+  // via `contentPanelTab`. `reportAttachment` carries the chat/PRD titles the
+  // list row already resolved, so the viewer needs no second fetch.
+  const [report, setReport] = useState<ReportDoc | null>(null)
+  const [reportLoading, setReportLoading] = useState(false)
+  const [reportAttachment, setReportAttachment] = useState<{
+    conversationTitle?: string | null
+    prdTitle?: string | null
+  }>({})
+
+  const closeReport = useCallback(() => {
+    setReport(null)
+    setReportLoading(false)
+    setReportAttachment({})
+    setActiveArtifactKey(null)
+  }, [])
+
+  // "New report" run in flight — the label of the kind being generated, or null.
+  // Drives the pending row so a multi-minute run is visible rather than silent.
+  const [generatingKind, setGeneratingKind] = useState<string | null>(null)
+
   // Upload-a-PRD state (the Import flow).
   const [importing, setImporting] = useState(false)
   const [importError, setImportError] = useState<string | null>(null)
@@ -397,6 +497,28 @@ export function ArtifactsScreen() {
         setContent({ evidence: markdownToEvidenceState(rec.payload_md), evidenceGenerating: false })
         return
       }
+      if (a.type === "report") {
+        // Same posture as evidence: the drawer opens IMMEDIATELY in its loading
+        // state and the fetch fills it in, so the click is never silent while
+        // the document (which can be large) comes over the wire.
+        setActiveArtifactKey(`${a.type}-${a.id}`)
+        setReport(null)
+        setReportAttachment({
+          conversationTitle: a.source.conversation_title,
+          prdTitle: a.source.prd_title,
+        })
+        setReportLoading(true)
+        try {
+          setReport(await reportsApi.get(a.open.report_id))
+          setReportLoading(false)
+        } catch (e) {
+          // Close the drawer and deselect the row, then let the shared handler
+          // below raise the single "couldn't open" toast.
+          closeReport()
+          throw e
+        }
+        return
+      }
       // prototype — open the in-tab canvas for its parent PRD.
       router.push(prototypePath(a.open.prd_id))
     } catch {
@@ -405,7 +527,43 @@ export function ArtifactsScreen() {
       setContent({ evidenceGenerating: false })
       showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
-  }, [setContent, openContentPanel, openPrdTab, router, showToast])
+  }, [setContent, openContentPanel, openPrdTab, router, showToast, closeReport])
+
+  // Generate a report straight from this panel. The run goes through the ORDINARY
+  // ask pipeline with the skill pinned, so the result is identical to asking for
+  // the same report in chat and it lands in the library via the same capture path
+  // (app/report_capture.py) — no parallel generation route to keep in step.
+  //
+  // The report has no chat or PRD to attach to, which is a normal state: the row
+  // simply reads as its kind with no "from" line.
+  const generateReport = useCallback(async (kind: ReportKindOption) => {
+    if (!activeCompany || generatingKind) return
+    setGeneratingKind(kind.label)
+    try {
+      const { ask_id } = await askApi.start(kind.prompt, activeCompany, {
+        pinned_skill: kind.skill,
+      })
+      // These runs are minutes long (the skills read every source), so poll
+      // rather than hold a request open.
+      for (;;) {
+        await new Promise((r) => setTimeout(r, REPORT_POLL_MS))
+        const job = await askApi.get(ask_id)
+        if (job.status === "generating") continue
+        if (job.status === "ready") {
+          showToast("Report ready", `Your ${kind.label} report is in Artifacts.`)
+          refreshArtifacts()
+        } else {
+          // cancelled / error — say so rather than leaving a row that never lands.
+          showToast("Report failed", "The report couldn't be generated. Please try again.")
+        }
+        return
+      }
+    } catch {
+      showToast("Report failed", "The report couldn't be started. Please try again.")
+    } finally {
+      setGeneratingKind(null)
+    }
+  }, [activeCompany, generatingKind, refreshArtifacts, showToast])
 
   // Import a PRD from an uploaded file. The backend parses + re-lays-it-out into
   // our format. The endpoint parses the file and kicks off generation, returning
@@ -436,6 +594,12 @@ export function ArtifactsScreen() {
       <div style={{ maxWidth: 780, margin: "0 auto", padding: "0 4px" }}>
         {/* Upload a PRD → parsed + converted into our format server-side. */}
         <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 12, marginBottom: 16 }}>
+          {/* Start a report without composing a prompt in chat. */}
+          <NewReportMenu
+            disabled={!activeCompany}
+            generating={generatingKind != null}
+            onGenerate={(kind) => void generateReport(kind)}
+          />
           <input
             ref={fileInputRef}
             type="file"
@@ -484,10 +648,27 @@ export function ArtifactsScreen() {
           filter={artifactFilter}
           loading={artifactsLoading}
           activeKey={activeArtifactKey}
+          generatingKind={generatingKind}
           onFilterChange={setArtifactFilter}
           onOpen={openArtifact}
         />
       </div>
+
+      {/* The report viewer drawer. Self-unmounting: it renders nothing unless a
+          report is open or loading. */}
+      <ReportPanel
+        report={report}
+        loading={reportLoading}
+        attachment={reportAttachment}
+        onClose={closeReport}
+        onToast={showToast}
+        // Keep the open document truthful after a share toggle, and refresh the
+        // list so the row's shared marker matches what the menu just did.
+        onShareChange={(next) => {
+          setReport((cur) => (cur ? { ...cur, ...next } : cur))
+          refreshArtifacts()
+        }}
+      />
     </AppLayout>
   )
 }

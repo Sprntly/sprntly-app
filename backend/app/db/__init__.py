@@ -87,8 +87,10 @@ from app.db.public_feedback_runs import (
 
 # Reports (captured skill-generated HTML report documents)
 from app.db.reports import (
+    find_report_by_share_token,
     get_report,
     save_report,
+    set_report_share_config,
 )
 
 # Website-analysis jobs (onboarding, fire-and-forget)
@@ -239,8 +241,10 @@ __all__ = [
     "start_ask_job",
     "start_cached_ask",
     # reports (captured HTML report documents)
+    "find_report_by_share_token",
     "get_report",
     "save_report",
+    "set_report_share_config",
     # website-analysis jobs
     "complete_analysis_job",
     "fail_analysis_job",

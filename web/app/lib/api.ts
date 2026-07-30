@@ -3858,6 +3858,52 @@ export type ArtifactItem =
       is_complete: boolean
       preview_image_url: string | null
     }
+  | {
+      type: "report"
+      id: number
+      title: string
+      /** Always "" — a report is complete the moment it is captured, so there is
+       *  no lifecycle for the row to render (contrast prototype's status). */
+      status: string
+      created_at: string
+      /** The report KIND: the skill id that produced it, e.g.
+       *  "voice-of-customer-report". Drives the badge sub-label. */
+      skill: string
+      /** Whether a share link exists. The TOKEN is never in the listing — only
+       *  the share dialog fetches it. */
+      share_mode: "private" | "public" | "passcode"
+      /** `conversation_*` / `prd_*` are the report's ATTACHMENT — the chat room
+       *  and PRD it was generated in. Either pair may be null (the run carried no
+       *  such context); a non-null id with a null title means that chat/PRD has
+       *  since been deleted, so the row shows no "from" label rather than a
+       *  fabricated one. */
+      source: {
+        skill: string
+        question: string
+        conversation_id: number | null
+        conversation_title: string | null
+        prd_id: number | null
+        prd_title: string | null
+      }
+      /** The listing carries no `html` — the body is fetched by id on open. */
+      open: { report_id: number }
+    }
+
+/** One captured report, body included (GET /v1/reports/{id}). */
+export type ReportDoc = {
+  id: number
+  skill: string
+  title: string
+  question: string
+  /** The self-contained HTML document, rendered verbatim in a sandboxed iframe. */
+  html: string
+  created_at: string
+  conversation_id: number | null
+  prd_id: number | null
+  share_mode: "private" | "public" | "passcode"
+  /** Null while private — the link is only revealed once sharing is on. */
+  share_token: string | null
+}
 
 export const artifactsApi = {
   /** Unified artifact list for a company slug, newest first. */
@@ -3872,6 +3918,125 @@ export const artifactsApi = {
    *  (never an error), and callers skip posting in that case. */
   chatSummary: (kind: "prd" | "evidence" | "prototype", id: number) =>
     api.post<{ summary: string | null }>("/v1/artifacts/chat-summary", { kind, id }),
+}
+
+/** One entry in the "New report" picker (GET /v1/reports/kinds). */
+export type ReportKindOption = {
+  /** The skill to pin when starting the run, e.g. "voice-of-customer-report". */
+  skill: string
+  label: string
+  blurb: string
+  /** The seeded question the run is started with. */
+  prompt: string
+}
+
+export const reportsApi = {
+  /** One captured report including its HTML body. The artifact listing omits the
+   *  body (it would carry N full documents), so the viewer fetches it on open. */
+  get: (reportId: number) => api.get<ReportDoc>(`/v1/reports/${reportId}`),
+
+  /**
+   * Download the report as a PDF. Rendered SERVER-side (headless Chromium over
+   * the document's own `@media print` rules), so every download is identical
+   * regardless of the viewer's browser — hence a blob fetch rather than
+   * `window.print()`. Returns `application/pdf`, not JSON, so it bypasses the
+   * shared `request<T>` helper while keeping the same auth path.
+   *
+   * 503 means the renderer was unavailable; the caller should say so rather than
+   * saving a broken file.
+   */
+  downloadPdf: async (reportId: number): Promise<{ blob: Blob; filename: string }> => {
+    const token = accessTokenProvider ? await accessTokenProvider() : null
+    const headers: Record<string, string> = { Accept: "application/pdf" }
+    if (token) headers["Authorization"] = `Bearer ${token}`
+    const res = await fetch(`${API_URL}/v1/reports/${reportId}/pdf`, {
+      method: "GET", headers, credentials: "include",
+    })
+    if (!res.ok) throw new ApiError(res.status, await res.text())
+    return { blob: await res.blob(), filename: filenameFromDisposition(res.headers) }
+  },
+
+  /**
+   * The report kinds the "New report" picker offers. Server-owned (and filtered
+   * to skills that actually exist) so the client never shows a button that would
+   * fail on click. Each carries the prompt to run — generation goes through the
+   * ordinary ask pipeline with the skill pinned, so a report started here is
+   * identical to one asked for in chat and is captured the same way.
+   */
+  kinds: () => api.get<{ kinds: ReportKindOption[] }>("/v1/reports/kinds"),
+
+  /** Turn link sharing on/off. Passcode is required iff share_mode==="passcode".
+   *  The returned token is null while private. */
+  share: (
+    reportId: number,
+    body: { share_mode: "private" | "public" | "passcode"; passcode?: string },
+  ) =>
+    api.post<{ share_mode: string; share_token: string | null }>(
+      `/v1/reports/${reportId}/share`, body,
+    ),
+}
+
+/** Parse `attachment; filename="x.pdf"` → `x.pdf`, falling back to `report.pdf`. */
+function filenameFromDisposition(headers: Headers): string {
+  const match = /filename="([^"]+)"/.exec(headers.get("content-disposition") ?? "")
+  return match?.[1] || "report.pdf"
+}
+
+/** What an anonymous visitor on `/r/<token>` can see — four fields, enforced
+ *  server-side by a response_model (routes/reports_public.py). */
+export type PublicReport = {
+  title: string
+  /** Humanised report kind, e.g. "Voice of customer report". */
+  kind: string
+  html: string
+  created_at: string | null
+}
+
+/**
+ * The no-auth share surface. These calls deliberately send NO credentials: the
+ * token in the URL is the access primitive, and a signed-in viewer must see
+ * exactly what a stranger sees.
+ */
+export const publicReportsApi = {
+  /** 401 `passcode_required` when the link is passcode-gated; 404 when the token
+   *  is unknown OR sharing was revoked (the two are indistinguishable by design). */
+  get: async (token: string): Promise<PublicReport> => {
+    const res = await fetch(`${API_URL}/v1/public/reports/${encodeURIComponent(token)}`)
+    if (!res.ok) throw new ApiError(res.status, await res.text())
+    return (await res.json()) as PublicReport
+  },
+
+  /** Exchange a passcode for the document. 401 on a wrong passcode, 429 once the
+   *  per-token attempt budget is spent. */
+  unlock: async (token: string, passcode: string): Promise<PublicReport> => {
+    const res = await fetch(
+      `${API_URL}/v1/public/reports/${encodeURIComponent(token)}/unlock`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ passcode }),
+      },
+    )
+    if (!res.ok) throw new ApiError(res.status, await res.text())
+    return (await res.json()) as PublicReport
+  },
+
+  /** PDF of a shared report. POST so a passcode-gated link can carry its passcode
+   *  in the body instead of a URL that would land in access logs and history. */
+  downloadPdf: async (
+    token: string, passcode?: string,
+  ): Promise<{ blob: Blob; filename: string }> => {
+    const res = await fetch(
+      `${API_URL}/v1/public/reports/${encodeURIComponent(token)}/pdf`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/pdf" },
+        body: JSON.stringify(passcode ? { passcode } : {}),
+      },
+    )
+    if (!res.ok) throw new ApiError(res.status, await res.text())
+    return { blob: await res.blob(), filename: filenameFromDisposition(res.headers) }
+  },
 }
 
 // ── MCP tokens (customer-facing Model Context Protocol access) ──
