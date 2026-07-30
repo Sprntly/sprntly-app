@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
+from app.prompt_history import clamp_turn_text
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.kg_ingest.pullers.fireflies import CallTranscript, fetch_calls
 
@@ -425,7 +426,7 @@ _QUERY_SYSTEM = (
 def _render_history_tail(history: list[dict] | None) -> str:
     if not history:
         return ""
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}"
+    rows = [f"{t.get('role', 'user').capitalize()}: {clamp_turn_text(t.get('content', ''))}"
             for t in history[-6:]]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 
@@ -626,5 +627,5 @@ def _render_history(history: list[dict] | None) -> str:
     if not history:
         return ""
     recent = history[-6:]
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}" for t in recent]
+    rows = [f"{t.get('role', 'user').capitalize()}: {clamp_turn_text(t.get('content', ''))}" for t in recent]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"

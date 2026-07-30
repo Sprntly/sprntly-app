@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 
+from app.prompt_history import clamp_turn_text
 from app.connectors import jira_fetch
 from app.llm import run_tool_loop
 
@@ -145,7 +146,7 @@ def _render_history(history: list[dict] | None) -> str:
     if not history:
         return ""
     recent = history[-10:]
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}" for t in recent]
+    rows = [f"{t.get('role', 'user').capitalize()}: {clamp_turn_text(t.get('content', ''))}" for t in recent]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 
 

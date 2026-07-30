@@ -28,6 +28,7 @@ import logging
 import re
 
 from app import public_feedback_report
+from app.prompt_history import clamp_turn_text
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
 
@@ -487,5 +488,5 @@ def _render_history(history: list[dict] | None) -> str:
     if not history:
         return ""
     recent = history[-6:]
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}" for t in recent]
+    rows = [f"{t.get('role', 'user').capitalize()}: {clamp_turn_text(t.get('content', ''))}" for t in recent]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
