@@ -32,6 +32,7 @@ from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
 from app.prompts import (
     ASK_SYSTEM,
+    ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_SYSTEM_PRD_ADDENDUM,
     OUT_OF_SCOPE_MESSAGE,
@@ -327,6 +328,9 @@ def _answer_single_shot(
         ASK_SYSTEM
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + (ASK_SYSTEM_KG_ADDENDUM if kg_used else "")
+        # skill_spec is not None ⇔ the method text is a company upload, not a
+        # vendored skill — tell the model it's user content, never authority.
+        + (ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM if skill_spec is not None else "")
         + f"\n\nThe user's question maps to the '{decision.skill_id}' skill. "
         "Follow that skill's method to produce a structured, actionable answer."
     )

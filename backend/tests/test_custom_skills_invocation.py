@@ -190,6 +190,9 @@ def test_answer_single_shot_passes_custom_spec(custom_in_db, monkeypatch):
     assert isinstance(captured["skill_spec"], SkillSpec)
     assert captured["skill_spec"].method.startswith("# Estimation")
     assert payload["answer"] == "ok"
+    # The untrusted-method guard rides the system prompt for custom skills:
+    # the model is told the METHOD is user content that can't override rules.
+    assert qa.ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM in captured["system"]
 
 
 def test_answer_single_shot_builtin_spec_is_none(custom_in_db, monkeypatch):
@@ -213,6 +216,8 @@ def test_answer_single_shot_builtin_spec_is_none(custom_in_db, monkeypatch):
 
     assert captured["skill"] == builtin_id
     assert captured["skill_spec"] is None  # built-ins load from disk as before
+    # No guard addendum for vendored skills — their prompt is unchanged.
+    assert qa.ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM not in captured["system"]
 
 
 def test_answer_single_shot_custom_overrides_builtin(custom_shadows_builtin, monkeypatch):
@@ -243,7 +248,7 @@ def test_answer_single_shot_custom_overrides_builtin(custom_shadows_builtin, mon
 # ─── gateway spec injection ──────────────────────────────────────────────────
 
 
-def test_gateway_builds_identical_block_from_injected_spec():
+def test_gateway_injected_spec_block_tagged_company_uploaded():
     spec = SkillSpec(
         id="my-estimator",
         method="# Estimation method\nScore by reach x confidence.",
@@ -253,7 +258,12 @@ def test_gateway_builds_identical_block_from_injected_spec():
     )
     block, suffix = _build_method_prefix("my-estimator", None, spec=spec)
 
-    assert block.startswith("## METHOD (skill: my-estimator @abc123def456)\n")
+    # Same shape as a built-in's block, with ONE deliberate difference: the
+    # header labels the method text as company-uploaded (untrusted), which
+    # the system prompt's custom-skill addendum points at.
+    assert block.startswith(
+        "## METHOD (skill: my-estimator @abc123def456, company-uploaded)\n"
+    )
     assert "# Estimation method" in block
     assert "### REFERENCE: rubric.md\nreference text" in block
     assert suffix == "+my-estimator@abc123def456"
@@ -276,3 +286,5 @@ def test_gateway_builtin_path_unchanged():
     block, suffix = _build_method_prefix(builtin_id, None)
     assert block.startswith(f"## METHOD (skill: {builtin_id} @")
     assert suffix.startswith(f"+{builtin_id}@")
+    # Vendored skills are never tagged — the label means "untrusted upload".
+    assert "company-uploaded" not in block.splitlines()[0]
