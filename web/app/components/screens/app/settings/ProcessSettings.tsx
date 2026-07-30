@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react"
 import { profileDisplayName, useWorkspace } from "../../../../context/WorkspaceContext"
 import { updateWorkspace } from "../../../../lib/onboarding/store"
-import { workspacesApi } from "../../../../lib/api"
+import { roadmapDocApi, workspacesApi, type RoadmapDoc } from "../../../../lib/api"
 import {
   PLANNING_CYCLES,
   PRIORITIZATION_FRAMEWORKS,
@@ -11,6 +11,22 @@ import {
 import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLayout"
 
 const FORM_ID = "pset-process-form"
+
+/** File types the shared ingest converter handles for a roadmap upload. */
+const ROADMAP_ACCEPT =
+  ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.md,.txt"
+
+/** Short "May 4, 2026" for the uploaded-at line. Falls back to the raw value. */
+function formatUploadedAt(iso: string | null): string | null {
+  if (!iso) return null
+  const t = new Date(iso)
+  if (Number.isNaN(t.getTime())) return null
+  return t.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  })
+}
 
 /**
  * Settings → Process & Planning — the team/process fields the v6 wizard
@@ -62,6 +78,66 @@ export function ProcessSettings() {
   const [decisionProcess, setDecisionProcess] = useState("")
   const [additionalContext, setAdditionalContext] = useState("")
   const [snapshot, setSnapshot] = useState<Fields | null>(null)
+
+  // ── Roadmap document ──────────────────────────────────────────────────────
+  // The uploaded roadmap file, NOT part of the form's dirty/Save flow: picking a
+  // file uploads immediately (same contract as the onboarding Workspace step, so
+  // a PM who skipped it there — or wants to replace it — has a real home for it
+  // here, which the /roadmap view and the onboarding copy already point at).
+  const [roadmapDoc, setRoadmapDoc] = useState<RoadmapDoc | null>(null)
+  const [roadmapLoading, setRoadmapLoading] = useState(true)
+  const [roadmapUploading, setRoadmapUploading] = useState(false)
+  const [roadmapError, setRoadmapError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setRoadmapLoading(true)
+    roadmapDocApi
+      .get()
+      .then((doc) => {
+        if (!cancelled) setRoadmapDoc(doc)
+      })
+      .catch(() => {
+        // A read failure must not block the rest of the pane — the picker still
+        // works, we just can't show what's currently stored.
+        if (!cancelled) setRoadmapDoc(null)
+      })
+      .finally(() => {
+        if (!cancelled) setRoadmapLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  async function onPickRoadmap(file: File | null) {
+    if (!file) return
+    setRoadmapUploading(true)
+    setRoadmapError(null)
+    try {
+      const res = await roadmapDocApi.upload(file)
+      // Re-read so the block shows exactly what the company now has stored
+      // (uploaded_at comes from the server); fall back to the POST response.
+      const fresh = await roadmapDocApi.get().catch(() => null)
+      setRoadmapDoc(
+        fresh ?? {
+          filename: res.filename,
+          content_type: file.type || null,
+          extracted_text: "",
+          uploaded_at: new Date().toISOString(),
+          version: res.version,
+        },
+      )
+    } catch (e) {
+      setRoadmapError(
+        e instanceof Error
+          ? `Couldn't upload "${file.name}" — ${e.message}`
+          : `Couldn't upload "${file.name}" just now. Try again.`,
+      )
+    } finally {
+      setRoadmapUploading(false)
+    }
+  }
 
   useEffect(() => {
     if (!workspace) return
@@ -316,6 +392,62 @@ export function ProcessSettings() {
                 maxLength={4000}
                 placeholder="What is committed, in progress, and planned"
               />
+            </div>
+            <div className="pset-field pset-field--full" data-testid="roadmap-doc-block">
+              <label className="pset-label" htmlFor="pr-roadmap-file">
+                Roadmap document
+              </label>
+              <p className="pset-card-hint">
+                Upload the roadmap you already keep — deck, doc or spreadsheet.
+                Sprntly reads it in and pressure-tests your data against the
+                bets in it.
+              </p>
+              {roadmapLoading ? (
+                <p className="settings-loading">Checking for a stored roadmap…</p>
+              ) : roadmapDoc ? (
+                <p className="pset-card-hint" data-testid="roadmap-doc-current">
+                  <strong>{roadmapDoc.filename}</strong>
+                  {` · version ${roadmapDoc.version}`}
+                  {formatUploadedAt(roadmapDoc.uploaded_at)
+                    ? ` · uploaded ${formatUploadedAt(roadmapDoc.uploaded_at)}`
+                    : ""}
+                  {" · "}
+                  <a href="/roadmap">View roadmap →</a>
+                </p>
+              ) : (
+                <p className="pset-card-hint" data-testid="roadmap-doc-empty">
+                  No roadmap uploaded yet.
+                </p>
+              )}
+              <label
+                className={`set-conn-upload${roadmapUploading ? " is-uploading" : ""}`}
+                aria-busy={roadmapUploading}
+              >
+                {roadmapUploading
+                  ? "Uploading…"
+                  : roadmapDoc
+                    ? "Replace roadmap"
+                    : "Upload roadmap"}
+                <span className="muted">PDF, doc, deck or spreadsheet</span>
+                <input
+                  id="pr-roadmap-file"
+                  type="file"
+                  accept={ROADMAP_ACCEPT}
+                  disabled={roadmapUploading}
+                  style={{ display: "none" }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0] ?? null
+                    // Reset so the same file can be re-picked after a failure.
+                    e.target.value = ""
+                    void onPickRoadmap(file)
+                  }}
+                />
+              </label>
+              {roadmapError && (
+                <div style={{ marginTop: 8 }}>
+                  <SettingsMessage kind="error">{roadmapError}</SettingsMessage>
+                </div>
+              )}
             </div>
             <div className="pset-field pset-field--full">
               <label className="pset-label" htmlFor="pr-decisions">How the team decides</label>
