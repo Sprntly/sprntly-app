@@ -42,7 +42,7 @@ from app.brief_schedule import (
 from app.config import settings
 from app.db.companies import list_companies
 from app.entitlements import top_insights_enabled
-from app.kg_ingest.auto_sync import kickoff_sync
+from app.kg_ingest.auto_sync import kickoff_slack_corpus_sync, kickoff_sync
 from app.kg_ingest.runner import PULLERS
 
 logger = logging.getLogger(__name__)
@@ -130,15 +130,31 @@ def _refresh_all_company_connectors() -> None:
                 company_id,
             )
             continue
+        slack_kicked = False
         for conn in connections:
             if conn.get("status") != "active":
                 continue
             provider = (conn.get("provider") or "").strip()
+            # Slack: company-level corpus sync (voice of customer) — one
+            # kick per company per cycle, however many members installed
+            # the bot. Pulls the shared channel selection into corpus + KG.
+            if provider == "slack":
+                if slack_kicked:
+                    continue
+                slack_kicked = True
+                try:
+                    kickoff_slack_corpus_sync(company_id)
+                except Exception:
+                    logger.exception(
+                        "refresh-connectors: slack kickoff raised for %s",
+                        company_id,
+                    )
+                continue
             # Fire for providers with a registered KG puller, plus google_drive
             # (connection-config sync — kickoff_sync special-cases it, so
             # picked Drive files that change get re-pulled into corpus + KG).
-            # Others (figma / slack) have their own corpus paths, are
-            # per-user, or aren't wired for periodic refresh.
+            # Others (figma) have their own corpus paths or aren't wired
+            # for periodic refresh.
             if not provider or (provider not in PULLERS
                                 and provider != "google_drive"):
                 continue

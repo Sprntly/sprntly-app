@@ -13,9 +13,12 @@ Bot token scopes required:
     chat:write             — post messages (used by brief delivery)
 
 Flow:
-    1. Decrypt stored Slack bot token from connections table
+    1. Resolve the COMPANY's Slack sync connection (slack_company.py) —
+       voice-of-customer pulling is company-level, one sync per company
     2. Fetch user list → build ID-to-name mapping
-    3. Fetch channel list (public + private the bot belongs to)
+    3. Fetch channel list (public + private the bot belongs to), then filter
+       to the user's pull-channel selection when one is stored (see
+       CONFIG_SYNC_CHANNEL_IDS; no selection = every bot-member channel)
     4. For each channel, fetch recent message history
     5. For threaded messages, fetch thread replies
     6. Convert everything to structured markdown
@@ -38,10 +41,6 @@ from fastapi import HTTPException
 from app import db
 from app.config import settings
 from app.connectors.slack_oauth import SLACK_PROVIDER
-from app.connectors.tokens import (
-    TokenEncryptionError,
-    decrypt_token_json,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +56,13 @@ MAX_MESSAGES_PER_CHANNEL = 200
 MAX_THREAD_REPLIES = 50
 # Only sync messages from the last N days (default 90)
 DEFAULT_HISTORY_DAYS = 90
+
+# Connection-config keys for the user's pull-channel selection, written by
+# POST /v1/connectors/slack/sync-channels and honored by sync_slack below.
+# ids is the authoritative list; names is an {id: name} display map kept so
+# a selected-but-unjoined channel can be reported by name, not raw id.
+CONFIG_SYNC_CHANNEL_IDS = "sync_channel_ids"
+CONFIG_SYNC_CHANNEL_NAMES = "sync_channel_names"
 
 
 class SlackSyncError(Exception):
@@ -85,26 +91,59 @@ class SyncResult:
 # ───── Token helpers ─────
 
 
-def _get_valid_access_token(company_id: str, user_id: str) -> str:
-    """Decrypt THIS user's stored Slack bot token and return it.
+def _get_company_token_and_config(
+    company_id: str,
+) -> tuple[str, dict[str, Any], dict[str, Any]]:
+    """(bot_token, config, row) for the COMPANY's Slack sync connection.
 
-    Slack is per-user, so the token is resolved by (company_id, user_id).
-    Slack bot tokens (xoxb-...) do not expire, so no refresh logic needed.
+    Voice-of-customer pulling is company-level (one workspace install, one
+    channel selection, one sync — see slack_company.py), so the sync never
+    resolves a per-user row. Slack bot tokens (xoxb-...) do not expire, so
+    no refresh logic needed.
     """
-    row = db.get_slack_connection(company_id, user_id)
-    if not row:
-        raise HTTPException(404, "Slack is not connected")
+    from app.connectors.slack_company import (
+        CompanySlackError,
+        company_slack_token,
+        row_config,
+    )
 
     try:
-        token_json = json.loads(decrypt_token_json(row["token_json_encrypted"]))
-    except (TokenEncryptionError, json.JSONDecodeError) as e:
-        raise HTTPException(500, "Slack token unreadable") from e
+        resolved = company_slack_token(company_id)
+    except CompanySlackError as e:
+        raise HTTPException(500, str(e)) from e
+    if not resolved:
+        raise HTTPException(404, "Slack is not connected")
+    token, row = resolved
+    return token, row_config(row), row
 
-    access_token = token_json.get("access_token")
-    if not access_token:
-        raise HTTPException(500, "Slack token has no access_token")
 
-    return access_token
+def select_sync_channels(
+    channels: list[dict[str, Any]],
+    config: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Apply the user's pull-channel selection to the bot-visible channels.
+
+    Returns (channels_to_sync, errors). No stored selection (or an empty
+    one) keeps the legacy behavior — every channel the bot is a member of.
+    Selected channels the bot can't see (not a member / archived) come back
+    as errors by name so the user knows to /invite the bot, and the sync
+    proceeds with whatever remains.
+    """
+    selected_ids = [
+        str(cid) for cid in (config.get(CONFIG_SYNC_CHANNEL_IDS) or []) if cid
+    ]
+    if not selected_ids:
+        return channels, []
+
+    names = config.get(CONFIG_SYNC_CHANNEL_NAMES) or {}
+    by_id = {ch.get("id", ""): ch for ch in channels}
+    errors = [
+        f"#{names.get(cid) or cid}: skipped — the bot is not in this channel "
+        "(invite the Sprntly bot in Slack, then re-sync)"
+        for cid in selected_ids
+        if cid not in by_id
+    ]
+    return [by_id[cid] for cid in selected_ids if cid in by_id], errors
 
 
 # ───── Slack API fetchers ─────
@@ -413,15 +452,18 @@ def sync_slack(
     dataset: str,
     *,
     company_id: str,
-    user_id: str,
     history_days: int = DEFAULT_HISTORY_DAYS,
 ) -> SyncResult:
     """Full sync: fetch channels + messages + threads → write markdown to corpus.
 
+    Company-level: uses the COMPANY's Slack sync connection and its shared
+    pull-channel selection (see slack_company.py) — whoever triggers it, one
+    sync serves the whole company. Runs from the manual Sync button and the
+    scheduled connector refresh.
+
     Args:
         dataset: The dataset slug to write corpus files into.
         company_id: Tenant the sync runs for.
-        user_id: The user whose own Slack connection is used (per-user).
         history_days: How many days of history to fetch (default 90).
 
     Returns:
@@ -429,7 +471,8 @@ def sync_slack(
     """
     result = SyncResult(dataset=dataset)
 
-    access_token = _get_valid_access_token(company_id, user_id)
+    access_token, config, row = _get_company_token_and_config(company_id)
+    sync_owner_id = row.get("user_id") or ""
     corpus_dir = settings.data_path / dataset
     corpus_dir.mkdir(parents=True, exist_ok=True)
 
@@ -452,7 +495,7 @@ def sync_slack(
         result.errors.append(msg)
         logger.warning("Slack channels fetch failed: %s", exc, exc_info=True)
         # Can't continue without channels
-        _update_sync_status(result)
+        _update_sync_status(result, company_id=company_id, user_id=sync_owner_id)
         return result
 
     if not channels:
@@ -460,7 +503,19 @@ def sync_slack(
             "No channels found — ensure the Slack bot is invited to at "
             "least one channel."
         )
-        _update_sync_status(result)
+        _update_sync_status(result, company_id=company_id, user_id=sync_owner_id)
+        return result
+
+    # Honor the user's pull-channel selection (picked at connect time or in
+    # the connector's Configure drawer). No selection = every bot-member
+    # channel, unchanged from before the picker existed.
+    channels, selection_errors = select_sync_channels(channels, config)
+    result.errors.extend(selection_errors)
+    result.channels_count = len(channels)
+    if not channels:
+        # Everything the user selected is bot-invisible — the per-channel
+        # errors above say which and why; nothing to write.
+        _update_sync_status(result, company_id=company_id, user_id=sync_owner_id)
         return result
 
     # Calculate oldest timestamp for history window
@@ -536,7 +591,7 @@ def sync_slack(
         logger.error("Failed to write slack_channels.md: %s", exc, exc_info=True)
 
     # 6. Update sync status + auto-enable input source
-    _update_sync_status(result, company_id=company_id, user_id=user_id)
+    _update_sync_status(result, company_id=company_id, user_id=sync_owner_id)
 
     return result
 
@@ -544,7 +599,8 @@ def sync_slack(
 def _update_sync_status(
     result: SyncResult, *, company_id: str, user_id: str
 ) -> None:
-    """Update THIS user's Slack connection sync timestamp and enable input source."""
+    """Stamp the sync timestamp on the company sync connection's owner row
+    and enable the input source."""
     try:
         error_msg = "; ".join(result.errors) if result.errors else None
         db.update_slack_connection_sync(

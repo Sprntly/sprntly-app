@@ -581,10 +581,11 @@ function BriefRefreshingBanner() {
 // connector (see hasEvidenceConnector). This is a dead end the user cannot
 // resolve by waiting — the brief will never generate — so unlike the greeting's
 // soft "add more sources" line it explains the causal chain and hands over a
-// single primary action. Delivery-only connectors (Slack) and work trackers
-// (Jira) don't clear this state, which is exactly the confusion the copy names:
-// a user who connected Slack has "connected something" and needs to be told why
-// the brief is still empty.
+// single primary action. Work trackers (Jira) and code hosts (GitHub) don't
+// clear this state, which is exactly the confusion the copy names: a user who
+// connected Jira has "connected something" and needs to be told why the brief
+// is still empty. (Slack DOES clear it since 2026-07-30 — it is dual-typed
+// communication + customer-voice and its synced channels are evidence.)
 function BriefNoConnectorState({ onConnect }: { onConnect: () => void }) {
   return (
     <div className="bc-empty" role="region" aria-labelledby="bc-empty-title">
@@ -623,7 +624,7 @@ function BriefNoConnectorState({ onConnect }: { onConnect: () => void }) {
         Connect a source
       </button>
       <p className="bc-empty-foot">
-        Already connected Slack or Jira? Those deliver and track the work —
+        Already connected Jira or GitHub? Those track and ship the work —
         Top Insights still needs a source that brings evidence in.
       </p>
     </div>

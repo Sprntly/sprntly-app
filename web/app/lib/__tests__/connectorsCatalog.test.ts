@@ -31,9 +31,15 @@ describe("CONNECTOR_CATALOG — design-3 shape", () => {
     expect(CONNECTOR_CATALOG.map((c) => c.title)).toEqual([...EXPECTED_CATEGORIES])
   })
 
-  it("totals 41 connector rows across all categories (Uploaded documents now lives under Company documentation)", () => {
+  it("totals 42 connector rows across all categories (Slack renders in both Voice and Communications)", () => {
     const total = CONNECTOR_CATALOG.reduce((n, c) => n + c.items.length, 0)
-    expect(total).toBe(41)
+    expect(total).toBe(42)
+    // 41 distinct connectors — the extra row is dual-typed Slack's second
+    // placement, not a second connector.
+    const distinct = new Set(
+      CONNECTOR_CATALOG.flatMap((c) => c.items.map((i) => i.id)),
+    )
+    expect(distinct.size).toBe(41)
   })
 
   it("every category has a non-empty uploadAccept hint + uploadExtensions list", () => {
@@ -112,11 +118,24 @@ describe("CONNECTOR_CATALOG — connector inventory per category", () => {
     ])
   })
 
-  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong", () => {
+  it("Voice of Customer & Support: Zendesk, Intercom, Dovetail, App Store, Play Store, Sprinklr, Fireflies, Gong, Slack", () => {
+    // Slack is dual-typed (communication + customer-voice) so its card sits
+    // on this shelf too — same item, same connection as in Communications.
     expect(items("Voice of Customer & Support")).toEqual([
       "Zendesk", "Intercom", "Dovetail", "App Store", "Play Store", "Sprinklr",
-      "Fireflies", "Gong",
+      "Fireflies", "Gong", "Slack",
     ])
+  })
+
+  it("Slack appears in both Voice and Communications as the SAME item (multi-type dual placement)", () => {
+    const voice = CONNECTOR_CATALOG.find((c) => c.key === "voice")!
+    const comms = CONNECTOR_CATALOG.find((c) => c.key === "comms")!
+    const voiceSlack = voice.items.find((i) => i.id === "slack")
+    const commsSlack = comms.items.find((i) => i.id === "slack")
+    // One shared object — the two shelves can never drift apart.
+    expect(voiceSlack).toBeDefined()
+    expect(voiceSlack).toBe(commsSlack)
+    expect(voiceSlack!.types).toEqual(["communication", "customer-voice"])
   })
 
   it("Customer Relationship (CRM): HubSpot, Salesforce, Pipedrive, Attio, Close, Zoho CRM", () => {
@@ -162,10 +181,14 @@ describe("CONNECTOR_IDS_WITH_OAUTH", () => {
   })
 
   it("is derived from the catalog (oauth flag) — they stay in sync", () => {
-    const flaggedOauth = CONNECTOR_CATALOG.flatMap((c) => c.items)
-      .filter((i) => i.oauth)
-      .map((i) => i.id)
-    expect(flaggedOauth.sort()).toEqual([...CONNECTOR_IDS_WITH_OAUTH].sort())
+    // Set-dedup: dual-placed Slack is flagged oauth on both shelves but is
+    // one connector.
+    const flaggedOauth = new Set(
+      CONNECTOR_CATALOG.flatMap((c) => c.items)
+        .filter((i) => i.oauth)
+        .map((i) => i.id),
+    )
+    expect([...flaggedOauth].sort()).toEqual([...CONNECTOR_IDS_WITH_OAUTH].sort())
   })
 
   it("excludes Fireflies (it's API-key based, not OAuth)", () => {
@@ -234,10 +257,12 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
   })
 
   it("shows only the 12 wired connectors (OAuth + API key + credentials + upload) and nothing else", () => {
-    const ids = connectableCatalog()
-      .flatMap((c) => c.items)
-      .map((i) => i.id)
-      .sort()
+    // Set-dedup: Slack's card renders on two shelves but is one connector.
+    const ids = [...new Set(
+      connectableCatalog()
+        .flatMap((c) => c.items)
+        .map((i) => i.id),
+    )].sort()
     expect(ids).toEqual(
       [
         "asana",
@@ -263,7 +288,10 @@ describe("connectableCatalog — Settings tab (hide 'Coming soon')", () => {
     const byTitle = (t: string) =>
       connectableCatalog().find((c) => c.title === t)!.items.map((i) => i.id)
     expect(byTitle("Analytics")).toEqual(["superset"])
-    expect(byTitle("Voice of Customer & Support")).toEqual(["sprinklr", "fireflies"])
+    // Slack (OAuth-wired, dual-typed) stays visible on the Voice shelf too.
+    expect(byTitle("Voice of Customer & Support")).toEqual([
+      "sprinklr", "fireflies", "slack",
+    ])
     expect(byTitle("Customer Relationship (CRM)")).toEqual(["hubspot"])
     expect(byTitle("Project Management")).toEqual(["jira", "clickup", "asana"])
     expect(byTitle("Codebase")).toEqual(["github"])

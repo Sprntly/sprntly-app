@@ -35,6 +35,7 @@ import { openOauthTab } from "../../lib/connectorsOauth"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
+import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
 
 /**
  * Provider page (keyed by connector id) where the user can view and copy
@@ -615,14 +616,26 @@ export function ConnectorConnectModal({
         />
       )
     } else if (providerId === "slack") {
+      // Both Slack roles get configured right at connect time: where the
+      // brief gets DELIVERED (channel/DM target — per-user, so hidden on
+      // the company's shared connection), and which channels the corpus
+      // sync PULLS from (company-wide, the customer-voice side).
       slot = (
-        <SlackChannelPicker
-          savedChannelId={connection.config?.channel_id as string | undefined}
-          savedChannelName={
-            connection.config?.channel_name as string | undefined
-          }
-          onSaved={onConnected}
-        />
+        <>
+          {connection.config?.company_connection ? null : (
+            <SlackChannelPicker
+              savedChannelId={connection.config?.channel_id as string | undefined}
+              savedChannelName={
+                connection.config?.channel_name as string | undefined
+              }
+              onSaved={onConnected}
+            />
+          )}
+          <SlackSyncChannelsPicker
+            savedChannelIds={connection.config?.sync_channel_ids}
+            onSaved={onConnected}
+          />
+        </>
       )
     } else if (providerId === "github") {
       // Same picker the settings Configure drawer mounts — lets the

@@ -296,6 +296,61 @@ def _run_corpus_seed(company_id: str, slug: str) -> None:
             logger.exception("corpus-seed failed for %s (slug=%s)", company_id, slug)
 
 
+def _run_slack_corpus_sync(company_id: str) -> None:
+    """Blocking Slack corpus sync + KG seed — runs inside the daemon thread.
+
+    Company-level: one sync per company per refresh cycle, using the
+    company's Slack sync connection and its shared pull-channel selection
+    (see connectors/slack_company.py). Fully isolated — any failure is
+    logged, never raised."""
+    from app.connectors.slack_sync import sync_slack
+    from app.db.companies import slug_for_company_id
+
+    try:
+        slug = slug_for_company_id(company_id)
+        if not slug:
+            logger.warning(
+                "slack-refresh: no dataset slug for company=%s — skipping",
+                company_id,
+            )
+            return
+        result = sync_slack(slug, company_id=company_id)
+        logger.info(
+            "slack-refresh done: %s (slug=%s) channels=%s messages=%s errors=%s",
+            company_id, slug, result.channels_count, result.messages_count,
+            len(result.errors),
+        )
+        # The corpus file landed — extract it into the KG now instead of
+        # waiting for the next brief's seed (same path as the manual sync
+        # route's _seed_corpus_after_sync).
+        _run_corpus_seed(company_id, slug)
+    except Exception:  # noqa: BLE001 — fully isolated
+        logger.exception("slack-refresh failed for %s", company_id)
+
+
+def kickoff_slack_corpus_sync(company_id: str) -> bool:
+    """Fire-and-forget: refresh the company's Slack corpus + KG.
+
+    Called by the scheduled connector refresh for every company with an
+    active Slack connection. Returns False (nothing started) when the
+    company has no usable Slack sync connection. Never blocks; never
+    raises into the scheduler loop."""
+    from app.connectors.slack_company import resolve_company_slack_row
+
+    try:
+        if not resolve_company_slack_row(company_id):
+            return False
+        t = threading.Thread(
+            target=_run_slack_corpus_sync, args=(company_id,),
+            name="slack-refresh", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a spawn failure break the cycle
+        logger.exception("slack-refresh: failed to start thread for %s", company_id)
+        return False
+
+
 def kickoff_corpus_seed(company_id: str, slug: str) -> bool:
     """Fire-and-forget: extract newly-arrived corpus docs into the KG.
 
