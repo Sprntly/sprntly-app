@@ -12,9 +12,14 @@ import { SettingsMessage, SettingsPaneBar, SettingsSection } from "./SettingsLay
 
 const FORM_ID = "pset-process-form"
 
-/** File types the shared ingest converter handles for a roadmap upload. */
-const ROADMAP_ACCEPT =
-  ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.md,.txt"
+/** File types the shared ingest converter can actually PARSE for a roadmap.
+ *
+ * Deliberately excludes the legacy binary formats .doc / .ppt / .xls: the
+ * converter has no parser for them, so they fall through to a "not yet parsed"
+ * placeholder stub instead of real text. Offering them here would invite an
+ * upload that looks accepted but carries no readable roadmap. Ask for the modern
+ * equivalent (.docx / .pptx / .xlsx) or a PDF export instead. */
+const ROADMAP_ACCEPT = ".pdf,.docx,.pptx,.xlsx,.csv,.md,.txt"
 
 /** Short "May 4, 2026" for the uploaded-at line; null when unset/unparseable
  *  (the caller then simply omits the "uploaded …" clause). */

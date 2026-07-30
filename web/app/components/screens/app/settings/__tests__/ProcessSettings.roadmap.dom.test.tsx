@@ -211,6 +211,24 @@ describe("Process & Planning — roadmap document block", () => {
     expect(document.getElementById("pr-team-roadmap")).toBeTruthy()
   })
 
+  it("only accepts formats the converter can actually parse", async () => {
+    // .doc/.ppt/.xls have no parser — they convert to a "not yet parsed"
+    // placeholder stub, so an upload would look accepted while carrying no
+    // readable roadmap. Only the modern equivalents + PDF/CSV/MD/TXT are offered.
+    roadmapGetMock.mockResolvedValue(null)
+    await act(async () => {
+      mount()
+    })
+    await waitFor(() => screen.getByTestId("roadmap-doc-empty"))
+
+    const accept = picker().getAttribute("accept") ?? ""
+    const offered = accept.split(",").map((s) => s.trim())
+    expect(offered).toEqual([".pdf", ".docx", ".pptx", ".xlsx", ".csv", ".md", ".txt"])
+    for (const legacy of [".doc", ".ppt", ".xls"]) {
+      expect(offered).not.toContain(legacy)
+    }
+  })
+
   it("does nothing when the picker is dismissed without a file", async () => {
     roadmapGetMock.mockResolvedValue(null)
     await act(async () => {
