@@ -1,7 +1,7 @@
 """One-shot backfill: push every ALREADY-UPLOADED roadmap into the knowledge graph.
 
-    # ALWAYS look first — reads nothing but roadmap_doc/kg_source, writes nothing:
-    python scripts/backfill_roadmap_kg.py --dry-run
+    # Dry run is the DEFAULT — reads roadmap_doc/kg_source only, writes nothing:
+    python scripts/backfill_roadmap_kg.py
 
     # Then, only with explicit owner approval for the target environment:
     python scripts/backfill_roadmap_kg.py --apply --limit 5
