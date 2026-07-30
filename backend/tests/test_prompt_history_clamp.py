@@ -38,6 +38,19 @@ def test_jpeg_and_svg_data_uris_are_stripped_too():
         assert "BBBB" not in out
 
 
+def test_data_uri_strip_stops_at_the_payload():
+    """Reported by review: `\s` in the base64 class walked past the payload and
+    ate the prose after it — "…;base64,AAAA\n\nExport users retain 2.3x longer"
+    became "[embedded image omitted].3x longer", deleting the narrative the clamp
+    exists to keep."""
+    out = strip_data_uris(
+        "src=data:image/png;base64,AAAA\n\nExport users retain 2.3x longer."
+    )
+    assert "[embedded image omitted]" in out
+    assert "Export users retain 2.3x longer." in out
+    assert "AAAA" not in out
+
+
 def test_html_report_is_reduced_to_its_narrative():
     assert looks_like_html(_REPORT)
     text = html_to_text(_REPORT)
@@ -93,8 +106,16 @@ def test_qa_agent_render_history_clamps_every_turn():
 def test_every_history_fold_site_is_clamped():
     """Each intercept keeps its own `_render_history`; all of them fold raw
     assistant turns, so all of them are exposed to a chart-bearing report.
-    (chat_intent is excluded: it already has its own per-turn + total clamp.)"""
+    (chat_intent is excluded: it already has its own per-turn + total clamp.)
+
+    `connector_lookup.answer._render_history` is the shared fold for EVERY
+    connector adapter (Jira via the jira_lookup shim, Slack, ClickUp, Fireflies,
+    GitHub, HubSpot, Drive), so one entry here covers all of them — and covers
+    adapters added later, which is the point of folding in one place.
+    `jira_lookup._render_history` stays listed because it is a public seam other
+    callers use; it delegates to the shared renderer."""
     from app import call_digest, jira_lookup, public_feedback
+    from app.connector_lookup import answer as connector_answer
     import app.ds.claude_analysis as claude_analysis
     import app.qa_agent as qa
 
@@ -105,6 +126,7 @@ def test_every_history_fold_site_is_clamped():
         call_digest._render_history,
         call_digest._render_history_tail,
         jira_lookup._render_history,
+        connector_answer._render_history,
         public_feedback._render_history,
     ]
     for render in renderers:

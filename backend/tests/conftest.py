@@ -1316,6 +1316,7 @@ def _no_background_connector_sync(request, monkeypatch):
     if request.module.__name__.rsplit(".", 1)[-1] in (
         "test_connector_auto_sync",
         "test_corpus_seed_kickoff",
+        "test_roadmap_kg_ingest",
     ):
         yield
         return
@@ -1330,6 +1331,20 @@ def _no_background_connector_sync(request, monkeypatch):
         auto_sync = importlib.import_module("app.kg_ingest.auto_sync")
         monkeypatch.setattr(auto_sync, "kickoff_sync", _noop_sync, raising=False)
         monkeypatch.setattr(auto_sync, "kickoff_corpus_seed", _noop_seed, raising=False)
+        # Same rationale for the roadmap ingest kickoff (POST
+        # /v1/company/roadmap-doc): its daemon thread would run a real LLM
+        # extraction against the mid-reset in-memory DB.
+        monkeypatch.setattr(auto_sync, "kickoff_roadmap_ingest", _noop_seed,
+                            raising=False)
+    except Exception:
+        pass
+    try:
+        # app.routes.company is NOT in _RELOAD_ORDER, so its `from auto_sync
+        # import kickoff_roadmap_ingest` binding is fixed at first import and the
+        # source patch above can't reach it — patch the route's own reference too.
+        company_route = importlib.import_module("app.routes.company")
+        monkeypatch.setattr(company_route, "kickoff_roadmap_ingest", _noop_seed,
+                            raising=False)
     except Exception:
         pass
     try:

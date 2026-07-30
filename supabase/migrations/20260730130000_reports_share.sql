@@ -1,3 +1,8 @@
+-- RECONSTRUCTED 2026-07-30: applied directly to the shared Supabase project
+-- (version 20260730130000 recorded) but never committed — see
+-- 20260730120000_reports.sql for the incident note. Statements verbatim from
+-- schema_migrations.statements; committing is a DB no-op.
+--
 -- Report share links — opt-in, per-report public access by token.
 --
 -- Append-only columns on `reports` (20260730120000_reports.sql). Mirrors the

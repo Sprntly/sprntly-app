@@ -369,3 +369,66 @@ def kickoff_corpus_seed(company_id: str, slug: str) -> bool:
         logger.exception("corpus-seed: failed to start thread for %s (slug=%s)",
                          company_id, slug)
         return False
+
+
+# ── Roadmap → KG on upload ──────────────────────────────────────────────────
+# The workspace roadmap has its own one-per-workspace, replace-semantics ingest
+# (kg_ingest.roadmap) rather than riding the corpus path — it's a priorities
+# anchor, not corpus evidence. Same shape as kickoff_corpus_seed above: a daemon
+# thread so the onboarding strategy step's upload response never waits on an
+# extraction, per-company lock so a burst of replaces serializes, and total error
+# isolation because synthesis_brief.seed_incremental re-runs it on the next brief
+# anyway (it doubles as the retry + grandfather path).
+
+def _roadmap_ingest_lock(company_id: str) -> "threading.RLock":
+    """The per-company roadmap-ingest lock.
+
+    Owned by kg_ingest.roadmap so EVERY entry point serializes on the same
+    object — this kickoff AND synthesis_brief's seed leg, which calls
+    ingest_roadmap directly. A lock private to this module would leave the seed
+    leg racing the upload. Reentrant, so holding it here and re-acquiring inside
+    ingest_roadmap is safe."""
+    from app.kg_ingest.roadmap import ingest_lock
+
+    return ingest_lock(company_id)
+
+
+def _run_roadmap_ingest(company_id: str, workspace_id: str | None) -> None:
+    """Blocking roadmap extraction — runs inside the daemon thread.
+
+    Fully isolated: any failure is logged, never raised. Serialized per company
+    so two quick replaces don't race each other's expiry pass; the queued run
+    reads whatever roadmap_doc holds at that point, and the content-hash ledger
+    makes a redundant run free."""
+    from app.kg_ingest.roadmap import ingest_roadmap
+
+    with _roadmap_ingest_lock(company_id):
+        try:
+            result = ingest_roadmap(company_id, workspace_id,
+                                    facade=GraphFacade())
+            logger.info("roadmap-ingest done: %s (ws=%s) %s",
+                        company_id, workspace_id, result)
+        except Exception:  # noqa: BLE001 — fully isolated
+            logger.exception("roadmap-ingest failed for %s (ws=%s)",
+                             company_id, workspace_id)
+
+
+def kickoff_roadmap_ingest(company_id: str, workspace_id: str | None) -> bool:
+    """Fire-and-forget: extract a just-uploaded roadmap into the KG.
+
+    Called right after POST /v1/company/roadmap-doc stores the file so the
+    company's stated bets reach the graph in seconds instead of waiting for the
+    next brief. Never blocks the upload response; never raises into the request
+    flow. A dropped kickoff self-heals — seed_incremental ingests the same
+    roadmap on the next brief generation."""
+    try:
+        t = threading.Thread(
+            target=_run_roadmap_ingest, args=(company_id, workspace_id),
+            name="roadmap-ingest", daemon=True,
+        )
+        t.start()
+        return True
+    except Exception:  # noqa: BLE001 — never let a thread-spawn failure break the request
+        logger.exception("roadmap-ingest: failed to start thread for %s (ws=%s)",
+                         company_id, workspace_id)
+        return False

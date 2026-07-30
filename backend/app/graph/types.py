@@ -15,6 +15,32 @@ from typing import Optional
 import uuid
 
 
+# ── Retirement ───────────────────────────────────────────────────────────────
+# A signal can leave the live picture two ways, both recorded in `properties`
+# (never a delete — history stays queryable):
+#
+#   superseded_by — a NEWER signal replaces this fact (facade.supersede_signal).
+#   expired_at    — the fact is simply gone, with no successor: a versioned
+#                   document no longer asserts it (facade.expire_signals; today
+#                   a roadmap bet dropped between roadmap versions).
+#
+# `stale_after` alone is NOT sufficient to retire a signal: the content readers
+# (synthesis.convergence, graph.retrieval's theme-edge path, evidence_kg's trail)
+# deliberately read UNFILTERED signals and decide for themselves, so a signal
+# that is only stale still steers briefs, Ask answers and PRD evidence. Every
+# one of those readers calls `signal_is_retired` so the two mechanisms can't
+# drift apart.
+_RETIRED_PROPERTY_KEYS: tuple[str, ...] = ("superseded_by", "expired_at")
+
+
+def signal_is_retired(properties: Optional[dict]) -> bool:
+    """True when a signal has been superseded or expired and must be excluded
+    from briefs / retrieval / evidence. Takes the raw `properties` dict so
+    callers can pass `sig.properties` without a None dance."""
+    props = properties or {}
+    return any(props.get(k) for k in _RETIRED_PROPERTY_KEYS)
+
+
 # Closed relationship vocabulary (S3). Novel relationships from the extractor
 # must be bucketed into RELATES_TO and flagged for human vocab review.
 RELATIONSHIP_VOCAB: frozenset[str] = frozenset({

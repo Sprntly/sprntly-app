@@ -30,7 +30,14 @@ import re
 # which is noise next to the corpus/KG blocks the same prompts already carry.
 MAX_TURN_CHARS = 4000
 
-_DATA_URI_RE = re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,[A-Za-z0-9+/=\s]*")
+# No `\s` in the payload class. With it, the match ran past the end of the
+# base64 and ate the prose that followed: "…;base64,AAAA\n\nExport users retain
+# 2.3x longer" collapsed to "[embedded image omitted].3x longer", deleting the
+# narrative this clamp exists to preserve (whitespace, then more [A-Za-z0-9], is
+# indistinguishable from a wrapped payload to a greedy class). The cost is that a
+# base64 payload split across lines only has its first line replaced — rare in a
+# `data:` attribute, and the residue is bounded by the char cap below.
+_DATA_URI_RE = re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,[A-Za-z0-9+/=]*")
 # Same sniff the frontend uses to decide "this answer is a document, not markdown"
 # (web/app/lib/htmlBrief.ts looksLikeHtmlBrief).
 _HTML_START_RE = re.compile(r"^\s*<(?:!doctype|meta|html|div|style)\b", re.I)

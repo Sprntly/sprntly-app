@@ -41,6 +41,7 @@ from app.prompts import (
 from app.skill_router import (
     detect_intent,
     is_call_digest,
+    is_connector_lookup,
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
@@ -601,12 +602,12 @@ def answer(
         )
 
     # Rewrite a ticket FROM a PRD ("update the ticket details with the PRD").
-    # Checked BEFORE the Jira lookup, which would otherwise claim it — a write
-    # verb on a PM noun is exactly its trigger — and hand it to a skill whose
-    # tools are Jira-only and which cannot read a PRD at all. That mismatch is
-    # the reported failure this path exists to fix. It serves BOTH kinds of
-    # ticket (Sprntly and Jira), so unlike the lookup it must not be gated on a
-    # Jira connection.
+    # Checked BEFORE the tracker lookup below, which would otherwise claim it —
+    # a write verb on a PM noun is exactly its trigger — and hand it to a skill
+    # whose tools are tracker-only and which cannot read a PRD at all. That
+    # mismatch is the reported failure this path exists to fix. It serves BOTH
+    # kinds of ticket (Sprntly and Jira), so unlike the lookup it must not be
+    # gated on a tracker connection.
     if (
         not pinned_skill
         and not question.lstrip().startswith("/")
@@ -621,19 +622,42 @@ def answer(
             prd_id=prd_id,
         )
 
-    # Live Jira read: a question referencing a Jira issue/epic wants the CURRENT
+    # Live TRACKER read: a question referencing a ticket/epic wants the CURRENT
     # state — status, comments, epic children — not the periodic, comment-less
     # KG snapshot the generic router would answer from. Intercept before routing
-    # and let the model fetch the real issues live (read-only tool loop). When
-    # Jira isn't connected, jira_lookup returns a helpful connect message rather
-    # than falling through. A slash command (handled by route()) is exempt so an
-    # explicit skill invocation that merely names Jira isn't hijacked.
+    # and let the model fetch the real issues live (read-only tool loop, plus
+    # Jira's propose→confirm card). The tracker picker resolves WHICH tracker the
+    # company has connected (Jira, else ClickUp) — routing here has always been
+    # tracker-agnostic while execution was Jira-only, which is why a ClickUp-only
+    # company used to be told to connect Jira. When no tracker is connected it
+    # returns a connect message rather than falling through. A slash command
+    # (handled by route()) is exempt so an explicit skill invocation that merely
+    # names Jira isn't hijacked.
     if not pinned_skill and not question.lstrip().startswith("/") and is_jira_lookup(question, history):
-        from app import jira_lookup
+        from app.connector_lookup import tracker
 
-        return jira_lookup.answer(
+        return tracker.answer(
             enterprise_id=enterprise_id, question=question, history=history
         )
+
+    # Live read of any OTHER connected tool the question names — "check slack for
+    # what was said about the pricing change", "what changed in the repo this
+    # week", "which deals in hubspot mention onboarding". Same reason as the
+    # tracker path: the answer lives in the tool, not in the KG snapshot. Placed
+    # LAST of the interceptions on purpose — call-digest, VoC and DS own their
+    # phrasings, and the tracker owns tickets; this one only fires when the
+    # question NAMES a source none of them claimed. A source we cannot read live
+    # is answered honestly here too (registry.not_supported_message), which is
+    # better than the generic path guessing from the KG.
+    if not pinned_skill and not question.lstrip().startswith("/"):
+        connector_hints = is_connector_lookup(question, history)
+        if connector_hints:
+            from app.connector_lookup import registry
+
+            return registry.answer_for_hints(
+                enterprise_id=enterprise_id, question=question,
+                history=history, hints=connector_hints,
+            )
 
     if pinned_skill and _routable(pinned_skill, enterprise_id):
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)

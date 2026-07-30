@@ -1,3 +1,12 @@
+-- RECONSTRUCTED 2026-07-30: this migration was applied directly to the shared
+-- Supabase project (version 20260730120000 recorded in
+-- supabase_migrations.schema_migrations) but its file was never committed,
+-- which blocked every deploy with "Remote migration versions not found in
+-- local migrations directory". Statements below are verbatim from
+-- schema_migrations.statements for that version; committing the file is a
+-- no-op against the database (the version is already recorded) and exists
+-- purely so `supabase db push` recognizes the remote history.
+--
 -- Reports — the durable home for skill-generated HTML report documents
 -- (voice-of-customer-report, competitive-intelligence-review,
 -- public-feedback-report, …).
@@ -55,15 +64,20 @@ create table if not exists reports (
 
 -- The artifacts listing: newest-first per company.
 create index if not exists reports_company_idx on reports (company_id, id desc);
+
 -- The attachment lookups: "which reports hang off this chat / this PRD".
 create index if not exists reports_conversation_idx on reports (conversation_id);
+
 create index if not exists reports_prd_idx on reports (prd_id);
+
 -- Re-capture dedupe: one report per originating ask job.
 create unique index if not exists reports_ask_id_uniq on reports (ask_id)
     where ask_id is not null;
 
 alter table reports enable row level security;
+
 -- Idempotent policy create: drop-if-exists first so this migration re-applies
 -- cleanly on an environment where an earlier run already created the policy.
 drop policy if exists "srv_reports" on reports;
+
 create policy "srv_reports" on reports for all using (true) with check (true);
