@@ -14,6 +14,7 @@ the command is registered.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import importlib
@@ -310,7 +311,10 @@ async def test_missing_files_write_scope_falls_back_to_a_pointer(connected_no_up
     assert "<!DOCTYPE html>" not in posted
 
 
-async def test_failed_upload_also_falls_back(connected):
+async def test_failed_upload_says_it_failed_not_that_the_scope_is_missing(connected):
+    """The scope IS granted here, so the fallback must not tell the user their
+    install "can't receive file uploads yet" — that sends them to reinstall Slack
+    for a transient failure."""
     from app.routes import connectors as conn
 
     with patch("app.qa_agent.answer",
@@ -324,7 +328,10 @@ async def test_failed_upload_also_falls_back(connected):
             text="", command="/competitive-scan", response_url=RESPONSE_URL,
         )
     posted = " ".join(c.kwargs.get("text", "") for c in mock_post.call_args_list)
-    assert "open Sprntly chat" in posted
+    assert "couldn't attach the full report" in posted
+    assert "open Sprntly chat" in posted            # they can still read it
+    assert "reconnect Slack" not in posted
+    assert "can't receive file uploads yet" not in posted
 
 
 async def test_unconnected_workspace_is_told_on_the_response_url(slack_env, monkeypatch):
@@ -398,7 +405,81 @@ async def test_no_response_url_is_a_no_op(connected):
     mock_http.assert_not_called()
 
 
+async def test_missing_scope_message_is_distinct_from_the_upload_failure_one(
+        connected_no_upload):
+    """The two fallbacks must not be interchangeable: one asks for a reinstall,
+    the other says retry."""
+    from app.routes import connectors as conn
+
+    assert conn._NO_UPLOAD_SCOPE != conn._UPLOAD_FAILED
+    with patch("app.qa_agent.answer",
+               return_value={"answer": REPORT_HTML, "citations": [],
+                             "_skill": "competitive-intelligence-review"}), \
+         patch("app.connectors.slack_oauth.post_message") as mock_post, \
+         patch("app.routes.connectors.requests.post"):
+        await conn._run_slack_report_command(
+            team_id=TEAM_ID, channel="C777", slack_user=INSTALLER_SLACK_USER,
+            text="", command="/competitive-scan", response_url=RESPONSE_URL,
+        )
+    posted = " ".join(c.kwargs.get("text", "") for c in mock_post.call_args_list)
+    assert "reconnect Slack" in posted
+    assert "couldn't attach the full report" not in posted
+
+
 # ─────────────────────────── interrupted-run sweep ───────────────────────────
+
+def test_marker_keys_are_unique_across_register_and_clear_cycles(connected):
+    """`len(dict)` as the uniqueness suffix reused a key after a clear, so two
+    runs in the same channel/thread could collide and lose a marker. A monotonic
+    counter cannot."""
+    from app.routes import connectors as conn
+
+    first = conn._register_slack_report(
+        team_id=TEAM_ID, channel="C777", thread_ts=None, question="q")
+    conn._clear_slack_report(first)
+    second = conn._register_slack_report(
+        team_id=TEAM_ID, channel="C777", thread_ts=None, question="q")
+    assert first != second
+    # ...and two concurrent runs in one channel keep separate markers.
+    third = conn._register_slack_report(
+        team_id=TEAM_ID, channel="C777", thread_ts=None, question="q")
+    assert third != second
+    assert len(conn._slack_report_markers) == 2
+    for key in (second, third):
+        conn._clear_slack_report(key)
+
+
+async def test_shutdown_sweep_actually_fires_for_an_in_flight_run(connected):
+    """The sweep runs on lifespan SHUTDOWN, not startup — a fresh process's
+    marker dict is empty by construction, so a startup sweep could never fire.
+    This asserts the wiring end to end: a marker registered while the process is
+    alive produces the notice when the lifespan tears down."""
+    from app.routes import connectors as conn
+
+    conn._register_slack_report(
+        team_id=TEAM_ID, channel="C777", thread_ts="1700000000.000100",
+        question="competitive intelligence report",
+    )
+    with patch("app.connectors.slack_oauth.post_message") as mock_post:
+        swept = await asyncio.to_thread(conn.sweep_interrupted_slack_reports)
+    assert len(swept) == 1
+    assert "interrupted" in mock_post.call_args.kwargs["text"]
+
+
+def test_main_calls_the_sweep_on_shutdown_not_startup():
+    """Guards the placement: the call must sit AFTER the lifespan's `yield`.
+    Before it, the registry is empty by construction and the mechanism is dead
+    code that can never notify anyone."""
+    import inspect
+
+    from app import main
+
+    src = inspect.getsource(main.lifespan)
+    assert "sweep_interrupted_slack_reports" in src
+    assert src.index("\n    yield") < src.index("sweep_interrupted_slack_reports"), (
+        "the Slack report sweep must run on shutdown, not startup"
+    )
+
 
 def test_sweep_posts_a_retry_notice_for_an_orphaned_report_marker(connected):
     from app.routes import connectors as conn

@@ -187,19 +187,6 @@ async def lifespan(app: FastAPI):
             )
     except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
         logger.exception("Orphan pipeline-run sweep failed at startup")
-    # Slack report runs interrupted mid-flight: the user was acknowledged ("~5-10
-    # minutes") and then the run died, so tell them to ask again rather than
-    # leaving the thread silent. KNOWN LIMIT: the markers are in-process, so this
-    # covers a run lost inside one process lifetime, not one lost to the restart
-    # itself — durable markers need a table (see routes/connectors).
-    try:
-        from app.routes.connectors import sweep_interrupted_slack_reports
-
-        swept = sweep_interrupted_slack_reports()
-        if swept:
-            logger.info("Swept %d interrupted Slack report run(s)", len(swept))
-    except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
-        logger.exception("Interrupted Slack report sweep failed at startup")
     # Design Agent startup invalidation (prototypes + iterations).
     #
     # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned
@@ -271,6 +258,28 @@ async def lifespan(app: FastAPI):
             logger.warning("Scheduler startup failed", exc_info=True)
 
     yield
+
+    # Slack report runs still in flight at SHUTDOWN: the user was acknowledged
+    # ("~5-10 minutes") and the run is about to die with the process, so tell
+    # them to ask again rather than leaving the thread silent forever.
+    #
+    # This runs on SHUTDOWN, not startup, and that is the whole point: the
+    # markers live in-process, so by the time a fresh process boots its registry
+    # is empty by construction and a startup sweep could never fire. Here the
+    # event loop is still alive and the bot token is still readable, so the
+    # notice actually goes out. Runs BEFORE the Design Agent drain (which can
+    # take ~200s) so the message lands promptly.
+    try:
+        from app.routes.connectors import sweep_interrupted_slack_reports
+
+        swept = await asyncio.to_thread(sweep_interrupted_slack_reports)
+        if swept:
+            logger.info(
+                "Notified %d interrupted Slack report run(s) at shutdown",
+                len(swept),
+            )
+    except Exception:  # noqa: BLE001 — shutdown must never break on bookkeeping
+        logger.exception("Interrupted Slack report sweep failed at shutdown")
 
     # ── Tier 0: graceful drain of in-flight Design Agent generation ────
     # On a deploy/restart SIGTERM, stop admitting new /generate work, then wait

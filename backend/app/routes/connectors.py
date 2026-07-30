@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import re
@@ -2228,6 +2229,14 @@ _NO_UPLOAD_SCOPE = (
     "receive file uploads yet — open Sprntly chat to read it, or reconnect "
     "Slack from Settings → Connectors to enable file delivery here."
 )
+# ...and a DIFFERENT message when the scope IS present and the upload still
+# failed. Telling someone their install "can't receive uploads yet" when it can
+# sends them to reinstall Slack for nothing; this is a transient failure, and the
+# honest line says so.
+_UPLOAD_FAILED = (
+    "I couldn't attach the full report here just now — open Sprntly chat to "
+    "read it, or ask me again to retry the upload."
+)
 
 
 async def _post_best_effort(bot_token: str, *, channel: str, text: str,
@@ -2286,22 +2295,35 @@ async def _deliver_slack_answer(
     except Exception:  # noqa: BLE001 — upload_file already swallows; belt and braces
         logger.warning("slack: report upload raised", exc_info=True)
     if not uploaded:
+        # The scope IS present (checked above), so this is a transient upload
+        # failure — do NOT tell them to reinstall Slack.
         await _post_best_effort(bot_token, channel=channel, thread_ts=thread_ts,
-                                text=_NO_UPLOAD_SCOPE)
+                                text=_UPLOAD_FAILED)
 
 
-# ───── In-flight report markers (restart interrupt) ─────
+# ───── In-flight report markers (shutdown interrupt) ─────
 #
-# A Slack report run lives in a fire-and-forget task, so a backend restart
-# mid-run drops it silently: the user got an ack and then nothing. These markers
-# let the startup sweep say so.
+# A Slack report run lives in a fire-and-forget task, so a restart mid-run drops
+# it silently: the user got an ack promising a report in ~5-10 minutes and then
+# nothing, forever. These markers let `sweep_interrupted_slack_reports` say so.
 #
-# KNOWN LIMIT, deliberately: the registry is IN-PROCESS, so it recovers a run
-# lost to a cancelled task within one process lifetime, not one lost to the
-# restart itself (the dict dies with the process). Durable markers need a table
-# and a migration; this ships the honest minimum and the sweep is already wired
-# so making it durable is a schema change, not a rewrite.
+# The sweep is called from the lifespan's SHUTDOWN half (app/main.py), not
+# startup. That is load-bearing: this registry is in-process, so a fresh
+# process's dict is empty by construction and a startup sweep could never fire.
+# At shutdown the loop is still alive and the bot token still readable, so the
+# notice actually goes out.
+#
+# KNOWN LIMIT: this covers an orderly shutdown (SIGTERM on deploy/restart) and
+# a task lost inside one process lifetime. A SIGKILL or a hard crash skips the
+# lifespan entirely and the markers die with the process. Durable markers need a
+# table and a migration; the sweep is already wired, so making it durable later
+# is a schema change rather than a rewrite.
 _slack_report_markers: dict[str, dict] = {}
+# Marker keys must be unique for the lifetime of the process. len(dict) is not:
+# register → clear → register reuses the same suffix, and two concurrent report
+# runs in one channel/thread could collide and lose a marker. A monotonic
+# counter cannot.
+_slack_report_seq = itertools.count(1)
 _INTERRUPTED_REPORT = (
     ":warning: That report run was interrupted before it finished — nothing was "
     "posted. Ask again and I'll rerun it."
@@ -2310,7 +2332,7 @@ _INTERRUPTED_REPORT = (
 
 def _register_slack_report(*, team_id: str, channel: str,
                            thread_ts: str | None, question: str) -> str:
-    key = f"{team_id}:{channel}:{thread_ts or ''}:{len(_slack_report_markers)}"
+    key = f"{team_id}:{channel}:{thread_ts or ''}:{next(_slack_report_seq)}"
     _slack_report_markers[key] = {
         "team_id": team_id, "channel": channel, "thread_ts": thread_ts,
         "question": question, "started_at": time.time(),
@@ -2325,9 +2347,12 @@ def _clear_slack_report(marker: str | None) -> None:
 
 def sweep_interrupted_slack_reports() -> list[dict]:
     """Post "interrupted — ask again" for every report run still marked
-    in-flight, and clear the markers. Returns the markers it swept (so startup
-    can log a count). Best-effort per marker: a failed post is logged and the
-    sweep continues."""
+    in-flight, and clear the markers. Returns the markers it swept (so the
+    caller can log a count). Best-effort per marker: a failed post is logged and
+    the sweep continues.
+
+    Called from the lifespan SHUTDOWN half — see the note above the registry for
+    why it cannot be startup."""
     swept = list(_slack_report_markers.values())
     _slack_report_markers.clear()
     for m in swept:
