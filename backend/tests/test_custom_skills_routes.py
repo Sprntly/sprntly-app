@@ -7,12 +7,15 @@ Covered:
 - happy path: .md and .zip uploads create a company-scoped skill row and
   stage the original bytes (filesystem fallback in tests)
 - the server-side validation ladder: missing/over-limit metadata (422), bad
-  extension (422), empty file (400), oversize (413), unparseable content (400)
+  extension (422), empty file (400), oversize (413), unparseable content
+  (400), over-limit parsed content in characters (413)
 - slug conflicts: company duplicates (409) with the staged object rolled
   back; shadowing a BUILT-IN id is allowed and flagged (overrides_builtin —
   PRD 1854 override: the custom skill replaces the built-in)
 - list: newest-first metadata, company-isolated
 - file links: signed/fallback URLs for owned skills; foreign ids 404
+- delete: removes the row and the staged original, frees the slug for
+  re-upload; foreign/missing ids 404 indistinguishably
 """
 from __future__ import annotations
 
@@ -152,10 +155,15 @@ def test_empty_file_400(tenant_client):
     assert _upload(t.client, data=b"").status_code == 400
 
 
-def test_oversize_413_and_boundary_accepted(tenant_client):
+def test_oversize_413_and_boundary_accepted(tenant_client, monkeypatch):
+    import app.routes.custom_skills as mod
     from app.skills_storage import MAX_SKILL_UPLOAD_BYTES
 
     t = tenant_client.make(slug="acme")
+    # Lift the CONTENT (character) cap so this test isolates the BYTE
+    # boundary — 20 MB of markdown is far over the character cap, which has
+    # its own boundary test below.
+    monkeypatch.setattr(mod, "MAX_SKILL_CONTENT_CHARS", 30 * 1024 * 1024)
     # Exactly 20 MB is accepted (inclusive boundary, per the PRD edge case)…
     at_limit = b"a" * MAX_SKILL_UPLOAD_BYTES
     assert _upload(t.client, name="At Limit", data=at_limit).status_code == 201
@@ -164,6 +172,36 @@ def test_oversize_413_and_boundary_accepted(tenant_client):
     resp = _upload(t.client, name="Over Limit", data=over)
     assert resp.status_code == 413
     assert "20 MB" in resp.json()["detail"]
+
+
+def test_content_cap_boundary_md(tenant_client):
+    from app.skills.custom import MAX_SKILL_CONTENT_CHARS
+
+    t = tenant_client.make(slug="acme")
+    # Exactly at the cap is accepted (inclusive, like the byte boundary)…
+    at_cap = b"a" * MAX_SKILL_CONTENT_CHARS
+    assert _upload(t.client, name="At Cap", data=at_cap).status_code == 201
+    assert len(_staged_files()) == 1
+    # …one character over is rejected, before anything is staged.
+    over = b"a" * (MAX_SKILL_CONTENT_CHARS + 1)
+    resp = _upload(t.client, name="Over Cap", data=over)
+    assert resp.status_code == 413
+    assert f"{MAX_SKILL_CONTENT_CHARS:,} character" in resp.json()["detail"]
+    assert len(_staged_files()) == 1
+
+
+def test_content_cap_counts_every_zip_member(tenant_client):
+    from app.skills.custom import MAX_SKILL_CONTENT_CHARS
+
+    t = tenant_client.make(slug="acme")
+    # Each member is under the cap; together they exceed it — the cap is on
+    # the TOTAL parsed text, not the method file alone.
+    half = b"a" * (MAX_SKILL_CONTENT_CHARS // 2 + 1)
+    data = _zip_bytes({"SKILL.md": half, "modules/big.md": half})
+    resp = _upload(t.client, name="Big Zip", filename="big.zip", data=data)
+    assert resp.status_code == 413
+    assert "character" in resp.json()["detail"]
+    assert _staged_files() == []
 
 
 def test_zip_without_md_400(tenant_client):
@@ -277,3 +315,44 @@ def test_file_links_foreign_id_404(tenant_client):
 def test_file_links_unknown_id_404(tenant_client):
     t = tenant_client.make(slug="acme")
     assert t.client.get("/v1/skills/not-a-real-id/file").status_code == 404
+
+
+# ─── delete ──────────────────────────────────────────────────────────────────
+
+
+def test_delete_removes_row_and_staged_file(tenant_client):
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+    assert len(_staged_files()) == 1
+
+    resp = t.client.delete(f"/v1/skills/{skill_id}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"deleted": True, "id": skill_id}
+    assert t.client.get("/v1/skills").json()["skills"] == []
+    # The staged original is cleaned up with the row.
+    assert _staged_files() == []
+
+
+def test_delete_frees_slug_for_reupload(tenant_client):
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+
+    assert t.client.delete(f"/v1/skills/{skill_id}").status_code == 200
+    # Same name again → no duplicate-slug 409 once the row is gone.
+    assert _upload(t.client).status_code == 201
+
+
+def test_delete_foreign_id_404_and_keeps_skill(tenant_client):
+    a = tenant_client.make(slug="acme")
+    b = tenant_client.make(slug="globex")
+    skill_id = _upload(a.client).json()["id"]
+
+    assert b.client.delete(f"/v1/skills/{skill_id}").status_code == 404
+    # The owner's skill and its staged file are untouched.
+    assert [s["id"] for s in a.client.get("/v1/skills").json()["skills"]] == [skill_id]
+    assert len(_staged_files()) == 1
+
+
+def test_delete_unknown_id_404(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert t.client.delete("/v1/skills/not-a-real-id").status_code == 404

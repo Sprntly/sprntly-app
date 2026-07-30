@@ -33,6 +33,7 @@ import {
   IconSearch,
   IconSparkles,
   IconSpeakerphone,
+  IconTrash,
   IconUser,
   IconWand,
 } from "@tabler/icons-react"
@@ -118,6 +119,10 @@ export function SkillsView({
   onQueryChange,
   onInvoke,
   onCreate,
+  deletePendingId,
+  deletingId,
+  onDeleteRequest,
+  onDeleteConfirm,
 }: {
   groups: SkillGroup[]
   /** The company's uploaded skills (already search-filtered by the caller). */
@@ -130,6 +135,14 @@ export function SkillsView({
   onQueryChange: (value: string) => void
   onInvoke: (skill: { trigger: string }) => void
   onCreate: () => void
+  /** Custom-skill id with the inline delete confirm armed (one at a time). */
+  deletePendingId: string | null
+  /** Custom-skill id whose delete is in flight — shows the Deleting… state. */
+  deletingId: string | null
+  /** Arm the confirm for an id; null disarms (Cancel / picking another card). */
+  onDeleteRequest: (id: string | null) => void
+  /** Actually delete — reachable only through the armed confirm. */
+  onDeleteConfirm: (id: string) => void
 }) {
   return (
     <div className="skl-wrap">
@@ -190,25 +203,66 @@ export function SkillsView({
             </div>
             <div className="skl-grid">
               {customSkills.map((s) => (
-                <button
-                  key={s.id}
-                  type="button"
-                  className="skl-card"
-                  onClick={() => onInvoke(s)}
-                  title={`${s.trigger} — start a thread with this skill`}
-                >
-                  <span className="skl-card-icon">
-                    <IconWand size={16} />
-                  </span>
-                  <span className="skl-card-t">{s.name}</span>
-                  <span className="skl-card-d">{skillBlurb(s.description, s.name)}</span>
-                  <span className="skl-card-foot">
-                    <span className="skl-by">
-                      <IconUser size={11} />
-                      {s.uploader_name || "Your team"}
+                // Wrapper div: the card is itself a <button>, so the delete
+                // affordance must be a sibling — nested buttons are invalid.
+                <div key={s.id} className="skl-card-wrap">
+                  <button
+                    type="button"
+                    className="skl-card"
+                    onClick={() => onInvoke(s)}
+                    title={`${s.trigger} — start a thread with this skill`}
+                  >
+                    <span className="skl-card-icon">
+                      <IconWand size={16} />
                     </span>
-                  </span>
-                </button>
+                    <span className="skl-card-t">{s.name}</span>
+                    <span className="skl-card-d">{skillBlurb(s.description, s.name)}</span>
+                    <span className="skl-card-foot">
+                      <span className="skl-by">
+                        <IconUser size={11} />
+                        {s.uploader_name || "Your team"}
+                      </span>
+                    </span>
+                  </button>
+                  {deletingId === s.id ? (
+                    <span className="skl-card-confirm" role="status">
+                      <span className="skl-del-spin" aria-hidden />
+                      Deleting…
+                    </span>
+                  ) : deletePendingId === s.id ? (
+                    <span
+                      className="skl-card-confirm"
+                      role="group"
+                      aria-label={`Confirm deleting ${s.name}`}
+                    >
+                      Delete for the whole company?
+                      <button
+                        type="button"
+                        className="btn btn-sm skl-del-yes"
+                        onClick={() => onDeleteConfirm(s.id)}
+                      >
+                        Delete
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-sm"
+                        onClick={() => onDeleteRequest(null)}
+                      >
+                        Cancel
+                      </button>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="skl-card-del"
+                      aria-label={`Delete ${s.name}`}
+                      title="Delete this skill"
+                      onClick={() => onDeleteRequest(s.id)}
+                    >
+                      <IconTrash size={13} />
+                    </button>
+                  )}
+                </div>
               ))}
             </div>
           </section>
@@ -268,6 +322,8 @@ function SkillsScreenContent() {
   const [skills, setSkills] = useState<SkillInfo[]>([])
   const [customSkills, setCustomSkills] = useState<CustomSkillInfo[]>([])
   const [customError, setCustomError] = useState<string | null>(null)
+  const [deletePendingId, setDeletePendingId] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
   const [uploadOpen, setUploadOpen] = useState(false)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -360,6 +416,31 @@ function SkillsScreenContent() {
     goTo("chat")
   }
 
+  // Delete a custom skill (company-wide — every workspace shares one library,
+  // so the inline confirm says as much). While the call is in flight the card
+  // shows a Deleting… spinner; it leaves the grid only after the API confirms,
+  // and a failure keeps it with the reason surfaced as a toast.
+  async function onDeleteConfirm(id: string) {
+    const skill = customSkills.find((s) => s.id === id)
+    setDeletePendingId(null)
+    setDeletingId(id)
+    try {
+      await skillsApi.remove(id)
+      setCustomSkills((prev) => prev.filter((s) => s.id !== id))
+      showToast(
+        "Skill deleted",
+        `${skill?.name ?? "The skill"} was removed from your company's library and no longer routes in chat.`,
+      )
+    } catch (e) {
+      showToast(
+        "Couldn't delete the skill",
+        e instanceof Error ? e.message : "Please try again.",
+      )
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   // Upload a custom skill: POST, then prepend the created skill so it appears
   // in the library immediately (the list endpoint orders newest-first too).
   async function onUpload(file: File, name: string, description: string) {
@@ -387,6 +468,10 @@ function SkillsScreenContent() {
         onQueryChange={setQuery}
         onInvoke={onInvoke}
         onCreate={() => setUploadOpen(true)}
+        deletePendingId={deletePendingId}
+        deletingId={deletingId}
+        onDeleteRequest={setDeletePendingId}
+        onDeleteConfirm={onDeleteConfirm}
       />
       <UploadSkillModal
         open={uploadOpen}

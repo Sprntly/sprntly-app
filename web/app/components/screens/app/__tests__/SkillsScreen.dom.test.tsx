@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const skillsMock = vi.fn()
 const customListMock = vi.fn()
 const customUploadMock = vi.fn()
+const customRemoveMock = vi.fn()
 const goToMock = vi.fn()
 const setPendingOndemandDraftMock = vi.fn()
 const showToastMock = vi.fn()
@@ -27,6 +28,7 @@ vi.mock("../../../../lib/api", () => ({
   skillsApi: {
     list: (...a: unknown[]) => customListMock(...a),
     upload: (...a: unknown[]) => customUploadMock(...a),
+    remove: (...a: unknown[]) => customRemoveMock(...a),
   },
 }))
 
@@ -172,9 +174,11 @@ describe("SkillsScreen", () => {
 
     expect(screen.getByRole("heading", { name: "Custom skills" })).toBeTruthy()
     expect(screen.getByText("Fortune Tede")).toBeTruthy()
-    // Custom cards hand off to chat exactly like built-ins.
+    // Custom cards hand off to chat exactly like built-ins. Anchored regex:
+    // the delete affordance is also a button whose name CONTAINS the skill
+    // name ("Delete Estimation helper") — the card's name starts with it.
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /estimation helper/i }))
+      fireEvent.click(screen.getByRole("button", { name: /^estimation helper/i }))
     })
     expect(setPendingOndemandDraftMock).toHaveBeenCalledWith("/estimation-helper ")
     expect(goToMock).toHaveBeenCalledWith("chat")
@@ -239,6 +243,92 @@ describe("SkillsScreen", () => {
     )
   })
 
+  it("deletes a custom skill only through the inline confirm, with an in-flight state", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    // Deferred resolution so the Deleting… state is observable mid-flight.
+    let resolveRemove!: (v: { deleted: true; id: string }) => void
+    customRemoveMock.mockReturnValue(
+      new Promise((res) => {
+        resolveRemove = res
+      }),
+    )
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    // Arming the confirm deletes nothing and doesn't invoke the skill.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete Estimation helper" }))
+    })
+    expect(customRemoveMock).not.toHaveBeenCalled()
+    expect(goToMock).not.toHaveBeenCalled()
+    expect(screen.getByText(/Delete for the whole company\?/)).toBeTruthy()
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^delete$/i }))
+    })
+
+    // In flight: the confirm is gone, a live Deleting… status shows, and the
+    // card is still present until the server confirms.
+    expect(customRemoveMock).toHaveBeenCalledWith(CUSTOM_SKILL.id)
+    expect(screen.getByRole("status").textContent).toContain("Deleting…")
+    expect(screen.getByText("Estimation helper")).toBeTruthy()
+
+    await act(async () => {
+      resolveRemove({ deleted: true, id: CUSTOM_SKILL.id })
+    })
+
+    await waitFor(() => expect(screen.queryByText("Estimation helper")).toBeNull())
+    expect(showToastMock).toHaveBeenCalledWith(
+      "Skill deleted",
+      expect.stringContaining("Estimation helper"),
+    )
+  })
+
+  it("cancelling the delete confirm keeps the skill and calls nothing", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete Estimation helper" }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /cancel/i }))
+    })
+
+    expect(customRemoveMock).not.toHaveBeenCalled()
+    expect(screen.getByText("Estimation helper")).toBeTruthy()
+    expect(screen.queryByText(/Delete for the whole company\?/)).toBeNull()
+  })
+
+  it("keeps the card and surfaces a toast when the delete fails", async () => {
+    customListMock.mockResolvedValue({ skills: [CUSTOM_SKILL] })
+    customRemoveMock.mockRejectedValue(new Error("Skill not found."))
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Estimation helper")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Delete Estimation helper" }))
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^delete$/i }))
+    })
+
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        "Couldn't delete the skill",
+        "Skill not found.",
+      ),
+    )
+    expect(screen.getByText("Estimation helper")).toBeTruthy()
+  })
+
   it("keeps built-ins rendering when the custom-skills fetch fails", async () => {
     customListMock.mockRejectedValueOnce(new Error("custom down"))
     await act(async () => {
@@ -276,10 +366,14 @@ describe("SkillsScreen", () => {
       fireEvent.click(screen.getByRole("button", { name: /^upload skill$/i }))
     })
 
-    expect(customUploadMock).toHaveBeenCalledWith(
-      expect.any(File),
-      "Estimation helper",
-      "Scores features by reach × confidence.",
+    // waitFor: the modal's .md content pre-check reads the file (FileReader)
+    // before calling upload, so the call lands a tick after the click.
+    await waitFor(() =>
+      expect(customUploadMock).toHaveBeenCalledWith(
+        expect.any(File),
+        "Estimation helper",
+        "Scores features by reach × confidence.",
+      ),
     )
     // Modal closes, toast fires, and the new skill is in the library.
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull())

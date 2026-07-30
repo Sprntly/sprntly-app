@@ -106,6 +106,7 @@ from app.db.datasets import (
 # Custom skills (workspace-scoped, user-uploaded — PRD 1854)
 from app.db.custom_skills import (
     DuplicateSkillSlug,
+    delete_custom_skill,
     get_custom_skill,
     get_custom_skill_by_id,
     insert_custom_skill,
@@ -245,6 +246,7 @@ __all__ = [
     "list_datasets",
     # custom skills
     "DuplicateSkillSlug",
+    "delete_custom_skill",
     "get_custom_skill",
     "get_custom_skill_by_id",
     "insert_custom_skill",

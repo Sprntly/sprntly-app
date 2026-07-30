@@ -10,6 +10,8 @@
  *   - file type: .md / .zip only (case-insensitive; also pre-filtered via
  *     `accept`, but a picked-anyway file still gets the inline error)
  *   - size: ≤ 20 MB, rejected before any bytes are transmitted
+ *   - content: ≤ 50,000 characters — checked client-side for bare .md files
+ *     only (zip content is parsed server-side), on submit
  *   - name + description: required, non-whitespace — the submit gates on them
  *     and empty-but-touched fields are highlighted (aria-invalid + field-error)
  * A name that slugifies to a built-in Sprntly skill id shows a NON-BLOCKING
@@ -25,6 +27,27 @@ import { useState } from "react"
 
 /** 20 MB — mirrors skills_storage.MAX_SKILL_UPLOAD_BYTES (the PRD cap). */
 export const MAX_SKILL_FILE_BYTES = 20 * 1024 * 1024
+
+/** Characters of skill text — mirrors skills.custom.MAX_SKILL_CONTENT_CHARS
+ *  (the parsed method is injected into the prompt on every invocation). */
+export const MAX_SKILL_CONTENT_CHARS = 50_000
+
+/** The server's over-cap `detail`, mirrored so the .md pre-check reads the
+ *  same whether it was caught client- or server-side. */
+export const SKILL_CONTENT_CAP_ERROR = `Skill content exceeds the ${MAX_SKILL_CONTENT_CHARS.toLocaleString(
+  "en-US",
+)} character limit. Please trim the skill text and try again.`
+
+/** File text via FileReader (File.text() is missing in jsdom — same reason
+ *  ChatScreen's attachment reader uses it). */
+function readSkillFileText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ""))
+    reader.onerror = () => reject(reader.error ?? new Error("Could not read the file."))
+    reader.readAsText(file)
+  })
+}
 
 /** Client mirror of skills.custom.slugify — display name → /trigger slug. */
 export function slugifyName(name: string): string {
@@ -177,7 +200,7 @@ export function UploadSkillModalView({
           <label className="set-conn-upload" title="Choose a skill file">
             <i className="ti ti-cloud-upload" aria-hidden />
             {file ? file.name : "Choose a skill file"}
-            <span className="muted">.md or .zip · up to 20 MB</span>
+            <span className="muted">.md or .zip · up to 20 MB · up to 50,000 characters</span>
             <input
               type="file"
               accept=".md,.zip"
@@ -258,6 +281,16 @@ export function UploadSkillModal({ open, onUpload, onClose, builtinSlugs }: Prop
     if (fileError) {
       setError(fileError)
       return
+    }
+    // Content cap, checkable client-side only for a bare .md (its text IS the
+    // skill content; a zip's members are parsed server-side). Fail-open on a
+    // read error — the server stays the authoritative validator.
+    if (file.name.toLowerCase().endsWith(".md")) {
+      const text = await readSkillFileText(file).catch(() => null)
+      if (text != null && text.length > MAX_SKILL_CONTENT_CHARS) {
+        setError(SKILL_CONTENT_CAP_ERROR)
+        return
+      }
     }
     setSubmitting(true)
     setError(null)

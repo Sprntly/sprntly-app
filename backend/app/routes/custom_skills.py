@@ -3,6 +3,7 @@
   POST   /v1/skills               -> upload a .md/.zip skill with name+description
   GET    /v1/skills               -> list the company's custom skills (metadata)
   GET    /v1/skills/{id}/file     -> signed view/download URLs for the original upload
+  DELETE /v1/skills/{id}          -> delete a skill (row + original file)
 
 Custom skills are COMPANY-SCOPED for now — all workspaces in a company share
 one skill library, so reads filter by company_id. The uploading workspace is
@@ -16,7 +17,8 @@ check must hold against direct API calls.
 
 Error ladder (mirrors the attachments/dataset upload guards): missing or
 over-limit name/description → 422, unsupported extension → 422, empty file →
-400, oversize → 413, unparseable content → 400, company-duplicate slug → 409.
+400, oversize → 413, unparseable content → 400, over-limit parsed content
+(characters) → 413, company-duplicate slug → 409.
 
 Shadowing a BUILT-IN skill id is allowed (PRD 1854 override): the company's
 upload replaces the built-in at invocation time (resolver checks the company
@@ -35,7 +37,9 @@ from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin
 from app.skills.custom import (
     MAX_DESCRIPTION_CHARS,
     MAX_NAME_CHARS,
+    MAX_SKILL_CONTENT_CHARS,
     SkillParseError,
+    content_chars,
     content_hash_for,
     parse_upload,
     slugify,
@@ -105,6 +109,15 @@ async def upload_skill(
         parsed = parse_upload(file.filename or f"skill.{ext}", data)
     except SkillParseError as e:
         raise HTTPException(400, str(e))
+    # Character cap on the PARSED text, after the byte cap on the raw file: a
+    # zip can pass 20 MB compressed yet expand into far more prompt text than
+    # any invocation should carry.
+    if content_chars(parsed) > MAX_SKILL_CONTENT_CHARS:
+        raise HTTPException(
+            413,
+            f"Skill content exceeds the {MAX_SKILL_CONTENT_CHARS:,} character "
+            "limit. Please trim the skill text and try again.",
+        )
 
     slug = slugify(name)
     if not slug:
@@ -182,3 +195,30 @@ def skill_file_links(
     except ValueError:
         raise HTTPException(404, "Skill file not found.")
     return {"name": f"{row['slug']}.{ext}", **urls}
+
+
+@router.delete(
+    "/{skill_id}",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+async def delete_skill(
+    skill_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Delete a custom skill for the WHOLE company (skills are company-scoped,
+    so it disappears from every workspace's library and stops routing on the
+    next invocation — the resolver reads the DB fresh each time).
+
+    Row first, then the staged original: a failed storage delete leaves an
+    orphaned file (best-effort, delete_skill_file never raises) rather than a
+    ghost skill that still routes. 404 on a foreign or missing id, made
+    indistinguishable by the company-filtered lookup."""
+    row = db.delete_custom_skill(company.company_id, skill_id)
+    if row is None:
+        raise HTTPException(404, "Skill not found.")
+    if row.get("storage_key"):
+        await skills_storage.delete_skill_file(
+            company_id=company.company_id, key=row["storage_key"]
+        )
+    logger.info("custom_skill_deleted slug=%s", row.get("slug"))
+    return {"deleted": True, "id": skill_id}
