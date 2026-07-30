@@ -234,7 +234,8 @@ def test_happy_path_renders_html_report_with_embedded_chart(workspace, logged, m
     assert row["decision_type"] == "chat_data_analysis_claude"
     assert row["model"] == "claude-sonnet-4-6"
     assert row["factors"]["files"] == 2
-    assert row["factors"]["charts"] == 1
+    assert row["factors"]["charts_rendered"] == 1
+    assert row["factors"]["charts_dropped"] == 0
     assert row["factors"]["turns"] == 1
     assert row["factors"]["input_tokens"] == 10
     assert row["factors"]["output_tokens"] == 20
@@ -304,7 +305,7 @@ def test_tool_error_result_yields_no_chart(workspace, logged, monkeypatch):
 
     out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
 
-    assert logged[0]["factors"]["charts"] == 0
+    assert logged[0]["factors"]["charts_rendered"] == 0
     assert "data:image/png" not in out["answer"]
 
 
@@ -704,6 +705,49 @@ def test_followup_ask_folds_a_chart_report_into_a_small_history(
     assert len(prompt) < 12_000, f"follow-up prompt is {len(prompt)} chars"
 
 
+# ── the decision log must count the same charts the report shows ─────────────
+# Staging QA (2026-07-30): header said "2 charts", two rendered, the log said 3.
+# The log was counting what the model PRODUCED; the header counts what survived
+# the embed budget. Two explicit fields now, so neither number is ambiguous.
+
+def test_decision_log_splits_rendered_from_dropped_charts(workspace, logged, monkeypatch):
+    _csv(workspace)
+    # Three produced; each ~53KB of base64, so the 100KB total budget embeds two.
+    _client(
+        monkeypatch,
+        _message([
+            _exec_result(file_ids=("c1", "c2", "c3")),
+            _text("findings"),
+        ]),
+        download_bytes=PNG + b"\x00" * 40_000,
+    )
+
+    out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
+
+    rendered = out["answer"].count("<figure>")
+    factors = logged[0]["factors"]
+    assert factors["charts_rendered"] == rendered, "log must match what was shown"
+    assert factors["charts_dropped"] == 3 - rendered
+    assert factors["charts_rendered"] + factors["charts_dropped"] == 3
+    # and the header the reader sees agrees with the log
+    assert f"{rendered} chart" in out["answer"]
+
+
+def test_decision_log_reports_zero_dropped_when_all_charts_fit(
+    workspace, logged, monkeypatch
+):
+    _csv(workspace)
+    _client(
+        monkeypatch,
+        _message([_exec_result(file_ids=("c1", "c2")), _text("findings")]),
+    )
+
+    out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
+
+    assert logged[0]["factors"]["charts_rendered"] == 2 == out["answer"].count("<figure>")
+    assert logged[0]["factors"]["charts_dropped"] == 0
+
+
 # ── truncation is never rendered as a finished report ────────────────────────
 
 def test_max_tokens_stop_is_flagged_in_the_report(workspace, logged, monkeypatch):
@@ -718,6 +762,104 @@ def test_max_tokens_stop_is_flagged_in_the_report(workspace, logged, monkeypatch
 
     assert "cut off" in out["answer"], "a truncated report must say so"
     assert logged[0]["factors"]["stopped_reason"] == "max_tokens"
+
+
+# ── markdown the model actually writes must not leak as literal text ─────────
+# Staging QA (2026-07-30) found three constructs rendering raw in the report:
+# pipe tables (the model writes its ranked TL;DR as one), `---` rules, and `>`
+# blockquotes. The fixtures below are the exact strings from that report.
+
+BUG_TABLE = (
+    "| # | Finding | Confidence | Action |\n"
+    "|---|---------|------------|--------|\n"
+    "| 2 | **Satisfaction predicts…** | HIGH | … |\n"
+)
+
+
+def test_pipe_table_renders_as_a_table_not_literal_text():
+    out = ca._md_to_html(BUG_TABLE)
+
+    assert "<table>" in out and "<thead>" in out and "<tbody>" in out
+    # the exact row from the bug must not survive as literal pipes
+    assert "| 2 | **Satisfaction predicts" not in out
+    assert "|---" not in out
+    assert "<th>Confidence</th>" in out
+    assert "<td>2</td>" in out
+    assert "<strong>Satisfaction predicts…</strong>" in out, "inline md still applies"
+    assert "<td>HIGH</td>" in out
+
+
+def test_table_alignment_row_is_honoured():
+    out = ca._md_to_html("| a | b | c |\n|:--|:-:|--:|\n| 1 | 2 | 3 |\n")
+    assert 'style="text-align:left"' in out
+    assert 'style="text-align:center"' in out
+    assert 'style="text-align:right"' in out
+
+
+def test_horizontal_rule_renders_as_hr():
+    for rule in ("---", "***", "___", "-----"):
+        out = ca._md_to_html(f"before\n\n{rule}\n\nafter")
+        assert "<hr>" in out, rule
+        assert rule not in out, f"{rule} leaked as literal text"
+
+
+def test_blockquote_renders_as_blockquote():
+    out = ca._md_to_html("> Caveat: the sample is small.\n> Treat as early signal.")
+
+    assert "<blockquote>" in out
+    assert "&gt;" not in out and ">" in out  # markers consumed, tags emitted
+    assert "Caveat: the sample is small." in out
+    assert "Treat as early signal." in out
+
+
+def test_blockquote_can_hold_a_list():
+    out = ca._md_to_html("> Caveats:\n> - small n\n> - one week only")
+    assert "<blockquote>" in out and "<ul>" in out
+    assert "<li>small n</li>" in out
+
+
+def test_prose_with_a_pipe_is_not_mistaken_for_a_table():
+    """No delimiter row → it's a sentence, not a table."""
+    out = ca._md_to_html("Revenue | cost split was not available in the export.")
+    assert "<table>" not in out
+    assert "Revenue | cost split" in out
+
+
+def test_table_cells_are_still_escaped():
+    """Escape-first discipline is unchanged by the new constructs."""
+    out = ca._md_to_html("| col |\n|---|\n| <script>alert(1)</script> |\n")
+    assert "<script>" not in out
+    assert "&lt;script&gt;" in out
+
+
+def test_blockquote_and_hr_content_is_escaped():
+    out = ca._md_to_html("> <img src=x onerror=alert(1)>\n\n---\n")
+    assert "<img" not in out
+    assert "&lt;img" in out
+
+
+def test_escaped_pipe_stays_literal_inside_a_cell():
+    out = ca._md_to_html("| expr |\n|---|\n| a \\| b |\n")
+    assert "<td>a | b</td>" in out
+
+
+def test_full_report_renders_the_bug_constructs(workspace, logged, monkeypatch):
+    """End to end: the same three constructs inside a real analysis answer."""
+    _csv(workspace)
+    _client(
+        monkeypatch,
+        _message([_text(
+            "## TL;DR\n\n"
+            + BUG_TABLE
+            + "\n---\n\n> Caveat: one week of data only.\n"
+        )]),
+    )
+
+    answer = ca.answer(enterprise_id=COMPANY, question="analyze my data")["answer"]
+
+    assert "<table>" in answer and "<hr>" in answer and "<blockquote>" in answer
+    for leaked in ("| 2 |", "|---|", "> Caveat"):
+        assert leaked not in answer, f"{leaked!r} leaked into the rendered report"
 
 
 # ── 9. routing negatives stay negative ───────────────────────────────────────

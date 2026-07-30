@@ -85,6 +85,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "cached_asks":          {"response"},
     "ask_jobs":             {"response"},
     "website_analysis_jobs": {"result"},
+    "company_research_runs": {"stages", "records"},
     "llm_context_jobs":     {"result"},
     "companies":            {"coworker_names", "kpi_tree", "competitors", "business_context", "notification_settings", "feature_flags", "icp", "tone_voice"},
     "products":             {"surfaces", "personas", "monetization"},
@@ -233,6 +234,13 @@ class _Query:
     def lt(self, col: str, val: Any) -> "_Query":
         """`col < ?` — used by the map-cache expiry sweep."""
         self._raw_where.append(f"{col} < ?")
+        self._raw_args.append(val)
+        return self
+
+    def gt(self, col: str, val: Any) -> "_Query":
+        """`col > ?` — used by the company-research in-flight guard (a
+        'running' row YOUNGER than the orphan cutoff)."""
+        self._raw_where.append(f"{col} > ?")
         self._raw_args.append(val)
         return self
 

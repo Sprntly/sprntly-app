@@ -1048,7 +1048,12 @@ describe("Mark-and-comment pin flow — view layer", () => {
     // withAuthRetry wrapping is the signed-in container's onCreate seam.
     expect(HOOK_SRC).toContain("async function handlePinSubmit")
     const start = HOOK_SRC.indexOf("async function handlePinSubmit")
-    const body = HOOK_SRC.slice(start, start + 1200)
+    // Window widened 1200→1600: the requireName-gate branch (public surface,
+    // name-required abort) grew a visible-error setPins call + comment, pushing
+    // the create-payload fields later in the function body. The window is pure
+    // text-capture plumbing, not a business invariant — widened to keep
+    // capturing the SAME unchanged assertions below.
+    const body = HOOK_SRC.slice(start, start + 1600)
     // anchor_id is the unchanged synthetic pin marker — back-compat with the list keying
     expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
     // the submit calls the injected create-fn (per-surface transport)
@@ -1062,7 +1067,9 @@ describe("Mark-and-comment pin flow — view layer", () => {
     // durable position fields alongside the unchanged synthetic anchor_id and
     // body. Pin position is persisted so every viewer sees the same pin location.
     const start = HOOK_SRC.indexOf("async function handlePinSubmit")
-    const fnBody = HOOK_SRC.slice(start, start + 1400)
+    // Window widened 1400→1600 — see the comment on the sibling test above
+    // (same requireName-branch growth, same pure text-capture rationale).
+    const fnBody = HOOK_SRC.slice(start, start + 1600)
     // anchor_id (synthetic pin marker) and body are still present — back-compat.
     expect(fnBody).toContain("anchor_id:")
     expect(fnBody).toContain("body:")
@@ -1121,7 +1128,9 @@ describe("PostGenerationResult container — pin-anchor threading through the le
     // End of the thread: the fields captured at click time are sent on create.
     // C2b: handlePinSubmit lives in the shared usePinMarking hook now.
     const start = HOOK_SRC.indexOf("async function handlePinSubmit")
-    const body = HOOK_SRC.slice(start, start + 1400)
+    // Window widened 1400→1600 — see the comment on the earlier sibling test
+    // (same requireName-branch growth, same pure text-capture rationale).
+    const body = HOOK_SRC.slice(start, start + 1600)
     expect(body).toMatch(/anchor_id:\s*`pin-\$\{n\}`/)
     expect(body).toContain("pin_x_pct:")
     expect(body).toContain("pin_y_pct:")

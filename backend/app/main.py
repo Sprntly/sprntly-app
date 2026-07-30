@@ -189,6 +189,20 @@ async def lifespan(app: FastAPI):
             )
     except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
         logger.exception("Orphan pipeline-run sweep failed at startup")
+    # Same for company_research_runs (the deep web-research sweep): a restart
+    # mid-run leaves the row 'running' forever, which would also wedge the
+    # in-flight guard so the company could never be researched again. Age-gated
+    # for the same shared-Supabase reason; repeated by the scheduler every 5m.
+    try:
+        research_orphans = db.fail_orphan_company_research_runs()
+        if research_orphans:
+            logger.info(
+                "Failed %d orphan running company-research run(s) "
+                "(restart interrupt)",
+                research_orphans,
+            )
+    except Exception:  # noqa: BLE001 — startup must never break on bookkeeping
+        logger.exception("Orphan company-research sweep failed at startup")
     # Design Agent startup invalidation (prototypes + iterations).
     #
     # Guarded (prod-hotfix 2026-05-30): the design-agent tables are provisioned

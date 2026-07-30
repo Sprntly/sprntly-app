@@ -19,6 +19,12 @@ FastAPI dependencies that enforce them server-side:
                        written before the rename (a migration renames stored
                        keys, but a concurrently-running old backend or a
                        restored row must not flip a company ON by accident).
+  * ``company_research`` — the deep company-research sweep (staged web
+                       research about the company's OWN public footprint →
+                       KG signals). Costs real money per run, so it carries
+                       a kill switch; checked in routes/onboarding.py (the
+                       post-website-submit kick) and in qa_agent's chat
+                       dispatch, both via ``company_research_enabled``.
 
 Resolution is FAIL-OPEN for grandfathering: existing companies carry
 feature_flags = {} or only legacy keys (on_demand_analysis,
@@ -97,6 +103,26 @@ def top_insights_enabled(flags: dict | None) -> bool:
         return bool(flags["top_insights"])
     if "weekly_brief" in flags:
         return bool(flags["weekly_brief"])
+    return True
+
+
+def company_research_enabled(flags: dict | None) -> bool:
+    """Resolve the `company_research` flag from a raw feature_flags dict.
+
+    Gates the deep company-research sweep (app/company_research.py) on BOTH of
+    its surfaces — the onboarding kick and the chat ask — so an explicit
+    `company_research: false` means "we never spend money researching this
+    company on the public web", not "off in one place only".
+
+    Fail-open like every other module flag: a missing key is ON, so existing
+    companies (feature_flags = {} or legacy keys only) get the capability
+    without a backfill, and only an explicit false in the staff panel turns it
+    off. There is no legacy alias — the key is new with this feature.
+    """
+    if not isinstance(flags, dict):
+        return True
+    if "company_research" in flags:
+        return bool(flags["company_research"])
     return True
 
 

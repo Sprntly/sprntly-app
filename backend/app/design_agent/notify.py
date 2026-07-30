@@ -199,12 +199,20 @@ def notify_prototype_ready(*, prototype_id: int, workspace_id: str) -> dict[str,
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": (
-                        f'Your prototype for "{title}" is ready.\n'
-                        f"<{deep_link}|Open prototype>"
-                    ),
+                    "text": f'Your prototype for "{title}" is ready.',
                 },
-            }
+            },
+            {
+                "type": "actions",
+                "elements": [
+                    {
+                        "type": "button",
+                        "text": {"type": "plain_text", "text": "Open prototype"},
+                        "url": deep_link,
+                        "style": "primary",
+                    }
+                ],
+            },
         ]
         provider_name = _DEFAULT_PROVIDER
         deliver = _PROVIDERS[provider_name]

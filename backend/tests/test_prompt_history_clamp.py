@@ -7,6 +7,8 @@ thousands of tokens — a non-retryable 400 on every subsequent ask.
 """
 from __future__ import annotations
 
+import re
+
 from app.prompt_history import (
     MAX_TURN_CHARS,
     clamp_turn_text,
@@ -103,36 +105,65 @@ def test_qa_agent_render_history_clamps_every_turn():
     assert "Export users retain 2.3x longer" in rendered
 
 
-def test_every_history_fold_site_is_clamped():
-    """Each intercept keeps its own `_render_history`; all of them fold raw
-    assistant turns, so all of them are exposed to a chart-bearing report.
-    (chat_intent is excluded: it already has its own per-turn + total clamp.)
+def _discover_history_renderers():
+    """Every `_render_history*` under app/, found by scanning the source tree.
 
-    `connector_lookup.answer._render_history` is the shared fold for EVERY
-    connector adapter (Jira via the jira_lookup shim, Slack, ClickUp, Fireflies,
-    GitHub, HubSpot, Drive), so one entry here covers all of them — and covers
-    adapters added later, which is the point of folding in one place.
-    `jira_lookup._render_history` stays listed because it is a public seam other
-    callers use; it delegates to the shared renderer."""
-    from app import call_digest, jira_lookup, public_feedback
-    from app.connector_lookup import answer as connector_answer
-    import app.ds.claude_analysis as claude_analysis
-    import app.qa_agent as qa
+    Deliberately discovery-based rather than a hardcoded list. Each chat
+    intercept keeps its OWN renderer and new intercepts keep arriving — the list
+    this replaces was dutifully extended for `connector_lookup.answer` and still
+    missed `ticket_update`, which shipped unclamped (found 2026-07-30). A list
+    only covers the sites someone remembered; a scan fails loudly on the next one.
+    """
+    import importlib
+    import inspect
+    from pathlib import Path
 
+    app_dir = Path(__file__).resolve().parents[1] / "app"
+    found = []
+    for path in sorted(app_dir.rglob("*.py")):
+        source = path.read_text(encoding="utf-8", errors="ignore")
+        names = re.findall(r"^def (_render_history\w*)\(", source, re.M)
+        if not names:
+            continue
+        rel = path.relative_to(app_dir).with_suffix("")
+        module_name = "app." + str(rel).replace("/", ".")
+        if module_name.endswith(".__init__"):
+            module_name = module_name[: -len(".__init__")]
+        module = importlib.import_module(module_name)
+        for name in names:
+            fn = getattr(module, name, None)
+            # Single-argument renderers only: the history-folding shape.
+            if fn and len(inspect.signature(fn).parameters) == 1:
+                found.append((f"{module_name}.{name}", fn))
+    return found
+
+
+def test_discovery_finds_the_known_fold_sites():
+    """Guard the guard — a scan that silently matched nothing would make the
+    test below pass vacuously."""
+    names = [name for name, _ in _discover_history_renderers()]
+    assert len(names) >= 7, names
+    for expected in ("qa_agent", "claude_analysis", "ticket_update", "call_digest"):
+        assert any(expected in n for n in names), f"{expected} not discovered: {names}"
+
+
+def test_every_history_fold_site_is_bounded():
+    """No fold site may replay a chart-bearing report at full size.
+
+    The invariant is BYTES, not the literal absence of "base64": chat_intent
+    truncates each turn to a char budget instead of stripping data URIs, which is
+    equally safe. So assert what actually prevents the 400 — the rendered block
+    stays small, and no single base64 run survives at a size that could matter.
+    """
     history = [{"role": "assistant", "content": _REPORT}]
-    renderers = [
-        qa._render_history,
-        claude_analysis._render_history,
-        call_digest._render_history,
-        call_digest._render_history_tail,
-        jira_lookup._render_history,
-        connector_answer._render_history,
-        public_feedback._render_history,
-    ]
-    for render in renderers:
+    renderers = _discover_history_renderers()
+    assert renderers
+
+    for name, render in renderers:
         out = render(history)
-        assert "base64" not in out, f"{render.__module__}.{render.__name__} folds base64"
-        assert len(out) < 12_000, f"{render.__module__}.{render.__name__} is unbounded"
+        assert len(out) < 12_000, f"{name} folds an unbounded turn ({len(out)} chars)"
+        longest = max((len(m) for m in re.findall(r"[A-Za-z0-9+/=]{40,}", out)), default=0)
+        assert longest < 500, f"{name} replays a {longest}-char base64 run"
 
 
 def test_qa_agent_render_history_bounds_many_fat_turns():

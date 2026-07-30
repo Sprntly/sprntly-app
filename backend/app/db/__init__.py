@@ -94,6 +94,16 @@ from app.db.reports import (
     set_report_share_config,
 )
 
+# Deep company-research runs (onboarding kick + chat ask)
+from app.db.company_research_runs import (
+    company_research_run_in_flight,
+    complete_company_research_run,
+    fail_company_research_run,
+    fail_orphan_company_research_runs,
+    latest_company_research_run,
+    start_company_research_run,
+)
+
 # Website-analysis jobs (onboarding, fire-and-forget)
 from app.db.website_analysis import (
     complete_analysis_job,
@@ -247,6 +257,13 @@ __all__ = [
     "list_reports_for_conversation",
     "save_report",
     "set_report_share_config",
+    # deep company-research runs
+    "company_research_run_in_flight",
+    "complete_company_research_run",
+    "fail_company_research_run",
+    "fail_orphan_company_research_runs",
+    "latest_company_research_run",
+    "start_company_research_run",
     # website-analysis jobs
     "complete_analysis_job",
     "fail_analysis_job",

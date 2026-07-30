@@ -74,6 +74,7 @@ from app.db.prototypes import (
     find_existing_prototype,
     find_prototype_by_prd,
     find_prototype_by_share_token,
+    find_prototypes_by_prd,
     flag_stale_handoff,
     get_prototype,
     infer_scenario_from_inputs,
@@ -919,24 +920,37 @@ def get_active_by_prd(
     prototype at all) still incurs this one extra attempt today — a
     deliberate, small, bounded cost accepted to close the race, not a
     regression (see the sizing rationale in the change that introduced it).
+
+    Shadow-candidate fix: this uses `find_prototypes_by_prd` (plural), NOT
+    `find_prototype_by_prd`. The single-row helper's `.limit(1)` fetches only
+    the newest matching row and, if THAT row turns out to be a 'failed' row
+    with no bundle (rejected below), never gets a chance to consider an
+    older-but-genuinely-active row underneath it — the query returns nothing
+    further to fall back to, so the route 404s even though a real active
+    prototype exists. Walking a bounded window of candidates newest-first and
+    picking the first one that passes the bundle check closes that gap.
     """
     _require_feature_enabled()
     workspace_id = company.company_id
     row = None
     for attempt in range(_ACTIVE_LOOKUP_RETRY_ATTEMPTS):
-        candidate = find_prototype_by_prd(
+        candidates = find_prototypes_by_prd(
             prd_id=prd_id, workspace_id=workspace_id,
             statuses=["ready", "generating", "failed"],
         )
-        # A 'failed' row only counts as active when it already has a bundle from
-        # an earlier successful stage — recovers visibility of a prototype whose
-        # LATEST iterate/manual-edit failed without destroying its working
-        # bundle (fail_prototype never touches bundle_url/current_checkpoint_id).
-        # A 'failed' row with no bundle_url never succeeded at all — treat
-        # exactly as "not found," unchanged from today.
-        if candidate is not None and candidate.get("status") == "failed" and not candidate.get("bundle_url"):
-            candidate = None
-        row = candidate
+        row = None
+        for candidate in candidates:
+            # A 'failed' row only counts as active when it already has a bundle
+            # from an earlier successful stage — recovers visibility of a
+            # prototype whose LATEST iterate/manual-edit failed without
+            # destroying its working bundle (fail_prototype never touches
+            # bundle_url/current_checkpoint_id). A 'failed' row with no
+            # bundle_url never succeeded at all — skip it and keep looking at
+            # older candidates, exactly as if it didn't match at all.
+            if candidate.get("status") == "failed" and not candidate.get("bundle_url"):
+                continue
+            row = candidate
+            break
         if row is not None:
             if attempt > 0:
                 logger.info(

@@ -24,6 +24,7 @@ import logging
 from typing import Iterator
 
 from app.document_sources import list_document_sources, list_source_files
+from app.ingest import is_unparsed_stub
 from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
@@ -37,7 +38,11 @@ _MAX_CHUNKS_PER_FILE = 25
 
 
 def _chunks(text: str) -> list[str]:
-    """Split on the chunk budget. Returns [] for whitespace-only text."""
+    """Split on the chunk budget. Returns [] for nothing worth extracting —
+    whitespace-only text, or the placeholder stub `app.ingest.convert` stores
+    for a file we could not read."""
+    if is_unparsed_stub(text):
+        return []
     body = (text or "").strip()
     if not body:
         return []
@@ -64,7 +69,9 @@ def pull(company_id: str) -> Iterator[RawRecord]:
             parts = _chunks(f.extracted_text)
             if not parts:
                 # Binary/unparseable upload: app.ingest.convert stored a stub,
-                # or extraction degraded to empty. Nothing to extract from.
+                # or extraction degraded to empty. Nothing to extract from —
+                # and crucially nothing is recorded, so if a parser for this
+                # file's type ships later, the next sync picks it up.
                 continue
             for i, chunk in enumerate(parts):
                 suffix = f" (part {i + 1}/{len(parts)})" if len(parts) > 1 else ""
