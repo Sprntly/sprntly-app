@@ -89,6 +89,81 @@ def test_modules_and_templates_loaded():
     assert "business-context-schema.yaml" in bc.templates
 
 
+# ---------- CIR v3 vendoring ----------
+
+def test_cir_v3_keeps_the_v2_module_sequence_on_disk():
+    """The v3 SKILL.md upgrade replaced the method text ONLY. The v2 modules
+    stay vendored because the weekly competitor deep-dive binds them BY FILENAME
+    (`app/research/competitor.py` CIR_DIAGNOSTIC_MODULES + CIR_SYNTHESIS_MODULE),
+    and v3 itself says stages E–G are "retained in full from v2". Deleting any
+    of these breaks the deep-dive at runtime, not at import."""
+    from app.research.competitor import (
+        CIR_DIAGNOSTIC_MODULES,
+        CIR_SYNTHESIS_MODULE,
+    )
+
+    cir = get_skill("competitive-intelligence-review")
+    for module in [*CIR_DIAGNOSTIC_MODULES, CIR_SYNTHESIS_MODULE]:
+        assert module in cir.modules, f"deep-dive binds {module!r} by filename"
+    # The two the deep-dive deliberately skips are still vendored (the skill
+    # self-scopes across all of 00..08 on the chat path).
+    assert "00-scope.md" in cir.modules
+    assert "01-us-first.md" in cir.modules
+
+
+def test_cir_v3_description_is_the_new_frontmatter():
+    """The router classifies against the frontmatter description, so the v3
+    text (two modes, derived set, entrant, never-fabricates) must be what the
+    loader parsed — not the v2 "McKinsey-grade" line."""
+    cir = get_skill("competitive-intelligence-review")
+    desc = cir.description
+    assert desc, "frontmatter description missing"
+    assert "McKinsey-grade" not in desc
+    for phrase in ("monthly Scan", "quarterly Review", "competitive intelligence",
+                   "where do we stand vs competitors", "Never fabricates"):
+        assert phrase in desc, f"v3 description is missing {phrase!r}"
+
+
+def test_cir_v3_references_are_loaded_for_the_method_prefix():
+    """`references/*` ride the gateway's cacheable METHOD prefix, so the state
+    contract and the follow-up guide are actually in-prompt at runtime."""
+    cir = get_skill("competitive-intelligence-review")
+    assert "state-spec.md" in cir.references
+    assert "query-guide.md" in cir.references
+    assert "ci-state.json" in cir.references["state-spec.md"]
+    assert "decisions" in cir.references["state-spec.md"]
+    assert "stored run" in cir.references["query-guide.md"]
+    # SKILL.md points at both, so a model following the method reads them.
+    assert "references/state-spec.md" in cir.method
+    assert "references/query-guide.md" in cir.method
+
+
+def test_cir_v3_ships_the_reference_example_in_tree():
+    """`examples/` is NOT injected into prompts, but it is the design anchor the
+    deterministic renderer is pinned to and it counts toward content_hash (same
+    as public-feedback-report). It must stay vendored, iframe-safe (no <script>)
+    and self-contained."""
+    example = (
+        SKILLS_ROOT / "competitive-intelligence-review"
+        / "examples" / "01-facebook-ads.html"
+    )
+    assert example.is_file()
+    html = example.read_text(encoding="utf-8")
+    assert html.lstrip().startswith("<!DOCTYPE html>")
+    # The chat renders reports in a script-less sandboxed iframe.
+    assert "<script" not in html.lower()
+    # The v3 sections the renderer mirrors are all present in the anchor.
+    for marker in ("Scale benchmark", "Feature benchmark", "Market position",
+                   "Sources", "radarwrap"):
+        assert marker in html, f"example lost the {marker!r} section"
+
+
+def test_cir_v3_ships_a_readme():
+    readme = SKILLS_ROOT / "competitive-intelligence-review" / "README.md"
+    assert readme.is_file()
+    assert "v3" in readme.read_text(encoding="utf-8")
+
+
 def test_references_and_assets_loaded():
     """The top-insights skill's `references/*` (schema, rubric, examples) and
     `assets/*` (the render template) are read into the SkillSpec so the gateway

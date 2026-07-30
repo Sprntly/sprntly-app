@@ -27,7 +27,7 @@ Category prefixes from upstream (e.g. `03-prioritization-and-planning/`) are
 | public-feedback-report | repo-only (public/external review & social mining) | examples/ |
 | interview-synthesis | 01-discovery-and-research | examples/ |
 | feedback-synthesis | 01-discovery-and-research | — |
-| competitive-intelligence-review | 02-strategy-and-positioning | modules/ (all), templates/ |
+| competitive-intelligence-review | 02-strategy-and-positioning | modules/ (v2 stages, still bound by name from `app/research/competitor.py`), templates/, references/, examples/ |
 | incident-runbook | 05-delivery-and-execution | — |
 | business-context | 02-strategy-and-positioning | templates/ (incl. business-context-schema.yaml) |
 | fact-check | 01-discovery-and-research | templates/ |

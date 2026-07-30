@@ -1,131 +1,287 @@
 ---
 name: competitive-intelligence-review
-description: A McKinsey-grade, decision-first competitive intelligence review for product teams — one skill that self-scopes, deciding internally which of its stages to run (scope, us-first, arena, 9-box, product/pricing, momentum, sentiment, financials, synthesis) based on the request and the competitors. Use when the user says "competitive intelligence", "deep competitive analysis", "market intelligence review", "full competitor study", "competitive landscape for strategy", "where are we vs competitors and what do we do", or wants the thorough version that pulls position, share, pricing, traffic, app ratings, sentiment, ship cadence, AI-search visibility, and (for public companies) filings into ranked product decisions. Written first-person for the company running it ("we/our"), as an internal review their own team built — and delivered as a mix of well-written prose and infographics (9-box, feature matrix, momentum/financial comparisons) for fast visual understanding. It self-scopes from a quick pulse to a full quarterly study, so it covers both fast teardowns and deep reviews.
+description: A decision-first competitive intelligence review a PM can hand to their VP without editing it. Runs in two modes — a monthly Scan that reports only what changed, and a quarterly Review that re-derives the whole picture. Reasons out the competitor set when none is supplied, logs every competitor launch with a classification, scans for new markets and technologies that could take the business rather than dent it, benchmarks sentiment per competitor, plots the deciding dimensions on a radar, and ends in a single ranked set of recommendations tied to named evidence. Use when the user says "competitive intelligence", "competitive analysis", "competitive review", "where do we stand vs competitors", "what are our competitors shipping", "monthly competitor report", or wants a recurring read on the landscape. Works for product, services, capital, and marketplace companies. Never fabricates a number, a feature, a price, or a quote.
 ---
 
-# Competitive Intelligence Review
+# Competitive Intelligence Review (v3)
 
 ## What it does
-Runs a thorough, decision-first competitive intelligence study for a product team — the kind a strategy partner would deliver. It starts with *your* position (not the competitors), maps the full arena including substitutes and future entrants, scores everyone on a McKinsey 9-box, tears down product and pricing by job-to-be-done, reads the momentum signals that reveal who is *actually* winning (traffic, app ratings, AI-search visibility, ship cadence), mines customer sentiment by theme, reads the money and strategy from public filings where available, and then **forces every finding into a ranked set of product decisions** tied to your strategy. It is explicitly not a data dump: a spreadsheet of competitor facts is worthless until synthesis turns it into a decision, and the whole skill is built around that last step.
 
-**This is one skill.** You invoke it once; it then **decides for itself which of its internal stages to run** based on what's being analyzed and what the request needs — it never asks you to call parts separately. (For example: it skips the financials stage for a private competitor, skips app-store data for a non-mobile product, and runs a light pass when you only want a quick pulse.) The stages live as files in `modules/` and are loaded by the skill only when it determines they're needed (progressive disclosure), so one call does the right amount of work.
+Produces the competitive review a product team actually needs: what changed, what it means relative to us, what could take the business, and what we should do about it — written so that the PM who generated it can forward it to their VP without rewriting a sentence.
 
-Internal stages (the skill selects which to run — see "How the skill self-scopes" below):
+It is not a data dump. A spreadsheet of competitor facts is worthless until synthesis turns it into a decision, and the whole skill is built around that last step.
 
-| # | Stage | The question it answers | File |
+**One call, self-scoped.** The caller invokes it once; the skill decides internally which stages to run and at what depth. It never asks the caller to pick modules.
+
+---
+
+## Voice — the standard this output is held to
+
+**Assume the reader is two levels up and was not in the research.** They have fifteen minutes, they will act on what they read, and they will be asked by their own leadership where a number came from. Everything below follows from that.
+
+**Write claims, not impressions.** "Reddit grew advertising revenue 74% year over year" is a claim. "Reddit is on a tear" is an impression. Impressions get cut.
+
+**Separate what is known from what is judged, visibly.** Sourced facts carry a confidence mark. Analytical reads are introduced as reads — *the pattern suggests*, *our interpretation is* — never smuggled in beside a filing figure in the same tone.
+
+**Calibrate severity honestly, in both directions.** Do not inflate a competitor's routine release into a threat to create urgency, and do not soften a real structural risk to avoid alarming the room. A reader who finds one overstated claim discounts the whole document — and a report that finds every threat already covered was written to reassure rather than to inform.
+
+**Describe gaps in our product factually and without blame.** "Advertisers report that generated variations altered logos" is reportable. "The creative team shipped this without guardrails" is not — it is an internal accusation the VP now has to manage. Name the gap, name the evidence, name the fix. Never name a team as the cause.
+
+**No snark about competitors and no cheerleading about us.** The reader may know these companies, may have worked at them, may be about to partner with one. Respect that. Competitors are described by what they did.
+
+**Say the difficult thing plainly, once.** If our position is weak on a dimension, state it in a sentence and move to the implication. Do not bury it, and do not dwell on it — repetition reads as editorialising rather than analysis.
+
+**Every acronym is expanded on first use, and internal shorthand is removed.** If a term is only meaningful to the team that generated the report, it does not survive the draft.
+
+**Recommendations are proposals with trade-offs, not demands.** Each names what to do, why now, how we would know it worked, and what to watch. A recommendation with no stated risk reads as advocacy.
+
+**Nothing about the mechanics of the report appears in the report.** No cadence explanation, no statement of who the audience is, no "this is a baseline run", no description of how the skill works. The document opens on the finding.
+
+---
+
+## Two modes
+
+| Mode | Cadence | Question | Stages |
 |---|---|---|---|
-| 0 | Scope & competitor set | Who actually shapes our buyer's decision? (pick 3–5, don't boil the ocean) | `modules/00-scope.md` |
-| 1 | Us first | What's our position, segments, share, where we win/lose, and our goal? | `modules/01-us-first.md` |
-| 2 | The arena | Direct rivals + substitutes + adjacent/future entrants (Porter's Five Forces) | `modules/02-arena.md` |
-| 3 | Position & share | 9-box: invest / maintain / harvest / divest per competitor & segment | `modules/03-position-share.md` |
-| 4 | Product & pricing | Feature teardown by job-to-be-done + pricing/packaging; where each wins | `modules/04-product-pricing.md` |
-| 5 | Momentum signals | Who's *actually* winning: traffic, app data, AI-search visibility, ship cadence | `modules/05-momentum-signals.md` |
-| 6 | Voice of customer | Review/social sentiment by theme, per competitor vs. us | `modules/06-third-party-feedback.md` |
-| 7 | Money & strategy | Public-company filings: growth, margins, R&D, M&A, broadening strategy | `modules/07-money-and-strategy.md` |
-| 4b | Head-to-head & feature gaps | How do we score vs. each rival by job? Which gaps are Build / Skip / Reframe, and why? | folded into `modules/04-product-pricing.md` + synthesis |
-| 8 | Synthesis → decisions | TLDR + ranked Build/Skip/Reframe + build queue; the "so what" → roadmap moves | `modules/08-synthesis-decisions.md` |
+| **Scan** | Monthly, or on demand | What changed, and what do we do? | 0, 1 (light), A, B, C, **D1**, D2, H |
+| **Review** | Quarterly | Where do we stand and where is this going? | All |
 
-A data-sourcing playbook (free/low-cost workarounds for the metrics that normally need paid APIs) is in `modules/data-sources.md`. The final artifact structure is `templates/cir-report-template.md`.
+**Scan is the default when a prior run exists on file.** Review is the default with no prior run, when the competitor set changes materially, or when the caller asks for the full study.
 
-## Voice & format
-- **First-person, insider voice.** Whoever runs this skill is analyzing the landscape *for their own company*, so write it that way: the company under review is **"we / our / us,"** and the report reads like the company's own team built it for an internal strategy discussion — not like an outside analyst describing a stranger. (In the worked example below, Sprntly is "we.")
-- **Prose + infographics, interleaved.** The deliverable is a mix of well-written documentation and visuals: render the 9-box, the job-to-be-done feature matrix, the momentum scorecard, the pricing comparison, and the financial/scale comparison as **infographics** (colored tables, quadrant plots, stat cards, simple bars) on a surface that supports them, with prose around each explaining the "so what." Lead with words, support with visuals — never a wall of tables, never a wall of text.
-- **One report, two layers — never drop the strategy.** The report always contains BOTH: **Part 1 — the build decision** (TLDR, head-to-head scorecard, feature-gap Build/Skip/Reframe, what's heating up, ranked build queue) AND **Part 2 — the strategic picture** (us, arena/lanes, 9-box position & share, product/pricing, momentum data, money/scale). Part 1 is what a PM acts on; Part 2 is the evidence base that proves the Part 1 calls are right. The PM build layer *augments* the strategic analysis — it never replaces it. A reader can stop after the TLDR, go one level deeper into Part 1, or read the full Part 2 evidence.
-- **TLDR first — always.** The report opens with a tight TLDR a busy PM reads in 30 seconds: the 2–3 things that changed / matter most, the top feature gaps, and the ranked recommendations (build / skip / reframe). Everything else is the evidence base for the TLDR.
-- **Built for a PM to know what to build.** This is not just strategy — it ends in *features and moves*. It must always deliver: (1) a **head-to-head scorecard** (how we do vs. each competitor, by the jobs that matter); (2) a **feature-gap matrix** with each gap classified **Build / Skip / Reframe** and *why it matters* (losing deals / user complaints / stalled evals vs. theoretical); (3) **what's heating up** — the trends, fast-growing features, and momentum signals that say where the puck is going; (4) a **ranked build queue** weighted by impact × our strength. A gap with no evidence it costs us is labeled theoretical and routed to Skip — naming what *not* to build is as valuable as what to build.
+Whichever mode runs, the reader should not be able to tell from the document's framing which one it was. The difference shows in what is present, not in language about cadence.
 
-## When to use / when NOT to use
-- **Use** for the thorough, periodic (e.g. quarterly) study that informs roadmap and strategy — when a PM needs a real pulse on the whole industry and a decision at the end.
-- **Do NOT use** for: market attractiveness/structure alone (`market-structure` — this skill *uses* it in module 2); your own positioning statement (`positioning` — this *feeds* it); a single decision between options (`decision-by-traffic-lights`). For a quick read, run this skill at its "quick pulse" depth rather than the full study.
+### State between runs
 
-## Inputs
-- **Required:** your product, and either the named competitors or "find them."
-- **A specific company to compare against:** if the user names one ("compare us to X"), X is always included as a first-class competitor and gets its own column in every matrix and the head-to-head scorecard — the skill still adds the other key rivals around it for context, but never drops the named one.
-- **Recurring run (this is built to run weekly / bi-weekly):** if a prior run is provided, the report leads with **what changed since last time** (new features shipped, pricing moves, traffic swings, new entrants) — a diff, not a re-derivation. If none, it's the baseline run and says so.
-- **Optional:** your strategy/market goal (strongly recommended — it's the lens module 8 judges everything against), target segment, your own metrics (share, traffic, ratings), win/loss notes, any data exports you have. *If a metric is missing and no source is available, the skill flags it as an open data-pull or labels an `[ASSUMPTION]` — it never fabricates a traffic number, share figure, or rating.*
+Every run reads a state file, diffs against it, and rewrites it. Without stored state, "what changed" is a memory exercise, and memory is where fabrication enters. `references/state-spec.md` holds the full contract — field discipline, staleness, tier travel, mode selection and decision carry-forward. Read it before writing state.
 
-## Method (methodology)
-Adopts the **McKinsey five-step spine** — diagnostic (current state) → benchmarking (vs competitors) → scenario modeling (where it's going) → prioritization (impact × feasibility) → implementation roadmap (sequenced, owned) — and maps the eight modules onto it: modules 1–7 are diagnostic + benchmarking, module 5's trend read is scenario modeling, and module 8 is prioritization + roadmap. Two named frameworks are baked in: **Porter's Five Forces** (module 2, for substitutes/entrants/power) and the **GE-McKinsey 9-box** (module 3, market attractiveness × competitive strength → invest/maintain/harvest/divest).
+```
+state/ci-state.json
+{
+  "run_id", "previous_run",
+  "competitors": { "<name>": { features[], pricing[], sentiment{}, hiring{},
+                               exec_commentary[], financials{}, geo{} } },
+  "our_state": { ... },
+  "decisions": [{ id, raised_in_run, recommendation, owner, status, outcome_note }]
+}
+```
 
-Run order:
-1. **Select stages (self-scope).** First decide which stages this particular review needs and at what depth, per "How the skill self-scopes" below — public vs. private competitors, mobile vs. not, quick pulse vs. full study, what data exists. Run only those; note what was skipped and why. The caller invokes the skill once and this routing happens inside it.
-2. **Scope (stage 0).** Pick the 3–5 competitors that actually shape buyer decisions; go deep on them, shallow on the rest. Resist the 40-points-×-N-competitors trap — that produces a month-stale data dump, not a decision.
-3. **Us before them (stage 1).** Establish our own position and, critically, our strategy/goal — every later finding is judged "so what *for us*."
-4. **Run the selected stages (2–7)** to the chosen depth, pulling data via `modules/data-sources.md`. **Tier every claim**: 🅗 hard (filings, app ratings, measured traffic), 🅢 soft (review themes, social sentiment), 🅘 inferred (strategy reads). Never blend tiers silently — a strategy partner labels confidence.
-5. **Synthesize (stage 8).** Turn the evidence into the "so what": the top 3–5 things to learn-from / close / exploit, each scored impact × feasibility and tied to our strategy, ending in concrete roadmap moves with owners. **This stage is the point; everything above feeds it.**
-6. **Set a refresh cadence.** CI decays fast — state when this is re-run and what change-alerts to watch, so it stays living, not a one-off.
-7. **Data-integrity self-audit (required).** Before delivering, scan every number, quote, and named fact; confirm each cites a source or is plainly described as unknown. Remove or rephrase anything untraceable. See "Data integrity" below — this is non-negotiable.
+Every field carries `observed_on` and a source. A field that could not be re-observed keeps its prior value and is marked stale with its age — never silently refreshed, never re-derived from memory. If no state file exists, populate it and omit every diff section rather than inventing a comparison.
 
-## Output spec
-A decision-first report (`templates/cir-report-template.md`), in this order: executive "so what" (the decisions, up front) → our position & goal → the arena (Five Forces) → 9-box position/share → product & pricing teardown → momentum signals + trend → third-party-feedback sentiment → money & strategy (public cos) → ranked decisions with owners & impact×feasibility → data appendix (sources + confidence tiers + open pulls) + refresh cadence. It is written **first-person (we/our)** as the company's own internal review, and is delivered as **interleaved prose + infographics**: the 9-box (quadrant plot), the JTBD feature matrix (colored grid), the momentum scorecard, the pricing comparison, and the competitor scale/financials (stat cards or bars) render as visuals on a surface that supports them, each wrapped in prose that states the implication.
+---
 
-## How the skill self-scopes (stage selection)
-One invocation. Before doing the work, the skill decides which stages to run and at what depth — the caller never picks. The rules:
+## Stage 0 — Scope and the competitor set
 
-- **Always run:** Stage 0 (scope), Stage 1 (us-first), Stage 8 (synthesis → decisions). These are the spine; without them it's a data dump.
-- **Depth dial — read the request:**
-  - *Quick pulse / "where do we stand"* → run 0, 1, a light 2 (arena), 4 (product/pricing), 8. Skip 3, and run 5–7 only if a specific signal is asked for — this is the fast-teardown depth.
-  - *Full / quarterly / "thorough" / "for strategy"* → run all stages.
-- **Conditional stages (include only if the condition holds):**
-  - **Stage 3 (9-box)** — include for portfolio/strategy/roadmap decisions; skip for a narrow single-competitor head-to-head.
-  - **Stage 5 (momentum)** — always include AI-search visibility + ship cadence; include the **app-data** sub-part only if the product is mobile; include traffic only if a source exists.
-  - **Stage 6 (third-party-feedback)** — include if the competitors have a meaningful review/social footprint; skip (and say so) for a brand-new competitor with no reviews yet.
-  - **Stage 7 (money & strategy)** — include only for **public or well-funded** competitors (filings/funding exist); for tiny private ones, skip the financials and use the lightweight proxy note instead.
-- **Data-driven skips:** if a stage's data can't be sourced (even via the free workarounds), the skill doesn't pad it — it records an *open data-pull* and moves on.
-- **State what it ran:** the report names which stages were run vs. skipped and why, so the scoping is transparent (e.g. "Stage 7 skipped — all competitors private").
+If the caller names competitors, use them, and add any obvious omission with a one-line reason. If they don't, **derive the set and show the reasoning.** Never ask, and never guess silently.
 
-## Data integrity — no fabricated data (hard guardrail)
-This is the skill's most important rule. Competitive analysis is exactly where invented-but-plausible numbers slip in (a traffic figure, a market share, a download count, a revenue line). **The skill never fabricates data. Not once, not "for illustration," not to fill a cell.** Enforced as follows:
+Derive from the company's own position: what job the customer is hiring them for, which budget line pays for it, and who else is in the consideration set at the moment of purchase. Build from four buckets:
 
-- **Every quantitative claim needs a real, named source + date.** Traffic, market share, downloads, ratings, revenue, growth %, margins, headcount, pricing — each must cite where it came from (e.g. "SEC 10-K, FY25"; "G2, pulled 2026-05-30"). A number with no source is forbidden.
-- **No invented specifics.** The skill does not guess a competitor's revenue, a traffic number, a download count, a rating, a price, a tier, a feature, or an exec quote. If it wasn't observed or sourced, it isn't stated as fact.
-- **Estimates are allowed only when grounded and labeled.** A directional range from a real basis (e.g. a free-tier estimate, or "≈, order-of-magnitude from employee count") is fine **if** tagged 🅢 soft with its basis. A precise-looking figure with no basis is not — "~2.3M monthly visits" pulled from nowhere is fabrication even if it "feels right."
-- **Unknown data is handled cleanly — never with placeholder clutter.** If a metric can't be sourced, the skill does ONE of two things: (a) **state it as unknown in plain prose** where the absence is itself informative (e.g. "Their traffic isn't publicly disclosed; as a stealth-stage company that's expected"), or (b) **omit the point entirely** where a blank line adds nothing. It never litters the report with bracketed `[DATA NEEDED]`-style tags, and it never fills the gap with a guess. If knowing the gap matters to a decision, note the missing item once in the closing data appendix as something worth pulling — in prose, not as inline placeholders.
-- **No fabricated quotes.** Filing/earnings-call language and customer reviews are paraphrased or quoted *only if real and cited*; the skill never manufactures a quote or attributes words to a person or company.
-- **Tier discipline.** 🅗 hard (observed/sourced) · 🅢 soft (grounded estimate/sentiment) · 🅘 inferred (analyst judgment). Tiers are never blended silently, and an inference is never promoted to a fact.
-- **If web/search/data tools aren't available in the run,** the skill says so plainly and limits itself to what it can source or reason about — it does not populate metrics from model memory (those are stale and unreliable) and does not present them as current.
-- **Final self-audit (required before delivery):** run a `fact-check` groundedness pass — scan every number, quote, and named fact and confirm each binds to a cited source snippet or is stated as unknown. Anything untraceable is removed or rephrased as unknown. The data appendix lists sources + dates, and (in prose) the few unknowns worth pulling later.
+| Bucket | Question | Count |
+|---|---|---|
+| **Direct** | Same job, same buyer, same budget line | 2–3 |
+| **Adjacent** | Different product, same budget | 1–2 |
+| **Substitute** | Solves the job without buying the category | 0–1 |
+| **Entrant** | Not a competitor yet; will be within 12 months | 1–2 |
 
-## Sprntly integration (optional)
-- **Inputs from Sprntly:** competitor mentions in lost deals, changelog/review ingestion, traffic/usage signals, and prior CIR runs from the knowledge graph (so trends are real deltas, not snapshots).
-- **Outputs to Sprntly:** the report as a living entity; white-space + "exploit" items become ranked opportunities; sentiment themes feed `positioning`; the decisions register to the outcome graph; the refresh cadence becomes a monitored schedule.
-- **Degrades to:** fully standalone — runs on web search + the data-sources workarounds, asking at most 1–2 scoping questions.
+**The entrant bucket is mandatory.** A set of only incumbents produces a report that confirms what the team already believes. Name the entrant even when it feels premature — being early on one is worth being wrong on three. If the caller supplied the set and none of their names is an entrant, say so once and add one.
 
-## Quality checklist (the bar)
-- [ ] **One call, self-scoped** — the skill selected which stages to run (and skipped the rest with a stated reason), rather than running everything blindly or asking the caller to pick.
-- [ ] **Us first** — our position and *strategy/goal* are established before any competitor, and every decision ties back to that goal.
-- [ ] Scope is disciplined — 3–5 decision-shaping competitors, not the whole field.
-- [ ] The arena includes **substitutes and future entrants**, not just direct rivals (Five Forces).
-- [ ] Position is a **9-box with a verb** (invest/maintain/harvest/divest), not just a quadrant.
-- [ ] Feature comparison is **by job-to-be-done**, not a feature checklist.
-- [ ] "Who's winning" uses **momentum signals** (traffic, app, AI-search, ship cadence), not vibes.
-- [ ] **No fabricated data** — every number, quote, price, and named fact cites a source + date, or is stated as unknown / omitted; nothing is invented "for illustration," no `[DATA NEEDED]`-style placeholder clutter, and the final self-audit was run.
-- [ ] Every claim carries a **confidence tier** (hard/soft/inferred); tiers are never blended silently.
-- [ ] It ends in **ranked decisions** (impact × feasibility, owners), and a **refresh cadence** is set.
+Print the derived set with a sentence each on why it is in, and note who was considered and excluded. Resist the forty-points-by-N-competitors trap: three to five deep beats twelve shallow.
 
-## Known gaps / limitations
-- The richest inputs (traffic, app downloads, share) come from paid tools; `modules/data-sources.md` gives free/low-cost workarounds, but those are *directional estimates* — labeled soft, never presented as precise.
-- Strategy and "where they win" reads are interpretive (inferred tier); they're hypotheses to validate (e.g. via `red-team-review`), not facts.
-- It structures and synthesizes intelligence; it can't manufacture data it wasn't given — missing metrics become open data-pulls, not guesses.
-- A full run is heavy; for speed, run the skill at its "quick pulse" depth, or only the modules the decision needs.
+### Company-type adaptation
 
-## Worked example (public company, two-layer format)
-**Input:** "Competitive intelligence review for Facebook / Meta."  *(Public company → financials from filings; no goal supplied, so the strategy layer is directional and says so.)*
-**Output (abridged — note it leads with the TLDR + build decision, then the strategic evidence base):**
+The stages hold; the evidence changes.
 
-**TLDR (read first):** Core ad engine firing (Q1 2026 rev $56.3B, +33% YoY, sourced to the release/10-Q) — but two signals matter more for *what to build*: TikTok's Jan-2026 move to US ownership removed its ban risk (Meta itself calls it "highly urgent"), and Family DAP fell to 3.56B, the first-ever sequential decline. **Recs:** BUILD generative-ads depth + agentic AI in WhatsApp + Reels discovery-AI; SKIP all-AI feeds (Vibes "AI slop" backlash); REFRAME Reality Labs from VR to AI wearables.
+| Type | Where the signal lives |
+|---|---|
+| Product / software | Changelogs, release notes, docs, app stores, pricing pages |
+| Services / agency | Case studies, named client wins and losses, practice launches, partner tiers, senior hires |
+| Capital / investment | Portfolio adds, fund closes, published theses, partner moves, LP disclosures |
+| Marketplace | Supply and demand-side terms, take-rate changes, category expansion, seller tooling |
 
-**Part 1 — the build decision:**
-- *Head-to-head scorecard:* win on ad-AI, messaging reach, AI wearables; lose on Gen-Z short-video discovery (TikTok) and the consumer assistant race (OpenAI).
-- *Feature-gap matrix:* TikTok discovery algorithm → BUILD (sourced: "still considered superior"); AI-assistant monetization → BUILD (~600M MAU, ~no revenue); all-AI feed → SKIP (sourced backlash); AR/AI glasses → BUILD (7M+ units 2025).
-- *What's heating up:* agentic AI (Meta positioning as the "OS for agents"), generative ads (millions of personalized variations), wearables over VR.
-- *Build queue (impact × strength):* 1) generative-ads/Advantage+, 2) agentic assistant in WhatsApp, 3) Reels discovery-AI, 4) AI wearables. Skip Vibes; reframe Reality Labs.
+Where a stage has no equivalent for the company type, say so in one line rather than forcing it.
 
-**Part 2 — the strategic evidence base (kept in full):**
-- *Us:* ~4B+ MAU; ads ~97–98% of revenue; projected to overtake Google on 2026 ad revenue; the DAP decline is the risk under the strong P&L.
-- *Arena:* three fronts — social/attention (TikTok, urgent), advertising (Google primary; Amazon/TikTok taking share), AI assistants (OpenAI/Google).
-- *9-box:* ads = invest; social engagement = invest-to-defend; assistant = invest; VR = harvest/reframe to wearables.
-- *Momentum / money:* impressions accelerating; capex guided up to $125–145B (CAPEX-fatigue is the named investor risk); Reality Labs −$4.0B in the quarter; $81B cash funds the bet.
-- *Integrity log:* financials hard-sourced to filings (🅗); scorecard / 9-box / build-ranking are judgment (🅘); per-competitor engagement-trend data flagged as the top open pull. No number invented; DAP decline's stated one-off cause (Iran/Russia) flagged rather than over-read.
+---
 
-*(The same structure runs for a private company — financials stage uses funding/scale proxies labeled 🅢 instead of filings, and the report still leads with the TLDR + build decision.)*
+## Stage 1 — Us first
+
+Establish our position, our segments, where we win and lose, and — critically — **our strategy or goal**, because every later finding is judged "so what *for us*." Without a stated goal the synthesis is directional and the report says so.
+
+---
+
+## Stage A — Launch log (per competitor, mandatory)
+
+For every competitor, a dated list of what shipped in the window. This is the section readers open first. It is never folded into a timeline.
+
+Each entry: **date · what it is, in one sentence · classification · source**.
+
+| Class | Meaning |
+|---|---|
+| `net-new` | Capability that did not exist in the category |
+| `parity` | Closed a gap with us or another rival |
+| `deprecation` | Removed or sunset — as informative as a launch, and almost never tracked |
+| `beta` | Announced, not generally available |
+| `market` | Same product, new geography or segment |
+
+Then one line per competitor on **what the pattern says** — three parity launches means they are closing a gap; three net-new means they are opening one. That sentence is what turns a log into intelligence.
+
+**If a competitor shipped nothing, say so with the window checked.** Silence from a fast-moving rival is a finding.
+
+---
+
+## Stage B — Market and technology threat scan
+
+Answers the question the reader actually has: *is anything happening that takes our business away, and are we defending it?*
+
+**1. New markets.** Has a competitor entered a geography, segment or vertical we are not in? Distinguish announced from live. Track the sequence — the order in which someone expands says which customer bases they think are worth the cost.
+
+**2. New technology.** Is a capability emerging that changes *how the job gets done* rather than how well? The test: does it move the customer's decision to a surface we do not own? Discovery moving upstream, a new interface layer, a protocol that disintermediates. These rarely appear as a competitor's feature launch, which is why a launch log alone misses them.
+
+**3. Structural threats.** Anything that could remove the business rather than dent it: platform-level regulation, a protocol that turns us into an API, a channel shift that bypasses our surface, an identity or data change that breaks targeting.
+
+Each threat carries three labels, all stated:
+
+| Axis | Values |
+|---|---|
+| **Severity** | Dents us · Reshapes us · Removes us |
+| **Timing** | Now · This year · Watch |
+| **Our defence** | Named · In flight · **None** |
+
+**"None" is written when it is true.** It is the most useful word in this stage.
+
+---
+
+## Stage C — Sentiment, per competitor
+
+Same axes for every competitor, including us. Pull from app stores, review platforms and public forums.
+
+Report where sourced: rating, review volume, direction versus prior run, and themes with representative **verbatim** quotes. Quotes are verbatim or they are paraphrased findings — never invented, never assembled from remembered substance. Where a competitor has no accessible corpus, say so rather than filling the row.
+
+Close with the column that makes this section worth reading: **for each complaint theme about us, which competitor is actively selling against it.** A theme that maps to a rival's marketing line is a roadmap item. One that maps to nobody is avoidable loss. Both are useful; they lead to different decisions.
+
+---
+
+## Stage D1 — Benchmarks (mandatory, all modes)
+
+Three benchmarks, always present, always in this order. They answer *where does everyone sit*, which is a different question from *what changed*.
+
+**Scale benchmark.** Every competitor's most recent reported revenue and growth, their differentiator in one phrase, and what they take from us. Where a competitor is private or does not disclose, say so; where published estimates diverge, report the range rather than picking a figure.
+
+**Market position benchmark.** A two-axis map — typically reach against differentiation of the buying experience, though the axes are chosen for the category. Every competitor placed, us included and visibly marked. Placement is judgment and is labelled as such. Follow it with the read: which square we occupy, who sits beside us, and whether our position rests on something copyable.
+
+**Feature benchmark.** Capability by capability, every competitor as a column, with a status on each row: `table stakes` (everyone has it), `contested` (some do), `X only` (one company holds it), or `their gap` (one company is behind). This is the section that tells a reader which specific features are commodity and which belong to one company — and rows marked *X only* should reappear in the recommendations or be explicitly dismissed.
+
+Close with the count: how many capabilities are table stakes, how many were differentiators a year ago, and which rows we hold alone.
+
+## Stage D2 — Radar on the deciding dimensions
+
+Choose six to eight dimensions that decide the category — not a feature list. Score every competitor 0–5. State plainly that scoring is judgment while the facts underneath are sourced.
+
+**Run it twice: once against the large rivals, once against the specialists.** Small competitors are usually sharpest on one or two dimensions, and averaging them into a six-way chart hides exactly the shape worth seeing.
+
+Follow each chart with the read: where shapes overlap is commodity; where a rival extends past us is their sales pitch; where we extend past everyone is what we should be selling.
+
+---
+
+## Stages E–G — The strategic picture (Review mode)
+
+Retained in full from v2, run when the mode calls for them:
+
+| Stage | Question |
+|---|---|
+| **The arena** | Direct rivals, substitutes, adjacent and future entrants (Porter's Five Forces) |
+| **Position and share** | GE-McKinsey 9-box with a verb — invest / maintain / harvest / divest, per competitor and segment |
+| **Product and pricing** | Teardown by job-to-be-done; pricing and packaging tracked as dated history, not a snapshot. **"No change" is reported as a finding**, with the window checked — a silent section reads as an unchecked one |
+| **Momentum** | Ship cadence always; traffic, app data and AI-search visibility where a source exists |
+| **Money and strategy** | For public companies: segment growth *and decline*, guidance versus actual, capex and R&D allocation, risk-factor changes, M&A. Read the transcript as text — what management leads with, what they avoid in Q&A, tone shift versus prior quarter |
+| **Organisational signals** | Hiring read through **STAR**: **S**cale (volume indicates investment level), **T**iming (clustering reveals urgency), **A**lignment (postings that do not match announced strategy reveal unannounced plans — the highest-value signal here), **R**ecurrence (net-new versus backfill). Plus notable hires and departures by specialty, and executive commentary with venue, date and source |
+
+---
+
+## Stage H — Consolidated recommendations
+
+One section, at the end, tying every stage together. Not per-section recommendations collected — a single ranked set where each item names the findings that produced it.
+
+Each recommendation carries:
+
+- **From** — the stages and specific findings behind it
+- **Do** — concrete enough to brief a PM or open a PRD
+- **Why now** — what changed that makes this the moment
+- **Measure** — how we would know it worked
+- **Watch** — the risk or trade-off
+
+Ranked by leverage, not effort. Three to five. A finding that produced no recommendation needs no padding — but **a threat rated *removes us* with defence *none* must produce one.**
+
+Carry prior recommendations forward with status (`open`, `in progress`, `done`, `dropped`) and what happened. A dropped item records why. This is what turns a report into a program.
+
+---
+
+## Data integrity — the hard guardrail
+
+Competitive analysis is exactly where invented-but-plausible numbers slip in. **The skill never fabricates. Not once, not "for illustration", not to fill a cell.**
+
+- **Every quantitative claim needs a real, named source and date.** Traffic, share, downloads, ratings, revenue, growth, margins, headcount, pricing.
+- **No invented specifics** — not a revenue figure, a traffic number, a rating, a price, a tier, a feature, or an executive quote. **Feature claims carry the same risk as numbers**: AI-drafted competitive content is documented to invent competitor features that do not exist. A feature is reported only when observed on the competitor's own surface — product page, changelog, docs, release notes, or a dated announcement.
+- **Estimates are allowed only when grounded and labelled**, tagged soft with their basis. A precise-looking figure with no basis is fabrication even if it feels right.
+- **Where sources disagree, report the range and say so.** A single figure quoted internally from a wide spread will be wrong.
+- **Unknowns are handled cleanly** — stated as unknown in prose where the absence is informative, or omitted where a blank adds nothing. Never placeholder clutter, never a guess. Items worth pulling later go in the sources block, in prose.
+- **Tier discipline.** 🅗 hard (observed, sourced) · 🅢 soft (grounded estimate) · 🅘 inferred (analytical judgment) · 🅥 vendor-reported (the company's own claim about itself). Tiers are never blended silently, and an inference is never promoted to a fact. **Vendor-reported is a separate axis from confidence** — it measures incentive, not certainty, and a competitor's self-reported performance figure is not an independent measurement.
+- **Our own figures need a marked source too.** Run first-person without internal data access, the skill will source *our* numbers from trade press. That is acceptable and must be marked — a report that says "we" while citing a third party about us is a credibility risk the reader cannot see.
+- **If search or data tools are unavailable**, say so plainly and limit the run to what can be sourced. Never populate metrics from model memory.
+- **Final self-audit, required before delivery.** Scan every number, quote and named fact; confirm each binds to a cited source or is stated as unknown. Remove or rephrase anything untraceable.
+
+---
+
+## Output
+
+A single self-contained HTML document. Order:
+
+1. **Opening** — the two or three findings that matter, in prose. No metadata banner, no audience label, no cadence note.
+2. **Radar** — where we win and lose, twice.
+3. **Scale benchmark** — revenue, growth, differentiator, what they take from us.
+4. **Market position benchmark** — the two-axis map, us marked.
+5. **Feature benchmark** — capability by capability, with table-stakes status.
+6. **Launch log** — per competitor, classified, with the pattern read.
+7. **Threat scan** — severity, timing, defence.
+8. **Sentiment** — theirs and ours, with the who-sells-against-it column.
+9. *(Review mode)* Arena · 9-box · product and pricing · momentum · money · organisational signals.
+10. **Recommendations** — consolidated and ranked.
+11. **Sources** — grouped by competitor in a designed block, each with what it supports and its date.
+12. **Thin meta line** — window, derived set, confidence key, and the note on our own figures.
+
+**Sections are additive, never substitutive.** A benchmark, matrix or map specified here is not dropped because a newer visual covers similar ground. The radar summarises eight aggregate dimensions; it does **not** replace the feature benchmark, which works at the level of individual capabilities, or the market position map, which places competitors rather than scoring them. If a section feels redundant with another, both stay and the prose around them is tightened instead. Removing an established section is a spec change, not an editorial one.
+
+**Presentation:** no format runs more than one screen. Rotate prose, table, radar, timeline, stat cards, quote, card. Confidence marks sit inline as small chips, never as a caveat paragraph. A reader who scrolls past four consecutive tables has stopped reading.
+
+---
+
+## When NOT to use
+
+Market attractiveness or structure alone → `market-structure` (this skill uses it). Our own positioning statement → `positioning` (this feeds it). A single decision between options → `decision-by-traffic-lights`. A sales-ready card against one named rival → `sales-battlecard`. For a fast read, run this skill in Scan mode rather than reaching for another skill.
+
+## Follow-ups after delivery
+
+A question that filters or interrogates a review already delivered ("what did Google ship", "which threats have no defence", "did their pricing change", "status of last quarter's recommendations") is answered from the stored run, not by re-running the study. `references/query-guide.md` governs those answers. A report-shaped ask is never a follow-up — it means a fresh run.
+
+---
+
+## Quality checklist
+
+- [ ] Output is VP-shareable as written — claims not impressions, judgment labelled as judgment, no internal blame, no snark, severity calibrated in both directions, no report mechanics on the page.
+- [ ] Competitor set reasoned and printed, including a named entrant.
+- [ ] Launch log present for every competitor, dated, classified, with a pattern line — and silence reported where a competitor shipped nothing.
+- [ ] Threat scan rates severity, timing and defence; "None" written where true; a *removes us / none* threat produced a recommendation.
+- [ ] Sentiment covers competitors and us on the same axes, with the who-sells-against-it column.
+- [ ] All three benchmarks present — scale, market position, feature — with the feature benchmark carrying a table-stakes status per row.
+- [ ] Radar run twice — scale players and specialists — with the read stated. The radar did not replace a benchmark.
+- [ ] Recommendations consolidated into one ranked set, each naming its evidence, with measure and watch.
+- [ ] Prior recommendations carried forward with status.
+- [ ] No fabricated number, price, feature, or quote; every figure sourced or stated unknown; ranges reported where sources disagree; our own figures marked.
+- [ ] Sources presented by competitor with dates; open pulls named in prose.
+
+---
+
+## Known gaps
+
+- The richest signals — traffic, share of search, app downloads, AI-search visibility — come from paid tools. Free workarounds are directional and are labelled soft, never presented as precise.
+- Strategy reads are interpretive by nature. They are hypotheses to validate, not facts.
+- The skill structures and synthesises; it cannot manufacture data it was not given. Missing metrics become open pulls, not guesses.
+- A Review-mode run is heavy. For speed, use Scan.
