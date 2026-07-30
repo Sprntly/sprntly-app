@@ -23,6 +23,12 @@ function flattenText(node: ReactNode): string {
   return ""
 }
 
+/** iframe title per skill that answers with a self-contained HTML document. */
+const REPORT_TITLES: Record<string, string> = {
+  "public-feedback-report": "Public Feedback report",
+  "ds-agent": "Data analysis report",
+}
+
 const askMarkdownComponents: Components = {
   // Fenced ```chart blocks render as inline SVG infographics. Other fenced
   // blocks fall through to the default <code><pre> rendering.
@@ -71,7 +77,7 @@ export function AskReplyBody({
   // stream and the citations chrome below it.
   if (looksLikeHtmlBrief(reply.answer)) {
     const reportTitle =
-      reply._skill === "public-feedback-report" ? "Public Feedback report" : "Voice of Customer report"
+      REPORT_TITLES[reply._skill ?? ""] ?? "Voice of Customer report"
     const report = <HtmlReportView html={reply.answer} title={reportTitle} />
     return animateIn ? (
       <div className="ask-reply-body ask-reply-body--enter">{report}</div>

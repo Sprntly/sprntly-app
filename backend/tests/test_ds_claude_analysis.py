@@ -15,6 +15,7 @@ accumulation + fail-closed model override (11).
 from __future__ import annotations
 
 import base64
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -401,19 +402,21 @@ def test_upload_failure_for_every_file_raises(workspace, logged, monkeypatch):
 # ── 6 & 10. caps ─────────────────────────────────────────────────────────────
 
 def test_pause_turn_resumes_are_capped_at_five(workspace, logged, monkeypatch):
+    """`_MAX_PAUSE_RESUMES` means 5 RESUMES — 6 model calls — not 5 calls."""
     _csv(workspace)
     fake = _client(
         monkeypatch,
         *[
             _message([_text(f"step {i}")], stop_reason="pause_turn")
-            for i in range(ca._MAX_PAUSE_RESUMES)
+            for i in range(ca._MAX_PAUSE_RESUMES + 1)
         ],
     )
 
     out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
 
-    assert fake.turns == ca._MAX_PAUSE_RESUMES == 5
-    assert "step 0" in out["answer"] and "step 4" in out["answer"]
+    assert fake.turns == ca._MAX_PAUSE_RESUMES + 1 == 6
+    assert logged[0]["factors"]["pause_resumes"] == ca._MAX_PAUSE_RESUMES == 5
+    assert "step 0" in out["answer"] and "step 5" in out["answer"]
     assert "reached my limit" in out["answer"]
     assert logged[0]["factors"]["stopped_reason"] == "pause_cap"
 
@@ -543,6 +546,178 @@ def test_cleanup_failure_is_swallowed(workspace, logged, monkeypatch):
     out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
 
     assert "findings" in out["answer"], "a failed delete must not fail the analysis"
+
+
+# ── history safety: a chart-bearing report must not poison the thread ────────
+# The answer is persisted verbatim as a conversation turn (web chatPersistence)
+# and replayed into EVERY later prompt in that thread — routes/ask._load_history
+# caps nothing, and qa_agent._render_history folds it into both the router and
+# the answer call. Uncapped base64 charts there are a non-retryable 400 on every
+# subsequent ask, so both ends are pinned: the embed budget and the fold clamp.
+
+def _chart_report(
+    workspace, monkeypatch, logged, *, n_charts: int = 3, download_bytes: bytes = PNG
+) -> str:
+    _csv(workspace)
+    blocks: list = [_text("## Findings\nCharts follow.")]
+    for i in range(n_charts):
+        blocks.append(_exec_result(file_ids=(f"file_chart_{i}",)))
+    blocks.append(_text("**TL;DR** all good."))
+    _client(monkeypatch, _message(blocks), download_bytes=download_bytes)
+    return ca.answer(enterprise_id=COMPANY, question="analyze my data")["answer"]
+
+
+def test_embedded_charts_stay_within_the_history_safe_budget(workspace, logged, monkeypatch):
+    """Three individually-legal 40KB charts would be ~160KB of base64; the TOTAL
+    budget is what stops the report from becoming a thread-poisoning turn."""
+    answer = _chart_report(
+        workspace, monkeypatch, logged, download_bytes=PNG + b"\x00" * 40_000
+    )
+
+    embedded = re.findall(r"base64,([A-Za-z0-9+/=]+)", answer)
+    b64_bytes = sum(len(m) for m in embedded)
+    assert embedded, "in-budget charts must still be embedded"
+    assert b64_bytes <= ca._MAX_TOTAL_CHART_B64_BYTES, (
+        f"embedded charts total {b64_bytes} bytes — a report this size is replayed "
+        "into every later prompt in the thread"
+    )
+    assert answer.count("<figure>") < 3, "the total budget must have stopped one"
+    assert "TL;DR" in answer, "the narrative is never dropped for budget"
+
+
+def test_chart_count_is_capped(workspace, logged, monkeypatch):
+    answer = _chart_report(workspace, monkeypatch, logged, n_charts=8)
+    assert answer.count("<figure>") == ca._MAX_CHARTS == 3
+
+
+def test_oversized_unshrinkable_chart_is_dropped(workspace, logged, monkeypatch):
+    """Padding bytes aren't a decodable image, so recompression can't help — the
+    chart is dropped rather than embedded over budget."""
+    _csv(workspace)
+    _client(
+        monkeypatch,
+        _message([_exec_result(file_ids=("file_chart_1",)), _text("findings")]),
+        download_bytes=PNG + b"\x00" * 200_000,
+    )
+
+    out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
+
+    assert "findings" in out["answer"]
+    assert "base64," not in out["answer"]
+
+
+def _oversized_png(seed: int = 7) -> bytes:
+    """A decodable PNG over the per-chart budget: 4-colour blocky texture.
+
+    Deliberately noisy — re-encoding it can INFLATE it, which is exactly the case
+    `_shrink_png` has to not make worse.
+    """
+    import io
+    import random
+
+    from PIL import Image
+
+    rng = random.Random(seed)
+    palette = [(255, 255, 255), (31, 111, 82), (187, 70, 60), (64, 64, 64)]
+    img = Image.new("RGB", (1600, 900), "white")
+    px = img.load()
+    for by in range(0, 900, 4):
+        for bx in range(0, 1600, 4):
+            colour = palette[rng.randrange(len(palette))]
+            for y in range(by, min(by + 4, 900)):
+                for x in range(bx, min(bx + 4, 1600)):
+                    px[x, y] = colour
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def test_shrink_png_never_inflates_a_chart(monkeypatch):
+    """Recompression must never hand back MORE bytes than it was given — a resize
+    interpolates new colours and JPEG loses to PNG on high-frequency content, so
+    the naive "PNG then JPEG" ladder can grow the file.
+
+    Pillow ships in the deployed image but is not a declared requirement, so this
+    skips where it is missing (the caller then simply drops the chart).
+    """
+    pytest.importorskip("PIL.Image", reason="Pillow not installed")
+    raw = _oversized_png()
+    assert len(raw) > ca._MAX_CHART_BYTES, "fixture must be over budget"
+
+    out, media_type = ca._shrink_png(raw)
+
+    assert len(out) <= len(raw)
+    assert media_type in ("image/png", "image/jpeg")
+
+
+def test_shrink_png_without_pillow_leaves_the_chart_alone(monkeypatch):
+    """No Pillow → return the input untouched so the caller drops it, rather than
+    raising into the analysis."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _no_pil(name, *a, **kw):
+        if name.startswith("PIL"):
+            raise ImportError("no Pillow here")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", _no_pil)
+    raw = PNG + b"\x00" * 100_000
+
+    assert ca._shrink_png(raw) == (raw, "image/png")
+
+
+def test_followup_ask_folds_a_chart_report_into_a_small_history(
+    workspace, logged, monkeypatch
+):
+    """The whole point: after a chart-bearing report, the NEXT ask's prompt must
+    not carry the images back to the model."""
+    report_html = _chart_report(workspace, monkeypatch, logged)
+    assert "data:image" in report_html, "fixture must actually contain a chart"
+
+    history = [
+        {"role": "user", "content": "analyze my data"},
+        {"role": "assistant", "content": report_html},
+    ]
+
+    # (a) the DS path's own history rendering
+    ds_rendered = ca._render_history(history)
+    assert "data:image" not in ds_rendered and "base64," not in ds_rendered
+    assert len(ds_rendered) < 12_000
+
+    # (b) the generic qa_agent fold — the router + every answer call
+    import app.qa_agent as qa
+
+    qa_rendered = qa._render_history(history)
+    assert "data:image" not in qa_rendered and "base64," not in qa_rendered
+    assert len(qa_rendered) < 12_000
+    # the narrative survives the clamp, so follow-ups still have context
+    assert "Findings" in qa_rendered
+
+    # (c) end to end: the follow-up's user turn is small and image-free
+    _csv(workspace)
+    fake = _client(monkeypatch, _message([_text("by plan: pro leads.")]))
+    ca.answer(enterprise_id=COMPANY, question="and by plan?", history=history)
+    prompt = fake.stream_kwargs[0]["messages"][0]["content"][0]["text"]
+    assert "base64," not in prompt
+    assert len(prompt) < 12_000, f"follow-up prompt is {len(prompt)} chars"
+
+
+# ── truncation is never rendered as a finished report ────────────────────────
+
+def test_max_tokens_stop_is_flagged_in_the_report(workspace, logged, monkeypatch):
+    _csv(workspace)
+    _client(
+        monkeypatch,
+        _message([_text("## Finding one\nRetention is 41% for pro and")],
+                 stop_reason="max_tokens"),
+    )
+
+    out = ca.answer(enterprise_id=COMPANY, question="analyze my data")
+
+    assert "cut off" in out["answer"], "a truncated report must say so"
+    assert logged[0]["factors"]["stopped_reason"] == "max_tokens"
 
 
 # ── 9. routing negatives stay negative ───────────────────────────────────────

@@ -30,6 +30,7 @@ from typing import Callable, Optional
 from app.ask_runner import _ASK_RESPONSE_SCHEMA, _retrieve_kg_bundle, compose_ask_answer
 from app.graph.gateway import llm_call
 from app.llm import run_tool_loop
+from app.prompt_history import clamp_turn_text
 from app.prompts import (
     ASK_SYSTEM,
     ASK_SYSTEM_KG_ADDENDUM,
@@ -164,11 +165,21 @@ def _router_menu() -> str:
 
 
 def _render_history(history: Optional[list[dict]]) -> str:
-    """Render the last few turns as plain text for prompt context."""
+    """Render the last few turns as plain text for prompt context.
+
+    Each turn is clamped (`app.prompt_history`) before it is folded in: an HTML
+    report answer — VoC, public-feedback, DS analysis — is persisted verbatim as
+    a conversation turn, and one carrying base64 charts is megabytes of `data:`
+    URI. Replaying that into the router and answer calls would 400 every later
+    ask in the thread, non-retryably. The turn count cap alone doesn't bound
+    bytes, so the per-turn clamp is what makes this safe."""
     if not history:
         return ""
     recent = history[-_HISTORY_TURNS:]
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}" for t in recent]
+    rows = [
+        f"{t.get('role', 'user').capitalize()}: {clamp_turn_text(t.get('content', ''))}"
+        for t in recent
+    ]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 
 

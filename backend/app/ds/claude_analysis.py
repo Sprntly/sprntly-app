@@ -25,22 +25,32 @@ service that already does exactly this):
     prescribes. We deliberately do NOT reuse `app.llm.run_tool_loop`: that is
     shaped for CLIENT-side tools (dispatch + tool_result), which is a different
     protocol from the pause_turn/container one server tools use.
-  - Tenancy: a fresh container per ask, bound to a `(enterprise_id, run_id)`
-    scope key (`ContainerScope`) — a container id captured for one ask can never
-    be replayed into another ask or another tenant, by construction. The
-    container itself is Anthropic-managed, isolated, and has no network egress.
+  - Tenancy: a fresh container per ask. The id lives in a `ContainerScope` local
+    to the run, keyed by `(enterprise_id, run_id)`, and nothing persists it — so
+    there is no store another ask or tenant could read it from, and the key check
+    is a guard for the day v2 threads a scope across turns. The container itself
+    is Anthropic-managed, isolated, and has no network egress.
   - Rendering: a deterministic HTML report (narrative + the charts Claude saved,
-    embedded as base64 PNGs) into `payload["answer"]`, riding the existing
+    embedded as base64) into `payload["answer"]`, riding the existing
     sandboxed-iframe path the VoC/public-feedback reports already use. Every
     model-supplied string is HTML-escaped here — the model never writes markup.
+    The embedded charts are held to a small byte budget on purpose: this answer is
+    persisted as a conversation turn and replayed into every later prompt in the
+    thread, so a fat report would 400 the rest of the conversation. The other half
+    of that fix is the per-turn clamp in `app.prompt_history`, applied where
+    history is folded in.
   - Cleanup: best-effort `files.delete` of every uploaded CSV and every chart we
     downloaded. See the data-handling note in the PR: until deletion lands the
-    raw CSVs are resident in the Files API.
+    raw CSVs are resident in the Files API, and a backend restart mid-run leaks
+    them (there is no reaper).
 
-Guardrails, all of them cheap and none of them optional: a 12-model-turn cap, a
-5-pause-resume cap, a ~5-minute wall-clock budget after which we stop and render
-what we have, and an `is_cancelled()` poll before every model call so a user Stop
-lands before the next (expensive) turn rather than after it.
+Guardrails, all of them cheap and none of them optional: a 5-pause-resume cap
+(the operative ceiling — `pause_turn` is the only continuation, so at most 6 model
+calls), a 12-turn structural backstop, a ~5-minute wall-clock budget after which
+we stop and render what we have, a VISIBLE note when a turn was cut short by
+`max_tokens` (a silently-truncated report is the one failure a reader can't see),
+and an `is_cancelled()` poll before every model call so a user Stop lands before
+the next (expensive) turn rather than after it.
 """
 from __future__ import annotations
 
@@ -56,6 +66,8 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+from app.prompt_history import clamp_turn_text
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +93,13 @@ _CODE_EXECUTION_TOOL = {"type": "code_execution_20260120", "name": "code_executi
 _FILES_BETA = "files-api-2025-04-14"
 
 _MAX_TOKENS_PER_TURN = 16000
-# Model turns (one streamed messages.create each). The pause-resume cap below is
-# stricter in practice; this is the belt for a model that keeps ending its turn
-# without finishing.
+# Two ceilings, and it is worth being precise about which one actually bites.
+# `pause_turn` is the ONLY way this conversation continues (server tools finish
+# their work inside one messages.create), so turns == pause_resumes + 1 and the
+# resume cap is the operative limit: at most 5 resumes, i.e. 6 model calls.
+# `_MAX_TURNS` is a structural backstop — it bounds total model calls should a
+# future continuation reason (a new stop_reason, a client-tool hop) be added, and
+# it is what the runaway-loop test asserts against with the resume cap lifted.
 _MAX_TURNS = 12
 _MAX_PAUSE_RESUMES = 5
 # Wall clock for the whole analysis. The ask-job poll surface tolerates minutes
@@ -91,10 +107,19 @@ _MAX_PAUSE_RESUMES = 5
 # LLM concurrency slot forever.
 _WALL_CLOCK_BUDGET_S = 300.0
 
-# Chart embedding caps — the report is inlined into a chat payload, so a runaway
-# figure count or a 40 MB PNG must not blow up the response.
-_MAX_CHARTS = 8
-_MAX_CHART_BYTES = 2 * 1024 * 1024
+# Chart embedding budget. The binding constraint is NOT the response size — it is
+# that this answer is persisted verbatim as a conversation turn and replayed into
+# every later prompt in the thread (see app.prompt_history). Even with the clamp
+# there, keeping the embedded charts small is the other half of the fix: the whole
+# report stays a normal-sized chat message. ~100 KB of base64 total is roughly a
+# 25k-token worst case if a clamp were ever bypassed, versus ~400k for 1.5 MB.
+_MAX_CHARTS = 3
+# Per chart, AFTER the optional recompression below (base64 inflates by 4/3).
+_MAX_CHART_BYTES = 48_000
+_MAX_TOTAL_CHART_B64_BYTES = 100_000
+# Recompression targets, applied only when a PNG lands over budget.
+_CHART_MAX_WIDTH_PX = 720
+_CHART_JPEG_QUALITY = 72
 
 _HISTORY_TURNS = 6
 
@@ -173,12 +198,16 @@ back-and-forth. Cover:
      improving, degrading?
   7. **Weirdness.** Outliers, threshold effects, unexpected interactions.
 
-CHARTS. Save a chart whenever it's the clearer way to convey a finding. Use \
-`matplotlib` or `seaborn`. ALWAYS:
+CHARTS. Save a chart when it is the clearer way to convey a finding — at most \
+THREE for the whole reply, for the findings that most need one. Use `matplotlib` \
+or `seaborn`. ALWAYS:
   - Save **PNG, directly to `$OUTPUT_DIR`**, e.g. \
     `plt.savefig(os.path.join(os.environ['OUTPUT_DIR'], 'chartname.png'), \
-    dpi=120, bbox_inches='tight')`, then `plt.close()`. Only files written to \
+    dpi=80, bbox_inches='tight')`, then `plt.close()`. Only files written to \
     `$OUTPUT_DIR` reach the reader.
+  - Keep them SMALL: `figsize=(6, 3.5)` and `dpi=80` or lower. The charts are \
+    embedded directly into the reply, so an oversized figure gets dropped rather \
+    than shown.
   - Give the chart a `plt.title(...)` that IS the finding in plain English \
     ("Users with a profile picture retain 2.3x longer"), not a column name.
   - One insight per chart. No multi-panel figures unless genuinely necessary.
@@ -246,6 +275,12 @@ _TIMEOUT_NOTE = (
     "deeper on it."
 )
 
+_TRUNCATED_NOTE = (
+    "This report is cut off — the analysis ran past the length I can return in "
+    "one go, so the closing summary is missing. Ask me a narrower question (or "
+    "about one file at a time) for a complete answer."
+)
+
 
 # ── model selection ──────────────────────────────────────────────────────────
 
@@ -288,9 +323,12 @@ def container_scope_key(enterprise_id: str, run_id: str) -> str:
 class ContainerScope:
     """Holds the Anthropic container id for ONE ask, keyed by its scope.
 
-    `resume_kwargs` only hands the container back when the caller presents the
-    same key it was captured under, so a cross-ask or cross-tenant replay is
-    impossible by construction rather than by convention.
+    What actually prevents cross-tenant reuse in v1 is lifetime: the scope is a
+    local in `_run`, so it is created and discarded within a single ask and there
+    is no store for another ask to read from. The key check in `resume_kwargs` is
+    a guard on top of that — today its only call site passes this scope's own key,
+    so it is a tripwire for a future caller that threads a scope through (v2's
+    per-thread container persistence), not a proof on its own.
     """
 
     key: str
@@ -478,14 +516,16 @@ def _upload_staged(client: Any, workdir: Path, staged: list[str]) -> list[str]:
     return file_ids
 
 
-def _download_charts(client: Any, file_ids: list[str]) -> dict[str, str]:
-    """file_id → base64 PNG, for the charts we can actually embed.
+def _download_charts(client: Any, file_ids: list[str]) -> dict[str, tuple[str, str]]:
+    """file_id → (media_type, base64), for the charts we can actually embed.
 
-    Only PNGs, only up to the per-chart and per-report caps. Anything else (a
-    CSV the model wrote, an oversized figure, a download failure) is skipped —
-    the narrative still stands on its own.
+    Only PNGs, only up to `_MAX_CHARTS`, only within the per-chart and total
+    base64 budgets. An oversized figure is recompressed first and dropped if it
+    still doesn't fit. Anything else (a CSV the model wrote, a download failure)
+    is skipped — the narrative stands on its own either way.
     """
-    charts: dict[str, str] = {}
+    charts: dict[str, tuple[str, str]] = {}
+    total = 0
     for file_id in file_ids:
         if len(charts) >= _MAX_CHARTS:
             break
@@ -494,12 +534,60 @@ def _download_charts(client: Any, file_ids: list[str]) -> dict[str, str]:
         except Exception:  # noqa: BLE001 — a missing chart is not a failed run
             logger.warning("DS Claude: chart download failed for %s", file_id, exc_info=True)
             continue
-        if not raw or len(raw) > _MAX_CHART_BYTES:
+        if not raw or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
             continue
-        if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+        media_type = "image/png"
+        if len(raw) > _MAX_CHART_BYTES:
+            raw, media_type = _shrink_png(raw)
+        if len(raw) > _MAX_CHART_BYTES:
+            logger.info(
+                "DS Claude: dropping chart %s (%d bytes over the embed budget)",
+                file_id, len(raw),
+            )
             continue
-        charts[file_id] = base64.b64encode(raw).decode("ascii")
+        encoded = base64.b64encode(raw).decode("ascii")
+        if total + len(encoded) > _MAX_TOTAL_CHART_B64_BYTES:
+            break
+        total += len(encoded)
+        charts[file_id] = (media_type, encoded)
     return charts
+
+
+def _shrink_png(raw: bytes) -> tuple[bytes, str]:
+    """Try to bring an oversized PNG under budget; never make it bigger.
+
+    Downscales to `_CHART_MAX_WIDTH_PX` and returns whichever of {original,
+    re-encoded PNG, JPEG} is smallest, with its media type. Pillow is present in
+    the deployed image but is NOT a declared requirement, so it is imported here
+    and its absence is not an error — the caller simply drops a chart it cannot
+    shrink. Returns the original bytes on any failure.
+    """
+    try:
+        import io
+
+        from PIL import Image
+
+        with Image.open(io.BytesIO(raw)) as img:
+            img = img.convert("RGB")
+            if img.width > _CHART_MAX_WIDTH_PX:
+                height = max(1, round(img.height * _CHART_MAX_WIDTH_PX / img.width))
+                img = img.resize((_CHART_MAX_WIDTH_PX, height))
+            candidates: list[tuple[bytes, str]] = [(raw, "image/png")]
+            for fmt, media_type, opts in (
+                ("PNG", "image/png", {"optimize": True}),
+                ("JPEG", "image/jpeg", {"quality": _CHART_JPEG_QUALITY, "optimize": True}),
+            ):
+                buf = io.BytesIO()
+                img.save(buf, format=fmt, **opts)
+                candidates.append((buf.getvalue(), media_type))
+            # Re-encoding a noisy image can INFLATE it (a resize interpolates new
+            # colours; JPEG on high-frequency content can beat neither). Keep
+            # whichever candidate is actually smallest — never hand back more
+            # bytes than we were given.
+            return min(candidates, key=lambda c: len(c[0]))
+    except Exception:  # noqa: BLE001 — no Pillow / undecodable image
+        logger.info("DS Claude: could not recompress an oversized chart", exc_info=True)
+        return raw, "image/png"
 
 
 def _download_bytes(client: Any, file_id: str) -> bytes:
@@ -585,12 +673,21 @@ def _loop(
         scope.capture(message)
         messages.append({"role": "assistant", "content": getattr(message, "content", []) or []})
 
-        if getattr(message, "stop_reason", None) != "pause_turn":
+        stop_reason = getattr(message, "stop_reason", None)
+        if stop_reason == "max_tokens":
+            # The turn was cut mid-sentence: the narrative has no closing TL;DR
+            # and may end mid-number. Rendering that as a finished report is the
+            # one failure mode a reader cannot see, so it gets a visible note.
+            report.stopped_reason = "max_tokens"
             return
-        report.pause_resumes += 1
+        if stop_reason != "pause_turn":
+            return
+        # Cap the RESUMES, checked before spending one, so `_MAX_PAUSE_RESUMES`
+        # means what it says: 5 resumes, i.e. at most 6 model calls.
         if report.pause_resumes >= _MAX_PAUSE_RESUMES:
             report.stopped_reason = "pause_cap"
             return
+        report.pause_resumes += 1
 
 
 def _user_content(question: str, history: list[dict] | None, file_ids: list[str]) -> list[dict]:
@@ -612,12 +709,19 @@ def _render_question(question: str, history: list[dict] | None) -> str:
 
 
 def _render_history(history: list[dict] | None) -> str:
+    """Recent turns, clamped per turn.
+
+    A turn count cap alone does not bound BYTES: a previous DS/VoC answer in this
+    thread is an HTML report whose base64 charts are the bulk of it. `clamp_turn_text`
+    strips those payloads and reduces the document to its narrative before it is
+    folded in — otherwise a follow-up ask replays the images back to the model.
+    """
     if not history:
         return ""
     lines = []
     for turn in history[-_HISTORY_TURNS:]:
         role = (turn.get("role") or "").strip() or "user"
-        text = (turn.get("content") or turn.get("text") or "").strip()
+        text = clamp_turn_text(turn.get("content") or turn.get("text") or "")
         if text:
             lines.append(f"{role}: {text}")
     return "\n".join(lines)
@@ -714,20 +818,24 @@ border:1px solid var(--line);border-radius:8px;padding:12px 14px;margin-top:26px
 """
 
 
-def _render_html(question: str, report: _Report, charts: dict[str, str], staged: list[str]) -> str:
+def _render_html(
+    question: str, report: _Report, charts: dict[str, tuple[str, str]], staged: list[str]
+) -> str:
     body: list[str] = []
     for kind, value in report.segments:
         if kind == "text":
             body.append(_md_to_html(value))
         elif value in charts:
+            media_type, encoded = charts[value]
             body.append(
                 '<figure><img alt="Analysis chart" '
-                f'src="data:image/png;base64,{charts[value]}"></figure>'
+                f'src="data:{media_type};base64,{encoded}"></figure>'
             )
     note = {
         "turn_cap": _TURN_CAP_NOTE,
         "pause_cap": _TURN_CAP_NOTE,
         "timeout": _TIMEOUT_NOTE,
+        "max_tokens": _TRUNCATED_NOTE,
     }.get(report.stopped_reason or "")
     if note:
         body.append(f'<div class="note">{html.escape(note)}</div>')
