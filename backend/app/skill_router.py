@@ -25,6 +25,80 @@ class SkillMatch:
     action: str        # human-readable label for the frontend
 
 
+# ── Competitive-intelligence report intent (narrowed) ────────────────────────
+# The CIR skill is the heaviest thing we ship: a multi-minute staged web-research
+# sweep. It must fast-path only when the user is asking for the REPORT, not
+# merely mentioning competitors. Two ingredients, and a shape needs both:
+#   * a competitor SUBJECT ("competitors", "competition", "competitive",
+#     "rivals", "market"), and
+#   * a report/comparison INTENT (report, analysis, review, scan, landscape,
+#     benchmark, intelligence, "where do we stand", "how do we compare",
+#     "what are they shipping").
+_CIR_SUBJECT = r"(?:competitors?|competition|competitive|rivals?|market)"
+_CIR_REPORT_NOUN = (
+    r"(?:report|analys[ie]s|review|scan|landscape|benchmark(?:ing|s)?|"
+    r"intelligence|study|teardown|round-?up|deep[\s-]?dive|pulse|briefing)"
+)
+
+
+def _near(a: str, b: str, gap: int = 45) -> str:
+    """Either order, within `gap` characters."""
+    return rf"(?:{a}.{{0,{gap}}}{b}|{b}.{{0,{gap}}}{a})"
+
+
+_CIR_REPORT_RULE_SRC = (
+    # "competitive intelligence", "competitor report", "competitive analysis",
+    # "market landscape", "monthly competitor scan", "quarterly competitive
+    # review", "competitor deep dive". Up to two filler words between the two.
+    rf"\b{_CIR_SUBJECT}\s+(?:\w+\s+){{0,2}}{_CIR_REPORT_NOUN}\b"
+    # "review of the competition", "benchmark against the market"
+    rf"|\b{_CIR_REPORT_NOUN}\s+(?:of|on|for|across|against|vs\.?|versus)\s+"
+    rf"(?:the\s+|our\s+)?(?:\w+\s+){{0,2}}{_CIR_SUBJECT}\b"
+    # "where do we stand vs competitors" / "vs the competition, where do we stand"
+    rf"|{_near(r'\bwhere\s+do\s+we\s+stand\b', rf'\b{_CIR_SUBJECT}\b')}"
+    # "how do we compare to the market" / "how do we stack up against rivals"
+    rf"|{_near(r'\bhow\s+do\s+we\s+(?:compare|stack\s+up|measure\s+up)\b', rf'\b{_CIR_SUBJECT}\b')}"
+    # "what are our competitors shipping/launching/doing/been up to"
+    rf"|\bwhat\s+(?:are|is|has|have)\b.{{0,30}}\b{_CIR_SUBJECT}\b.{{0,30}}"
+    r"\b(?:ship(?:ping|ped)?|launch(?:ing|ed)?|releas\w+|doing|building|"
+    r"been\s+up\s+to|up\s+to)\b"
+    # "benchmark us against the market"
+    rf"|{_near(r'\bbenchmark\b', rf'\b{_CIR_SUBJECT}\b')}"
+)
+
+# Sibling strategy skills whose asks read competitor-ish but belong elsewhere.
+# Vetoing them keeps the fast-path honest instead of widening the regex further
+# and then apologising for it.
+_CIR_VETO = re.compile(
+    r"\bmarket\s+structure\b|\bfive\s+forces\b|\bporter'?s\b"
+    r"|\bmarket\s+siz\w+\b|\b(?:tam|sam|som)\b"
+    r"|\bpositioning\s+statement\b|\bbattle\s?cards?\b"
+    r"|\btraffic\s+lights?\b|\bbeachhead\b",
+    re.I,
+)
+
+# skill_id → veto pattern. When a rule matches but its veto also matches, the
+# fast-path DEFERS (falls through to the remaining rules, then the haiku router)
+# rather than claiming a question that belongs to a sibling skill.
+_RULE_VETOES: dict[str, re.Pattern] = {
+    "competitive-intelligence-review": _CIR_VETO,
+}
+
+
+def is_competitive_report_request(question: str) -> bool:
+    """True when the question asks for the competitive-intelligence REPORT.
+
+    The predicate behind the CIR fast-path rule, exported because the Slack
+    surface needs the same judgement BEFORE running anything: a report ask has
+    to be acknowledged with its duration up front, since the run itself takes
+    minutes.
+    """
+    q = question or ""
+    if _CIR_VETO.search(q):
+        return False
+    return bool(re.search(_CIR_REPORT_RULE_SRC, q, re.I))
+
+
 # Keyword patterns → skill mapping. Order matters: first match wins.
 # Each entry: (compiled regex, skill_id, action_label, base_confidence)
 _RULES: list[tuple[re.Pattern, str, str, float]] = [
@@ -107,9 +181,30 @@ _RULES: list[tuple[re.Pattern, str, str, float]] = [
     (re.compile(r"\b(customer|support).{0,20}\b(ticket|review|complaint|issue)s?\b", re.I),
      "voice-of-customer-report", "Analyze customer feedback", 0.80),
 
-    # Competitive intelligence
-    (re.compile(r"\b(competit|competitor|competitive\s+analysis|market\s+position)\b", re.I),
-     "competitive-intelligence-review", "Competitive analysis", 0.85),
+    # Sales battlecard — ABOVE competitive intelligence on purpose: "how do we
+    # sell against Acme" and "build a battlecard for the competitive deal" both
+    # carry competitor vocabulary, and before this rule existed the CIR rule
+    # swallowed them into a multi-minute landscape review.
+    (re.compile(
+        r"\bbattle\s?cards?\b"
+        r"|\b(?:sell|selling|pitch|pitching|win|winning)\s+against\b"
+        r"|\bobjection\s+handling\b|\bhandle\s+objections?\b"
+        r"|\b(?:talk|trap)\s+tracks?\b", re.I),
+     "sales-battlecard", "Sales battlecard", 0.90),
+
+    # Competitive intelligence — REPORT-INTENT shapes only.
+    #
+    # This rule used to be `\b(competit|competitor|competitive analysis|market
+    # position)\b`, which meant ANY sentence containing the word "competitor"
+    # fast-pathed into the heaviest skill we ship: "the PRD should mention our
+    # competitors", "customers keep comparing us to a competitor", "who are our
+    # competitors?" all bought a multi-minute web-research review nobody asked
+    # for. Intent-first convention (#925): the regex tier is a zero-latency
+    # fast-path for UNAMBIGUOUS report asks, and everything else is the haiku
+    # router's job — phrasings live as test data in
+    # tests/test_cir_routing_phrases.py, not as ever-growing regexes.
+    (re.compile(_CIR_REPORT_RULE_SRC, re.I),
+     "competitive-intelligence-review", "Competitive intelligence report", 0.85),
 
     # Incident runbook
     (re.compile(r"\b(incident|runbook|post-?mortem|sev-?\d|on-?call|outage)\b", re.I),
@@ -563,10 +658,18 @@ def detect_intent(question: str) -> SkillMatch | None:
     """Match a user question to a skill via keyword rules.
 
     Returns the best SkillMatch, or None if no skill matches (→ general Ask).
+
+    A rule with a `_RULE_VETOES` entry defers when its veto also matches, so a
+    question that belongs to a sibling skill keeps falling through instead of
+    being claimed by a broader rule.
     """
     for pattern, skill_id, action, confidence in _RULES:
-        if pattern.search(question):
-            return SkillMatch(skill_id=skill_id, confidence=confidence, action=action)
+        if not pattern.search(question):
+            continue
+        veto = _RULE_VETOES.get(skill_id)
+        if veto is not None and veto.search(question):
+            continue
+        return SkillMatch(skill_id=skill_id, confidence=confidence, action=action)
     return None
 
 

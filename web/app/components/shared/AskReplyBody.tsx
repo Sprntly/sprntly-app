@@ -23,6 +23,17 @@ function flattenText(node: ReactNode): string {
   return ""
 }
 
+/**
+ * Report title per skill, for the sandboxed-iframe header. Every skill that
+ * answers with a self-contained HTML document needs an entry; anything not
+ * listed falls back to the VoC label, which is where this surface started.
+ */
+const REPORT_TITLES: Record<string, string> = {
+  "public-feedback-report": "Public Feedback report",
+  "competitive-intelligence-review": "Competitive Intelligence report",
+  "voice-of-customer-report": "Voice of Customer report",
+}
+
 const askMarkdownComponents: Components = {
   // Fenced ```chart blocks render as inline SVG infographics. Other fenced
   // blocks fall through to the default <code><pre> rendering.
@@ -70,8 +81,7 @@ export function AskReplyBody({
   // escape the tags. The report is self-contained, so we skip the simulated-typing
   // stream and the citations chrome below it.
   if (looksLikeHtmlBrief(reply.answer)) {
-    const reportTitle =
-      reply._skill === "public-feedback-report" ? "Public Feedback report" : "Voice of Customer report"
+    const reportTitle = REPORT_TITLES[reply._skill ?? ""] ?? "Voice of Customer report"
     const report = <HtmlReportView html={reply.answer} title={reportTitle} />
     return animateIn ? (
       <div className="ask-reply-body ask-reply-body--enter">{report}</div>
