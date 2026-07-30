@@ -38,6 +38,7 @@ from app.brief_gate import (
 )
 from app.connectors.catalog import EVIDENCE_UPLOAD_CATEGORIES
 from app.corpus import load_corpus
+from app.ingest import is_unparsed_stub
 from app.db.briefs import get_current_brief
 from app.db.companies import company_id_for_slug, slug_for_company_id
 from app.graph.extractor import _NS, extract_document
@@ -134,7 +135,8 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
     successful extract, so a failed doc retries on the next run. Missing corpus
     is not fatal — a company might be connector-only.
     """
-    totals = {"signals": 0, "themes": 0, "skipped": 0, "docs": 0, "unchanged": 0}
+    totals = {"signals": 0, "themes": 0, "skipped": 0, "docs": 0, "unchanged": 0,
+              "unreadable": 0}
     try:
         corpus = load_corpus(slug)
     except (FileNotFoundError, RuntimeError) as e:
@@ -160,6 +162,14 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
 
     extracted = 0
     for doc in corpus.docs:
+        # A placeholder for a file we couldn't read is not content: extracting
+        # it spends an LLM call on the words "its content is not included in
+        # analysis yet", and recording it would mark the file permanently
+        # ingested so a future parser never gets to retry it. Skip WITHOUT
+        # recording, so it re-enters the moment we can read its type.
+        if is_unparsed_stub(doc.text):
+            totals["unreadable"] += 1
+            continue
         sha = hashlib.sha256(f"{company_id}|{doc.text}".encode()).hexdigest()
         if sha in existing:
             totals["unchanged"] += 1

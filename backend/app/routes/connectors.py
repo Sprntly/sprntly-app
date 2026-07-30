@@ -2744,6 +2744,29 @@ async def _store_uploaded_files(
 
     stored: list[dict] = []
     errors: list[dict] = []
+
+    def _store_one(name: str, blob: bytes, content_type: str | None) -> None:
+        """Convert + persist one file, recording a per-file error on failure."""
+        try:
+            saved = add_document_file(
+                company_id, source_id,
+                filename=name, data=blob, content_type=content_type,
+            )
+        except Exception as e:  # noqa: BLE001 — one bad file must not fail the batch
+            logger.exception("uploads: could not store %s", name)
+            errors.append({"filename": name, "error": f"Could not store: {e}"})
+            return
+        stored.append({
+            "id": saved.id,
+            "filename": saved.filename,
+            "content_type": saved.content_type,
+            "size_bytes": saved.size_bytes,
+            # Never the text itself — the list surfaces how much we extracted,
+            # the same shape the company-document list uses.
+            "extracted_chars": len(saved.extracted_text or ""),
+            "uploaded_at": saved.uploaded_at,
+        })
+
     for upload in files[:UPLOAD_MAX_FILES_PER_REQUEST]:
         filename = upload.filename or "untitled"
         data = await upload.read()
@@ -2756,25 +2779,31 @@ async def _store_uploaded_files(
                 "error": f"File exceeds {UPLOAD_MAX_FILE_BYTES // (1024 * 1024)}MB limit",
             })
             continue
-        try:
-            saved = add_document_file(
-                company_id, source_id,
-                filename=filename, data=data, content_type=upload.content_type,
-            )
-        except Exception as e:  # noqa: BLE001 — one bad file must not fail the batch
-            logger.exception("uploads: could not store %s", filename)
-            errors.append({"filename": filename, "error": f"Could not store: {e}"})
+        # A .zip is a container, not a document: expand it and store each
+        # member as its own file, matching the dataset upload route. Without
+        # this the archive itself went through the converter — i.e. landed as
+        # an unreadable placeholder — and none of its contents reached the KG.
+        if filename.lower().endswith(".zip"):
+            from app.datasets import DatasetError, expand_zip_members
+
+            try:
+                members, zip_errors = expand_zip_members(
+                    filename, data, per_member_max_bytes=UPLOAD_MAX_FILE_BYTES,
+                )
+            except DatasetError as e:
+                errors.append({"filename": filename, "error": str(e)})
+                continue
+            errors.extend(zip_errors)
+            if not members:
+                errors.append({
+                    "filename": filename,
+                    "error": "Archive contained no usable files",
+                })
+            for member_name, member_bytes in members:
+                _store_one(member_name, member_bytes, None)
             continue
-        stored.append({
-            "id": saved.id,
-            "filename": saved.filename,
-            "content_type": saved.content_type,
-            "size_bytes": saved.size_bytes,
-            # Never the text itself — the list surfaces how much we extracted,
-            # the same shape the company-document list uses.
-            "extracted_chars": len(saved.extracted_text or ""),
-            "uploaded_at": saved.uploaded_at,
-        })
+        _store_one(filename, data, upload.content_type)
+
     if len(files) > UPLOAD_MAX_FILES_PER_REQUEST:
         errors.append({
             "filename": "",
