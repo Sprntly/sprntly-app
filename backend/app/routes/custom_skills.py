@@ -3,6 +3,7 @@
   POST   /v1/skills               -> upload a .md/.zip skill with name+description
   GET    /v1/skills               -> list the company's custom skills (metadata)
   GET    /v1/skills/{id}/file     -> signed view/download URLs for the original upload
+  DELETE /v1/skills/{id}          -> delete a skill (row + original file)
 
 Custom skills are COMPANY-SCOPED for now — all workspaces in a company share
 one skill library, so reads filter by company_id. The uploading workspace is
@@ -174,3 +175,30 @@ def skill_file_links(
     except ValueError:
         raise HTTPException(404, "Skill file not found.")
     return {"name": f"{row['slug']}.{ext}", **urls}
+
+
+@router.delete(
+    "/{skill_id}",
+    dependencies=[Depends(require_same_origin)],  # CSRF/Origin gate (authed mutating)
+)
+async def delete_skill(
+    skill_id: str,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Delete a custom skill for the WHOLE company (skills are company-scoped,
+    so it disappears from every workspace's library and stops routing on the
+    next invocation — the resolver reads the DB fresh each time).
+
+    Row first, then the staged original: a failed storage delete leaves an
+    orphaned file (best-effort, delete_skill_file never raises) rather than a
+    ghost skill that still routes. 404 on a foreign or missing id, made
+    indistinguishable by the company-filtered lookup."""
+    row = db.delete_custom_skill(company.company_id, skill_id)
+    if row is None:
+        raise HTTPException(404, "Skill not found.")
+    if row.get("storage_key"):
+        await skills_storage.delete_skill_file(
+            company_id=company.company_id, key=row["storage_key"]
+        )
+    logger.info("custom_skill_deleted slug=%s", row.get("slug"))
+    return {"deleted": True, "id": skill_id}
