@@ -153,13 +153,14 @@ def _slack_get(
     url: str,
     token: str,
     params: dict[str, Any] | None = None,
+    timeout: int = 30,
 ) -> dict[str, Any]:
     """Make an authenticated GET to the Slack Web API."""
     resp = requests.get(
         url,
         headers={"Authorization": f"Bearer {token}"},
         params=params or {},
-        timeout=30,
+        timeout=timeout,
     )
     if not resp.ok:
         logger.warning("Slack API error: %s %s", resp.status_code, resp.text[:300])
@@ -170,7 +171,7 @@ def _slack_get(
     return data
 
 
-def fetch_users(token: str) -> dict[str, str]:
+def fetch_users(token: str, timeout: int = 30) -> dict[str, str]:
     """Fetch workspace users and return a {user_id: display_name} mapping."""
     users: dict[str, str] = {}
     cursor: str | None = None
@@ -180,7 +181,7 @@ def fetch_users(token: str) -> dict[str, str]:
         if cursor:
             params["cursor"] = cursor
 
-        data = _slack_get(SLACK_USERS_URL, token, params)
+        data = _slack_get(SLACK_USERS_URL, token, params, timeout=timeout)
         if not data.get("ok"):
             break
 
@@ -207,6 +208,7 @@ def fetch_users(token: str) -> dict[str, str]:
 def fetch_channels(
     token: str,
     limit: int = MAX_CHANNELS,
+    timeout: int = 30,
 ) -> list[dict[str, Any]]:
     """Fetch public + private channels the bot belongs to."""
     channels: list[dict[str, Any]] = []
@@ -221,7 +223,7 @@ def fetch_channels(
         if cursor:
             params["cursor"] = cursor
 
-        data = _slack_get(SLACK_CONVERSATIONS_LIST_URL, token, params)
+        data = _slack_get(SLACK_CONVERSATIONS_LIST_URL, token, params, timeout=timeout)
         if not data.get("ok"):
             break
 
@@ -241,6 +243,7 @@ def fetch_channel_history(
     channel_id: str,
     limit: int = MAX_MESSAGES_PER_CHANNEL,
     oldest_ts: str | None = None,
+    timeout: int = 30,
 ) -> list[dict[str, Any]]:
     """Fetch recent messages from a channel."""
     messages: list[dict[str, Any]] = []
@@ -256,7 +259,7 @@ def fetch_channel_history(
         if cursor:
             params["cursor"] = cursor
 
-        data = _slack_get(SLACK_CONVERSATIONS_HISTORY_URL, token, params)
+        data = _slack_get(SLACK_CONVERSATIONS_HISTORY_URL, token, params, timeout=timeout)
         if not data.get("ok"):
             error = data.get("error", "unknown")
             if error in ("channel_not_found", "not_in_channel"):
@@ -280,6 +283,7 @@ def fetch_thread_replies(
     channel_id: str,
     thread_ts: str,
     limit: int = MAX_THREAD_REPLIES,
+    timeout: int = 30,
 ) -> list[dict[str, Any]]:
     """Fetch replies in a message thread."""
     params: dict[str, Any] = {
@@ -287,7 +291,7 @@ def fetch_thread_replies(
         "ts": thread_ts,
         "limit": min(limit, 100),
     }
-    data = _slack_get(SLACK_CONVERSATIONS_REPLIES_URL, token, params)
+    data = _slack_get(SLACK_CONVERSATIONS_REPLIES_URL, token, params, timeout=timeout)
     if not data.get("ok"):
         return []
 
