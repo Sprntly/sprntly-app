@@ -275,6 +275,28 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # Slack report runs still in flight at SHUTDOWN: the user was acknowledged
+    # ("~5-10 minutes") and the run is about to die with the process, so tell
+    # them to ask again rather than leaving the thread silent forever.
+    #
+    # This runs on SHUTDOWN, not startup, and that is the whole point: the
+    # markers live in-process, so by the time a fresh process boots its registry
+    # is empty by construction and a startup sweep could never fire. Here the
+    # event loop is still alive and the bot token is still readable, so the
+    # notice actually goes out. Runs BEFORE the Design Agent drain (which can
+    # take ~200s) so the message lands promptly.
+    try:
+        from app.routes.connectors import sweep_interrupted_slack_reports
+
+        swept = await asyncio.to_thread(sweep_interrupted_slack_reports)
+        if swept:
+            logger.info(
+                "Notified %d interrupted Slack report run(s) at shutdown",
+                len(swept),
+            )
+    except Exception:  # noqa: BLE001 — shutdown must never break on bookkeeping
+        logger.exception("Interrupted Slack report sweep failed at shutdown")
+
     # ── Tier 0: graceful drain of in-flight Design Agent generation ────
     # On a deploy/restart SIGTERM, stop admitting new /generate work, then wait
     # for any in-flight generation to finish (up to a tunable deadline) so the

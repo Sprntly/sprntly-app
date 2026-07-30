@@ -20,6 +20,8 @@
   GET    /v1/connectors/slack/history            -> read channel/DM messages
   GET    /v1/connectors/slack/search             -> search the user's own content
   POST   /v1/connectors/slack/sync-to-corpus    -> sync messages into corpus
+  POST   /v1/connectors/slack/events             -> Events API sink (signature-auth)
+  POST   /v1/connectors/slack/commands          -> slash-command sink (signature-auth)
 
   GET    /v1/connectors/github/authorize        -> redirect to GitHub
   GET    /v1/connectors/github/callback         -> OAuth callback
@@ -32,13 +34,14 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import re
 import sys
 import time
 from typing import Annotated
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode
 
 import requests
 
@@ -59,6 +62,7 @@ from pydantic import BaseModel, Field
 
 from app import db
 from app import datasets as datasets_service
+from app import html_report
 from app.auth import (  # noqa: F401 — require_workspace re-exported for tests' dependency_overrides
     CompanyContext,
     WorkspaceContext,
@@ -92,6 +96,8 @@ from app.connectors.tokens import (
     encrypt_token_json,
 )
 from app.kg_ingest.auto_sync import kickoff_corpus_seed, kickoff_sync
+from app.prompt_history import clamp_turn_text
+from app.skill_router import is_competitive_report_request
 
 logger = logging.getLogger(__name__)
 
@@ -2084,12 +2090,13 @@ async def _handle_slack_message(
     from app import qa_agent
     from app.db.companies import slug_for_company_id
 
+    marker: str | None = None
     try:
         resolved = _resolve_slack_inbound(team_id, slack_user)
         if not resolved:
             logger.info("slack inbound: no connection for team=%s — ignoring", team_id)
             return
-        company_id, _user_id, bot_token, bot_user_id = resolved
+        company_id, _user_id, bot_token, bot_user_id, scopes = resolved
         # Defence-in-depth self-message guard (bot_id is checked at the webhook;
         # this also catches the rare bot_id-less self post).
         if bot_user_id and slack_user == bot_user_id:
@@ -2109,6 +2116,19 @@ async def _handle_slack_message(
             if not is_mention
             else []
         )
+        # A report ask takes MINUTES (staged web research), and Slack gives no
+        # typing indicator to a bot. Without an up-front acknowledgement the
+        # channel just goes quiet and the user asks again, which starts a second
+        # run. Ack first, with the duration, then run.
+        if is_competitive_report_request(question):
+            marker = _register_slack_report(
+                team_id=team_id, channel=channel, thread_ts=thread_ts,
+                question=question,
+            )
+            await _post_best_effort(
+                bot_token, channel=channel, thread_ts=thread_ts,
+                text=_REPORT_ACK,
+            )
         payload = await asyncio.to_thread(
             qa_agent.answer,
             enterprise_id=company_id,
@@ -2122,12 +2142,9 @@ async def _handle_slack_message(
                 "I couldn't find an answer to that one. Try rephrasing, or ask "
                 "me something about your product data."
             )
-        await asyncio.to_thread(
-            slack_oauth.post_message,
-            bot_token,
-            channel=channel,
-            text=answer_text,
-            thread_ts=thread_ts,
+        await _deliver_slack_answer(
+            bot_token, channel=channel, thread_ts=thread_ts,
+            answer_text=answer_text, skill=payload.get("_skill"), scopes=scopes,
         )
         # Analytics parity with the web Ask path (never fail the answer on this).
         try:
@@ -2142,21 +2159,26 @@ async def _handle_slack_message(
             logger.exception("slack inbound: log_ask failed")
     except Exception:  # noqa: BLE001 — a webhook task must never crash the loop
         logger.exception("slack inbound: handler failed team=%s", team_id)
+    finally:
+        _clear_slack_report(marker)
 
 
 def _resolve_slack_inbound(
     team_id: str, slack_user: str
-) -> tuple[str, str, str, str] | None:
+) -> tuple[str, str, str, str, str] | None:
     """Map an inbound Slack (team_id, slack_user) to one Sprntly connection.
 
-    Returns (company_id, user_id, bot_token, bot_user_id), or None if the team
-    has no usable connection. The installing user's Slack id (authed_user_id)
+    Returns (company_id, user_id, bot_token, bot_user_id, scopes), or None if the
+    team has no usable connection. The installing user's Slack id (authed_user_id)
     lives inside the encrypted token blob — not an indexed column — so we list
     the team's connections and prefer the one whose authed_user_id matches the
     messaging user; absent a match we fall back to the team's first connection
-    (1 install = 1 company by design, so its bot token + company apply)."""
-    chosen: tuple[str, str, str, str] | None = None
-    fallback: tuple[str, str, str, str] | None = None
+    (1 install = 1 company by design, so its bot token + company apply).
+
+    `scopes` is the granted-scope string recorded at install time; report
+    delivery reads it to decide between a file upload and a text fallback."""
+    chosen: tuple[str, str, str, str, str] | None = None
+    fallback: tuple[str, str, str, str, str] | None = None
     for row in db.list_slack_connections_by_team(team_id):
         try:
             tj = json.loads(decrypt_token_json(row["token_json_encrypted"]))
@@ -2170,6 +2192,7 @@ def _resolve_slack_inbound(
             row["user_id"],
             bot_token,
             tj.get("bot_user_id") or "",
+            row.get("scopes") or tj.get("scope") or "",
         )
         if fallback is None:
             fallback = cand
@@ -2216,10 +2239,337 @@ def _slack_conversation_history(
         history.append(
             {
                 "role": "assistant" if is_bot else "user",
-                "content": content if is_bot else _strip_leading_mention(content),
+                # Clamped at construction (#949's per-turn clamp). The consuming
+                # fold in qa_agent clamps too, but this path is the one that now
+                # carries REPORT answers: a Slack DM thread can hold the bot's
+                # own report summary, and before file delivery it could hold a
+                # whole HTML document. Bounding it here means every downstream
+                # fold — qa_agent's and every divert's — sees a sane turn.
+                "content": clamp_turn_text(
+                    content if is_bot else _strip_leading_mention(content)
+                ),
             }
         )
     return history[-12:]
+
+
+# ───── Report delivery into Slack (ack → summary → file) ─────
+
+CIR_SKILL = "competitive-intelligence-review"
+
+# Posted BEFORE the run starts. Names the duration, because the alternative is a
+# silent channel and a second ask that starts a second multi-minute run.
+_REPORT_ACK = (
+    ":mag: On it — running your competitive scan now. This takes about 5-10 "
+    "minutes (a full quarterly review can take 10-20), because I research each "
+    "competitor on the live web rather than answering from memory. I'll post "
+    "the report here when it's ready."
+)
+
+_REPORT_FILENAME = {
+    CIR_SKILL: "competitive-intelligence-report.html",
+    "public-feedback-report": "public-feedback-report.html",
+    "voice-of-customer-report": "voice-of-customer-report.html",
+}
+_REPORT_TITLE = {
+    CIR_SKILL: "Competitive Intelligence report",
+    "public-feedback-report": "Public Feedback report",
+    "voice-of-customer-report": "Voice of Customer report",
+}
+# Shown when the install predates file delivery (no files:write). Adding a scope
+# forces a workspace reinstall, which is the user's call — so we say where the
+# report is instead of failing.
+_NO_UPLOAD_SCOPE = (
+    "The full report is a formatted document, and this Slack install can't "
+    "receive file uploads yet — open Sprntly chat to read it, or reconnect "
+    "Slack from Settings → Connectors to enable file delivery here."
+)
+# ...and a DIFFERENT message when the scope IS present and the upload still
+# failed. Telling someone their install "can't receive uploads yet" when it can
+# sends them to reinstall Slack for nothing; this is a transient failure, and the
+# honest line says so.
+_UPLOAD_FAILED = (
+    "I couldn't attach the full report here just now — open Sprntly chat to "
+    "read it, or ask me again to retry the upload."
+)
+
+
+async def _post_best_effort(bot_token: str, *, channel: str, text: str,
+                            thread_ts: str | None) -> bool:
+    """post_message off the event loop, swallowing failures. Used for the ack and
+    the fallbacks, where a delivery failure must not lose the answer that
+    follows it."""
+    try:
+        await asyncio.to_thread(
+            slack_oauth.post_message, bot_token,
+            channel=channel, text=text, thread_ts=thread_ts,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — one failed post can't break delivery
+        logger.warning("slack: post failed for channel=%s", channel, exc_info=True)
+        return False
+
+
+async def _deliver_slack_answer(
+    bot_token: str, *, channel: str, thread_ts: str | None, answer_text: str,
+    skill: str | None, scopes: str,
+) -> None:
+    """Post an agent answer to Slack, handling the HTML-report case.
+
+    A prose answer posts as-is (unchanged behaviour). An answer that IS a
+    self-contained HTML document — the CIR / public-feedback / VoC reports —
+    would post as a wall of CSS that Slack then truncates, so instead we post a
+    short text summary read from the document's own opening and attach the
+    document as a file. Missing `files:write` degrades to the summary plus a
+    pointer to Sprntly chat; the answer is never lost.
+    """
+    if not html_report.looks_like_html_report(answer_text):
+        await _post_best_effort(bot_token, channel=channel, text=answer_text,
+                                thread_ts=thread_ts)
+        return
+
+    label = _REPORT_TITLE.get(skill or "", "report")
+    summary = html_report.summarize_report(answer_text)
+    header = f":page_facing_up: Your {label} is ready."
+    await _post_best_effort(
+        bot_token, channel=channel, thread_ts=thread_ts,
+        text=f"{header}\n\n{summary}" if summary else header,
+    )
+    if not slack_oauth.has_file_upload_scope(scopes):
+        await _post_best_effort(bot_token, channel=channel, thread_ts=thread_ts,
+                                text=_NO_UPLOAD_SCOPE)
+        return
+    filename = _REPORT_FILENAME.get(skill or "", "sprntly-report.html")
+    uploaded = False
+    try:
+        uploaded = await asyncio.to_thread(
+            slack_oauth.upload_file, bot_token,
+            channel=channel, filename=filename, content=answer_text,
+            title=label, thread_ts=thread_ts,
+        )
+    except Exception:  # noqa: BLE001 — upload_file already swallows; belt and braces
+        logger.warning("slack: report upload raised", exc_info=True)
+    if not uploaded:
+        # The scope IS present (checked above), so this is a transient upload
+        # failure — do NOT tell them to reinstall Slack.
+        await _post_best_effort(bot_token, channel=channel, thread_ts=thread_ts,
+                                text=_UPLOAD_FAILED)
+
+
+# ───── In-flight report markers (shutdown interrupt) ─────
+#
+# A Slack report run lives in a fire-and-forget task, so a restart mid-run drops
+# it silently: the user got an ack promising a report in ~5-10 minutes and then
+# nothing, forever. These markers let `sweep_interrupted_slack_reports` say so.
+#
+# The sweep is called from the lifespan's SHUTDOWN half (app/main.py), not
+# startup. That is load-bearing: this registry is in-process, so a fresh
+# process's dict is empty by construction and a startup sweep could never fire.
+# At shutdown the loop is still alive and the bot token still readable, so the
+# notice actually goes out.
+#
+# KNOWN LIMIT: this covers an orderly shutdown (SIGTERM on deploy/restart) and
+# a task lost inside one process lifetime. A SIGKILL or a hard crash skips the
+# lifespan entirely and the markers die with the process. Durable markers need a
+# table and a migration; the sweep is already wired, so making it durable later
+# is a schema change rather than a rewrite.
+_slack_report_markers: dict[str, dict] = {}
+# Marker keys must be unique for the lifetime of the process. len(dict) is not:
+# register → clear → register reuses the same suffix, and two concurrent report
+# runs in one channel/thread could collide and lose a marker. A monotonic
+# counter cannot.
+_slack_report_seq = itertools.count(1)
+_INTERRUPTED_REPORT = (
+    ":warning: That report run was interrupted before it finished — nothing was "
+    "posted. Ask again and I'll rerun it."
+)
+
+
+def _register_slack_report(*, team_id: str, channel: str,
+                           thread_ts: str | None, question: str) -> str:
+    key = f"{team_id}:{channel}:{thread_ts or ''}:{next(_slack_report_seq)}"
+    _slack_report_markers[key] = {
+        "team_id": team_id, "channel": channel, "thread_ts": thread_ts,
+        "question": question, "started_at": time.time(),
+    }
+    return key
+
+
+def _clear_slack_report(marker: str | None) -> None:
+    if marker:
+        _slack_report_markers.pop(marker, None)
+
+
+def sweep_interrupted_slack_reports() -> list[dict]:
+    """Post "interrupted — ask again" for every report run still marked
+    in-flight, and clear the markers. Returns the markers it swept (so the
+    caller can log a count). Best-effort per marker: a failed post is logged and
+    the sweep continues.
+
+    Called from the lifespan SHUTDOWN half — see the note above the registry for
+    why it cannot be startup."""
+    swept = list(_slack_report_markers.values())
+    _slack_report_markers.clear()
+    for m in swept:
+        resolved = None
+        try:
+            resolved = _resolve_slack_inbound(m.get("team_id") or "", "")
+        except Exception:  # noqa: BLE001 — a sweep must never break startup
+            logger.warning("slack sweep: connection lookup failed", exc_info=True)
+        if not resolved:
+            continue
+        try:
+            slack_oauth.post_message(
+                resolved[2], channel=m.get("channel") or "",
+                text=_INTERRUPTED_REPORT, thread_ts=m.get("thread_ts"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("slack sweep: retry notice post failed", exc_info=True)
+    return swept
+
+
+# ───── Slash commands ─────
+
+
+@router.post("/slack/commands")
+async def slack_commands(request: Request):
+    """Slack slash-command sink. Unauthenticated by design — the signing-secret
+    request signature is the auth, exactly as for /slack/events.
+
+    Slack requires a response within 3 SECONDS or the user sees an operation
+    timeout, and a competitive scan takes minutes. So this endpoint does no LLM
+    work at all: it verifies the signature, returns an ephemeral ack
+    immediately, and runs the report in a background task that delivers via the
+    command's `response_url` plus an in-channel post (with the HTML document
+    attached as a file).
+
+    `/competitive-scan [competitor names…]` is the intended command; any
+    competitor names in the text override the stored roster for that run. The
+    endpoint accepts whatever command Slack sends, because ACTIVATING a slash
+    command is a Slack app-manifest change made per app (prod and dev are
+    SEPARATE apps) — deliberately NOT part of this code. Until the command is
+    registered nothing reaches here, and this endpoint is simply idle; it never
+    assumes registration."""
+    raw = await request.body()
+    ts = request.headers.get("X-Slack-Request-Timestamp", "")
+    sig = request.headers.get("X-Slack-Signature", "")
+    if not slack_oauth.verify_signature(ts, raw, sig):
+        raise HTTPException(401, "invalid Slack signature")
+    form = {k: v[0] for k, v in parse_qs(raw.decode("utf-8", "replace")).items()}
+    command = (form.get("command") or "").strip()
+    text = (form.get("text") or "").strip()
+    team_id = (form.get("team_id") or "").strip()
+    channel = (form.get("channel_id") or "").strip()
+    slack_user = (form.get("user_id") or "").strip()
+    response_url = (form.get("response_url") or "").strip()
+    if not (team_id and channel):
+        # Nothing actionable; still 200 so Slack doesn't show an error.
+        return {"response_type": "ephemeral",
+                "text": "I couldn't read that command — try again."}
+
+    coro = _run_slack_report_command(
+        team_id=team_id, channel=channel, slack_user=slack_user,
+        text=text, command=command, response_url=response_url,
+    )
+    if "pytest" in sys.modules:
+        # Same reason as /slack/events: the TestClient loop doesn't persist
+        # between requests, so a fire-and-forget task would never run.
+        await coro
+    else:
+        task = asyncio.create_task(coro)
+        _slack_inflight_tasks.add(task)
+        task.add_done_callback(_slack_inflight_tasks.discard)
+
+    return {
+        "response_type": "ephemeral",
+        "text": _REPORT_ACK,
+    }
+
+
+def _command_question(text: str) -> str:
+    """The question the command runs. Names in the command text override the
+    stored roster for this run (they reach the pipeline through the question,
+    which is where `named_competitors` reads an ad-hoc set from)."""
+    names = text.strip()
+    if not names:
+        return "Run a competitive intelligence report"
+    return f"Run a competitive intelligence report vs {names}"
+
+
+async def _run_slack_report_command(
+    *, team_id: str, channel: str, slack_user: str, text: str, command: str,
+    response_url: str,
+) -> None:
+    """Background half of a slash command: run the report pinned to the CIR
+    skill and deliver it. Best-effort throughout — a slash command must never
+    crash the event loop, and every failure path still tells the user."""
+    from app import qa_agent
+    from app.db.companies import slug_for_company_id
+
+    marker: str | None = None
+    try:
+        resolved = _resolve_slack_inbound(team_id, slack_user)
+        if not resolved:
+            await _respond_to_command(
+                response_url,
+                "Sprntly isn't connected to this workspace yet — connect Slack "
+                "from Settings → Connectors and try again.",
+            )
+            return
+        company_id, _user_id, bot_token, _bot_user_id, scopes = resolved
+        dataset = slug_for_company_id(company_id) or ""
+        question = _command_question(text)
+        marker = _register_slack_report(
+            team_id=team_id, channel=channel, thread_ts=None, question=question,
+        )
+        payload = await asyncio.to_thread(
+            qa_agent.answer,
+            enterprise_id=company_id,
+            question=question,
+            dataset=dataset,
+            pinned_skill=CIR_SKILL,
+        )
+        answer_text = (payload.get("answer") or "").strip()
+        if not answer_text:
+            await _respond_to_command(
+                response_url,
+                "I couldn't complete that competitive scan. Please try again.",
+            )
+            return
+        await _deliver_slack_answer(
+            bot_token, channel=channel, thread_ts=None,
+            answer_text=answer_text, skill=payload.get("_skill") or CIR_SKILL,
+            scopes=scopes,
+        )
+        await _respond_to_command(response_url, "Your report is posted above. :white_check_mark:")
+    except Exception:  # noqa: BLE001 — a background task must never crash the loop
+        logger.exception("slack command failed: %s team=%s", command, team_id)
+        await _respond_to_command(
+            response_url,
+            "Something went wrong running that competitive scan. Please try again.",
+        )
+    finally:
+        _clear_slack_report(marker)
+
+
+async def _respond_to_command(response_url: str, text: str) -> None:
+    """Post a follow-up to a slash command's `response_url` (valid for 30
+    minutes, 5 uses). Ephemeral so a long report's progress chatter doesn't
+    clutter the channel. No-op without a URL; never raises."""
+    if not response_url:
+        return
+
+    def _post() -> None:
+        requests.post(
+            response_url,
+            json={"response_type": "ephemeral", "text": text},
+            timeout=15,
+        )
+
+    try:
+        await asyncio.to_thread(_post)
+    except Exception:  # noqa: BLE001 — the in-channel post is the real delivery
+        logger.warning("slack command response_url post failed", exc_info=True)
 
 
 def _slack_token_json(company_id: str, user_id: str) -> tuple[dict, dict]:
