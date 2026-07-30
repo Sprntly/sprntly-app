@@ -3673,17 +3673,19 @@ export function ChatScreen() {
     }
   }
 
-  const filteredSkills = useMemo(
-    () =>
-      // Custom skills first — the user's own workflows outrank the catalog.
-      [...customSkills, ...skills].filter((s) =>
+  const filteredSkills = useMemo(() => {
+    // Custom skills first — the user's own workflows outrank the catalog.
+    // A custom skill sharing a built-in's trigger REPLACES it (PRD 1854
+    // override): drop the built-in row so one trigger never lists twice.
+    const customTriggers = new Set(customSkills.map((s) => s.trigger))
+    return [...customSkills, ...skills.filter((s) => !customTriggers.has(s.trigger))].filter(
+      (s) =>
         slashFilter === "" ||
         s.trigger.toLowerCase().includes("/" + slashFilter) ||
         s.label.toLowerCase().includes(slashFilter) ||
         s.description.toLowerCase().includes(slashFilter),
-      ),
-    [customSkills, skills, slashFilter],
-  )
+    )
+  }, [customSkills, skills, slashFilter])
   const slashOpen = showSlash && filteredSkills.length > 0
   // Keep the highlight in range as the filtered list shrinks/grows.
   useEffect(() => {

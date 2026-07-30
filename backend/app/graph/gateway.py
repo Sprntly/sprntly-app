@@ -63,9 +63,11 @@ def _build_method_prefix(
     `spec` lets a caller inject a spec that is NOT a vendored disk skill — a
     company's uploaded custom skill (PRD 1854), resolved from the DB by
     qa_agent via app.skills.resolver. When None (every built-in call site),
-    the id loads from disk exactly as before; the injected block and version
-    suffix are built identically either way, so custom and built-in skills
-    are indistinguishable downstream of this line.
+    the id loads from disk exactly as before. The ONE deliberate difference
+    for an injected spec: its header carries a `company-uploaded` tag, so the
+    untrusted method text is labeled where the model reads it (the system
+    prompt's custom-skill addendum points at that tag). The version suffix
+    is built identically either way.
 
     The skill's `references/*` docs are appended to the block under
     `### REFERENCE: <name>` headers. SKILL.md instructs the model to *read*
@@ -78,8 +80,10 @@ def _build_method_prefix(
     are deliberately NOT injected: the app renders from the structured payload,
     so the template is a downstream view, not a prompt input.
     """
-    spec = spec if spec is not None else get_skill(skill)
-    header = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n"
+    injected = spec is not None
+    spec = spec if injected else get_skill(skill)
+    origin = ", company-uploaded" if injected else ""
+    header = f"## METHOD (skill: {spec.id} @{spec.content_hash}{origin})\n"
     block = header + spec.method
     if skill_module:
         try:
