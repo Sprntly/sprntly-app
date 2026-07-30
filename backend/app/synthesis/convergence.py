@@ -31,6 +31,31 @@ CONNECTED_SOURCE_TYPES: frozenset[str] = frozenset({
     "outcome_measured",
 })
 
+# Provenance origins whose signals are NEVER evidence, whatever source_type they
+# carry. Today: `web_research` — facts scraped off the public web about the
+# company's own footprint (app/company_research.py).
+#
+# Belt to the extractor's braces. The producer clamps research signals to
+# `agent_inferred` (extract_document(force_source_type=...)), which is what
+# actually keeps them out of CONNECTED_SOURCE_TYPES. This set is the SECOND
+# line: even a signal that reaches the graph mis-stamped — a future caller that
+# forgets the clamp, a hand-inserted row, a backfill — is excluded here from
+# every dimension the evidence gate reads (source_types → breadth /
+# connected_breadth, and connected_signal_count).
+#
+# Why it must be both: has_sufficient_evidence keys on SOURCE_TYPE, not on
+# origin, so origin by itself defends nothing. A scraped "$49/seat" labelled
+# `revenue` plus a scraped testimonial labelled `customer_voice` would give a
+# theme connected_breadth == 2 and open the gate — generating a brief out of the
+# company's own marketing site for every new signup. See
+# test_company_research.test_scraped_facts_mis_stamped_as_evidence_stay_gated.
+#
+# Research signals still count toward signal_count, effective_weight and the
+# evidence list: once a tenant has REAL evidence and a brief is warranted, the
+# research context is useful. They just cannot be what makes a brief happen,
+# and they never inflate a "N sources converging" claim.
+NON_EVIDENCE_ORIGINS: frozenset[str] = frozenset({"web_research"})
+
 
 @dataclass
 class ThemeConvergence:
@@ -59,9 +84,17 @@ class ThemeConvergence:
     # instead of an empty one. Both <= signal_count.
     upload_signal_count: int = 0
     connector_signal_count: int = 0
+    # Distinct signals on this theme whose provenance origin is in
+    # NON_EVIDENCE_ORIGINS (scraped web research). Counted for observability
+    # only — deliberately absent from source_types and connected_signal_count,
+    # so these can never open the evidence gate. <= signal_count.
+    research_signal_count: int = 0
 
     @property
     def breadth(self) -> int:
+        """Distinct source types agreeing — EXCLUDING non-evidence origins (see
+        NON_EVIDENCE_ORIGINS), so a scraped web fact never inflates a
+        "N sources converging" claim in the brief."""
         return len(self.source_types)
 
     @property
@@ -128,11 +161,19 @@ def compute_convergence(
             tc.signal_count += 1
             if tc.latest_signal_at is None or sig.valid_at > tc.latest_signal_at:
                 tc.latest_signal_at = sig.valid_at
-            tc.source_types.add(sig.source_type)
-            if sig.source_type in CONNECTED_SOURCE_TYPES:
-                tc.connected_signal_count += 1
             prov = sig.provenance or {}
             origin = prov.get("origin")
+            if origin in NON_EVIDENCE_ORIGINS:
+                # Scraped web research: never evidence, whatever source_type the
+                # extracting model chose. Kept out of source_types entirely, so
+                # it contributes to neither breadth nor connected_breadth nor
+                # connected_signal_count — the three dimensions the sufficiency
+                # gate reads. See NON_EVIDENCE_ORIGINS.
+                tc.research_signal_count += 1
+            else:
+                tc.source_types.add(sig.source_type)
+                if sig.source_type in CONNECTED_SOURCE_TYPES:
+                    tc.connected_signal_count += 1
             # Connector-category uploads carry origin="connector" (they ARE
             # that connector's data for scoring/source_type purposes) plus
             # channel="upload" (the bytes came from a manual upload). For the
@@ -184,8 +225,9 @@ def is_upload_only(convergence: list[ThemeConvergence]) -> bool:
     True iff (a) at least one signal across all themes carries the ``upload``
     provenance origin (so there IS uploaded-doc evidence), AND (b) NO signal
     carries the ``connector`` origin (no live connector sync has contributed).
-    The origin is stamped at ingest by extract_document; legacy / onboarding /
-    research signals carry no origin and count as neither — so a tenant with
+    The origin is stamped at ingest by extract_document; legacy / onboarding
+    signals carry no origin and deep-research signals carry ``web_research``
+    (see NON_EVIDENCE_ORIGINS), so all of those count as neither — a tenant with
     only onboarding metadata is NOT upload-only (it has no upload-origin signal),
     and a tenant with any connector evidence is NOT upload-only. This is the
     narrowest provenance condition that distinguishes the upload-only case
@@ -225,7 +267,8 @@ def has_sufficient_evidence(
         sources never reaches it and its gate behavior is unchanged.
 
     Otherwise the only evidence is onboarding / business-context / agent-inferred
-    metadata (pm_manual, agent_inferred, verbal_claim) or a single thin source
+    metadata (pm_manual, agent_inferred, verbal_claim), scraped web research
+    (excluded by origin — see NON_EVIDENCE_ORIGINS), or a single thin source
     with no uploaded docs, so we return False and the caller emits an EMPTY brief
     rather than fabricating low-value findings from profile metadata.
 

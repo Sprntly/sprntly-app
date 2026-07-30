@@ -125,9 +125,19 @@ def extract_document(
     otherwise be extracted as revenue+analytics evidence and could open the gate
     on the company's own stated plans. Takes precedence over
     ``source_type_default``; the value must be in SIGNAL_SOURCE_TYPES.
+    Two callers today, for the same reason: the roadmap ingest (a stated
+    plan is not measured evidence) and the deep company-research sweep
+    (scraped web copy is not measured evidence). Both pin
+    ``agent_inferred``. Enforced here rather than asked for in a prompt —
+    a prompt can be talked out of it.
 
     ``provenance_extra`` is merged into each signal's provenance verbatim
     (e.g. {"channel": "upload", "category": "voice"} for category uploads)."""
+    if force_source_type and force_source_type not in SIGNAL_SOURCE_TYPES:
+        raise ValueError(
+            f"force_source_type={force_source_type!r} is not a valid "
+            f"signal source_type"
+        )
     cfg = resolve_config(enterprise_id)
     tau_high = cfg["resolution"]["tau_high"]
 
