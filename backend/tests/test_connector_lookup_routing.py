@@ -62,6 +62,20 @@ def test_unnamed_questions_are_not_intercepted():
         assert is_connector_lookup(question) is None, question
 
 
+def test_naming_a_tool_as_a_SUBJECT_is_not_a_lookup():
+    """A competitive-intelligence request lists products as subjects. is_jira_lookup
+    already refuses these (its own negative fixtures); the connector router must
+    too, or it steals every CIR that happens to name a tool."""
+    for question in [
+        "do a competitive analysis of Linear, Jira and Asana",
+        "how does our roadmap compare to Jira and Asana?",
+        "what are the alternatives to zendesk",
+        "should we migrate from clickup to jira",
+        "is hubspot better than salesforce for us",
+    ]:
+        assert is_connector_lookup(question) is None, question
+
+
 def test_write_commands_are_vetoed():
     """We can read. A command to write must fall through to normal routing rather
     than a read path implying it posted something."""
