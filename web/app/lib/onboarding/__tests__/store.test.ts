@@ -139,9 +139,20 @@ describe("createWorkspace slug generation", () => {
     await createWorkspace(baseInput("  -Acme  "))
     expect(capturedRow).not.toBeNull()
     const row = capturedRow as unknown as Record<string, unknown>
+    // Restore BEFORE asserting: this spy is process-wide, so an assertion that
+    // throws below would otherwise leak it into every later test in the file.
+    supabaseStub.from = orig
+
     expect(row.display_name).toBe("-Acme")
     expect(row.slug).toMatch(SLUG_FORMAT)
-    supabaseStub.from = orig
+
+    // A newly onboarded company must NOT carry a ds_claude_analysis key: the
+    // backend gate (qa_agent._ds_claude_enabled) treats a MISSING key as ON, so
+    // the absence here is what enrolls new companies by default. Seeding the key
+    // — in either direction — would silently take that decision away from the
+    // backend default and freeze it per-company at signup time.
+    const flags = (row.feature_flags ?? {}) as Record<string, unknown>
+    expect(Object.keys(flags)).not.toContain("ds_claude_analysis")
   })
 
   it("regenerates a fresh token and retries on a 23505 unique collision", async () => {

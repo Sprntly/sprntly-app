@@ -473,17 +473,30 @@ def _maybe_verify(payload: dict, enterprise_id: str) -> dict:
 def _ds_claude_enabled(enterprise_id: Optional[str]) -> bool:
     """Is the Claude data-analysis engine enabled for this company?
 
-    `ds_claude_analysis` in companies.feature_flags, DEFAULT OFF — the opposite
-    of the module entitlements, which grandfather absent flags ON. A read failure
-    also resolves OFF, so the deterministic engine is what an unreachable/legacy
-    flags column gets.
+    `ds_claude_analysis` in companies.feature_flags. DEFAULT ON since 2026-07-30
+    (Apurva): a missing key means ON, so every existing company gets the engine
+    without a backfill and named opt-outs are explicit `false` rows — the same
+    grandfather pattern chat_intent_envelope shipped under.
+
+    THREE states, and the third is why this isn't a one-liner:
+      * explicit `false`            → OFF (the deterministic engine)
+      * key absent                  → ON  (grandfathered / newly onboarded)
+      * flags UNKNOWN (read failed) → OFF, deliberately
+
+    That last case diverges from #893, which fails OPEN. The difference is what
+    the flag gates: chat_intent_envelope picks a routing strategy, while this one
+    decides whether a tenant's raw uploaded CSVs leave the box for the Anthropic
+    Files API. "I couldn't read your flags" must not resolve to "so I shipped
+    your data" — and the fallback costs the user nothing, since the v5.8 engine
+    answers instead. `feature_flags_for_company` can't express this (it collapses
+    a failed read into `{}`), hence `read_feature_flags`, which returns None.
     """
     if not enterprise_id:
         return False
     try:
-        from app.entitlements import feature_flags_for_company
+        from app.entitlements import ds_claude_analysis_enabled, read_feature_flags
 
-        return bool(feature_flags_for_company(enterprise_id).get("ds_claude_analysis"))
+        return ds_claude_analysis_enabled(read_feature_flags(enterprise_id))
     except Exception:  # noqa: BLE001 — flag read must never break the ask
         logger.exception("ds_claude_analysis flag read failed for %s", enterprise_id)
         return False

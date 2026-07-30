@@ -126,13 +126,40 @@ def company_research_enabled(flags: dict | None) -> bool:
     return True
 
 
-def feature_flags_for_company(company_id: str) -> dict:
-    """A company's raw feature_flags dict, `{}` on any failure.
+def ds_claude_analysis_enabled(flags: dict | None) -> bool:
+    """Resolve the `ds_claude_analysis` flag from a raw feature_flags dict.
 
-    Lenient on READ FAILURE only (legacy schema without the column, fake
-    test client, transient DB error ⇒ {} ⇒ every module resolves ON,
-    matching the grandfather semantics) — an explicit false stored in the
-    row is always respected. Mirrors prototype_enabled_for_company.
+    Gates the Claude code-execution data-analysis engine (app/ds/claude_analysis)
+    against the deterministic v5.8 engine. DEFAULT ON since 2026-07-30 (Apurva):
+    a missing key is ON, so existing companies get it without a backfill and only
+    an explicit `ds_claude_analysis: false` — set per company in the staff panel —
+    opts out. Same grandfather shape as `agents` / `top_insights` /
+    `company_research`.
+
+    ONE DELIBERATE DIVERGENCE from its siblings: an UNKNOWN flag state resolves
+    OFF, not ON. `None` here means the read never reached the row (see
+    `read_feature_flags`), and this flag does not gate a UI module — it gates
+    whether a company's raw uploaded CSVs are shipped to the Anthropic Files API.
+    Fail-open is the right default for "can this tenant see a feature"; it is the
+    wrong default for "may we send this tenant's data off the box", where the
+    safe answer to "I don't know" is no. The cost of failing closed is the
+    deterministic engine answering instead — a working answer, not an error.
+    """
+    if not isinstance(flags, dict):
+        return False
+    if "ds_claude_analysis" in flags:
+        return bool(flags["ds_claude_analysis"])
+    return True
+
+
+def read_feature_flags(company_id: str) -> dict | None:
+    """A company's raw feature_flags dict, or None when the READ itself failed.
+
+    Distinguishes the two cases `feature_flags_for_company` deliberately
+    collapses into `{}`: flags that genuinely contain no keys, and a read that
+    never reached the row (legacy schema, fake test client, transient DB error).
+    Callers that grandfather a missing key ON cannot tell those apart from `{}`
+    alone — and a caller that must fail CLOSED on an unknown state needs to.
     """
     from app.db.client import require_client
 
@@ -147,12 +174,29 @@ def feature_flags_for_company(company_id: str) -> dict:
             .data
             or []
         )
-    except Exception:  # noqa: BLE001 — fail open, see docstring
-        return {}
+    except Exception:  # noqa: BLE001 — the caller decides open vs closed
+        logger.warning("feature_flags read failed for %s", company_id, exc_info=True)
+        return None
     if not rows:
         return {}
     flags = rows[0].get("feature_flags")
     return flags if isinstance(flags, dict) else {}
+
+
+def feature_flags_for_company(company_id: str) -> dict:
+    """A company's raw feature_flags dict, `{}` on any failure.
+
+    Lenient on READ FAILURE only (legacy schema without the column, fake
+    test client, transient DB error ⇒ {} ⇒ every module resolves ON,
+    matching the grandfather semantics) — an explicit false stored in the
+    row is always respected. Mirrors prototype_enabled_for_company.
+
+    Unchanged contract, now expressed over `read_feature_flags`: a failed read
+    (None) and empty flags ({}) both collapse to {} here, which is exactly the
+    fail-open behaviour every module gate already depends on.
+    """
+    flags = read_feature_flags(company_id)
+    return flags if flags is not None else {}
 
 
 def require_agents_module(
