@@ -12,7 +12,7 @@ vi.hoisted(() => {
 
 const downloadPdf = vi.fn((..._a: unknown[]) => Promise.resolve<unknown>(null))
 const share = vi.fn((..._a: unknown[]) => Promise.resolve<unknown>(null))
-const saveAs = vi.fn()
+const saveBlob = vi.fn()
 
 vi.mock("../../../lib/api", () => ({
   reportsApi: {
@@ -20,7 +20,9 @@ vi.mock("../../../lib/api", () => ({
     share: (...a: unknown[]) => share(...a),
   },
 }))
-vi.mock("file-saver", () => ({ saveAs: (...a: unknown[]) => saveAs(...a) }))
+vi.mock("../../../lib/saveBlob", () => ({
+  saveBlob: (...a: unknown[]) => saveBlob(...a),
+}))
 
 import { ReportPanel } from "../ReportPanel"
 // Type-only import: erased at runtime, so it does not defeat the module mock.
@@ -77,7 +79,7 @@ describe("ReportPanel — share menu", () => {
     await act(async () => { fireEvent.click(screen.getByTestId("report-download-pdf")) })
 
     expect(downloadPdf).toHaveBeenCalledWith(4)
-    await waitFor(() => expect(saveAs).toHaveBeenCalledWith(blob, "voice-of-customer-q2.pdf"))
+    await waitFor(() => expect(saveBlob).toHaveBeenCalledWith(blob, "voice-of-customer-q2.pdf"))
   })
 
   it("says so when the renderer is unavailable instead of saving a broken file", async () => {
@@ -88,7 +90,7 @@ describe("ReportPanel — share menu", () => {
 
     await waitFor(() => expect(onToast).toHaveBeenCalled())
     expect(onToast.mock.calls[0][0]).toContain("PDF export failed")
-    expect(saveAs).not.toHaveBeenCalled()
+    expect(saveBlob).not.toHaveBeenCalled()
   })
 
   it("shows no link until sharing is turned on", () => {

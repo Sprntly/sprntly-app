@@ -35,6 +35,7 @@ WITHOUT allow-scripts):
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,10 @@ _ALLOWED_SUBRESOURCE_HOSTS = frozenset({
 # hold a request open indefinitely.
 _CONTENT_TIMEOUT_MS = 8000
 _FONT_SETTLE_TIMEOUT_MS = 3000
-_PDF_TIMEOUT_MS = 20000
+# Seconds, and applied with asyncio.wait_for rather than a Playwright kwarg:
+# `page.pdf()` takes no `timeout` argument (unlike set_content / wait_for_*), so
+# the cap has to be imposed from outside the call.
+_PDF_TIMEOUT_S = 20.0
 
 # The documents set `.page{max-width:100%;padding:0}` under @media print and
 # expect the printer margins to supply the whitespace, so the margins here are
@@ -133,13 +137,16 @@ async def render_report_pdf(html: str) -> bytes | None:
                     )
                 except Exception:  # noqa: BLE001 — settle is best-effort.
                     pass
-                return await page.pdf(
-                    format="A4",
-                    # The cards, badges and chart fills ARE the document; without
-                    # this Chromium drops every background in print media.
-                    print_background=True,
-                    margin=dict(_PDF_MARGIN),
-                    timeout=_PDF_TIMEOUT_MS,
+                return await asyncio.wait_for(
+                    page.pdf(
+                        format="A4",
+                        # The cards, badges and chart fills ARE the document;
+                        # without this Chromium drops every background in print
+                        # media.
+                        print_background=True,
+                        margin=dict(_PDF_MARGIN),
+                    ),
+                    timeout=_PDF_TIMEOUT_S,
                 )
             finally:
                 # Dispose per call on every path, including errors (no pool).

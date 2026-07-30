@@ -8,15 +8,9 @@ import { IconClose, IconCopy, IconCheck } from "./app-icons"
 // the two menus are visually identical.
 import { IconShare, IconFileTypePdf } from "@tabler/icons-react"
 import { reportKindLabel } from "../../lib/reportKind"
+import { slugifyTitle } from "../../lib/prdExport"
+import { saveBlob } from "../../lib/saveBlob"
 import { reportsApi, type ReportDoc } from "../../lib/api"
-
-/** Save a fetched blob to disk. `file-saver` is lazy-imported so it never weighs
- *  down the initial bundle — only a click pays for it (same posture as
- *  lib/prdExport.ts). */
-async function saveBlob(blob: Blob, filename: string): Promise<void> {
-  const { saveAs } = await import("file-saver")
-  saveAs(blob, filename)
-}
 
 /**
  * The report's Share menu: download the PDF, and turn a public link on or off.
@@ -61,15 +55,19 @@ function ReportShareMenu({
     setBusy("pdf")
     try {
       const { blob, filename } = await reportsApi.downloadPdf(report.id)
-      await saveBlob(blob, filename)
+      saveBlob(blob, filename || `${slugifyTitle(report.title)}.pdf`)
       setOpen(false)
-    } catch {
+    } catch (err) {
       // 503 = renderer unavailable. Say so rather than saving a broken file.
+      // The reason goes to the console: a failed download is otherwise
+      // indistinguishable from a failed render, and the two are fixed in
+      // different places.
+      console.error("report PDF download failed", err)
       onToast("PDF export failed", "Could not generate the PDF. Please try again.")
     } finally {
       setBusy(null)
     }
-  }, [report.id, onToast])
+  }, [report.id, report.title, onToast])
 
   const handleToggleShare = useCallback(async () => {
     const turningOn = report.share_mode === "private"

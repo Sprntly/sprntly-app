@@ -14,7 +14,7 @@ vi.hoisted(() => {
 const publicGet = vi.fn((..._a: unknown[]) => Promise.resolve<unknown>(null))
 const publicUnlock = vi.fn((..._a: unknown[]) => Promise.resolve<unknown>(null))
 const publicPdf = vi.fn((..._a: unknown[]) => Promise.resolve<unknown>(null))
-const saveAs = vi.fn()
+const saveBlob = vi.fn()
 
 // The ApiError class is defined INSIDE the factory: the factory body runs at
 // import time (before the module's top-level consts initialise), so referencing
@@ -35,7 +35,7 @@ vi.mock("../../lib/api", () => {
     },
   }
 })
-vi.mock("file-saver", () => ({ saveAs: (...a: unknown[]) => saveAs(...a) }))
+vi.mock("../../lib/saveBlob", () => ({ saveBlob: (...a: unknown[]) => saveBlob(...a) }))
 
 import { ApiError as FakeApiError } from "../../lib/api"
 import { PublicReportViewer } from "../PublicReportViewer"
@@ -161,6 +161,6 @@ describe("PublicReportViewer", () => {
     })
 
     expect(publicPdf).toHaveBeenCalledWith("tok-123", "letmein")
-    await waitFor(() => expect(saveAs).toHaveBeenCalledWith(blob, "voc-q2.pdf"))
+    await waitFor(() => expect(saveBlob).toHaveBeenCalledWith(blob, "voc-q2.pdf"))
   })
 })

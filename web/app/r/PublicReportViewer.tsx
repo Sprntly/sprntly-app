@@ -15,6 +15,7 @@
 
 import { useCallback, useEffect, useState } from "react"
 import { HtmlReportView } from "../components/shared/HtmlReportView"
+import { saveBlob } from "../lib/saveBlob"
 import { ApiError, publicReportsApi, type PublicReport } from "../lib/api"
 import { reportTokenFromLocation } from "./reportTokenFromPathname"
 
@@ -157,10 +158,10 @@ export function PublicReportViewer() {
       const { blob, filename } = await publicReportsApi.downloadPdf(
         token, passcode || undefined,
       )
-      const { saveAs } = await import("file-saver")
-      saveAs(blob, filename)
-    } catch {
+      saveBlob(blob, filename || "report.pdf")
+    } catch (err) {
       // Nothing to fall back to on a page with no toast host — say it inline.
+      console.error("public report PDF download failed", err)
       window.alert("Couldn't generate the PDF right now. Please try again.")
     } finally {
       setDownloading(false)

@@ -44,6 +44,28 @@ async def test_blank_document_renders_nothing_rather_than_a_blank_page():
     assert await rp.render_report_pdf("   \n  ") is None
 
 
+def test_the_pdf_kwargs_we_pass_are_accepted_by_the_installed_playwright():
+    """Guard against Playwright API drift.
+
+    Every test here stubs the browser out, so a kwarg Playwright does not accept
+    would sail through the suite and fail only in a real render — which is exactly
+    what happened with `page.pdf(timeout=...)` (accepted by set_content and the
+    wait_for_* family, but NOT by pdf(), hence the asyncio.wait_for wrapper).
+    Checking the real signature costs nothing and needs no Chromium.
+    """
+    import inspect
+
+    from playwright.async_api import Page
+
+    accepted = set(inspect.signature(Page.pdf).parameters)
+    for kwarg in ("format", "print_background", "margin"):
+        assert kwarg in accepted, f"Page.pdf no longer accepts {kwarg!r}"
+    assert "timeout" not in accepted, (
+        "Page.pdf now takes a timeout — the asyncio.wait_for wrapper in "
+        "render_report_pdf can be simplified"
+    )
+
+
 async def test_missing_playwright_returns_none_instead_of_raising(monkeypatch):
     """conftest already stubs the seam to raise ImportError; assert the contract
     explicitly since the route depends on None (→ 503) rather than an exception."""
