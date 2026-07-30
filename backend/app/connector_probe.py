@@ -253,10 +253,16 @@ def probe_connection(provider: str, row: dict) -> tuple[bool, str]:
         user_obj = fireflies_apikey.fetch_authenticated_user(api_key) or {}
     elif provider == gong_auth.GONG_PROVIDER:
         # Re-run the workspaces call the connect route validated with; a
-        # revoked key pair reads as a soft rejection ("reconnect required").
-        token = token_json.get(gong_auth.BASIC_TOKEN_KEY) or ""
+        # revoked or EXPIRED key pair (Gong pairs expire) reads as a soft
+        # rejection → "reconnect required".
+        credential = token_json.get(gong_auth.CREDENTIAL_KEY) or ""
         try:
-            workspaces = gong_auth.fetch_workspaces(token)
+            base_url, token = gong_auth.parse_credential(credential)
+        except (ValueError, KeyError, json.JSONDecodeError) as e:
+            raise ProbeError("Stored Gong credential unreadable",
+                             reason="unreadable") from e
+        try:
+            workspaces = gong_auth.fetch_workspaces(base_url, token)
             user_obj = {
                 "name": gong_auth.account_label_from_workspaces(workspaces),
             }

@@ -245,7 +245,13 @@ def _seed_from_connectors(facade: GraphFacade, company_id: str) -> dict:
                 decrypt_token_json(row["token_json_encrypted"])
             )
             token = token_for(provider, token_json)
-            r = sync_provider(facade, company_id, provider, token=token)
+            r = sync_provider(
+                facade, company_id, provider, token=token,
+                # Incremental for providers that support it — the seed runs
+                # on every synthesis, so re-requesting a full window each
+                # time would be pure waste.
+                last_sync_at=row.get("last_sync_at"),
+            )
             totals["providers"] += 1
             totals["signals"] += r.get("signals", 0)
         except Exception:  # noqa: BLE001 — error-isolation per connector

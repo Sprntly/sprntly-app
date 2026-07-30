@@ -166,9 +166,22 @@ describe("connectorsApi Slack methods", () => {
     await connectorsApi.connectGongWithCredentials("AK", "SECRET")
     expect(lastCall!.url).toBe(`${API_URL}/v1/connectors/gong/credentials`)
     expect(lastCall!.init?.method).toBe("POST")
+    // No base URL sent when the user leaves it blank — the backend falls
+    // back to the common Gong host.
     expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
       access_key: "AK",
       access_key_secret: "SECRET",
+    })
+  })
+
+  it("connectGongWithCredentials includes api_base_url for region-specific tenants", async () => {
+    await connectorsApi.connectGongWithCredentials(
+      "AK", "SECRET", "https://us-12345.api.gong.io",
+    )
+    expect(JSON.parse(String(lastCall!.init!.body))).toEqual({
+      access_key: "AK",
+      access_key_secret: "SECRET",
+      api_base_url: "https://us-12345.api.gong.io",
     })
   })
 

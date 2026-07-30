@@ -1,10 +1,10 @@
 """Gong puller — distilled call intelligence → RawRecords (voice of customer).
 
-REST API (api.gong.io/v2), Basic auth with a workspace Access Key + Secret
-(see app/connectors/gong.py — the runner hands us the precomputed basic
-token). One endpoint does everything: POST /v2/calls/extensive lists calls
-in a date window WITH the content we ask for via `contentSelector`, cursor-
-paginated.
+REST API, Basic auth with an Access Key + Secret pair. The runner hands us
+the stored credential string (base URL + basic token — the base URL is
+per-company, see app/connectors/gong.py). One endpoint does everything:
+POST {base}/calls/extensive lists calls in a date window WITH the content we
+ask for via `contentSelector`, cursor-paginated.
 
 Same no-raw-dump contract as the Fireflies puller (§6): the KG-ingest path
 pulls the DISTILLED layer only — Gong's own call brief, key points,
@@ -25,15 +25,21 @@ from typing import Any, Iterator, Optional
 
 import requests
 
-from app.connectors.gong import API_BASE
+from app.connectors.gong import parse_credential
 from app.kg_ingest.types import RawRecord
 
 logger = logging.getLogger(__name__)
 
 _TIMEOUT = 30
-_LIMIT = 50            # KG-ingest cap per sync — newest calls win, pilot-scale
+# Per-sync record cap — a cost bound, not a coverage policy. In steady state
+# the runner pulls INCREMENTALLY (see runner.INCREMENTAL_PULLERS), so a cycle
+# holds only the calls since the last sync and never approaches this. It binds
+# only the one-time backfill on the first sync, where a very busy 90-day
+# history is truncated to whatever Gong returns first (their ordering, not
+# ours — we deliberately don't claim "newest").
+_LIMIT = 100
 _PAGE_SIZE = 100       # Gong's max page size for /calls/extensive
-_WINDOW_DAYS = 90      # default lookback when the runner passes no window
+_WINDOW_DAYS = 90      # backfill lookback when no `since` is supplied
 _TEXT_CAP = 3000       # per-record extraction budget (mirrors fireflies)
 
 # Ask Gong for the distilled layer only — no media, no transcript structure.
@@ -57,13 +63,15 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _post_extensive(token: str, body: dict[str, Any]) -> dict[str, Any]:
-    """One /v2/calls/extensive page. Raises on transport/API error (the
+def _post_extensive(
+    base_url: str, token: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    """One {base}/calls/extensive page. Raises on transport/API error (the
     runner isolates per-provider failures). Gong signals 'no calls in this
     window' as HTTP 404 with a requestId body — normalized to an empty page
     rather than an error."""
     r = requests.post(
-        f"{API_BASE}/calls/extensive",
+        f"{base_url}/calls/extensive",
         json=body,
         headers={"Authorization": f"Basic {token}",
                  "Content-Type": "application/json"},
@@ -119,7 +127,7 @@ def _distill(call: dict[str, Any]) -> str:
 
 
 def pull(
-    token: str,
+    credential: str,
     *,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
@@ -127,10 +135,16 @@ def pull(
 ) -> Iterator[RawRecord]:
     """KG-ingest pull: distilled call intelligence → RawRecords.
 
-    Defaults to the last _WINDOW_DAYS ending now (Gong requires an explicit
-    date window). Pages newest-window content up to `limit` calls; repeated
-    syncs are cheap downstream — the runner's content-hash ledger skips
-    already-extracted records before any LLM call."""
+    `credential` is the stored Gong credential string (base URL + basic
+    token), handed over whole by the runner's token_for().
+
+    Gong requires an explicit date window. `since` is what makes a scheduled
+    sync incremental — the runner passes the connection's last_sync_at (minus
+    a safety overlap), so each cycle fetches just that delta. Without it the
+    window falls back to the last _WINDOW_DAYS, the first-sync backfill.
+    Re-fetched calls are cheap downstream: the runner's content-hash ledger
+    drops already-extracted records before any LLM call."""
+    base_url, token = parse_credential(credential)
     now = datetime.now(timezone.utc)
     filter_body: dict[str, Any] = {
         "fromDateTime": _iso(since or now - timedelta(days=_WINDOW_DAYS)),
@@ -146,7 +160,7 @@ def pull(
         }
         if cursor:
             body["cursor"] = cursor
-        page = _post_extensive(token, body)
+        page = _post_extensive(base_url, token, body)
 
         calls = page.get("calls") or []
         for call in calls:

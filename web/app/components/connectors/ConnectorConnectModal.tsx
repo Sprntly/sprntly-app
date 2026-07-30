@@ -249,9 +249,10 @@ export function ConnectorConnectModalView({
                 <>
                   <p className="conn-modal-blurb">
                     Connect {item.name} with an API Access Key. A {item.name}{" "}
-                    <strong>technical administrator</strong> can create one
-                    under Company settings → Ecosystem → API; Sprntly uses it
-                    to read call briefs and key points as customer evidence.
+                    <strong>administrator</strong> creates one under Admin
+                    center → Settings → Ecosystem → API → “Get API Key”;
+                    Sprntly uses it to read call briefs and key points as
+                    customer evidence.
                   </p>
                   <label className="field-label" htmlFor="conn-modal-cred-user">
                     Access key
@@ -282,6 +283,25 @@ export function ConnectorConnectModalView({
                     placeholder="Access key secret"
                     autoComplete="new-password"
                   />
+                  <label className="field-label" htmlFor="conn-modal-cred-url">
+                    API base URL <span className="field-optional">(optional)</span>
+                  </label>
+                  <input
+                    id="conn-modal-cred-url"
+                    type="url"
+                    className="input"
+                    value={credentials.baseUrl}
+                    onChange={(e) =>
+                      onCredentialsChange({ ...credentials, baseUrl: e.target.value })
+                    }
+                    placeholder="https://api.gong.io/v2"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <p className="conn-modal-hint">
+                    Leave blank unless your {item.name} API page shows a
+                    different base URL (some accounts are region-specific).
+                  </p>
                 </>
               ) : (
                 /* Self-hosted tools (Superset): URL + service-account login. */
@@ -631,10 +651,12 @@ export function ConnectorConnectModal({
         onConnected()
       } else if (providerId === "gong") {
         // Key-pair form: Access Key rides the username slot, Secret the
-        // password slot (see the View's key-pair credentials branch).
+        // password slot, and the OPTIONAL per-tenant API base URL rides
+        // baseUrl (see the View's key-pair credentials branch).
         await connectorsApi.connectGongWithCredentials(
           credentials.username.trim(),
           credentials.password.trim(),
+          credentials.baseUrl.trim() || undefined,
         )
         onConnected()
       } else {

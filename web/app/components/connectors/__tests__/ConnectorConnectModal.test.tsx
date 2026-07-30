@@ -266,14 +266,19 @@ const SUPERSET_ITEM: ConnectorItemRow = {
 }
 
 describe("ConnectorConnectModalView — credentials mode", () => {
-  it("Gong shows an Access key + Secret form, no instance URL", () => {
+  it("Gong shows Access key + Secret plus an OPTIONAL API base URL", () => {
     const html = render({ item: GONG_ITEM, authType: "credentials" })
     expect(html).toContain("Access key")
     expect(html).toContain("Access key secret")
-    // Gong is SaaS — an instance URL would be meaningless.
+    // Gong is SaaS — no self-hosted "Instance URL"; the base URL field is
+    // optional, for region-specific tenants only.
     expect(html).not.toContain("Instance URL")
-    // The blurb points at who can mint the key.
-    expect(html).toContain("technical administrator")
+    expect(html).toContain("API base URL")
+    expect(html).toContain("(optional)")
+    expect(html).toContain("region-specific")
+    // The blurb points at who can mint the key, and where.
+    expect(html).toContain("administrator")
+    expect(html).toContain("Ecosystem")
   })
 
   it("Gong's Connect stays disabled until BOTH key and secret are filled", () => {

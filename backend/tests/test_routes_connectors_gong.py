@@ -11,6 +11,7 @@ import base64
 import importlib
 import json
 import sys
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -60,13 +61,45 @@ def test_basic_token_is_base64_of_key_colon_secret(gong_env):
     assert base64.b64decode(token).decode() == "AK:SECRET"
 
 
-def test_token_payload_keeps_pair_and_precomputed_basic_token(gong_env):
+def test_credential_to_store_bundles_base_url_and_basic_token(gong_env):
     from app.connectors import gong
 
-    payload = json.loads(gong.token_payload_to_store("AK", "SECRET"))
+    payload = json.loads(
+        gong.credential_to_store(gong.DEFAULT_API_BASE, "AK", "SECRET")
+    )
     assert payload["access_key"] == "AK"
     assert payload["access_key_secret"] == "SECRET"
-    assert payload[gong.BASIC_TOKEN_KEY] == gong.basic_token("AK", "SECRET")
+    base_url, token = gong.parse_credential(payload[gong.CREDENTIAL_KEY])
+    assert base_url == gong.DEFAULT_API_BASE
+    assert token == gong.basic_token("AK", "SECRET")
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, "https://api.gong.io/v2"),
+    ("", "https://api.gong.io/v2"),
+    ("   ", "https://api.gong.io/v2"),
+    # Region-specific tenants: host alone gets /v2 appended…
+    ("https://us-12345.api.gong.io", "https://us-12345.api.gong.io/v2"),
+    # …and a full API root is kept as-is (trailing slash stripped).
+    ("https://us-12345.api.gong.io/v2/", "https://us-12345.api.gong.io/v2"),
+])
+def test_normalize_api_base(gong_env, raw, expected):
+    from app.connectors import gong
+
+    assert gong.normalize_api_base(raw) == expected
+
+
+@pytest.mark.parametrize("bad", [
+    "api.gong.io",                      # no scheme
+    "ftp://api.gong.io",                # wrong scheme
+    "https://",                         # no host
+    "https://api.gong.io/v2?x=1",       # query string
+])
+def test_normalize_api_base_rejects_bad_urls(gong_env, bad):
+    from app.connectors import gong
+
+    with pytest.raises(ValueError):
+        gong.normalize_api_base(bad)
 
 
 def test_fetch_workspaces_calls_api_with_basic_auth(gong_env):
@@ -75,7 +108,7 @@ def test_fetch_workspaces_calls_api_with_basic_auth(gong_env):
     with patch(
         "app.connectors.gong.requests.get", return_value=_workspaces_resp()
     ) as mock_get:
-        workspaces = gong.fetch_workspaces("basic-token")
+        workspaces = gong.fetch_workspaces(gong.DEFAULT_API_BASE, "basic-token")
 
     assert [w["name"] for w in workspaces] == ["Meridian Health"]
     call_args = mock_get.call_args
@@ -91,7 +124,7 @@ def test_fetch_workspaces_raises_on_rejected_credentials(gong_env):
     mock_resp.status_code = 401
     with patch("app.connectors.gong.requests.get", return_value=mock_resp):
         with pytest.raises(gong.GongAuthError, match="rejected"):
-            gong.fetch_workspaces("bad-token")
+            gong.fetch_workspaces(gong.DEFAULT_API_BASE, "bad-token")
 
 
 def test_account_label_prefers_first_named_workspace(gong_env):
@@ -139,6 +172,7 @@ def test_credentials_route_stores_connection_with_workspace_label(
     assert rows[0]["types"] == ["meetings", "customer-voice"]
     # Non-secret workspace metadata is on config; the key pair is not.
     assert rows[0]["config"]["workspaces"] == [{"id": "w0", "name": "Meridian Health"}]
+    assert rows[0]["config"]["base_url"] == "https://api.gong.io/v2"
     assert "token_json_encrypted" not in rows[0]
 
 
@@ -198,6 +232,47 @@ def test_credentials_route_rekey_overwrites_existing(gong_env, monkeypatch):
     assert rows[0]["account_label"] == "Second WS"
 
 
+def test_credentials_route_accepts_a_region_specific_base_url(
+    gong_env, monkeypatch
+):
+    """A tenant whose Gong API page shows a different host can supply it;
+    validation and storage both use that host."""
+    ctx = company_client(monkeypatch)
+
+    with patch(
+        "app.connectors.gong.requests.get", return_value=_workspaces_resp()
+    ) as mock_get:
+        r = ctx.client.post(
+            "/v1/connectors/gong/credentials",
+            json={
+                "access_key": "AK",
+                "access_key_secret": "S",
+                "api_base_url": "https://us-12345.api.gong.io",
+            },
+        )
+
+    assert r.status_code == 200, r.text
+    assert mock_get.call_args.args[0] == (
+        "https://us-12345.api.gong.io/v2/workspaces"
+    )
+    listed = ctx.client.get("/v1/connectors").json()
+    row = next(c for c in listed["connections"] if c["provider"] == "gong")
+    assert row["config"]["base_url"] == "https://us-12345.api.gong.io/v2"
+
+
+def test_credentials_route_422s_on_a_malformed_base_url(gong_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/gong/credentials",
+        json={
+            "access_key": "AK",
+            "access_key_secret": "S",
+            "api_base_url": "not-a-url",
+        },
+    )
+    assert r.status_code == 422
+
+
 def test_delete_gong_disconnects(gong_env, monkeypatch):
     ctx = company_client(monkeypatch)
 
@@ -225,7 +300,7 @@ def test_gong_is_a_registered_kg_puller(gong_env):
     from app.kg_ingest.runner import PULLERS
 
     puller_fn, token_key, hint = PULLERS["gong"]
-    assert token_key == "basic_token"
+    assert token_key == "gong_credential"
     assert "customer_voice" in hint
 
 
@@ -259,6 +334,11 @@ def _call(call_id="c1", title="Renewal call", *, brief="Customer wants SSO",
     }
 
 
+def _credential(base_url="https://api.gong.io/v2", token="basic-token"):
+    """The stored credential string the runner hands the puller."""
+    return json.dumps({"base_url": base_url, "basic_token": token})
+
+
 def _page(calls, cursor=None):
     mock_resp = MagicMock()
     mock_resp.ok = True
@@ -276,7 +356,7 @@ def test_pull_yields_distilled_records_no_transcript(gong_env):
     with patch(
         "app.kg_ingest.pullers.gong.requests.post", return_value=_page([_call()])
     ) as mock_post:
-        records = list(gong_puller.pull("basic-token"))
+        records = list(gong_puller.pull(_credential()))
 
     assert len(records) == 1
     rec = records[0]
@@ -305,6 +385,37 @@ def test_pull_yields_distilled_records_no_transcript(gong_env):
     assert body["filter"]["fromDateTime"]  # Gong requires an explicit window
 
 
+def test_pull_targets_the_connections_own_base_url(gong_env):
+    """Region-specific tenants: the puller hits the stored base URL, never a
+    hardcoded api.gong.io."""
+    from app.kg_ingest.pullers import gong as gong_puller
+
+    cred = _credential(base_url="https://us-12345.api.gong.io/v2")
+    with patch(
+        "app.kg_ingest.pullers.gong.requests.post", return_value=_page([_call()])
+    ) as mock_post:
+        list(gong_puller.pull(cred))
+
+    assert mock_post.call_args.args[0] == (
+        "https://us-12345.api.gong.io/v2/calls/extensive"
+    )
+
+
+def test_pull_since_narrows_the_window(gong_env):
+    """An incremental sync asks Gong only for calls since the given bound —
+    that's what keeps the per-sync cap from becoming a coverage ceiling."""
+    from app.kg_ingest.pullers import gong as gong_puller
+
+    since = datetime(2026, 7, 28, 6, 0, tzinfo=timezone.utc)
+    with patch(
+        "app.kg_ingest.pullers.gong.requests.post", return_value=_page([_call()])
+    ) as mock_post:
+        list(gong_puller.pull(_credential(), since=since))
+
+    sent = mock_post.call_args.kwargs["json"]["filter"]["fromDateTime"]
+    assert sent.startswith("2026-07-28T06:00")
+
+
 def test_pull_pages_through_cursor_and_respects_limit(gong_env):
     from app.kg_ingest.pullers import gong as gong_puller
 
@@ -315,7 +426,7 @@ def test_pull_pages_through_cursor_and_respects_limit(gong_env):
     with patch(
         "app.kg_ingest.pullers.gong.requests.post", side_effect=pages
     ) as mock_post:
-        records = list(gong_puller.pull("t", limit=3))
+        records = list(gong_puller.pull(_credential(), limit=3))
 
     assert [r.external_id for r in records] == ["c1", "c2", "c3"]
     # Second request carried the cursor from the first page.
@@ -331,7 +442,7 @@ def test_pull_treats_404_as_empty_window(gong_env):
     mock_resp.ok = False
     mock_resp.status_code = 404
     with patch("app.kg_ingest.pullers.gong.requests.post", return_value=mock_resp):
-        assert list(gong_puller.pull("t")) == []
+        assert list(gong_puller.pull(_credential())) == []
 
 
 def test_pull_skips_calls_without_id_and_survives_thin_content(gong_env):
@@ -349,10 +460,105 @@ def test_pull_skips_calls_without_id_and_survives_thin_content(gong_env):
         "app.kg_ingest.pullers.gong.requests.post",
         return_value=_page([thin, no_id]),
     ):
-        records = list(gong_puller.pull("t"))
+        records = list(gong_puller.pull(_credential()))
 
     assert [r.external_id for r in records] == ["c9"]
     assert records[0].text == ""
+
+
+# ─────────────────── Incremental sync (runner wiring) ───────────────────
+#
+# Steady state must pull only the delta: with a fixed window, a per-sync
+# record cap silently becomes a coverage ceiling for busy workspaces.
+
+
+def test_incremental_since_subtracts_a_processing_overlap(gong_env):
+    """Gong finishes call briefs asynchronously, so `since` reaches back
+    before the last sync — otherwise a brief that landed after its window
+    closed would be skipped forever."""
+    from app.kg_ingest.runner import _INCREMENTAL_OVERLAP, incremental_since
+
+    since = incremental_since("2026-07-30T12:00:00+00:00")
+    assert since == datetime(2026, 7, 30, 12, 0, tzinfo=timezone.utc) - _INCREMENTAL_OVERLAP
+
+
+def test_incremental_since_assumes_utc_for_naive_stamps(gong_env):
+    from app.kg_ingest.runner import incremental_since
+
+    assert incremental_since("2026-07-30T12:00:00").tzinfo is timezone.utc
+
+
+@pytest.mark.parametrize("bad", [None, "", "not-a-date"])
+def test_incremental_since_degrades_to_full_window(gong_env, bad):
+    """Never-synced or unparseable ⇒ None ⇒ the puller's own backfill
+    window. A bad stamp must yield MORE data, never silently less."""
+    from app.kg_ingest.runner import incremental_since
+
+    assert incremental_since(bad) is None
+
+
+def test_sync_provider_pulls_incrementally_for_gong(gong_env):
+    from app.kg_ingest import runner
+
+    seen: dict = {}
+
+    def fake_pull(token, **kwargs):
+        seen.update(kwargs)
+        return iter(())
+
+    with patch.dict(
+        runner.PULLERS, {"gong": (fake_pull, "gong_credential", "hint")}
+    ):
+        runner.sync_provider(
+            object(), "co-1", "gong",
+            token=_credential(),
+            last_sync_at="2026-07-30T12:00:00+00:00",
+        )
+
+    assert "since" in seen and seen["since"] is not None
+
+
+def test_sync_provider_full_window_on_first_ever_sync(gong_env):
+    """No last_sync_at (just connected) ⇒ no `since` ⇒ the backfill."""
+    from app.kg_ingest import runner
+
+    seen: dict = {}
+
+    def fake_pull(token, **kwargs):
+        seen.update(kwargs)
+        return iter(())
+
+    with patch.dict(
+        runner.PULLERS, {"gong": (fake_pull, "gong_credential", "hint")}
+    ):
+        runner.sync_provider(
+            object(), "co-1", "gong", token=_credential(), last_sync_at=None
+        )
+
+    assert "since" not in seen
+
+
+def test_sync_provider_leaves_non_incremental_pullers_alone(gong_env):
+    """Providers outside INCREMENTAL_PULLERS keep their existing call shape
+    — this change must not alter Fireflies/ClickUp/etc."""
+    from app.kg_ingest import runner
+
+    calls: list = []
+
+    def fake_pull(token, **kwargs):
+        calls.append(kwargs)
+        return iter(())
+
+    assert "fireflies" not in runner.INCREMENTAL_PULLERS
+    with patch.dict(
+        runner.PULLERS, {"fireflies": (fake_pull, "api_key", "hint")}
+    ):
+        runner.sync_provider(
+            object(), "co-1", "fireflies", token="k",
+            last_sync_at="2026-07-30T12:00:00+00:00",
+        )
+
+    assert calls == [{}]
 
 
 # ─────────────────────────── Catalog / sanity ───────────────────────────

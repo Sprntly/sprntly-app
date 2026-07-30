@@ -51,6 +51,9 @@ def sync(provider: str, company: WorkspaceContext = Depends(require_workspace)):
 
     facade = GraphFacade()
     try:
+        # Deliberately NOT incremental: an admin hitting "sync now" means
+        # "re-scan the provider's window", not "just the delta". Scheduled
+        # syncs are the incremental path (see runner.INCREMENTAL_PULLERS).
         result = sync_provider(facade, company.company_id, provider, token=token)
     except Exception as e:  # noqa: BLE001 — puller-level failure (bad token, API down)
         logger.exception("sync failed for %s", provider)

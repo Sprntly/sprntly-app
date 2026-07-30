@@ -2631,6 +2631,9 @@ def fireflies_disconnect(
 class GongCredentialsIn(BaseModel):
     access_key: str = Field(..., min_length=1)
     access_key_secret: str = Field(..., min_length=1)
+    #: Optional — Gong's docs tell each customer to read their own API base
+    #: URL off their Gong API page. Blank means the common tenant host.
+    api_base_url: str | None = None
 
 
 @router.post("/gong/credentials")
@@ -2643,9 +2646,13 @@ def gong_connect_credentials(
     _require_admin_for_org_connector(company, gong_auth.GONG_PROVIDER)
     access_key = body.access_key.strip()
     secret = body.access_key_secret.strip()
+    try:
+        base_url = gong_auth.normalize_api_base(body.api_base_url)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
     token = gong_auth.basic_token(access_key, secret)
     try:
-        workspaces = gong_auth.fetch_workspaces(token)
+        workspaces = gong_auth.fetch_workspaces(base_url, token)
     except gong_auth.GongAuthError as e:
         raise HTTPException(400, str(e)) from e
 
@@ -2653,7 +2660,7 @@ def gong_connect_credentials(
 
     try:
         token_encrypted = encrypt_token_json(
-            gong_auth.token_payload_to_store(access_key, secret)
+            gong_auth.credential_to_store(base_url, access_key, secret)
         )
     except TokenEncryptionError as e:
         raise HTTPException(500, str(e)) from e
@@ -2664,9 +2671,10 @@ def gong_connect_credentials(
         token_encrypted=token_encrypted,
         scopes="",
         account_label=label,
-        # Workspace names are non-secret and useful for the UI; the key pair
-        # stays exclusively in the encrypted token payload.
+        # Base URL + workspace names are non-secret and useful for the UI;
+        # the key pair stays exclusively in the encrypted token payload.
         config_json=json.dumps({
+            "base_url": base_url,
             "workspaces": [
                 {"id": w.get("id"), "name": w.get("name")} for w in workspaces
             ],
