@@ -33,7 +33,7 @@ def test_refresh_iterates_every_company_active_kg_puller_provider():
             {"provider": "github",   "status": "active"},
             {"provider": "hubspot",  "status": "active"},
             {"provider": "figma",    "status": "active"},   # no puller → skipped
-            {"provider": "slack",    "status": "active"},   # no puller → skipped
+            {"provider": "slack",    "status": "active"},   # own company-level kick
             {"provider": "clickup",  "status": "inactive"}, # inactive → skipped
         ],
         "co-b": [
@@ -47,6 +47,7 @@ def test_refresh_iterates_every_company_active_kg_puller_provider():
             "app.scheduler.db.list_connections",
             side_effect=lambda cid: conns_by_company.get(cid, []),
          ), \
+         patch("app.scheduler.kickoff_slack_corpus_sync") as mock_slack, \
          patch("app.scheduler.kickoff_sync") as mock_kickoff:
         _refresh_all_company_connectors()
 
@@ -57,6 +58,9 @@ def test_refresh_iterates_every_company_active_kg_puller_provider():
         ("co-b", "fireflies"),
         ("co-b", "github"),
     ])
+    # Slack refreshes through its own company-level corpus kick, not
+    # kickoff_sync — once for the company that has it.
+    assert [c.args[0] for c in mock_slack.call_args_list] == ["co-a"]
 
 
 def test_refresh_isolates_per_company_failures():
@@ -96,9 +100,9 @@ def test_refresh_no_companies_is_a_clean_no_op():
 
 
 def test_refresh_skips_providers_without_kg_pullers():
-    """figma / slack have their own corpus-sync routes (or are per-user) —
-    never fire kickoff_sync for them even if they're the company's only
-    active connection."""
+    """figma has its own corpus-sync route — never fire kickoff_sync for it.
+    slack refreshes through kickoff_slack_corpus_sync (company-level), never
+    kickoff_sync."""
     from app.scheduler import _refresh_all_company_connectors
 
     companies = [{"id": "co-a", "slug": "acme"}]
@@ -109,10 +113,35 @@ def test_refresh_skips_providers_without_kg_pullers():
 
     with patch("app.scheduler.list_companies", return_value=companies), \
          patch("app.scheduler.db.list_connections", return_value=conns), \
+         patch("app.scheduler.kickoff_slack_corpus_sync") as mock_slack, \
          patch("app.scheduler.kickoff_sync") as mock_kickoff:
         _refresh_all_company_connectors()
 
     mock_kickoff.assert_not_called()
+    assert [c.args[0] for c in mock_slack.call_args_list] == ["co-a"]
+
+
+def test_refresh_kicks_slack_once_per_company_despite_many_installs():
+    """Slack is per-user for delivery, so a company can hold several rows —
+    but the voice-of-customer corpus sync is company-level: exactly ONE
+    kick per company per cycle, however many members installed the bot."""
+    from app.scheduler import _refresh_all_company_connectors
+
+    companies = [{"id": "co-a", "slug": "acme"}]
+    conns = [
+        {"provider": "slack", "status": "active", "user_id": "u-pm"},
+        {"provider": "slack", "status": "active", "user_id": "u-eng"},
+        {"provider": "slack", "status": "revoked", "user_id": "u-old"},
+    ]
+
+    with patch("app.scheduler.list_companies", return_value=companies), \
+         patch("app.scheduler.db.list_connections", return_value=conns), \
+         patch("app.scheduler.kickoff_slack_corpus_sync") as mock_slack, \
+         patch("app.scheduler.kickoff_sync") as mock_kickoff:
+        _refresh_all_company_connectors()
+
+    mock_kickoff.assert_not_called()
+    assert [c.args[0] for c in mock_slack.call_args_list] == ["co-a"]
 
 
 def test_refresh_includes_google_drive():

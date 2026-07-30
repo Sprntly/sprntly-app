@@ -167,7 +167,15 @@ export function PersonalizeStep() {
   }, [loading, workspace, router])
 
   const slack = useMemo(
-    () => connections.find((c) => c.provider === "slack" && c.status === "active") ?? null,
+    // Delivery is per-user: the company's SHARED Slack connection (surfaced
+    // for the voice-of-customer view) is not YOUR delivery target — only a
+    // row you installed yourself counts here.
+    () => connections.find(
+      (c) =>
+        c.provider === "slack"
+        && c.status === "active"
+        && !c.config?.company_connection,
+    ) ?? null,
     [connections],
   )
 

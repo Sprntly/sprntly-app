@@ -81,9 +81,20 @@ def extract_document(
     origin: str | None = None,
     source_type_default: str | None = None,
     force_source_type: str | None = None,
-    provenance_extra: dict[str, str] | None = None,
+    # jsonb-shaped: str values in the connector paths, plus ints/None from the
+    # roadmap path (roadmap_version, workspace_id).
+    provenance_extra: dict[str, object] | None = None,
 ) -> dict:
-    """Extract one document into the KG. Returns {signals, themes, skipped}.
+    """Extract one document into the KG.
+
+    Returns ``{signals, themes, skipped, signal_ids}``. ``signal_ids`` is the
+    ADDITIVE key (added for roadmap replace semantics): every signal id this
+    document accounts for — the ones newly written PLUS the ones skipped as
+    duplicates of an already-extracted identical fact. Callers that need to
+    know "which signals does the current version of this document assert?"
+    (roadmap re-upload expiry — see kg_ingest.roadmap) use it as the keep-set;
+    every pre-existing caller reads only signals/themes/skipped and is
+    unaffected.
 
     ``origin`` records HOW this document reached us, stamped onto each extracted
     signal's provenance as ``provenance["origin"]``. The two values the brief
@@ -103,19 +114,22 @@ def extract_document(
     customer_voice evidence deterministically, while an evidence type the LLM
     picked on merit (e.g. a revenue fact inside a call transcript) is kept.
 
-    ``force_source_type`` CLAMPS every extracted signal to one source_type,
-    overriding whatever the LLM picked — the inverse of ``source_type_default``
-    (which only *upgrades* seeded/invalid types and otherwise trusts the model).
-    This exists because ``origin`` alone cannot keep non-evidence out of the
-    brief: ``has_sufficient_evidence`` keys on source_type
-    (``CONNECTED_SOURCE_TYPES``), not on origin, so a document whose facts the
-    model plausibly labels ``revenue`` or ``customer_voice`` would open the
-    evidence gate no matter what origin it carried. Callers ingesting
-    NON-EVIDENCE text — scraped web research about the company's own public
-    footprint being the motivating case — pass
-    ``force_source_type="agent_inferred"`` so the clamp is enforced in CODE and
-    cannot be talked out of it by a prompt. Must be a member of
-    SIGNAL_SOURCE_TYPES.
+    ``force_source_type`` is the STRONGER form: every signal gets this type, no
+    matter what the model chose. Use it when the DOCUMENT CLASS — not the
+    sentence — determines evidentiary weight, and a model-picked connected type
+    would be a security/integrity problem rather than a nicety. The brief
+    sufficiency gate counts signals by ``source_type``
+    (convergence.CONNECTED_SOURCE_TYPES → connected_breadth / connected count),
+    so a document that must never count as connected evidence has to be pinned,
+    not merely defaulted: a roadmap bullet reading "ARR $2M, churn 9%" would
+    otherwise be extracted as revenue+analytics evidence and could open the gate
+    on the company's own stated plans. Takes precedence over
+    ``source_type_default``; the value must be in SIGNAL_SOURCE_TYPES.
+    Two callers today, for the same reason: the roadmap ingest (a stated
+    plan is not measured evidence) and the deep company-research sweep
+    (scraped web copy is not measured evidence). Both pin
+    ``agent_inferred``. Enforced here rather than asked for in a prompt —
+    a prompt can be talked out of it.
 
     ``provenance_extra`` is merged into each signal's provenance verbatim
     (e.g. {"channel": "upload", "category": "voice"} for category uploads)."""
@@ -136,7 +150,7 @@ def extract_document(
     )
     items = result.output.get("signals", [])
     if not items:
-        return {"signals": 0, "themes": 0, "skipped": 0}
+        return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
 
     # Batch-embed signal contents + theme labels.
     theme_labels = sorted({i["theme"].strip() for i in items if i.get("theme")})
@@ -170,15 +184,16 @@ def extract_document(
             new_themes += 1
 
     written = skipped = 0
+    # Every id this document asserts (written + duplicate-skipped) — the
+    # keep-set for replace semantics. See the docstring.
+    signal_ids: list[str] = []
     for item, vec in zip(items, sig_vecs):
         # Content-keyed (not doc-keyed): re-syncs + shifting ingest batches
         # cannot duplicate the same fact under a different doc name.
         sig_id = str(uuid.uuid5(_NS, f"{enterprise_id}|{item['content']}"))
         source_type = item["source_type"]
         if force_source_type:
-            # Unconditional clamp — the model's choice is discarded. See the
-            # docstring: this is the only mechanism that keeps non-evidence text
-            # out of the CONNECTED_SOURCE_TYPES the brief gate counts.
+            # Document-class pinning wins outright — see the docstring.
             source_type = force_source_type
         elif source_type_default and (
             source_type in _SEEDED_SOURCE_TYPES
@@ -203,6 +218,10 @@ def extract_document(
             facade.write_signal(enterprise_id, signal)
         except Exception:  # noqa: BLE001 — duplicate id ⇒ already extracted
             skipped += 1
+            # A duplicate is still a fact THIS document asserts, so it belongs
+            # in the keep-set (a re-uploaded roadmap that repeats a bet must not
+            # expire that bet's live signal).
+            signal_ids.append(sig_id)
             continue
         rel_type = item["relationship"]
         facade.write_relationship(enterprise_id, Relationship(
@@ -215,5 +234,7 @@ def extract_document(
             confidence=float(item.get("confidence", 0.8)),
         ))
         written += 1
+        signal_ids.append(sig_id)
 
-    return {"signals": written, "themes": new_themes, "skipped": skipped}
+    return {"signals": written, "themes": new_themes, "skipped": skipped,
+            "signal_ids": signal_ids}

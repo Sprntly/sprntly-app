@@ -17,6 +17,27 @@ import { UPLOAD_ACCEPT_HINT, UPLOAD_EXTENSIONS } from "./sources-helpers"
 // Codebase → Communications, with the settings-only extras (docs, revenue)
 // appended. The onboarding wizard shows only ONBOARDING_CONNECTOR_CATEGORIES
 // (lib/onboarding/connectorsWizard.ts).
+
+// Slack is the first MULTI-TYPE connector (product decision 2026-07-30): a
+// communication tool (brief delivery target) AND a customer-voice source —
+// the corpus sync pulls the channels the user selects. Multi-type connectors
+// render a card in EVERY category they belong to (same id, same underlying
+// connection — connect from either shelf and both show Connected), so this
+// one item object is shared by the `voice` and `comms` categories below.
+// Mirrors backend/app/connectors/catalog.py.
+const SLACK_ITEM: ConnectorItemRow = {
+  // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
+  // (Slack Marketplace requires OAuth install, not a pasted bot token).
+  id: "slack",
+  name: "Slack",
+  logo: "S",
+  logoText: "S",
+  logoColor: "#4A154B",
+  logoSvg: "/connectors/slack.svg",
+  oauth: true,
+  types: ["communication", "customer-voice"],
+}
+
 export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
   {
     key: "analytics",
@@ -53,6 +74,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
       // brand-color letter glyph (sharper than the old fuzzy favicon anyway).
       { id: "fireflies",  name: "Fireflies",  logo: "F", logoText: "F", logoColor: "#FFAD33", oauth: false, authType: "apikey", types: ["meetings"] },
       { id: "gong",       name: "Gong",       logo: "G", logoText: "G", logoColor: "#E74C3C", oauth: false, types: ["meetings"] },
+      // Dual-typed communication + customer-voice — the same item also sits
+      // in the Communications category (see SLACK_ITEM above).
+      SLACK_ITEM,
     ],
   },
   {
@@ -135,9 +159,9 @@ export const CONNECTOR_CATALOG: ConnectorCategoryRow[] = [
     // transcript has no channel/permission model. See `allowsManualUpload`.
     allowsManualUpload: false,
     items: [
-      // OAuth-only: Connect routes through Slack's OAuth "Add to Slack" flow
-      // (Slack Marketplace requires OAuth install, not a pasted bot token).
-      { id: "slack",   name: "Slack",    logo: "S", logoText: "S", logoColor: "#4A154B", logoSvg: "/connectors/slack.svg", oauth: true, types: ["communication"] },
+      // Dual-typed — the same item also sits under Voice of Customer &
+      // Support above (see SLACK_ITEM).
+      SLACK_ITEM,
       { id: "msteams", name: "MS Teams", logo: "M", logoText: "M", logoColor: "#5059C9", logoSvg: "/connectors/msteams.svg", oauth: false, types: ["communication"] },
     ],
   },
@@ -255,9 +279,13 @@ export function connectableCatalog(
 // don't do that, so they can't satisfy the brief on their own and don't count
 // as a data source:
 //
-//   comms  Slack / Teams  — a DELIVERY target (where the brief gets posted),
+//   comms  MS Teams       — a DELIVERY target (where the brief gets posted),
 //                           not a source of findings. (Email is a delivery
-//                           destination too, not a connector at all.)
+//                           destination too, not a connector at all.) Slack
+//                           ALSO sits in this category but DOES count: it is
+//                           dual-typed communication + customer-voice and
+//                           listed in the evidence-bearing `voice` category,
+//                           which is what feeds EVIDENCE_PROVIDER_IDS.
 //   pm     Jira / ClickUp / Asana — where work is TRACKED once decided; the
 //                           brief's output flows to them, not from them.
 //   code   GitHub         — what was BUILT, not what users need.
@@ -320,9 +348,10 @@ export function hasEvidenceConnector(connectedIds: readonly string[]): boolean {
  * evidence-bearing connector (see NON_EVIDENCE_CATEGORIES). This is the gate for
  * whether onboarding kicks the first brief: a real data source (analytics,
  * customer support/calls/feedback, CRM, revenue, monitoring) must be
- * connected before we generate. Slack/Teams/Email, Jira & PM tools, GitHub,
- * Figma, and docs tools (Notion / Google Docs) do NOT count. Onboarding info
- * alone never produces a brief.
+ * connected before we generate. Teams/Email, Jira & PM tools, GitHub,
+ * Figma, and docs tools (Notion / Google Docs) do NOT count — but Slack DOES
+ * (dual-typed communication + customer-voice since 2026-07-30; its synced
+ * channels are evidence). Onboarding info alone never produces a brief.
  */
 export function hasDataSourceConnection(
   connections: readonly { provider: string; status: string }[],
@@ -334,10 +363,12 @@ export function hasDataSourceConnection(
 
 // ── Connector types ──────────────────────────────────────────────────────────
 //
-// Every catalog item carries its type (what the tool IS), the mirror of the
+// Every catalog item carries its types (what the tool IS), the mirror of the
 // backend authority (backend/app/connectors/catalog.py). Features read these
-// instead of hardcoding provider ids. ONE type per connector for now (product
-// decision) — the list shape is future-proofing for multi-type.
+// instead of hardcoding provider ids. Multi-type is allowed per-entry with
+// product sign-off (2026-07-30) — Slack is the first (communication +
+// customer-voice); a multi-type connector's card renders in every category
+// it belongs to.
 
 /** Human labels for the type chips shown on connector cards. */
 export const CONNECTOR_TYPE_LABELS: Record<ConnectorType, string> = {
@@ -361,9 +392,16 @@ export function connectorTypes(id: string): ConnectorType[] {
   return ALL_ITEMS.find((i) => i.id === id)?.types ?? []
 }
 
-/** Every catalog connector carrying `type` (e.g. all task-management tools). */
+/** Every catalog connector carrying `type` (e.g. all task-management tools).
+ *  Deduped by id — a multi-type connector is listed in several categories
+ *  but is still ONE connector. */
 export function connectorsWithType(type: ConnectorType): ConnectorItemRow[] {
-  return ALL_ITEMS.filter((i) => (i.types ?? []).includes(type))
+  const seen = new Set<string>()
+  return ALL_ITEMS.filter((i) => {
+    if (!(i.types ?? []).includes(type) || seen.has(i.id)) return false
+    seen.add(i.id)
+    return true
+  })
 }
 
 /**

@@ -1,7 +1,9 @@
 """Tests for the brief data-source gate (app.brief_gate).
 
 The rule (product decision, 2026-07-22): connectors in the pm / code / design /
-comms / docs categories can never satisfy brief generation on their own. Every
+comms / docs categories can never satisfy brief generation on their own.
+Exception since 2026-07-30: Slack is dual-typed communication + customer-voice
+(its synced channels are evidence), so it DOES count as a data source. Every
 user-triggered generation surface — the onboarding first-brief kick
 (/v1/datasets/{slug}/generate), the Connectors-settings "Regenerate brief"
 button (/v1/brief/regenerate-all), and the brief page's empty-state auto-kick
@@ -31,6 +33,8 @@ from app.connectors.catalog import is_evidence_provider
     "stripe", "chartmogul",  # revenue
     "sentry", "datadog", "newrelic", "pagerduty",  # monitoring
     "intercom",  # type `communication`, but a customer-support inbox → voice
+    "slack",  # dual-typed communication + customer-voice (2026-07-30):
+              # user-selected channels are synced into the corpus as evidence
 ])
 def test_evidence_providers(provider):
     assert is_evidence_provider(provider), f"{provider} should be evidence"
@@ -40,7 +44,7 @@ def test_evidence_providers(provider):
     "jira", "clickup", "linear", "asana",  # task management (pm)
     "github", "gitlab", "bitbucket",  # code
     "figma", "framer",  # design
-    "slack", "msteams",  # communication
+    "msteams",  # communication (delivery target only — unlike dual-typed Slack)
     "notion", "google_drive",  # documents
 ])
 def test_non_evidence_providers(provider):
@@ -79,7 +83,7 @@ def test_gate_false_when_only_non_evidence_connectors(
     connected, nothing else → no generation."""
     _patch_connections(monkeypatch, isolated_settings, [
         _conn("jira"), _conn("github"), _conn("figma"),
-        _conn("slack"), _conn("google_drive"), _conn("notion"),
+        _conn("msteams"), _conn("google_drive"), _conn("notion"),
     ])
     assert not has_brief_data_source("co-1", "acme")
 
@@ -88,8 +92,15 @@ def test_gate_true_with_one_evidence_connector_among_non_evidence(
     isolated_settings, monkeypatch
 ):
     _patch_connections(monkeypatch, isolated_settings, [
-        _conn("slack"), _conn("jira"), _conn("hubspot"),
+        _conn("msteams"), _conn("jira"), _conn("hubspot"),
     ])
+    assert has_brief_data_source("co-1", "acme")
+
+
+def test_gate_true_with_only_slack_connected(isolated_settings, monkeypatch):
+    """Slack alone satisfies the gate (2026-07-30): dual-typed communication +
+    customer-voice — its synced channels bring evidence in."""
+    _patch_connections(monkeypatch, isolated_settings, [_conn("slack")])
     assert has_brief_data_source("co-1", "acme")
 
 
@@ -105,7 +116,7 @@ def test_gate_ignores_inactive_evidence_connections(
 def test_gate_true_with_uploaded_sources_only(isolated_settings, monkeypatch):
     from app.datasets import raw_path
 
-    _patch_connections(monkeypatch, isolated_settings, [_conn("slack")])
+    _patch_connections(monkeypatch, isolated_settings, [_conn("msteams")])
     raw_dir = raw_path("acme")
     raw_dir.mkdir(parents=True, exist_ok=True)
     (raw_dir / "interview-notes.md").write_text("real user data")

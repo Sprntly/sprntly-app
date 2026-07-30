@@ -136,16 +136,23 @@ function Harness() {
       briefV2: EMPTY_BRIEF,
       connectedConnectorIds: [],
     }),
-    // Slack (comms) + Jira (pm) + GitHub (code) — the three excluded categories.
+    // MS Teams (comms) + Jira (pm) + GitHub (code) — three excluded
+    // categories. (Slack no longer belongs here: dual-typed communication +
+    // customer-voice since 2026-07-30, so it counts as evidence.)
     button("set-non-evidence-only", {
       briefHydration: "ready",
       briefV2: EMPTY_BRIEF,
-      connectedConnectorIds: ["slack", "jira", "github"],
+      connectedConnectorIds: ["msteams", "jira", "github"],
     }),
     button("set-evidence-connector", {
       briefHydration: "ready",
       briefV2: EMPTY_BRIEF,
-      connectedConnectorIds: ["slack", "superset"],
+      connectedConnectorIds: ["msteams", "superset"],
+    }),
+    button("set-slack-only", {
+      briefHydration: "ready",
+      briefV2: EMPTY_BRIEF,
+      connectedConnectorIds: ["slack"],
     }),
     button("set-findings-without-connector", {
       briefHydration: "ready",
@@ -196,7 +203,7 @@ describe("BriefChat — no evidence connector", () => {
     expect(document.querySelector(".bc-generating")).toBeNull()
   })
 
-  it("test_non_evidence_connectors_still_show_connect_page: Slack/Jira/GitHub don't satisfy the brief", () => {
+  it("test_non_evidence_connectors_still_show_connect_page: Teams/Jira/GitHub don't satisfy the brief", () => {
     mountHarness()
     act(() => {
       fireEvent.click(screen.getByTestId("set-non-evidence-only"))
@@ -207,7 +214,19 @@ describe("BriefChat — no evidence connector", () => {
     expect(screen.getByText(CONNECT_TITLE)).not.toBeNull()
     // The copy names that misread explicitly, so the user isn't left thinking
     // the page is a bug.
-    expect(screen.getByText(/Already connected Slack or Jira\?/)).not.toBeNull()
+    expect(screen.getByText(/Already connected Jira or GitHub\?/)).not.toBeNull()
+  })
+
+  it("test_slack_alone_satisfies_the_brief: dual-typed Slack clears the empty state", () => {
+    mountHarness()
+    act(() => {
+      fireEvent.click(screen.getByTestId("set-slack-only"))
+    })
+
+    // Slack is communication + customer-voice (2026-07-30): its synced
+    // channels are evidence, so connecting it unlocks the brief surface.
+    expect(screen.queryByText(CONNECT_TITLE)).toBeNull()
+    expect(screen.getByText(new RegExp(EMPTY_GREETING))).not.toBeNull()
   })
 
   it("test_evidence_connector_shows_brief: one evidence connector clears the empty state", () => {
@@ -216,7 +235,7 @@ describe("BriefChat — no evidence connector", () => {
       fireEvent.click(screen.getByTestId("set-evidence-connector"))
     })
 
-    // Superset (analytics) qualifies even though Slack alongside it doesn't.
+    // Superset (analytics) qualifies even though Teams alongside it doesn't.
     expect(screen.queryByText(CONNECT_TITLE)).toBeNull()
     expect(document.querySelector(".bc-empty")).toBeNull()
     // The normal empty-brief greeting takes over instead.

@@ -18,8 +18,12 @@ check must hold against direct API calls.
 Error ladder (mirrors the attachments/dataset upload guards): missing or
 over-limit name/description → 422, unsupported extension → 422, empty file →
 400, oversize → 413, unparseable content → 400, over-limit parsed content
-(characters) → 413, slug conflict (company duplicate OR shadowing a built-in
-skill id) → 409.
+(characters) → 413, company-duplicate slug → 409.
+
+Shadowing a BUILT-IN skill id is allowed (PRD 1854 override): the company's
+upload replaces the built-in at invocation time (resolver checks the company
+library first), and the 201/list payloads carry `overrides_builtin` so the UI
+tells the uploader they're replacing a Sprntly skill with their own.
 """
 from __future__ import annotations
 
@@ -47,8 +51,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1/skills", tags=["skills"])
 
 
-def _skill_payload(row: dict) -> dict:
-    """Row → API shape shared by POST (201 body) and GET (list items)."""
+def _skill_payload(row: dict, builtin_ids: set[str]) -> dict:
+    """Row → API shape shared by POST (201 body) and GET (list items).
+    `overrides_builtin`: this slug shadows a vendored skill id, so the custom
+    skill wins at invocation — the UI uses the flag to say so."""
     return {
         "id": row["id"],
         "slug": row["slug"],
@@ -58,6 +64,7 @@ def _skill_payload(row: dict) -> dict:
         "uploader_name": row.get("uploader_name") or "",
         "created_at": row.get("created_at"),
         "has_file": bool(row.get("storage_key")),
+        "overrides_builtin": row["slug"] in builtin_ids,
     }
 
 
@@ -115,11 +122,10 @@ async def upload_skill(
     slug = slugify(name)
     if not slug:
         raise HTTPException(422, "Skill name must contain at least one letter or number.")
-    if slug in set(list_skills()):
-        # Shadowing a vendored built-in id would make the /trigger ambiguous.
-        raise HTTPException(
-            409, f"'{slug}' is the id of a built-in Sprntly skill — choose a different name."
-        )
+    # Shadowing a vendored built-in id is deliberately NOT rejected: the
+    # custom skill replaces the built-in for this company (resolver looks the
+    # company library up first). The payload's overrides_builtin flag is how
+    # the uploader learns they're replacing a Sprntly skill.
 
     key = await skills_storage.stage_skill_file(
         company_id=company.company_id, data=data, ext=ext
@@ -150,11 +156,12 @@ async def upload_skill(
         await skills_storage.delete_skill_file(company_id=company.company_id, key=key)
         raise
 
+    builtin_ids = set(list_skills())
     logger.info(
-        "custom_skill_created company_present=%s slug=%s size_bytes=%s ext=%s",
-        bool(company.company_id), slug, len(data), ext,
+        "custom_skill_created company_present=%s slug=%s size_bytes=%s ext=%s overrides_builtin=%s",
+        bool(company.company_id), slug, len(data), ext, slug in builtin_ids,
     )
-    return _skill_payload(row)
+    return _skill_payload(row, builtin_ids)
 
 
 @router.get("")
@@ -162,7 +169,8 @@ def list_skills_route(company: WorkspaceContext = Depends(require_workspace)):
     """The COMPANY's custom skills, newest first (metadata only) — shared
     across all of the company's workspaces."""
     rows = db.list_custom_skills(company.company_id)
-    return {"skills": [_skill_payload(r) for r in rows]}
+    builtin_ids = set(list_skills())  # one scan for the whole list
+    return {"skills": [_skill_payload(r, builtin_ids) for r in rows]}
 
 
 @router.get("/{skill_id}/file")

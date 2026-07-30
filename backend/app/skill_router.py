@@ -567,6 +567,255 @@ def is_jira_lookup(question: str, history: list[dict] | None = None) -> bool:
     )
 
 
+# ── Ticket-update intent (rewrite an existing ticket FROM a PRD) ─────────────
+# "update the ticket details with the PRD", "rewrite PROJ-142 from the spec",
+# "sync the ticket description to the PRD". Checked BEFORE is_jira_lookup, which
+# claims these sentences today (a write verb on a PM noun) and hands them to a
+# skill with no way to read a PRD — the reported failure. Routes to
+# app/ticket_update.py, which serves both Sprntly tickets and Jira issues.
+_TICKET_UPDATE_VERB = re.compile(
+    r"\b(updat(?:e|ing)|rewrit(?:e|ing)|revis(?:e|ing)|refresh(?:ing)?|"
+    r"sync(?:ing)?|synchroni[sz](?:e|ing)|align(?:ing)?|populat(?:e|ing)|"
+    r"fill\s+in|flesh(?:ing)?\s+out|expand(?:ing)?)\b",
+    re.I,
+)
+# The SOURCE document the ticket is rewritten from.
+_TICKET_UPDATE_SOURCE = re.compile(
+    r"\b(prd|product\s+requirements?(?:\s+doc\w*)?|spec(?:ification)?s?|"
+    r"product\s+brief|requirements?\s+doc\w*)\b",
+    re.I,
+)
+# The link between the two — "update the ticket WITH the PRD". Requiring one
+# keeps "update the ticket and the PRD" (two objects, not a rewrite) out.
+_TICKET_UPDATE_LINK = re.compile(
+    r"\b(with|from|using|based\s+on|per|against|to\s+match|to\s+reflect|"
+    r"to\s+align\s+with|in\s+line\s+with)\b",
+    re.I,
+)
+# Creation phrasings belong to the user-stories skill ("create tickets from the
+# PRD" makes new tickets; it does not rewrite one that exists). Deliberately
+# WITHOUT `sync` — which _vetoed_as_creation treats as creation because there it
+# means the push flow, while "sync the ticket with the PRD" is exactly this path.
+_TICKET_UPDATE_CREATE_VETO = re.compile(
+    r"\b(create|generate|draft|make|build|author|produce|compose|push|delete)\b",
+    re.I,
+)
+
+
+def is_ticket_update(question: str, history: list[dict] | None = None) -> bool:
+    """True when the message asks to rewrite an EXISTING ticket from a PRD.
+
+    Direction is what this test is really about, and it is the one thing a bag
+    of keywords gets wrong. "update the ticket with the PRD" and "update the PRD
+    with the ticket" carry the same words and mean opposite things — one
+    rewrites a ticket, the other edits a document. So the ticket must appear
+    BEFORE the source document: whichever noun the verb reaches first is the
+    thing being changed.
+
+    A follow-up inside a tracker thread may name no ticket at all ("update it
+    with the PRD") — there the thread supplies the target, so anaphora plus an
+    active tracker thread stands in for naming it.
+    """
+    q = question or ""
+    if not (
+        _TICKET_UPDATE_VERB.search(q)
+        and _TICKET_UPDATE_LINK.search(q)
+    ):
+        return False
+    m_source = _TICKET_UPDATE_SOURCE.search(q)
+    if m_source is None:
+        return False
+
+    m_key = _JIRA_ISSUE_KEY.search(q)
+    m_noun = _JIRA_PM_NOUN.search(q)
+    starts = [m.start() for m in (m_key, m_noun) if m is not None]
+    if not starts:
+        # No ticket named here. Only a live tracker thread can supply one.
+        return bool(history) and _in_tracker_thread(history) and bool(
+            _TRACKER_ANAPHORA.search(q)
+        )
+    target_at = min(starts)
+    # The document comes first → the DOCUMENT is what's being changed. Not ours.
+    if target_at > m_source.start():
+        return False
+    m_veto = _TICKET_UPDATE_CREATE_VETO.search(q)
+    # A creation verb governing the ticket ("create tickets from the PRD"), as
+    # opposed to one sitting inside what's being described.
+    if m_veto is not None and m_veto.start() < target_at:
+        return False
+    return True
+
+
+# ── Connector-lookup intent (live reads beyond the tracker) ──────────────────
+#
+# "check slack for what was said about the pricing change", "what changed in the
+# repo this week", "which deals in hubspot mention onboarding" — questions whose
+# answer lives in a connected TOOL, read live, rather than in the periodic KG
+# snapshot the generic router answers from (app/connector_lookup/).
+#
+# The trigger is deliberately narrow: the question must NAME a source (or be a
+# follow-up inside a thread that named one). Two reasons.
+#   1. Anti-hallucination cuts both ways. Naming a source we can't read must
+#      reach the honest "that isn't connectable yet" answer instead of a
+#      KG-flavoured guess — so unsupported names (Zendesk, Gong, …) are matched
+#      here on purpose, and the registry answers them without fetching anything.
+#   2. False-positive routing is the biggest UX risk on this path: stealing
+#      "what are customers complaining about" from the VoC/DS paths would be a
+#      visible regression, and those interceptions run BEFORE this one in
+#      qa_agent.answer precisely so ordering — not regex cleverness — decides.
+# The plan's second, wider trigger (provider-specific NOUNS plus that provider
+# being connected) needs the tenant's connection list, which this module has no
+# access to by design; it is deliberately left for a follow-up.
+#
+# Unambiguous product names. A mention is enough — "in slack", "from hubspot",
+# "the github repo".
+_CONNECTOR_STRONG_NAMES: dict[str, re.Pattern] = {
+    "slack": re.compile(r"\bslack\b", re.I),
+    "jira": re.compile(r"\b(jira|atlassian)\b", re.I),
+    "clickup": re.compile(r"\bclick\s?up\b", re.I),
+    "github": re.compile(r"\bgit\s?hub\b", re.I),
+    "hubspot": re.compile(r"\bhub\s?spot\b", re.I),
+    "fireflies": re.compile(r"\bfireflies\b", re.I),
+    "google_drive": re.compile(
+        r"\b(google\s+drive|g\s?drive|my\s+drive|drive\s+(?:files?|docs?|folder)|"
+        r"google\s+docs?)\b", re.I,
+    ),
+    "asana": re.compile(r"\basana\b", re.I),
+    "zendesk": re.compile(r"\bzen\s?desk\b", re.I),
+    "gong": re.compile(r"\bgong\b", re.I),
+    "amplitude": re.compile(r"\bamplitude\b", re.I),
+    "mixpanel": re.compile(r"\bmixpanel\b", re.I),
+    "sprinklr": re.compile(r"\bsprinklr\b", re.I),
+    "superset": re.compile(r"\bsuperset\b", re.I),
+    "figma": re.compile(r"\bfigma\b", re.I),
+    "intercom": re.compile(r"\bintercom\b", re.I),
+    "gitlab": re.compile(r"\bgit\s?lab\b", re.I),
+    "sentry": re.compile(r"\bsentry\b", re.I),
+    "stripe": re.compile(r"\bstripe\b", re.I),
+}
+# Names that are ordinary English too, so they need a data-read context in the
+# same message ("in linear", "the notion doc") — never "linear growth", "I have
+# no notion of it".
+_CONNECTOR_AMBIGUOUS_NAMES: dict[str, re.Pattern] = {
+    "linear": re.compile(r"\blinear\b", re.I),
+    "notion": re.compile(r"\bnotion\b", re.I),
+}
+_CONNECTOR_AMBIGUOUS_VETO = re.compile(
+    r"\blinear\s+(?:growth|regression|scale|relationship|model|algebra|time)\b|"
+    r"\bno\s+notion\b|\bnotion\s+(?:that|of\s+(?:a|an|the)?\s*\w+ness)\b",
+    re.I,
+)
+# A read context: the tracker read verbs, plus the verbs people use for tools
+# ("check", "search", "look in", "what did … say").
+_CONNECTOR_READ_CONTEXT = re.compile(
+    r"\b(check|search|look\s*(?:in|up|at)|read|see|list|what'?s?|which|who|"
+    r"any|find|get|fetch|show|pull|summari[sz]e|"
+    r"tickets?|issues?|docs?|documents?|pages?|messages?|channels?|threads?|"
+    r"deals?|contacts?|companies|records?|calls?|meetings?|commits?|prs?|"
+    r"pull\s+requests?|repos?|files?)\b",
+    re.I,
+)
+# A Slack channel reference — "#general", "in #product-eng". Two-plus chars and
+# a leading letter so "#1" or a markdown heading never counts.
+_SLACK_CHANNEL_REF = re.compile(r"(?<![\w/])#[a-z][a-z0-9._-]{1,60}\b", re.I)
+# We can READ. A command to WRITE to a tool ("post this in slack", "send a
+# message to #general", "create a hubspot deal") is not a lookup: it falls
+# through to normal routing, which explains what Sprntly does, instead of a read
+# path implying it posted something.
+#
+# Anchored at the START of the message (optionally behind "please"/"can you"),
+# because that is what makes it a COMMAND. Matching these verbs anywhere would
+# swallow plain reads — "what did they share in slack", "did anyone post in
+# #general" are questions about the past, not instructions.
+_CONNECTOR_WRITE_VETO = re.compile(
+    r"^\s*(?:please\s+|can\s+you\s+|could\s+you\s+|i\s+want\s+you\s+to\s+|"
+    r"let'?s\s+|go\s+ahead\s+and\s+)*"
+    r"(post|send|dm|notify|announce|publish|schedule|invite|upload|create|add|"
+    r"delete|remove|archive|push|sync|share|reply|respond)\b",
+    re.I,
+)
+
+
+# What a follow-up inside a connector thread asks FOR. The tracker's equivalent
+# (_TRACKER_DETAIL) is issue-shaped ("assignee", "priority"); these are the nouns
+# of a conversation or a document — "what's the full thread", "any more context".
+_CONNECTOR_FOLLOWUP_DETAIL = re.compile(
+    r"\b(threads?|messages?|channels?|conversation|quotes?|verbatim|transcript|"
+    r"full|rest|context|commits?|diff|files?)\b",
+    re.I,
+)
+
+
+# NAMING a tool is not always asking to read it. A competitive-intelligence
+# request lists products as SUBJECTS ("competitive analysis of Linear, Jira and
+# Asana", "how does our roadmap compare to Jira?"), and the same veto guards
+# "what are the alternatives to Zendesk". is_jira_lookup already refuses these
+# for exactly this reason (see its own negative fixtures); the connector router
+# has to refuse them too or it would steal every CIR that names a tool.
+_CONNECTOR_MENTION_VETO = re.compile(
+    r"\b(competitive|competitors?|competing|compare[ds]?|comparison|comparing|"
+    r"versus|vs\.?|alternatives?|instead\s+of|migrat(?:e|ing|ion)|"
+    r"market\s+(?:landscape|leaders?)|better\s+than|switch(?:ing)?\s+(?:to|from))\b",
+    re.I,
+)
+
+
+def _named_connector_providers(text: str) -> set[str]:
+    """Provider keys explicitly named in one message."""
+    if _CONNECTOR_MENTION_VETO.search(text):
+        return set()
+    found: set[str] = set()
+    for provider, pattern in _CONNECTOR_STRONG_NAMES.items():
+        if pattern.search(text):
+            found.add(provider)
+    if _SLACK_CHANNEL_REF.search(text):
+        found.add("slack")
+    if not _CONNECTOR_AMBIGUOUS_VETO.search(text) and _CONNECTOR_READ_CONTEXT.search(text):
+        for provider, pattern in _CONNECTOR_AMBIGUOUS_NAMES.items():
+            if pattern.search(text):
+                found.add(provider)
+    return found
+
+
+def is_connector_lookup(
+    question: str, history: list[dict] | None = None
+) -> set[str] | None:
+    """The provider keys an ad-hoc connector lookup should cover, or None.
+
+    A set (not a bool) because the answer needs to know WHICH sources to open —
+    and because a question may name two ("check slack and jira for the pricing
+    decision"). Includes providers we cannot read live: the registry turns those
+    into an honest not-supported answer, which is the whole point of intercepting
+    them here rather than letting the generic path guess.
+
+    Returns None for write requests, creation phrasings, and anything that names
+    no source at all.
+    """
+    q = question or ""
+    if _CONNECTOR_WRITE_VETO.search(q) or _vetoed_as_creation(q):
+        return None
+    named = _named_connector_providers(q)
+    if named:
+        return named
+    # Sticky thread: "who said that?" right after a Slack read names nothing at
+    # all. Same two-signal shape as the tracker thread — the thread named a
+    # source, and this message continues it rather than pivoting away.
+    if not history or _TRACKER_PIVOT.search(q):
+        return None
+    if not (
+        _TRACKER_ANAPHORA.search(q)
+        or _TRACKER_DETAIL.search(q)
+        or _CONNECTOR_FOLLOWUP_DETAIL.search(q)
+    ):
+        return None
+    prior: set[str] = set()
+    for turn in history[-_TRACKER_THREAD_WINDOW:]:
+        content = turn.get("content") or ""
+        if content:
+            prior |= _named_connector_providers(content)
+    return prior or None
+
+
 def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:
     """True when the message only means something as a continuation of the
     thread — its subject lives in an earlier turn, not in its own words ("can you

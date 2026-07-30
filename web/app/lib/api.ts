@@ -470,6 +470,31 @@ export type PendingJiraChange = {
   preview: string[]
 }
 
+/** A PRD-grounded rewrite of one ticket's description, PROPOSED and not yet
+ *  applied. Rides on the ask answer; the chat renders it as a confirm card.
+ *
+ *  `target` says which surface owns the ticket, because a chat says "the
+ *  ticket" for both: "sprntly" is one generated from a PRD (applied through
+ *  ticketDataApi.saveDescription), "jira" is a real Jira issue (applied through
+ *  jiraApi.applyChange). The backend resolved this by looking the ticket up —
+ *  the card just routes the write. */
+export type PendingTicketChange = {
+  target: "sprntly" | "jira"
+  ticket_key: string
+  /** The ticket's current title, for the card header. */
+  title: string
+  /** The full proposed description, markdown. Replaces what is there. */
+  description: string
+  /** For `sprntly`, the EXACT criteria list to write — the ticket's current
+   *  ones when the agent didn't rewrite them, because PUT /description replaces
+   *  whatever it is sent and an omitted list would blank them. Always null for
+   *  `jira`, which has no separate criteria field: there they are folded into
+   *  `description` by the backend. */
+  acceptance_criteria: string[] | null
+  /** Human "what will change" lines, rendered verbatim on the card. */
+  preview: string[]
+}
+
 export type AskResponse = {
   answer: string
   key_points: string[]
@@ -480,6 +505,9 @@ export type AskResponse = {
   _skill?: string | null
   /** Present only when the Jira agent proposed a change awaiting confirmation. */
   _pending_jira_change?: PendingJiraChange
+  /** Present only when the ticket-update agent proposed a rewrite awaiting
+   *  confirmation. */
+  _pending_ticket_change?: PendingTicketChange
 }
 
 /** What POST /v1/jira/write reports back. Each part is independent: a request
@@ -597,6 +625,9 @@ export type CustomSkillInfo = {
   uploader_name: string
   created_at: string | null
   has_file: boolean
+  /** The slug shadows a built-in Sprntly skill id — this skill REPLACES the
+   *  built-in for the company at invocation time (PRD 1854 override). */
+  overrides_builtin: boolean
 }
 
 export const skillsApi = {
@@ -1469,10 +1500,19 @@ export type ConnectionSummary = {
     folder_name?: string
     // Google Drive — files picked via the Google Picker (drive.file scope)
     files?: GoogleDrivePickedFile[]
-    // Slack
+    // Slack — brief-delivery target…
     target_type?: "channel" | "dm"
     channel_id?: string
     channel_name?: string
+    // …and the corpus-sync pull-channel selection (empty/absent = every
+    // channel the bot is a member of). The selection is COMPANY-wide.
+    sync_channel_ids?: string[]
+    sync_channel_names?: Record<string, string>
+    // True when this row is the company's SHARED Slack connection surfaced
+    // to a member who has no install of their own (voice-of-customer view,
+    // sanitized server-side). Delivery UIs must ignore such rows — the
+    // member has no personal delivery target until they connect their own.
+    company_connection?: boolean
     // Figma (PAT-vs-OAuth distinction set by backend on save)
     auth_kind?: "pat" | "oauth"
   }
@@ -1720,6 +1760,17 @@ export const connectorsApi = {
       dataset,
       history_days: historyDays,
     }),
+  /** Save which channels the Slack corpus sync pulls from (stored on the
+   * connection config as sync_channel_ids / sync_channel_names). An empty
+   * list clears the selection — the sync reverts to every channel the bot
+   * is a member of. `joined` echoes the public channels the bot could
+   * self-join right away. */
+  setSlackSyncChannels: (channels: { id: string; name?: string }[]) =>
+    api.post<{
+      ok: true
+      config: ConnectionSummary["config"]
+      joined: string[]
+    }>(`/v1/connectors/slack/sync-channels`, { channels }),
 
   // ---- Sprinklr ------------------------------------------------------------
   disconnectSprinklr: () =>

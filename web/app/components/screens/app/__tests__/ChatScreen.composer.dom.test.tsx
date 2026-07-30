@@ -133,6 +133,7 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
 import { NavigationProvider } from "../../../../context/NavigationContext"
 import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
+import { skillsApi } from "../../../../lib/api"
 
 function renderScreen() {
   return render(
@@ -239,6 +240,38 @@ describe("ChatScreen landing composer (A1 / A2)", () => {
     const narrowed = within(screen.getByRole("listbox", { name: "Skills" })).getAllByRole("option")
     expect(narrowed).toHaveLength(1)
     expect(narrowed[0].textContent).toContain("/my-estimator")
+  })
+
+  // Override (PRD 1854): a custom skill sharing a built-in's trigger REPLACES
+  // it — the palette lists the trigger once, as the custom skill.
+  it("dedupes the slash palette when a custom skill shadows a built-in trigger", async () => {
+    vi.mocked(skillsApi.list).mockResolvedValueOnce({
+      skills: [
+        {
+          id: "c2",
+          slug: "prioritize",
+          trigger: "/prioritize",
+          name: "Our Prioritize",
+          description: "House ranking rules",
+          uploader_name: "Fortune",
+          created_at: null,
+          has_file: true,
+          overrides_builtin: true,
+        },
+      ],
+    })
+    searchString = "new=1"
+    renderScreen()
+    const textarea = document.querySelector(".chat-home-composer-input") as HTMLTextAreaElement
+
+    await act(async () => {
+      fireEvent.change(textarea, { target: { value: "/prior" } })
+    })
+    const palette = await screen.findByRole("listbox", { name: "Skills" })
+    const rows = within(palette).getAllByRole("option")
+    expect(rows).toHaveLength(1)
+    expect(rows[0].textContent).toContain("Our Prioritize")
+    expect(rows[0].textContent).toContain("/prioritize")
   })
 
   // A1: firing a change on the landing file input adds the attachment, and the

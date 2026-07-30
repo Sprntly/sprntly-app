@@ -81,6 +81,7 @@ from app.graph.extractor import extract_document
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
+from app.prompt_history import clamp_turn_text
 # The salvage-tolerant JSON-array parser is shared with the public-feedback
 # capture pass: both read a model's "output ONLY a JSON array" turn and must
 # survive fences, prose wrappers and a budget-truncated tail. Reusing it keeps
@@ -869,9 +870,16 @@ def _answer_from_run(
 
 
 def _render_history(history: list[dict] | None) -> str:
+    """The last few turns, each CLAMPED (#949) before folding.
+
+    A prior turn in this thread can be a VoC / public-feedback / DS HTML report
+    — up to ~1 MB of base64 `data:` URIs — which replayed verbatim is a
+    non-retryable 400 on every later ask. Same fold-site clamp qa_agent,
+    public_feedback and call_digest apply."""
     if not history:
         return ""
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}"
+    rows = [f"{t.get('role', 'user').capitalize()}: "
+            f"{clamp_turn_text(t.get('content', ''))}"
             for t in history[-6:]]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 
