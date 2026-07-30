@@ -46,6 +46,13 @@ def _near(a: str, b: str, gap: int = 45) -> str:
     return rf"(?:{a}.{{0,{gap}}}{b}|{b}.{{0,{gap}}}{a})"
 
 
+# Named sub-patterns, bound before the f-strings below: an f-string EXPRESSION
+# cannot contain a backslash before Python 3.12, and CI runs 3.11.
+_CIR_SUBJECT_B = rf"\b{_CIR_SUBJECT}\b"
+_CIR_STANDING = r"\bwhere\s+do\s+we\s+stand\b"
+_CIR_COMPARE = r"\bhow\s+do\s+we\s+(?:compare|stack\s+up|measure\s+up)\b"
+_CIR_BENCHMARK = r"\bbenchmark\b"
+
 _CIR_REPORT_RULE_SRC = (
     # "competitive intelligence", "competitor report", "competitive analysis",
     # "market landscape", "monthly competitor scan", "quarterly competitive
@@ -55,15 +62,15 @@ _CIR_REPORT_RULE_SRC = (
     rf"|\b{_CIR_REPORT_NOUN}\s+(?:of|on|for|across|against|vs\.?|versus)\s+"
     rf"(?:the\s+|our\s+)?(?:\w+\s+){{0,2}}{_CIR_SUBJECT}\b"
     # "where do we stand vs competitors" / "vs the competition, where do we stand"
-    rf"|{_near(r'\bwhere\s+do\s+we\s+stand\b', rf'\b{_CIR_SUBJECT}\b')}"
+    rf"|{_near(_CIR_STANDING, _CIR_SUBJECT_B)}"
     # "how do we compare to the market" / "how do we stack up against rivals"
-    rf"|{_near(r'\bhow\s+do\s+we\s+(?:compare|stack\s+up|measure\s+up)\b', rf'\b{_CIR_SUBJECT}\b')}"
+    rf"|{_near(_CIR_COMPARE, _CIR_SUBJECT_B)}"
     # "what are our competitors shipping/launching/doing/been up to"
     rf"|\bwhat\s+(?:are|is|has|have)\b.{{0,30}}\b{_CIR_SUBJECT}\b.{{0,30}}"
     r"\b(?:ship(?:ping|ped)?|launch(?:ing|ed)?|releas\w+|doing|building|"
     r"been\s+up\s+to|up\s+to)\b"
     # "benchmark us against the market"
-    rf"|{_near(r'\bbenchmark\b', rf'\b{_CIR_SUBJECT}\b')}"
+    rf"|{_near(_CIR_BENCHMARK, _CIR_SUBJECT_B)}"
 )
 
 # Sibling strategy skills whose asks read competitor-ish but belong elsewhere.
