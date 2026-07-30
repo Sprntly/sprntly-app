@@ -226,4 +226,46 @@ describe("PublicPrototypeChrome — regression (extraction moved logic, did not 
       }),
     )
   })
+
+  it("test_public_chrome_pin_submit_without_name_shows_error_then_recovers: a pin submit BEFORE a name is captured shows a visible error and preserves the draft; the SAME pin submits successfully once a name is captured", async () => {
+    renderChrome({ token: "no-name-tok" })
+    await waitFor(() => expect(screen.getByTestId("public-mark-toggle")).toBeTruthy())
+    // Enter mark mode directly — the Mark toggle has no name-capture gate (only
+    // the General/Pinned composer sections do), so a fresh anonymous visitor can
+    // reach the on-canvas pin composer with no name ever having been captured.
+    fireEvent.click(screen.getByTestId("public-mark-toggle"))
+    await waitFor(() => expect(screen.getByTestId("da-mark-overlay")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("da-mark-overlay"))
+    await waitFor(() => expect(screen.getByTestId("da-pin-input-1")).toBeTruthy())
+    fireEvent.change(screen.getByTestId("da-pin-input-1"), {
+      target: { value: "Move this up" },
+    })
+    fireEvent.click(screen.getByTestId("da-pin-submit-1"))
+    // The abort must be VISIBLE — no silent no-op.
+    await waitFor(() => expect(screen.getByText("Add your name below, then send again.")).toBeTruthy())
+    // The typed draft is preserved, never lost.
+    expect((screen.getByTestId("da-pin-input-1") as HTMLTextAreaElement).value).toBe(
+      "Move this up",
+    )
+    // The create call never fired.
+    expect(createCommentByTokenMock).not.toHaveBeenCalled()
+    // The blocked submit force-opened the sidebar (onRequireName), surfacing the
+    // name-capture form — recover by capturing a name now.
+    await waitFor(() => expect(screen.getByTestId("viewer-name-form")).toBeTruthy())
+    fireEvent.change(screen.getByTestId("viewer-full-name-input"), {
+      target: { value: "Grace Hopper" },
+    })
+    fireEvent.submit(screen.getByTestId("viewer-name-form"))
+    // Submit the SAME pin again — now succeeds with the preserved draft text.
+    fireEvent.click(screen.getByTestId("da-pin-submit-1"))
+    await waitFor(() => expect(createCommentByTokenMock).toHaveBeenCalled())
+    expect(createCommentByTokenMock).toHaveBeenCalledWith(
+      "no-name-tok",
+      expect.objectContaining({
+        anchor_id: "pin-1",
+        body: "Move this up",
+        viewer_name: "Grace Hopper",
+      }),
+    )
+  })
 })
