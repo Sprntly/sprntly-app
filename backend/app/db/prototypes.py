@@ -307,12 +307,20 @@ def find_prototype_by_prd(
     — a different helper for a different purpose, kept separate). Filtered to
     the caller's workspace, newest by id. `statuses=None` means no status
     filter at all (matches ANY status, including 'failed'/'invalidated') —
-    this backs the three read-only /by-prd lookups:
+    this backs two of the three read-only /by-prd lookups:
 
-      statuses=["ready"]              -> GET /by-prd/{prd_id}        (ready only)
-      statuses=["ready", "generating"] -> GET /by-prd/{prd_id}/active (resume lookup)
-      statuses=None                    -> GET /by-prd/{prd_id}/latest (any status,
-                                           incl. 'failed' — backs the error+retry surface)
+      statuses=["ready"] -> GET /by-prd/{prd_id}        (ready only)
+      statuses=None       -> GET /by-prd/{prd_id}/latest (any status, incl.
+                              'failed' — backs the error+retry surface)
+
+    GET /by-prd/{prd_id}/active (the resume lookup) does NOT use this
+    function — it needs to look PAST a newer row that matches a SQL-level
+    status filter but fails an additional Python-side validity check (a
+    'failed' row with no bundle_url isn't a real resumable prototype), and
+    this function's hard `.limit(1)` can't do that: if the single row it
+    fetches turns out to be invalid, there is no second row to fall back to,
+    even when a genuinely valid older row exists. See `find_prototypes_by_prd`
+    (plural) and `get_active_by_prd`'s own docstring for the fix.
     """
     c = require_client()
     q = (
@@ -325,6 +333,40 @@ def find_prototype_by_prd(
         q = q.in_("status", statuses)
     resp = q.order("id", desc=True).limit(1).execute()
     return resp.data[0] if resp.data else None
+
+
+def find_prototypes_by_prd(
+    *,
+    prd_id: int,
+    workspace_id: str,
+    statuses: list[str] | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Return up to `limit` prototypes for a PRD matching `statuses`, newest
+    (highest id) first — the multi-candidate sibling of `find_prototype_by_prd`.
+
+    Exists for callers that must apply an ADDITIONAL Python-side validity
+    check on top of the SQL status filter and need to look past a candidate
+    that fails it. `find_prototype_by_prd`'s `.limit(1)` cannot do this: a
+    newer row that matches `statuses` at the SQL level but is later rejected
+    in Python (e.g. get_active_by_prd's 'failed row with no bundle_url isn't
+    resumable' check) would shadow a genuinely valid OLDER row underneath it,
+    since the query never even fetches that older row to consider it. This
+    function fetches a bounded WINDOW of candidates instead of just the top
+    one, so the caller can walk them newest-first and pick the first one that
+    passes its own check.
+    """
+    c = require_client()
+    q = (
+        c.table(_TABLE)
+        .select("*")
+        .eq("prd_id", prd_id)
+        .eq("workspace_id", workspace_id)
+    )
+    if statuses is not None:
+        q = q.in_("status", statuses)
+    resp = q.order("id", desc=True).limit(limit).execute()
+    return resp.data or []
 
 
 def create_checkpoint(
