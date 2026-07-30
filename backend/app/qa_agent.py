@@ -42,6 +42,7 @@ from app.skill_router import (
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
+    is_ticket_update,
     is_voc_report_request,
 )
 from app.skills.catalog import NON_ROUTABLE, routable_manifest
@@ -541,6 +542,27 @@ def answer(
 
         return chat_analysis.answer(
             enterprise_id=enterprise_id, question=question, history=history
+        )
+
+    # Rewrite a ticket FROM a PRD ("update the ticket details with the PRD").
+    # Checked BEFORE the Jira lookup, which would otherwise claim it — a write
+    # verb on a PM noun is exactly its trigger — and hand it to a skill whose
+    # tools are Jira-only and which cannot read a PRD at all. That mismatch is
+    # the reported failure this path exists to fix. It serves BOTH kinds of
+    # ticket (Sprntly and Jira), so unlike the lookup it must not be gated on a
+    # Jira connection.
+    if (
+        not pinned_skill
+        and not question.lstrip().startswith("/")
+        and is_ticket_update(question, history)
+    ):
+        from app import ticket_update
+
+        return ticket_update.answer(
+            enterprise_id=enterprise_id,
+            question=question,
+            history=history,
+            prd_id=prd_id,
         )
 
     # Live Jira read: a question referencing a Jira issue/epic wants the CURRENT
