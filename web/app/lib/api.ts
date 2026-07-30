@@ -617,6 +617,12 @@ export const skillsApi = {
     api.get<{ name: string; view_url: string; download_url: string }>(
       `/v1/skills/${encodeURIComponent(id)}/file`,
     ),
+  /** Delete a skill for the WHOLE company (row + original file). 404s on a
+   *  foreign or unknown id. */
+  remove: (id: string) =>
+    api.delete<{ deleted: true; id: string }>(
+      `/v1/skills/${encodeURIComponent(id)}`,
+    ),
 }
 
 /** The action envelope from POST /v1/chat/intent — the backend's history-aware

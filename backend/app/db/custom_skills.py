@@ -159,3 +159,23 @@ def get_custom_skill_by_id(company_id: str, skill_id: str) -> dict | None:
         .execute()
     )
     return _decode(resp.data[0]) if resp.data else None
+
+
+def delete_custom_skill(company_id: str, skill_id: str) -> dict | None:
+    """Delete one company-owned skill row; returns the decoded deleted row
+    (the route needs storage_key to clean up the original file), or None when
+    the id is missing or belongs to another company — indistinguishable, like
+    the by-id lookup. The delete itself is also company-filtered so a racing
+    caller can never remove a foreign row."""
+    row = get_custom_skill_by_id(company_id, skill_id)
+    if row is None:
+        return None
+    c = require_client()
+    (
+        c.table("custom_skills")
+        .delete()
+        .eq("company_id", company_id)
+        .eq("id", skill_id)
+        .execute()
+    )
+    return row

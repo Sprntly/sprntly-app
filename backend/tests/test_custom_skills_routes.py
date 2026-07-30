@@ -12,6 +12,8 @@ Covered:
   staged object rolled back on the duplicate path
 - list: newest-first metadata, company-isolated
 - file links: signed/fallback URLs for owned skills; foreign ids 404
+- delete: removes the row and the staged original, frees the slug for
+  re-upload; foreign/missing ids 404 indistinguishably
 """
 from __future__ import annotations
 
@@ -266,3 +268,44 @@ def test_file_links_foreign_id_404(tenant_client):
 def test_file_links_unknown_id_404(tenant_client):
     t = tenant_client.make(slug="acme")
     assert t.client.get("/v1/skills/not-a-real-id/file").status_code == 404
+
+
+# ─── delete ──────────────────────────────────────────────────────────────────
+
+
+def test_delete_removes_row_and_staged_file(tenant_client):
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+    assert len(_staged_files()) == 1
+
+    resp = t.client.delete(f"/v1/skills/{skill_id}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"deleted": True, "id": skill_id}
+    assert t.client.get("/v1/skills").json()["skills"] == []
+    # The staged original is cleaned up with the row.
+    assert _staged_files() == []
+
+
+def test_delete_frees_slug_for_reupload(tenant_client):
+    t = tenant_client.make(slug="acme")
+    skill_id = _upload(t.client).json()["id"]
+
+    assert t.client.delete(f"/v1/skills/{skill_id}").status_code == 200
+    # Same name again → no duplicate-slug 409 once the row is gone.
+    assert _upload(t.client).status_code == 201
+
+
+def test_delete_foreign_id_404_and_keeps_skill(tenant_client):
+    a = tenant_client.make(slug="acme")
+    b = tenant_client.make(slug="globex")
+    skill_id = _upload(a.client).json()["id"]
+
+    assert b.client.delete(f"/v1/skills/{skill_id}").status_code == 404
+    # The owner's skill and its staged file are untouched.
+    assert [s["id"] for s in a.client.get("/v1/skills").json()["skills"]] == [skill_id]
+    assert len(_staged_files()) == 1
+
+
+def test_delete_unknown_id_404(tenant_client):
+    t = tenant_client.make(slug="acme")
+    assert t.client.delete("/v1/skills/not-a-real-id").status_code == 404
