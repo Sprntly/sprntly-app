@@ -234,7 +234,10 @@ def test_extractor_writes_signals_themes_edges(facade):
          patch.object(extractor, "embed_texts",
                       side_effect=lambda texts, **k: [[0.1] * 4 for _ in texts]):
         r = extractor.extract_document(facade, "ent-A", doc_name="doc1", text="...")
-    assert r == {"signals": 2, "themes": 1, "skipped": 0}
+    assert {k: r[k] for k in ("signals", "themes", "skipped")} == {
+        "signals": 2, "themes": 1, "skipped": 0}
+    # Additive key (roadmap replace semantics): the ids this doc asserts.
+    assert len(r["signal_ids"]) == 2
     themes = facade.query_entities("ent-A", type="theme")
     assert len(themes) == 1 and themes[0].canonical_label == "SSO"
     edges = facade.edges_to("ent-A", themes[0].id)
