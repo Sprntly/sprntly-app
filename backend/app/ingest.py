@@ -314,21 +314,31 @@ def _looks_textual(data: bytes) -> bool:
 #: the module docstring for why this must be detectable).
 UNPARSED_STUB_MARKER = "<!-- sprntly:unparsed -->"
 
+# Prose prefix inside the same placeholder, and the only marker stubs carried
+# before the HTML comment shipped. `fallback_to_md` still writes it and
+# `is_unparsed_stub` still matches it, so the stub text and its detector can
+# never drift apart — and stubs already stored stay detectable.
+_UNPARSED_STUB_MARKER = "_Stored as a source but not yet parsed (type "
+
 
 def is_unparsed_stub(text: str | None) -> bool:
     """True iff `text` is a placeholder for a file we could not read.
 
     Callers use this to keep "we couldn't read this" out of anything that
     treats text as content — extraction, the corpus seed, evidence counts.
-    Also matches pre-marker stubs by their distinctive wording so files
-    uploaded before this shipped are skipped too.
+
+    The stub is deliberately NON-EMPTY so the file still registers as a source,
+    which means an `if not text` check does NOT catch it. Anything that treats
+    "no usable text" as a decision point (e.g. roadmap→KG ingest, which must not
+    let an unparseable re-upload retire the previous roadmap's signals) has to
+    ask this instead.
     """
     if not text:
         return False
     if UNPARSED_STUB_MARKER in text:
         return True
     # Legacy stubs (written before the marker existed).
-    return "_Stored as a source but not yet parsed (type " in text
+    return _UNPARSED_STUB_MARKER in text
 
 
 def fallback_to_md(filename: str, data: bytes) -> str:
@@ -346,7 +356,7 @@ def fallback_to_md(filename: str, data: bytes) -> str:
     return (
         f"{UNPARSED_STUB_MARKER}\n"
         f"# {Path(filename).name}\n\n"
-        f"_Stored as a source but not yet parsed (type {suffix}, {kb} KB). "
+        f"{_UNPARSED_STUB_MARKER}{suffix}, {kb} KB). "
         "Binary or unrecognized format — its content is not included in "
         "analysis yet._\n"
     )

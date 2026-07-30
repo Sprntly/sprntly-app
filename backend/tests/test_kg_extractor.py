@@ -72,6 +72,31 @@ def test_no_default_keeps_llm_source_types(facade):
     assert by_content["seeded fact"].source_type == "pm_manual"
 
 
+def test_force_source_type_overrides_even_merited_evidence_types(facade):
+    """force_source_type PINS every signal, unlike source_type_default which
+    keeps an evidence type the LLM picked on merit.
+
+    Used where the DOCUMENT CLASS decides evidentiary weight and a model-picked
+    connected type would be an integrity problem — the roadmap path, whose
+    quoted metrics must never count as connected evidence in the brief gate."""
+    _extract(facade, [
+        _item("seeded fact", "pm_manual"),
+        _item("revenue fact", "revenue"),      # merited — still overridden
+        _item("weird fact", "meeting_notes"),  # out of vocabulary
+    ], force_source_type="pm_manual")
+
+    by_content = {s.content: s for s in _signals(facade).values()}
+    assert {s.source_type for s in by_content.values()} == {"pm_manual"}
+
+
+def test_force_source_type_takes_precedence_over_default(facade):
+    """When both are passed, the pin wins."""
+    _extract(facade, [_item("revenue fact", "revenue")],
+             source_type_default="customer_voice", force_source_type="pm_manual")
+    by_content = {s.content: s for s in _signals(facade).values()}
+    assert by_content["revenue fact"].source_type == "pm_manual"
+
+
 def test_provenance_extra_merged_with_origin(facade):
     """provenance_extra rides into every signal's provenance next to origin."""
     _extract(facade, [_item("seeded fact", "pm_manual")],

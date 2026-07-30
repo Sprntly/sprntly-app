@@ -264,23 +264,79 @@ def _seed_from_connectors(facade: GraphFacade, company_id: str) -> dict:
     return totals
 
 
+def _workspace_id_for_slug(company_id: str, slug: str) -> str | None:
+    """Which workspace's roadmap does this brief slug refer to?
+
+    Additional workspaces own a '{company_slug}--{workspace_slug}' dataset, so
+    the dataset→workspace binding answers directly. A bare company slug is the
+    DEFAULT workspace's dataset, whose binding predates workspace scoping for
+    older tenants — fall back to the company's default workspace. None means we
+    couldn't resolve one (legacy/unbound dataset): ingest_roadmap then reads the
+    company's no-workspace roadmap row, which is the same row the synthesis
+    agent's company-keyed load_roadmap_doc reads.
+    """
+    from app.db.workspaces import default_workspace_for_company, workspace_for_dataset_slug
+
+    try:
+        binding = workspace_for_dataset_slug(slug)
+        if binding and binding.get("workspace_id"):
+            return str(binding["workspace_id"])
+        ws = default_workspace_for_company(company_id)
+        return str(ws["id"]) if ws else None
+    except Exception:  # noqa: BLE001 — best-effort resolution, never fatal
+        logger.exception("seed: could not resolve workspace for slug %s", slug)
+        return None
+
+
+def _seed_from_roadmap(facade: GraphFacade, company_id: str, slug: str) -> dict:
+    """Grandfather + retry leg: make sure the workspace's uploaded roadmap is in
+    the KG before synthesis reads it.
+
+    The roadmap upload endpoint already kicks this off (auto_sync.
+    kickoff_roadmap_ingest), so on the happy path this is a ledger no-op costing
+    one kg_source read. It exists for the two paths the kickoff can't cover:
+    every roadmap uploaded BEFORE roadmap→KG ingest shipped (backfilled on the
+    next brief, no migration needed), and any kickoff that failed or lost its
+    thread. Error-isolated — a roadmap problem must never block a brief.
+
+    Concurrency: ingest_roadmap takes the per-company roadmap lock itself (the
+    same object auto_sync's kickoff uses), so this leg cannot interleave with an
+    in-flight upload ingest and expire the current roadmap's signals.
+    """
+    from app.kg_ingest.roadmap import ingest_roadmap
+
+    try:
+        return ingest_roadmap(
+            company_id, _workspace_id_for_slug(company_id, slug), facade=facade
+        )
+    except Exception:  # noqa: BLE001 — error-isolation, mirrors the corpus leg
+        logger.exception("seed: roadmap ingest failed for %s (slug=%s)",
+                         company_id, slug)
+        return {"status": "error"}
+
+
 def seed_incremental(facade: GraphFacade, company_id: str, slug: str) -> dict:
     """Populate the KG before synthesis, incrementally.
 
     The corpus seed ALWAYS runs (extracting only docs not already ingested),
-    so a doc uploaded after the first brief reaches the graph. Connectors are
-    pulled ONLY on a first-ever (empty) KG — they have their own ongoing sync
-    path, so we don't re-pull them on every brief regen.
+    so a doc uploaded after the first brief reaches the graph. The roadmap leg
+    ALSO always runs, ledger-deduped to a no-op when the current roadmap version
+    is already in the graph. Connectors are pulled ONLY on a first-ever (empty)
+    KG — they have their own ongoing sync path, so we don't re-pull them on every
+    brief regen.
 
-    Returns {"corpus": <totals>, "connectors": <totals>|None, "was_empty": bool}.
+    Returns {"corpus": <totals>, "roadmap": <status>, "connectors":
+    <totals>|None, "was_empty": bool}.
     """
     was_empty = _kg_is_empty(facade, company_id)
     if was_empty:
         logger.info("KG empty for company=%s (slug=%s) — first-time seed "
                     "(corpus + connectors) before synthesis", company_id, slug)
     corpus = _seed_from_corpus(facade, company_id, slug)
+    roadmap = _seed_from_roadmap(facade, company_id, slug)
     connectors = _seed_from_connectors(facade, company_id) if was_empty else None
-    return {"corpus": corpus, "connectors": connectors, "was_empty": was_empty}
+    return {"corpus": corpus, "roadmap": roadmap, "connectors": connectors,
+            "was_empty": was_empty}
 
 
 def generate_all_synthesis_briefs() -> None:

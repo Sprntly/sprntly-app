@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from app.graph.facade import GraphFacade
-from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal
+from app.graph.types import SOURCE_STALE_WINDOW_DAYS, Signal, signal_is_retired
 from app.synthesis.scoring import voc_score
 
 # Source types that represent REAL connected-source evidence (a connector sync
@@ -121,7 +121,7 @@ def compute_convergence(
             if edge.source_kind != "signal" or edge.source_id in seen:
                 continue
             sig = signals_by_id.get(edge.source_id)
-            if sig is None or sig.properties.get("superseded_by"):
+            if sig is None or signal_is_retired(sig.properties):
                 continue
             seen.add(sig.id)
             w = sig.confidence * sig.weight * _recency_factor(sig, now)
