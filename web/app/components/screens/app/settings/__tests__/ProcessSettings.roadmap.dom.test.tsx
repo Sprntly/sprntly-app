@@ -211,6 +211,33 @@ describe("Process & Planning — roadmap document block", () => {
     expect(document.getElementById("pr-team-roadmap")).toBeTruthy()
   })
 
+  it("shows a stable version when the same file is re-uploaded", async () => {
+    // Staging QA symptom: re-uploading a byte-identical deck walked the label
+    // "version 2" → "version 3" while KG ingest correctly no-opped. The server
+    // now holds the version (save_roadmap_doc compares extracted text, the same
+    // key the ingest ledger hashes); this pins that the block renders the
+    // SERVER's version and never derives or increments one of its own.
+    roadmapGetMock.mockResolvedValue({ ...STORED, filename: "H2.pdf", version: 2 })
+    await act(async () => {
+      mount()
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId("roadmap-doc-current").textContent).toContain("version 2"),
+    )
+
+    // Same file again — the no-op POST returns the unchanged version.
+    roadmapUploadMock.mockResolvedValue({
+      ok: true, filename: "H2.pdf", version: 2, extracted_chars: 120,
+    })
+    await act(async () => {
+      fireEvent.change(picker(), { target: { files: [file("H2.pdf")] } })
+    })
+
+    const current = await waitFor(() => screen.getByTestId("roadmap-doc-current"))
+    expect(current.textContent).toContain("version 2")
+    expect(current.textContent).not.toContain("version 3")
+  })
+
   it("only accepts formats the converter can actually parse", async () => {
     // .doc/.ppt/.xls have no parser — they convert to a "not yet parsed"
     // placeholder stub, so an upload would look accepted while carrying no
