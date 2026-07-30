@@ -8,6 +8,7 @@ import { EvidenceHtmlBrief } from "./EvidenceHtmlBrief"
 import { StreamingHtmlPreview, stripLeadingFence } from "./StreamingHtmlPreview"
 import { stripHtmlCodeFence } from "../../lib/htmlBrief"
 import { HtmlReportView } from "./HtmlReportView"
+import { useCpanelPhase } from "./useCpanelPhase"
 import { EmptyPane } from "./EmptyPane"
 import { IconClose, IconSparkle } from "./app-icons"
 import { runEvidenceGeneration, loadEvidenceByInsight } from "../../lib/runEvidenceGeneration"
@@ -20,6 +21,7 @@ import {
   type TrackerProvider,
 } from "../../lib/api"
 import { PrdPanelContent } from "./PrdPanelContent"
+import { ReportsTab } from "./ReportsTab"
 import { GeneratePrototypeCTA } from "../design-agent/GeneratePrototypeCTA"
 import { TicketDetail } from "./TicketDetail"
 import { DestinationPicker } from "./DestinationPicker"
@@ -27,7 +29,7 @@ import { JiraPushModal, type JiraPushChoice } from "./JiraPushModal"
 import { ticketSyncTrackers } from "../../lib/connectorsCatalog"
 import {
   IconMicroscope, IconFileText, IconTicket, IconShare, IconFileTypePdf,
-  IconRefresh, IconChevronDown, IconPlugConnected,
+  IconRefresh, IconChevronDown, IconPlugConnected, IconChartBar,
 } from "@tabler/icons-react"
 import { downloadPrdPdf, printPrdHtml } from "../../lib/prdExport"
 import { printCombined } from "../../lib/combinedExport"
@@ -36,21 +38,21 @@ import type { PrdState, PrdContent, PrdDesignBlock, AppContentState } from "../.
 // Tab order mirrors the pipeline: Evidence → PRD → Tickets (each tab's bottom
 // bar launches the NEXT artifact). Evidence is hidden for non-brief PRDs (see
 // isEvidenceTabHidden), so uploads show PRD → Tickets.
+//
+// Reports sits AFTER the pipeline because it isn't part of it: a report hangs off
+// the CHAT THREAD, not off the PRD, and a thread may hold several. It's hidden
+// until the thread actually has one (see reportsTabHidden below), so the pipeline
+// tabs are unchanged for every chat that never asked for a report.
 const TABS = [
   { icon: <IconMicroscope size={11.5} />, id: "evidence", label: "Evidence" },
   { icon: <IconFileText size={11.5}/> , id: "prd", label: "PRD" },
   { icon: <IconTicket size={11.5}/> , id: "tickets", label: "Tickets" },
+  { icon: <IconChartBar size={11.5}/> , id: "reports", label: "Reports" },
 ] as const
 
 const CPANEL_WIDTH_KEY = "sprntly-cpanel-width"
 const CPANEL_WIDTH_MIN = 650   // min: content needs room to breathe
 const CPANEL_MAX_VW   = 0.6    // max: never more than 60% of the viewport
-
-// Drawer timings. MUST match --cpanel-in-ms / --cpanel-out-ms in globals.css:
-// the CSS animates the slide, these drive when the transform class comes off
-// (in) and when the panel actually unmounts (out).
-const CPANEL_IN_MS = 260
-const CPANEL_OUT_MS = 200
 
 function clampCpanelWidth(px: number): number {
   const max = Math.round(window.innerWidth * CPANEL_MAX_VW)
@@ -218,46 +220,6 @@ function useResolvePrd() {
   return { meta, resolving, resolve }
 }
 
-/**
- * Drives the panel's mount lifecycle so it can animate BOTH ways.
- *
- * `contentPanelTab` flipping to null used to unmount the panel on the spot —
- * it vanished while the main column was still easing its padding shut. Here
- * the panel stays mounted for the length of the exit animation and only then
- * comes off the tree.
- *
- * Phases: "in" and "out" are the two animating states and each carries the
- * matching class; "idle" is the settled, open panel with NO transform on it
- * (see the .cpanel--in comment in globals.css for why that matters).
- */
-function useCpanelPhase(open: boolean) {
-  const [mounted, setMounted] = useState(open)
-  const [phase, setPhase] = useState<"in" | "idle" | "out">(open ? "in" : "idle")
-  // Read inside the effect without re-running it: the effect reacts to `open`
-  // only, so a mount/unmount it performs itself can't restart the animation.
-  const mountedRef = useRef(mounted)
-  mountedRef.current = mounted
-
-  useEffect(() => {
-    if (open) {
-      setMounted(true)
-      setPhase("in")
-      const t = setTimeout(() => setPhase("idle"), CPANEL_IN_MS)
-      return () => clearTimeout(t)
-    }
-    // Never mounted (first render with the panel closed) — nothing to play out.
-    if (!mountedRef.current) return
-    setPhase("out")
-    const t = setTimeout(() => {
-      setMounted(false)
-      setPhase("idle")
-    }, CPANEL_OUT_MS)
-    return () => clearTimeout(t)
-  }, [open])
-
-  return { mounted, phase }
-}
-
 export function ContentPanel() {
   const { contentPanelTab, openContentPanel, closeContentPanel, showToast } = useNavigation()
   const { content } = useContent()
@@ -275,8 +237,60 @@ export function ContentPanel() {
   }, [contentPanelTab])
   const shownTab = contentPanelTab ?? lastTabRef.current
 
-  const evidenceHidden = isEvidenceTabHidden(content)
-  const visibleTabs = evidenceHidden ? TABS.filter((t) => t.id !== "evidence") : TABS
+  // This thread's captured reports — fetched once per thread by
+  // useThreadReportsSync (AppShell), never here. Defaulted because the panel is
+  // rendered against partial content in plenty of places (tests, and any surface
+  // that sets only the slices it cares about); a missing slice means "no reports
+  // in scope", never a crash in the shared panel.
+  const reports = content.threadReports ?? []
+  const reportsLoading = content.threadReportsStatus === "loading"
+  const reportsError = content.threadReportsStatus === "error"
+
+  // THE RULE: a tab exists only when this thread actually has that artifact.
+  //
+  // Evidence → PRD → Tickets are one pipeline, entered by having a PRD or the
+  // insight to resolve one from. A chat whose only artifact is a report was
+  // showing all three regardless, so the panel advertised three documents that
+  // did not exist and could not be made from there.
+  //
+  // "In scope" is deliberately wider than "loaded": the PRD tab resolves an
+  // insight's PRD on click, and the Evidence tab loads a finding's brief, so a
+  // pointer to one (prdMeta / detail.meta) is as good as the document itself.
+  const pipelineInScope = !!(
+    content.prd ||
+    content.prdGenerating ||
+    content.prdMeta ||
+    content.detail?.meta ||
+    content.evidence ||
+    content.evidenceGenerating
+  )
+  const evidenceHidden = !pipelineInScope || isEvidenceTabHidden(content)
+
+  // Same rule for reports — with one addition: "no reports" has to be KNOWN, not
+  // merely unproven. An empty list from a FAILED fetch used to hide the tab, so
+  // switching to another tab made the report the user was reading disappear from
+  // the panel entirely. So the tab also survives an error.
+  const reportsHidden =
+    reports.length === 0 &&
+    !reportsError &&
+    // A standalone report (opened from Artifacts with no chat behind it) has no
+    // thread list at all — the open document IS the reason the tab belongs.
+    content.reportFocusId == null
+
+  const hidden: Record<(typeof TABS)[number]["id"], boolean> = {
+    evidence: evidenceHidden,
+    prd: !pipelineInScope,
+    tickets: !pipelineInScope,
+    reports: reportsHidden,
+  }
+  // The tab currently being shown is never pulled out from under the reader —
+  // whatever is in the body must stay reachable in the bar above it. Evidence is
+  // the exception: it going hidden means this PRD has no research brief AT ALL
+  // (not a timing artifact), and the redirect off it is deliberate — see the
+  // effect below.
+  const visibleTabs = TABS.filter(
+    (t) => !hidden[t.id] || (t.id === shownTab && t.id !== "evidence"),
+  )
 
   // Clicking the PRD tab with no PRD in scope IS the request for one — parking on
   // "No PRD draft loaded" makes the user hunt for a button to do the obvious next
@@ -290,14 +304,21 @@ export function ContentPanel() {
     if (id === "prd" && !content.prd && !content.prdGenerating) void resolvePrd()
   }, [openContentPanel, content.prd, content.prdGenerating, resolvePrd])
 
-  // If the panel is parked on Evidence but that tab just became hidden (a
-  // backlog/upload PRD loaded), render the PRD tab instead of a stranded body.
-  const activeTab = evidenceHidden && shownTab === "evidence" ? "prd" : shownTab
+  // If the panel is parked on a tab that just became hidden (a backlog/upload PRD
+  // loaded → no Evidence; the panel sliding out off an empty Reports tab), fall
+  // back to the first tab that IS visible rather than a stranded body. Not
+  // hardcoded to "prd" any more: on a report-only thread the PRD tab is exactly
+  // the one that doesn't exist.
+  const activeTab = visibleTabs.some((t) => t.id === shownTab)
+    ? shownTab
+    : (visibleTabs[0]?.id ?? "prd")
 
   // Persist that fallback into navigation state so re-opens land on a real tab.
   useEffect(() => {
-    if (evidenceHidden && contentPanelTab === "evidence") openContentPanel("prd")
-  }, [evidenceHidden, contentPanelTab, openContentPanel])
+    if (evidenceHidden && contentPanelTab === "evidence" && activeTab !== "evidence") {
+      openContentPanel(activeTab)
+    }
+  }, [evidenceHidden, contentPanelTab, activeTab, openContentPanel])
 
   // Tracks the live pixel width; null = use the CSS default (60vw).
   const widthRef = useRef<number | null>(null)
@@ -399,9 +420,21 @@ export function ContentPanel() {
               ))}
             </div>
           </div>
-            <span className="cpanel-main-name">{content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}</span>
+            {/* The header names what the panel is SHOWING. On Reports that's the
+                thread's reports — not the PRD, which the tab isn't about (and
+                which a report-only thread may not even have). */}
+            <span className="cpanel-main-name">
+              {activeTab === "reports"
+                ? "Reports"
+                : content.prd?.title ? `PRD · ${content.prd.title}` : "PRD"}
+            </span>
           <div className="cpanel-head-actions">
-            <ShareMenu prd={content.prd} evidence={content.evidence} onToast={showToast} />
+            {/* The header Share menu exports the Evidence + PRD pair, so it has no
+                meaning on Reports — a report carries its OWN share/PDF actions,
+                on the open document (ReportsTab). */}
+            {activeTab !== "reports" && (
+              <ShareMenu prd={content.prd} evidence={content.evidence} onToast={showToast} />
+            )}
             <button type="button" className="cpanel-close" onClick={closeContentPanel} aria-label="Close">
               <IconClose size={16} />
             </button>
@@ -412,6 +445,9 @@ export function ContentPanel() {
           {activeTab === "evidence" && <EvidenceTab />}
           {activeTab === "prd" && <PrdPanelContent evidenceTabAvailable={!evidenceHidden} />}
           {activeTab === "tickets" && <TicketsTab />}
+          {activeTab === "reports" && (
+            <ReportsTab reports={reports} loading={reportsLoading} error={reportsError} />
+          )}
         </div>
 
         {/* Fixed pipeline bar — each tab's bottom launches the NEXT artifact.

@@ -273,6 +273,10 @@ async def ask(
             history=history,
             pinned_skill=body.pinned_skill,
             prd_id=body.prd_id,
+            # Attachment context for a captured HTML report: the chat room and
+            # PRD this ask ran in (see app/report_capture.py).
+            conversation_id=body.conversation_id,
+            workspace_id=company.workspace_id,
         )
         row = get_ask_job(ask_id)
         return {"ask_id": ask_id, "status": (row or {}).get("status", "ready")}
@@ -286,6 +290,9 @@ async def ask(
             history=history,
             pinned_skill=body.pinned_skill,
             prd_id=body.prd_id,
+            # Attachment context for a captured HTML report — see above.
+            conversation_id=body.conversation_id,
+            workspace_id=company.workspace_id,
         )
     )
     _inflight_tasks.add(task)

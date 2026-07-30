@@ -1102,6 +1102,35 @@ CREATE TABLE custom_skills (
 );
 CREATE INDEX custom_skills_company_id_idx ON custom_skills (company_id);
 
+-- Captured HTML report documents (mirrors 20260730120000_reports.sql,
+-- SQLite-ized). COMPANY-scoped (all workspaces in a company share one report
+-- library; workspace_id records the generating workspace and may be NULL).
+-- conversation_id / prd_id are the report's ATTACHMENT — the chat room and PRD
+-- the run happened in, NULL when the ask carried neither. No FKs, matching the
+-- workspaces-table note: route tests fabricate tenant ids with no parent rows.
+-- share_* mirror 20260730130000_reports_share.sql: opt-in public access by
+-- token, DEFAULT PRIVATE (nothing is reachable by link until explicitly shared).
+CREATE TABLE reports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    skill           TEXT NOT NULL,
+    title           TEXT NOT NULL DEFAULT '',
+    html            TEXT NOT NULL DEFAULT '',
+    question        TEXT NOT NULL DEFAULT '',
+    ask_id          INTEGER,
+    conversation_id INTEGER,
+    prd_id          INTEGER,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    share_mode      TEXT NOT NULL DEFAULT 'private',
+    share_token     TEXT,
+    share_passcode_hash TEXT,
+    shared_at       TEXT
+);
+CREATE INDEX reports_company_idx ON reports (company_id, id DESC);
+CREATE UNIQUE INDEX reports_share_token_uniq ON reports (share_token)
+    WHERE share_token IS NOT NULL;
+
 -- Onboarding drip / nudge email tracking (mirrors
 -- 20260614100000_drip_email_sends.sql). One row per delivered (company ×
 -- member × step); UNIQUE is the de-dup guard so steps never double-send.
@@ -1428,16 +1457,25 @@ def _no_real_browser_in_preview_capture(monkeypatch):
     Tests that genuinely exercise capture override this: the screenshot unit tests
     re-patch this same seam to inject a fake Playwright graph, and completion-path
     success tests mock the route's `capture_bundle_screenshot` to return fake bytes.
-    Both run after this autouse fixture, so their patch wins for that test."""
-    try:
-        import app.design_agent.screenshot as _screenshot
+    Both run after this autouse fixture, so their patch wins for that test.
 
-        def _no_playwright():
-            raise ImportError("playwright disabled in tests")
+    The report-PDF renderer (app/report_pdf.py) has the same lazy seam and is
+    stubbed here too, so a report download test degrades to None (→ 503) instead
+    of launching Chromium."""
 
-        monkeypatch.setattr(_screenshot, "_resolve_async_playwright", _no_playwright, raising=False)
-    except Exception:
-        pass
+    def _no_playwright():
+        raise ImportError("playwright disabled in tests")
+
+    for mod_name in ("app.design_agent.screenshot", "app.report_pdf"):
+        try:
+            import importlib
+
+            mod = importlib.import_module(mod_name)
+            monkeypatch.setattr(
+                mod, "_resolve_async_playwright", _no_playwright, raising=False
+            )
+        except Exception:
+            pass
     yield
 
 

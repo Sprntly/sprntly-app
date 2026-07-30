@@ -85,6 +85,15 @@ from app.db.public_feedback_runs import (
     save_public_feedback_run,
 )
 
+# Reports (captured skill-generated HTML report documents)
+from app.db.reports import (
+    find_report_by_share_token,
+    get_report,
+    list_reports_for_conversation,
+    save_report,
+    set_report_share_config,
+)
+
 # Deep company-research runs (onboarding kick + chat ask)
 from app.db.company_research_runs import (
     company_research_run_in_flight,
@@ -242,6 +251,12 @@ __all__ = [
     "log_ask",
     "start_ask_job",
     "start_cached_ask",
+    # reports (captured HTML report documents)
+    "find_report_by_share_token",
+    "get_report",
+    "list_reports_for_conversation",
+    "save_report",
+    "set_report_share_config",
     # deep company-research runs
     "company_research_run_in_flight",
     "complete_company_research_run",

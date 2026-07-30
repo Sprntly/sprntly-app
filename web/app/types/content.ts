@@ -1,6 +1,6 @@
 /** Serializable app payload — hydrate from API / LLM via `setContent`. */
 
-import type { AskResponse } from "../lib/api"
+import type { AskResponse, ReportSummary } from "../lib/api"
 
 export type BriefTagType = "double" | "new" | "fix"
 
@@ -597,6 +597,12 @@ export interface PrdState extends PrdContent {
    *  have none, so the right-panel Evidence tab is hidden for them. Absent on
    *  legacy rows — treat missing as `'brief'` (show the tab). */
   source?: "brief" | "ideation" | "backlog" | "upload" | "chat"
+  /** When this PRD was written (`PrdRecord.generated_at`). Used to order it
+   *  against the thread's other artifacts — the tab strip's reopen button opens
+   *  whichever was created LAST. Absent on paths that build a PrdState without a
+   *  record behind it (a streaming draft), which read as "no timestamp" rather
+   *  than as oldest. */
+  generatedAt?: string
 }
 
 export interface AppContentState {
@@ -663,12 +669,28 @@ export interface AppContentState {
    *  previous run's preview can never bleed into a new one. Mirrors
    *  `prdPartialHtml`. */
   evidencePartialHtml: string | null
-  /** A self-contained HTML report answer (e.g. the voice-of-customer-report
-   *  skill's fixed-template document) currently open in the right panel's
-   *  Report tab. Chat surfaces set this instead of rendering the document
-   *  inline, so the user keeps chatting on the left while reading it on the
-   *  right. `null` = no Report tab shown. */
-  report: { html: string; title: string } | null
+  /** The active chat tab's conversation id, mirrored here by ChatScreen so the
+   *  content panel knows which THREAD it is showing. The Reports tab lists this
+   *  conversation's captured reports; null (a brand-new chat with nothing
+   *  persisted yet, or the brief tab) means there is no thread to list. */
+  conversationId: number | null
+  /** A specific report to open in the Reports tab, set when the user arrived by
+   *  clicking that exact document (e.g. an Artifacts row). The tab consumes it
+   *  once — selecting the report and clearing this — so the user lands on what
+   *  they clicked instead of a list they must search. */
+  reportFocusId: number | null
+  /** The active thread's captured reports, newest first. Owned by
+   *  `useThreadReportsSync` (called once in AppShell) and read by both the panel
+   *  and ChatScreen — see that hook for why there is exactly one fetcher. */
+  threadReports: ReportSummary[]
+  /** Lifecycle of `threadReports`, because an empty list means different things:
+   *   idle    — no thread in scope (nothing was ever asked for)
+   *   loading — in flight; empty is "not yet", not "none"
+   *   ready   — authoritative; empty genuinely means this chat has no reports
+   *   error   — the fetch failed; empty says nothing at all
+   *  The Reports tab hides only on a KNOWN-empty thread, so a failed load never
+   *  makes the tab vanish. */
+  threadReportsStatus: "idle" | "loading" | "ready" | "error"
   teamMembers: TeamMemberRow[]
   teamPending: TeamPendingRow[]
   connectorCategories: ConnectorCategoryRow[]

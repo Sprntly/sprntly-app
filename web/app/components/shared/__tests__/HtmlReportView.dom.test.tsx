@@ -50,6 +50,23 @@ describe("HtmlReportView", () => {
     expect(sandbox).toBe("allow-same-origin")
     expect(sandbox).not.toContain("allow-scripts")
   })
+
+  it("leaves the document's own page gutter alone by default", () => {
+    // The standalone /r/<token> page has the whole viewport — the report's own
+    // layout is right there.
+    const { container } = render(<HtmlReportView html={REPORT} />)
+    expect(container.querySelector("iframe")!.getAttribute("srcdoc")).toBe(REPORT)
+  })
+
+  it("trims the page gutter inside the panel, without touching the document's own styles", () => {
+    const { container } = render(<HtmlReportView html={REPORT} fitPanel />)
+    const srcdoc = container.querySelector("iframe")!.getAttribute("srcdoc")!
+    expect(srcdoc).toContain(".page{padding:0px 0px !important;}")
+    // Appended INSIDE head, after the document's own <style>, so it wins on
+    // order rather than by editing the skill's template.
+    expect(srcdoc.indexOf(".page{padding")).toBeGreaterThan(srcdoc.indexOf(".page{max-width:900px}"))
+    expect(srcdoc).toContain("<h1>Voice of Customer</h1>")
+  })
 })
 
 describe("AskReplyBody HTML routing", () => {
@@ -69,5 +86,42 @@ describe("AskReplyBody HTML routing", () => {
     expect(container.querySelector("iframe")).toBeNull()
     expect(container.querySelector(".ai-bar-reply-answer")).not.toBeNull()
     expect(container.textContent).toContain("plain")
+  })
+})
+
+// On a surface WITH the content panel, a report is an artifact like any other:
+// it reads in the panel, and the chat turn is the card that opens it. Printing
+// the document inline as well showed the same report twice — once in the thread,
+// once in the panel — and buried the conversation under it.
+describe("AskReplyBody — a report answer on a surface with the panel", () => {
+  it("renders a card naming the report instead of the document", () => {
+    const onOpenReport = vi.fn()
+    const { container } = render(
+      <AskReplyBody reply={reply(REPORT)} onOpenReport={onOpenReport} />,
+    )
+
+    expect(container.querySelector("iframe")).toBeNull()
+    const card = container.querySelector('[data-testid="report-answer-card"]')!
+    expect(card).not.toBeNull()
+    // Named by the document's own <h1>, the way the captured artifact is.
+    expect(card.textContent).toContain("Voice of Customer")
+  })
+
+  it("opens the report in the panel on click", () => {
+    const onOpenReport = vi.fn()
+    const { container } = render(
+      <AskReplyBody reply={reply(REPORT)} onOpenReport={onOpenReport} />,
+    )
+
+    ;(container.querySelector('[data-testid="open-report-btn"]') as HTMLButtonElement).click()
+    expect(onOpenReport).toHaveBeenCalledTimes(1)
+  })
+
+  it("still renders the document inline where there is no panel to open", () => {
+    // The staff transcript viewer and the AI rail pass no handler — inline is
+    // the only way to read it there.
+    const { container } = render(<AskReplyBody reply={reply(REPORT)} />)
+    expect(container.querySelector("iframe")).not.toBeNull()
+    expect(container.querySelector('[data-testid="report-answer-card"]')).toBeNull()
   })
 })

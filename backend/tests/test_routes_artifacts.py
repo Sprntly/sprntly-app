@@ -2,7 +2,9 @@
 
 Covers:
   - tenant scoping (caller sees only their own dataset; 404 on an unowned slug)
-  - unified shape across all three artifact types (prd / prototype / evidence)
+  - unified shape across all four artifact types (prd / prototype / evidence /
+    report), including a report's chat/PRD attachment and the omission of its
+    (potentially huge) html body from the listing
   - per-source PRD dedupe: only the newest row per regeneration FAMILY lists,
     where a family is theme_id (chat/ideation), the row itself (upload), or
     insight_index (brief) — see db/artifacts._prd_family_key
@@ -132,6 +134,38 @@ def _seed_prototype(*, prd_id: int, workspace_id: str, status: str = "ready",
     if preview_image_url is not None:
         row["preview_image_url"] = preview_image_url
     resp = require_client().table("prototypes").insert(row).execute()
+    return resp.data[0]["id"]
+
+
+def _seed_conversation(*, company_id: str, title: str) -> int:
+    from app.db.client import require_client
+    resp = require_client().table("conversations").insert({
+        "company_id": company_id,
+        "title": title,
+    }).execute()
+    return resp.data[0]["id"]
+
+
+def _seed_report(*, company_id: str, skill: str, title: str,
+                 html: str = "<!DOCTYPE html><html></html>",
+                 question: str = "", created_at: str | None = None,
+                 conversation_id: int | None = None,
+                 prd_id: int | None = None) -> int:
+    """Seed a captured report (what app/report_capture.py writes).
+    `conversation_id` / `prd_id` are its attachment; both optional."""
+    from app.db.client import require_client
+    row = {
+        "company_id": company_id,
+        "skill": skill,
+        "title": title,
+        "html": html,
+        "question": question,
+        "conversation_id": conversation_id,
+        "prd_id": prd_id,
+    }
+    if created_at is not None:
+        row["created_at"] = created_at
+    resp = require_client().table("reports").insert(row).execute()
     return resp.data[0]["id"]
 
 
@@ -406,3 +440,110 @@ def test_prototype_emits_preview_and_completion_fields(artifacts_env, monkeypatc
     assert building["is_complete"] is False
     # NULL preview surfaces as JSON null (the shimmer case).
     assert building["preview_image_url"] is None
+
+
+# ─── Reports ─────────────────────────────────────────────────────────────────
+
+
+def test_report_lists_with_its_kind_and_no_html_body(artifacts_env, monkeypatch):
+    ctx = _client(monkeypatch)
+    _seed_report(
+        company_id=ctx.company_id,
+        skill="voice-of-customer-report",
+        title="Voice of Customer Report · Q2",
+        html="<!DOCTYPE html><html><body>" + ("x" * 5000) + "</body></html>",
+        question="what are customers saying?",
+    )
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    assert r.status_code == 200
+    reports = [a for a in r.json()["artifacts"] if a["type"] == "report"]
+    assert len(reports) == 1
+    rep = reports[0]
+    assert rep["title"] == "Voice of Customer Report · Q2"
+    # The report KIND drives the badge sub-label / per-kind filtering.
+    assert rep["skill"] == "voice-of-customer-report"
+    assert rep["source"]["skill"] == "voice-of-customer-report"
+    assert rep["source"]["question"] == "what are customers saying?"
+    assert rep["open"] == {"report_id": rep["id"]}
+    # A report is complete the moment it is captured — no lifecycle to render.
+    assert rep["status"] == ""
+    # The listing must never carry document bodies.
+    assert "html" not in rep
+
+
+def test_report_attachment_names_its_chat_and_prd(artifacts_env, monkeypatch):
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    prd_id = _seed_prd(brief_id=brief_id, title="Checkout revamp")
+    convo_id = _seed_conversation(company_id=ctx.company_id, title="Q2 customer themes")
+
+    _seed_report(
+        company_id=ctx.company_id, skill="voice-of-customer-report",
+        title="VoC", conversation_id=convo_id, prd_id=prd_id,
+    )
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    rep = next(a for a in r.json()["artifacts"] if a["type"] == "report")
+    assert rep["source"]["conversation_id"] == convo_id
+    assert rep["source"]["conversation_title"] == "Q2 customer themes"
+    assert rep["source"]["prd_id"] == prd_id
+    assert rep["source"]["prd_title"] == "Checkout revamp"
+
+
+def test_unattached_report_reports_null_attachment(artifacts_env, monkeypatch):
+    ctx = _client(monkeypatch)
+    _seed_report(
+        company_id=ctx.company_id, skill="competitive-intelligence-review",
+        title="Competitive Review",
+    )
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    rep = next(a for a in r.json()["artifacts"] if a["type"] == "report")
+    # Standing alone is a normal state, not an error — the row simply shows no
+    # "from" line.
+    assert rep["source"]["conversation_id"] is None
+    assert rep["source"]["conversation_title"] is None
+    assert rep["source"]["prd_id"] is None
+    assert rep["source"]["prd_title"] is None
+
+
+def test_report_from_a_deleted_chat_still_lists(artifacts_env, monkeypatch):
+    """`on delete set null` fires in prod, but a report whose conversation row is
+    gone must still list — with no invented label — rather than vanish."""
+    ctx = _client(monkeypatch)
+    _seed_report(
+        company_id=ctx.company_id, skill="voice-of-customer-report",
+        title="VoC", conversation_id=4242,  # no such conversation
+    )
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    rep = next(a for a in r.json()["artifacts"] if a["type"] == "report")
+    assert rep["source"]["conversation_id"] == 4242
+    assert rep["source"]["conversation_title"] is None
+
+
+def test_reports_are_tenant_scoped(artifacts_env, monkeypatch):
+    ctx = _client(monkeypatch)
+    other_company_id = seed_company(user_id="intruder", slug="rival")
+    _seed_report(company_id=other_company_id, skill="voice-of-customer-report",
+                 title="Rival VoC")
+    _seed_report(company_id=ctx.company_id, skill="voice-of-customer-report",
+                 title="My VoC")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    titles = [a["title"] for a in r.json()["artifacts"] if a["type"] == "report"]
+    assert titles == ["My VoC"]
+
+
+def test_reports_sort_into_the_unified_recency_order(artifacts_env, monkeypatch):
+    ctx = _client(monkeypatch)
+    brief_id = _seed_brief(dataset="acme", week_label="Wk 24")
+    _seed_prd(brief_id=brief_id, title="Older PRD",
+              generated_at="2026-06-01T00:00:00+00:00")
+    _seed_report(company_id=ctx.company_id, skill="voice-of-customer-report",
+                 title="Newer report", created_at="2026-06-05T00:00:00+00:00")
+
+    r = ctx.client.get("/v1/artifacts", params={"dataset": "acme"})
+    order = [(a["type"], a["title"]) for a in r.json()["artifacts"]]
+    assert order == [("report", "Newer report"), ("prd", "Older PRD")]

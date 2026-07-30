@@ -1,8 +1,8 @@
 """HTTP layer for the All-Chats "Artifacts" tab.
 
   GET /v1/artifacts?dataset=<slug>  -> unified, recency-sorted list of every
-                                       generated PRD, prototype, and evidence
-                                       for the caller's company.
+                                       generated PRD, prototype, evidence, and
+                                       report for the caller's company.
 
 Tenant-gated exactly like routes/brief.py: `require_company` resolves the
 caller's company from the JWT, then `require_owned_dataset(dataset, ...)`
@@ -11,8 +11,11 @@ another company's artifacts, and existence is never disclosed).
 
 The aggregation/scoping lives in db/artifacts.py. PRDs + evidences are scoped
 by the brief's `dataset` slug; prototypes by `workspace_id` (= the company
-UUID). This route passes the slug AND the resolved company UUID so each
-surface is scoped the way its own writers scoped it.
+UUID); reports by `company_id`. This route passes the slug AND the resolved
+company UUID so each surface is scoped the way its own writers scoped it.
+
+A report row carries no `html` — the document body is fetched on open from
+GET /v1/reports/{id} (routes/reports.py).
 """
 from __future__ import annotations
 
@@ -41,11 +44,12 @@ def list_artifacts(
     dataset: str,
     company: CompanyContext = Depends(require_company),
 ):
-    """Unified artifact list for a company (PRDs + prototypes + evidence).
+    """Unified artifact list for a company (PRDs + prototypes + evidence +
+    reports).
 
     Each item is shaped:
         {
-          "type": "prd" | "prototype" | "evidence",
+          "type": "prd" | "prototype" | "evidence" | "report",
           "id": <int>,
           "title": <str>,
           "status": <str>,

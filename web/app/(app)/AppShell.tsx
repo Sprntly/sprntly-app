@@ -31,10 +31,15 @@ import { connectorsApi, teamApi, type TeamMemberRecord } from "../lib/api"
 import { useBriefHydration } from "../lib/useBriefHydration"
 import { selectableInsightTypes } from "../lib/insight-types"
 import { DesignAgentNotificationReplay } from "../components/design-agent/DesignAgentNotificationReplay"
+import { useThreadReportsSync } from "../components/shared/useThreadReports"
 import { useGenerationNotify } from "./hooks/useGenerationNotify"
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   useGenerationNotify()
+  // Single owner of the active thread's reports (mirrored into ContentContext),
+  // same shape as useBriefHydration below: the panel and ChatScreen both read
+  // that list, and neither should fetch it.
+  useThreadReportsSync()
   const auth = useAuth()
   const { activeCompany } = useCompany()
   const { profile, workspace } = useWorkspace()
