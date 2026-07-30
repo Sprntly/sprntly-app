@@ -296,6 +296,27 @@ CREATE TABLE website_analysis_jobs (
 );
 CREATE INDEX website_analysis_jobs_company_idx ON website_analysis_jobs (company_id, id DESC);
 
+-- Deep company-research runs (mirrors
+-- 20260730134500_company_research_runs.sql). One row per staged web-research
+-- sweep over the company's OWN public footprint; status walks running →
+-- completed (or failed). `records` holds the captured fact records. No client
+-- polls this — the row IS the handle on an abandonment-proof background run.
+CREATE TABLE company_research_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id   TEXT NOT NULL,
+    url          TEXT,
+    trigger      TEXT NOT NULL,
+    status       TEXT NOT NULL DEFAULT 'running',
+    stages       TEXT NOT NULL DEFAULT '{}',
+    records      TEXT,
+    summary      TEXT,
+    error        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+CREATE INDEX company_research_runs_company_idx
+    ON company_research_runs (company_id, created_at DESC);
+
 -- Fire-and-forget LLM-context extraction jobs (mirrors
 -- 20260723130000_llm_context_jobs.sql). The onboarding import step reads the
 -- uploaded Markdown with an LLM pass here — the only reader since the v3

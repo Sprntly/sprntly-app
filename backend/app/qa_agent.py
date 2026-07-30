@@ -606,6 +606,22 @@ def answer(
         if pf is not None:
             return _maybe_verify(pf, enterprise_id)
 
+    # Company-research routed: "do some deep research on our company/pricing"
+    # needs the public WEB, which the generic skill answer can't reach — it
+    # would answer from whatever the KG already holds, which for a fresh
+    # company is nothing. Run the dedicated staged sweep instead; it also seeds
+    # the KG (origin="web_research", never "upload"/"connector"). Returns None
+    # when the feature flag is off or the company profile can't be read, falling
+    # through to the generic answer.
+    if decision.skill_id == "company-research":
+        from app import company_research
+
+        cr = company_research.answer(
+            enterprise_id=enterprise_id, question=question, history=history
+        )
+        if cr is not None:
+            return _maybe_verify(cr, enterprise_id)
+
     # VoC routed by ANY stage — including the haiku intent router. Prefer the
     # SAME live call digest the phrase fast-paths use when a call source is
     # connected, so a phrasing only the LLM router understands ("what is the
