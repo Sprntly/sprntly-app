@@ -16,18 +16,33 @@ custom skill restores the built-in on the next invocation.
 """
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from app.db.custom_skills import get_custom_skill
 from app.skills.custom import build_spec
-from app.skills.loader import SkillSpec, UnknownSkillError, get_skill, list_skills
+from app.skills.loader import SkillSpec, get_skill, list_skills
+
+logger = logging.getLogger(__name__)
 
 
 def custom_skill_spec(company_id: str, slug: str) -> Optional[SkillSpec]:
-    """The company's uploaded skill as a gateway-ready SkillSpec, or None."""
+    """The company's uploaded skill as a gateway-ready SkillSpec, or None.
+
+    Fails OPEN to None on a DB error: the override lookup now rides EVERY
+    skill invocation (custom-first), so a PostgREST hiccup must degrade to
+    the vendored library — losing the override for one request — rather than
+    take built-in skill answers down with it."""
     if not company_id or not slug:
         return None
-    row = get_custom_skill(company_id, slug)
+    try:
+        row = get_custom_skill(company_id, slug)
+    except Exception:  # noqa: BLE001 — any DB failure degrades to built-ins
+        logger.warning(
+            "custom-skill lookup failed for slug=%s; falling back to built-ins",
+            slug, exc_info=True,
+        )
+        return None
     return build_spec(row) if row else None
 
 

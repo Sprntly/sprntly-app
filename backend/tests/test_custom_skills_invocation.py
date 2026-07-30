@@ -99,6 +99,24 @@ def test_resolver_custom_overrides_builtin(custom_shadows_builtin):
     assert resolver.resolve_skill(builtin_id).content_hash != "abc123def456"
 
 
+def test_custom_lookup_db_failure_fails_open_to_builtins(monkeypatch):
+    # The custom-first lookup rides EVERY skill invocation, so a DB failure
+    # must degrade to the vendored library — never break built-in answers
+    # (this is exactly what CI suites without a reachable DB exercise).
+    def boom(company_id: str, slug: str):
+        raise RuntimeError("postgrest unreachable")
+
+    monkeypatch.setattr(resolver, "get_custom_skill", boom)
+
+    builtin_id = list_skills()[0]
+    assert resolver.custom_skill_spec("co-1", builtin_id) is None
+    assert resolver.has_custom_skill("co-1", "my-estimator") is False
+    # Built-ins still resolve and stay routable; NON_ROUTABLE ids stay blocked.
+    assert resolver.resolve_skill(builtin_id, company_id="co-1").id == builtin_id
+    assert qa._routable(builtin_id, "co-1") is True
+    assert qa._routable(next(iter(qa.NON_ROUTABLE)), "co-1") is False
+
+
 # ─── qa_agent routing ────────────────────────────────────────────────────────
 
 
