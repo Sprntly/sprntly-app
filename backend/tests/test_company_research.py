@@ -30,6 +30,7 @@ import pytest
 
 import app.company_research as cr
 from app.db.client import require_client
+from app.db.company_research_runs import ORPHAN_RUN_AFTER_MINUTES
 from app.skill_router import detect_intent
 
 _COMPANY_ID = "co-research"
@@ -198,6 +199,13 @@ def _full_stack(monkeypatch, **kw):
 def _iso(minutes_ago: int) -> str:
     return (datetime.now(timezone.utc)
             - timedelta(minutes=minutes_ago)).isoformat()
+
+
+# Ages expressed RELATIVE to the orphan window, so shortening it can never make
+# a "stale" fixture accidentally young (or vice versa) and leave these tests
+# passing for the wrong reason.
+_STALE_MIN = ORPHAN_RUN_AFTER_MINUTES * 4      # comfortably orphaned
+_YOUNG_MIN = 1                                  # comfortably live
 
 
 def _seed_other_company(cid: str) -> str:
@@ -536,11 +544,11 @@ def test_orphan_sweep_fails_only_old_running_rows(seeded_company):
     c = require_client()
     old = c.table("company_research_runs").insert({
         "company_id": _COMPANY_ID, "url": "u", "trigger": "onboarding",
-        "status": "running", "stages": {}, "created_at": _iso(120),
+        "status": "running", "stages": {}, "created_at": _iso(_STALE_MIN),
     }).execute().data[0]["id"]
     young = c.table("company_research_runs").insert({
         "company_id": other, "url": "u", "trigger": "chat",
-        "status": "running", "stages": {}, "created_at": _iso(2),
+        "status": "running", "stages": {}, "created_at": _iso(_YOUNG_MIN),
     }).execute().data[0]["id"]
 
     assert fail_orphan_company_research_runs() == 1
@@ -558,7 +566,7 @@ def test_live_run_makes_a_second_trigger_a_noop(seeded_company, monkeypatch):
     captures, _e, _c, _l = _full_stack(monkeypatch)
     require_client().table("company_research_runs").insert({
         "company_id": _COMPANY_ID, "url": "u", "trigger": "onboarding",
-        "status": "running", "stages": {}, "created_at": _iso(1),
+        "status": "running", "stages": {}, "created_at": _iso(_YOUNG_MIN),
     }).execute()
 
     out = cr.execute_run(_COMPANY_ID, url="https://acme.com", trigger="chat")
@@ -577,7 +585,7 @@ def test_stale_running_row_does_not_block_a_new_run(seeded_company, monkeypatch)
     _full_stack(monkeypatch)
     stale = require_client().table("company_research_runs").insert({
         "company_id": _COMPANY_ID, "url": "u", "trigger": "onboarding",
-        "status": "running", "stages": {}, "created_at": _iso(120),
+        "status": "running", "stages": {}, "created_at": _iso(_STALE_MIN),
     }).execute().data[0]["id"]
 
     out = cr.execute_run(_COMPANY_ID, url="https://acme.com", trigger="chat")
@@ -593,11 +601,67 @@ def test_chat_reports_an_already_running_sweep(seeded_company, monkeypatch):
     _full_stack(monkeypatch)
     require_client().table("company_research_runs").insert({
         "company_id": _COMPANY_ID, "url": "u", "trigger": "onboarding",
-        "status": "running", "stages": {}, "created_at": _iso(1),
+        "status": "running", "stages": {}, "created_at": _iso(_YOUNG_MIN),
     }).execute()
 
     out = cr.answer(enterprise_id=_COMPANY_ID, question="research our company")
     assert "already researching your company" in out["answer"]
+    # The wait is NAMED. This branch also fires for a run whose owner died, and
+    # "ask me again shortly" implied findings were seconds away when the row
+    # could sit in the way for the whole orphan window (staging 2026-07-30).
+    assert f"about {ORPHAN_RUN_AFTER_MINUTES} minutes" in out["answer"]
+    assert "interrupted" in out["answer"]
+    assert "shortly" not in out["answer"]
+
+
+def test_orphan_window_is_short_enough_to_not_look_stuck():
+    """The window is the exact period a company is locked out of research after
+    a deploy kills a run mid-sweep: while a `running` row is younger than it,
+    the row is indistinguishable from a live run and the in-flight guard refuses
+    a new one. 30 minutes made a routine deploy read as a broken feature; 15 is
+    still 3x the observed p50 (~5 min; a real staging run measured 4m53s).
+
+    Under-shooting is cheap by construction — a live run still finishes and
+    writes its signals, and the racing trigger is stopped by the partial unique
+    index rather than double-spending a sweep — so the bias is deliberately
+    toward the shorter window."""
+    assert ORPHAN_RUN_AFTER_MINUTES == 15
+
+
+def test_run_just_inside_the_window_is_live_and_just_outside_is_orphaned(
+    seeded_company,
+):
+    """Pins the boundary itself, not a magic number either side of it."""
+    from app.db.company_research_runs import (
+        company_research_run_in_flight,
+        fail_orphan_company_research_runs,
+    )
+
+    c = require_client()
+    other = _seed_other_company("co-research-edge")
+    inside = c.table("company_research_runs").insert({
+        "company_id": _COMPANY_ID, "url": "u", "trigger": "chat",
+        "status": "running", "stages": {},
+        "created_at": _iso(ORPHAN_RUN_AFTER_MINUTES - 1),
+    }).execute().data[0]["id"]
+    outside = c.table("company_research_runs").insert({
+        "company_id": other, "url": "u", "trigger": "chat",
+        "status": "running", "stages": {},
+        "created_at": _iso(ORPHAN_RUN_AFTER_MINUTES + 1),
+    }).execute().data[0]["id"]
+
+    # Just inside → still counts as live, so no second sweep is started.
+    assert company_research_run_in_flight(_COMPANY_ID) is True
+    # Just outside → treated as an orphan and reaped.
+    assert company_research_run_in_flight(other) is False
+    assert fail_orphan_company_research_runs() == 1
+
+    def _status(i):
+        return c.table("company_research_runs").select("status") \
+            .eq("id", i).execute().data[0]["status"]
+
+    assert _status(inside) == "running"
+    assert _status(outside) == "failed"
 
 
 # --------------------------------------------------------------------------- #
@@ -722,7 +786,7 @@ def test_insert_conflict_is_read_as_already_running(seeded_company, monkeypatch)
     captures, _e, _c, _l = _full_stack(monkeypatch)
     require_client().table("company_research_runs").insert({
         "company_id": _COMPANY_ID, "url": "u", "trigger": "onboarding",
-        "status": "running", "stages": {}, "created_at": _iso(1),
+        "status": "running", "stages": {}, "created_at": _iso(_YOUNG_MIN),
     }).execute()
     # Simulate losing the race: the pre-check saw nothing, the DB disagrees.
     monkeypatch.setattr(

@@ -985,9 +985,15 @@ def answer(
         )
 
     if result.get("reason") == "already_running":
+        # "Shortly" was dishonest: this branch also fires for a run whose owner
+        # died (a deploy mid-sweep), and that row stays in the way for the whole
+        # orphan window. Name the real wait instead of implying findings are
+        # seconds away. The window here must match
+        # db.company_research_runs.ORPHAN_RUN_AFTER_MINUTES.
         return _plain_payload(
-            "I'm already researching your company right now — that sweep takes "
-            "a few minutes. Ask me again shortly and I'll have the findings.",
+            "I'm already researching your company — a run takes a few minutes. "
+            "If that run was interrupted, I'll clear it automatically within "
+            "about 15 minutes; ask me again then and I'll start a fresh one.",
             confidence=0.3,
         )
     if not result.get("ok"):
