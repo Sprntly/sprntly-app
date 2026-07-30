@@ -597,6 +597,9 @@ export type CustomSkillInfo = {
   uploader_name: string
   created_at: string | null
   has_file: boolean
+  /** The slug shadows a built-in Sprntly skill id — this skill REPLACES the
+   *  built-in for the company at invocation time (PRD 1854 override). */
+  overrides_builtin: boolean
 }
 
 export const skillsApi = {
