@@ -45,6 +45,7 @@ import logging
 from typing import Optional
 
 from app.graph.gateway import llm_call
+from app.prompt_history import clamp_turn_text
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +183,15 @@ def _render_history(history: Optional[list[dict]]) -> str:
     total = 0
     for turn in reversed(history[-_HISTORY_TURNS:]):
         role = (turn.get("role") or "user").capitalize()
-        content = _clamp((turn.get("content") or "").strip(), _HISTORY_TURN_CHARS)
+        # clamp_turn_text first: the per-turn char cap alone keeps the BYTES safe
+        # but happily spends them on raw base64 when the turn is an HTML report
+        # with embedded charts — the router then classifies intent against ~1.5k
+        # of image payload instead of the narrative. Strip the data URIs and
+        # reduce the document to its text, THEN apply the existing cap.
+        content = _clamp(
+            clamp_turn_text(turn.get("content"), max_chars=_HISTORY_TURN_CHARS),
+            _HISTORY_TURN_CHARS,
+        )
         if not content:
             continue
         row = f"{role}: {content}"
