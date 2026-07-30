@@ -16,7 +16,8 @@ const FORM_ID = "pset-process-form"
 const ROADMAP_ACCEPT =
   ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.md,.txt"
 
-/** Short "May 4, 2026" for the uploaded-at line. Falls back to the raw value. */
+/** Short "May 4, 2026" for the uploaded-at line; null when unset/unparseable
+ *  (the caller then simply omits the "uploaded …" clause). */
 function formatUploadedAt(iso: string | null): string | null {
   if (!iso) return null
   const t = new Date(iso)
