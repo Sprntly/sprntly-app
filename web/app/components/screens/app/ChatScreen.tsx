@@ -3781,10 +3781,10 @@ export function ChatScreen() {
 
   const filteredSkills = useMemo(() => {
     // Custom skills first — the user's own workflows outrank the catalog.
-    // A custom skill sharing a built-in's trigger REPLACES it (PRD 1854
-    // override): drop the built-in row so one trigger never lists twice.
-    const customTriggers = new Set(customSkills.map((s) => s.trigger))
-    return [...customSkills, ...skills.filter((s) => !customTriggers.has(s.trigger))].filter(
+    // Two skills may share a NAME (an upload no longer replaces a built-in),
+    // and both are listed: their descriptions are what tells them apart, and
+    // their triggers differ, so picking either one invokes what was picked.
+    return [...customSkills, ...skills].filter(
       (s) =>
         slashFilter === "" ||
         s.trigger.toLowerCase().includes("/" + slashFilter) ||

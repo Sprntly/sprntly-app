@@ -90,7 +90,7 @@ const CUSTOM_SKILL = {
   uploader_name: "Fortune Tede",
   created_at: "2026-07-28T18:00:00+00:00",
   has_file: true,
-  overrides_builtin: false,
+  name_conflict: false,
 }
 
 beforeEach(() => {
@@ -184,33 +184,40 @@ describe("SkillsScreen", () => {
     expect(goToMock).toHaveBeenCalledWith("chat")
   })
 
-  it("hides a built-in card that a custom skill overrides", async () => {
-    // The override rule (PRD 1854): a custom skill under a built-in's id
-    // replaces it, so the catalog must not advertise the built-in card.
+  it("keeps the built-in card when a custom skill shares its name", async () => {
+    // No-override (PRD 1854 revision): the upload replaces nothing, so BOTH
+    // cards belong in the library — under the different triggers they run on.
     customListMock.mockResolvedValue({
       skills: [
         {
           ...CUSTOM_SKILL,
           id: "c-shadow",
-          slug: "journey-map",
-          trigger: "/journey-map",
-          name: "Our journey map",
-          overrides_builtin: true,
+          slug: "journey-map-2",
+          trigger: "/journey-map-2",
+          name: "Journey map",
+          name_conflict: true,
         },
       ],
     })
     await act(async () => {
       render(React.createElement(SkillsScreen))
     })
-    await waitFor(() => expect(screen.getByText("Our journey map")).toBeTruthy())
+    await waitFor(() => expect(screen.getAllByText("Journey map").length).toBe(2))
 
-    expect(screen.queryByText("Journey map")).toBeNull()
+    // Two same-named cards, each carrying the trigger that invokes IT.
+    expect(screen.getByTitle(/^\/journey-map —/)).toBeTruthy()
+    expect(screen.getByTitle(/^\/journey-map-2 —/)).toBeTruthy()
     // Other built-ins are untouched.
     expect(screen.getByText("Stakeholder map")).toBeTruthy()
   })
 
-  it("toasts the replacement wording when an upload overrides a built-in", async () => {
-    customUploadMock.mockResolvedValue({ ...CUSTOM_SKILL, overrides_builtin: true })
+  it("toasts the assigned trigger when the uploaded name was taken", async () => {
+    customUploadMock.mockResolvedValue({
+      ...CUSTOM_SKILL,
+      slug: "estimation-helper-2",
+      trigger: "/estimation-helper-2",
+      name_conflict: true,
+    })
     const { container } = render(React.createElement(SkillsScreen))
     await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
 
@@ -238,9 +245,11 @@ describe("SkillsScreen", () => {
     await waitFor(() =>
       expect(showToastMock).toHaveBeenCalledWith(
         "Skill uploaded",
-        expect.stringContaining("replaces the built-in Sprntly skill"),
+        expect.stringContaining("/estimation-helper-2"),
       ),
     )
+    // …and it says the skill that owned the name is still there.
+    expect(showToastMock.mock.calls.at(-1)?.[1]).toMatch(/still works too/i)
   })
 
   it("deletes a custom skill only through the inline confirm, with an in-flight state", async () => {
