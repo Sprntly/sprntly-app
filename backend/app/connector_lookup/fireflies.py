@@ -95,8 +95,9 @@ class FirefliesHandle:
     """API key plus a per-lookup cache of the calls already fetched, so
     search-then-read doesn't pay for the window twice."""
 
-    api_key: str
-    calls: dict[str, CallTranscript] = field(default_factory=dict)
+    # repr suppressed: a live API key must not reach a log line or a test dump.
+    api_key: str = field(repr=False)
+    calls: dict[str, CallTranscript] = field(default_factory=dict, repr=False)
 
 
 def load_api_key(company_id: str) -> str | None:

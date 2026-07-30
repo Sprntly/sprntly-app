@@ -34,6 +34,15 @@ OBJECT_PROPS: dict[str, str] = {
 }
 _MAX_HITS = 20
 
+#: Singular labels for user-facing copy. Naive de-pluralisation
+#: ("companies"[:-1]) yields "companie", which lands in a sentence a user reads.
+SINGULAR: dict[str, str] = {
+    "contacts": "contact",
+    "companies": "company",
+    "deals": "deal",
+    "tickets": "ticket",
+}
+
 SYSTEM = (
     "Tools:\n"
     "- hubspot_search: search one CRM object type (contacts, companies, deals or "
@@ -192,7 +201,7 @@ class HubSpotProvider:
             timeout=HTTP_TIMEOUT,
         )
         if resp.status_code == 404:
-            return f"(no HubSpot {object_type[:-1]} with id {record_id})"
+            return f"(no HubSpot {SINGULAR[object_type]} with id {record_id})"
         _raise_for_status(resp)
         return _render_row(object_type, resp.json() or {}, full=True)
 
@@ -231,7 +240,7 @@ def _render_row(object_type: str, row: dict, *, full: bool = False) -> str:
         # Everything HubSpot returned, not just the curated list.
         extra = [f"{k}: {v}" for k, v in props.items() if k not in wanted and v]
         pairs += extra
-        return f"{object_type[:-1]} {row.get('id')}\n" + "\n".join(f"  {p}" for p in pairs)
+        return f"{SINGULAR[object_type]} {row.get('id')}\n" + "\n".join(f"  {p}" for p in pairs)
     return f"- {row.get('id')}: " + " · ".join(pairs)
 
 

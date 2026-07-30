@@ -489,6 +489,23 @@ def test_hubspot_get_renders_every_property(monkeypatch):
     assert "deal 501" in out and "custom_field: yes" in out
 
 
+def test_hubspot_singular_labels_are_english(monkeypatch):
+    """"companies"[:-1] is "companie" — and this string is read by a user."""
+    from app.connector_lookup import hubspot as hs
+
+    assert hs.SINGULAR["companies"] == "company"
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp({}, status=404))
+    out = HUBSPOT.dispatch(_hs_session(), "hubspot_get",
+                           {"object_type": "companies", "record_id": "7"})
+    assert out == "(no HubSpot company with id 7)"
+    monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp(
+        {"id": "7", "properties": {"name": "Acme"}}))
+    out = HUBSPOT.dispatch(_hs_session(), "hubspot_get",
+                           {"object_type": "companies", "record_id": "7"})
+    assert out.startswith("company 7")
+    assert "companie" not in out
+
+
 def test_hubspot_get_missing_record(monkeypatch):
     monkeypatch.setattr(requests, "get", lambda *a, **k: _Resp({}, status=404))
     out = HUBSPOT.dispatch(_hs_session(), "hubspot_get",
@@ -695,3 +712,19 @@ def test_a_supported_and_an_unsupported_source_together_still_read_what_it_can(m
     registry.answer_for_hints(enterprise_id="co-a", question="check slack and zendesk",
                               history=None, hints={"slack", "zendesk"})
     assert [p.provider for p in seen["providers"]] == ["slack"]
+
+
+# ── credential hygiene ───────────────────────────────────────────────────────
+
+def test_no_adapter_credential_survives_a_repr():
+    """A LookupSession repr shows up in log lines, exception context and pytest
+    failure dumps — none of them may contain a live token."""
+    from app.connector_lookup.fireflies import FirefliesHandle
+
+    handle = FirefliesHandle(api_key="ff-secret")
+    assert "ff-secret" not in repr(handle)
+    # The framework backstop covers adapters whose handle is a bare token string.
+    assert "hs-secret" not in repr(_session("hubspot", "hs-secret"))
+    assert "xoxp-secret" not in repr(
+        _session("slack", {"user_token": "xoxp-secret"})
+    )
