@@ -648,8 +648,24 @@ _CONNECTOR_FOLLOWUP_DETAIL = re.compile(
 )
 
 
+# NAMING a tool is not always asking to read it. A competitive-intelligence
+# request lists products as SUBJECTS ("competitive analysis of Linear, Jira and
+# Asana", "how does our roadmap compare to Jira?"), and the same veto guards
+# "what are the alternatives to Zendesk". is_jira_lookup already refuses these
+# for exactly this reason (see its own negative fixtures); the connector router
+# has to refuse them too or it would steal every CIR that names a tool.
+_CONNECTOR_MENTION_VETO = re.compile(
+    r"\b(competitive|competitors?|competing|compare[ds]?|comparison|comparing|"
+    r"versus|vs\.?|alternatives?|instead\s+of|migrat(?:e|ing|ion)|"
+    r"market\s+(?:landscape|leaders?)|better\s+than|switch(?:ing)?\s+(?:to|from))\b",
+    re.I,
+)
+
+
 def _named_connector_providers(text: str) -> set[str]:
     """Provider keys explicitly named in one message."""
+    if _CONNECTOR_MENTION_VETO.search(text):
+        return set()
     found: set[str] = set()
     for provider, pattern in _CONNECTOR_STRONG_NAMES.items():
         if pattern.search(text):
