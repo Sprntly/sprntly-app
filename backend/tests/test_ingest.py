@@ -184,3 +184,132 @@ def test_convert_routes_pptx():
 def test_convert_md_passthrough():
     out = ingest.convert("notes.md", b"# heading\n\nbody")
     assert out.startswith("# heading")
+
+
+# ─────────────── Unreadable-file stubs are machine-detectable ───────────────
+#
+# The stub means "we could not read this file". It must never be mistaken for
+# content: it used to reach the KG extractor and burn an LLM call mining
+# signals out of its own apology text.
+
+
+def test_stub_carries_the_marker_and_is_detected():
+    out = ingest.convert("memo.m4a", b"\x00\x01\x02binary\xff\xfe")
+    assert ingest.UNPARSED_STUB_MARKER in out
+    assert ingest.is_unparsed_stub(out)
+
+
+def test_real_content_is_not_mistaken_for_a_stub():
+    for text in [
+        ingest.convert("notes.txt", b"customers keep asking for SSO"),
+        ingest.convert("config.yaml", b"name: acme\n"),
+        "",
+        None,
+    ]:
+        assert not ingest.is_unparsed_stub(text)
+
+
+def test_legacy_stubs_without_the_marker_are_still_detected():
+    """Files uploaded before the marker shipped must also be skipped."""
+    legacy = (
+        "# old.doc\n\n_Stored as a source but not yet parsed (type .doc, 12 KB). "
+        "Binary or unrecognized format — its content is not included in "
+        "analysis yet._\n"
+    )
+    assert ingest.is_unparsed_stub(legacy)
+
+
+def test_marker_is_an_html_comment_so_it_never_renders():
+    """It rides in the markdown, so it must be invisible when displayed."""
+    assert ingest.UNPARSED_STUB_MARKER.startswith("<!--")
+    assert ingest.UNPARSED_STUB_MARKER.endswith("-->")
+
+
+# ─────────────────────────── HTML / RTF ───────────────────────────
+#
+# Both decode as text, so before this they "passed through" — the extractor
+# received raw tags / control words as if they were customer evidence.
+
+
+def test_html_is_read_as_text_not_raw_markup():
+    html = (
+        b"<html><head><style>.x{color:red}</style></head><body>"
+        b"<nav>Home About</nav>"
+        b"<h1>Customer feedback</h1>"
+        b"<p>Users want SSO before renewal.</p>"
+        b"<script>track()</script>"
+        b"<footer>(c) 2026</footer>"
+        b"</body></html>"
+    )
+    out = ingest.convert("export.html", html)
+    assert "Customer feedback" in out
+    assert "Users want SSO before renewal." in out
+    # Markup and non-content chrome are gone.
+    assert "<p>" not in out and "<h1>" not in out
+    assert "track()" not in out
+    assert "color:red" not in out
+
+
+def test_htm_extension_routes_to_the_html_reader():
+    out = ingest.convert("page.htm", b"<html><body><p>hello</p></body></html>")
+    assert "hello" in out
+    assert "<p>" not in out
+
+
+def test_rtf_control_words_are_stripped():
+    # Shaped like real RTF: \par is followed by a newline (a writer never runs
+    # a control word straight into a word), and the font table is a NESTED
+    # destination group.
+    rtf = (
+        rb"{\rtf1\ansi\deff0{\fonttbl{\f0 Times New Roman;}}" b"\n"
+        rb"{\*\generator Riched20 10.0;}" b"\n"
+        rb"\pard\f0\fs24 Churn risk on the Acme account.\par" b"\n"
+        rb"Renewal is at risk.\par" b"\n"
+        rb"}"
+    )
+    out = ingest.convert("note.rtf", rtf)
+    assert "Churn risk on the Acme account." in out
+    assert "Renewal is at risk." in out
+    # None of the control layer or the metadata tables survive.
+    assert "rtf1" not in out
+    assert "fonttbl" not in out and "Times New Roman" not in out
+    assert "generator" not in out and "Riched20" not in out
+    assert r"\par" not in out
+
+
+def test_rtf_keeps_the_word_after_a_paragraph_break():
+    """Regression: a two-pass stripper that rewrote \\par before tokenizing
+    control words swallowed the following word (`\\parRenewal` reads as one
+    control word). Single-pass tokenizing is what makes this safe."""
+    out = ingest.convert("note.rtf", rb"{\rtf1 First line.\par Second line.}")
+    assert "First line." in out
+    assert "Second line." in out
+
+
+# ─────────────────── Tabular row caps are generous now ───────────────────
+#
+# 30 (xlsx) / 200 (csv) silently discarded most of a real analytics, revenue
+# or CRM export — exactly the evidence-bearing categories.
+
+
+def test_csv_keeps_far_more_than_the_old_200_row_cap():
+    rows = [b"id,comment"] + [b"%d,needs SSO" % i for i in range(1, 1001)]
+    out = ingest.convert("feedback.csv", b"\n".join(rows))
+    assert ingest.CSV_MAX_ROWS >= 5000
+    # A 1000-row export survives whole — no truncation notice.
+    assert "truncated" not in out
+    assert out.count("needs SSO") == 1000
+
+
+def test_csv_still_truncates_a_pathological_file_and_says_so():
+    n = ingest.CSV_MAX_ROWS + 10
+    rows = [b"id,comment"] + [b"%d,x" % i for i in range(n)]
+    out = ingest.convert("huge.csv", b"\n".join(rows))
+    assert f"truncated to {ingest.CSV_MAX_ROWS}" in out
+
+
+def test_tsv_passes_through_intact_rather_than_being_misparsed():
+    """A comma-splitting CSV reader would collapse tab data into one column,
+    so .tsv deliberately keeps the textual passthrough."""
+    out = ingest.convert("export.tsv", b"id\tcomment\n1\tneeds SSO\n")
+    assert "needs SSO" in out

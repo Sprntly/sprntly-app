@@ -4,14 +4,24 @@ Mirrors the offline `scripts/convert_dataset.py` flow but exposes it as a
 library so the upload endpoint can convert in-process. Each public converter
 returns markdown as a string; the caller decides where to write it.
 
-Rich converters exist for .docx, .xlsx, .csv, .pdf, .txt, .md. Any other type
-is *accepted, never rejected*: `convert` falls back to a best-effort handler
-that passes the file through as text when it decodes cleanly (yaml, json, toml,
-logs, …) or stores a placeholder stub for binary content (audio, images, …).
-The raw bytes are always saved by the caller, so processing can be improved
-later without changing the upload contract. A .zip is not a converter here —
-it's expanded by `app.datasets.ingest_zip`, which feeds each member back
-through these converters.
+Rich converters exist for .docx, .xlsx, .csv, .pdf, .pptx, .html, .rtf, .txt,
+.md. Any other type is *accepted, never rejected*: `convert` falls back to a
+best-effort handler that passes the file through as text when it decodes
+cleanly (yaml, json, toml, logs, …) or stores a placeholder stub for binary
+content (audio, images, legacy .doc/.xls/.ppt, …). The raw bytes are always
+saved by the caller, so processing can be improved later without changing the
+upload contract. A .zip is not a converter here — it's expanded by
+`app.datasets.ingest_zip` / the document-source upload route, which feed each
+member back through these converters.
+
+THE STUB IS MACHINE-DETECTABLE. A placeholder carries UNPARSED_STUB_MARKER and
+`is_unparsed_stub()` recognizes it, because "we could not read this file" must
+never be mistaken for content: it used to flow into the knowledge-graph
+extractor, spending an LLM call to mine signals out of the sentence "its
+content is not included in analysis yet", and — on the corpus path — get
+recorded as permanently ingested, so the file was never retried even after a
+parser for its type shipped. Ingestion paths skip stubs and leave them
+unrecorded so a later parser picks them up.
 """
 from __future__ import annotations
 
@@ -68,7 +78,17 @@ def docx_to_md(data: bytes) -> str:
     return "\n".join(parts)
 
 
-def xlsx_to_md(data: bytes, max_rows: int = 30) -> str:
+#: Row ceilings for tabular formats. These are guards against a pathological
+#: file, not a sampling policy — they used to be 30 (xlsx) and 200 (csv), which
+#: silently discarded most of a real support/analytics/revenue export before
+#: the model ever saw it, in exactly the evidence-bearing categories. The true
+#: backstop downstream is document_sources.MAX_EXTRACTED_CHARS (200k), so these
+#: can be generous.
+XLSX_MAX_ROWS = 2000
+CSV_MAX_ROWS = 5000
+
+
+def xlsx_to_md(data: bytes, max_rows: int = XLSX_MAX_ROWS) -> str:
     wb = _openpyxl().load_workbook(io.BytesIO(data), data_only=True, read_only=True)
     parts: list[str] = []
     for sheet in wb.sheetnames:
@@ -133,7 +153,96 @@ def txt_to_md(data: bytes) -> str:
     return data.decode("utf-8", errors="replace")
 
 
-def csv_to_md(data: bytes, max_rows: int = 200) -> str:
+def html_to_md(data: bytes) -> str:
+    """Readable text out of an HTML export, nav/script/style stripped.
+
+    HTML decodes as text, so before this existed it "passed through" — meaning
+    the extractor was handed raw tags and the page's navigation chrome as if it
+    were customer evidence. Reuses the scraper's extractor so uploaded pages and
+    scraped pages are read the same way.
+    """
+    from app.agents.scraper import extract_text
+
+    return extract_text(data.decode("utf-8", errors="replace"))
+
+
+# An RTF control word is a backslash, letters, an optional numeric parameter,
+# and ONE optional trailing space that belongs to the control word, not the
+# text. Matching that in a single pass matters: a two-pass approach that
+# rewrites \par first would see `\parRenewal` (letters run on) and swallow the
+# following word.
+_RTF_CONTROL_RE = re.compile(r"\\([a-zA-Z]+)(-?\d+)?[ ]?")
+_RTF_HEX_RE = re.compile(r"\\'[0-9a-fA-F]{2}")
+_RTF_ESCAPED_CHAR_RE = re.compile(r"\\([{}\\])")
+
+#: Control words that carry structure worth keeping as whitespace.
+_RTF_BREAKS = {"par", "line", "sect", "page"}
+
+#: Destination groups whose CONTENTS are metadata, not document text — font
+#: and colour tables, styles, doc info, embedded pictures. Dropped wholesale;
+#: everything else keeps its text.
+_RTF_NOISE_DESTINATIONS = (
+    "fonttbl", "colortbl", "stylesheet", "info", "pict", "generator",
+    "themedata", "colorschememapping", "latentstyles", "datastore",
+)
+
+
+def _strip_rtf_groups(text: str) -> str:
+    """Remove `{\\*...}` groups and known metadata destinations, brace-aware.
+
+    A regex can't do this correctly — these groups nest (`{\\fonttbl{\\f0
+    Times;}}`) — so this walks braces and skips a group whole once its opening
+    control word marks it as noise.
+    """
+    out: list[str] = []
+    depth = 0
+    skip_until_depth: int | None = None
+    i = 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "{":
+            depth += 1
+            if skip_until_depth is None:
+                head = text[i + 1:i + 40]
+                if head.startswith("\\*") or any(
+                    head.startswith("\\" + d) for d in _RTF_NOISE_DESTINATIONS
+                ):
+                    skip_until_depth = depth
+            i += 1
+            continue
+        if ch == "}":
+            if skip_until_depth is not None and depth == skip_until_depth:
+                skip_until_depth = None
+            depth -= 1
+            i += 1
+            continue
+        if skip_until_depth is None:
+            out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def rtf_to_md(data: bytes) -> str:
+    """Plain text out of an RTF document.
+
+    Like HTML, RTF decodes as text and so used to pass through raw — the model
+    received `{\\rtf1\\ansi\\deff0…` control-word sludge as if it were customer
+    evidence. This strips the control layer rather than adding a dependency:
+    RTF is a dying format and a full parser isn't worth it. Formatting is
+    discarded, words and paragraph breaks are kept.
+    """
+    text = data.decode("utf-8", errors="replace")
+    text = _strip_rtf_groups(text)
+    text = _RTF_HEX_RE.sub("", text)          # \'e9 escapes — drop, don't guess
+    text = _RTF_CONTROL_RE.sub(
+        lambda m: "\n" if m.group(1) in _RTF_BREAKS else "", text
+    )
+    text = _RTF_ESCAPED_CHAR_RE.sub(r"\1", text)  # literal \{ \} \\
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return "\n".join(line.strip() for line in text.splitlines()).strip()
+
+
+def csv_to_md(data: bytes, max_rows: int = CSV_MAX_ROWS) -> str:
     """Convert CSV data to a markdown table."""
     import csv as _csv
 
@@ -167,8 +276,14 @@ _SUFFIX_TO_CONVERTER = {
     ".docx": docx_to_md,
     ".xlsx": xlsx_to_md,
     ".csv": csv_to_md,
+    # .tsv deliberately absent: csv.reader would split on commas and collapse
+    # tab-separated data into one column. The textual fallback passes it
+    # through intact, which reads better.
     ".pdf": pdf_to_md,
     ".pptx": pptx_to_md,
+    ".html": html_to_md,
+    ".htm": html_to_md,
+    ".rtf": rtf_to_md,
     ".txt": txt_to_md,
     ".md": txt_to_md,  # already markdown, passthrough
 }
@@ -193,37 +308,53 @@ def _looks_textual(data: bytes) -> bool:
         return False
 
 
-# Sentinel inside the binary placeholder `fallback_to_md` emits. Callers that
-# must distinguish "we extracted nothing usable" from real content check for it
-# via `is_unparsed_stub` rather than string-matching themselves, so the stub text
-# and its detector can never drift apart.
+#: Marks a placeholder produced for a file we could not read. Kept as an HTML
+#: comment so it is invisible wherever the markdown is rendered, and stable so
+#: `is_unparsed_stub` can recognize stubs written by earlier releases too (see
+#: the module docstring for why this must be detectable).
+UNPARSED_STUB_MARKER = "<!-- sprntly:unparsed -->"
+
+# Prose prefix inside the same placeholder, and the only marker stubs carried
+# before the HTML comment shipped. `fallback_to_md` still writes it and
+# `is_unparsed_stub` still matches it, so the stub text and its detector can
+# never drift apart — and stubs already stored stay detectable.
 _UNPARSED_STUB_MARKER = "_Stored as a source but not yet parsed (type "
 
 
-def is_unparsed_stub(text: str) -> bool:
-    """True when `text` is the placeholder `fallback_to_md` produces for content
-    it could not parse (legacy binary .doc/.ppt/.xls, images, audio…).
+def is_unparsed_stub(text: str | None) -> bool:
+    """True iff `text` is a placeholder for a file we could not read.
+
+    Callers use this to keep "we couldn't read this" out of anything that
+    treats text as content — extraction, the corpus seed, evidence counts.
 
     The stub is deliberately NON-EMPTY so the file still registers as a source,
     which means an `if not text` check does NOT catch it. Anything that treats
     "no usable text" as a decision point (e.g. roadmap→KG ingest, which must not
     let an unparseable re-upload retire the previous roadmap's signals) has to
-    ask this instead."""
-    return _UNPARSED_STUB_MARKER in (text or "")
+    ask this instead.
+    """
+    if not text:
+        return False
+    if UNPARSED_STUB_MARKER in text:
+        return True
+    # Legacy stubs (written before the marker existed).
+    return _UNPARSED_STUB_MARKER in text
 
 
 def fallback_to_md(filename: str, data: bytes) -> str:
     """Best-effort conversion for types without a dedicated converter.
 
     Never raises: textual content (yaml/json/toml/logs/…) passes through as-is;
-    binary content (audio/images/…) becomes a placeholder stub so the file still
-    lands as a source. The raw bytes are preserved by the caller either way.
+    binary content (audio/images/legacy Office formats/…) becomes a placeholder
+    stub so the file still lands as a source. The raw bytes are preserved by
+    the caller either way, so a future parser can read the original.
     """
     if _looks_textual(data):
         return data.decode("utf-8", errors="replace")
     suffix = Path(filename).suffix.lower() or "(none)"
     kb = max(1, round(len(data) / 1024))
     return (
+        f"{UNPARSED_STUB_MARKER}\n"
         f"# {Path(filename).name}\n\n"
         f"{_UNPARSED_STUB_MARKER}{suffix}, {kb} KB). "
         "Binary or unrecognized format — its content is not included in "
