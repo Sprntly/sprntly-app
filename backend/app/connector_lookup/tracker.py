@@ -34,6 +34,10 @@ _NAMES = {
     "jira": re.compile(r"\b(jira|atlassian)\b", re.I),
     "clickup": re.compile(r"\bclick\s?up\b", re.I),
 }
+_DISPLAY = {"jira": "Jira", "clickup": "ClickUp"}
+#: How far back a tracker thread stays "the tracker we're talking about" — same
+#: 8-turn window skill_router uses for tracker-thread stickiness.
+_THREAD_WINDOW = 8
 
 
 def _has_connection(enterprise_id: str, provider: str) -> bool:
@@ -55,14 +59,37 @@ def _has_connection(enterprise_id: str, provider: str) -> bool:
         return False
 
 
-def pick(enterprise_id: str, question: str) -> str | None:
-    """Which tracker should serve this question, or None when none is connected."""
+def named_trackers(text: str) -> list[str]:
+    """Trackers explicitly named in a message, in TRACKERS order."""
+    return [t for t in TRACKERS if _NAMES[t].search(text or "")]
+
+
+def pick(
+    enterprise_id: str, question: str, history: list[dict] | None = None
+) -> str | None:
+    """Which tracker should serve this question, or None when none is connected.
+
+    Order of evidence:
+      1. a tracker the question NAMES and the company has connected;
+      2. a tracker an earlier turn of THIS thread named and the company has
+         connected — without which a follow-up carrying no name of its own
+         ("yes", "more details on that") silently jumps trackers on a
+         dual-tracker tenant: the thread was about ClickUp, the follow-up names
+         nothing, and step 3 would hand it to Jira and answer about the wrong
+         workspace;
+      3. the default preference order (Jira first: reads plus propose→confirm).
+    """
     connected = [t for t in TRACKERS if _has_connection(enterprise_id, t)]
     if not connected:
         return None
-    for tracker in connected:
-        if _NAMES[tracker].search(question or ""):
+    for tracker in named_trackers(question):
+        if tracker in connected:
             return tracker
+    # Walk the thread newest-first so the most recent tracker mentioned wins.
+    for turn in reversed((history or [])[-_THREAD_WINDOW:]):
+        for tracker in named_trackers(turn.get("content") or ""):
+            if tracker in connected:
+                return tracker
     return connected[0]
 
 
@@ -70,7 +97,20 @@ def answer(
     *, enterprise_id: str, question: str, history: list[dict] | None = None
 ) -> dict:
     """Answer a tracker read against the company's connected tracker."""
-    tracker = pick(enterprise_id, question)
+    # The user named a tracker and it is NOT connected. Serving the other one
+    # would answer a question about ClickUp out of Jira and never say so — worse
+    # than an honest refusal, because the answer looks authoritative.
+    named = named_trackers(question)
+    if named and not any(_has_connection(enterprise_id, t) for t in named):
+        missing = " or ".join(_DISPLAY[t] for t in named)
+        return connector_answer.plain_payload(
+            f"{missing} isn't connected, so I can't read it — I'd rather say that "
+            f"than answer about a different tracker. Connect {missing} in "
+            "Settings → Connectors and ask me again."
+            + connector_answer.connected_sources_sentence(enterprise_id),
+            skill_action="Tracker lookup",
+        )
+    tracker = pick(enterprise_id, question, history)
     if tracker == "jira":
         # Unchanged path: the Jira lookup owns its own session handling, connect/
         # reconnect copy, propose→confirm card and decision-log row.

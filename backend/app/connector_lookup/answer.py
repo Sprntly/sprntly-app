@@ -143,16 +143,45 @@ def not_connected_message(
     )
 
 
+def _unavailable_display_names(
+    missing: list[LookupProvider], extra: list[str] | None
+) -> list[str]:
+    """Display names of sources the question referred to but we could not open —
+    providers whose session failed to open, plus names the caller already knows
+    have no adapter (registry passes those in)."""
+    names = [p.display_name for p in missing]
+    for name in extra or []:
+        if name not in names:
+            names.append(name)
+    return names
+
+
 def _build_system(
-    connected: list[tuple[LookupProvider, LookupSession]]
+    connected: list[tuple[LookupProvider, LookupSession]],
+    unavailable: list[str] | None = None,
 ) -> str:
     """Framework rules + each connected adapter's own block + any honest mode
-    notes the session recorded (e.g. Slack's search-vs-channel-read mode)."""
+    notes the session recorded (e.g. Slack's search-vs-channel-read mode), plus
+    the sources this answer could NOT reach.
+
+    The unavailable list matters for a question like "check Slack and HubSpot"
+    where only Slack is connected: answering purely from Slack, with no mention of
+    the half that was never read, reads as a complete answer to both.
+    """
     parts = [_SYSTEM_HEAD]
     for provider, session in connected:
         parts.append(f"\n## {provider.display_name}\n{provider.system_block()}")
         for note in session.notes:
             parts.append(f"Note about {provider.display_name}: {note}")
+    if unavailable:
+        parts.append(
+            "\n## Not available for this question\n"
+            + ", ".join(unavailable)
+            + " — the question referred to this, but it is not connected (or "
+            "Sprntly cannot read it live yet), so you did NOT check it. Say so "
+            "explicitly in your answer; do not let an answer from the other "
+            "source(s) imply you covered this one."
+        )
     if len(connected) > 1:
         parts.append(
             "\nSeveral sources are connected. Prefer the one the question names; "
@@ -209,7 +238,10 @@ def answer(
     skill_source: str = SKILL_SOURCE,
     skill_action: str | None = None,
     not_connected_text: str | None = None,
+    empty_text: str | None = None,
+    exception_text: str | None = None,
     system_text: str | None = None,
+    unavailable_names: list[str] | None = None,
     run_loop=None,
     log=None,
 ) -> dict:
@@ -219,9 +251,17 @@ def answer(
     module-level `run_tool_loop` and its own `_log(enterprise_id, meta)` so that
     path keeps its exact decision-log contract (and its long-standing test patch
     surface), and tests can drive the loop deterministically.
-    `not_connected_text` and `system_text` let an adapter keep verbatim copy that
-    predates the framework: the Jira path passes both, so its long-tuned system
-    prompt and connect message are unchanged by this refactor.
+    `not_connected_text` / `empty_text` / `exception_text` / `system_text` let an
+    adapter keep verbatim copy that predates the framework. The Jira path passes
+    ALL FOUR: its three deterministic branches and its long-tuned system prompt
+    are word-for-word what they were before this refactor, because generic copy
+    about "the channel, ticket, file or person" is wrong for a Jira user who
+    needs to be told to double-check the issue key.
+
+    `unavailable_names` are sources the question referred to that could NOT be
+    opened (not connected, or no adapter). They go into the system block so the
+    answer says what it did not cover, instead of quietly answering from half the
+    sources and sounding complete.
 
     Never raises — a chat answer degrades, it does not error.
     """
@@ -245,7 +285,10 @@ def answer(
         tools.extend(provider.tools())
     try:
         text = loop(
-            system=system_text or _build_system(connected),
+            system=system_text or _build_system(
+                connected,
+                unavailable=_unavailable_display_names(missing, unavailable_names),
+            ),
             user=_render_history(history) + f"Question: {question}",
             tools=tools,
             dispatch=_make_dispatch(connected, deadline),
@@ -260,9 +303,11 @@ def answer(
             "connector-lookup: tool loop failed for %s (%s)", enterprise_id, names
         )
         return plain_payload(
-            f"I couldn't reach {names} to look that up just now. Please retry in "
-            "a moment — if it keeps failing, that connection may need "
-            "reconnecting in Settings → Connectors.",
+            exception_text or (
+                f"I couldn't reach {names} to look that up just now. Please retry "
+                "in a moment — if it keeps failing, that connection may need "
+                "reconnecting in Settings → Connectors."
+            ),
             skill_source=skill_source, skill_action=action,
         )
 
@@ -273,8 +318,10 @@ def answer(
     if not text.strip():
         names = " / ".join(p.display_name for p, _ in connected)
         return plain_payload(
-            f"I looked in {names} but couldn't find what your question refers "
-            "to. Try naming the channel, ticket, file or person more exactly.",
+            empty_text or (
+                f"I looked in {names} but couldn't find what your question refers "
+                "to. Try naming the channel, ticket, file or person more exactly."
+            ),
             skill_source=skill_source, skill_action=action,
         )
     payload = {

@@ -59,7 +59,9 @@ class ClickUpSession:
     the teams (workspaces) it can see, resolved once per lookup like Jira's
     cloud_id."""
 
-    access_token: str
+    # repr suppressed: a live token must not land in a log line, an exception
+    # context or a test failure dump.
+    access_token: str = field(repr=False)
     team_ids: list[str] = field(default_factory=list)
     team_names: dict[str, str] = field(default_factory=dict)
 

@@ -85,7 +85,13 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
         providers=[jira_adapter.PROVIDER],
         skill_source=_SKILL_SOURCE,
         skill_action=_SKILL_ACTION,
+        # All three deterministic branches keep their pre-refactor wording. The
+        # generic copy speaks about channels/files/records and "that connection",
+        # which is wrong for a Jira user who should be told to check the issue key
+        # and reconnect *Jira*.
         not_connected_text=jira_adapter.NOT_CONNECTED,
+        empty_text=jira_adapter.EMPTY_RESULT,
+        exception_text=jira_adapter.UNREACHABLE,
         system_text=_SYSTEM,
         # Resolved from THIS module's globals at call time — the seams tests and
         # future callers already patch.
