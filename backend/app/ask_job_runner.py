@@ -19,6 +19,7 @@ from app.ask_stream import AnswerFieldExtractor
 from app.db import complete_ask_job, fail_ask_job, is_ask_cancelled
 from app.graph import token_stream
 from app.qa_agent import AskCancelled
+from app.report_capture import capture_report
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,8 @@ def _run_sync(
     pinned_skill: str | None,
     prd_id: int | None,
     loop: asyncio.AbstractEventLoop,
+    conversation_id: int | None = None,
+    workspace_id: str | None = None,
 ) -> None:
     # Token-stream the answer text as it generates: the structured answer call
     # forwards its partial-JSON fragments to this extractor, which decodes just
@@ -82,6 +85,29 @@ def _run_sync(
     except Exception:  # noqa: BLE001 — analytics logging must never fail the answer
         logger.exception("log_ask failed for ask_id=%s", ask_id)
     complete_ask_job(ask_id, _strip_citations(payload))
+    # A report skill answers with a self-contained HTML document rather than
+    # markdown. Capture it as a durable `reports` artifact so it survives the
+    # chat turn — listable on /artifacts, downloadable, shareable. Attached to
+    # the chat room and/or PRD this ask ran in (whichever the ask carried).
+    #
+    # AFTER complete_ask_job, and self-swallowing: the reply is already the
+    # authoritative stored answer, so capture can only add a library entry and
+    # can never delay or break the turn. A no-op for every markdown answer.
+    #
+    # Only the generation path captures. The cache-hit short-circuit in
+    # routes/ask.py deliberately does not: those are pre-warmed starter-chip
+    # answers (markdown), and re-serving one per user would mint a duplicate row
+    # on every hit.
+    capture_report(
+        payload,
+        company_id=enterprise_id,
+        question=question,
+        workspace_id=workspace_id,
+        ask_id=ask_id,
+        conversation_id=conversation_id,
+        prd_id=prd_id,
+        is_cancelled=lambda: is_ask_cancelled(ask_id),
+    )
 
 
 async def run_ask_job(
@@ -92,6 +118,8 @@ async def run_ask_job(
     history: list[dict] | None = None,
     pinned_skill: str | None = None,
     prd_id: int | None = None,
+    conversation_id: int | None = None,
+    workspace_id: str | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
     result. A failure marks the row `error` and is swallowed — the worker never
@@ -110,6 +138,8 @@ async def run_ask_job(
             pinned_skill,
             prd_id,
             loop,
+            conversation_id,
+            workspace_id,
         )
         logger.info("Ask job succeeded ask_id=%s", ask_id)
         # Terminal SSE frame AFTER complete_ask_job (inside _run_sync) so a

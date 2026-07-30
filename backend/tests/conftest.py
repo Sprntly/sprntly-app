@@ -1073,6 +1073,27 @@ CREATE TABLE custom_skills (
 );
 CREATE INDEX custom_skills_company_id_idx ON custom_skills (company_id);
 
+-- Captured HTML report documents (mirrors 20260730120000_reports.sql,
+-- SQLite-ized). COMPANY-scoped (all workspaces in a company share one report
+-- library; workspace_id records the generating workspace and may be NULL).
+-- conversation_id / prd_id are the report's ATTACHMENT — the chat room and PRD
+-- the run happened in, NULL when the ask carried neither. No FKs, matching the
+-- workspaces-table note: route tests fabricate tenant ids with no parent rows.
+CREATE TABLE reports (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id      TEXT NOT NULL,
+    workspace_id    TEXT,
+    skill           TEXT NOT NULL,
+    title           TEXT NOT NULL DEFAULT '',
+    html            TEXT NOT NULL DEFAULT '',
+    question        TEXT NOT NULL DEFAULT '',
+    ask_id          INTEGER,
+    conversation_id INTEGER,
+    prd_id          INTEGER,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX reports_company_idx ON reports (company_id, id DESC);
+
 -- Onboarding drip / nudge email tracking (mirrors
 -- 20260614100000_drip_email_sends.sql). One row per delivered (company ×
 -- member × step); UNIQUE is the de-dup guard so steps never double-send.

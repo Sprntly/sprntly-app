@@ -85,6 +85,12 @@ from app.db.public_feedback_runs import (
     save_public_feedback_run,
 )
 
+# Reports (captured skill-generated HTML report documents)
+from app.db.reports import (
+    get_report,
+    save_report,
+)
+
 # Website-analysis jobs (onboarding, fire-and-forget)
 from app.db.website_analysis import (
     complete_analysis_job,
@@ -232,6 +238,9 @@ __all__ = [
     "log_ask",
     "start_ask_job",
     "start_cached_ask",
+    # reports (captured HTML report documents)
+    "get_report",
+    "save_report",
     # website-analysis jobs
     "complete_analysis_job",
     "fail_analysis_job",
