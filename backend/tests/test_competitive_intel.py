@@ -236,6 +236,7 @@ def test_mode_choice_is_pure_and_ignores_reordering(monkeypatch):
     ("competitive review vs Linear, Jira and Asana", ["Linear", "Jira", "Asana"]),
     ("benchmark us against Notion", ["Notion"]),
     ("competitive scan versus Figma & Sketch", ["Figma", "Sketch"]),
+    ("how do we compare to Sam's Club and Costco", ["Sam's Club", "Costco"]),
     # collective nouns are NOT names — these fall through to the roster
     ("where do we stand vs the market?", []),
     ("how do we compare against our competitors", []),
@@ -244,6 +245,41 @@ def test_mode_choice_is_pure_and_ignores_reordering(monkeypatch):
 ])
 def test_named_competitors_extraction(q, expected):
     assert ci.named_competitors(q) == expected
+
+
+@pytest.mark.parametrize("q", [
+    # The two confirmed regressions: these extracted as "European market" /
+    # "enterprise market", and because a user-named set WINS over the roster the
+    # pipeline then web-researched a company by that name and never looked at
+    # the real competitors.
+    "where do we stand versus the European market?",
+    "how do we compare to the enterprise market",
+    # ...and the same shape with other collective head nouns.
+    "competitive review vs the market leaders",
+    "benchmark us against the SMB segment",
+    "where do we stand vs the competitive landscape",
+    "how do we compare to the enterprise space",
+    "competitive scan vs the other players",
+    "where do we stand versus the payments industry",
+    "how do we compare against the incumbents",
+])
+def test_qualified_collectives_are_not_names(q):
+    """English puts the head noun last, so a trailing collective ("market",
+    "segment", "players") means the phrase describes a GROUP to compare against,
+    not a company to research. Those must fall back to the roster."""
+    assert ci.named_competitors(q) == []
+
+
+def test_qualified_collective_falls_back_to_the_roster(monkeypatch):
+    """End-to-end shape of the blocker: the run covers the REAL roster, not a
+    company called "European market"."""
+    saves = []
+    _full(monkeypatch, roster=("Globex", "Initech"), saves=saves)
+    out = ci.answer(enterprise_id="e1",
+                    question="where do we stand versus the European market?")
+    assert saves[0]["competitor_set"] == ["Globex", "Initech"]
+    assert "European market" not in saves[0]["competitor_set"]
+    assert out["answer"].startswith("<!DOCTYPE html>")
 
 
 def test_user_named_set_wins_and_is_never_written_to_the_roster(monkeypatch):
@@ -463,6 +499,52 @@ def test_competitor_with_nothing_found_is_marked_unobserved(monkeypatch):
     assert unobserved == ["Initech"]
 
 
+def test_review_partial_module_failure_keeps_the_records_and_not_unobserved(monkeypatch):
+    """A Review runs SEVERAL staged calls per competitor. One module raising
+    mid-sequence used to mark the whole competitor `unobserved` even though
+    earlier stages had already produced sourced records — and ANALYSE was then
+    told "never fill their rows from general knowledge" about a competitor whose
+    records sat in the same prompt. A partial Review is partial data, not silence."""
+    seen = []
+
+    def _web(*, system, user, **kw):
+        module = kw.get("skill_module")
+        seen.append(module)
+        # First stage succeeds, second stage dies.
+        if module and module.startswith("03"):
+            raise RuntimeError("search failed mid-sequence")
+        return json.dumps([{"what": f"observed in {module}", "source": "s",
+                            "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    records, unobserved, _ = ci._capture(
+        "e1", scope="s", names=["Globex"], mode=ci.MODE_REVIEW,
+        prior_state=PRIOR_STATE,
+    )
+    globex = [r for r in records if r.get("competitor") == "Globex"]
+    assert globex, "stage-1 records were discarded"
+    assert "Globex" not in unobserved, (
+        "a competitor with sourced records must never be reported as unobserved"
+    )
+
+
+def test_review_competitor_whose_every_stage_fails_is_unobserved(monkeypatch):
+    def _web(*, system, user, **kw):
+        # Match the per-competitor marker, not a bare name: the prior-state
+        # block carries competitor names into the "us" pass too.
+        if "Competitor under review: Globex" in user:
+            raise RuntimeError("search failed")
+        return json.dumps([{"what": "ours", "source": "s", "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    records, unobserved, _ = ci._capture(
+        "e1", scope="s", names=["Globex"], mode=ci.MODE_REVIEW,
+        prior_state=PRIOR_STATE,
+    )
+    assert unobserved == ["Globex"]
+    assert all(r.get("competitor") != "Globex" for r in records)
+
+
 def test_every_pass_failing_raises_so_the_caller_says_so_plainly(monkeypatch):
     def _web(**kw): raise RuntimeError("api down")
 
@@ -470,6 +552,58 @@ def test_every_pass_failing_raises_so_the_caller_says_so_plainly(monkeypatch):
     with pytest.raises(RuntimeError):
         ci._capture("e1", scope="s", names=["Globex"], mode=ci.MODE_SCAN,
                     prior_state={})
+
+
+def test_records_survive_even_when_every_attempt_recorded_a_failure(monkeypatch):
+    """The "web is down" raise is gated on having captured NOTHING. A partial
+    Review can leave failures == attempts (the "us" pass died, then one late
+    module died) while real records exist — those must never be thrown away."""
+    def _web(*, system, user, **kw):
+        module = kw.get("skill_module")
+        if module is None:                      # the "us" pass
+            raise RuntimeError("us pass down")
+        if module.startswith("04"):             # a late module
+            raise RuntimeError("late stage down")
+        return json.dumps([{"what": "real finding", "source": "s", "tier": "h"}])
+
+    _patch_web(monkeypatch, _web)
+    records, unobserved, _ = ci._capture(
+        "e1", scope="s", names=["Globex"], mode=ci.MODE_REVIEW,
+        prior_state=PRIOR_STATE,
+    )
+    assert any(r["what"] == "real finding" for r in records)
+    assert unobserved == ["us"]
+
+
+def test_total_record_cap_bounds_the_run_and_counts_the_drops(monkeypatch):
+    """Per-pass caps don't bound a Review (competitors x stages passes), and
+    every record lands in ONE 16k-output ANALYSE call. Overflow is dropped and
+    logged, not silently absorbed."""
+    monkeypatch.setattr(ci, "_TOTAL_RECORD_CAP", 5)
+    logged: dict = {}
+    monkeypatch.setattr(
+        ci, "_log_capture",
+        lambda *a, **k: logged.update({"args": a, "kw": k}),
+    )
+    import app.graph.config_layers as layers
+
+    monkeypatch.setattr(
+        layers, "resolve_config",
+        lambda _eid: {"research": {"max_searches": 4, "cir_modules_max": 2,
+                                   "deep_dive_max_web_searches": 40}},
+    )
+    monkeypatch.setattr(
+        ci, "call_with_web_search",
+        lambda **kw: json.dumps(
+            [{"what": f"rec {i}", "source": "s", "tier": "h"} for i in range(4)]
+        ),
+    )
+    records, _, _ = ci._capture(
+        "e1", scope="s", names=["Globex", "Initech"], mode=ci.MODE_SCAN,
+        prior_state={},
+    )
+    assert len(records) == 5                     # capped, not 12
+    assert logged["args"][-1] > 0                # dropped count reported
 
 
 def test_capture_salvages_a_truncated_record_array(monkeypatch):

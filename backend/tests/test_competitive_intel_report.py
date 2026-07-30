@@ -332,11 +332,38 @@ def test_radar_with_too_few_dimensions_is_omitted_not_broken():
     assert "Scale benchmark" in html
 
 
-def test_series_with_missing_scores_is_padded_not_dropped():
+def test_series_with_too_few_scores_is_dropped_not_padded():
+    """Padding a short score array with 0.0 pinned the competitor to the centre
+    on every trailing axis, which READS as "we scored them zero on trust and
+    measurement" — a fabricated finding rendered as a picture. Drop the shape."""
+    radar = _radar()
+    radar["series"] = [
+        {"name": "Us", "is_us": True, "scores": [5, 3, 4, 1, 2, 2, 2, 3]},
+        {"name": "Globex", "is_us": False, "scores": [4, 5]},   # short → dropped
+    ]
+    html = _render(radars=[radar])
+    assert html.count("<svg") == 1
+    series = re.findall(r'<polygon [^>]*fill-opacity="0\.10"[^>]*>', html)
+    assert len(series) == 1                       # only the complete one
+    assert "Globex" not in html[html.index("<svg"):html.index("</svg>")]
+    # ...and the dropped series takes no legend slot / colour with it.
+    assert 'fill="#1A6B47"' in series[0]
+
+
+def test_radar_is_omitted_when_every_series_is_unusable():
     radar = _radar()
     radar["series"] = [{"name": "Us", "is_us": True, "scores": [5, 4]}]
     html = _render(radars=[radar])
-    assert html.count("<svg") == 1
+    assert "<svg" not in html
+    assert "Where we win and where we lose" not in html
+    assert "Scale benchmark" in html               # the rest still renders
+
+
+def test_extra_scores_beyond_the_dimensions_are_truncated():
+    radar = _radar()
+    radar["series"] = [{"name": "Us", "is_us": True,
+                        "scores": [5, 3, 4, 1, 2, 2, 2, 3, 9, 9]}]
+    assert "<svg" in _render(radars=[radar])
 
 
 # ── Defensive normalization (#928: 'str' has no attribute 'get') ─────────────

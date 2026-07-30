@@ -37,7 +37,10 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import math
+
+logger = logging.getLogger(__name__)
 
 # ── Pinned design (examples/01-facebook-ads.html) ────────────────────────────
 
@@ -425,12 +428,22 @@ def _radar(spec: dict) -> str:
         )
     # one polygon per series; "us" always takes the first (green) colour
     ordered = sorted(series, key=lambda s: not bool(s.get("is_us")))
-    legend: list[str] = []
-    for idx, s in enumerate(ordered):
-        colour = _SERIES_COLORS[idx % len(_SERIES_COLORS)]
-        scores = [_num(v) for v in (s.get("scores") or [])][:n]
-        while len(scores) < n:
-            scores.append(0.0)
+    legend: list[tuple[str, str]] = []
+    for s in ordered:
+        # A series with FEWER scores than dimensions is dropped, not padded.
+        # Padding with 0.0 drew the competitor pinned to the centre on every
+        # trailing axis — which reads as "we scored them zero on trust and
+        # measurement", a fabricated finding rendered as a picture. A missing
+        # shape is honest; a wrong one is not.
+        raw = s.get("scores")
+        scores = [_num(v) for v in raw] if isinstance(raw, list) else []
+        if len(scores) < n:
+            logger.warning(
+                "competitive-intel radar: dropping series %r — %d score(s) for "
+                "%d dimensions", str(s.get("name") or "?"), len(scores), n,
+            )
+            continue
+        colour = _SERIES_COLORS[len(legend) % len(_SERIES_COLORS)]
         pts = " ".join(
             f"{x:.1f},{y:.1f}" for x, y in
             (_radar_point(scores[i], i, n) for i in range(n))
@@ -440,6 +453,10 @@ def _radar(spec: dict) -> str:
             f'stroke="{colour}" stroke-width="2" stroke-linejoin="round"/>'
         )
         legend.append((colour, str(s.get("name") or "")))
+    if not legend:
+        # Every series was unusable — an empty grid says nothing, so omit the
+        # chart entirely rather than shipping axes with no shapes on them.
+        return ""
     # legend row along the bottom of the 500×470 viewBox
     slot = 420.0 / max(1, len(legend))
     for idx, (colour, name) in enumerate(legend):
