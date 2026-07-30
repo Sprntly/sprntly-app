@@ -14,6 +14,7 @@ import {
   MAX_SKILL_FILE_BYTES,
   UploadSkillModal,
   skillFileError,
+  slugifyName,
 } from "../UploadSkillModal"
 
 afterEach(() => {
@@ -48,7 +49,64 @@ describe("skillFileError", () => {
   })
 })
 
+describe("slugifyName", () => {
+  it("mirrors the backend slugify (lowercase kebab, no edge hyphens)", () => {
+    expect(slugifyName("PRD Author")).toBe("prd-author")
+    expect(slugifyName("  Roadmap!! v2 ")).toBe("roadmap-v2")
+    expect(slugifyName("!!!")).toBe("")
+  })
+})
+
 describe("UploadSkillModal", () => {
+  it("warns — without blocking — when the name matches a built-in skill", async () => {
+    const onUpload = vi.fn().mockResolvedValue(undefined)
+    const { container } = render(
+      React.createElement(UploadSkillModal, {
+        open: true,
+        onUpload,
+        onClose: vi.fn(),
+        builtinSlugs: ["prd-author"],
+      }),
+    )
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), {
+        target: { value: "PRD Author" },
+      })
+    })
+    // Informational status, not an alert — the upload is allowed to proceed.
+    expect(screen.getByRole("status").textContent).toMatch(
+      /replace it with your skill/,
+    )
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Our own PRD flow." },
+      })
+      pickFile(container, MD_FILE())
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /upload skill/i }))
+    })
+    await waitFor(() => expect(onUpload).toHaveBeenCalled())
+  })
+
+  it("shows no override warning for a non-colliding name", async () => {
+    render(
+      React.createElement(UploadSkillModal, {
+        open: true,
+        onUpload: vi.fn(),
+        onClose: vi.fn(),
+        builtinSlugs: ["prd-author"],
+      }),
+    )
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), {
+        target: { value: "My Own Skill" },
+      })
+    })
+    expect(screen.queryByRole("status")).toBeNull()
+  })
+
   it("gates submit until file, name, and description are all present", async () => {
     const onUpload = vi.fn().mockResolvedValue(undefined)
     const { container } = render(

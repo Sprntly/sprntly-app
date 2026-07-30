@@ -9,8 +9,10 @@ two apart. Deliberately NO cache on the DB path: a read per invocation is one
 PostgREST select, it keeps every replica consistent, and a deleted skill
 disappears immediately (the invocation-error ticket relies on that).
 
-The upload route rejects slugs that shadow a vendored id, so lookup order
-(built-in first) is a formality, never a conflict-resolution rule.
+Lookup order is CUSTOM FIRST: a company upload that shares a vendored id
+REPLACES the built-in for that company (PRD 1854 override — the uploader is
+warned at upload time via the 201's overrides_builtin flag). Deleting the
+custom skill restores the built-in on the next invocation.
 """
 from __future__ import annotations
 
@@ -35,16 +37,15 @@ def has_custom_skill(company_id: str, slug: str) -> bool:
 
 
 def resolve_skill(skill_id: str, company_id: Optional[str] = None) -> SkillSpec:
-    """A SkillSpec from either library: vendored disk skill first, then the
-    company's custom skills. Raises UnknownSkillError when neither has it."""
-    try:
-        return get_skill(skill_id)
-    except UnknownSkillError:
-        if company_id:
-            spec = custom_skill_spec(company_id, skill_id)
-            if spec is not None:
-                return spec
-        raise
+    """A SkillSpec from either library — the company's CUSTOM skill first, so
+    an upload sharing a vendored id replaces the built-in for that company;
+    vendored disk skills are the fallback. Raises UnknownSkillError when
+    neither has it."""
+    if company_id:
+        spec = custom_skill_spec(company_id, skill_id)
+        if spec is not None:
+            return spec
+    return get_skill(skill_id)
 
 
 def is_builtin(skill_id: str) -> bool:

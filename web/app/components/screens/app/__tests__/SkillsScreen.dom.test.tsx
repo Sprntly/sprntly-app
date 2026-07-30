@@ -88,6 +88,7 @@ const CUSTOM_SKILL = {
   uploader_name: "Fortune Tede",
   created_at: "2026-07-28T18:00:00+00:00",
   has_file: true,
+  overrides_builtin: false,
 }
 
 beforeEach(() => {
@@ -177,6 +178,65 @@ describe("SkillsScreen", () => {
     })
     expect(setPendingOndemandDraftMock).toHaveBeenCalledWith("/estimation-helper ")
     expect(goToMock).toHaveBeenCalledWith("chat")
+  })
+
+  it("hides a built-in card that a custom skill overrides", async () => {
+    // The override rule (PRD 1854): a custom skill under a built-in's id
+    // replaces it, so the catalog must not advertise the built-in card.
+    customListMock.mockResolvedValue({
+      skills: [
+        {
+          ...CUSTOM_SKILL,
+          id: "c-shadow",
+          slug: "journey-map",
+          trigger: "/journey-map",
+          name: "Our journey map",
+          overrides_builtin: true,
+        },
+      ],
+    })
+    await act(async () => {
+      render(React.createElement(SkillsScreen))
+    })
+    await waitFor(() => expect(screen.getByText("Our journey map")).toBeTruthy())
+
+    expect(screen.queryByText("Journey map")).toBeNull()
+    // Other built-ins are untouched.
+    expect(screen.getByText("Stakeholder map")).toBeTruthy()
+  })
+
+  it("toasts the replacement wording when an upload overrides a built-in", async () => {
+    customUploadMock.mockResolvedValue({ ...CUSTOM_SKILL, overrides_builtin: true })
+    const { container } = render(React.createElement(SkillsScreen))
+    await waitFor(() => expect(screen.getByText("Stakeholder map")).toBeTruthy())
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /create or upload skill/i }))
+    })
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText(/skill name/i), {
+        target: { value: "Estimation helper" },
+      })
+      fireEvent.change(screen.getByLabelText(/what does this skill do/i), {
+        target: { value: "Ours." },
+      })
+    })
+    const fileInput = container.querySelector('input[type="file"]') as HTMLInputElement
+    await act(async () => {
+      fireEvent.change(fileInput, {
+        target: { files: [new File(["# method"], "skill.md", { type: "text/markdown" })] },
+      })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /^upload skill$/i }))
+    })
+
+    await waitFor(() =>
+      expect(showToastMock).toHaveBeenCalledWith(
+        "Skill uploaded",
+        expect.stringContaining("replaces the built-in Sprntly skill"),
+      ),
+    )
   })
 
   it("keeps built-ins rendering when the custom-skills fetch fails", async () => {

@@ -176,12 +176,14 @@ def _routable(skill_id: str, enterprise_id: Optional[str] = None) -> bool:
     """Can this id be invoked? Built-ins: vendored and not NON_ROUTABLE.
     With an enterprise_id, the company's CUSTOM skills (PRD 1854) also count —
     a fresh DB check, so a just-uploaded skill works and a just-deleted one
-    stops immediately. Custom skills reach here only via the slash fast-path
-    and pinned_skill; the regex rules and the LLM router menu stay built-in
-    only (the memoized menu is process-global — per-company entries there
-    would leak names across tenants)."""
-    if skill_id in set(list_skills()):
-        return skill_id not in NON_ROUTABLE
+    stops immediately. A custom skill may share a vendored id (the override
+    rule: custom wins), so a NON_ROUTABLE built-in id still routes when the
+    company has an upload under it. Custom skills reach here only via the
+    slash fast-path and pinned_skill; the regex rules and the LLM router menu
+    stay built-in only (the memoized menu is process-global — per-company
+    entries there would leak names across tenants)."""
+    if skill_id in set(list_skills()) and skill_id not in NON_ROUTABLE:
+        return True
     if enterprise_id:
         from app.skills.resolver import has_custom_skill
 
@@ -291,18 +293,20 @@ def _kg_grounding(enterprise_id, question) -> tuple[str, bool]:
 
 def _answer_single_shot(
     decision: RouteDecision, enterprise_id, question, history, prd_context: str = "",
-    on_delta=None,
+    on_delta=None, skill_spec=None,
 ) -> dict:
     """Skill answer via one gateway call (SKILL.md injected by the gateway),
     grounded on the KG when the tenant's graph has relevant signal — or, for a
     PRD-tab chat, on the open PRD alone (`prd_context` rides the cacheable
     prefix and the KG retrieval is skipped)."""
     model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
-    # Custom skill (PRD 1854): not a vendored dir, so the gateway can't load it
-    # by id — resolve the DB-backed spec here and hand it over. Built-ins pass
-    # spec=None and the gateway loads from disk exactly as before.
-    skill_spec = None
-    if decision.skill_id and decision.skill_id not in set(list_skills()):
+    # Custom skill (PRD 1854): resolve the DB-backed spec and hand it over —
+    # CUSTOM FIRST even when the id names a vendored dir, because a company
+    # upload sharing a built-in id replaces it (the override rule). Only when
+    # the company has no upload under this id does spec=None send the gateway
+    # to disk, exactly as before. The dispatch may pass the spec in to save
+    # the repeat lookup.
+    if skill_spec is None and decision.skill_id and enterprise_id:
         from app.skills.resolver import custom_skill_spec
 
         skill_spec = custom_skill_spec(enterprise_id, decision.skill_id)
@@ -591,6 +595,22 @@ def answer(
             dataset, q, enterprise_id=enterprise_id, prd_context=prd_context,
             on_delta=on_delta,
         )
+
+    # Custom-skill override (PRD 1854): a company upload that shares a
+    # vendored id WINS, so it must run as itself through the generic
+    # single-shot path — never through the built-in's special-cased pipeline
+    # below (public-feedback web search, VoC call digest, script tools). One
+    # fresh DB read; the resolved spec is handed to the single-shot call so
+    # it isn't looked up twice.
+    from app.skills.resolver import custom_skill_spec
+
+    custom_spec = custom_skill_spec(enterprise_id, decision.skill_id)
+    if custom_spec is not None:
+        payload = _answer_single_shot(
+            decision, enterprise_id, question, history, prd_context=prd_context,
+            on_delta=on_delta, skill_spec=custom_spec,
+        )
+        return _maybe_verify(payload, enterprise_id)
 
     # Public-feedback routed: the report needs the public WEB (app stores,
     # Reddit, review sites), which the generic skill answer can't reach — it

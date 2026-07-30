@@ -8,8 +8,9 @@ Covered:
   stage the original bytes (filesystem fallback in tests)
 - the server-side validation ladder: missing/over-limit metadata (422), bad
   extension (422), empty file (400), oversize (413), unparseable content (400)
-- slug conflicts: built-in shadowing and company duplicates (409), with the
-  staged object rolled back on the duplicate path
+- slug conflicts: company duplicates (409) with the staged object rolled
+  back; shadowing a BUILT-IN id is allowed and flagged (overrides_builtin —
+  PRD 1854 override: the custom skill replaces the built-in)
 - list: newest-first metadata, company-isolated
 - file links: signed/fallback URLs for owned skills; foreign ids 404
 """
@@ -77,6 +78,7 @@ def test_upload_md_creates_skill(tenant_client):
     # minted test token carries neither, so it may be empty, never client-set).
     assert "uploader_name" in body
     assert body["has_file"] is True
+    assert body["overrides_builtin"] is False
     # The original bytes are staged under the workspace prefix.
     assert len(_staged_files()) == 1
 
@@ -184,16 +186,25 @@ def test_symbol_only_name_422(tenant_client):
 # ─── slug conflicts + rollback ───────────────────────────────────────────────
 
 
-def test_builtin_shadowing_409(tenant_client, monkeypatch):
+def test_builtin_shadowing_allowed_and_flagged(tenant_client, monkeypatch):
     import app.routes.custom_skills as mod
 
     t = tenant_client.make(slug="acme")
     monkeypatch.setattr(mod, "list_skills", lambda: ["prd-author"])
+    # Shadowing a built-in id is a normal upload (PRD 1854 override — the
+    # custom skill replaces the built-in), flagged so the UI can say so.
     resp = _upload(t.client, name="PRD Author")
-    assert resp.status_code == 409
-    assert "built-in" in resp.json()["detail"]
-    # Rejected before staging — nothing written to storage.
-    assert _staged_files() == []
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["slug"] == "prd-author"
+    assert body["overrides_builtin"] is True
+    assert len(_staged_files()) == 1
+
+    # The list carries the flag too; non-shadowing skills stay False.
+    assert _upload(t.client, name="Own Thing").status_code == 201
+    skills = {s["slug"]: s for s in t.client.get("/v1/skills").json()["skills"]}
+    assert skills["prd-author"]["overrides_builtin"] is True
+    assert skills["own-thing"]["overrides_builtin"] is False
 
 
 def test_company_duplicate_409_rolls_back_staged_file(tenant_client):

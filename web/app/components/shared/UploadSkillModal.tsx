@@ -12,6 +12,10 @@
  *   - size: ≤ 20 MB, rejected before any bytes are transmitted
  *   - name + description: required, non-whitespace — the submit gates on them
  *     and empty-but-touched fields are highlighted (aria-invalid + field-error)
+ * A name that slugifies to a built-in Sprntly skill id shows a NON-BLOCKING
+ * warning (the upload replaces the built-in for the whole company — PRD 1854
+ * override); the server's overrides_builtin flag on the 201 stays the
+ * authoritative signal, since the client only knows the routable catalog.
  * On a server rejection the modal keeps every input intact so the user fixes
  * and retries (the failure ACs across the PRD's validation tickets).
  */
@@ -21,6 +25,16 @@ import { useState } from "react"
 
 /** 20 MB — mirrors skills_storage.MAX_SKILL_UPLOAD_BYTES (the PRD cap). */
 export const MAX_SKILL_FILE_BYTES = 20 * 1024 * 1024
+
+/** Client mirror of skills.custom.slugify — display name → /trigger slug. */
+export function slugifyName(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .replace(/-{2,}/g, "-")
+}
 
 /** Client-side mirror of the accepted upload formats. */
 export function skillFileError(file: File): string | null {
@@ -46,6 +60,9 @@ export type UploadSkillModalViewProps = {
   submitting: boolean
   /** Inline error — client pre-check or server `detail`. */
   error: string | null
+  /** Non-blocking: the typed name matches a built-in Sprntly skill, which
+   *  this upload will replace for the whole company (PRD 1854 override). */
+  overrideWarning: string | null
   /** Marks empty required fields once the user has interacted with them. */
   touched: { name: boolean; description: boolean }
   onNameChange: (next: string) => void
@@ -62,6 +79,7 @@ export function UploadSkillModalView({
   file,
   submitting,
   error,
+  overrideWarning,
   touched,
   onNameChange,
   onDescriptionChange,
@@ -123,6 +141,12 @@ export function UploadSkillModalView({
           {nameMissing ? (
             <p className="settings-msg settings-msg-error" role="alert">
               Skill name is required.
+            </p>
+          ) : null}
+          {overrideWarning ? (
+            // role="status", not alert: informational — the upload proceeds.
+            <p className="settings-msg settings-warning" role="status">
+              {overrideWarning}
             </p>
           ) : null}
 
@@ -202,9 +226,16 @@ type Props = {
    */
   onUpload: (file: File, name: string, description: string) => Promise<void>
   onClose: () => void
+  /**
+   * Built-in Sprntly skill ids, for the live "you're replacing a Sprntly
+   * skill" warning as the user types a name. The caller passes the routable
+   * catalog it already fetched; the server's overrides_builtin flag on the
+   * 201 stays authoritative (it also knows the non-routable ids).
+   */
+  builtinSlugs?: string[]
 }
 
-export function UploadSkillModal({ open, onUpload, onClose }: Props) {
+export function UploadSkillModal({ open, onUpload, onClose, builtinSlugs }: Props) {
   const [name, setName] = useState("")
   const [description, setDescription] = useState("")
   const [file, setFile] = useState<File | null>(null)
@@ -241,6 +272,15 @@ export function UploadSkillModal({ open, onUpload, onClose }: Props) {
     }
   }
 
+  // Live override warning: the typed name slugifies to a built-in skill id.
+  // Informational only — submit stays enabled; uploading really does replace
+  // the built-in for the whole company (PRD 1854 override).
+  const slug = slugifyName(name)
+  const overrideWarning =
+    slug && (builtinSlugs ?? []).includes(slug)
+      ? `“${name.trim()}” matches the built-in Sprntly skill /${slug}. Uploading will replace it with your skill for your whole company.`
+      : null
+
   return (
     <UploadSkillModalView
       open={open}
@@ -249,6 +289,7 @@ export function UploadSkillModal({ open, onUpload, onClose }: Props) {
       file={file}
       submitting={submitting}
       error={error}
+      overrideWarning={overrideWarning}
       touched={touched}
       onNameChange={(v) => {
         setName(v)
