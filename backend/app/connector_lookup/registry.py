@@ -72,12 +72,30 @@ def provider_for(name: str) -> LookupProvider | None:
         from app.connector_lookup.slack import PROVIDER
 
         return PROVIDER
+    if name == "fireflies":
+        from app.connector_lookup.fireflies import PROVIDER
+
+        return PROVIDER
+    if name == "github":
+        from app.connector_lookup.github import PROVIDER
+
+        return PROVIDER
+    if name == "hubspot":
+        from app.connector_lookup.hubspot import PROVIDER
+
+        return PROVIDER
+    if name == "google_drive":
+        from app.connector_lookup.gdrive import PROVIDER
+
+        return PROVIDER
     return None
 
 
 #: Keys `provider_for` can resolve. Kept as data so the router and the
 #: not-supported copy agree with what actually exists.
-LOOKUP_PROVIDERS: tuple[str, ...] = ("jira", "clickup", "slack")
+LOOKUP_PROVIDERS: tuple[str, ...] = (
+    "jira", "clickup", "slack", "fireflies", "github", "hubspot", "google_drive",
+)
 
 #: Connected (they sync into the KG) but no live-read adapter yet.
 DEFERRED: dict[str, str] = {

@@ -59,7 +59,12 @@ class LookupSession:
     """
 
     provider: str
-    handle: Any
+    #: repr suppressed: `handle` is the credential-bearing object for EVERY
+    #: adapter (a token string for HubSpot, a dataclass of tokens for Slack /
+    #: ClickUp), and a LookupSession repr otherwise reaches log lines, exception
+    #: context and test failure dumps. Adapters suppress their own fields too;
+    #: this is the backstop that covers the ones that are bare strings.
+    handle: Any = field(repr=False)
     extras: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
