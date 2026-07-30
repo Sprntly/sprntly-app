@@ -449,6 +449,25 @@ def _maybe_verify(payload: dict, enterprise_id: str) -> dict:
     return payload
 
 
+def _ds_claude_enabled(enterprise_id: Optional[str]) -> bool:
+    """Is the Claude data-analysis engine enabled for this company?
+
+    `ds_claude_analysis` in companies.feature_flags, DEFAULT OFF — the opposite
+    of the module entitlements, which grandfather absent flags ON. A read failure
+    also resolves OFF, so the deterministic engine is what an unreachable/legacy
+    flags column gets.
+    """
+    if not enterprise_id:
+        return False
+    try:
+        from app.entitlements import feature_flags_for_company
+
+        return bool(feature_flags_for_company(enterprise_id).get("ds_claude_analysis"))
+    except Exception:  # noqa: BLE001 — flag read must never break the ask
+        logger.exception("ds_claude_analysis flag read failed for %s", enterprise_id)
+        return False
+
+
 def _log_qa(enterprise_id: str, skill_id: str, purpose: str, meta: dict) -> None:
     """Best-effort decision-log row for the tool-loop path (the single-shot path
     is logged by the gateway itself)."""
@@ -527,12 +546,34 @@ def answer(
                 enterprise_id=enterprise_id, question=question, history=history
             )
 
-    # "Analyze my data" is a COMMAND to run the deterministic DS engine over the
-    # company's uploaded CSV/Excel exports — not a question for the corpus/KG.
+    # "Analyze my data" is a COMMAND to run a DS engine over the company's
+    # uploaded CSV/Excel exports — not a question for the corpus/KG.
     # Intercept before generic routing for the same reason as the call digest:
     # the keyword rules would send it to a synthesis skill, which answers from
     # the KG instead of computing over the actual data.
     if not pinned_skill and is_data_analysis_request(question):
+        # Opt-in per company: the Claude code-execution engine actually reads the
+        # question (the v5.8 battery never does) but sends the raw CSVs to the
+        # Files API, so it stays behind a flag until that's signed off. Any
+        # failure falls through to the deterministic engine — the permanent
+        # fail-open floor — so this can never 500 the chat.
+        if _ds_claude_enabled(enterprise_id):
+            try:
+                from app.ds import claude_analysis
+
+                return claude_analysis.answer(
+                    enterprise_id=enterprise_id,
+                    question=question,
+                    history=history,
+                    is_cancelled=is_cancelled,
+                )
+            except AskCancelled:
+                raise  # a user Stop must not spend a second (legacy) run
+            except Exception:  # noqa: BLE001 — fall back, never fail
+                logger.exception(
+                    "DS Claude analysis failed for %s; falling back to the "
+                    "deterministic engine", enterprise_id,
+                )
         from app.ds import chat_analysis
 
         return chat_analysis.answer(
