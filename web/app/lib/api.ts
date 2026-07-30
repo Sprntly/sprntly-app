@@ -1468,9 +1468,14 @@ export type ConnectionSummary = {
     channel_id?: string
     channel_name?: string
     // …and the corpus-sync pull-channel selection (empty/absent = every
-    // channel the bot is a member of).
+    // channel the bot is a member of). The selection is COMPANY-wide.
     sync_channel_ids?: string[]
     sync_channel_names?: Record<string, string>
+    // True when this row is the company's SHARED Slack connection surfaced
+    // to a member who has no install of their own (voice-of-customer view,
+    // sanitized server-side). Delivery UIs must ignore such rows — the
+    // member has no personal delivery target until they connect their own.
+    company_connection?: boolean
     // Figma (PAT-vs-OAuth distinction set by backend on save)
     auth_kind?: "pat" | "oauth"
   }

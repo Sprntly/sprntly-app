@@ -67,3 +67,73 @@ def test_unavailable_channel_without_name_falls_back_to_id():
     assert kept == []
     assert len(errors) == 1
     assert "C9" in errors[0]
+
+
+# ── resolve_company_slack_row — which install is "the company's" ────────────
+#
+# Voice-of-customer pulling is company-level: one Slack row serves the whole
+# company. Preference: the active row carrying a pull-channel selection
+# (latest-updated wins), else the oldest active install (the PM's).
+
+def _row(user_id: str, *, status: str = "active", config: dict | None = None,
+         created: str = "2026-07-01", updated: str = "2026-07-01") -> dict:
+    import json as _json
+
+    return {
+        "user_id": user_id,
+        "status": status,
+        "config_json": _json.dumps(config or {}),
+        "created_at": created,
+        "updated_at": updated,
+    }
+
+
+def test_resolve_prefers_row_with_selection(monkeypatch):
+    from app import db
+    from app.connectors.slack_company import resolve_company_slack_row
+
+    rows = [
+        _row("u-pm", created="2026-07-01"),
+        _row("u-eng", created="2026-07-10",
+             config={CONFIG_SYNC_CHANNEL_IDS: ["C1"]}),
+    ]
+    monkeypatch.setattr(db, "list_slack_connections", lambda _cid: rows)
+    assert resolve_company_slack_row("co-1")["user_id"] == "u-eng"
+
+
+def test_resolve_falls_back_to_oldest_active_install(monkeypatch):
+    from app import db
+    from app.connectors.slack_company import resolve_company_slack_row
+
+    rows = [
+        _row("u-late", created="2026-07-20"),
+        _row("u-pm", created="2026-07-01"),
+        _row("u-gone", status="revoked", created="2026-06-01"),
+    ]
+    monkeypatch.setattr(db, "list_slack_connections", lambda _cid: rows)
+    assert resolve_company_slack_row("co-1")["user_id"] == "u-pm"
+
+
+def test_resolve_latest_updated_selection_wins(monkeypatch):
+    from app import db
+    from app.connectors.slack_company import resolve_company_slack_row
+
+    rows = [
+        _row("u-old-cfg", config={CONFIG_SYNC_CHANNEL_IDS: ["C1"]},
+             updated="2026-07-05"),
+        _row("u-new-cfg", config={CONFIG_SYNC_CHANNEL_IDS: ["C2"]},
+             updated="2026-07-25"),
+    ]
+    monkeypatch.setattr(db, "list_slack_connections", lambda _cid: rows)
+    assert resolve_company_slack_row("co-1")["user_id"] == "u-new-cfg"
+
+
+def test_resolve_none_when_no_active_install(monkeypatch):
+    from app import db
+    from app.connectors.slack_company import resolve_company_slack_row
+
+    monkeypatch.setattr(
+        db, "list_slack_connections",
+        lambda _cid: [_row("u-gone", status="revoked")],
+    )
+    assert resolve_company_slack_row("co-1") is None

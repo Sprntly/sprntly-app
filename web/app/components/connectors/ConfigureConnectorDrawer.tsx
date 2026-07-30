@@ -490,16 +490,32 @@ export function ConfigureConnectorDrawer({
       />
     )
   } else if (providerId === "slack") {
+    // The delivery target is PER-USER config — on the company's shared
+    // connection (a member viewing the workspace install, no row of their
+    // own) there is nothing personal to configure, so the delivery picker
+    // is replaced by a hint. The pull-channel selection and sync are
+    // COMPANY-wide and render either way.
+    const isSharedCompanyConnection = Boolean(
+      connection?.config?.company_connection,
+    )
     slot = (
       <>
-        <SlackChannelPicker
-          savedTargetType={
-            connection?.config?.target_type as "channel" | "dm" | undefined
-          }
-          savedChannelId={connection?.config?.channel_id as string | undefined}
-          savedChannelName={connection?.config?.channel_name as string | undefined}
-          onSaved={onDisconnected /* reuse the reload callback */}
-        />
+        {isSharedCompanyConnection ? (
+          <p className="conn-slack-hint">
+            This is your workspace&apos;s shared Slack connection. To get the
+            brief delivered to your own Slack, connect Slack from
+            Settings → Notifications.
+          </p>
+        ) : (
+          <SlackChannelPicker
+            savedTargetType={
+              connection?.config?.target_type as "channel" | "dm" | undefined
+            }
+            savedChannelId={connection?.config?.channel_id as string | undefined}
+            savedChannelName={connection?.config?.channel_name as string | undefined}
+            onSaved={onDisconnected /* reuse the reload callback */}
+          />
+        )}
         <SlackSyncChannelsPicker
           savedChannelIds={connection?.config?.sync_channel_ids}
           onSaved={onDisconnected /* reuse the reload callback */}

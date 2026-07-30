@@ -1,9 +1,11 @@
 /**
  * Slack pull-channel picker — mounted next to the notification-target picker
- * in the Slack config slots (post-connect modal + Configure drawer). Lets the
- * user choose WHICH channels the corpus sync reads messages from; the
- * selection is stored on the connection config (sync_channel_ids /
- * sync_channel_names) and honored by /slack/sync-to-corpus.
+ * in the Slack config slots (post-connect modal + Configure drawer). Chooses
+ * WHICH channels the corpus sync reads messages from. The selection is
+ * COMPANY-WIDE (voice of customer is company-level): stored on the company's
+ * Slack connection via POST /slack/sync-channels (admin-only — non-admins
+ * get the admin-gate error inline), honored by the manual sync AND the
+ * scheduled per-company refresh.
  *
  * No selection stored = the sync's legacy behavior: every channel the bot is
  * a member of. Saving an empty selection clears back to that.
@@ -58,9 +60,11 @@ export function SlackSyncChannelsPickerView({
       <div>
         <span className="conn-slack-label">Channels to pull from</span>
         <p className="conn-slack-hint">
-          Sprntly reads messages only from the channels you select here.
-          With nothing selected, it reads every channel the bot has been
-          invited to.
+          Sprntly reads messages only from the channels selected here, and
+          syncs them into your knowledge base on a schedule. This selection
+          applies to your whole workspace and only admins can change it.
+          With nothing selected, every channel the bot has been invited to
+          is read.
         </p>
       </div>
 
