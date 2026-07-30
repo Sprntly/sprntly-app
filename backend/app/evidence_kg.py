@@ -42,7 +42,7 @@ from app.db import complete_evidence, fail_evidence, get_brief_by_id
 from app.graph.decision_log import log_agent_decision
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
-from app.graph.types import Entity, Signal
+from app.graph.types import Entity, Signal, signal_is_retired
 from app.html_style import inject_canonical_css
 from app.llm import strip_code_fence
 from app.prompts import (
@@ -141,7 +141,7 @@ def gather_evidence_trail(
         if source_id in seen:
             continue
         sig = signals_by_id.get(source_id)
-        if sig is None or sig.properties.get("superseded_by"):
+        if sig is None or signal_is_retired(sig.properties):
             continue
         seen.add(sig.id)
         trail.append(_signal_to_trail_item(sig, edge_type))

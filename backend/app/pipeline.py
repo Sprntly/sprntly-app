@@ -190,12 +190,11 @@ async def _no_corpus_sync() -> dict[str, Any]:
 
 
 async def _sync_slack(dataset: str) -> dict[str, Any]:
-    # Slack is per-user now: sync_slack needs (company_id, user_id) to
-    # resolve a specific user's bot token. The company-level pipeline run
-    # has no single user to act as, so corpus sync is driven from the
-    # per-user route (POST /slack/sync-to-corpus) instead. Skip here rather
-    # than guess an owner.
-    return {"status": "skipped", "reason": "slack_sync_is_per_user"}
+    # Slack corpus sync is company-level and already covered elsewhere: the
+    # scheduled connector refresh (scheduler → kickoff_slack_corpus_sync)
+    # and the manual Sync button (POST /slack/sync-to-corpus). Skip here so
+    # a pipeline run doesn't double-sync the same workspace.
+    return {"status": "skipped", "reason": "slack_synced_by_scheduler"}
 
 
 async def _sync_hubspot(dataset: str) -> dict[str, Any]:

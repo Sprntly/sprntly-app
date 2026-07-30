@@ -51,6 +51,7 @@ from datetime import datetime, timezone
 from app import competitive_intel_report
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
+from app.prompt_history import clamp_turn_text
 from app.report_records import parse_records
 
 logger = logging.getLogger(__name__)
@@ -490,11 +491,23 @@ def _plain_payload(answer: str, *, confidence: float = 0.0) -> dict:
 
 
 def _render_history(history: list[dict] | None) -> str:
+    """Recent turns, per-turn clamped, for the query-mode and ANALYSE prompts.
+
+    The clamp is load-bearing on THIS path specifically: this module's own
+    answers are self-contained HTML reports with inline SVG radars, and they are
+    persisted verbatim as conversation turns. Folding one back in raw would
+    replay a whole document — stylesheet, both charts and all — into every later
+    prompt in the thread, which is the non-retryable 400 `clamp_turn_text`
+    exists to prevent.
+    """
     if not history:
         return ""
     recent = history[-6:]
-    rows = [f"{t.get('role', 'user').capitalize()}: {t.get('content', '')}"
-            for t in recent]
+    rows = [
+        f"{t.get('role', 'user').capitalize()}: "
+        f"{clamp_turn_text(t.get('content', ''))}"
+        for t in recent
+    ]
     return "Conversation so far:\n" + "\n".join(rows) + "\n\n"
 
 

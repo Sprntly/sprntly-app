@@ -154,6 +154,11 @@ or referencing a PRD or ticket is answer.
 - generate_prd vs edit_prd: no PRD exists yet in this tab/thread → \
 generate_prd; one exists and the message asks to change it → edit_prd. \
 "Redo it with X" aimed at an existing PRD is still edit_prd.
+- Direction decides edit_prd, and the same words run both ways. "update the \
+PRD with the ticket details" changes the DOCUMENT → edit_prd. "update the \
+ticket details with the PRD" changes the TICKET, which is not an action here → \
+answer (the ask path owns it). Whichever the verb reaches first is the thing \
+being changed; when the target is a ticket, issue or story, choose answer.
 - A bare affirmative ("yes", "go ahead", "do it") adopts whatever action \
 the assistant just offered in its most recent turn; if it offered nothing, \
 answer.

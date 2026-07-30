@@ -9,10 +9,13 @@ declares what a tool is, the engine declares what we can do with it). The
 web's connectorsCatalog.ts mirrors this map for display; this module is the
 backend's authority.
 
-Cardinality (product decision, 2026-07): every connector carries EXACTLY ONE
-type for now. The shape stays list-valued so allowing multi-type connectors
-later is a data change, not a schema/API change — do not add a second type to
-any entry without product sign-off.
+Cardinality (product decision, 2026-07-30): connectors may carry MULTIPLE
+types when the tool genuinely is more than one thing — Slack is both a
+communication tool and a customer-voice source (customer/community channels
+are synced into the corpus). Multi-type entries still need product sign-off
+per entry; every provider carries at least one type. The web renders a
+multi-type connector's card in EVERY category it belongs to (one connection,
+several shelves) — see connectorsCatalog.ts.
 """
 from __future__ import annotations
 
@@ -29,7 +32,7 @@ CODE = "code"
 MONITORING = "monitoring"
 DESIGN = "design"
 
-#: provider → its type (a one-element list; see cardinality note above).
+#: provider → its types (see cardinality note above).
 #: Covers every provider the backend has an auth module or puller for, plus
 #: catalog-only ("coming soon") providers so the web can read one map. A
 #: provider absent here has no types (empty list).
@@ -40,7 +43,12 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
     "linear": [TASK_MANAGEMENT],
     "asana": [TASK_MANAGEMENT],
     # Communication
-    "slack": [COMMUNICATION],
+    # Slack is dual-typed (product decision 2026-07-30): a communication tool
+    # (brief delivery target) AND a customer-voice source — the corpus sync
+    # pulls the channels the user selects (see slack_sync.py), so customer/
+    # community channels are real evidence. The customer-voice type is what
+    # makes is_evidence_provider("slack") True.
+    "slack": [COMMUNICATION, CUSTOMER_VOICE],
     "msteams": [COMMUNICATION],
     "intercom": [COMMUNICATION],
     # Documentation
@@ -93,12 +101,16 @@ CONNECTOR_TYPES: dict[str, list[str]] = {
 #                    decided; the brief's output flows to them, not from them.
 #   code             GitHub — what was BUILT, not what users need.
 #   design           Figma / Framer — design surfaces, not customer signal.
-#   communication    Slack / Teams — DELIVERY targets for the brief.
+#   communication    MS Teams — a DELIVERY target for the brief. (Slack is
+#                    dual-typed communication + customer-voice, so it counts
+#                    as evidence via its customer-voice type — the corpus
+#                    sync pulls user-selected channels.)
 #   documents        Notion / Google Docs — internal documentation; context
 #                    that shapes a brief, not customer/product evidence.
 #
 # Everything else (analytics, customer-voice, meetings, crm, revenue,
-# monitoring) is evidence and can drive a brief.
+# monitoring) is evidence and can drive a brief. A multi-type provider is
+# evidence iff ANY of its types is evidence-bearing.
 NON_EVIDENCE_TYPES: frozenset[str] = frozenset(
     {TASK_MANAGEMENT, CODE, DESIGN, COMMUNICATION, DOCUMENTS}
 )

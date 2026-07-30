@@ -31,6 +31,7 @@ SKILL_CATEGORY: dict[str, str] = {
     "user-stories": "Documentation & Specification",
     "assumption-risk-map": "Discovery & Research",
     "business-context": "Discovery & Research",
+    "company-research": "Discovery & Research",
     "continuous-discovery": "Discovery & Research",
     "evidence-brief": "Discovery & Research",
     "interview-guide": "Discovery & Research",

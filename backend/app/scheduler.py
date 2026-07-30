@@ -42,7 +42,7 @@ from app.brief_schedule import (
 from app.config import settings
 from app.db.companies import list_companies
 from app.entitlements import top_insights_enabled
-from app.kg_ingest.auto_sync import kickoff_sync
+from app.kg_ingest.auto_sync import kickoff_slack_corpus_sync, kickoff_sync
 from app.kg_ingest.runner import PULLERS
 
 logger = logging.getLogger(__name__)
@@ -130,15 +130,31 @@ def _refresh_all_company_connectors() -> None:
                 company_id,
             )
             continue
+        slack_kicked = False
         for conn in connections:
             if conn.get("status") != "active":
                 continue
             provider = (conn.get("provider") or "").strip()
+            # Slack: company-level corpus sync (voice of customer) — one
+            # kick per company per cycle, however many members installed
+            # the bot. Pulls the shared channel selection into corpus + KG.
+            if provider == "slack":
+                if slack_kicked:
+                    continue
+                slack_kicked = True
+                try:
+                    kickoff_slack_corpus_sync(company_id)
+                except Exception:
+                    logger.exception(
+                        "refresh-connectors: slack kickoff raised for %s",
+                        company_id,
+                    )
+                continue
             # Fire for providers with a registered KG puller, plus google_drive
             # (connection-config sync — kickoff_sync special-cases it, so
             # picked Drive files that change get re-pulled into corpus + KG).
-            # Others (figma / slack) have their own corpus paths, are
-            # per-user, or aren't wired for periodic refresh.
+            # Others (figma) have their own corpus paths or aren't wired
+            # for periodic refresh.
             if not provider or (provider not in PULLERS
                                 and provider != "google_drive"):
                 continue
@@ -550,7 +566,9 @@ def _run_orphan_ask_job_sweep() -> None:
     failure here never affects other jobs. Also sweeps `pipeline_runs` rows
     abandoned in 'running' (a deploy restart mid-regenerate kills the owning
     task silently — same shared-Supabase age-gating rationale, see
-    db/pipeline_runs.fail_orphan_running_runs)."""
+    db/pipeline_runs.fail_orphan_running_runs) and `company_research_runs` rows
+    abandoned the same way (a stale 'running' row there also wedges the
+    double-trigger guard, so healing it is what lets a retry through)."""
     try:
         from app.db.asks import fail_orphan_generating_ask_jobs
 
@@ -568,6 +586,17 @@ def _run_orphan_ask_job_sweep() -> None:
                 "Failed %d abandoned pipeline run(s) stuck in running", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan pipeline-run sweep failed")
+    try:
+        from app.db.company_research_runs import (
+            fail_orphan_company_research_runs,
+        )
+
+        n = fail_orphan_company_research_runs()
+        if n:
+            logger.info(
+                "Failed %d abandoned company-research run(s) stuck in running", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("orphan company-research sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:

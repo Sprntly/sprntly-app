@@ -91,6 +91,16 @@ from app.db.public_feedback_runs import (
     save_public_feedback_run,
 )
 
+# Deep company-research runs (onboarding kick + chat ask)
+from app.db.company_research_runs import (
+    company_research_run_in_flight,
+    complete_company_research_run,
+    fail_company_research_run,
+    fail_orphan_company_research_runs,
+    latest_company_research_run,
+    start_company_research_run,
+)
+
 # Website-analysis jobs (onboarding, fire-and-forget)
 from app.db.website_analysis import (
     complete_analysis_job,
@@ -238,6 +248,13 @@ __all__ = [
     "log_ask",
     "start_ask_job",
     "start_cached_ask",
+    # deep company-research runs
+    "company_research_run_in_flight",
+    "complete_company_research_run",
+    "fail_company_research_run",
+    "fail_orphan_company_research_runs",
+    "latest_company_research_run",
+    "start_company_research_run",
     # website-analysis jobs
     "complete_analysis_job",
     "fail_analysis_job",

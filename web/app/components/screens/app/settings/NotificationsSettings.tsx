@@ -126,7 +126,14 @@ export function NotificationsSettings() {
     setSlackError(null)
     try {
       const r = await connectorsApi.list()
-      setSlack(r.connections.find((c) => c.provider === "slack") ?? null)
+      // Delivery is per-user: ignore the company's SHARED Slack connection
+      // (voice-of-customer view) — only the user's own install carries
+      // their delivery target.
+      setSlack(
+        r.connections.find(
+          (c) => c.provider === "slack" && !c.config?.company_connection,
+        ) ?? null,
+      )
     } catch (e) {
       setSlackError(
         e instanceof ApiError ? apiErrorMessage(e.status, e.body)

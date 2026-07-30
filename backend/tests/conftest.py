@@ -296,6 +296,35 @@ CREATE TABLE website_analysis_jobs (
 );
 CREATE INDEX website_analysis_jobs_company_idx ON website_analysis_jobs (company_id, id DESC);
 
+-- Deep company-research runs (mirrors
+-- 20260730134500_company_research_runs.sql). One row per staged web-research
+-- sweep over the company's OWN public footprint; status walks running →
+-- completed / completed_partial (or failed). `records` holds the captured fact
+-- records. No client polls this — the row IS the handle on an
+-- abandonment-proof background run. The partial unique index is the ATOMIC
+-- one-live-run-per-company guard (SQLite supports partial indexes, so the
+-- insert-conflict path is exercised by the tests exactly as in Postgres).
+CREATE TABLE company_research_runs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id   TEXT NOT NULL REFERENCES companies (id) ON DELETE CASCADE,
+    url          TEXT,
+    trigger      TEXT NOT NULL
+                 CHECK (trigger IN ('onboarding', 'chat')),
+    status       TEXT NOT NULL DEFAULT 'running'
+                 CHECK (status IN ('running', 'completed',
+                                   'completed_partial', 'failed')),
+    stages       TEXT NOT NULL DEFAULT '{}',
+    records      TEXT,
+    summary      TEXT,
+    error        TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    completed_at TEXT
+);
+CREATE INDEX company_research_runs_company_idx
+    ON company_research_runs (company_id, created_at DESC);
+CREATE UNIQUE INDEX company_research_runs_one_live_idx
+    ON company_research_runs (company_id) WHERE status = 'running';
+
 -- Fire-and-forget LLM-context extraction jobs (mirrors
 -- 20260723130000_llm_context_jobs.sql). The onboarding import step reads the
 -- uploaded Markdown with an LLM pass here — the only reader since the v3
@@ -1287,6 +1316,7 @@ def _no_background_connector_sync(request, monkeypatch):
     if request.module.__name__.rsplit(".", 1)[-1] in (
         "test_connector_auto_sync",
         "test_corpus_seed_kickoff",
+        "test_roadmap_kg_ingest",
     ):
         yield
         return
@@ -1301,6 +1331,20 @@ def _no_background_connector_sync(request, monkeypatch):
         auto_sync = importlib.import_module("app.kg_ingest.auto_sync")
         monkeypatch.setattr(auto_sync, "kickoff_sync", _noop_sync, raising=False)
         monkeypatch.setattr(auto_sync, "kickoff_corpus_seed", _noop_seed, raising=False)
+        # Same rationale for the roadmap ingest kickoff (POST
+        # /v1/company/roadmap-doc): its daemon thread would run a real LLM
+        # extraction against the mid-reset in-memory DB.
+        monkeypatch.setattr(auto_sync, "kickoff_roadmap_ingest", _noop_seed,
+                            raising=False)
+    except Exception:
+        pass
+    try:
+        # app.routes.company is NOT in _RELOAD_ORDER, so its `from auto_sync
+        # import kickoff_roadmap_ingest` binding is fixed at first import and the
+        # source patch above can't reach it — patch the route's own reference too.
+        company_route = importlib.import_module("app.routes.company")
+        monkeypatch.setattr(company_route, "kickoff_roadmap_ingest", _noop_seed,
+                            raising=False)
     except Exception:
         pass
     try:

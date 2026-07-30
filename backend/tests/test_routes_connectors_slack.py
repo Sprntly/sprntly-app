@@ -1100,3 +1100,141 @@ def test_search_route_404_when_not_connected(slack_env, monkeypatch):
     ctx = company_client(monkeypatch)
     r = ctx.client.get("/v1/connectors/slack/search?q=x")
     assert r.status_code == 404
+
+
+# ─────────────────── /slack/sync-channels route ───────────────────
+
+
+def test_sync_channels_route_persists_selection(slack_env, monkeypatch):
+    """Saves the pull-channel selection on the connection config and
+    best-effort joins each selected channel."""
+    from app.connectors import slack_oauth
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    join_calls: list = []
+    monkeypatch.setattr(
+        slack_oauth, "join_channel",
+        lambda tok, channel_id: join_calls.append(channel_id) or True)
+
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [
+            {"id": "C1", "name": "customer-feedback"},
+            {"id": "C2", "name": "support"},
+            {"id": "C1", "name": "customer-feedback"},  # dupe — dropped
+        ]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+    assert body["config"]["sync_channel_ids"] == ["C1", "C2"]
+    assert body["config"]["sync_channel_names"] == {
+        "C1": "customer-feedback", "C2": "support",
+    }
+    assert join_calls == ["C1", "C2"]
+    assert body["joined"] == ["C1", "C2"]
+
+    # And persisted on the connection row (what the web reads back).
+    listed = ctx.client.get("/v1/connectors").json()
+    slack_row = next(c for c in listed["connections"] if c["provider"] == "slack")
+    assert slack_row["config"]["sync_channel_ids"] == ["C1", "C2"]
+
+
+def test_sync_channels_route_empty_list_clears_selection(slack_env, monkeypatch):
+    """An empty list clears the selection (sync reverts to every bot-member
+    channel) and never attempts a join."""
+    from app.connectors import slack_oauth
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    join_calls: list = []
+    monkeypatch.setattr(
+        slack_oauth, "join_channel",
+        lambda *a, **k: join_calls.append(a) or True)
+
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels", json={"channels": []}
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["config"]["sync_channel_ids"] == []
+    assert body["joined"] == []
+    assert join_calls == []
+
+
+def test_sync_channels_route_join_failure_never_blocks_save(slack_env, monkeypatch):
+    """A failed auto-join (private channel, revoked scope) still saves."""
+    from app.connectors import slack_oauth
+
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+
+    def boom(tok, channel_id):
+        raise RuntimeError("method_not_supported_for_channel_type")
+
+    monkeypatch.setattr(slack_oauth, "join_channel", boom)
+
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [{"id": "G9", "name": "private-vips"}]},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["config"]["sync_channel_ids"] == ["G9"]
+    assert body["joined"] == []
+
+
+def test_sync_channels_route_rejects_empty_id(slack_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [{"id": "  ", "name": "x"}]},
+    )
+    assert r.status_code == 422
+
+
+def test_sync_channels_route_rejects_oversized_selection(slack_env, monkeypatch):
+    """The sync caps at 50 channels — a selection it can't honor is refused."""
+    ctx = company_client(monkeypatch)
+    seed_connection(
+        company_id=ctx.company_id,
+        user_id=ctx.user_id,
+        provider="slack",
+        token_blob={"access_token": "xoxb-real"},
+    )
+    channels = [{"id": f"C{i}", "name": f"ch-{i}"} for i in range(51)]
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels", json={"channels": channels}
+    )
+    assert r.status_code == 422
+
+
+def test_sync_channels_route_404_when_not_connected(slack_env, monkeypatch):
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/connectors/slack/sync-channels",
+        json={"channels": [{"id": "C1"}]},
+    )
+    assert r.status_code == 404
