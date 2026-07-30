@@ -2362,6 +2362,82 @@ def slack_save_config(
     return {"ok": True, "config": config, "joined": joined}
 
 
+class SlackSyncChannelIn(BaseModel):
+    id: str
+    # Display name, stored alongside the id so an unjoined channel can be
+    # reported by name at sync time.
+    name: str | None = None
+
+    def model_post_init(self, _context) -> None:
+        self.id = (self.id or "").strip()
+        if not self.id:
+            raise ValueError("channel id cannot be empty")
+
+
+class SlackSyncChannelsIn(BaseModel):
+    channels: list[SlackSyncChannelIn]
+
+    def model_post_init(self, _context) -> None:
+        # The sync caps at 50 channels (slack_sync.MAX_CHANNELS) — refuse a
+        # selection it could never honor.
+        if len(self.channels) > 50:
+            raise ValueError("select at most 50 channels")
+
+
+@router.post("/slack/sync-channels")
+def slack_save_sync_channels(
+    body: SlackSyncChannelsIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save which channels the Slack corpus sync pulls from.
+
+    Stored on THIS user's own Slack connection config; sync_slack reads it
+    and pulls only the selected channels. An empty list clears the selection
+    (back to every channel the bot is a member of). Selected public channels
+    are best-effort self-joined right away (idempotent, `channels:join`) so
+    the first sync doesn't skip them as not_in_channel; private channels
+    can't be self-joined and need a manual /invite."""
+    from app.connectors.slack_sync import (
+        CONFIG_SYNC_CHANNEL_IDS,
+        CONFIG_SYNC_CHANNEL_NAMES,
+    )
+
+    row = db.get_slack_connection(company.company_id, company.user_id)
+    if not row:
+        raise HTTPException(404, "Slack is not connected")
+    # Dedupe preserving order — the sync pulls in selection order.
+    ids = list(dict.fromkeys(c.id for c in body.channels))
+    names = {
+        c.id: c.name.strip()
+        for c in body.channels
+        if c.name and c.name.strip()
+    }
+    updated = db.patch_slack_connection_config(
+        company.company_id,
+        company.user_id,
+        {CONFIG_SYNC_CHANNEL_IDS: ids, CONFIG_SYNC_CHANNEL_NAMES: names},
+    )
+    config: dict = {}
+    if updated:
+        try:
+            config = json.loads(updated.get("config_json") or "{}")
+        except (TypeError, ValueError):
+            config = {}
+    joined: list[str] = []
+    if ids:
+        try:
+            bot_token, _row = _slack_bot_token(company.company_id, company.user_id)
+            for cid in ids:
+                try:
+                    if slack_oauth.join_channel(bot_token, cid):
+                        joined.append(cid)
+                except Exception:  # noqa: BLE001 — join is best-effort per channel
+                    logger.exception("slack auto-join failed for %s", cid)
+        except Exception:  # noqa: BLE001 — join must never block the save
+            logger.exception("slack auto-join on sync-channels save failed")
+    return {"ok": True, "config": config, "joined": joined}
+
+
 class SlackSyncCorpusIn(BaseModel):
     dataset: str
     history_days: int = 90

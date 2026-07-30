@@ -15735,6 +15735,48 @@
     height: 16px;
   }
 
+  /* SlackSyncChannelsPicker — the multi-select pull-channel checklist.
+     Same card look as the radios, in a scrollable column so a big
+     workspace doesn't blow the drawer out. */
+  .conn-slack-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 240px;
+    overflow-y: auto;
+    padding-right: 2px;
+  }
+
+  .conn-slack-check {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    color: var(--ink);
+    cursor: pointer;
+    padding: 9px 13px;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .conn-slack-check:hover {
+    border-color: var(--ink-3);
+    background: var(--surface-2);
+  }
+
+  .conn-slack-check:has(input:checked) {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  .conn-slack-check input {
+    accent-color: var(--accent);
+    margin: 0;
+    width: 16px;
+    height: 16px;
+  }
+
   .conn-slack-label {
     display: block;
     font-size: 11px;

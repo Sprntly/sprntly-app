@@ -32,6 +32,7 @@ import { ConnectorLogo } from "./ConnectorLogo"
 import { GithubInstallsSlot } from "./GithubInstallsSlot"
 import { GoogleDrivePicker } from "./GoogleDrivePicker"
 import { SlackChannelPicker } from "./SlackChannelPicker"
+import { SlackSyncChannelsPicker } from "./SlackSyncChannelsPicker"
 
 // ─────────────────────── Slack Sync Button ─────────────────────
 
@@ -497,6 +498,10 @@ export function ConfigureConnectorDrawer({
           }
           savedChannelId={connection?.config?.channel_id as string | undefined}
           savedChannelName={connection?.config?.channel_name as string | undefined}
+          onSaved={onDisconnected /* reuse the reload callback */}
+        />
+        <SlackSyncChannelsPicker
+          savedChannelIds={connection?.config?.sync_channel_ids}
           onSaved={onDisconnected /* reuse the reload callback */}
         />
         <SlackSyncButton

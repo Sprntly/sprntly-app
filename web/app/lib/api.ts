@@ -1463,10 +1463,14 @@ export type ConnectionSummary = {
     folder_name?: string
     // Google Drive — files picked via the Google Picker (drive.file scope)
     files?: GoogleDrivePickedFile[]
-    // Slack
+    // Slack — brief-delivery target…
     target_type?: "channel" | "dm"
     channel_id?: string
     channel_name?: string
+    // …and the corpus-sync pull-channel selection (empty/absent = every
+    // channel the bot is a member of).
+    sync_channel_ids?: string[]
+    sync_channel_names?: Record<string, string>
     // Figma (PAT-vs-OAuth distinction set by backend on save)
     auth_kind?: "pat" | "oauth"
   }
@@ -1714,6 +1718,17 @@ export const connectorsApi = {
       dataset,
       history_days: historyDays,
     }),
+  /** Save which channels the Slack corpus sync pulls from (stored on the
+   * connection config as sync_channel_ids / sync_channel_names). An empty
+   * list clears the selection — the sync reverts to every channel the bot
+   * is a member of. `joined` echoes the public channels the bot could
+   * self-join right away. */
+  setSlackSyncChannels: (channels: { id: string; name?: string }[]) =>
+    api.post<{
+      ok: true
+      config: ConnectionSummary["config"]
+      joined: string[]
+    }>(`/v1/connectors/slack/sync-channels`, { channels }),
 
   // ---- Sprinklr ------------------------------------------------------------
   disconnectSprinklr: () =>

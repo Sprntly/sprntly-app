@@ -248,8 +248,10 @@ export interface TeamPendingRow {
  * What a connector IS: drives feature availability across the app — e.g. the
  * ticket sync offers connected `task-management` connectors — instead of
  * features hardcoding provider ids. Mirrors the backend authority
- * (backend/app/connectors/catalog.py). One type per connector for now
- * (product decision); the list shape is future-proofing for multi-type.
+ * (backend/app/connectors/catalog.py). Connectors may carry multiple types
+ * with product sign-off per entry (2026-07-30) — Slack is the first
+ * (communication + customer-voice); a multi-type connector renders a card in
+ * every catalog category it belongs to.
  */
 export type ConnectorType =
   | "task-management"
@@ -268,7 +270,7 @@ export interface ConnectorItemRow {
   id: string
   logo: string
   name: string
-  /** The connector's type, list-shaped (e.g. ClickUp → ["task-management"]). */
+  /** The connector's types (e.g. Slack → ["communication", "customer-voice"]). */
   types?: ConnectorType[]
   /**
    * Single-letter glyph rendered in the connector logo box (sprntly_Design-3).
