@@ -58,7 +58,15 @@ def test_the_pdf_kwargs_we_pass_are_accepted_by_the_installed_playwright():
     from playwright.async_api import Page
 
     accepted = set(inspect.signature(Page.pdf).parameters)
-    for kwarg in ("format", "print_background", "margin"):
+    for kwarg in (
+        "format",
+        "print_background",
+        "margin",
+        # The sprntly.ai footer band — see app/watermark.py.
+        "display_header_footer",
+        "header_template",
+        "footer_template",
+    ):
         assert kwarg in accepted, f"Page.pdf no longer accepts {kwarg!r}"
     assert "timeout" not in accepted, (
         "Page.pdf now takes a timeout — the asyncio.wait_for wrapper in "

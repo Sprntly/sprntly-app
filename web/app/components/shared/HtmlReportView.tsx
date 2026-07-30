@@ -2,6 +2,7 @@
 
 import { useRef, useState } from "react"
 import { stripHtmlCodeFence } from "../../lib/htmlBrief"
+import { watermarkHtml } from "../../lib/watermark"
 
 /**
  * Renders a self-contained HTML report — e.g. the `voice-of-customer-report`
@@ -41,17 +42,24 @@ export function HtmlReportView({
   html,
   title = "Report",
   fitPanel = false,
+  watermark = false,
 }: {
   html: string
   title?: string
   /** Trim the document's own page gutter — see PANEL_STYLE. Set by the content
    *  panel's Reports tab, which has far less width than a full page. */
   fitPanel?: boolean
+  /** Stamp the Sprntly wordmark behind the document. Opt-in, and set only by the
+   *  public `/r/<token>` page: this component also renders the in-app Reports
+   *  tab, where the reader is a signed-in member reading their own workspace's
+   *  work and a mark over it is noise. The mark is for the copy that left. */
+  watermark?: boolean
 }) {
   const ref = useRef<HTMLIFrameElement>(null)
   const [height, setHeight] = useState(720)
   const stripped = stripHtmlCodeFence(html)
-  const doc = fitPanel ? withPanelStyle(stripped) : stripped
+  const sized = fitPanel ? withPanelStyle(stripped) : stripped
+  const doc = watermark ? watermarkHtml(sized) : sized
 
   const resize = () => {
     const cdoc = ref.current?.contentDocument

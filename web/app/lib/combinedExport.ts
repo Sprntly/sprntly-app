@@ -12,13 +12,16 @@
  * sections in one document. The CSS comes from fixed skill templates, so a
  * lightweight top-level rule scoper is sufficient and stable.
  *
- * PDF export prints the combined document (the browser's Save-as-PDF); DOCX
- * export saves it as an HTML `.doc` (Word opens HTML directly), matching the
- * single-PRD export path in prdExport.ts.
+ * PDF export sends the assembled document to the server, which renders it in
+ * headless Chromium (`documentsApi.downloadPdf`) exactly as a report downloads —
+ * one identical file per browser, watermarked and footered. DOCX export saves it
+ * as an HTML `.doc` (Word opens HTML directly), matching the single-PRD export
+ * path in prdExport.ts.
  */
 import type { PrdContent } from "../types/content"
 import { stripHtmlCodeFence, stripHypothesisSection } from "./htmlBrief"
 import { slugifyTitle } from "./prdExport"
+import { watermarkWordHtml } from "./watermark"
 
 /** Find the index of the `}` that closes the `{` at `open` (brace-matched). */
 function matchBrace(css: string, open: number): number {
@@ -180,44 +183,6 @@ export function canExportCombined(
 }
 
 /**
- * Print the combined Evidence + PRD document (browser Print → "Save as PDF").
- * Mirrors prdExport.printPrdHtml: writes the combined HTML into a hidden
- * same-origin iframe, prints it, then removes the iframe. Throws when there is
- * nothing to export or the print frame can't be created.
- */
-export function printCombined(
-  evidence: PrdContent | null,
-  prd: PrdContent | null,
-): void {
-  const html = buildCombinedHtml(evidence, prd)
-  if (!html) throw new Error("no HTML briefs to print")
-  const frame = document.createElement("iframe")
-  frame.style.position = "fixed"
-  frame.style.right = "0"
-  frame.style.bottom = "0"
-  frame.style.width = "0"
-  frame.style.height = "0"
-  frame.style.border = "0"
-  document.body.appendChild(frame)
-  const cdoc = frame.contentDocument
-  const cwin = frame.contentWindow
-  if (!cdoc || !cwin) {
-    frame.remove()
-    throw new Error("could not open a print frame")
-  }
-  cdoc.open()
-  cdoc.write(html)
-  cdoc.close()
-  const cleanup = () => setTimeout(() => frame.remove(), 1000)
-  cwin.addEventListener("afterprint", cleanup)
-  setTimeout(() => {
-    cwin.focus()
-    cwin.print()
-    cleanup()
-  }, 250)
-}
-
-/**
  * Download the combined Evidence + PRD document as a Word `.doc` (Word opens
  * HTML directly, so both visual systems survive). file-saver is lazy-imported,
  * matching prdExport. Throws when there is nothing to export.
@@ -229,7 +194,7 @@ export async function downloadCombinedDoc(
   const html = buildCombinedHtml(evidence, prd)
   if (!html) throw new Error("no HTML briefs to export")
   const slug = slugifyTitle(prd?.title || evidence?.title)
-  const blob = new Blob([html], { type: "application/msword" })
+  const blob = new Blob([watermarkWordHtml(html)], { type: "application/msword" })
   const { saveAs } = await import("file-saver")
   saveAs(blob, `${slug}-evidence-prd.doc`)
 }
